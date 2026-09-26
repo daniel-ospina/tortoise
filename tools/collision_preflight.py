@@ -508,6 +508,32 @@ class Hit:
     strength: str  # "strong" (issue number / closing reference) | "weak"
 
 
+def _default_branch_names(git_bin: str, cwd: str, timeout: float) -> set[str]:
+    """Names of the repo's DEFAULT branch, so auto-declaration can refuse them.
+
+    ⛔ A default branch is not a lane's private branch. It is the shared landing
+    target — and on a FORK pull request it is also the ordinary HEAD REF NAME,
+    because a fork pushes from its own `main`. Declaring the default as "mine"
+    therefore demotes a genuine in-flight PR to `weak` and reports CLEAN on real
+    work. Measured: the fleet's hub checkout sits on `main`, so the *default*
+    way to run this tool (`--repo .` from the hub) reproduced it, not an exotic
+    path. Guarding only the SEARCHED-clone case was not enough.
+
+    The resolved `origin/HEAD` is consulted first, with `main`/`master` as a
+    fallback for a clone that has no remote HEAD symref. Erring toward a LARGER
+    set is deliberate: refusing to auto-declare leaves the hit blocking, which
+    is the fail-closed direction.
+    """
+    names = {"main", "master"}
+    rc, out, _err, _to = _run(
+        [git_bin, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd, timeout,
+    )
+    if rc == 0 and out.strip():
+        names.add(out.strip().rsplit("/", 1)[-1])
+    return names
+
+
 def _short_branch(ref: str) -> str:
     """The bare branch name behind any ref spelling the tool EMITS.
 
@@ -624,15 +650,17 @@ class RepoTarget:
     path: str | None = None
     source: str = "unresolved"
     requested: bool = False
-    # Whether `path` is a checkout the CALLER chose, rather than one the tool
-    # FOUND by searching for a clone of the requested slug. This gates the
-    # best-effort self-identity detection and it is a correctness flag, not
-    # bookkeeping: a checkout that was searched for is typically the canonical
-    # hub clip sitting on `main`, and auto-declaring ITS current branch as the
-    # caller's own makes a PR whose head branch is `main` (the ordinary shape
-    # for a fork PR) read as "your own PR" and suppress a real hit — the
-    # fail-OPEN direction. A checkout you are STANDING IN is yours; a checkout
-    # somebody's search handed you is not.
+    # Whether `path` is a checkout the CALLER named, rather than one the tool
+    # FOUND by searching for a clone of the requested slug.
+    #
+    # This is a correctness flag, not bookkeeping, and it is ONE of TWO
+    # conditions on the best-effort self-identity detection (the other is the
+    # default-branch refusal in `main`). It is deliberately NOT described as
+    # "the caller's own checkout": `--repo PATH` naming somebody else's checkout
+    # sets it too, so it means only "the caller pointed at this", never "this is
+    # theirs". What it does establish is the difference that matters here — a
+    # checkout that was SEARCHED FOR is exactly the canonical hub clone, whose
+    # current branch is certain not to be the caller's private work.
     caller_checkout: bool = False
 
 
@@ -1264,6 +1292,21 @@ def _closing_ref_numbers(pr: dict) -> list[int]:
             numbers.append(item["number"])
         elif isinstance(item, int):
             numbers.append(item)
+        else:
+            # ⛔ The contract above is applied PER ELEMENT, not just to the
+            # container. `["3504"]`, `[{"number": "3504"}]` and
+            # `[{"number": None}]` all used to fall through and be appended
+            # NOWHERE — so a field that was present and claimed to close N could
+            # vanish with no INCOMPLETE, which is the same fail-open drop as
+            # reading an absent field as empty. The body-regex union hides it
+            # for a body reference, but GitHub also derives closing references
+            # from the title and commit messages, where the body need not carry
+            # a closing keyword at all. Refuse rather than drop.
+            raise SurfaceError(
+                "closingIssuesReferences contains an element this tool cannot "
+                f"read as an issue number ({item!r}) — refusing to drop a "
+                "closing reference silently"
+            )
     return numbers
 
 
@@ -1354,14 +1397,25 @@ def _branch_terminal_state(
     issue it closed, permanently, with no dismissal path. #5129 fixed exactly
     this shape for the PR surface and did not cover local branches.
 
-    Two independent predicates, both exact:
+    Two independent predicates:
 
       1. TIP SHA == a MERGED PR's head SHA. Squash-merging discards the commits
          but the PR record keeps the original head SHA, so this is the source.
          It costs ZERO extra API calls: the closed-PR sample is already fetched
-         and carries `head.sha` and `merged_at`.
+         and carries the head sha and `mergedAt`.
+         ⚠ Coverage is the SAMPLED window, not all of merge history: that sample
+         is bounded to `CLOSED_PR_LIMIT` (100) most recent closed PRs. A
+         squash-merge older than the window is simply NOT detected, and the
+         branch keeps blocking (fail-closed — the safe direction, but the doc
+         must not imply full coverage).
       2. The tip is an ANCESTOR of origin/main — a merge or rebase that kept
          history. One `for-each-ref --merged` per namespace.
+
+    BOTH apply to LOCAL branches only. A remote-tracking ref is a local CACHE of
+    the last fetch, not the remote's state: a branch that was squash-merged and
+    then REUSED for new work still reads as its old, merged sha until someone
+    fetches. Judging that terminal would be a false ACCEPT — a live branch read
+    as free — so remote-tracking refs are never demoted by these predicates.
 
     ⛔ `patch-id` is deliberately NOT a third predicate (D1; agent-infra #1362
     ledger 09-23). `--stable` and the default `--unstable` both IGNORE
@@ -1369,6 +1423,16 @@ def _branch_terminal_state(
     differs — a FALSE ACCEPT, which is this test's dangerous direction, because
     a live branch read as terminal is a live lane read as free.
     """
+    if not ref.startswith("refs/heads/"):
+        # ⛔ REMOTE-TRACKING REFS ARE A CACHE, so a terminal verdict on one can be
+        # a false ACCEPT: `refs/remotes/origin/<branch>` keeps pointing at a
+        # merged PR's head sha after the branch has been REUSED for new work,
+        # because nothing in this tool fetches. The local `refs/heads/` value is
+        # what the lane actually has and is authoritative for "is there unlanded
+        # work here". Refusing to demote a remote ref leaves the hit BLOCKING,
+        # which is the fail-closed direction — and the local branch, if it still
+        # exists, is judged on its own merits by this same call.
+        return None
     if sha and sha in merged_head_shas:
         return ("squash-merged — its tip SHA is a merged PR's head, so its content "
                 "already landed even though its commits are not ancestors of main")
@@ -1434,8 +1498,12 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
             cur.setdefault("branch", "(detached)")
         elif cur is not None and line.startswith("HEAD "):
             # The worktree's checked-out commit, carried free by --porcelain.
-            # The terminal test needs it for a DETACHED worktree, whose branch
-            # is not in refs/heads and so has no other tip to consult.
+            # It reaches ONLY `_branch_terminal_state`'s tip-SHA predicate. It
+            # does NOT unlock the ancestor predicate for a detached worktree:
+            # that one tests `ref in ancestor_merged`, a set of REF NAMES, and a
+            # detached worktree's ref is the literal "(detached)". So a detached
+            # worktree at an ancestor-of-main commit is still reported as a hit
+            # (fail-closed). An earlier comment here implied otherwise.
             cur["head"] = line[len("HEAD "):].strip()
     if cur is not None:
         blocks.append(cur)
@@ -2363,7 +2431,10 @@ def run_preflight(
         except SurfaceError as exc:
             surface.incomplete(f"gh-unavailable: {exc}")
 
-    # 3. Branch surfaces. Remote refs are number-matched ONLY: the
+    # 3. Branch surfaces. The TERMINAL predicates are not applied to the
+    #    remote namespace (see `_branch_terminal_state`): a remote-tracking ref
+    #    is a local cache, and demoting on it could call a reused live branch
+    #    merged. Remote refs are number-matched ONLY: the
     #    remote-tracking namespace carries hundreds of stale branches and
     #    keyword-scanning it produced 878 false hits on a real run.
     # The local-branch walk, kept so the worktree surface can REUSE it rather
@@ -2715,9 +2786,16 @@ def format_report(
         )
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
     if weak:
+        # NOT "prose signals": since identity and terminal detection landed,
+        # `weak` also carries the caller's own branch/worktree, a terminal
+        # branch, and an assignee equal to the shared fleet account. The WEAK
+        # SIGNALS block above was already corrected to say so; leaving this line
+        # calling them all "prose" made the report contradict its own contents
+        # eight lines earlier — the same unverifiable-verdict class this change
+        # removes (#3504 class 2).
         lines.append(
-            f"NOTE: {len(weak)} weak prose signal(s) ignored (cross-reference prose "
-            "is not work; non-blocking)"
+            f"NOTE: {len(weak)} weak, non-blocking signal(s) ignored (see WEAK "
+            "SIGNALS above); none can cause a refusal"
         )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(queried)}/{len(ALL_SURFACES)} "
@@ -3040,7 +3118,21 @@ def main(argv: list[str] | None = None) -> int:
         if rc == 0 and out.strip() and out.strip() != "HEAD":
             # `HEAD` means detached (no branch) — nothing to declare. A failure
             # here is not reported: it can only leave hits blocking.
-            self_branches.add(out.strip())
+            #
+            # ⛔ AND NEVER THE DEFAULT BRANCH. This is not a refinement, it is the
+            # difference between the tool working and the tool being inert: the
+            # hub checkout sits on `main`, so `--repo .` — the documented,
+            # default invocation — would otherwise declare `main` as a
+            # self-branch, and every open PR whose head is `main` (the ordinary
+            # fork-PR shape) is demoted to weak before the closing-reference test
+            # is reached. An explicit `--self-branch main` is still honoured:
+            # that is the caller ASSERTING it, and the assertion is theirs to
+            # make. This only refuses to make it for them.
+            _branch = out.strip()
+            if _branch not in _default_branch_names(
+                args.git, cwd_for_identity, args.timeout
+            ):
+                self_branches.add(_branch)
 
     identity = Identity(
         login=None,

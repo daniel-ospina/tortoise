@@ -1181,6 +1181,107 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("your own branch", out)
 
+    def test_default_branch_is_never_auto_declared(self):
+        # ⛔ THE P0, AND IT IS THE *DEFAULT* INVOCATION. `setUp` leaves the
+        # fixture checkout on `main`, and `run_tool()` passes `--repo <path>` —
+        # `caller_checkout` is True. So auto-detection sees `main` and declares
+        # it, and because the self arm runs FIRST for EVERY PR, an open PR whose
+        # head branch is `main` (the ordinary shape for a fork PR) is demoted to
+        # weak before the closing-reference test is ever reached: COLLISION
+        # becomes CLEAN on real in-flight work.
+        #
+        # The earlier `caller_checkout` guard fixed only the SEARCHED-clone case
+        # and left this one open, which is why the rule is now "never the DEFAULT
+        # branch" rather than "only a caller's checkout".
+        self.assertEqual(self._git_out("rev-parse", "--abbrev-ref", "HEAD"), "main")
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing", "body": "",
+            "headRefName": "main", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own", out)
+
+    def test_default_branch_is_still_honoured_when_declared_EXPLICITLY(self):
+        # The refusal applies to what the tool INFERS, never to what the caller
+        # ASSERTS. `--self-branch main` is a statement by the caller about its own
+        # work, and the tool has no business overriding it.
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing", "body": "",
+            "headRefName": "main", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool(self_branches=("main",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("not a competing claim", out)
+
+    def test_a_non_default_branch_is_still_auto_declared(self):
+        # The sensitivity half: the fix must not be "stop auto-declaring". A
+        # lane branch (the fleet's normal shape) still gets the convenience.
+        _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-lane")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+    def test_remote_tracking_ref_is_not_judged_terminal(self):
+        # C2-5. A remote-tracking ref is a local CACHE of the last fetch, not the
+        # remote's state: a branch that was squash-merged and then REUSED for new
+        # work still reads as its old, merged sha until someone fetches. Demoting
+        # on that would be a false ACCEPT — a LIVE branch read as free — so the
+        # terminal predicates apply to LOCAL branches, and the remote-tracking
+        # copy keeps blocking.
+        #
+        # Note there is deliberately NO local branch of this name, so the only
+        # candidate is the remote ref.
+        ref = f"fix/{ISSUE}-reused"
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+        sha = self._git_out("rev-parse", f"refs/remotes/origin/{ref}")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "land it", "body": "", "state": "closed",
+            "headRefName": ref, "headSha": sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+        self.assertNotIn("squash-merged", out)
+
+    def test_unreadable_closing_reference_element_is_incomplete_not_dropped(self):
+        # C2-2. The absent-field contract is applied PER ELEMENT too. A field
+        # that IS present and claims to close N must not lose N because the
+        # element is shaped differently than expected — that is the same
+        # fail-open drop as reading an absent field as empty. The body-regex
+        # union hides it for a body reference, but GitHub also derives closing
+        # references from the title and commit messages, where the body need not
+        # contain a closing keyword at all.
+        for bad in (["3061"], [{"number": "3061"}], [{"number": None}], ["x"]):
+            with self.subTest(element=bad[0]):
+                self.gh_fixtures(open_prs=[{
+                    "number": 5150, "title": "unrelated", "body": "",
+                    "headRefName": "feat/5150-other", "state": "open",
+                    "closingIssuesReferences": bad,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"element={bad[0]!r}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn("closing-reference-source-unavailable", out)
+
+    def test_clean_note_does_not_call_every_weak_hit_prose(self):
+        # C2-3. The WEAK SIGNALS block was corrected to stop describing every
+        # weak hit as prose, but the CLEAN-path NOTE eight lines below it still
+        # said "weak prose signal(s)". A report contradicting its own contents is
+        # the unverifiable-verdict class this change removes (#3504 class 2).
+        self.gh_fixtures(issue=self.issue_payload(assignees=("test-agent",)))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("weak, non-blocking signal(s)", out)
+        self.assertNotIn("weak prose signal(s)", out)
+
     # ── a PR whose head branch the caller DECLARED is its own work ──────────
 
     def test_declared_own_pr_branch_suppresses_the_pr(self):
