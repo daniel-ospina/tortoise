@@ -98,7 +98,7 @@ def test_falkor_roundtrip():
     a, b, op = _build(api)  # noqa: RUF059
     proj = FalkorProjection(_tmp("g.db"), graph_name="t")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         n = proj.query("MATCH (p:Point) RETURN count(p) AS n").result_set[0][0]
         assert n == len(fold(log.read_all())), f"node count {n} != fold"
         edges = proj.query(
@@ -117,7 +117,7 @@ def test_falkor_matches_inmemory():
     _build(api)
     proj_f = FalkorProjection(_tmp("g2.db"), graph_name="t")
     try:
-        proj_f.rebuild(log)
+        proj_f.rebuild(log, confirm_destructive=True)
         n = proj_f.query("MATCH (p:Point) RETURN count(p) AS n").result_set[0][0]
         stmts, ops = split(proj_mem.points)
         assert n == len(stmts) + len(ops)

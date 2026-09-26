@@ -35,7 +35,7 @@ def a10(tmp_path):
 
 
 def _rebuild(sdk, events_dir: Path) -> None:
-    sdk._get_proj().rebuild_all(str(events_dir))
+    sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════

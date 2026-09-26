@@ -175,7 +175,7 @@ class TestIngestGuardAfterRebuild:
                 "MATCH (n:Point {id:$id}) RETURN n.content_hash",
                 params={"id": pid}).result_set[0][0] is not None
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
             # Premise (fixed by the #2795 re-derivation): the rebuild
             # PRESERVES the hash while preserving the terminal status, so the
@@ -207,7 +207,7 @@ class TestIngestGuardAfterRebuild:
             pid = sdk.create_point("statement", content)["id"]
             sdk.retract_point(pid)
 
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
             # Deliberately construct the NULL-hash condition the fallback
             # exists for — the rebuild itself no longer produces it (#2795).

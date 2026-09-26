@@ -703,6 +703,7 @@ surfaces:
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
+  - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
   - test_shared_state_concurrency.py
@@ -1792,6 +1793,21 @@ durations:
   test_dump_edge_asymmetry_3895.py: 0.8
   test_divergence_conformance.py: 4.8
   test_from_uri_userinfo.py: 2.7
+  # #2944: new file. The row is required. Pair at this commit: 544/605 = 89.92%
+  # without it (below the 90% floor, so the gated `--integrity` step reds) vs
+  # 545/605 = 90.08% with it (545 is the lowest passing count for a 605-file
+  # pool). Each parent passes on its own — branch parent 525/583 = 90.05%,
+  # main parent 544/604 = 90.07% — so the red exists only in the merge: main's
+  # added fast files moved the pool 583 -> 605, and this branch's `core`
+  # registration is the file that lands unweighed.
+  #
+  # The value is a LOCAL measurement (30 tests, 66.7s at fleet load), not a CI
+  # junit artifact — chosen over the flat 2.0s default for the reason the #3039
+  # block gives: a 33x under-weight would skew the LPT pack for a ~67s file
+  # (this tree's durations map has 548 entries, median 0.85s, so ~78x; the fast
+  # pool's own median is 0.8s). Refresh from the first
+  # post-merge main junit run that includes it.
+  test_destructive_wipe_guard.py: 66.7
   test_export_cli.py: 13.5
   test_github_indexer.py: 50.2
   test_doctor.py: 7.1

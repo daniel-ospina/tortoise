@@ -485,7 +485,7 @@ def test_prewipe_snapshot_version_bumped_and_stamped(monkeypatch, graph):
     _write_journal(events, [])
     _write_install(sdk, "stamped", version="1.0.0")
     written = _capture_writes(monkeypatch)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert written, "no sidecar payload was written"
     assert written[0]["version"] == pr._PREWIPE_SNAPSHOT_VERSION
 
@@ -541,7 +541,7 @@ def test_prewipe_snapshot_oversized_refused_before_wipe(monkeypatch, tmp_path):
         _write_journal(events, [])
         _write_install(sdk, "big", version="1.0.0", blob="x" * 400)
         with pytest.raises(RuntimeError) as exc:
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert "aborted BEFORE the graph wipe" in str(exc.value)
         # Pre-wipe: the config is still there and NO sidecar was written.
         assert _read_install(sdk, "big") is not None
@@ -574,7 +574,7 @@ def test_rebuild_all_write_payload_covers_every_snapshot_section(
     incoming = _capture_writes(monkeypatch)
     # Keep the sidecar on disk so the round-trip can be read back: replace the
     # retirement with a no-op AFTER the write.
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert incoming, "no write payload captured"
     payload = incoming[0]
     for section in _SNAPSHOT_SECTIONS:
@@ -603,7 +603,7 @@ def test_snapshot_pending_is_derived_from_section_values(graph):
     _write_journal(events, [])
     _write_install(sdk, "only-config", version="1.2.3")
     assert _read_install(sdk, "only-config") is not None
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     # The config survived AND the graph has no Points (nothing to replay).
     assert _read_install(sdk, "only-config") is not None
 
@@ -632,7 +632,7 @@ def test_rebuild_all_preserves_pack_install_and_manifest(graph):
               for k in ("dev", "other")}
     before_manifest = _read_manifest(sdk, "custom-pack")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     for ns in ("dev", "other"):
         assert _read_install(sdk, ns) == before[ns], (
@@ -661,7 +661,7 @@ def test_rebuild_all_preserves_calibration_milestone(graph):
             "recordedAt": "2026-04-04T00:00:00Z"}})
     before = _read_node(sdk, "Meta", "key", key)
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _read_node(sdk, "Meta", "key", key) == before
 
@@ -679,7 +679,7 @@ def test_rebuild_all_preserves_config_reset_marker(graph):
     written = set_config_reset_marker(_g(sdk), "restore_incomplete")
     assert written["count"] == 1
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     after = read_config_reset(_g(sdk))
     assert after is not None
@@ -695,8 +695,8 @@ def test_config_reset_marker_is_sticky_across_rebuilds(graph):
     events, sdk = graph
     _write_journal(events, [])
     first = set_config_reset_marker(_g(sdk), "restore_incomplete")
-    sdk._get_proj().rebuild_all(str(events))
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     still = read_config_reset(_g(sdk))
     assert still is not None and still["count"] == 1
 
@@ -738,7 +738,7 @@ def test_rebuild_all_wipe_statement_is_byte_identical_and_classified_bulk(
         return real(self, cypher, params=params, timeout=timeout)
 
     monkeypatch.setattr(pr._GuardedGraph, "query", spy)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     deletes = [c for c in seen if "DETACH DELETE" in c]
     assert deletes == ["MATCH (n) DETACH DELETE n"], deletes
@@ -768,7 +768,7 @@ def test_rebuild_all_sidecar_recovery_restores_config(graph):
     ]))
     assert _read_install(sdk, "dev") is None
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _read_install(sdk, "dev")["version"] == "0.9.0"
     assert _read_manifest(sdk, "custom")["sha256"] == "abc"
@@ -781,13 +781,13 @@ def test_retired_sidecar_does_not_resurrect_config_deleted_after_rebuild(graph):
     _write_journal(events, [])
     _write_install(sdk, "dev", version="0.9.0", status="active")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _read_install(sdk, "dev") is not None
 
     _g(sdk).query(
         f"MATCH (p:{_PACK_INSTALL_LABEL} {{namespace:$ns}}) DETACH DELETE p",
         params={"ns": "dev"})
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _read_install(sdk, "dev") is None, (
         "a RETIRED sidecar must not resurrect config deleted after the rebuild")
@@ -821,7 +821,7 @@ def test_leftover_config_wins_over_self_healed_defaults(graph):
     _write_manifest(sdk, "post-wipe-only", name="New", yaml="name: n\n",
                     sha256="feed", status="active")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     restored = _read_install(sdk, "dev")
     assert restored["version"] == "0.9.0"
@@ -842,7 +842,7 @@ def test_fresh_only_config_key_survives_pending_leftover(graph):
     _write_install(sdk, "fresh-only", version="2.0.0", source="custom")
     _write_manifest(sdk, "fresh-only", name="F", yaml="a: 1\n", sha256="s1")
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _read_install(sdk, "leftover") is not None
     fresh = _read_install(sdk, "fresh-only")
@@ -870,7 +870,7 @@ def test_pending_sidecar_restores_leftover_config_over_a_post_wipe_delete(graph)
         params={"ns": "dev"})
     assert _read_install(sdk, "dev") is None
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _read_install(sdk, "dev")["version"] == "0.9.0", (
         "documented residual: the pending leftover reverts a post-wipe delete")
@@ -890,7 +890,7 @@ def test_config_capture_failure_aborts_before_wipe(graph):
     patcher, injected = _inject_query_failure(
         sdk, lambda c: "(n:PackInstall)" in c and "properties(n)" in c)
     with patcher, pytest.raises(RuntimeError) as exc:
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert injected, "the capture failure was never injected"
     assert "aborted BEFORE the graph wipe" in str(exc.value)
     assert _read_install(sdk, "keep-me") is not None, "the graph was touched"
@@ -913,7 +913,7 @@ def test_post_restore_mismatch_sets_config_reset_and_logs_error(graph, caplog):
     patcher, injected = _inject_query_failure(
         sdk, lambda c: c.startswith("MERGE (n:PackInstall"))
     with caplog.at_level(logging.ERROR, logger="tortoise.projection"), patcher:
-        result = sdk._get_proj().rebuild_all(str(events))
+        result = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert injected, "the restore failure was never injected"
 
     marker = read_config_reset(_g(sdk))
@@ -939,7 +939,7 @@ def test_never_configured_vs_wiped_distinguishable(graph):
 
     events, sdk = graph
     _write_journal(events, [])
-    result = sdk._get_proj().rebuild_all(str(events))
+    result = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert read_config_reset(_g(sdk)) is None
     assert result["config_reset"] is False
     assert result["config_expected"] == 0
@@ -947,7 +947,7 @@ def test_never_configured_vs_wiped_distinguishable(graph):
     # Now the legacy shape: a v1 rescue file (no config record at all).
     _plant(Path(_sidecar_path(events)), _sidecar_payload(
         version=1, batch_snapshot=[{"id": "b-legacy"}]))
-    result2 = sdk._get_proj().rebuild_all(str(events))
+    result2 = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     marker = read_config_reset(_g(sdk))
     assert marker is not None
     assert marker["reason"] == "legacy_sidecar_no_config_record"
@@ -976,7 +976,7 @@ def test_v1_leftover_stages_the_marker_into_the_written_payload(graph,
         version=1, batch_snapshot=[{"id": "b-legacy"}]))
 
     written = _capture_writes(monkeypatch)
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert written, "no sidecar payload was written"
     staged = [e for e in written[0]["config_snapshot"]
@@ -995,7 +995,7 @@ def test_v1_leftover_stages_the_marker_into_the_written_payload(graph,
     _g(sdk).query("MATCH (n:Meta {key:'config_reset'}) DETACH DELETE n")
     assert read_config_reset(_g(sdk)) is None
     _plant(Path(path), _load_prewipe_snapshot(path) or written[0])
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     recovered = read_config_reset(_g(sdk))
     assert recovered is not None, (
         "a v2 sidecar carrying the staged marker must restore it on recovery")
@@ -1010,7 +1010,7 @@ def test_rebuild_all_returns_config_restored_counts(graph):
     _write_install(sdk, "b", version="1.0.0")
     _write_manifest(sdk, "c", name="C", yaml="c: 1\n")
 
-    result = sdk._get_proj().rebuild_all(str(events))
+    result = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert result["config_expected"] == 3
     assert result["config_restored"] == 3
@@ -1176,7 +1176,7 @@ def test_v1_leftover_with_self_healed_config_still_reports_unknown(graph):
     _write_install(sdk, "dev", version="0.3.0", status="active",
                    source="starter")
 
-    result = sdk._get_proj().rebuild_all(str(events))
+    result = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     marker = read_config_reset(_g(sdk))
     assert marker is not None, (
@@ -1209,7 +1209,7 @@ def test_unreadable_marker_is_not_reported_as_absent(graph, monkeypatch):
         raise RuntimeError("injected marker read failure")
 
     monkeypatch.setattr(pr, "read_config_reset", _boom)
-    result = sdk._get_proj().rebuild_all(str(events))
+    result = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert result["config_reset"] is True, (
         "an unreadable marker must fail SAFE (report the incident), never "
@@ -1253,7 +1253,7 @@ def test_staged_marker_that_fails_to_restore_stays_in_the_verification(graph,
 
     monkeypatch.setattr(pr, "_capture_config_snapshot",
                         _capture_without_the_marker)
-    result = sdk._get_proj().rebuild_all(str(events))
+    result = sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert result["config_reset"] is True, (
         "a staged marker that did not restore must be re-recorded, not read "

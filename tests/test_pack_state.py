@@ -838,7 +838,7 @@ def test_pack_install_survives_rebuild_all(tmp_path):
         before = [tuple(r) for r in _read_installs(sdk)]
         assert before, "the writer activated nothing — the test would be vacuous"
 
-        sdk._get_proj().rebuild_all(str(events))
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
         after = [tuple(r) for r in _read_installs(sdk)]
         assert after == before, (

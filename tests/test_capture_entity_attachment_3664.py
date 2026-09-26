@@ -155,7 +155,7 @@ def test_capture_about_edges_and_session_survive_rebuild(journal_sdk):
     live_session = _session_props(g, sid)
     assert live_edges, "capture wrote no aboutObject edge to begin with"
 
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert _about_edges(g) == live_edges, (
         f"about-edge drift across rebuild\n live={live_edges}\n "
@@ -267,7 +267,7 @@ def test_capture_ok_and_extractor_survive_journal_only_replay(journal_sdk):
                 return [json.loads(line) for line in fh if line.strip()]
 
     # (1) journal-only rebuild().
-    proj.rebuild(_Log())
+    proj.rebuild(_Log(), confirm_destructive=True)
     post = _session_props(g, sid)
     assert post.get("capture_ok") is True, (live, post)
     assert post.get("capture_extractor") == "v2", (live, post)
@@ -321,7 +321,7 @@ def test_entity_linked_not_resurrected_by_same_id_recreate(journal_sdk):
     assert _live_link_count(g, pid, oid) == 0, (
         "re-creating the endpoint resurrected the live link")
 
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
     assert _live_link_count(g, pid, oid) == 0, (
         "replay resurrected a link the live graph had deleted")
 
@@ -352,7 +352,7 @@ def test_entity_linked_not_resurrected_in_apply_engines(journal_sdk):
             with open(events / "events.jsonl", encoding="utf-8") as fh:
                 return [json.loads(line) for line in fh if line.strip()]
 
-    proj.rebuild(_Log())
+    proj.rebuild(_Log(), confirm_destructive=True)
     assert _live_link_count(g, pid, oid) == 0, "rebuild() resurrected the link"
 
     g.query("MATCH (n) DETACH DELETE n")
@@ -438,10 +438,10 @@ def test_noop_link_after_hard_delete_does_not_resurrect(journal_sdk):
             with open(events / "events.jsonl", encoding="utf-8") as fh:
                 return [json.loads(line) for line in fh if line.strip()]
 
-    proj.rebuild(_Log())
+    proj.rebuild(_Log(), confirm_destructive=True)
     assert _live_link_count(g, pid, oid) == 0, "rebuild() resurrected the link"
 
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
     assert _live_link_count(g, pid, oid) == 0, (
         "rebuild_all resurrected a link the live graph never had")
 
@@ -480,11 +480,11 @@ def _replay_every_engine(proj, events_dir, query):
 
     out = {}
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
     out["rebuild_all"] = proj.g.query(query).result_set[0][0]
 
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild(_Log())
+    proj.rebuild(_Log(), confirm_destructive=True)
     out["rebuild"] = proj.g.query(query).result_set[0][0]
 
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -713,11 +713,11 @@ def _replay_all_four_engines(proj, tmp_path, events_dir, queries):
 
     out = {}
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild_all(str(events_dir))
+    proj.rebuild_all(str(events_dir), confirm_destructive=True)
     out["rebuild_all"] = _read(proj)
 
     proj.g.query("MATCH (n) DETACH DELETE n")
-    proj.rebuild(_Log())
+    proj.rebuild(_Log(), confirm_destructive=True)
     out["rebuild"] = _read(proj)
 
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -1242,7 +1242,7 @@ def test_entity_linked_session_source_without_session_recorded_survives_rebuild_
             for ev in events:
                 fh.write(json.dumps(ev) + "\n")
         proj.g.query("MATCH (n) DETACH DELETE n")
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         assert proj.g.query(
             "MATCH (:Session {id:'s1'}) RETURN count(*)"
         ).result_set[0][0] == 1
@@ -1280,7 +1280,7 @@ def test_entity_linked_forward_reference_folds_in_rebuild(tmp_path):
             def read_all(self):
                 return list(events)
 
-        proj.rebuild(_Log())
+        proj.rebuild(_Log(), confirm_destructive=True)
         assert proj.g.query(
             "MATCH (:Point {id:'pt-fwd'})-[:aboutObject]->"
             "(:Object {id:'obj-fwd'}) RETURN count(*)").result_set[0][0] == 1
