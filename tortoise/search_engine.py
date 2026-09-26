@@ -362,6 +362,11 @@ class SearchResult:
     valid_to: str = ""
     expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
+    # #4889: the ACTIONABLE reason `subject` could not be resolved because the
+    # graph has no aboutSubject producer at all. Emitted only when set, so a
+    # consumer can tell "no subject binding was ever built" (marker present)
+    # from "this hit has no subject" (marker absent, `subject` also absent).
+    subject_unavailable: str = ""
     # A5 (#2070): stored evidence mark (``has_answer`` — written by the
     # eval ingest / fixture seeding; the product extractor does not write it
     # yet, so production hits are False). Carried so the ask lane's
@@ -419,6 +424,11 @@ class SearchResult:
             d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
+        elif self.subject_unavailable:
+            # #4889: never dress an unanswerable read as an empty one. The key
+            # is additive (absent on every graph that has a producer) and names
+            # the missing producer plus the tracking issues.
+            d["subject_unavailable"] = self.subject_unavailable
         # A5 (#2070): additive evidence mark — emitted ONLY when known
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
@@ -2152,10 +2162,60 @@ def get_relationships_bounded(
     return rels
 
 
+# ── #4889: the Point→Subject binding is UNRESOLVABLE, and says so ─────────
+# `subject` below resolves from `(n)-[:aboutSubject]->(s:Subject)` (own edge)
+# or the ≤1-hop source-event fallback. MEASURED 2026-09-23 on the hosted
+# graph: **0** `aboutSubject` edges against 27,310 `aboutObject` — because the
+# capture entity spine writes EVERY extracted entity as an Object
+# (`sdk.py::_capture_session_impl`'s spine loop calls
+# `create_entity("object", …)`) even when the extractor's `kind` is a
+# SUBJECT-vocabulary kind (ONTOLOGY §5: `core:naturalPerson`,
+# `core:organization`, `core:team`, `core:role`), and
+# `create_point(aboutEntities=…)` never wires about* live (#2501).
+#
+# A consumer therefore cannot tell "this claim has no subject" from "subject
+# binding was never built". Mirrors `ask_lane._ask_d8_decoration_unavailable`:
+# a silent null on a dead surface is SURFACED, never reported as an honest
+# absence. `subject_unavailable` rides only when the graph itself cannot
+# answer (zero `aboutSubject` edges anywhere), so the marker disappears by
+# itself the moment a producer lands.
+SUBJECT_BINDING_UNAVAILABLE = (
+    "no aboutSubject producer is wired in any default path: the capture entity "
+    "spine mints every extracted entity as an Object "
+    "(sdk.py::_capture_session_impl) even for SUBJECT kinds (#4934), and the "
+    "document path's only Subject producer (Extractor.extract_entities, S7) is "
+    "behind an opt-in flag (#4938); create_point(aboutEntities=…) never wires "
+    "about* live either (#2501) — so `subject` is unresolvable for EVERY "
+    "Point. Tracked in #1370 / #1509 / #4934 / #4938 (#4889)"
+)
+
+
+def subject_binding_available(graph) -> bool:
+    """True when the graph holds ANY ``aboutSubject`` edge — the structural
+    precondition for :func:`fetch_point_epistemic_state`'s ``subject`` leg.
+
+    #4889: on a graph with zero ``aboutSubject`` edges the decoration CANNOT
+    resolve a subject for any Point, so its ``None`` is a build gap, not an
+    observation. The caller probes ONLY in the degraded case (no row in the
+    batch resolved a subject), so a graph with a live producer pays nothing.
+    Fails OPEN (True) on a query error: a broken probe must never manufacture
+    a spurious unavailability marker.
+    """
+    try:
+        rows = graph.query(
+            "MATCH ()-[:aboutSubject]->() RETURN count(*) LIMIT 1"
+        ).result_set
+    except Exception:
+        logger.warning("aboutSubject availability probe failed", exc_info=True)
+        return True
+    return bool(rows and rows[0][0])
+
+
 def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
     """Fetch promoted epistemic state for a batch of Points (#1353 D8/D10).
 
-    Returns {pid: {status, superseded_by, supersedes, subject}} where:
+    Returns {pid: {status, superseded_by, supersedes, subject,
+    subject_unavailable}} where:
       status         — n.status (live/superseded/deprecated/retracted/draft)
       superseded_by  — {id, content_snippet, created_at} of the newest superseding
                        claim (incoming CORRECTS) or None
@@ -2168,6 +2228,12 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                        edge (that edge is content-aboutness, ONTOLOGY §3.4).
                        NEVER derived through operator chains (fail-closed, D10):
                        absent = honestly unknown, never wrong-via-chain.
+      subject_unavailable
+                     — #4889: the ACTIONABLE reason the ``subject`` leg could
+                       not be answered by ANY row in this batch AND the graph
+                       holds no ``aboutSubject`` edge at all. Absent when the
+                       graph can answer (a per-point ``subject: None`` then
+                       really does mean "this claim has no subject").
 
     Chained OPTIONAL MATCHes can cartesian — deduped in Python. Rows are small
     (per-point CORRECTS/subject counts are low-volume).
@@ -2244,6 +2310,24 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
         logger.warning("Epistemic-state fetch failed", exc_info=True)
 
     return out
+
+
+def subject_binding_unavailable_reason(graph, state) -> str:
+    """#4889 fail-loud reason for a ``subject`` decoration that came back empty
+    for a WHOLE batch, or ``""`` when the emptiness is a real answer.
+
+    ``state`` is a :func:`fetch_point_epistemic_state` result. The availability
+    probe runs ONLY when nothing in the batch resolved a subject, so a live
+    producer costs nothing and the marker self-clears the moment one lands.
+    Deliberately placed at the SURFACE rather than inside the fetcher: callers
+    that do not advertise ``subject`` (the why-block assembly) keep their pinned
+    query budget untouched.
+    """
+    if not state:
+        return ""
+    if any(st.get("subject") for st in state.values()):
+        return ""
+    return "" if subject_binding_available(graph) else SUBJECT_BINDING_UNAVAILABLE
 
 
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────

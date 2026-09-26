@@ -1929,8 +1929,13 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     if not results:
         return results
     try:
-        from tortoise.search_engine import fetch_point_epistemic_state
+        from tortoise.search_engine import (
+            fetch_point_epistemic_state,
+            subject_binding_unavailable_reason,
+        )
         state = fetch_point_epistemic_state(graph, [r["id"] for r in results])
+        # #4889: decided once per batch, only when nothing resolved a subject.
+        subject_gap = subject_binding_unavailable_reason(graph, state)
     except Exception:
         _logger.warning("embedded fallback decoration failed — returning "
                         "undecorated hits", exc_info=True)
@@ -1947,7 +1952,57 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         for key in ("valid_from", "valid_to", "expired_at"):
             if st.get(key):
                 r[key] = st[key]
+        # #4889: propagate the subject-binding-unavailable marker so the
+        # fallback tier's silence is surfaced too (the tier never resolved a
+        # subject — make that a stated fact, not an implied empty).
+        if subject_gap:
+            r["subject_unavailable"] = subject_gap
     return results
+
+
+# ── #4889: read surfaces that advertise a mechanism nothing produces ────────
+# Maps a `get_org_structure` leg → (relation, actionable reason). A leg listed
+# here has NO automatic producer anywhere in the product; the marker is
+# emitted only when the graph also holds ZERO edges of that relation, so it
+# self-clears for good the moment a producer lands (or a caller writes one
+# edge by hand). `members` is deliberately NOT listed: `memberOf` HAS a
+# producer (the onboarding anchor seed) and an empty list is a truthful
+# "nothing filed".
+_ORG_STRUCTURE_UNPRODUCED_LEGS: dict[str, tuple[str, str]] = {
+    "roles": (
+        "holdsRole",
+        "no automatic holdsRole producer is wired anywhere in the product — "
+        "the only writer is an explicit create_edge('holdsRole', ...), so an "
+        "empty list cannot be told apart from a leg that was never built "
+        "(tortoise #4889)",
+    ),
+}
+
+
+def _relation_populated(proj, relation: str) -> bool:
+    """True when the graph holds ANY edge of ``relation``.
+
+    #4889: the structural probe behind the ``unavailable`` marker. ``relation``
+    is interpolated into the query STRUCTURE, so it is validated against the
+    frozen producer-less leg table first — never a free-form caller value.
+    """
+    if relation not in {
+            rel for rel, _reason in _ORG_STRUCTURE_UNPRODUCED_LEGS.values()}:
+        raise RuntimeError(
+            f"_relation_populated: {relation!r} is not a declared "
+            "producer-less relation (contract: "
+            "_ORG_STRUCTURE_UNPRODUCED_LEGS values only)")
+    try:
+        rows = proj.g.query(
+            f"MATCH ()-[:{relation}]->() RETURN count(*) LIMIT 1"
+        ).result_set
+    except Exception:
+        _logger.warning(
+            "relation-populated probe failed for %s", relation, exc_info=True)
+        # Fail OPEN (treat as populated): a broken probe must never invent an
+        # unavailability claim about a relation the graph may well hold.
+        return True
+    return bool(rows and rows[0][0])
 
 
 # ── Session-context digest noise filter (#2207) ─────────────────────────
@@ -13793,6 +13848,7 @@ class TortoiseSDK:
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
             fetch_point_epistemic_state, fallback_tfidf,
+            subject_binding_unavailable_reason,
             SearchResult, SearchScores,
             search_provenance_enabled,
             filter_by_relationship, filter_by_traversal_predicate,
@@ -14410,6 +14466,13 @@ class TortoiseSDK:
         point_relationships = get_relationships_bounded(graph, result_ids) if entity_type == "point" else {}
         # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
         point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
+        # #4889: the D10 subject decoration is UNRESOLVABLE whole-graph until a
+        # producer exists (the fetch itself issues no extra query — the probe
+        # lives here, at the surface that advertises the field). Empty ⇒ the
+        # field is a build gap, not an observation; the reason names #4934.
+        subject_gap = (
+            subject_binding_unavailable_reason(graph, point_state)
+            if entity_type == "point" else "")
 
         # 8. Build SearchResult objects, filter, and order
         results = []
@@ -14470,6 +14533,11 @@ class TortoiseSDK:
                 expired_at=point_state.get(pid, {}).get("expired_at")
                 or pt.get("expiredAt") or "",
                 subject=point_state.get(pid, {}).get("subject"),
+                # #4889: the D10 subject decoration's silence is surfaced —
+                # present ONLY when the graph has no aboutSubject producer at
+                # all, so `subject` absent + this absent still means "no
+                # subject", while this present means "binding never built".
+                subject_unavailable=subject_gap,
                 topics=cap_topics,
                 summary=cap_summary,
                 session_id=cap_session,
@@ -20757,7 +20825,23 @@ class TortoiseSDK:
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:
-        """Return organisational structure: members, roles, sub-orgs."""
+        """Return organisational structure: members, roles, sub-orgs.
+
+        #4889 — the `roles` leg has NO automatic producer anywhere in the
+        product (the only writer is an explicit
+        ``create_edge('holdsRole', …)``), so on a graph where that relation is
+        empty an empty list is indistinguishable from "this leg was never
+        built". When the graph holds zero ``holdsRole`` edges the response
+        carries an additive ``unavailable`` map naming the leg and the reason
+        — never a silent ``[]``. ``members`` needs no marker: ``memberOf`` HAS
+        a producer (the onboarding anchor seed,
+        ``tortoise/onboarding/seed.py::seed_onboarding_anchors``), so an empty
+        ``members`` is a truthful "nothing filed". Both markers disappear by
+        themselves the moment the graph holds the relation.
+
+        ``unavailable`` is ADDITIVE — absent on every graph that holds the
+        relation, so a caller that ignores it is byte-compatible.
+        """
         proj = self._get_proj()
         # Issue #327: labeled Subject start (id|name OR both indexed -> Index
         # Scan) then traverse outward; roles filters the source Subject p.
@@ -20771,10 +20855,20 @@ class TortoiseSDK:
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
             params={"sid": subject_id},
         )
-        return {
+        out = {
             "members": [dict(row[0]) for row in members.result_set],
             "roles": [dict(row[0]) for row in roles.result_set],
         }
+        # #4889 — a leg the system cannot produce must say so. Probed
+        # (not hard-coded) so the marker self-clears once a producer lands.
+        unavailable = {}
+        for leg, reason in _ORG_STRUCTURE_UNPRODUCED_LEGS.items():
+            if leg in out and not out[leg] and not _relation_populated(
+                    proj, reason[0]):
+                unavailable[leg] = reason[1]
+        if unavailable:
+            out["unavailable"] = unavailable
+        return out
 
     def ulid(self) -> str:
         from .ids import ulid as _ulid
