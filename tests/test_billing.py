@@ -1130,7 +1130,8 @@ class TestBillingSupabaseStore:
         assert r.status_code == 409, r.text
         assert called == [], "the active-status guard must reject before any Stripe call"
 
-    def test_mirror_subscription_writes_the_orgs_row_not_the_registry(self, sb):
+    def test_mirror_subscription_writes_the_orgs_row_not_the_registry(
+            self, sb, monkeypatch):
         """#4726: in Supabase mode ``mirror_subscription`` writes the billing
         state to the authoritative ``organizations`` row, exactly as the
         webhook's ``_set`` does. The pre-fix unconditional
@@ -1142,8 +1143,27 @@ class TestBillingSupabaseStore:
         row's ``subscription_status``/``subscription_id`` stay None.
         Reachable in the fixture: the ``sb`` row exists and
         ``get_control_plane`` is patched to it.
+
+        F3 (#4726 review): the seam PAYLOAD is pinned by a spy, not only
+        inferred from the resulting row. ``update_org_billing``'s ``allowed``
+        allow-list silently drops ``cancel_at_period_end``, so a row-only
+        assertion cannot see the exclusion at ``billing.py`` — deleting it
+        (passing ``dict(twin)``) left the old test GREEN. Exact-payload
+        equality reds that mutation: the failing value is a payload carrying
+        ``cancel_at_period_end``, reachable because the fixture's
+        ``sub`` sets it ``True``.
         """
+        import tortoise.supabase_control as sc
+
         _, fake = sb
+        sent: list[tuple[str, dict]] = []
+        real_update = sc.update_org_billing
+
+        def _spy(cp, org_id, updates):
+            sent.append((org_id, dict(updates)))
+            return real_update(cp, org_id, updates)
+
+        monkeypatch.setattr(sc, "update_org_billing", _spy)
 
         class _NoRegistrySdk:
             def _get_registry(self):  # pragma: no cover — must never run
@@ -1160,6 +1180,16 @@ class TestBillingSupabaseStore:
             customer_email="owner@example.com")
         assert summary == {"tier": "pro", "interval": "monthly",
                            "status": "active"}
+        # The seam sees the EXACT mirror payload (apply_limits' quota write is
+        # the earlier call; the status/period write is the last).
+        assert sent[-1] == (self.ORG_ID, {
+            "subscription_status": "active",
+            "subscription_id": "sub_sb_4726",
+            "current_period_start": 1756512000,
+            "current_period_end": 1759104000,
+            "customer_email": "owner@example.com",
+        }), sent
+        assert all("cancel_at_period_end" not in u for _, u in sent), sent
         row = fake.tables["organizations"][0]
         assert row["tier"] == "pro"
         assert row["subscription_status"] == "active"
@@ -1172,6 +1202,24 @@ class TestBillingSupabaseStore:
         # ``cancel_at_period_end`` has no ``organizations`` column — it is the
         # registry-twin property and must not be written to the row.
         assert "cancel_at_period_end" not in row
+
+    def test_mirror_subscription_raises_when_the_org_row_is_absent(self, sb):
+        """#4726 F2: mirroring onto an org with NO ``organizations`` row must
+        fail closed, not return a success summary.
+
+        Failing value: the seam's PATCH matches 0 rows — the fixture row's id
+        is ``ORG_ID``, so ``org_absent_4726`` is absent; pre-fix the mirror
+        returned ``{'tier': 'pro', ...}`` while the row list stayed unchanged.
+        Reachable in the fixture: ``sb`` seeds exactly one org row, and the
+        ``None`` SDK is never reached (the Supabase branch raises first).
+        """
+        _, fake = sb
+        before = [dict(r) for r in fake.tables["organizations"]]
+        sub = {"id": "sub_absent_4726", "status": "active",
+               "items": {"data": [{"price": {"id": "price_200proMM"}}]}}
+        with pytest.raises(RuntimeError, match="no organizations row matched"):
+            billing.mirror_subscription(None, "org_absent_4726", sub)
+        assert fake.tables["organizations"] == before
 
     def test_reconcile_org_reads_the_orgs_row_in_supabase_mode(self, sb, monkeypatch):
         """#4726: ``reconcile_org`` reads the subscription/customer identifiers

@@ -3069,13 +3069,20 @@ def org_billing_state(cp, org_id: str) -> dict:
 
 
 def update_org_billing(cp, org_id: str, updates: dict) -> None:
-    """PATCH billing state on the orgs row (webhook SET twin).
+    """PATCH billing state on the orgs row (the Supabase twin of every
+    registry billing write — the webhook's ``_set``, the checkout customer
+    binding, ``apply_limits``, and ``billing.mirror_subscription``).
 
     ``updates`` is a subset of {tier, stripe_customer_id, subscription_id,
     subscription_status, customer_email, grace_until, current_period_end,
     current_period_start} — only columns that exist on orgs (0006 + 0012 +
     20260918000001) are written. Raises on failure (fail-closed): a dropped
     billing write must surface, not silently lose an upgrade/downgrade/cancel.
+    That includes a PATCH that matches NO row: PostgREST answers a
+    ``return=minimal`` PATCH with an empty body whether it updated one row or
+    zero, so this seam requests ``return=representation`` and raises on ``[]``
+    — an absent/renamed org (or a row deleted under it) must not read as a
+    successful write (#4726 F2).
 
     ``current_period_start`` (#3825) is the METER WINDOW ANCHOR, and its
     omission here is SILENT: the ``if k in allowed`` filter below drops the key
@@ -3101,21 +3108,29 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     # PGlite. The REGISTRY twin stores the int verbatim because
     # ``metering._anchor_instant`` accepts both shapes, but the control plane
     # can only bind an ISO-8601 instant. Normalising HERE — the one seam every
-    # Supabase-lane billing write passes through (checkout and
-    # ``customer.subscription.updated``) — fixes every writer at once without
-    # changing what the webhook handlers pass. (The registry twin does NOT use
-    # this seam: ``mirror_subscription`` writes the graph directly and
-    # ``_anchor_instant`` reads its epoch ints.)
+    # Supabase-lane billing write passes through (checkout, the webhook's
+    # ``_set``/``apply_limits``, and ``billing.mirror_subscription``) — fixes
+    # every writer at once without changing what the callers pass. (The
+    # registry twin does NOT use this seam: it writes the ``:Team`` node
+    # directly and ``_anchor_instant`` reads its epoch ints.)
     for _col in ("current_period_start", "current_period_end"):
         _v = body.get(_col)
         if isinstance(_v, (int, float)) and not isinstance(_v, bool):
             body[_col] = datetime.fromtimestamp(float(_v), tz=UTC).isoformat()
-    cp.query(
+    # ``select`` is what makes PostgREST return the updated rows
+    # (``Prefer: return=representation``) instead of an empty 204 — the only
+    # way a 0-row PATCH is distinguishable from a real write (see docstring).
+    rows = cp.query(
         "organizations",
+        select=["id"],
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body=body,
     )
+    if not rows:
+        raise RuntimeError(
+            f"update_org_billing: no organizations row matched id="
+            f"{org_id!r} — the billing write was dropped (fail-closed)")
 
 
 def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
