@@ -5519,7 +5519,21 @@ def _bucket_route(store, key, now: float, window_s: int, cap: int):
     a key with its OWN in-window overflow charges stays in the overflow rather
     than being handed a second full budget, while a key with none takes a free
     owned slot (a store-wide rule would deny every fresh key until the whole
-    overflow drained)."""
+    overflow drained). A key equal to the reserved overflow sentinel is routed
+    to the overflow rather than being allowed to own it."""
+    # A client key must NEVER own the reserved slot (#3124 review). If one
+    # could, its bucket would be stored under `_BUCKET_OVERFLOW_KEY` with bare
+    # float entries, and the next fresh-key scan (`entry[1]` on a float) would
+    # raise TypeError -> 500 for the whole window. Unreachable over HTTP today
+    # (h11's field grammar forbids NUL in a header value, and every other key
+    # is a tuple or an IP string), but the reserved-key boundary must be
+    # structural rather than transport-dependent.
+    if key == _BUCKET_OVERFLOW_KEY:
+        overflow = store.get(_BUCKET_OVERFLOW_KEY)
+        if overflow is None:
+            return [], True
+        overflow[:] = _bucket_prune_window(overflow, now, window_s)
+        return overflow, True
     bucket = store.get(key)
     if bucket is not None:
         bucket[:] = _bucket_prune_window(bucket, now, window_s)

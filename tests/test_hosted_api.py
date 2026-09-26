@@ -9988,6 +9988,35 @@ class TestBoundedIpBucketStore:
         _ha_mod._forget_bucket_charge(store2, "k")
         assert store2[sentinel] == [(1.0, "other")], store2[sentinel]
 
+    def test_reserved_sentinel_key_cannot_poison_the_overflow(
+            self, monkeypatch):
+        """#3124 review: a key equal to the reserved sentinel must not own it.
+
+        If it could, the store would hold bare floats under
+        `_BUCKET_OVERFLOW_KEY`, and the next fresh-key scan (`entry[1]` on a
+        float) would raise TypeError -> 500 for the whole window. Unreachable
+        over HTTP (h11's field grammar forbids NUL in a header value) — this
+        pins the structural guard, not a transport guarantee.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        sentinel = _ha_mod._BUCKET_OVERFLOW_KEY
+        kw = dict(limit=1, window_s=3600, detail="x", max_entries=8)
+
+        async def _run():
+            store, lock = {}, asyncio.Lock()
+            codes = await _drive_bucket_check(store, lock, [sentinel] * 3, **kw)
+            # A NORMAL key must still be routed without raising.
+            codes += await _drive_bucket_check(store, lock, ["normal"], **kw)
+            return store, codes
+
+        store, codes = asyncio.run(_run())
+        overflow = store.get(sentinel, [])
+        assert all(isinstance(e, tuple) and len(e) == 2 for e in overflow), (
+            f"a malformed (bare-float) entry poisoned the overflow: {overflow}")
+        assert codes[0] == 200, codes
+        assert codes[3] == 200, codes
+        assert len(overflow) <= 1, overflow  # limit=1
+
     def test_sentinel_cannot_collide_with_a_client_key(self):
         """The reserved overflow sentinel must be unreachable from a request.
 
