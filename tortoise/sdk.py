@@ -5000,7 +5000,7 @@ class TortoiseSDK:
                 #    the seam is the backstop).
                 resolved = exact_hit_id(canonical_by_hash, content)
                 dedup = DEDUP_CONTENT_HASH_HIT if resolved else DEDUP_NEW
-                # #2813: read the four E3 passthrough props OFF the payload
+                # #2813: read the whitelisted passthrough props OFF the payload
                 # point dict ONCE, before the write, so the same VALUES reach
                 # both `create_point` (node persistence) and the response
                 # `props` superset — a COPY, not the same dict object:
@@ -5068,7 +5068,8 @@ class TortoiseSDK:
                     # (`restore_point_at` → ambiguous). Absent `when` stays
                     # absent — never a fabricated now. Deliberately a
                     # create-only dict: folding `validFrom` into the RESPONSE
-                    # `props` would change the documented E3 whitelist surface
+                    # `props` would change the documented
+                    # ``_CAPTURE_PASSTHROUGH_PROPS`` surface
                     # AND make the response differ between a create and a
                     # dedup hit on the same node (the read-back reads only
                     # ``_CAPTURE_PASSTHROUGH_PROPS``), the #2949 asymmetry.
@@ -5265,7 +5266,8 @@ class TortoiseSDK:
                 # same lane class as the points-loop resolution above — so it
                 # reports the canonical's STORED passthrough props too, not a
                 # hardcoded {}. Emitting {} here for the SAME canonical that
-                # the points loop describes with its four E3 fields was the
+                # the points loop describes with its whitelisted passthrough
+                # fields was the
                 # exact asymmetry this PR set out to remove (a consumer saw
                 # the fields on one lane and an empty dict on the other).
                 extracted.append({
