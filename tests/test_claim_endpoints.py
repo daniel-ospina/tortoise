@@ -66,6 +66,7 @@ def _claim_env(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-claim-test")
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
     ha_mod._CLAIM_BUCKETS.clear()
+    ha_mod._CLAIM_OVERFLOW.clear()
     fake = FakeControlPlane()
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
 
@@ -75,6 +76,7 @@ def _claim_env(monkeypatch):
     monkeypatch.setattr(ha_mod, "_gotrue_email_confirmed", _confirmed)
     yield fake
     ha_mod._CLAIM_BUCKETS.clear()
+    ha_mod._CLAIM_OVERFLOW.clear()
 
 
 @pytest.fixture
@@ -417,6 +419,155 @@ class TestClaimEndpoint:
         )
         assert r3.status_code == 429, r3.text
         assert r3.headers.get("retry-after") == "86400"
+
+    def test_claim_limiter_is_per_real_client_ip(self, client, fake,
+                                                 monkeypatch):
+        """#3125: two clients behind the Fly proxy from DIFFERENT source IPs
+        must NOT share a claim budget.
+
+        Pre-fix the limiter keyed on ``request.client.host``, which behind
+        Fly is the PROXY's IP — a constant — so both clients shared ONE
+        bucket and the bundle was a GLOBAL 2/24h cap: the second client's
+        FIRST attempt was already the global 3rd and 429'd. The requests are
+        INTERLEAVED so the assertion cannot pass on sequential budgets alone.
+        ``ClientIPMiddleware`` resolves ``request.state.client_ip`` from
+        ``Fly-Client-IP`` when ``TORTOISE_TRUST_FLY_CLIENT_IP=1`` (#1559).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)  # ON
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        monkeypatch.setenv("TORTOISE_CLAIM_MAX_PER_24H", "2")
+        monkeypatch.setenv("TORTOISE_CLAIM_WINDOW_S", "86400")
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+
+        def attempt(fly_ip):
+            return client.post(
+                "/v1/claim",
+                headers={"Authorization": "Bearer abc.def.ghi",
+                         "Fly-Client-IP": fly_ip},
+                json={"api_key": "tt_limiter_key_0000000000000000000000000"},
+            )
+
+        a, b = "203.0.113.7", "198.51.100.9"
+        # 2 attempts each, interleaved: every one is within ITS OWN budget.
+        for ip in (a, b, a, b):
+            r = attempt(ip)
+            assert r.status_code != 429, (ip, r.text)
+        # each client's 3rd attempt exhausts its own (not a shared) budget
+        assert attempt(a).status_code == 429
+        assert attempt(b).status_code == 429
+        # the real assertion: TWO distinct buckets, keyed on the real client
+        # IP — not one bucket keyed on the constant proxy host.
+        assert set(ha_mod._CLAIM_BUCKETS) == {a, b}
+
+        # The IPv4-mapped spelling of an ALREADY-SEEN address is the same
+        # client, so it shares that budget instead of minting a second bucket
+        # (a dual-stack client would otherwise get 2x the budget). The other
+        # per-IP limiters get this inside _check_ip_bucket_rate_limit.
+        assert attempt(f"::ffff:{b}").status_code == 429
+        assert set(ha_mod._CLAIM_BUCKETS) == {a, b}
+
+    def test_claim_limiter_store_is_bounded_and_overflow_fails_closed(
+            self, client, fake, monkeypatch):
+        """#3125: the store is BOUNDED — never the unbounded distinct-new-key
+        growth the pre-fix prune allowed.
+
+        That branch pruned only *stale* buckets, AFTER the charge (#2866's
+        non-bounding shape): under a fresh-key flood every bucket is
+        in-window, so nothing was reclaimed and the store grew without bound.
+        Now: (1) inactive LRU-head buckets are reclaimed on the new-key path;
+        (2) while the store is full of LIVE buckets a new IP gets NO bucket of
+        its own — it shares ONE overflow bucket with the same 2/24h budget
+        (fail closed: a bounded 429, never an unbounded budget); (3) a
+        tracked key's budget is never reset by other keys' churn; (4) the
+        store never exceeds ``TORTOISE_CLAIM_STORE_CAP``.
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)  # ON
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        monkeypatch.setenv("TORTOISE_CLAIM_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_CLAIM_MAX_PER_24H", "2")
+        monkeypatch.setenv("TORTOISE_CLAIM_WINDOW_S", "86400")
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+        # A frozen clock drives the aging leg (the #2866 test pattern).
+        clock = [1_000_000.0]
+        monkeypatch.setattr(ha_mod.time, "time", lambda: clock[0])
+
+        def overflow():
+            return len(ha_mod._CLAIM_OVERFLOW[ha_mod._CLAIM_OVERFLOW_KEY])
+
+        def attempt(fly_ip):
+            return client.post(
+                "/v1/claim",
+                headers={"Authorization": "Bearer abc.def.ghi",
+                         "Fly-Client-IP": fly_ip},
+                json={"api_key": "tt_limiter_key_0000000000000000000000000"},
+            )
+
+        # two distinct IPs fill the store TO its cap
+        for ip in ("203.0.113.1", "203.0.113.2"):
+            assert attempt(ip).status_code != 429
+        assert len(ha_mod._CLAIM_BUCKETS) == 2
+
+        # a THIRD new IP while both buckets are LIVE: no bucket of its own,
+        # charged to the shared overflow bucket — the store does NOT grow.
+        assert attempt("203.0.113.3").status_code != 429
+        assert len(ha_mod._CLAIM_BUCKETS) == 2
+        assert "203.0.113.3" not in ha_mod._CLAIM_BUCKETS
+        assert overflow() == 1
+
+        # overflow binds at the SAME budget (2/24h) — fail-closed, not
+        # unlimited: the 2nd charges, the 3rd is 429, store still bounded.
+        assert attempt("203.0.113.4").status_code != 429
+        assert overflow() == 2
+        r = attempt("203.0.113.5")
+        assert r.status_code == 429, r.text
+        assert len(ha_mod._CLAIM_BUCKETS) == 2
+
+        # a TRACKED key's budget is not reset by the other keys' churn:
+        # 203.0.113.1 already spent 1 — its 2nd is allowed, its 3rd 429s.
+        assert attempt("203.0.113.1").status_code != 429
+        assert attempt("203.0.113.1").status_code == 429
+
+        # (1) aging: every stored bucket is now inactive, so a new IP RECLAIMS
+        # them and gets its own bucket — a full store never permanently
+        # denies new clients, and the store stays within the cap.
+        clock[0] += 24 * 3600 + 1
+        assert attempt("203.0.113.9").status_code != 429
+        assert "203.0.113.9" in ha_mod._CLAIM_BUCKETS
+        assert len(ha_mod._CLAIM_BUCKETS) <= 2
+
+    def test_claim_limiter_invalid_window_never_fails_open(
+            self, client, fake, monkeypatch):
+        """#3125: a NON-POSITIVE ``TORTOISE_CLAIM_WINDOW_S`` must not
+        silently disable the limiter.
+
+        With ``window_s <= 0`` the in-window test ``now - t < window_s`` is
+        never true, so the bucket is emptied on every request and EVERY claim
+        is allowed — a fail-OPEN, and the knob is new here (#3125 item 3).
+        An invalid window falls back to the default instead; the intended
+        off-switch is RATE_LIMIT_DISABLED. The advertised Retry-After proves
+        the fallback (it is the default window, not 0).
+        """
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)  # ON
+        monkeypatch.setenv("TORTOISE_CLAIM_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_CLAIM_MAX_PER_24H", "2")
+        monkeypatch.setenv("TORTOISE_CLAIM_STORE_CAP", "10000")
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+
+        def attempt():
+            return client.post(
+                "/v1/claim",
+                headers={"Authorization": "Bearer abc.def.ghi"},
+                json={"api_key": "tt_limiter_key_0000000000000000000000000"},
+            )
+
+        for _ in range(2):
+            assert attempt().status_code != 429
+        r = attempt()
+        assert r.status_code == 429, r.text
+        assert r.headers.get("retry-after") == "86400"
 
     def test_claim_allowed_under_0015_drift_then_blocked_after_recovery(
             self, client, fake, monkeypatch):
