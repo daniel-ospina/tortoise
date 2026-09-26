@@ -42,6 +42,14 @@ UNAVAILABLE EVIDENCE IS A REFUSAL, NEVER A SKIP
     read its evidence must not report success (the #1382 class), and a `cut` that cannot
     read the artifact it is about to overwrite must not silently discard the approvals
     recorded in it.
+
+THE RESET IS THE CONTROL, BUT IT IS NOT SILENT
+    `cut` writes `approval: null` for every row — CONTRIBUTING.md ("To propose an
+    addition", steps 2-4) makes that reset the control, so a changed `served_from`
+    cannot ride an old approval into `approved`. The reset is therefore NOT reversed
+    here. It is gated: the artifact is the only carrier of the owner's per-row
+    approvals, so a re-cut that would blank any of them refuses, names every row it
+    would blank, and proceeds only under an explicit `--allow-approval-reset` (#4598).
 """
 
 from __future__ import annotations
@@ -1025,41 +1033,44 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
             found.append((str(name), str(approval)))
     return found
 
-
 def cmd_cut(args: argparse.Namespace) -> int:
+    # READ THE ARTIFACT BEFORE DERIVING ANYTHING. `build_doc` cannot read it, so it emits
+    # `approval: null` for every row: this write is the one that destroys the approvals,
+    # and the artifact is their only carrier. The gate therefore lives at the write site.
+    # A MISSING artifact has no approvals to lose (the first cut, which must keep
+    # working); an UNREADABLE one is a refusal, never a silent overwrite. The absent-flag
+    # default is `False` — an unstated permission is not a permission.
+    blanked: list[tuple[str, str]] = []
+    if MANIFEST_FILE.exists():
+        try:
+            prior = _read_manifest()
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
+        blanked = _recorded_approvals(prior)
+        if blanked and not getattr(args, "allow_approval_reset", False):
+            listed = "; ".join(f"{name} = {value!r}" for name, value in blanked)
+            return _refuse(
+                SurfaceEvidenceUnreadable(
+                    f"refusing to overwrite {_display(MANIFEST_FILE)}: the re-cut would blank "
+                    f"{len(blanked)} recorded owner approval(s) — {listed}. Re-run with "
+                    "--allow-approval-reset to perform the reset deliberately "
+                    '(CONTRIBUTING.md, "To propose an addition", steps 2-4).'
+                )
+            )
+        if blanked:
+            # The reset is authorised — but still say WHAT it costs, so a deliberate
+            # reset is as visible in the transcript as the refusal is.
+            print(
+                f"--allow-approval-reset: blanking {len(blanked)} recorded owner "
+                f"approval(s) from {_display(MANIFEST_FILE)}:"
+            )
+            for name, value in blanked:
+                print(f"    {name} = {value!r}")
+
     try:
         doc = build_doc(args.commit)
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
-
-    # FAIL CLOSED ON A SILENT APPROVAL WIPE (#4598). `build_doc` writes `approval: null` on
-    # every row, and CONTRIBUTING.md makes that reset the CONTROL: a re-cut forces the owner to
-    # re-approve the baseline, so a changed `served_from` cannot ride an old approval into
-    # `approved`. That control is KEPT — what is removed here is only its SILENCE. On
-    # 2026-09-23 a re-cut landed on `main` through PR #4043 and carried six recorded owner
-    # approvals to zero, and nothing went red: `approval` is NON_DERIVABLE, so no derived
-    # property compares it and no check can see the loss. Refusing here costs one flag; not
-    # refusing costs an owner decision, with no artifact left to recover it from.
-    #
-    # A MISSING artifact has no approvals to lose — that is the first cut, and it must keep
-    # working. An UNREADABLE one is different in kind: it may well carry approvals that cannot
-    # be enumerated, so overwriting it destroys them without ever naming them, which is the
-    # #4598 wipe again. Refuse. Never a silent overwrite of a document we could not read.
-    doomed: list[tuple[str, str]] = []
-    if MANIFEST_FILE.exists():
-        try:
-            doomed = _recorded_approvals(_read_manifest())
-        except SurfaceEvidenceUnreadable as exc:
-            return _refuse(exc)
-    if doomed and not getattr(args, "allow_approval_reset", False):
-        print(f"::error::cut would reset {len(doomed)} recorded approval(s) to null")
-        print(f"REFUSED {_display(MANIFEST_FILE)} carries {len(doomed)} recorded approval(s) "
-              f"that a re-cut would destroy:")
-        for name, approval in doomed:
-            print(f"  {name}: {approval}")
-        print("  Re-record them after the cut (CONTRIBUTING.md, step 4), or pass "
-              "--allow-approval-reset to drop them deliberately.")
-        return 1
 
     MANIFEST_FILE.write_text(
         yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False),
@@ -1074,16 +1085,18 @@ def cmd_cut(args: argparse.Namespace) -> int:
     # changed `served_from` cannot ride an old approval into `approved`. Preserving them
     # would silently reverse that decision, so the reset stays and the tool SAYS so, because
     # otherwise the next reader sees the wipe as a bug and "fixes" it back.
+    # The guard above does NOT reverse that decision — it makes it non-silent: the reset
+    # still happens, but only once `--allow-approval-reset` says so out loud.
     print(f"wrote {_display(MANIFEST_FILE)}")
     print(f"  tools={doc['counts']['tools']} sdk={doc['counts']['sdk_public_methods']} "
           f"retired={doc['counts']['retired']}")
     print(f"  keyword distribution: {doc['counts']['keyword_distribution']}")
     print(f"  distinct declared bindings: "
           f"{len({r['sdk_method'] for r in doc['rows'] if r.get('sdk_method')})}")
-    if doomed:
+    if blanked:
         # Named, not summarised: the operator asked for this, and the rows are the loss.
-        print(f"  DROPPED {len(doomed)} recorded approval(s) (--allow-approval-reset):")
-        for name, approval in doomed:
+        print(f"  DROPPED {len(blanked)} recorded approval(s) (--allow-approval-reset):")
+        for name, approval in blanked:
             print(f"    {name}: {approval}")
     else:
         print("  approvals reset to null — re-record them per row (CONTRIBUTING.md, step 4)")
@@ -1888,7 +1901,11 @@ def main() -> int:
     p_cut.add_argument(
         "--allow-approval-reset",
         action="store_true",
-        help="permit dropping recorded per-row approvals (default: refuse and name every row)",
+        help=(
+            "perform a re-cut that blanks recorded per-row owner approvals. Without it, "
+            "`cut` refuses when the baseline it would overwrite carries any non-null "
+            "`approval`, and names every row it would blank."
+        ),
     )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)

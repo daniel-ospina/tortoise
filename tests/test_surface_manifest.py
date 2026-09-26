@@ -1065,8 +1065,10 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    ns = argparse.Namespace(commit="deadbeef", allow_approval_reset=True)
-    assert sm.cmd_cut(ns) == 0
+    # Since the blanked-approval guard (#4598), the reset the decision relies on is
+    # performed only when it is asked for out loud. The reset is unchanged; the flag is
+    # what keeps it from being SILENT (see the two guard tests below).
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
 
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert written["approval_status"] == "pending-owner-approval"
@@ -1079,6 +1081,96 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
         "the write site carried the previous approvals across the re-cut, reversing the "
         f"control CONTRIBUTING.md steps 2-4 rely on: {carried[:5]}"
     )
+
+
+def _manifest_with_one_approval(tmp_path, name="tortoise_recall", value="#4173 @daniel-ospina"):
+    """A baseline-shaped fixture whose ONLY recorded approval sits on `name`."""
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = None
+    next(r for r in prior["rows"] if r["name"] == name)["approval"] = value
+    path = tmp_path / "surface-manifest.yml"
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+    return path, name, value
+
+
+def test_cut_refuses_to_blank_a_recorded_approval(monkeypatch, tmp_path, capsys, derived_baseline):
+    """A re-cut that would discard a recorded approval REFUSES, and names the row.
+
+    `build_doc` cannot read the artifact, so every row it emits carries `approval: null`.
+    The artifact is the only carrier of the owner's per-row approvals, which makes this
+    write the one that silently destroys them — it did exactly that on this branch,
+    blanking six approvals recorded on `origin/main` (#4598). Fail closed at the write
+    site; the reset remains available, but only on request.
+    """
+    sm = _load_manifest_tool()
+    path, name, value = _manifest_with_one_approval(tmp_path)
+    before = path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    rc = sm.cmd_cut(argparse.Namespace(commit="deadbeef"))
+    out = capsys.readouterr().out
+
+    assert rc == 1, "a re-cut that blanks a recorded approval must refuse"
+    assert "::error::" in out, out
+    assert name in out and value in out, f"the refusal must name the row it would blank: {out}"
+    assert "allow-approval-reset" in out, out
+    assert path.read_text(encoding="utf-8") == before, "a refused cut wrote the baseline anyway"
+
+
+def test_cut_allow_approval_reset_proceeds_and_PRINTS_the_loss(
+    monkeypatch, tmp_path, capsys, derived_baseline
+):
+    """The reset stays the control — authorised, but never silent.
+
+    CONTRIBUTING.md ("To propose an addition", steps 2-4) makes the reset what forces
+    re-approval, so `--allow-approval-reset` keeps the behaviour and drops only the
+    silence: the transcript must record what the reset cost.
+    """
+    sm = _load_manifest_tool()
+    path, name, value = _manifest_with_one_approval(tmp_path)
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    rc = sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True))
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "blanking 1 recorded owner approval(s)" in out, out
+    assert name in out and value in out, f"the authorised reset must still say what it cost: {out}"
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["approval_status"] == "pending-owner-approval"
+    assert [r for r in written["rows"] if r.get("approval")] == []
+
+
+def test_cut_is_not_blocked_when_no_approval_is_recorded(monkeypatch, tmp_path, derived_baseline):
+    """The guard gates the LOSS, not the tool.
+
+    An approval-free baseline is the ordinary re-cut CONTRIBUTING.md steps 2-4 describe
+    (and the first cut): it must still run without the flag. Without this test the guard
+    could red the documented workflow while the refusal tests stayed green.
+    """
+    sm = _load_manifest_tool()
+    path = tmp_path / "surface-manifest.yml"
+    prior = copy.deepcopy(_manifest())
+    for row in [*prior["rows"], *prior["retired"]]:
+        row["approval"] = None
+    path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
+
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+
+
+def test_cut_still_cuts_when_the_baseline_does_not_exist(tmp_path, monkeypatch, derived_baseline):
+    """The very first cut has no artifact to read — and no approval to lose."""
+    sm = _load_manifest_tool()
+    missing = tmp_path / "surface-manifest.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", missing)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    assert missing.exists(), "a cut with no prior artifact wrote nothing"
 
 
 def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, derived_baseline):
