@@ -202,7 +202,9 @@ def test_key_limit_403_census_fires_the_extraction_killer_gate():
     assert set(census) & EXTRACTION_KILLER_CENSUS_CLASSES
     # a points-healthy question is degraded by the census alone (before the
     # fix its census key was fatal_403_forbidden — outside the killer set —
-    # and this returned "healthy").
+    # and this returned "healthy"). The shape matters: a FULLY aborted session
+    # also bumps empty_embed_list (which fires the gate), so the carve-out's
+    # value is this PARTIAL shape — an embed list present, no empty_embed_list.
     assert _outcome_extraction_health({
         "question_id": "wp01", "error_classes": census,
         "ingest": {"points": 202}, "points_total": 1000,
