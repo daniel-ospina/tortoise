@@ -191,7 +191,10 @@ def _timestamptz_columns_from_migrations() -> set[tuple[str, str]]:
     This is a TEXT-LEVEL derivation, not a SQL parser: it reads CREATE TABLE
     bodies and ``ALTER TABLE ... ADD COLUMN`` clauses (multi-column lists
     included), applies ``RENAME COLUMN`` / ``RENAME TO`` transitively, and
-    honours DROP COLUMN/TABLE. Comments are stripped. Migrations are
+    honours DROP COLUMN. (DROP TABLE is NOT handled — no migration issues one
+    today, so it is latent; a future migration that drops a table would leave
+    its columns in this set until the parser learns the shape.) Comments are
+    stripped. Migrations are
     append-only (#1235), so the replay end state is the live schema — this set
     was verified to equal PGlite 0.5.4's ``information_schema.columns`` exactly
     (61 columns over all migrations) when the registry was introduced.
