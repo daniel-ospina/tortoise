@@ -5691,6 +5691,7 @@ class TortoiseSDK:
                 _payload_point_content_by_id,
                 apply_payload_operators,
                 remap_operator_endpoint_refs,
+                reverse_point_id_map,
             )
             # #4716 Part 1: rewrite payload endpoint refs to the ids the commit
             # resolved the points to BEFORE the operator write. A payload id
@@ -5707,9 +5708,8 @@ class TortoiseSDK:
             # pre-remap ref named (first payload id wins when several folded
             # into one graph id — deterministic, and the fold guarantees equal
             # normalized content anyway).
-            _capture_reverse_id_map: dict[str, str] = {}
-            for _payload_id, _resolved_id in capture_point_id_map.items():
-                _capture_reverse_id_map.setdefault(_resolved_id, _payload_id)
+            _capture_reverse_id_map = reverse_point_id_map(
+                capture_point_id_map)
             # A FOLDED (NOOP) endpoint's ref is the PRIOR's graph id and has no
             # payload point at all — the extractor's noop record carries the
             # canonical content precisely so the reason still resolves here

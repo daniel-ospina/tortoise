@@ -11801,13 +11801,31 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # the write to (the payload id on a fresh create, the canonical's id on a
     # content-hash dedup hit). The binder below is keyed on this, never on the
     # payload id, so it can only bind a Point the write actually addressed.
+    #
+    # #4970 — the SAME map is the #4716 two-id-space resolution for the hosted
+    # lane, and every consumer below reads it. ``create_point(...,
+    # dedup=True)`` does NOT necessarily write at the id it was handed: on a
+    # content-hash hit its dedup branch re-keys to the EXISTING node
+    # (``sdk._find_point_by_content``) and RETURNS that node's id, while the
+    # payload's ``pt_<sha>`` id is never minted. The §5 CONTAINS MERGE, §6's
+    # aboutObject, §6b's supersession refs and §7's operator refs used to keep
+    # naming the payload id, so they all addressed a node that does not exist
+    # (the ``operator write skipped (inputs missing?)`` silent drop of #4654).
+    # Same map, same shared ``commit_ops.remap_*`` helpers as the v2 capture
+    # path (#4716 Part 1) — no rival mechanism.
     point_resolved_ids: dict[str, str] = {}
     for pr in reconcile.points:
         pid = pr.point.id
+        resolved_pid = pid
+        # #1370 fail-closed: stays ``None`` unless a create actually ran and
+        # returned a usable id, so the map below can never hold a
+        # requested-but-unconfirmed id.
+        _rid: str | None = None
         if pr.action == "merge":
             # MERGE bump (zero budget, PL3): updatedAt touch ONLY — never
             # re-write status (update_point refuses non-promoting transitions;
-            # a live re-capture would 500 — review fix, PR #953).
+            # a live re-capture would 500 — review fix, PR #953). The node
+            # already exists at the payload id, so the resolution is identity.
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
                 params={"pid": pid, "now": now},
@@ -11843,10 +11861,15 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            # #1370: record the id the write RESOLVED to (the map the binder
+            # reads). #4970: the SUCCESSOR may itself re-key (its content
+            # already exists under another id) — supersede the prior with the
+            # id the graph actually holds, else ``supersede_point``'s lifecycle
+            # guard targets a node that was never minted and the commit fails
+            # closed.
             _rid = _written.get("id") if isinstance(_written, dict) else None
-            if isinstance(_rid, str) and _rid:
-                point_resolved_ids[pr.point.id] = _rid
-            sdk.supersede_point(pr.existing_id, pid)
+            resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
+            sdk.supersede_point(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
@@ -11871,13 +11894,45 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            # #1370: the id the write RESOLVED to. #4970: the graph id §5
+            # CONTAINS and the supersede below must use — the pre-existing
+            # node on a dedup re-key, the payload id otherwise.
             _rid = _written.get("id") if isinstance(_written, dict) else None
-            if isinstance(_rid, str) and _rid:
-                point_resolved_ids[pr.point.id] = _rid
+            resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
+        # #1370's fail-closed contract, PRESERVED: only a CONFIRMED resolved id
+        # enters the map. ``create_point`` returning no usable id must leave the
+        # binder below to SKIP, never bind a requested-but-unconfirmed id (a
+        # phantom link: ``link_entity`` matches no endpoint, returns 0, and the
+        # binder's F7 path reads that as "already present"). When the gate is
+        # false every #4970 consumer degrades to identity — exactly the
+        # pre-fix target id, so no consumer regresses on that path.
+        #
+        # ⛔ ONE id space: keyed by the PAYLOAD point id ONLY. Every consumer
+        # names a payload point — §6b's ``supersedes_by`` and §7's operator
+        # endpoints are payload ``pt_<sha>`` ids BY construction, and §6
+        # resolves through ``pr.point.id`` below. Do NOT also key this
+        # branch's ``pid`` (the server-recomputed ``supersede_id`` on the
+        # supersede path): that is a second id space in one dict, and because
+        # ``point_content_id`` hashes CONTENT ONLY while dedup matches
+        # content+kind (#784), one record's payload id can EQUAL another's
+        # ``supersede_id`` — a ``supersede_id`` entry would then overwrite a
+        # payload-id entry (last writer wins) and silently re-point that
+        # record's aboutObject / supersession / binder lookups at the WRONG
+        # node.
+        #
+        # On the ``supersede`` action ``resolved_pid`` is the SUCCESSOR's
+        # resolved id and ``pr.point.id`` IS the PRIOR node's payload id
+        # (``reconcile_payload`` sets ``existing_id=pt.id``), so a payload ref
+        # naming that point resolves to the SUCCESSOR. Deliberate, and
+        # consistent with ``supersede_point``'s own edge transfer — an operator
+        # edge on a superseded point belongs to its successor; pinned by
+        # ``test_supersede_operator_ref_follows_the_successor``.
+        if isinstance(_rid, str) and _rid:
+            point_resolved_ids[pr.point.id] = resolved_pid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
-            params={"sid": session_id, "pid": pid},
+            params={"sid": session_id, "pid": resolved_pid},
         )
 
     # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
@@ -11928,7 +11983,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # discriminates pre-payload terminality). The step-6 entity writes above
     # have landed the payload's net-new successors.
     # ──
-    from tortoise.commit_ops import apply_supersessions
+    from tortoise.commit_ops import (
+        apply_supersessions,
+        remap_supersession_point_refs,
+    )
 
     warned = 0
 
@@ -11944,7 +12002,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         _logger.warning(msg, *args, **kwargs)
 
     applied = apply_supersessions(
-        proj, sdk, payload.supersessions,
+        proj, sdk,
+        # #4970: same remap the capture path applies (#4716 Part 1, the
+        # adjacent hole). ``supersedes_by`` is a payload ``pt_<sha>`` id BY
+        # CONSTRUCTION and shares the operators' two-id-space hole — a
+        # re-keyed successor reached ``sdk.supersede(prior, '<payload id>')
+        # with the target missing, which RAISED and was swallowed by
+        # ``apply_supersessions`` as ``point supersede '<prior>' → '<payload
+        # id>' failed: …`` (NOT the ``… ref '<payload id>' not found`` skip,
+        # which fires only when the already-graph-id ``superseded`` side is
+        # absent) — so the CORRECTS fold was lost. ``superseded`` is
+        # deliberately NOT remapped by the helper: it is already a graph id
+        # and is the record's downstream LANE DISCRIMINATOR
+        # (``startswith("pt_")``), so a map entry could silently flip a
+        # CORRECTS fold onto the entity lane.
+        remap_supersession_point_refs(payload.supersessions,
+                                      point_resolved_ids),
         session_id=session_id, warn=_supersession_warn,
     )
     if payload.supersessions:
@@ -11953,7 +12026,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             applied, len(payload.supersessions), session_id)
 
     for pr in reconcile.points:
+        # Pre-#4970 target: on the supersede action the edge belongs on the
+        # SUCCESSOR, whose id is the recomputed ``supersede_id``.
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
+        # #4970: the RESOLVED graph id, looked up by the PAYLOAD point id
+        # (the map has one id space) — the payload id may name no node, in
+        # which case the aboutObject MATCH below found nothing and the edge
+        # was silently absent. On a supersede the map's value IS the
+        # successor, so the lookup target and the fallback agree; the fallback
+        # keeps the pre-fix id when §5's write gate found no confirmed id.
+        pid = point_resolved_ids.get(pr.point.id, pid)
         for name in pr.point.about_entities:
             if str(name) in subject_entity_names:
                 continue  # #1370: the gated binder owns aboutSubject
@@ -11994,12 +12076,31 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # (op)-[:mitigated_by]->(m), §4.2). Same-commit map → Cypher fallback →
     # deep-miss drop (DE2E-11 negative, support-edge-first) live in the
     # helper — TestMitigates is the refactor-safety gate. ──
-    from tortoise.commit_ops import apply_payload_operators
+    from tortoise.commit_ops import (
+        apply_payload_operators,
+        remap_operator_endpoint_refs,
+        reverse_point_id_map,
+    )
+    # #4970: rewrite payload endpoint refs to the ids §5 ACTUALLY resolved the
+    # points to, BEFORE the operator write. A payload ``pt_<sha>`` that
+    # re-keyed onto a pre-existing node named nothing here, ``create_operator``
+    # raised, and the helper swallowed it as ``operator write skipped (inputs
+    # missing?)`` (the #4654 silent drop, hosted leg). Identical map + shared
+    # helper as the v2 capture path (#4716 Part 1).
+    #
+    # ⛔ The MITIGATES reason is resolved from the SAME ref, so after the remap
+    # the ref is a GRAPH id while ``payload.points`` is keyed by PAYLOAD id —
+    # hand the helper a map-aware resolver (reverse map) or a re-keyed
+    # dampener's reason degrades to its bare graph id (#4716 review P1).
+    _commit_reverse_id_map = reverse_point_id_map(point_resolved_ids)
     apply_payload_operators(
         proj, sdk,
-        [op_rec.operator for op_rec in reconcile.operators
-         if op_rec.action == "new"],
-        point_content_by_id=lambda pid: _point_content_by_id(payload, pid),
+        remap_operator_endpoint_refs(
+            [op_rec.operator for op_rec in reconcile.operators
+             if op_rec.action == "new"],
+            point_resolved_ids),
+        point_content_by_id=lambda pid: _point_content_by_id(
+            payload, _commit_reverse_id_map.get(pid, pid)),
     )
 
 

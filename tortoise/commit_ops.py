@@ -87,17 +87,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     MITIGATES target triples to the re-derived ids, else Layer-1 referential
     integrity fails", #1272).
 
-    ⚠️ Scope, stated honestly (an earlier revision of this docstring claimed
-    the hosted path was immune — it is NOT, and the claim was falsified by the
-    #4716 PR review; **#4970** carries the residual): the hosted commit (``hosted_api._execute_commit_writes`` §5/§7)
-    passes the RAW payload ``Operator`` models and creates its points with
-    ``create_point(..., dedup=True)``, whose internal re-key to an
-    existing-content node is NOT fed back into the operator refs — so a graph
-    holding the point's content under a non-``pt_`` id reproduces the identical
-    silent drop on the hosted lane. Wiring the remap there is a separate
-    change (it needs §5 to surface the resolved ids); #4716 deliberately scopes
-    this helper's CALL SITE to the capture commit, not its correctness claim to
-    the hosted lane.
+    ⚠️ Scope (updated by **#4970**): BOTH write paths now wire this remap —
+    the call site is no longer capture-only. The hosted commit
+    (``hosted_api._execute_commit_writes`` §5/§7) used to pass the RAW payload
+    ``Operator`` models while its ``create_point(..., dedup=True)`` re-keyed
+    to an existing-content node, so the refs named nothing and the edge
+    dropped silently (#4654). #4970 closed that residual: the hosted §5 point
+    loop surfaces the id ``create_point`` actually RESOLVED to (its
+    ``point_resolved_ids`` payload→graph map) and §7 passes the refs through
+    THIS helper — the same graph-id precondition the capture commit satisfies.
 
     Pure and total: only refs present in ``id_map`` are rewritten, everything
     else (graph ids, event ids, empty refs) passes through untouched — so an
@@ -106,6 +104,18 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     ``commit_schema`` Operator models; rewritten entries are copies, entries
     needing no change are returned as the original object, and the INPUTS are
     never mutated in place.
+
+    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids, and ONLY by
+    payload ids (ONE id space): a key the payload never named resolves
+    nothing, and a server-recomputed id (``supersede_id``) mixed into the map
+    could collide with another record's payload id (``point_content_id``
+    hashes content only). On a ``supersede`` reconcile action the payload
+    point id IS the PRIOR node's graph id, and the map keys it to the RESOLVED
+    successor — deliberate, and consistent with ``supersede_point``'s own edge
+    transfer (an operator edge on a superseded point belongs to its
+    successor); pinned by
+    ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
+    test_supersede_operator_ref_follows_the_successor``.
     """
     if not id_map:
         return list(operators or [])
@@ -140,6 +150,38 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     return out
 
 
+def reverse_point_id_map(id_map: dict) -> dict:
+    """Invert a payload-id → resolved-graph-id map for reason lookups.
+
+    ``apply_payload_operators`` resolves a MITIGATES reason from the SAME ref
+    it passes to ``sdk.mitigate_operator`` — but that ref has already been
+    remapped into GRAPH-id space, while the caller's content lookup is keyed
+    by PAYLOAD id. Handing the helper the naive resolver then degrades a
+    re-keyed dampener's reason to its bare graph id (#4716 review P1,
+    reproduced end-to-end). This builds the reverse lookup both write paths
+    pass as ``point_content_by_id``.
+
+    **FIRST payload id wins** when several ids resolved to one graph node
+    (``setdefault`` over the map's insertion order). The rule is stated HERE,
+    once, so the two call sites cannot drift on it. Both write paths key the
+    map by PAYLOAD point id alone, so the winner is always a real
+    ``payload.points`` entry and the reason resolves: two ids resolve to one
+    node only when content+kind match (``_find_point_by_content``), so their
+    normalized content is equal and either winner yields the same reason
+    TEXT. ⛔ Do NOT add a non-payload key (e.g. the server-recomputed
+    ``supersede_id``) to a caller's map: it has no ``payload.points`` entry,
+    so if it won the lookup the reason would degrade to the bare graph id —
+    exactly the #4716 review-P1 degradation this helper exists to prevent —
+    and, being a second id space (``point_content_id`` hashes CONTENT only),
+    it could collide with another record's payload id. See the §5 note in
+    ``hosted_api._execute_commit_writes``.
+    """
+    reverse: dict[str, str] = {}
+    for payload_id, resolved_id in (id_map or {}).items():
+        reverse.setdefault(resolved_id, payload_id)
+    return reverse
+
+
 def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     """#4716 Part 1 (adjacent hole) — same remap for the supersession
     reference that is a payload id BY CONSTRUCTION.
@@ -149,8 +191,12 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
     id). A ``supersedes_by`` whose payload point resolved to an existing graph
     node under a different id is the SAME two-id-space mismatch the operators
-    had — ``apply_supersessions`` would warn ``point supersession ref '<payload
-    id>' not found — skipped (fail-open)`` and the CORRECTS fold would be lost.
+    had: ``sdk.supersede(prior, '<payload id>')`` targets a node that does not
+    exist, RAISES, and ``apply_supersessions`` swallows it as ``point
+    supersede '<prior>' → '<payload id>' failed: …`` — so the CORRECTS fold
+    would be lost. (It is NOT the ``point supersession ref '<payload id>' not
+    found — skipped (fail-open)`` warning: that fires only when the
+    already-graph-id ``superseded`` side is absent.)
 
     ``superseded`` is deliberately NOT remapped (code-review P2): it is the
     record's LANE DISCRIMINATOR downstream — ``apply_supersessions`` dispatches
