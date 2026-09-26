@@ -41,7 +41,10 @@ import {
   keyTabAffordance,
   graphMissingCta,
   REENTRY_BUILD_LEAD_IN,
+  REENTRY_SELF_LEAD_IN,
+  REENTRY_KEYED_LEAD_IN,
   GRAPH_MISSING_BUILD_LEAD_IN,
+  GRAPH_MISSING_SELF_LEAD_IN,
 } from './onboardingEmptyStateKeyNote.js'
 import { probeTags, evalExpressions, extractOne, extractAll, importsFromMain } from './jsxSourceProbe.js'
 import { HARNESS_NAMES, HARNESS_OAUTH } from './harnesses.js'
@@ -704,7 +707,8 @@ test('#4637 wiring: each member arm RENDERS its fork’s lead-in (and never the 
         imports: MAIN_IMPORTS,
         bindings: { isBuildFork: buildFork },
       })
-      const html = String(rendered.html)
+      // react-dom entity-escapes apostrophes; the copy is what matters here
+    const html = String(rendered.html).replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
       const buildLeadIns = [REENTRY_BUILD_LEAD_IN, GRAPH_MISSING_BUILD_LEAD_IN]
       if (buildFork === 'true') {
         assert.ok(buildLeadIns.some((leadIn) => html.includes(leadIn)),
@@ -813,6 +817,72 @@ test('#4637 wiring: the graph-missing card renders the snippet only with the gat
         assert.equal(liveClaim.test(html), holdsKey,
           `gate ${JSON.stringify(gate)}: the member card's live-key paragraph must follow the gate's plaintext — got ${html}`)
       }
+    }
+  }
+})
+
+test('#4637: the five empty-state lead-ins are those exact sentences', () => {
+  // The lead-ins are the user-facing copy this PR exists to make fork- and
+  // key-state-correct: a reword that reintroduces a categorical claim ("you'll
+  // need an API key") must be a deliberate, reviewed change, not a silent one.
+  // Four of them are also exercised through the owner-note render tests; the
+  // member-only KEYED lead-in has no other value pin, so every one is pinned here
+  // as a LITERAL (comparing against the module's own constant would be
+  // self-referential — a reviewer's rewording of that constant stayed green).
+  assert.equal(REENTRY_BUILD_LEAD_IN, 'Your Organization is live — finish the setup below. ')
+  assert.equal(REENTRY_SELF_LEAD_IN, 'Your Organization is live — finish the setup below to connect your agent. ')
+  assert.equal(REENTRY_KEYED_LEAD_IN, "You're in — finish the setup below to connect your agent. ")
+  assert.equal(GRAPH_MISSING_BUILD_LEAD_IN, 'Your Organization is live. ')
+  assert.equal(GRAPH_MISSING_SELF_LEAD_IN, 'Your Organization is live — connect your agent below. ')
+})
+
+test('#4637 wiring: the re-entry card RENDERS the member lead-in its key state selects', async () => {
+  // The re-entry card's member arm selects between the keyed and the no-key
+  // lead-in on `snippetKey || connectGate.mode === 'existing'`. Nothing rendered
+  // that pairing, so swapping the two consequent arms (a member whose
+  // Organization holds a key being told the generic sentence, and a keyless
+  // member the "You're in" one) stayed green — an independent reviewer's
+  // mutation. The card is now rendered for both selector states.
+  const sections = extractAll(stripComments(mainJsxSource),
+    /<section className="overview empty-state graph-missing">(?:(?!<section className="overview empty-state graph-missing">)[\s\S])*?<\/section>/,
+    'the sections with the graph-missing className')
+  const reentryCard = sections[0]
+  assert.ok(/Continue setup →/.test(reentryCard), 'the first section must be the re-entry card')
+  // The SELF fork is the one that can tell the two member lead-ins apart (the
+  // build fork renders REENTRY_BUILD_LEAD_IN in BOTH key states by design), so
+  // the selector->arm pairing is only observable here — which is exactly why an
+  // arm swap stayed green.
+  const states = [
+    { label: 'a reveal is held (self fork)', isBuildFork: 'false', snippetKey: "'stale-reveal'", mode: 'mint', expected: REENTRY_KEYED_LEAD_IN },
+    { label: 'the Organization holds a row (self fork)', isBuildFork: 'false', snippetKey: "''", mode: 'existing', expected: REENTRY_KEYED_LEAD_IN },
+    { label: 'no key anywhere (self fork)', isBuildFork: 'false', snippetKey: 'null', mode: 'mint', expected: REENTRY_SELF_LEAD_IN },
+    { label: 'the build fork, keyed', isBuildFork: 'true', snippetKey: "'stale-reveal'", mode: 'mint', expected: REENTRY_BUILD_LEAD_IN },
+    { label: 'the build fork, keyless', isBuildFork: 'true', snippetKey: 'null', mode: 'mint', expected: REENTRY_BUILD_LEAD_IN },
+  ]
+  for (const state of states) {
+    const gate = await gateValue({ ...GATE_INPUTS[state.mode] })
+    assert.equal(gate.mode, state.mode, `the ${state.mode} input must resolve to mode ${state.mode}`)
+    const [rendered] = await evalExpressions(reentryCard, {
+      imports: MAIN_IMPORTS,
+      bindings: {
+        isOwnerAdmin: 'false',
+        isBuildFork: state.isBuildFork,
+        snippetKey: state.snippetKey,
+        connectGate: JSON.stringify(gate),
+        keyIsLive: String(ownerKeyLive(gate.mode)),
+        firstDataSnippet: "'snippet'",
+        shownOrgName: "'Acme'",
+        setTab: '() => {}',
+      },
+    })
+    // react-dom entity-escapes apostrophes; the copy is what matters here
+    const html = String(rendered.html).replace(/&#x27;/g, "'").replace(/&quot;/g, '"')
+    assert.ok(html.includes(state.expected),
+      `${state.label}: the member arm must render the lead-in its key state selects — got ${html}`)
+    if (state.isBuildFork === 'false') {
+      const other = state.expected === REENTRY_KEYED_LEAD_IN ? REENTRY_SELF_LEAD_IN : REENTRY_KEYED_LEAD_IN
+      assert.ok(!html.includes(other),
+        `${state.label}: the other member lead-in must not render — got ${html}`)
     }
   }
 })
