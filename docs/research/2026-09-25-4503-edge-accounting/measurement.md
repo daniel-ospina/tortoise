@@ -14,16 +14,19 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 # The edge class is outside every accounting surface — measured
 
 **Issue:** [#4503](https://github.com/danielospina/tortoise/issues/4503) · **Lane:** `obj7-4503-edges` · **Date:** 2026-09-25
-**Base:** `origin/main` @ `a2a08beaa` (every locator below re-verified there on 2026-09-26)
-Measured at: origin/main@a2a08beaafc9af5b95c08cfb106b96784fcdbd91 on 2026-09-26
-**Measurement history.** The figures in §2–§4 were taken on **2026-09-25** against this branch's tree
-(based on `origin/main` @ `99a98ddc5`); every locator in §1 was re-read against `a2a08beaa` on
-**2026-09-26** and is unchanged. Two things make that re-verification sound, and neither is an
+**Base:** `origin/main` @ `a2a08beaa` — this branch is rebased onto it, so the branch tree contains it
+Measured at: fix/4503-edge-accounting@26f6c5789d26bf169b1a1220242905f344579c41 on 2026-09-26
+**Measurement history.** The figures in §2–§4 were taken on **2026-09-25** against this branch's tree, and
+naming the branch here is not a convenience — it is the only tree that *can* have produced them:
+`tools/edge_census.py` is **branch-only** and does not exist on `origin/main` at all
+(`git cat-file -e origin/main:tools/edge_census.py` fails). An earlier revision of this line named
+`origin/main` itself, which asserted a measurement tree that cannot contain the instrument and passed
+the ancestry gate only vacuously (the named SHA *was* `origin/main`). Every locator in §1 was re-read
+against `a2a08beaa` on **2026-09-26** and is unchanged. Two things make that sound, and neither is an
 assumption:
-- `tools/edge_census.py` is **branch-only** — it does not exist on `origin/main` at all
-  (`git cat-file -e origin/main:tools/edge_census.py` fails), so no intervening main commit can have
-  altered the instrument. (An empty `git diff <a> <b> -- tools/edge_census.py` would NOT have shown
-  this: absent at both ends also diffs empty.)
+- The branch now contains `origin/main` (`git merge-base --is-ancestor origin/main HEAD` succeeds), so
+  the reported finding has not been overtaken by main. (An empty `git diff <a> <b> --
+  tools/edge_census.py` would NOT have shown this: absent at both ends also diffs empty.)
 - The two commits between `99a98ddc5` and `a2a08beaa` change `tortoise/assembly.py`,
   `tortoise/commit_ops.py`, `tortoise/projection/entities.py` and tests. The only property they touch
   in the measured path is `supersedes_by` (a 200-char truncation fix), which `tools/edge_census.py`
