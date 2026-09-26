@@ -101,7 +101,7 @@ def _run_hook(home: Path, *, path: str, src: Path | None = None,
 
 
 def _cli(argv: list[str], *, home: Path | str, receipt_dir: Path | str | None = None,
-         cwd: Path | None = None,
+         cwd: Path | None = None, timeout: int = 180,
          extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """The REAL CLI, with the same HOME/receipt-dir derivation the hook used."""
     env = dict(os.environ)
@@ -125,7 +125,7 @@ def _cli(argv: list[str], *, home: Path | str, receipt_dir: Path | str | None = 
         env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-m", "tortoise", *argv], capture_output=True,
-        text=True, env=env, cwd=str(cwd) if cwd else None, timeout=180)
+        text=True, env=env, cwd=str(cwd) if cwd else None, timeout=timeout)
 
 
 def _record(home: Path) -> dict:
@@ -458,10 +458,16 @@ def test_hook_and_reader_agree_on_the_hook_run_dir(tmp_path, monkeypatch, suffix
     assert proc.returncode == 0, proc.stderr
 
     looked_for = _hook_run_file("claude")
-    assert looked_for.is_file(), (
+    # EQUALITY, not just `is_file()`: the reader must land on the SAME
+    # absolute path the hook wrote, and a relative result (which a mutated
+    # derivation produces) must not be satisfiable by a stray file in the
+    # process cwd (see the empty-override test).
+    expected = tmp_path / "hook-runs" / "claude.json"
+    assert looked_for.is_absolute() and looked_for == expected, (
         f"the hook's record is invisible to the reader for "
         f"TORTOISE_IMPORT_RECEIPT_DIR={receipt_dir!r}: the reader looks at "
-        f"{looked_for}, the hook wrote under {tmp_path}")
+        f"{looked_for}, expected {expected}")
+    assert looked_for.is_file(), (looked_for, tmp_path)
     assert json.loads(looked_for.read_text(encoding="utf-8"))["kind"] == "hook-run"
 
 
@@ -517,10 +523,16 @@ def test_hook_and_reader_agree_when_the_override_is_empty(tmp_path, monkeypatch)
     assert proc.returncode == 0, proc.stderr
 
     looked_for = _hook_run_file("claude")
-    assert looked_for.is_file(), (
-        f"an EMPTY override made the reader look at {looked_for} while the "
-        f"hook wrote under {home} (/hook-runs/*: "
+    # EQUALITY, not just `is_file()`: a relative or otherwise-wrong derivation
+    # could be satisfied by a stray file in the process cwd, which is how this
+    # assertion was nearly vacuous (a mutated derivation created a
+    # repo-relative `hook-runs/` and the next iteration passed on it).
+    expected = home / ".tortoise" / "hook-runs" / "claude.json"
+    assert looked_for.is_absolute() and looked_for == expected, (
+        f"an EMPTY override made the reader look at {looked_for}, expected "
+        f"{expected} (the hook wrote under {home}: "
         f"{sorted(str(p) for p in home.rglob('*.json'))})")
+    assert looked_for.is_file(), looked_for
     assert json.loads(
         looked_for.read_text(encoding="utf-8"))["kind"] == "hook-run"
 
@@ -601,7 +613,7 @@ def test_an_install_too_old_to_record_is_not_reported_as_never_ran(tmp_path):
 
     Mutation: drop the installed-generation check — the line becomes a bare
     "none — no run recorded" and this REDs."""
-    from tortoise.hook_install import HOOK_RUN_GENERATION
+    from tortoise.hook_install import HOOK_RUN_GENERATION, read_hook_version
 
     home = tmp_path / "home"
     home.mkdir()
@@ -611,11 +623,16 @@ def test_an_install_too_old_to_record_is_not_reported_as_never_ran(tmp_path):
     receipts = home / "receipts"
     installed = root / ".claude" / "hooks" / "session-start.sh"
     body = installed.read_text(encoding="utf-8")
-    marker = "# tortoise-hook-version: "
-    old_marker = f"{marker}{HOOK_RUN_GENERATION}"
-    assert old_marker in body, body.splitlines()[:4]
+    # Derive the SHIPPED marker from the file: pinning it to the constant would
+    # make an unrelated generation bump (which must NOT move the writer floor)
+    # fail here, forcing the floor to track the shipped generation.
+    shipped = read_hook_version(installed)
+    assert shipped is not None and shipped > HOOK_RUN_GENERATION - 1
+    marker = f"# tortoise-hook-version: {shipped}"
+    assert marker in body, body.splitlines()[:4]
     installed.write_text(
-        body.replace(old_marker, f"{marker}{HOOK_RUN_GENERATION - 1}", 1),
+        body.replace(marker,
+                     f"# tortoise-hook-version: {HOOK_RUN_GENERATION - 1}", 1),
         encoding="utf-8")
 
     proc = _cli(["hooks", "status", "--harness", "claude", "--dir", str(root)],
@@ -674,3 +691,174 @@ def test_hooks_status_json_carries_the_observation(tmp_path):
     # codex's hooks never write one: `null`, never a fabricated absence.
     _proc, payload = status("codex")
     assert payload["hook_run"] is None, payload["hook_run"]
+
+
+def _status(home, receipts, cwd, *, harness="claude", root=None, json_out=False):
+    """Run the REAL `hooks status` and return (proc, payload-or-None)."""
+    argv = ["hooks", "status", "--harness", harness]
+    if root is not None:
+        argv += ["--dir", str(root)]
+    if json_out:
+        argv.append("--json")
+    proc = _cli(argv, home=home, receipt_dir=receipts, cwd=cwd,
+                timeout=60)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    return proc, (json.loads(proc.stdout) if json_out else None)
+
+
+def test_an_unversioned_installed_hook_is_not_reported_as_never_ran(tmp_path):
+    """A pre-#3795 install carries NO version marker, and `read_hook_version`'s
+    own contract calls that a first-class STALE signal — it is by definition
+    pre-#3797 and cannot write a record.  Collapsing it into "no basis to say
+    the writer is missing" reports an absence nobody observed.
+
+    Mutation: treat an absent marker as "no opinion" — both surfaces report a
+    real absence and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    installed = root / ".claude" / "hooks" / "session-start.sh"
+    installed.write_text(
+        "\n".join(ln for ln in installed.read_text(encoding="utf-8").splitlines()
+                  if not ln.startswith("# tortoise-hook-version:")) + "\n",
+        encoding="utf-8")
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    _assert_observation_is_honest(line)
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no version marker" in line, line
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    assert payload["hook_run"]["observed"] is None, payload["hook_run"]
+    assert payload["hook_run"]["reason"] == "hook-script-unversioned", \
+        payload["hook_run"]
+
+
+def test_a_missing_writer_is_named_as_such_on_the_machine_surface(tmp_path):
+    """Nothing installed at all: the absence of a record IS real, but a
+    machine consumer must be able to tell it from "installed and never ran"
+    without cross-reading the findings.
+
+    Mutation: emit `reason: null` for the missing case — the field no longer
+    distinguishes the two and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()          # deliberately NOT installed
+    receipts = home / "receipts"
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    assert "none" in line and "no run recorded" in line, line
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    assert payload["hook_run"]["observed"] is False, payload["hook_run"]
+    assert payload["hook_run"]["reason"] == "hook-script-missing", \
+        payload["hook_run"]
+
+
+def test_a_fifo_at_the_record_path_cannot_hang_hooks_status(tmp_path):
+    """`open()` on a FIFO blocks FOREVER — strictly worse than a raise, in a
+    command whose docstrings promise best-effort behaviour.  The repo already
+    pins this rule for `settings.json`
+    (`test_hook_upgrade.py::test_fifo_at_the_settings_path_does_not_hang`);
+    this is a NEW path the credential-free surface reads.
+
+    Mutation: drop the `is_file()` gate in `_read_hook_run` — the child never
+    returns and this REDs on the timeout."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    run_dir = home / "hook-runs"
+    run_dir.mkdir(parents=True)
+    os.mkfifo(run_dir / "claude.json")
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    assert "no run recorded" in line, line
+
+
+def test_an_unreadable_record_is_not_reported_as_no_record(tmp_path):
+    """A record that EXISTS but cannot be READ must not be rendered as an
+    absence nobody observed, which is what lumping it with "no record" does.
+
+    Mutation: treat the `OSError` from `read_text` as "no record" — the line
+    claims nothing was recorded and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    run_dir = home / "hook-runs"
+    run_dir.mkdir(parents=True)
+    record = run_dir / "claude.json"
+    record.write_text(json.dumps({
+        "harness": "claude", "kind": "hook-run",
+        "recorded_at": "2026-09-26T00:00:00Z",
+        "probe_recorded": False, "probe_rc": 1}), encoding="utf-8")
+    record.chmod(0o000)
+    try:
+        proc, _ = _status(home, receipts, tmp_path, root=root)
+        _proc, payload = _status(home, receipts, tmp_path, root=root,
+                                 json_out=True)
+    finally:
+        record.chmod(0o600)
+
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    _assert_observation_is_honest(line)
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no run recorded" not in line, line
+    assert payload["hook_run"]["observed"] is None, payload["hook_run"]
+    assert payload["hook_run"]["reason"] == "record-unreadable", \
+        payload["hook_run"]
+
+
+@pytest.mark.parametrize("fields,why", [
+    ({"probe_recorded": True, "probe_rc": None}, "recorded with no exit code"),
+    ({"probe_recorded": "true", "probe_rc": 0}, "recorded is a string"),
+    ({"probe_recorded": False, "probe_rc": True}, "exit code is a bool"),
+    ({"recorded_at": "T"}, "no probe fields at all"),
+])
+def test_an_unreadable_probe_outcome_agrees_on_both_surfaces(tmp_path, fields, why):
+    """The two surfaces are companions: where the text refuses to state a probe
+    outcome, the JSON must not hand a consumer the raw contradictory pair (a
+    consumer doing `if hr["probe_recorded"]` would read a result the text says
+    is unreadable).
+
+    Mutation: pass the raw fields through in `_hook_run_json` — the payload
+    carries `probe_recorded` and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    (home / "hook-runs").mkdir(parents=True)
+    (home / "hook-runs" / "claude.json").write_text(json.dumps(
+        {"harness": "claude", "kind": "hook-run", **fields}),
+        encoding="utf-8")
+
+    proc, _ = _status(home, receipts, tmp_path, root=root)
+    line = _status_line(proc.stdout)
+    assert line is not None, (why, proc.stdout)
+    assert "does not say what the install probe did" in line, (why, line)
+    assert "exit True" not in line and "exit None" not in line, (why, line)
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    hr = payload["hook_run"]
+    assert hr["observed"] is True, (why, hr)
+    assert hr["reason"] == "probe-outcome-unreadable", (why, hr)
+    assert "probe_recorded" not in hr and "probe_rc" not in hr, (why, hr)

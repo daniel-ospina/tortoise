@@ -130,13 +130,14 @@ KIND_CAPTURE_FAILURE = "capture-failure"
 #: foreign or corrupt file can never read as a run.
 KIND_HOOK_RUN = "hook-run"
 
-#: The script generation that FIRST writes the hook-run observation (#3797).
-#: An INSTALLED ``session-start.sh`` below this generation structurally cannot
-#: record a run, so its silence is not evidence that the hook never ran: the
-#: reader must say it could not tell, never render the absence as an
-#: observation.  This is a capability epoch, not a copy of the shipped
-#: generation — it changes only when the WRITE contract changes, which is also
-#: when a future generation bump makes older writers unable to satisfy it.
+#: The script generation at which the hook-run observation was INTRODUCED
+#: (#3797).  An INSTALLED ``session-start.sh`` below it cannot record a run, so
+#: its silence is not evidence that the hook never ran: the reader must say it
+#: could not tell, never render the absence as an observation.  While the write
+#: contract stays unchanged this coincides with the shipped ``session-start.sh``
+#: generation; a later UNRELATED behaviour bump moves the shipped marker past
+#: it, and that is correct — an install at or above this generation can still
+#: write the record, so this floor must NOT be raised to follow such a bump.
 HOOK_RUN_GENERATION = 7
 
 

@@ -51,9 +51,14 @@ fi
 # ── The ONE HOME-scoped local-state derivation (#3797) ───────────────────
 # The two HOME-scoped writers in THIS script — the capture-error breadcrumb
 # and the hook-run observation — resolve their directory here, so they cannot
-# disagree about where the state tree is.  The sibling harness hooks
-# (`session-end.sh`, `codex-hooks/`, `cursor-hooks/`) still carry their own
-# copies of this surgery and must be kept in step with it.
+# disagree about where the state tree is.  FIVE sibling hooks still carry their
+# own copies of this surgery and must be kept in step BY HAND: `session-end.sh`
+# and `session-turn.sh` in this directory, `volunteer-turn.sh`,
+# `codex-hooks/session-end.sh` and `cursor-hooks/session-end.sh`.  This helper
+# is the only one of the six that also drops a trailing `/.` — the copies do
+# not — so a `TORTOISE_IMPORT_RECEIPT_DIR` ending in `/.` still splits them.
+# That residual is the #4373 duplication; a sourced shared snippet would close
+# it, and until then the copies are what the comment above must not overstate.
 # The subtle half is the base: `$TORTOISE_IMPORT_RECEIPT_DIR` names the
 # RECEIPT dir, so the base is its `.parent`, and that must match pathlib's
 # `Path(x).parent` — a TRAILING SLASH is dropped first (a bare `${x%/*}`

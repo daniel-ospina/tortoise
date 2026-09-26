@@ -4163,19 +4163,40 @@ def _read_hook_run(harness: str) -> dict | None:
     ``capture-errors`` record, and it is what stops a foreign file at this
     path from reading as "the hook ran".
 
-    The catch is broad ON PURPOSE and must stay broad: the next unenumerated
-    parse failure is the same silent-suppression bug — a deeply nested
-    document raises ``RecursionError`` (a ``RuntimeError``), which escaped an
-    ``OSError``-only tuple here and in ``capture_install`` (#4024 P2-2), and
-    an escape reads as "no record", i.e. as a run that never happened.
+    The catch on the PARSE is broad ON PURPOSE and must stay broad: the next
+    unenumerated parse failure is the same silent-suppression bug — a deeply
+    nested document raises ``RecursionError`` (a ``RuntimeError``), which
+    escaped an ``OSError``-only tuple here and in ``capture_install`` (#4024
+    P2-2), and an escape reads as "no record", i.e. as a run that never
+    happened.  Same shape as ``detect_install``'s boundary above.
+
+    A record that is present but UNREADABLE is not treated as absent: it
+    raises :class:`_HookRunUnreadable`, because rendering it as "no run
+    recorded" would be an absence nobody observed.  A non-regular file (FIFO,
+    directory, socket) is never read at all — ``open()`` on a FIFO blocks
+    forever, and this command is credential-free and interactive
+    (``hook_install._load_settings`` carries the same rule for settings.json).
     """
     import json as _json
 
     from tortoise.hook_install import KIND_HOOK_RUN
 
+    path = _hook_run_file(harness)
+    if not path.is_file():
+        return None
     try:
-        data = _json.loads(_hook_run_file(harness).read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError):
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise _HookRunUnreadable(str(e)) from e
+    except MemoryError:
+        raise
+    except Exception:
+        return None
+    try:
+        data = _json.loads(raw)
+    except MemoryError:
+        raise
+    except Exception:
         return None
     if not isinstance(data, dict):
         return None
@@ -4184,43 +4205,82 @@ def _read_hook_run(harness: str) -> dict | None:
     return data
 
 
-def _installed_lead_script_generation(layout, root) -> int | None:
-    """The generation of the INSTALLED script that would write the record.
+#: Reasons an ABSENT hook-run record is not evidence that the hook never ran.
+#: :data:`NO_WRITER_MISSING` is the one case where the record genuinely was not
+#: made because nothing is installed to make it; the other two are scripts that
+#: exist and cannot write one, so a reader must say it could not tell.
+NO_WRITER_UNVERSIONED = "hook-script-unversioned"
+NO_WRITER_TOO_OLD = "hook-scripts-too-old"
+NO_WRITER_MISSING = "hook-script-missing"
 
-    ``HarnessLayout`` describes the SHIPPED scripts; an install made by an
-    older CLI holds older copies on disk.  The hook-run observation is written
-    by the harness's ``session-start.sh``, so that one script's installed
-    generation is the only thing that can say whether an ABSENCE of record is
-    evidence at all (#3797 review: reading a pre-#3797 install's silence as
-    "never ran" is an observation nobody made).  Best-effort by design — a
-    missing or unreadable script yields ``None``, i.e. "no opinion".
+
+class _HookRunUnreadable(Exception):
+    """A record EXISTS at the path but could not be READ (#3797).
+
+    Distinct from "no record": the read/write condition makes a MALFORMED
+    record indistinguishable from no observation, but a file that is present
+    and unreadable must not be rendered as an absence nobody observed.
     """
-    from tortoise.hook_install import read_hook_version
+
+
+def _hook_run_writer_gap(layout, root) -> tuple[str, int | None, int] | None:
+    """``(reason, installed, writer)`` when an absent record is NOT evidence.
+
+    ``None`` means the installed scripts COULD have written the record, so an
+    absent one is a real absence of a RUN.  Otherwise the reason names why it
+    could not be: nothing is installed at the path at all
+    (:data:`NO_WRITER_MISSING`), the script is present but carries no version
+    marker and therefore predates the writer (:data:`NO_WRITER_UNVERSIONED`),
+    or it is marked below :data:`~tortoise.hook_install.HOOK_RUN_GENERATION`
+    (:data:`NO_WRITER_TOO_OLD`).  All three collapse to "there is no record"
+    if they are not distinguished, which is how a pre-#3795 install — the
+    class that by definition cannot record a run — ends up reported as never
+    having run.  One place holds the rule so the text and JSON surfaces cannot
+    disagree about it.
+
+    Best-effort by design: a read failure yields ``None`` (no opinion), never a
+    claim about an install.
+    """
+    from tortoise.hook_install import HOOK_RUN_GENERATION, read_hook_version
 
     try:
-        for spec in layout.scripts:
-            if "session-start" in spec.name:
-                return read_hook_version(layout.hooks_root(root) / spec.name)
+        spec = next((s for s in layout.scripts if "session-start" in s.name),
+                    None)
+        if spec is None:
+            return (NO_WRITER_MISSING, None, HOOK_RUN_GENERATION)
+        path = layout.hooks_root(root) / spec.name
+        if not path.is_file():
+            return (NO_WRITER_MISSING, None, HOOK_RUN_GENERATION)
+        installed = read_hook_version(path)
+    except MemoryError:
+        raise
     except Exception:
         return None
+    if installed is None:
+        return (NO_WRITER_UNVERSIONED, None, HOOK_RUN_GENERATION)
+    if installed < HOOK_RUN_GENERATION:
+        return (NO_WRITER_TOO_OLD, installed, HOOK_RUN_GENERATION)
     return None
 
 
-def _stale_hook_run_writer(layout, root) -> tuple[int, int] | None:
-    """``(installed, writer)`` when the install is too old to record a run.
+def _hook_run_probe_outcome(record: dict) -> tuple[bool, int | None] | None:
+    """``(recorded, rc)`` when the record's probe fields can be STATED.
 
-    ``None`` means "no basis to say the writer is missing" (a current install,
-    a missing script, or an unreadable version); otherwise the observed
-    generation and the generation the record starts at, which is
-    :data:`~tortoise.hook_install.HOOK_RUN_GENERATION`.  One place holds that
-    rule so the text and JSON surfaces cannot disagree about it.
+    ``None`` means they cannot, and the honest rendering is to say so rather
+    than to invent an outcome.  ``probe_rc`` rejects ``bool`` EXPLICITLY:
+    ``isinstance(True, int)`` is True, and "exit True" is not an exit status.
+    A missing ``recorded`` is not ``False`` — it is an unknown, exactly like a
+    missing ``rc``.
     """
-    from tortoise.hook_install import HOOK_RUN_GENERATION
-
-    old = _installed_lead_script_generation(layout, root)
-    if old is None or old >= HOOK_RUN_GENERATION:
+    recorded = record.get("probe_recorded")
+    rc = record.get("probe_rc")
+    if not isinstance(recorded, bool):
         return None
-    return (old, HOOK_RUN_GENERATION)
+    if rc is None:
+        return None if recorded else (False, None)
+    if type(rc) is not int:
+        return None
+    return (recorded, rc)
 
 
 def _print_hook_run(harness: str, layout, root) -> None:
@@ -4236,11 +4296,12 @@ def _print_hook_run(harness: str, layout, root) -> None:
 
     Every rendering reports an OBSERVATION and carries the scope.  None of
     them says "installed" — the record proves a RUN, and the drift findings
-    above are the only thing that speak to the install.  Where the record
-    cannot be read, or the installed scripts predate the writer, the line
-    says the observation could not be MADE rather than reporting an absence
-    it did not observe; and where the record's own fields are unreadable it
-    says so instead of inventing a probe outcome.
+    above are the only thing that speak to the install.  Where the observation
+    could not be MADE — the state directory is unresolvable, a record is
+    present but unreadable, the installed scripts carry no version marker or
+    predate the writer — the line says so rather than reporting an absence it
+    did not observe; and where the record's own probe fields are unreadable it
+    says that instead of inventing an outcome.
     """
     label = "Last hook run observed on this machine:"
     try:
@@ -4258,38 +4319,46 @@ def _print_hook_run(harness: str, layout, root) -> None:
     except MemoryError:
         raise
     except Exception:
+        # The record EXISTS but refused to be read (or the path could not be
+        # resolved): the observation could not be MADE, so say that, never an
+        # absence we did not observe.
         print(f"{label} cannot tell whether a run was recorded "
               "(the record could not be read)")
         return
     if record is None:
-        gap = _stale_hook_run_writer(layout, root)
-        if gap is not None:
+        gap = _hook_run_writer_gap(layout, root)
+        if gap is not None and gap[0] == NO_WRITER_TOO_OLD:
             print(f"{label} cannot tell whether a run was recorded (the hook "
-                  f"scripts on this machine are generation {gap[0]}; the "
-                  f"record starts at generation {gap[1]})")
+                  f"scripts on this machine are generation {gap[1]}; the "
+                  f"record starts at generation {gap[2]})")
+        elif gap is not None and gap[0] == NO_WRITER_UNVERSIONED:
+            print(f"{label} cannot tell whether a run was recorded (the hook "
+                  "scripts on this machine carry no version marker, so they "
+                  "predate the record)")
         else:
+            # Including NO_WRITER_MISSING: nothing is installed to run, so
+            # the absence of a record is real (the drift findings above say
+            # what is missing).
             print(f"{label} none — no run recorded under {path.parent}")
         return
     stamp = record.get("recorded_at") or "?"
-    recorded = record.get("probe_recorded")
-    rc = record.get("probe_rc")
-    if (not isinstance(recorded, bool)
-            or not (rc is None or isinstance(rc, int))
-            or (recorded and rc is None)):
+    outcome = _hook_run_probe_outcome(record)
+    if outcome is None:
         # A record accepted on kind+harness but carrying no readable probe
         # outcome.  Rendering `exit {rc}` here would fabricate a FAILURE
         # nobody observed (`exit None`), which is the same class of lie as
         # reading a missing record as a run.
         print(f"{label} ran at {stamp} — the record does not say what the "
               "install probe did")
-    elif recorded:
-        print(f"{label} ran at {stamp} — install probe recorded (exit {rc})")
-    elif rc is None:
+    elif outcome[0]:
+        print(f"{label} ran at {stamp} — install probe recorded "
+              f"(exit {outcome[1]})")
+    elif outcome[1] is None:
         print(f"{label} ran at {stamp} — the hook exited before the probe "
               "was attempted")
     else:
         print(f"{label} ran at {stamp} — install probe NOT recorded "
-              f"(exit {rc}); run 'tortoise session probe --harness "
+              f"(exit {outcome[1]}); run 'tortoise session probe --harness "
               f"{harness}' to see why")
 
 
@@ -4324,19 +4393,26 @@ def _hook_run_json(harness: str, layout, root) -> dict | None:
     except Exception:
         return {"observed": None, "path": path, "reason": "record-unreadable"}
     if record is None:
-        gap = _stale_hook_run_writer(layout, root)
-        if gap is not None:
-            return {"observed": None, "path": path,
-                    "reason": "hook-scripts-too-old", "generation": gap[0]}
-        return {"observed": False, "path": path, "reason": None}
-    return {
-        "observed": True,
-        "path": path,
-        "reason": None,
-        "recorded_at": record.get("recorded_at"),
-        "probe_recorded": record.get("probe_recorded"),
-        "probe_rc": record.get("probe_rc"),
-    }
+        gap = _hook_run_writer_gap(layout, root)
+        if gap is None:
+            return {"observed": False, "path": path, "reason": None}
+        reason, installed, _writer = gap
+        out = {"observed": False if reason == NO_WRITER_MISSING else None,
+               "path": path, "reason": reason}
+        if installed is not None:
+            out["generation"] = installed
+        return out
+    out = {"observed": True, "path": path, "reason": None,
+           "recorded_at": record.get("recorded_at")}
+    outcome = _hook_run_probe_outcome(record)
+    if outcome is None:
+        # No readable probe outcome: the fields are OMITTED rather than
+        # passed through, so a consumer cannot mistake them for a stated
+        # result (the text surface refuses to state one either).
+        out["reason"] = "probe-outcome-unreadable"
+    else:
+        out["probe_recorded"], out["probe_rc"] = outcome
+    return out
 
 
 def _record_capture_error(harness: str, detail: str,
