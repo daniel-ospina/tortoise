@@ -3188,8 +3188,12 @@ class TestSessionList:
         surfaces must agree with it on the shared projection.
 
         The assertion iterates ``SESSION_READ_FIELDS`` rather than a
-        hardcoded subset, so a field added to one read surface without the
-        other fails here instead of drifting silently.
+        hardcoded subset, and pins the hosted response KEY SETS against it,
+        so a field added to the SDK read or to either hosted handler fails
+        here instead of drifting silently. (The tuple itself is declared
+        SDK-side and imports nothing from ``tortoise/hosted_api.py``, whose
+        handlers spell their columns inline — the key-set assertion is what
+        binds the hosted side.)
         """
         captured = _ha_mod._make_sdk(namespace=TEST_ORG_ID).capture_session([
             {"role": "user",
@@ -3206,16 +3210,38 @@ class TestSessionList:
         assert read is not None, (
             "the SDK session read must see a captured :Session — the capture "
             "lane writes no AgentSession Event (#3557)")
+        # #3557 review (P2): the tuple is declared SDK-side; nothing imports
+        # it from ``tortoise/hosted_api.py``, whose handlers spell their
+        # columns inline. Pinning the hosted KEY SETS against it is what
+        # converts "a field added to one read surface without the other fails
+        # here" from a claim into a fact — a column ADDED to either handler
+        # (the likely drift direction) reddens these lines.
+        assert set(read) == set(detail) == set(SESSION_READ_FIELDS) | {
+            "actor_display", "turn_points", "extracted_points", "source"}
+        assert set(served) == set(SESSION_READ_FIELDS) | {"actor_display"}
         for field in SESSION_READ_FIELDS:
-            assert read[field] == served[field], (
-                f"{field} diverges between the SDK read ({read[field]!r}) "
-                f"and GET /v1/sessions ({served[field]!r})")
+            # #3555: `extracted` is excluded from the LIST comparison — the
+            # one field on which the list endpoint is NOT the shared
+            # projection. `list_sessions` still counts with the legacy typed
+            # filter (pointKind IN ['decision','statement']) while the SDK
+            # and the detail endpoint count every non-turn Point
+            # (pointKind IS NULL OR <> 'event'). For an untyped M2 extraction
+            # — the documented normal shape — the list reports 0 and the
+            # other two report N (measured here: one injected untyped Point
+            # → sdk=2, detail=2, list=1). Asserting the list value would MASK
+            # that divergence rather than bind it; #3555 tracks it.
+            if field != "extracted":
+                assert read[field] == served[field], (
+                    f"{field} diverges between the SDK read ({read[field]!r}) "
+                    f"and GET /v1/sessions ({served[field]!r})")
             assert read[field] == detail[field], (
                 f"{field} diverges between the SDK read ({read[field]!r}) "
                 f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
         # The hosted surfaces and the SDK read one node, so the shared field
         # list is one vocabulary. A zero count would make the parity
-        # assertion vacuous — the mock extractor mints a typed point.
+        # assertion vacuous — the mock extractor mints a TYPED point, which
+        # is why the list endpoint's legacy filter happens to agree here; a
+        # real untyped extraction diverges (#3555, excluded above).
         assert read["extracted"] >= 1
 
 

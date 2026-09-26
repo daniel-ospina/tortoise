@@ -585,14 +585,21 @@ def _capture_turn_role_text(stored: str) -> tuple[str, str]:
 #: and the subset `TortoiseSDK.get_session` returns for a captured `:Session`.
 #: The hosted handlers spell these column names inline — the shared surface is
 #: the declared NAMES, not a shared import — so this tuple is the SDK-side
-#: declaration and the parity test BINDS the two: it iterates this tuple rather
-#: than a hardcoded subset, so a field added to one read surface without the
-#: other fails there instead of drifting silently. Ordered as the hosted
-#: handlers append their columns: existing positions are stable and new columns
-#: go at the END, so a consumer reading positionally never shifts.
-#: (`GET /v1/sessions` additionally serves `actor_display`, and the by-id
-#: endpoint additionally serves `actor_display` and the point lists; those are
-#: derived per-request and are deliberately not part of this shared list.)
+#: declaration and the parity test BINDS the two in BOTH directions: it
+#: iterates this tuple (a field dropped from or renamed on the SDK read
+#: reddens it) AND pins the detail response's key SET to this tuple plus the
+#: detail endpoint's known extras — `actor_display`, `turn_points`,
+#: `extracted_points`, `source` — so a column ADDED to the hosted detail
+#: handler reddens it too, the direction the inline columns would otherwise
+#: let drift silently. The `GET /v1/sessions` LIST key set is pinned the same
+#: way (this tuple plus `actor_display`); its `extracted` COUNT is not,
+#: because the list still uses the legacy typed filter and diverges for
+#: untyped extractions (#3555). Ordered as the hosted handlers append their
+#: columns: existing positions are stable and new columns go at the END, so
+#: a consumer reading positionally never shifts.
+#: (`GET /v1/sessions` additionally serves `actor_display`; the by-id endpoint
+#: additionally serves `actor_display`, the point lists and `source`; those
+#: are derived per-request and are deliberately not part of this shared list.)
 SESSION_READ_FIELDS: tuple[str, ...] = (
     "id", "created_at", "turns", "extracted",
     "actor_user_id", "harness", "machine_id", "model",
