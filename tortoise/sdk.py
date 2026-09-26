@@ -454,6 +454,16 @@ class _InMemoryEventLog:
 # hand-written inline RETURN) where a newly whitelisted field was stored but
 # silently omitted from the dedup reply, re-minting the #2813 class on the
 # dedup path.
+#
+# #3945 (deliberate exception): the capture CREATE site also persists ONE
+# non-whitelist property — `validFrom`, mapped from the `when` slot
+# (docs/ONTOLOGY.md §4.7: one slot, two spellings). It is intentionally
+# outside this declaration and outside the dedup read-back/response surface:
+# the whitelist stays the source of truth for the passthrough fields only —
+# E3 quote/when/search_keys/source_turn_id plus E4 span_start/span_end.
+# Do NOT "fix" the divergence by adding `validFrom` here — that would
+# widen the public capture response and re-open the #2949 create/dedup
+# response-parity asymmetry.
 _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
                               "source_turn_id",
                               # E4 (#5007): the verbatim span pointer
@@ -5387,7 +5397,7 @@ class TortoiseSDK:
                 #    the seam is the backstop).
                 resolved = exact_hit_id(canonical_by_hash, content)
                 dedup = DEDUP_CONTENT_HASH_HIT if resolved else DEDUP_NEW
-                # #2813: read the four E3 passthrough props OFF the payload
+                # #2813: read the whitelisted passthrough props OFF the payload
                 # point dict ONCE, before the write, so the same VALUES reach
                 # both `create_point` (node persistence) and the response
                 # `props` superset — a COPY, not the same dict object:
@@ -5447,6 +5457,26 @@ class TortoiseSDK:
                 if resolved is None:
                     resolved = pid
                     created_here = True
+                    # #3945: the extractor's validated `when` is the same slot
+                    # as `validFrom` (docs/ONTOLOGY.md §4.7; the extractor
+                    # emits only the `when` spelling) — map it here, or every
+                    # capture Point is born undated and a downstream undated
+                    # supersession double-covers its predecessor
+                    # (`restore_point_at` → ambiguous). Absent `when` stays
+                    # absent — never a fabricated now. Deliberately a
+                    # create-only dict: folding `validFrom` into the RESPONSE
+                    # `props` would change the documented
+                    # ``_CAPTURE_PASSTHROUGH_PROPS`` surface
+                    # AND make the response differ between a create and a
+                    # dedup hit on the same node (the read-back reads only
+                    # ``_CAPTURE_PASSTHROUGH_PROPS``), the #2949 asymmetry.
+                    # No `validFrom`-presence guard is needed: `props` is
+                    # already filtered to ``_CAPTURE_PASSTHROUGH_PROPS``, which
+                    # deliberately EXCLUDES `validFrom`, so it can never arrive
+                    # here to be clobbered.
+                    create_props = props
+                    if props.get("when"):
+                        create_props = {**props, "validFrom": props["when"]}
                     self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
@@ -5455,10 +5485,14 @@ class TortoiseSDK:
                         # Source (mirrors the M2 EventAPI provenance;
                         # create_point wires the extractedFrom edge).
                         extractedFrom=f"session:{session_id}",
-                        # #2813: persist the E3 passthrough fields on the node
-                        # (quote/when/search_keys/source_turn_id) — the exact
-                        # fields the response whitelist below advertises.
-                        **props,
+                        # #2813: persist the whitelisted passthrough fields on
+                        # the node (the `_CAPTURE_PASSTHROUGH_PROPS` E3 fields
+                        # quote/when/search_keys/source_turn_id plus the E4
+                        # span_start/span_end) — exactly the fields the response
+                        # read-back advertises — plus #3945's `validFrom` when
+                        # `when` supplied it. `validFrom` is deliberately NOT in
+                        # that whitelist, so the response never advertises it.
+                        **create_props,
                     )
                 pid = resolved
                 # #4716 Part 1: remember which graph id this payload id
@@ -5650,7 +5684,8 @@ class TortoiseSDK:
                 # same lane class as the points-loop resolution above — so it
                 # reports the canonical's STORED passthrough props too, not a
                 # hardcoded {}. Emitting {} here for the SAME canonical that
-                # the points loop describes with its four E3 fields was the
+                # the points loop describes with its whitelisted passthrough
+                # fields was the
                 # exact asymmetry this PR set out to remove (a consumer saw
                 # the fields on one lane and an empty dict on the other).
                 extracted.append({

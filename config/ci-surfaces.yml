@@ -665,6 +665,11 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
+  # #3945: the primary capture create site must map the extractor's validated
+  # `when` onto `validFrom` (one slot, two spellings — docs/ONTOLOGY.md §4.7).
+  # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
+  # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
+  - test_capture_validfrom_3945.py
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
