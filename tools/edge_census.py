@@ -13,9 +13,29 @@ edge — ``r.msg_alpha``, ``r.msg_beta``, ``r.back_msg_alpha``,
 rather than node **volume** is uncapped, unmetered and unpriced — and, unlike
 the node-resident EP state fixed by #2884, it is never journaled (#5380).
 
-This tool measures that. It is **read-only**: it never writes to a graph it
-was pointed at. The only writes it performs are inside a **disposable
-isolated container it starts and removes itself**, for the RAM probe.
+This tool measures that. Its reads are **read-only**, and the boundary is
+worth stating exactly:
+
+- A census over a **`--uri`** connection reads through a **raw `falkordb`
+  client** and issues no DDL whatsoever. Nothing on the caller's graph is
+  created, altered or deleted. This is the path to use against a graph you do
+  not own.
+- A census over **`--embedded <path>`** necessarily opens the **SDK**, because
+  the embedded backend is the SDK's own entry point — so it constructs a
+  projection, which ensures indexes on that database (idempotent; the
+  application does the same at startup) and may run a health recovery. The
+  ``--embedded`` path therefore writes schema and must not be pointed at a
+  database you need left untouched.
+- **`--org`** also opens the **SDK**, on either path, because the cap's count
+  must come from the cap's own function rather than a second implementation of
+  its predicate. A read against a production graph should therefore use a URI
+  and no ``--org``.
+- The only writes the tool itself performs are inside a **disposable isolated
+  container it starts and removes itself** (``--network none``, ``--rm``), for
+  the RAM probe.
+
+Relationship-type names are read from the graph and are therefore **bound as
+``$rtype``, never interpolated** into a Cypher pattern.
 
 Two subcommands
 ---------------
@@ -87,16 +107,19 @@ class CensusError(RuntimeError):
 
 # ── graph access (duck-typed so tests can inject a fake) ────────────────────
 
-def _scalar(graph: Any, cypher: str) -> int:
+def _scalar(graph: Any, cypher: str, params: dict | None = None) -> int:
     """Run a single-value Cypher query and return the int.
 
     ``graph`` is anything exposing ``.query(cypher) -> obj.result_set`` — the
     FalkorDB client and ``proj.g`` both do. An empty or non-integer result is
     an error, not a 0: a count this tool cannot read must never be printed as
     a count of zero.
+
+    ``params`` exists so graph-sourced strings can be bound rather than
+    interpolated — see ``relationship_census``.
     """
     try:
-        result = graph.query(cypher)
+        result = graph.query(cypher, params=params)
     except Exception as exc:
         raise CensusError(f"query failed: {cypher!r}: {exc}") from exc
     rows = getattr(result, "result_set", None)
@@ -114,12 +137,22 @@ def _relationship_types(graph: Any) -> list[str]:
 
     Discovered rather than hardcoded so a new relationship type is counted
     without a code change — and so the census cannot undercount by omission.
+
+    The NAMES are returned, never interpolated into Cypher: a stored type name
+    is graph data, and a name crafted to look like Cypher is an injection
+    primitive (``tortoise/security.py`` says the same about a raw/imported
+    undeclared type). ``relationship_census`` binds them as ``$rtype``.
     """
     try:
         result = graph.query("CALL db.relationshipTypes()")
     except Exception as exc:
         raise CensusError(f"db.relationshipTypes() failed: {exc}") from exc
-    rows = getattr(result, "result_set", None) or []
+    rows = getattr(result, "result_set", None)
+    if rows is None:
+        # An UNREADABLE result is an error. An empty list stays legal — an
+        # empty graph legitimately has none — and the reconciliation against
+        # `total` in `relationship_census` catches the dangerous case.
+        raise CensusError("db.relationshipTypes() returned no result set")
     types = []
     for row in rows:
         if row and isinstance(row[0], str) and row[0]:
@@ -146,10 +179,31 @@ def relationship_census(graph: Any) -> dict[str, Any]:
     difference is invisible if only one of the two is printed.
     """
     total = _scalar(graph, "MATCH ()-[r]->() RETURN count(r)")
+    # ⛔ `type(r) = $rtype`, NOT `-[r:TYPE]->`: the type name comes FROM THE
+    # GRAPH, and interpolating it into the pattern lets a crafted name close
+    # the pattern and inject clauses. Demonstrated in review: a type stored as
+    # ``IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r`` produced a query that
+    # DELETED the graph's relationships and returned the deletion count — a
+    # WRITE against a graph this tool promises only to read, reported as a
+    # count. Binding the name removes the primitive entirely and still counts
+    # types the allowlist has never heard of.
+    types = _relationship_types(graph)
     by_type = {
-        rtype: _scalar(graph, f"MATCH ()-[r:{rtype}]->() RETURN count(r)")
-        for rtype in _relationship_types(graph)
+        rtype: _scalar(
+            graph,
+            "MATCH ()-[r]->() WHERE type(r) = $rtype RETURN count(r)",
+            params={"rtype": rtype},
+        )
+        for rtype in types
     }
+    # Fail closed on a breakdown that does not reconcile with the total: an
+    # empty `by_type` beside a non-zero `total` is the "2000 relationships,
+    # none of any type" lie that a reader takes as "no relationships".
+    typed = sum(by_type.values())
+    if typed != total:
+        raise CensusError(
+            f"per-type counts do not reconcile with the total: "
+            f"sum(by_type)={typed} total={total} types={types!r}")
     by_slot = {
         slot: _scalar(
             graph,
@@ -296,6 +350,21 @@ def probe_marginals(stages: Sequence[Stage]) -> list[dict[str, Any]]:
                     f"per_element={stage.per_element} — cannot derive a "
                     f"marginal, and reporting 0 would be a false measurement"
                 )
+        elif delta == 0:
+            # The mirror of the case above, and it is the one that bites: a
+            # stage that DECLARES elements while `used_memory` did not move at
+            # all means the staged write did not happen (or was not observed).
+            # Emitting `marginal_bytes: 0.0` there is not a small number, it is
+            # an absent measurement wearing a number's clothes — and adding
+            # N>=100 elements to a fresh instance always grows used_memory, so
+            # the honest reading is "this stage did not run".
+            raise CensusError(
+                f"stage {stage.label!r} declares per_element="
+                f"{stage.per_element} but used_memory did not move "
+                f"({previous.used_memory} -> {stage.used_memory}) — the staged "
+                f"write did not happen, so a 0.0 marginal here would be a "
+                f"false measurement"
+            )
         else:
             marginal = round(delta / stage.per_element, 1)
         out.append({
@@ -323,7 +392,11 @@ def docker_available() -> bool:
 
 
 def _container_used_memory(container: str) -> int:
-    proc = _docker("exec", container, "redis-cli", "INFO", "memory")
+    try:
+        proc = _docker("exec", container, "redis-cli", "INFO", "memory")
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise CensusError(
+            f"could not read used_memory from {container!r}: {exc}") from exc
     for line in proc.stdout.replace("\r", "").splitlines():
         if line.startswith("used_memory:"):
             return int(line.split(":", 1)[1])
@@ -333,10 +406,27 @@ def _container_used_memory(container: str) -> int:
 
 
 def _container_query(container: str, graph: str, cypher: str) -> None:
+    """Run one staged write in the probe container, failing LOUD on refusal.
+
+    ⛔ ``redis-cli`` exits 0 on a SERVER-SIDE error — a syntax error, an OOM, a
+    constraint violation all come back as ``errMsg: ...`` on STDOUT with
+    returncode 0 (verified against a live FalkorDB). Checking the exit code
+    alone therefore turns a stage that did nothing into a stage whose
+    ``used_memory`` delta is attributed to it — a false marginal, exactly the
+    "silence is how a probe lies" failure ``probe_marginals`` exists to catch.
+    """
     proc = _docker("exec", container, "redis-cli", "GRAPH.QUERY", graph, cypher,
                    check=False)
-    if proc.returncode != 0:
-        raise CensusError(f"probe query failed in {container!r}: {cypher!r}")
+    out = proc.stdout or ""
+    if proc.returncode != 0 or "errMsg" in out or "ERR " in out:
+        raise CensusError(
+            f"probe query failed in {container!r}: {cypher!r}: "
+            f"{(proc.stderr or out).strip()[:400]}")
+
+
+#: Label every probe container, so an orphan from a SIGKILLed run is
+#: identifiable and reapable instead of accumulating invisibly.
+_PROBE_LABEL = "edge-census-probe=1"
 
 
 #: The staged shapes. Deliberately the SAME shapes the #4333 §3.4 node probe
@@ -383,8 +473,22 @@ def run_probe(
     edges = n - 1
     container = f"edge-census-probe-{os.getpid()}-{int(time.time())}"
     log(f"starting disposable container {container!r} ({image})")
-    _docker("run", "-d", "--name", container, image)
+    # `--rm` so a failure that escapes the teardown below still removes the
+    # container; `--network none` so the probe cannot reach any sibling
+    # container — the caller's own FalkorDB is routinely a bridge container on
+    # the documented local URI, and the probe only ever talks to its own
+    # loopback. `--label` marks an orphan (SIGKILL / host crash) reapable.
+    # The `run` is INSIDE the try: starting the container is the step most
+    # likely to fail (image pull, name collision, daemon error), and above the
+    # try a failure there left a container behind with no `rm`.
     try:
+        try:
+            _docker("run", "-d", "--rm", "--network", "none",
+                    "--label", _PROBE_LABEL, "--name", container, image)
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise CensusError(
+                f"could not start the probe container from {image!r}: {exc}"
+            ) from exc
         deadline = time.time() + 60
         while time.time() < deadline:
             if _docker("exec", container, "redis-cli", "PING",
@@ -487,20 +591,62 @@ def run_probe(
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
-def _open_sdk(uri: str | None, graph_name: str | None, embedded: str | None):
-    """Open an SDK handle. Never writes; the SDK is used for URI parsing.
+def _raw_graph_from_uri(uri: str, graph_name: str | None):
+    """A RAW FalkorDB handle — no SDK, so no DDL touches the caller's graph.
 
-    Returns the SDK (not just its graph) because ``--org`` must count the cap in
-    **this** graph — see ``_org_capped_points``.
+    ⛔ The SDK is the obvious handle here and it is the WRONG one for a
+    measurement tool. ``sdk._get_proj()`` constructs a ``FalkorProjection``
+    whose ``__init__`` unconditionally runs ``_ensure_indexes()`` — CREATE
+    INDEX / DROP INDEX DDL issued against the target graph — and an embedded
+    health recovery that can rebuild a database. A tool whose entire promise
+    is "read, change nothing" must not open a handle that writes schema and
+    then recommend itself against a live production graph.
+
+    This path reuses the repo's own URI parser (``resolve_db_endpoint``, the
+    canonical derivation) and nothing else.
+    """
+    from falkordb import FalkorDB
+
+    from tortoise.projection import resolve_db_endpoint
+
+    endpoint = resolve_db_endpoint(uri, graph_name)
+    client = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl)
+    return client.select_graph(endpoint.graph_name)
+
+
+def _open_sdk(uri: str | None, graph_name: str | None, embedded: str | None):
+    """Open an SDK handle. Needed only for ``--org`` (the cap's own function).
+
+    ⚠️ Opening the SDK is NOT side-effect free: it constructs a projection,
+    which ensures indexes on the target graph (and, on the embedded path, may
+    run a health recovery). That is why the plain census does not use this
+    path — see ``_raw_graph_from_uri`` — and why ``--org`` is the only thing
+    that pays the cost.
+
+    The caller's ``TORTOISE_DB_URI`` is restored before returning: the SDK
+    captures ``self._db_uri`` in ``__init__`` and ``_get_proj()`` reads that
+    captured value, so restoring the environment afterwards does not change
+    which graph the handle binds — but it does stop one in-process invocation
+    from re-pointing the next one (``main()`` is called in-process by this
+    tool's own tests, and by any script that imports it).
     """
     from tortoise.sdk import TortoiseSDK  # imported lazily — probe needs no DB
 
-    if uri:
-        os.environ["TORTOISE_DB_URI"] = uri
-        return TortoiseSDK(graph_name=graph_name)
-    if embedded:
-        os.environ.pop("TORTOISE_DB_URI", None)
-        return TortoiseSDK(embedded, graph_name=graph_name)
+    prior = os.environ.get("TORTOISE_DB_URI")
+    try:
+        if uri:
+            os.environ["TORTOISE_DB_URI"] = uri
+            return TortoiseSDK(graph_name=graph_name)
+        if embedded:
+            os.environ.pop("TORTOISE_DB_URI", None)
+            return TortoiseSDK(embedded, graph_name=graph_name)
+    finally:
+        if prior is None:
+            os.environ.pop("TORTOISE_DB_URI", None)
+        else:
+            os.environ["TORTOISE_DB_URI"] = prior
     raise CensusError("census needs --uri or --embedded")
 
 
@@ -558,7 +704,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     census = sub.add_parser("census", help="count relationships and EP slots")
-    census.add_argument("--uri", help="FalkorDB URI (docker:// or bolt://)")
+    census.add_argument(
+        "--uri",
+        help="FalkorDB URI (docker:// / redis:// / rediss://). Falls back to "
+             "the TORTOISE_DB_URI environment variable, so a password need "
+             "not appear in the process argument list.")
     census.add_argument("--graph", help="graph name override")
     census.add_argument("--embedded", help="embedded DB path (no URI)")
     census.add_argument("--org", help="org id — also read the cap's own count")
@@ -602,18 +752,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "census":
-            sdk = _open_sdk(args.uri, args.graph, args.embedded)
-            graph = sdk._get_proj().g
-            edges = relationship_census(graph)
-            nodes = node_census(graph)
-            capped = (_org_capped_points(args.org, sdk)
-                      if args.org else None)
-            view = accounting_view(edges=edges, nodes=nodes,
-                                   capped_points=capped)
-            if args.org:
-                assert_subset_ratio_available(view)
-            _print_census(view, as_json=args.json)
-            return 0
+            # `--uri` first, then the environment: a password on argv is
+            # visible to every process listing on the host. Same variable the
+            # SDK reads, so both spellings reach the same connection.
+            uri = args.uri or os.environ.get("TORTOISE_DB_URI") or None
+            return _run_census(args, uri)
         result = run_probe(n=args.n, image=args.image,
                            log=lambda m: print(m, file=sys.stderr))
         _print_probe(result, as_json=args.json)
@@ -627,6 +770,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"edge_census: the cap's own count could not be read: {exc}",
               file=sys.stderr)
         return 2
+    except (subprocess.SubprocessError, OSError) as exc:
+        # A missing/broken docker or socket is a tool-level failure, not a
+        # traceback: translate it to the same exit-2 diagnostic as everything
+        # else the tool cannot answer honestly.
+        print(f"edge_census: external command failed: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run_census(args: Any, uri: str | None) -> int:
+    """Run the census, keeping the SDK — and its schema writes — optional.
+
+    A **URI** census WITHOUT ``--org`` touches the graph through the raw client
+    only, so it issues no DDL at all. ``--org`` has to open the SDK, because the
+    cap count must come from the cap's own function rather than a second
+    implementation of its predicate. ``--embedded`` opens the SDK on every
+    path, ``--org`` or not — the embedded backend IS the SDK, so that lane
+    always ensures indexes. The SDK is closed again on the way out.
+    """
+    sdk = None
+    try:
+        if args.embedded:
+            sdk = _open_sdk(None, args.graph, args.embedded)
+            graph = sdk._get_proj().g
+        elif uri:
+            graph = _raw_graph_from_uri(uri, args.graph)
+        else:
+            raise CensusError("census needs --uri, --embedded, or "
+                              "TORTOISE_DB_URI")
+        edges = relationship_census(graph)
+        nodes = node_census(graph)
+        capped = None
+        if args.org:
+            if sdk is None:
+                sdk = _open_sdk(uri, args.graph, None)
+            capped = _org_capped_points(args.org, sdk)
+        view = accounting_view(edges=edges, nodes=nodes,
+                               capped_points=capped)
+        if args.org:
+            assert_subset_ratio_available(view)
+        _print_census(view, as_json=args.json)
+        return 0
+    finally:
+        if sdk is not None:
+            sdk.close()
 
 
 if __name__ == "__main__":

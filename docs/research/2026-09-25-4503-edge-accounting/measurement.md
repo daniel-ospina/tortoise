@@ -17,6 +17,15 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 **Base:** `origin/main` @ `536ca7d2a` (branch rebased there; every locator below re-read at that HEAD)
 **Instrument:** `tools/edge_census.py` (shipped with this report) · **Status:** measurement only.
 
+> **What the instrument touches.** Over a **`--uri`** connection a census reads through a raw
+> `falkordb` client and issues no DDL — nothing on the target graph is created, altered or deleted;
+> this is the path to use against a graph you do not own. Two paths DO open the SDK (which ensures
+> indexes on that graph, idempotently, and on an embedded database may run a health recovery):
+> `--embedded`, whose backend *is* the SDK, and `--org`, which must call the cap's own function
+> rather than reimplement its predicate. A read against a production graph should therefore use a
+> **URI and no `--org`**. Relationship-type names read from the graph are **bound as `$rtype`,
+> never interpolated** into a Cypher pattern.
+
 > ⛔ **No price change, no cap change, no quota change, no engine change.**
 > The findings that imply one are recorded as an **owner question** (issue #4503, protocol shape), not acted on.
 > `product/pricing.json` values are untouched.
