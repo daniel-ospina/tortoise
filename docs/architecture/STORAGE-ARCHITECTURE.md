@@ -443,10 +443,12 @@ Two link types look like near-duplicates:
 
 **Merging them is the obvious tidy-up, and it is refused.** The two are **not** interchangeable in the rebuild machinery:
 
-| | in the snapshot-derivable set? | what `rebuild_all` pass-2b does |
-|---|---|---|
-| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | **re-creates it at the OLD point** from its immutable snapshot |
-| `aboutSource` | ❌ **deliberately excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+| | in the snapshot-derivable set? | moved by the live `supersede_point` transfer? | what `rebuild_all` pass-2b does |
+|---|---|---|---|
+| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | ✅ **yes** (`SUPERSEDE_STRUCTURAL_RELS`) | **re-creates it at the OLD point** from its immutable snapshot |
+| `aboutSource` | ❌ **deliberately excluded** | ❌ **also excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+
+**⚠️ The two omissions are independent, and `aboutSource` is the only `about*` rel absent from BOTH.** `aboutAction` and `wasDerivedFrom` are excluded from the snapshot-derivable set too, but `supersede_point` **does** transfer them live; `aboutSource` is moved by neither leg — a supersede leaves it on the old point, and pass-2b never re-creates it. So the exclusion is stronger than the transfer set's other members: a reader comparing the two sets must not read `aboutSource` as "excluded from replay, transferred live" like the other two.
 
 **⇒ Collapsing `aboutDocument` into `aboutSource` moves the edge class OUT of the replayable set. That is a durability regression**, and it would be invisible until a rebuild was actually needed. **The contradiction test caught this and disqualified the recommendation that proposed it** — which is the rule working, not the analysis failing.
 
