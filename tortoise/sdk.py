@@ -604,10 +604,16 @@ def _redact_turn_contents(
     protection: in the hosted lane every capture-path caller of this is now off
     the event loop (#4911 cycle 1).
 
-    Idempotent: a marker contains no character class any pattern matches, so
-    re-scrubbing already-scrubbed text returns it unchanged with zero counts —
-    which is what lets the turn store, the Source and the extractor each apply
-    it without multi-counting the same span.
+    Idempotent: no rule's ANCHOR GROUP can be satisfied inside a
+    ``[REDACTED:<kind>]`` marker, so re-running over already-redacted text
+    changes nothing and adds no counts — which is what lets the turn store, the
+    Source and the extractor each apply it without multi-counting the same
+    span. The reason is the ANCHOR, not the marker's character classes: the
+    ``private_key`` body matches everything (including ``[``/``:``/``]``), and
+    the AWS/bearer markers DO contain their anchor keyword but never the
+    separator or whitespace that keyword's anchor group requires. (An earlier
+    revision of this docstring gave the character-class reason, which is
+    false; ``security.redact_secrets`` carries the corrected proof.)
     """
     out: list[dict] = []
     totals: dict[str, int] = {}
@@ -744,9 +750,12 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     construction. A second, deliberate consequence: the #4675 confirmation
     path (``tortoise/session_confirm.expected_turns``) calls THIS function to
     build what it expects the server to have stored, so the client's
-    expectation and the server's stored row cannot drift — redacting at the
-    writer instead would make every session containing a secret compare
-    unequal forever and never file.
+    expectation and the server's stored row cannot drift for the same
+    ``_SECRET_SHAPES`` table — redacting at the writer instead would make every
+    session containing a secret compare unequal forever and never file. ⛔ The
+    parity is VERSION-BOUND: a client running an older table than the server's
+    does drift, and the deferred spool entry then never terminalises — that is
+    the filed residual #5394, not an exception to the sentence above.
     """
     return _capture_turn_texts_with_redactions(windowed)[0]
 

@@ -378,12 +378,26 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("anthropic_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="anthropic_api_key")),
+    # DeepSeek — the body is EXACTLY 32 LOWERCASE alnum characters, which sits
+    # BELOW the generic `sk-` rule's 40 floor, so without this rule a pasted
+    # DeepSeek key was stored verbatim with `capture_redactions: 0` (found in
+    # review). This is the repo's OWN default extractor provider
+    # (`_SESSION_LLM_PROVIDER_PRIORITY`), so the shape reaches its transcripts
+    # routinely. A DEDICATED lowercase-only rule is what makes the short floor
+    # safe where lowering the generic one is not: the measured prose false
+    # positive `sk-learn-pipeline-version-2` carries hyphens inside its body,
+    # so `[a-z0-9]{32,}` cannot match it. Ordered BEFORE the generic rule so the
+    # narrower shape wins the label (same reason `sk-ant-` precedes both).
+    ("deepseek_api_key",
+     re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="deepseek_api_key")),
     # OpenAI / OpenRouter. The lookbehind is LOAD-BEARING: `disk-…`, `risk-…`
     # and `task-…` all contain the substring `sk-` (the measured #4911 false
     # positive) and are excluded because their `sk-` is INSIDE a word. The body
     # floor of 40 is load-bearing too: at 20, an ordinary engineering sentence
     # matched (`sk-learn-pipeline-version-2`), while every real OpenAI/
-    # OpenRouter body after `sk-`/`sk-proj-` is 48+.
+    # OpenRouter body after `sk-`/`sk-proj-` is 48+. It is NOT a floor for the
+    # whole `sk-` family — DeepSeek's 32-char form is the separate rule above.
     ("openai_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{40,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="openai_api_key")),
@@ -574,10 +588,18 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # PEM labels are short — ``RSA``, ``EC``, ``OPENSSH``, ``DSA``, ``ENCRYPTED``,
     # ``PRIVATE KEY`` — so 40 is generous; a "label" longer than that is not one
     # we can recognise anyway.
+    # ⛔ TWO SHAPES THE FIRST CUT MISSED, both real pastes (found in review):
+    # a PGP key block, whose label is `PGP PRIVATE KEY BLOCK` — it does not END
+    # in `PRIVATE KEY`, so the required suffix never matched and the whole block
+    # was stored verbatim; and the LOWERCASE form an OpenSSL config or a
+    # re-encoded PEM uses (`-----begin rsa private key-----`). The optional
+    # `(?: BLOCK)?` and the case-insensitive flag are constant-cost, so the
+    # linearity argument above is unchanged (the bounded `{0,40}` label class,
+    # not the suffix, is what makes it linear).
     ("private_key",
-     re.compile(r"-----BEGIN [A-Za-z0-9 ._-]{0,40}PRIVATE KEY-----"
+     re.compile(r"(?i)-----BEGIN [A-Za-z0-9 ._-]{0,40}PRIVATE KEY(?: BLOCK)?-----"
                 r"[\s\S]*?"
-                r"(?:-----END [A-Za-z0-9 ._-]{0,40}PRIVATE KEY-----|\Z)"),
+                r"(?:-----END [A-Za-z0-9 ._-]{0,40}PRIVATE KEY(?: BLOCK)?-----|\Z)"),
      _REDACTION_VALUE.format(kind="private_key")),
     # `Authorization: Bearer <token>` — the header NAME is KEPT so the record
     # stays diagnostic; only the credential goes.

@@ -94,6 +94,11 @@ def _webhook(*parts: str) -> str:
 CASES: tuple[tuple[str, str, str], ...] = (
     ("anthropic", "anthropic_api_key", "sk-ant-api03-" + _fill(93) + "AA"),
     ("openai", "openai_api_key", "sk-proj-" + _fill(64)),
+    # #4911 review: DeepSeek's key is `sk-` + EXACTLY 32 lowercase alnum —
+    # below the generic `sk-` rule's 40 floor, so it needs its own row or the
+    # floor can silently regress. Assembled at runtime (see ``_synth``).
+    ("deepseek", "deepseek_api_key",
+     _synth("sk-", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6")),
     ("jev", "jev_api_key", "jv_live_" + _fill(24)),
     ("github_classic", "github_token", "ghp_" + _fill(36)),
     ("github_fine_grained", "github_token", "github_pat_" + _fill(60)),
@@ -127,6 +132,14 @@ CASES: tuple[tuple[str, str, str], ...] = (
     ("private_key", "private_key",
      _pem("RSA PRIVATE KEY") + "\nMIIEowIBAAKCAQEA\n"
      + _pem_end("RSA PRIVATE KEY")),
+    # #4911 review: the two PEM shapes the first cut missed — a PGP block (the
+    # label does not END in `PRIVATE KEY`) and the lowercase form.
+    ("private_key_pgp", "private_key",
+     _pem("PGP PRIVATE KEY BLOCK") + "\nmQENBGA\n"
+     + _pem_end("PGP PRIVATE KEY BLOCK")),
+    ("private_key_lowercase", "private_key",
+     _synth("-----", "begin rsa private key-----") + "\nMIIEowIBAAKCAQEA\n"
+     + _synth("-----", "end rsa private key-----")),
     ("bearer", "bearer_token", "Authorization: Bearer " + _fill(32)),
 )
 
