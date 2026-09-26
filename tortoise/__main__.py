@@ -4179,7 +4179,9 @@ def _read_hook_run(harness: str) -> dict | None:
     ran.  A non-regular file (FIFO, directory, socket) is never read at all —
     ``open()`` on a FIFO blocks forever, and this command is credential-free
     and interactive (``hook_install._load_settings`` carries the same rule for
-    settings.json).
+    settings.json) — and it is reported as an observation that could not be
+    made, not as an absence: the hook's write could not have landed there as a
+    record.
     """
     import json as _json
     import stat as _stat
@@ -4200,10 +4202,11 @@ def _read_hook_run(harness: str) -> dict | None:
         # is the #3797 defect on the very reason set added for it.
         raise _HookRunUnreadable(str(e)) from e
     if not _stat.S_ISREG(st_mode):
-        # A FIFO, directory or socket at the record path: never open it
-        # (`open()` on a FIFO blocks forever), and do not call it "read" — the
-        # writer gap reports what can be said about this machine.
-        return None
+        # A FIFO, directory or socket at the record path: never OPEN it
+        # (`open()` on a FIFO blocks forever), and never call the resulting
+        # silence an absence — the hook's own write could not have landed here
+        # as a record, so the observation could not be MADE.
+        raise _HookRunUnreadable(f"not a regular file (mode {st_mode:#o})")
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as e:
@@ -4247,13 +4250,15 @@ NO_WRITER_TOO_OLD = "hook-scripts-too-old"
 
 
 class _HookRunUnreadable(Exception):
-    """A record EXISTS at the path but did not yield one (#3797).
+    """The record could not be read — a record may exist at the path, or the
+    path could not even be looked at (#3797).
 
     Distinct from "no record": a file that is present but yields no record —
-    unreadable, undecodable, not JSON at all, or torn mid-write — must not be
-    rendered as an absence nobody observed.  ``None`` from
-    :func:`_read_hook_run` is reserved for a record that is ABSENT or that
-    PARSES to something which is not this harness's ``hook-run`` marker.
+    unreadable, undecodable, not JSON at all, torn mid-write, or not a regular
+    file — must not be rendered as an absence nobody observed, and neither must
+    a path that could not be stat-ed.  ``None`` from :func:`_read_hook_run` is
+    reserved for a record that is ABSENT, or that PARSES to something which is
+    not this harness's ``hook-run`` marker.
     """
 
 

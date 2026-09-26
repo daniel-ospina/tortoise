@@ -393,7 +393,7 @@ def test_an_unstatable_record_path_is_not_reported_as_no_record(tmp_path):
     the very reason set added for it (`record-unreadable`).
 
     Mutation: put the `is_file()` gate back — the stat failure collapses to
-    `None`, the reason goes `hook-script-missing`/null and this REDs."""
+    `None`, the reason goes `null` and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "project"
@@ -1081,8 +1081,13 @@ def test_a_fifo_at_the_record_path_cannot_hang_hooks_status(tmp_path):
     (`test_hook_upgrade.py::test_fifo_at_the_settings_path_does_not_hang`);
     this is a NEW path the credential-free surface reads.
 
-    Mutation: drop the `is_file()` gate in `_read_hook_run` — the child never
-    returns and this REDs on the timeout."""
+    It is also an observation that could not be MADE, not an absence: the
+    hook's own write could not have landed here as a record, so "no run
+    recorded" would be a claim about a run nobody could observe.
+
+    Mutation: drop the `S_ISREG` check (the `is_file()` gate it replaced) —
+    the child never returns and this REDs on the timeout.  Or return `None`
+    instead of raising — the line claims an absence and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "project"
@@ -1097,7 +1102,13 @@ def test_a_fifo_at_the_record_path_cannot_hang_hooks_status(tmp_path):
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     line = _status_line(proc.stdout)
     assert line is not None, proc.stdout
-    assert "no run recorded" in line, line
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no run recorded" not in line, line
+
+    _proc, payload = _status(home, receipts, tmp_path, root=root, json_out=True)
+    assert payload["hook_run"]["observed"] is None, payload["hook_run"]
+    assert payload["hook_run"]["reason"] == "record-unreadable", \
+        payload["hook_run"]
 
 
 def test_an_unreadable_record_is_not_reported_as_no_record(tmp_path):
