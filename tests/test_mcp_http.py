@@ -953,6 +953,54 @@ class TestPackInstallRateBudget:
         finally:
             ha_mod._SENSITIVE_BUCKETS.clear()
 
+    def test_clientless_request_still_returns_with_an_explicit_key(
+            self, monkeypatch):
+        """#5397 review: the widening for the Request-FREE arm must not widen
+        the HTTP callers that already pass a Request.
+
+        The pre-#2050 guard (``not request.client``) is restored FIRST, so a
+        client-less Request charges NOTHING whether or not an explicit ``key``
+        is supplied. Pinned on the reviewer's worst case: the per-IP dimension
+        of ``invite-accept`` collapsing into one shared
+        ``("invite-accept", "ip", None)`` bucket across unrelated tokens.
+        The Request-free arm keeps enforcing on the SAME store, so the guard
+        cannot be dropped without failing this test's second half.
+        """
+        from collections import defaultdict
+
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        store = defaultdict(list)
+        lock = asyncio.Lock()
+        req = Request({"type": "http", "method": "POST",
+                       "path": "/invites/accept", "headers": [],
+                       "query_string": b"", "client": None})
+
+        async def _scenario():
+            kw = {"buckets": store, "lock": lock, "limit": 1,
+                  "window_s": 3600, "detail": "rate limited",
+                  "retry_after_s": None}
+            # A client-less Request: both attempts ADMITTED, nothing charged.
+            for _ in range(2):
+                await ha_mod._check_ip_bucket_rate_limit(
+                    req, key=("invite-accept", "ip", None), **kw)
+            assert store == {}, (
+                "a client-less Request charged an explicit key — an existing "
+                f"caller now enforces where it used to return: {dict(store)}")
+            # The Request-free arm charges the SAME store and refuses at limit.
+            await ha_mod._check_ip_bucket_rate_limit(
+                None, key=("team-x", "pack_manifest"), **kw)
+            with pytest.raises(HTTPException) as exc:
+                await ha_mod._check_ip_bucket_rate_limit(
+                    None, key=("team-x", "pack_manifest"), **kw)
+            assert exc.value.status_code == 429
+
+        asyncio.run(_scenario())
+
 
 # ── Excluded tools ──────────────────────────────────────────────────────────
 

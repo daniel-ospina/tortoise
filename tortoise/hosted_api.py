@@ -5333,12 +5333,16 @@ async def _check_ip_bucket_rate_limit(
     test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
     computes time-until-oldest-entry-expires (sliding-window precision).
 
-    #2050: an explicit `key` IS the bucket identity, so the Request is
-    consulted only for the bare-IP fallback. A Request-free caller (the MCP
-    dispatch point, key-authenticated per team — no client address exists)
-    passes `key` and no Request, and charges the SAME store through this SAME
-    implementation. Passing a Request is still the path every HTTP caller
-    takes; a missing client is only fatal to the fallback it feeds.
+    #2050: widening this helper for a Request-FREE caller (the MCP dispatch
+    point, key-authenticated per team — no client address exists there) must
+    not widen it for the HTTP callers that already pass a Request. The
+    Request is therefore consulted FIRST: a Request with no client address
+    has no identity to bucket on and returns, exactly as before #2050. Only
+    when NO Request is passed does an explicit `key` stand alone as the
+    bucket identity. An HTTP caller's `key` is a composite that CONTAINS the
+    client IP, so admitting it on a client-less Request would collide the
+    per-IP dimension of invite-accept / invite-otp into one shared
+    (…, "ip", None) bucket across unrelated callers (#5397 review).
 
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
@@ -5347,10 +5351,21 @@ async def _check_ip_bucket_rate_limit(
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if key is None:
-        if request is None or not request.client or not request.client.host:
+    if request is None:
+        # Request-free arm (#2050): `key` alone is the bucket identity. There
+        # is no client address to fall back to, so a missing key is the only
+        # reason to return.
+        if key is None:
             return
-        key = request.client.host
+    else:
+        # Pre-#2050 guard, restored for EVERY Request-carrying caller: a
+        # client-less request has no identity to bucket on, whether or not a
+        # `key` was supplied. This is what keeps every existing caller's
+        # behaviour identical to the merge-base.
+        if not request.client or not request.client.host:
+            return
+        if key is None:
+            key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles both dotted-quad
     # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
@@ -5747,10 +5762,11 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
     _ip = _normalize_mapped_ipv6(_ip)
-    # An unknown client has no identity to bucket on. Pre-#2050 the shared
-    # helper returned on exactly this condition; it is stated here instead so
-    # that widening the helper for the Request-free arm cannot quietly merge
-    # every client-less request into one shared (None, op) bucket.
+    # An unknown client has no identity to bucket on, and this composite key
+    # must never be built around a None IP. _check_ip_bucket_rate_limit
+    # enforces the same requirement for every Request-carrying caller (#5397
+    # review restored it); stated here as well so the invariant is explicit
+    # at the one place this key is formed.
     if _ip is None:
         return
     kwargs = _sensitive_op_budget(op, (_ip, op))
