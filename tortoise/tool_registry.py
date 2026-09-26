@@ -3,6 +3,19 @@
 One ToolDefinition per SDK operation. Both MCP and REST surfaces derive their
 registrations from this registry. HTTP_ALLOWED is derived — zero manual sync.
 """
+# ⛔ THE MCP TOOL SURFACE AND THE PUBLIC SDK METHOD SURFACE CANNOT CHANGE WITHOUT DANIEL'S
+#    APPROVAL. Registering a tool here — or via `@mcp.tool()` in `tortoise/mcp_server.py`, or an
+#    entry this registry grows — adds it to what every agent can see; a public `def` on
+#    `TortoiseSDK` (`tortoise/sdk.py`) does the same for the SDK. That surface is the contract
+#    every agent and customer integration depends on, so a change to it materially affects
+#    customer outcomes (the surface once grew to 98 MCP tools / 150 SDK methods with nobody
+#    deciding it should — #3863). ADDING, REMOVING OR RENAMING an entry therefore needs Daniel's
+#    explicit approval FIRST: raise it as a USER QUESTION / DECISION RELAY per `AGENTS.md`.
+#
+#    `tools/surface-guard.py` + `tools/surface_manifest.py check` catch an UNRECORDED drift only.
+#    They do NOT enforce approval — an expansion that edits the declaration AND re-cuts the
+#    baseline passes both. A green gate is not approval. See `CONTRIBUTING.md`
+#    §"The MCP tool surface and public SDK methods cannot grow without Daniel's approval".
 from __future__ import annotations  # noqa: I001
 
 from dataclasses import dataclass, replace, field  # noqa: F401

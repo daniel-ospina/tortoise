@@ -41,13 +41,29 @@ later), we need a clear license grant from every outside contributor. See the
 5. **CI must be green.** The project's checks (lint, tests, drift gates) run
    on every PR.
 
-## The MCP tool surface and public SDK methods cannot grow by accident
+## The MCP tool surface and public SDK methods cannot grow without Daniel's approval
 
-Adding an entry to `TOOL_REGISTRY` in [`tortoise/tool_registry.py`](tortoise/tool_registry.py) does not
-just register a tool — it **expands what every agent can see**. That surface grew to 98 MCP tools and
-150 public SDK methods without anyone deciding it should, so it is now gated. (The #3863 curation then
-retired 16 names; the live surface is 82 MCP tools, and the gate's baseline in
+**The rule.** You may not **add, remove or rename** an MCP tool (a `TOOL_REGISTRY` entry in
+[`tortoise/tool_registry.py`](tortoise/tool_registry.py), a `@mcp.tool()` or direct `mcp.add_tool(...)` in
+[`tortoise/mcp_server.py`](tortoise/mcp_server.py), or an `mcp.add_transform` call) or a public method
+on `TortoiseSDK` ([`tortoise/sdk.py`](tortoise/sdk.py)) on your own initiative. A rename is a removal
+plus an addition.
+
+**Why.** That surface is the contract every agent and every customer integration depends on — it is
+what an agent can see and call, so changing it materially affects customer outcomes. It grew to 98 MCP
+tools and 150 public SDK methods without anyone deciding it should, so it is now gated. (The #3863
+curation then retired 16 names; the live surface is 82 MCP tools, and the gate's baseline in
 `config/surface-manifest.yml` records every one of them.)
+
+**What to do.** Get **Daniel's explicit approval before the change** — raise it as a **USER QUESTION /
+DECISION RELAY** per [`AGENTS.md`](AGENTS.md), naming the tool/method, what it does, and what it changes
+for a caller, and wait for his answer. Record the approval as part of the re-cut (step 4 below).
+
+**What the gate does — and does not — do.** Everything below describes a **consistency** gate, not an
+**approval** gate. `tools/surface-guard.py` and `tools/surface_manifest.py check` red when the code and
+the frozen baseline disagree, but a change that updates the code *and* re-cuts the baseline in the same
+PR **passes both**. The gate makes an unrecorded drift impossible to land silently; it cannot tell
+whether a human approved, and **a green gate is not approval.**
 
 The gate: **`tools/surface-guard.py`** (CI job `surface-guard`, part of the required `python-ci-gate`)
 compares the live declaration against the approved baseline in
@@ -82,7 +98,10 @@ them — see "To propose an addition"), and `baseline_counts` in
 empty — an empty table cannot turn the distribution check off. If an added tool moves the distribution,
 the check reds until the order table records the new expectation. Note what the approval reference does
 and does not do: the gate verifies its **shape** (a PR number and an `@handle`), never that the review it
-names exists — the carrier for that is a repository ruleset requiring review, as the #3863 scope doc states.
+names exists. **The carrier for that is the rule above plus Daniel's own review — not the machine.** There
+is deliberately no ruleset, `CODEOWNERS` entry, or required-reviewer config doing this: the fleet is
+agent-run and follows mandated instructions, and the approval path is the existing USER QUESTION /
+DECISION RELAY — asking Daniel.
 
 **"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
 ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible
@@ -119,8 +138,8 @@ reads, through a route nobody chose.
    `approval_status: pending-owner-approval`.
 3. `uv run python tools/surface_manifest.py render` — regenerates
    [`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md).
-4. Get the owner's approval and record it **per row** in `approval:` — a PR number and a principal,
-   never a bare `yes` or a date. This applies to **every** row, MCP tools and SDK methods alike; once
+4. **Get Daniel's approval first**, then record it **per row** in `approval:` — a PR number and a
+   principal (Daniel's handle), never a bare `yes` or a date. This applies to **every** row, MCP tools and SDK methods alike; once
    `approval_status: approved` is set, a row without a recorded approval is a red build. The
    `exemption: true` flag is **not** an approval carve-out — it records a method deliberately outside
    the reachable set, and the guard reds if such a method later becomes reachable.

@@ -391,6 +391,31 @@ Public repository that houses:
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Adding/removing/renaming an MCP tool or a public SDK method | Get **Daniel's explicit approval FIRST** — a USER QUESTION / DECISION RELAY per this file | An unapproved surface change ships to every agent and customer; the surface grows without a decision (#3863) |
+
+### ⛔ HARD RULE: The MCP/SDK surface cannot change without Daniel's approval
+
+**The rule.** You may not **add, remove or rename** a tool on the MCP surface (`TOOL_REGISTRY` in
+`tortoise/tool_registry.py`, or any `@mcp.tool()` / `mcp.add_tool(...)` / `mcp.add_transform(...)`
+in `tortoise/mcp_server.py`) or a public method on the SDK surface (`TortoiseSDK` in
+`tortoise/sdk.py`) on your own initiative. A rename is a removal plus an addition.
+
+**Why.** That surface is the contract every agent and every customer integration depends on — it is
+what an agent can see and call, so changing it materially affects customer outcomes. It once grew to
+98 MCP tools and 150 public SDK methods without anyone deciding it should (#3863).
+
+**What to do.** Get **Daniel's explicit approval BEFORE the change** — the route is the one this file
+already mandates: raise it as a **USER QUESTION / DECISION RELAY**, stating the tool/method, what it
+does, and what it changes for a caller, and wait for his answer. Then re-cut the baseline and record
+the approval (`approval:` on the row). Full procedure: `CONTRIBUTING.md` §"The MCP tool surface and
+public SDK methods cannot grow without Daniel's approval".
+
+**What the gate does and does not do.** `tools/surface-guard.py` and
+`tools/surface_manifest.py check` red on **drift** between the code and the frozen baseline. That is
+a **consistency** control, not an **approval** control: a change that updates the code *and* re-cuts
+the baseline **passes both**. The gate catches an *unrecorded* drift; it cannot tell whether a human
+approved. **A green gate is not approval** — the approval is carried by this rule and by Daniel's
+review.
 
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 

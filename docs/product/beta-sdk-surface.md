@@ -25,6 +25,13 @@ they do — not pruned from the existing 150.
 > approval here is approval **of the target**, not of any of them. See
 > `vision-mcp-sdk-surface.md` §"Cross-artifact tensions".
 
+> ⛔ **This target cannot be executed by changing the surface unilaterally.** Adding or removing an
+> MCP tool or a public SDK method is Daniel's decision — it is the contract every agent and customer
+> integration sees and calls, and a change to it materially affects customer outcomes. Raise it as a
+> USER QUESTION / DECISION RELAY per `AGENTS.md` and get his explicit approval **before** the change.
+> `tools/surface-guard.py` + `tools/surface_manifest.py check` red on an **unrecorded** drift only —
+> a change that re-cuts the baseline passes both, so **a green gate is not approval**.
+
 **Canonical terms:** an **organisation account** (the customer's account — the billing and
 plan boundary) owns many **memory graphs** (the unit of memory).
 
@@ -223,7 +230,7 @@ Recorded so they are not silently dropped. None is required for beta:
 - **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the
   **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`
   parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**
-  today. **Filed post-beta** (issue to be created) and **unlisted** until then.
+  today. **Filed post-beta** (#4667) and **unlisted** until then.
 
 ## Discarded — and why
 

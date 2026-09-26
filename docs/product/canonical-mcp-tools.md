@@ -30,6 +30,14 @@ generated view of the current baseline) and the gate in `tools/surface-guard.py`
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
 > `config/surface-manifest.yml`. This file records what the surface is *approved to become*.
 
+> ⛔ **This list is approved, and it cannot change without Daniel's approval.** Adding or removing
+> an MCP tool is the owner's decision — the surface is what every agent and customer integration can
+> see and call, so a change to it materially affects customer outcomes (it once grew to 98 tools with
+> nobody deciding it should, #3863). Raise it as a USER QUESTION / DECISION RELAY per `AGENTS.md` and
+> get Daniel's explicit approval **before** the change. Note what the gates do and do not do:
+> `tools/surface-guard.py` + `tools/surface_manifest.py check` red on an **unrecorded** drift only —
+> a change that re-cuts the baseline passes both, so **a green gate is not approval**.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so

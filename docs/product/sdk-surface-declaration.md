@@ -52,26 +52,41 @@ AST and reflection are *not* the same question, and nothing reconciled them befo
 exactly the divergence this reconciliation makes loud, and exactly where Phase 2.5's warning
 aliases land.
 
+## ⛔ Adding or removing a method needs Daniel's approval FIRST
+
+The public method set on `TortoiseSDK` is the **contract every agent and customer integration
+depends on** — adding, removing or renaming one materially affects customer outcomes, so it may
+not be changed on a lane's own initiative. **Get Daniel's explicit approval before the change** —
+raise it as a USER QUESTION / DECISION RELAY per `AGENTS.md`, naming the method, what it does,
+and what it changes for a caller.
+
+**This declaration does not enforce that.** `--check` reconciles the declaration against the code
+and the baseline, and `tools/surface-guard.py` reds when they disagree. Both are **consistency**
+controls: a change that updates the code AND re-cuts the baseline passes both. Neither can tell
+whether a human approved — the approval is carried by the rule above and by Daniel's review,
+never by a green check.
+
 ## How to add a method to the surface
 
 1. **Define it** in the `TortoiseSDK` class body in `tortoise/sdk.py` (a `def`/`async def`
    with no leading `_`). That alone makes it public — which is the point: it is now *caught*,
    not absorbed.
 2. **Re-render**: `uv run python tools/sdk_surface.py`.
-3. **Get it approved**: `uv run python tools/surface-guard.py` will now be RED. A new public
-   method is an unapproved endpoint (#3863), so add its `sdk:` row to
-   `config/surface-manifest.yml` and set `approval` on that row to the PR number and the
-   approving principal's handle. That step is a human decision, by design — this declaration
-   records identity; the manifest records approval.
+3. **Record the decision**: add its `sdk:` row to `config/surface-manifest.yml` and set
+   `approval` on that row to the PR number and the approving principal's handle — **Daniel's**,
+   because this is his decision. A re-cut marks the baseline `pending-owner-approval`, and the
+   `approval` reference records the decision; it is not a substitute for asking.
 4. **Verify**: `uv run python tools/surface-guard.py` and
    `uv run pytest tests/test_sdk_surface.py tests/test_surface_manifest.py -q`.
 
-Adding a method without steps 2–3 reds `--check`. Adding it without step 3 reds the guard.
-Neither reds silently.
+Adding a method without step 2 reds `--check`. Adding one without step 3 reds `surface-guard`
+**until the baseline is re-cut** — which is exactly why step 3 records a decision, and why a green
+gate is not itself that decision.
 
-**Removing or renaming** a method is the mirror image, with one extra gate: #3883 requires
-that a retired name still **resolve and warn, naming its replacement**, before anything is
-removed. Do not delete a `def` from the class body until its retired-name warning exists.
+**Removing or renaming** a method is the mirror image and needs the same approval. It carries one
+extra gate: #3883 requires that a retired name still **resolve and warn, naming its replacement**,
+before anything is removed. Do not delete a `def` from the class body until its retired-name
+warning exists.
 
 ## Related
 

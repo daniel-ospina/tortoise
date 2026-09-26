@@ -51,8 +51,13 @@ today* plus an earlier 32-group target sketch; its names are superseded wherever
 ## Scope of the freeze
 
 The freeze is on **tools and endpoints** — nothing is added, removed, renamed or deprecated on
-either surface without explicit human approval. A **response field** that is off by default and
-leaves the response unchanged is **not** a gate failure, but must be recorded.
+either surface without explicit human approval. **The approval is Daniel's, and it comes FIRST**
+(raise it as a USER QUESTION / DECISION RELAY per `AGENTS.md`): the surface is what every agent and
+customer integration can see and call, so a change to it materially affects customer outcomes.
+`tools/surface-guard.py` and `tools/surface_manifest.py check` do **not** enforce this — they catch an
+unrecorded drift only, and a change that re-cuts the baseline passes both, so a green gate is not
+approval. A **response field** that is off by default and leaves the response unchanged is **not** a
+gate failure, but must be recorded.
 
 ## The reconciliation — MCP 98 → 26
 

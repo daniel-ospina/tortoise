@@ -1,4 +1,16 @@
 """TORT-MCP-001: MCP server wrapping TortoiseSDK. Stdio transport, ~10 tools."""
+# ⛔ THE MCP TOOL SURFACE CANNOT CHANGE WITHOUT DANIEL'S APPROVAL. A `@mcp.tool()` here adds a
+#    tool to what every agent can see, and `mcp.add_tool(...)` / `mcp.add_transform(...)` are the
+#    two routes that reach agents WITHOUT entering `TOOL_REGISTRY` (the guard checks each
+#    separately). A public `def` on `TortoiseSDK` in `tortoise/sdk.py` changes the SDK surface the
+#    same way. That surface is the contract every agent and customer integration depends on, so a
+#    change to it materially affects customer outcomes. ADDING, REMOVING OR RENAMING a tool or
+#    method therefore needs Daniel's explicit approval FIRST — raise it as a USER QUESTION /
+#    DECISION RELAY per `AGENTS.md`.
+#
+#    `tools/surface-guard.py` + `tools/surface_manifest.py check` catch an UNRECORDED drift only;
+#    they do NOT enforce approval. A green gate is not approval. See `CONTRIBUTING.md`
+#    §"The MCP tool surface and public SDK methods cannot grow without Daniel's approval".
 from __future__ import annotations  # noqa: I001
 
 import asyncio

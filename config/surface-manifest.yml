@@ -1,3 +1,11 @@
+# ⛔ THE SURFACE THIS BASELINE APPROVES CANNOT CHANGE WITHOUT DANIEL'S APPROVAL.
+# Re-running `tools/surface_manifest.py cut` records a NEW surface — it does not approve it.
+# Adding, removing or renaming an MCP tool or a public SDK method is the owner's decision: the
+# surface is what every agent and customer integration can see and call, so a change to it
+# materially affects customer outcomes. Get Daniel's explicit approval FIRST — raise it as a
+# USER QUESTION / DECISION RELAY per AGENTS.md; CONTRIBUTING.md has the procedure.
+# `tools/surface-guard.py` and this file's `check` catch an UNRECORDED drift only, never an
+# unapproved one: an expansion that re-cuts the baseline passes both. A green gate is NOT approval.
 manifest_version: 1
 issue: 3863
 cut_at_commit: 1af4a0f83

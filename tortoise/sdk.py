@@ -9,6 +9,18 @@ referenced in the builder capability catalog (onboarding) — catalog module
 facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
 an extractor/indexer, update the catalog reference.
 """
+# ⛔ THE PUBLIC SDK METHOD SURFACE CANNOT CHANGE WITHOUT DANIEL'S APPROVAL. Every `def`/`async
+#    def` in the `TortoiseSDK` class body whose name has no leading `_` becomes a public method the
+#    moment it is written — the surface is the class body, not an `__all__` (`tools/sdk_surface.py`
+#    derives it from the AST). This mirrors the MCP surface: it is the contract every agent and
+#    customer integration depends on, so adding, removing or renaming a public method materially
+#    affects customer outcomes. It needs Daniel's explicit approval FIRST — raise it as a USER
+#    QUESTION / DECISION RELAY per `AGENTS.md`.
+#
+#    `tools/surface-guard.py` + `tools/surface_manifest.py check` catch an UNRECORDED drift only;
+#    they do NOT enforce approval — an expansion that re-cuts the baseline passes both. A green
+#    gate is not approval. See `CONTRIBUTING.md` §"The MCP tool surface and public SDK methods
+#    cannot grow without Daniel's approval".
 from __future__ import annotations  # noqa: I001
 
 import hashlib

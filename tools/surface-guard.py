@@ -7,6 +7,16 @@ WHAT THIS STOPS
     every agent depends on; growing them silently is the defect this gate
     exists to prevent.
 
+WHAT THIS DOES NOT DO
+    It does NOT enforce approval. It compares the declaration against a FROZEN baseline; a lane
+    that edits the declaration AND re-cuts the baseline in the same PR passes. A green gate is
+    therefore NOT approval and must never be read as one — a lane that believes the machine will
+    stop it will not seek the approval it needs. The approval is carried by the mandated RULE:
+    adding or removing an MCP tool or a public SDK method requires DANIEL'S explicit approval
+    BEFORE the change (USER QUESTION / DECISION RELAY per `AGENTS.md`; see `CONTRIBUTING.md`
+    §"The MCP tool surface and public SDK methods cannot grow without Daniel's approval"). This
+    gate's job is narrower and it is exact: make an UNRECORDED drift impossible to land silently.
+
 HOW IT WORKS
     It EXECUTES the declaration (imports TOOL_REGISTRY, introspects
     TortoiseSDK) and compares it against the approved baseline in
@@ -290,7 +300,8 @@ def main(argv: list[str]) -> int:
     #              class that copies an approved transform's identity, a function that
     #              forges `__code__`, or simply editing this guard. That party has commit
     #              access to these files, so no gate here can constrain them; the control
-    #              for that class is required review, not this check (§ CONTRIBUTING.md).
+    #              for that class is the mandated approval rule plus Daniel's own review
+    #              (`CONTRIBUTING.md`; `AGENTS.md`), not this check.
     #              Residuals of this class are follow-ups, not merge blockers.
     baseline_transforms = doc.get("allowed_transforms")
     if not isinstance(baseline_transforms, list):

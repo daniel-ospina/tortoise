@@ -38,6 +38,13 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 > `docs/product/mcp-sdk-surface.md`, rendered from `config/surface-manifest.yml`; the freeze from #3863 covers the tool
 > surface, and nothing here is implemented until the owner approves.
 
+> ⛔ **This inventory is not a mandate to change the surface.** Adding or removing an MCP tool or a
+> public SDK method is Daniel's decision, because the surface is what every agent and customer
+> integration can see and call, and a change to it materially affects customer outcomes. Raise it as
+> a USER QUESTION / DECISION RELAY per `AGENTS.md` and get his explicit approval **before** the
+> change. `tools/surface-guard.py` + `tools/surface_manifest.py check` red on an **unrecorded** drift
+> only — a change that re-cuts the baseline passes both, so **a green gate is not approval**.
+
 ## The count
 
 | | |
@@ -390,7 +397,7 @@ this" is **not** by itself a strong justification, and several entries below fai
 | W10 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | delete (12/13) | **Core.** | — |
 | W11 | `supersede`, `supersede_point`, `invalidate_point` | Graphiti `invalid_at`/`expired_at` | Supersession is **implicit in theirs** (an ingest side effect they never expose) and **explicit in ours** — a first-class operation with edge transfer. | **strong** |
 | W12 | `retract_point` | none | A claim is **withdrawn without a successor**. Every competitor either deletes or supersedes; none retracts. | **strong** |
-| W13 | `promote_point`, `list_drafts`, `quarantine_batch` | Cognee write proposals | Draft→live promotion that also promotes incident operators, under review gating. Nobody else has a draft lifecycle for claims. | adequate |
+| W13 | `promote_point`, `list_drafts`, `quarantine_batch` | **none** | Draft→live promotion that also promotes incident operators, under review gating. Nobody else has a draft lifecycle for claims. ⚠️ **Corrected — the earlier citation to Cognee "write proposals" did not reproduce and is withdrawn.** Cognee's MCP exposes `remember`/`recall`/`forget` (+ tool discovery); its nearest proposal concept is **skill**-self-improvement (`improve`/Memify), not memory-claim promotion, and the memory promote/approval tools that surface in a search belong to an **unrelated** project (`ai-memory-mcp`). With no competitor analogue, the differential is **strong**, not merely adequate. | **strong** |
 | W14 | `operator_action`, `mitigate_operator`, `annotate_operator` | none | `mitigate_operator` dampens an operator's effective weight — **no surveyed system has a mitigation-bearing operator object**, in RDF/OWL, PSL, Cyc, PLN or any graph DB. This is the narrowest defensible novelty in the operator family. | **strong** |
 | W15 | `set_point_baseline` | **none** | Declares a claim's **starting belief** (the Beta prior) with provenance on who set it. No product has a per-claim prior. | **strong** |
 | W16 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | `mem_scheduler` (MemOS) | Ours recomputes **beliefs** over a graph; MemOS reschedules **storage**. Different in kind, not degree. | **strong** |
