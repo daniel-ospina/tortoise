@@ -2285,15 +2285,19 @@ def get_relationships_bounded(
 #: read-only 2026-09-23: the whole edge inventory of the dogfood graph
 #: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
 #: node, because the capture entity spine stores SUBJECT-kind entities as
-#: ``:Object`` (issue #4934) and the only document-path Subject writer is
-#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
-#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
-#: ``aboutSubject`` edge exists on the graph.
+#: ``:Object`` (issue #4934) and the document-path Subject writer is ON by
+#: default since #4938 — but it writes ``(document :Source)-[:aboutSubject]->
+#: (:Subject)`` edges, which this probe deliberately does NOT count because
+#: they cannot resolve a Point's ``subject`` field. Tracked producers for the
+#: Point/Event-sourced shapes: #1370, #1509. The marker self-clears as soon as
+#: any Point/Event-sourced ``aboutSubject`` edge exists.
 SUBJECT_BINDING_UNAVAILABLE = (
     "aboutSubject has no reachable producer for Points or Events on this "
     "graph, so 'subject' is structurally empty rather than unknown: the "
     "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
-    "and the document extractor's Subject writer is opt-in (#4938). "
+    "and the document extractor's Subject writer — on by default since "
+    "#4938 — writes document-Source-sourced edges only, which cannot "
+    "resolve a Point's subject. "
     "Tracked producers: #1370, #1509."
 )
 
