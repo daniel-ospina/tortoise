@@ -175,6 +175,56 @@ extraction:
     relations: {}
     chains: {}
 
+# ── Manifest v3.1 (epic #909 §1.4/§1.5, #1026): extraction behaviour slots ──
+# Additive and backward compatible: a v3 manifest with none of these keys
+# normalizes to the documented shape unchanged (all four default to empty).
+#
+# ⛔ These slots DECLARE; they never DROP. The design that motivated this
+# section originally included `entityPatterns`/`excludePatterns` — name-pattern
+# rules that discarded artefacts at mint. #1026 rules against them:
+#
+#     "keep the slot, as declared entity types only — the pack declares which
+#      kinds its artefacts are; no name patterns; nothing is dropped at mint."
+#
+# Declaring either key is a validation ERROR carrying that reason, so an author
+# arriving from a pattern-filtering design is told why at the point of adoption
+# rather than being left to infer it from "unknown key".
+#
+#   entityCues:        {kind: [surface cue, ...]} — the surface forms YOUR
+#                      domain writes this kind in (dev: "the .py module";
+#                      product-strategy: "our pricing page"). Every key MUST be
+#                      a kind this pack or core already declares — that is what
+#                      makes the slot declarative rather than a pattern filter.
+#   relationTemplates: pack-typical edge shapes, so the extractor recognizes
+#                      the domain's IMPL/NAND/MITIGATES phrasings.
+#                        predicate:        the domain verb
+#                        mechanism:        IMPL | NAND | MITIGATES (closed set)
+#                        fromKind/toKind:  declared kinds
+#                        description:      one line of what the shape captures
+#   valueGate:         {keep: [...], drop: [...]} — what a VALUABLE utterance
+#                      looks like in this domain. Hints for the value brief: it
+#                      judges utterances and never removes an artefact.
+#   promptFragments:   ["..."] — pack-authored instruction snippets compiled
+#                      into the value brief. Capped at ~120 words per fragment
+#                      and ~600 total (a whitespace-word proxy, not a tokenizer).
+#
+# Example:
+#   extraction:
+#     entityCues:
+#       concept: ["the <domain> concept", "our <domain> approach"]
+#       artifact: ["the .py module", "the migration file"]
+#     relationTemplates:
+#       - predicate: addresses
+#         mechanism: IMPL
+#         fromKind: concept
+#         toKind: artifact
+#         description: "a concept implemented by an artefact"
+#     valueGate:
+#       keep: ["design rationale", "a trade-off stated with its reason"]
+#       drop: ["logistics", "tool mechanics"]
+#     promptFragments:
+#       - "Prefer domain nouns over file paths when naming an entity."
+
 # ── Layer 2: Connectors ──────────────────────────────────────────────────
 connectors: []
 
