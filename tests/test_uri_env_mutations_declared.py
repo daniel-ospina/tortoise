@@ -207,6 +207,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # DELIBERATE_URI: the docker-calibrated cross-lens test (T8 D9) forces
     # the docker lane — its setenv IS the test input.
     "test_cross_lens.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #1370: the subject-binding suite's URI-mode construction case forces the
+    # docker lane so `_graph_report` takes its URI branch. The URI is
+    # DELIBERATELY unreachable (port 16610) — the test pins the construction
+    # contract (no positional db_path, namespace passed through) against a
+    # spy SDK, so it never needs a server and proves nothing about one.
+    # Fixture-param monkeypatch, so pytest auto-undoes at teardown (no lane
+    # leak into a later docker-lane test).
+    "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
