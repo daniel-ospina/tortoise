@@ -624,9 +624,10 @@ export function preferredSurface(family, current) {
 // the public setup docs page (#4836): website/docs.html#chatgpt names the
 // Developer-mode path, the canonical connector URL and the onboarding
 // instructions URL. The block below embeds the workflows prompt; the page hands
-// over the onboarding document. This block must not name `tortoise_health` — that
-// name is retired and absent from `tools/list` (#3883), so a tool-grant client
-// cannot call it (pinned in harnesses.test.js).
+// over the onboarding document. Only this block's `chatgpt` copy must omit
+// `tortoise_health` — it verifies in the chat instead (pinned in
+// harnesses.test.js); the commands below keep the name the DE2E-5 contract
+// above them names.
 //
 // Contract (DE2E-5): every harness reaches a connected state verifiable via
 // tortoise_health; the served onboarding instructions take over from the

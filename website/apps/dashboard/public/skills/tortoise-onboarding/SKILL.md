@@ -442,8 +442,7 @@ Guide the human through:
 
 ## 4. Verify, then checkpoint harness-connected
 
-1. Call `tortoise_health` (MCP tool, every harness this document covers once
-   connected; ChatGPT verifies per the #1701 note in §2). It
+1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
    must report the graph reachable + your organization context.
 2. On failure: retry once; then give an honest diagnostic — config write
    invalid (harness broken)? Offer the teach-human fallback (the connector
@@ -470,10 +469,7 @@ Guide the human through:
      fact — you have **no chooser surface at all** (#2912), so the dashboard's
      connect step offers you nothing to pick. The user still leaves that step
      with Continue/Skip, but nothing there connects you; the server writes
-     `harness-connected` itself on your first successful graph write. Verify
-     with the ADVERTISED `tortoise_overview(section="health")` — the legacy
-     `tortoise_health` name is retired and absent from `tools/list` (#3883), so
-     a tool-grant client like you cannot call it. This
+     `harness-connected` itself on your first successful graph write. This
      document is your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —

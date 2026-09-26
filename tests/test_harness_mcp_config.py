@@ -473,7 +473,7 @@ class TestDocsPageAndSkillConfig:
         assert "does <em>not</em> read shell exports" in desktop
 
     # The dashboard's harness table: it pins the connector URL the ChatGPT row
-    # must teach (#2864) and the chooser §2's note has to agree with.
+    # must teach (#2864).
     HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
 
     @classmethod
@@ -545,7 +545,8 @@ class TestDocsPageAndSkillConfig:
             "Scan Tools",           # 4 — OAuth enrolment
             "Authorize",            # 4 — consent (key-less connect completes here)
             "paste it into that chat",  # 5 — the hand-off to the agent
-            "files your first memory",  # 6 — the journey's outcome
+            "to verify the connection",  # 6 — verification is still instructed
+            "file your first memory",  # 6 — the journey's outcome
             "plan-dependent",       # 6 — which tools appear is plan-dependent
         ):
             assert step in steps, (
