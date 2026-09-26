@@ -581,8 +581,10 @@ def test_docker_lane_index_shape():
 # hosted capture path: one 2-turn capture constructs ~12 projections (7 of
 # them on the event-loop thread), and 180+ of the capture's ~217 on-loop
 # queries were that repeated, already-satisfied DDL. The guard answers the
-# same question in ONE round trip by reading the engine's own index
-# catalogue. These tests pin each property the guard's correctness rests on:
+# same question from the engine's own index catalogue — for Point that is two
+# bounded reads: the catalogue, plus the array-valued `search_keys`
+# precondition. These tests pin each property the guard's correctness rests
+# on:
 # it is TRUE only when the schema really is complete, it is FALSE for every
 # shape that still needs the sweep, and it is keyed on the GRAPH (not on
 # process memory, which goes stale the moment a graph is re-created).
@@ -792,21 +794,24 @@ def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
         f"{len(repeated)} schema statement(s): {repeated[:6]} — the "
         "bootstrap is repeated per construction again (#4465)")
 
-    # #5444: the fast path also READS the fixup's state (the marker, then the
-    # array precondition). That is the fix — the probe must be able to tell an
-    # owed fixup from a done one. Bound it: reads only, at most one of each,
-    # and never a write, so the check above cannot be evaded by probing via
-    # rebuilding.
+    # #5444: the fast path also READS the fixup's precondition (the
+    # array-valued `search_keys`), which is what lets the probe tell an owed
+    # fixup from a done one. Bound it: exactly one such read, and never a
+    # write, so the check above cannot be evaded by probing via rebuilding.
+    # (The `point_fts_v2` marker is NOT read — see `_schema_is_current`.)
     reads = [c for c in seen if _is_fast_path_read(c)]
     assert len(reads) <= 1, (
         f"the fast path issued {len(reads)} precondition read(s): {reads} — "
         "bounded to the single cap-immune array read (#5444)")
 
-    # NO statement at all may write: the fixup belongs to the first sweep. This
-    # replaces a `" SET "`/`" MERGE "` blacklist applied to the reads only,
-    # which a reworded statement could evade (#5312 review, P2); the fast-path
-    # list above is pinned to exact literals, so a reworded probe is not
-    # counted as a permitted read in the first place.
+    # No DESTRUCTIVE statement may run: the fixup belongs to the first sweep.
+    # `_is_destructive` matches the five verbs the fixup itself uses, so this
+    # pins "no data write", NOT "no write at all" — the vector-API handle
+    # probe below legitimately issues `CREATE VECTOR INDEX`/`createNodeIndex`
+    # and is budgeted for separately. This replaces a `" SET "`/`" MERGE "`
+    # blacklist applied to the reads only, which a reworded statement could
+    # evade; the fast-path list above is pinned to exact literals, so a
+    # reworded probe is not counted as a permitted read in the first place.
     writes = [c for c in seen if _is_destructive(c)]
     assert writes == [], (
         f"a second `_ensure_indexes()` issued destructive statement(s): "
@@ -833,22 +838,21 @@ def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
     those Points permanently invisible to ``queryNodes`` — silent
     unfindability, not a slow path.
 
-    The probe tests the fixup's REAL precondition, not the ``point_fts_v2``
-    marker: the marker write is swallowed on the fresh-create path
-    (``except Exception: pass``), so "marker absent" does not mean "fixup
-    owed", and gating on it re-bootstrapped every construction on CI.
+    The probe tests the fixup's REAL precondition (an array-valued
+    ``search_keys``), never the ``point_fts_v2`` marker: more than one writer
+    controls that marker, so "marker present" is not "fixup done".
 
     Mutation check (must stay true): removing the
     ``_array_valued_search_keys_exist()`` arm from ``_schema_is_current``
-    fails assertion (a) below.
+    fails assertion (a) below — with the arm gone the early-return condition
+    is ``required <= present and fts_required``, which is True for a
+    fully-indexed graph, so the probe would report a healthy graph as
+    not-current and re-bootstrap it on every construction.
 
     Assertion (a) pins the state that ISOLATES that arm: the marker absent
-    and NO array-valued ``search_keys`` anywhere. Without the array arm the
-    condition collapses to ``not _point_fts_marker_present()``, which is True
-    there — so the probe would report a healthy marker-less graph as
-    not-current and re-bootstrap it on every construction. That is the exact
-    CI regression the marker-gate attempt caused, so (a) is both the arm's
-    guard and the fast-path-preservation test.
+    and NO array-valued ``search_keys`` anywhere. That state must read as
+    CURRENT, so (a) is both the arm's mutation guard and the
+    fast-path-preservation test.
     """
     proj = graph_factory()
     g = proj.g
@@ -910,7 +914,7 @@ def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
 
 
 def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factory):
-    """#5312 review P1: the legacy branch's gate needs the SCHEMA half too.
+    """The legacy branch's gate needs the SCHEMA half too (#5444).
 
     That branch exists to drop→recreate ``Point(content)`` into
     ``Point(content, search_keys)``. Gating it only on "an array is owed" meant
@@ -955,7 +959,7 @@ def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factor
             fields = set((row[2] or {}).keys())
     assert fields and "search_keys" in fields, (
         "the legacy single-field index must be upgraded to carry search_keys "
-        f"even when no array is owed, got {fields} (#5312 review P1)")
+        f"even when no array is owed, got {fields} (#5444)")
     assert proj._schema_is_current() is True
 
 

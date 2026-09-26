@@ -6030,7 +6030,7 @@ class FalkorProjection(
     )
 
     def _schema_is_current(self) -> bool:
-        """#4465 — ONE round trip answering "is this graph already indexed?".
+        """#4465 — answering "is this graph already indexed?" from the GRAPH.
 
         ``_ensure_indexes`` is idempotent, but it pays ~26 graph round-trips
         of DDL that is already satisfied on every construction after the
@@ -6038,8 +6038,9 @@ class FalkorProjection(
         on the event-loop thread). Measured before this guard, for a schema
         that had not changed: 182 of the capture's 219 on-loop queries on the
         docker lane (180 of 217 embedded) were that repeated DDL (`#4465`).
-        This reads the engine's own index catalogue in ONE round trip and
-        lets the sweep run only when it has work to do.
+        This reads the engine's own index catalogue, plus — for Point — the
+        bounded data read described below, and lets the sweep run only when it
+        has work to do.
 
         ⛔ The answer is read from the GRAPH, never from process memory. A
         process-wide "already bootstrapped" flag keyed on the graph name looks
@@ -6057,21 +6058,38 @@ class FalkorProjection(
         behaviour. A probe that cannot PROVE the schema is current must never
         be able to skip the work.
 
-        The FTS contract is checked by FIELD SET, and — for Point — by the
-        ``point_fts_v2`` marker as well. A one-field legacy index fails the
-        field requirement below, so it takes the full path.
+        The FTS contract is checked by FIELD SET, plus — for Point — the data
+        precondition below. A one-field legacy index fails the field
+        requirement, so it takes the full path.
 
-        The fixup's real precondition is tested too (#5444). The
-        ``if not done:`` block also performs a ONE-TIME DATA FIXUP (flattening
-        array-valued ``search_keys``), so a graph in the state "two-field
-        index present, fixup owed" used to read as current and stay that way —
-        those Points are permanently invisible to FTS. Requiring the
-        ``point_fts_v2`` marker for this was tried and reverted: the
-        fresh-create branch swallows a failed marker write
-        (``except Exception: pass``), so a healthy graph can legitimately have
-        no marker, and gating on it re-bootstrapped every construction on CI
-        (embedded + test-slow legs). The probe therefore tests the array
-        itself, using the marker only as a cheap skip.
+        ⛔ The ``point_fts_v2`` marker is WRITE-ONLY and is deliberately NEVER
+        read here. It records "the fixup ran", which is a different claim from
+        "no fixup is owed": ``update_entity`` applies caller props with a raw
+        ``SET n += $props`` and does not flatten (#5482), so an array-valued
+        ``search_keys`` can be introduced AFTER the marker is minted, and the
+        fresh-create path can swallow a failed marker write. A probe trusting
+        the marker would certify such a graph as current while its Points
+        stayed permanently invisible to FTS.
+
+        So the fixup's real precondition is tested directly (#5444): the legacy
+        ``"already"`` branch also performs a ONE-TIME DATA FIXUP (flattening
+        array-valued ``search_keys``), which means a graph in the state
+        "two-field index present, fixup owed" used to read as current and stay
+        that way. ``_array_valued_search_keys_exist()`` reads the array itself
+        — the sound precondition — and ``_point_fts_search_keys_field_missing()``
+        covers the schema half in the same branch.
+
+        ⚠️ COST OF THE SOUND CHECK, measured (docker FalkorDB 4.20.4, graph
+        holding FLAT ``search_keys``): the array read is an unindexed
+        All-Node-Scan over ``:Point`` — ``EXPLAIN`` gives ``Node By Label
+        Scan``, ``CALL db.indexes()`` has no RANGE index on ``search_keys``,
+        and ``typeof()`` cannot use the FULLTEXT one — so it is LINEAR in the
+        Point count and the healthy (no-array) case must scan every row before
+        it can answer "none": ≈1.4 ms at N=1k, 8.1 ms at 30k, 26.9 ms at
+        120k, 66.2 ms at 300k (≈0.2 µs/point), paid on EVERY fast-path probe.
+        That is the price of a check that cannot certify an owed fixup as
+        done; #5444 tracks the write-maintained-signal alternative that would
+        make it O(1).
 
         ``event_fts_v2`` is deliberately NOT consulted: no data fixup rides it
         (it guards only the drop→recreate churn), and a fresh graph sets the
@@ -6124,39 +6142,38 @@ class FalkorProjection(
         # current: skipping the fixup is unfindable data, not a slow path.
         #
         # Test the fixup's ACTUAL precondition (an array-valued
-        # ``search_keys``), NOT the ``point_fts_v2`` marker. The marker write
-        # is swallowed on the fresh-create path (``except Exception: pass``),
-        # so "marker absent" does not mean "fixup owed"; requiring it was
-        # measured to re-bootstrap every construction on CI (#5444). The real
+        # ``search_keys``), NOT the ``point_fts_v2`` marker. The real
         # precondition is exact: no array ⇒ nothing owed, whatever the marker
         # says.
         #
-        # The MARKER IS DELIBERATELY NOT CONSULTED (review P1). It was tried
-        # as a cheap skip, and it is unsound: "marker present" does not mean
-        # "fixup done", because more than one writer controls it. The public
-        # entity-update path (`sdk.update_entity`, the `surface.update_entity`
-        # MCP tool) writes caller props with a raw `SET n += $p` and does NOT
-        # flatten, so it can store an array-valued `search_keys` on a graph
-        # whose marker is already set. Short-circuiting on the marker made that
-        # state permanently invisible to this probe — the #5444 defect itself,
-        # merely relocated. The array check is the REAL precondition and, being
-        # a cap-immune single-row `typeof` test, it is cheap enough to be the
-        # only check.
+        # ⛔ THE MARKER IS DELIBERATELY NOT CONSULTED. "Marker present" does
+        # not mean "fixup done", because more than one writer controls it. The
+        # public entity-update path (`sdk.update_entity`, the
+        # `surface.update_entity` MCP tool) writes caller props with a raw
+        # `SET n += $p` and does NOT flatten (#5482), so it can store an
+        # array-valued `search_keys` on a graph whose marker is already set.
+        # Short-circuiting on the marker makes that state permanently
+        # invisible to this probe — the #5444 defect itself, merely relocated.
+        #
+        # ⚠️ The array check is cap-immune (one bounded `typeof` row) but NOT
+        # cheap: it is an unindexed All-Node-Scan over `:Point`, linear in the
+        # Point count and paid on every fast-path probe (measured 1.4 ms @1k →
+        # 66.2 ms @300k). See the docstring for the figures; #5444 tracks the
+        # write-maintained-signal alternative that would make it O(1).
         if (required <= present and fts_required
                 and self._array_valued_search_keys_exist()):
             return False
         return required <= present
 
-    #: Cap-immune fixup precondition (#5312 review, P1). ``typeof`` is a
-    #: per-row predicate and the read takes a single bounded row, so
-    #: FalkorDB's server-global ``RESULTSET_SIZE`` (default 10 000) cannot
-    #: truncate it into a FALSE NEGATIVE. The pre-review form read every
-    #: ``search_keys`` unbounded and scanned client-side, so on a graph with
-    #: more than ``RESULTSET_SIZE`` Points an array beyond the cap was
-    #: invisible and the fixup was skipped again — the #5444 symptom surviving
-    #: precisely where the data volume is real (measured on docker 4.20.4:
-    #: 10 050 Points, arrays only in rows 10 001-10 050 → 10 000 rows returned,
-    #: 0 array-typed).
+    #: Cap-immune fixup precondition. ``typeof`` is a per-row predicate and
+    #: the read takes a single bounded row, so FalkorDB's server-global
+    #: ``RESULTSET_SIZE`` (default 10 000) cannot truncate it into a FALSE
+    #: NEGATIVE. A client-side read of every ``search_keys`` returns only the
+    #: first ``RESULTSET_SIZE`` rows, so on a large graph an array beyond the
+    #: cap was invisible and the fixup was skipped again — the #5444 symptom
+    #: surviving precisely where the data volume is real (measured on docker
+    #: 4.20.4: 10 050 Points with arrays only in rows 10 001-10 050 → a plain
+    #: read returns 10 000 rows and 0 array-typed; this probe finds them).
     _ARRAY_SEARCH_KEYS_PROBE = (
         "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
         "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
@@ -6311,8 +6328,8 @@ class FalkorProjection(
         ``hosted_backup._audit_copied_boolean_indexes`` for the copy-path
         verification.
 
-        #4465: the sweep is GUARDED by ``_schema_is_current()`` — one
-        round trip that answers the same question this DDL answers ("is the
+        #4465: the sweep is GUARDED by ``_schema_is_current()``, which
+        answers the same question this DDL answers ("is the
         schema already there?"). A fully-indexed graph skips straight to the
         vector-API handle below; a graph with any missing index, any
         forbidden ``is_operator`` index, or an unreadable index catalogue
@@ -6542,13 +6559,15 @@ class FalkorProjection(
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
                         #
-                        # Mint the marker ONLY when nothing is owed (#5312
-                        # review, P1). A RESTORE/DR graph reaches THIS branch
-                        # too — array-valued search_keys with no index, because
-                        # the dump carries no indexes and skips the marker — so
-                        # an unconditional marker here would declare that owed
-                        # fixup done *permanently*: the probe then skips the
-                        # very check that would have found it.
+                        # Mint the marker ONLY when nothing is owed. A
+                        # RESTORE/DR graph reaches THIS branch too —
+                        # array-valued search_keys with no index, because the
+                        # dump carries no indexes and skips the marker — so an
+                        # unconditional marker here would record "fixup done"
+                        # over an owed fixup. Consumers read that marker as the
+                        # migration watermark (`docs/durability-posture.md`,
+                        # the DR checks), so minting it over owed work is false
+                        # bookkeeping regardless of who reads it.
                         if self._array_valued_search_keys_exist():
                             self._fix_point_search_keys()
                         else:
