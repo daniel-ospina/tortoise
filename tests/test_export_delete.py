@@ -1473,3 +1473,89 @@ class TestDeferredSensitiveOpCharging:
             asyncio.run(_scenario())
         finally:
             ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_cancel_during_terminal_charge_is_not_dropped(self, monkeypatch):
+        """#2051 review P2: a cancellation delivered WHILE the terminal
+        charge waits on the contended ``_SENSITIVE_LOCK`` must not drop the
+        charge on ANY exit branch.
+
+        ``_SENSITIVE_LOCK`` is ONE global lock shared by all four sensitive
+        ops and all IPs, so an attacker can manufacture the contention the
+        way this test does: the endpoint body takes the (task-agnostic)
+        lock and holds it, so the terminal charge blocks on it; the request
+        task is then cancelled. Un-shielded, the ``await`` on the charge
+        raises ``CancelledError`` out of the wrapper and the append never
+        happens — for an operation that ALREADY EXECUTED (success and 4xx
+        branches). ``_terminal_charge`` shields it, so the charge lands once
+        the lock is released, while the cancellation still propagates.
+
+        MUTATION: restore the un-shielded
+        ``await _charge_sensitive_op_rate_limit(key, op)`` in any branch
+        (drop the ``_terminal_charge`` helper) and the success / 4xx
+        assertions fail with ``entries_after_lock_released == 0``.
+        """
+        import asyncio
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 10)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+
+        def _entries():
+            return sum(len(v) for v in ha_mod._SENSITIVE_BUCKETS.values())
+
+        async def _attack(mode, *, double_cancel=False):
+            acquired = asyncio.Event()
+
+            @ha_mod._deferred_sensitive_op("export")
+            async def ep(request):
+                # Hold the shared lock across the terminal charge: the body
+                # acquires it (asyncio.Lock is not owner-bound), signals,
+                # then unwinds into the charge, which blocks on the lock
+                # this same task holds.
+                await ha_mod._SENSITIVE_LOCK.acquire()
+                acquired.set()
+                if mode == "ok":
+                    return {"ok": True}
+                if mode == "client":
+                    raise ha_mod.HTTPException(status_code=403, detail="nope")
+                raise asyncio.CancelledError()
+
+            task = asyncio.ensure_future(ep(request=self._request()))
+            await acquired.wait()
+            # let the body unwind into the terminal charge, which must now
+            # be blocked on the held lock
+            for _ in range(5):
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.02)
+            assert not task.done(), "the terminal charge must be blocked"
+            assert _entries() == 0, "nothing may charge while the lock is held"
+            task.cancel()
+            if double_cancel:
+                await asyncio.sleep(0)
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, ha_mod.HTTPException):
+                pass
+            else:  # pragma: no cover
+                raise AssertionError("the cancellation must propagate")
+            assert _entries() == 0, "the charge is still waiting on the lock"
+            ha_mod._SENSITIVE_LOCK.release()
+            await asyncio.sleep(0.05)
+            assert _entries() == 1, (
+                f"a cancellation during the terminal charge DROPPED the "
+                f"charge for mode={mode!r} (double_cancel={double_cancel})")
+            # drain the shieldee before the next branch reuses the loop
+            await asyncio.sleep(0)
+
+        async def _scenario():
+            for mode in ("ok", "client", "cancel"):
+                ha_mod._SENSITIVE_BUCKETS.clear()
+                await _attack(mode)
+                ha_mod._SENSITIVE_BUCKETS.clear()
+                await _attack(mode, double_cancel=True)
+                ha_mod._SENSITIVE_BUCKETS.clear()
+
+        try:
+            asyncio.run(_scenario())
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()

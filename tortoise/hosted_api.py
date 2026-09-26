@@ -5759,6 +5759,30 @@ async def _charge_sensitive_op_rate_limit(
         limit=limit, window_s=3600)
 
 
+async def _terminal_charge(key: tuple | None, op: str) -> None:
+    """#2051: the ONE shielded terminal charge for the sensitive-op family.
+
+    #2051 (review P2): the charge runs under ``asyncio.shield`` so a
+    cancellation delivered while it waits on the contended
+    ``_SENSITIVE_LOCK`` — ONE global lock shared by all four ops and all
+    IPs, so an attacker can manufacture the contention — cannot DROP a
+    charge for an operation that ALREADY EXECUTED. Un-shielded, the
+    cancellation propagated out of the wrapper and the append never
+    happened: the same evasion class the ``CancelledError`` branch closes,
+    left open on the success and 4xx paths. ``shield`` keeps the charge in
+    its own task, so a second cancellation cannot drop it either. The
+    best-effort guard keeps a charge-side fault from masking the underlying
+    outcome (a charge is telemetry, never a failure path), and it does NOT
+    swallow ``CancelledError`` (a ``BaseException``), so the cancellation
+    still propagates after the charge is committed.
+
+    All three terminal branches — success, non-5xx ``HTTPException`` and
+    cancellation — charge through this helper so they cannot diverge again.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.shield(_charge_sensitive_op_rate_limit(key, op))
+
+
 def _deferred_sensitive_op(op: str):
     """#2051: deferred-terminal charging for a sensitive-op endpoint.
 
@@ -5790,7 +5814,7 @@ def _deferred_sensitive_op(op: str):
                 result = await fn(*args, **kwargs)
             except HTTPException as exc:
                 if exc.status_code < 500:
-                    await _charge_sensitive_op_rate_limit(key, op)
+                    await _terminal_charge(key, op)
                 raise
             except asyncio.CancelledError:
                 # #2051 (review P2): a request cancelled mid-flight (client
@@ -5800,16 +5824,13 @@ def _deferred_sensitive_op(op: str):
                 # uncharged executions of the heavy ``import``/``export``
                 # ops; the pre-migration check-time behaviour charged this
                 # class, so charging here restores parity (it REMOVES a
-                # limits change, it is not one). ``shield`` runs the charge
-                # in its own task so a SECOND cancellation cannot drop it
-                # while it waits on the bucket lock; the best-effort guard
-                # keeps a charge-side fault from masking this cancellation
-                # (a charge is telemetry, never a failure path).
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(
-                        _charge_sensitive_op_rate_limit(key, op))
+                # limits change, it is not one). ``_terminal_charge`` is
+                # shielded, so a SECOND cancellation cannot drop it while it
+                # waits on the bucket lock. The cancellation is re-raised
+                # below, so it still reaches the caller.
+                await _terminal_charge(key, op)
                 raise
-            await _charge_sensitive_op_rate_limit(key, op)
+            await _terminal_charge(key, op)
             return result
         return wrapper
     return decorator
