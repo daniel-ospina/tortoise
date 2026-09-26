@@ -13,10 +13,13 @@ is an EP-weight delta on the operator it is attached to:
 
     w_eff = w * (1 - strength)        # ontology §3.1; tortoise/weights.py
 
-Every assertion below therefore reads the weight the propagation path ACTUALLY
-CONSUMES — the tuple ``TortoiseEP._affected_factors`` returns (the same list
-``run()`` folds) — and/or the posterior that propagation settles. None of them
-asserts that an edge exists.
+Every assertion below therefore reads an observable the propagation path
+PRODUCES: the tuple ``TortoiseEP._affected_factors`` returns (the same list
+``run()`` folds), the posterior propagation settles, or the graph's own
+node/edge counts being unchanged across a read-only resolution. No assertion
+here asserts that a mitigation edge exists — an edge-existence assertion would
+stay green for a mitigation whose strength was never applied, which is exactly
+the defeat this module exists to prevent.
 
 MUTATION THAT MUST RED THE CORE ASSERTION (AC1/AC2/AC5): neuter the strength
 application in ``tortoise/weights.py::compute_operator_weight`` — keep the
@@ -153,14 +156,6 @@ def get_conf(result, point_id):
     return result.get(point_id, 0.5)
 
 
-def count_mitigated_by(sdk):
-    return (
-        sdk._get_proj()
-        .g.query("MATCH (:Point)-[r:mitigated_by]->(:Point) RETURN count(r)")
-        .result_set[0][0]
-    )
-
-
 class TestWeightMovesByDeclaredDecay:
     """AC1 — the resolved weight moves by the computed decay, not by an edge."""
 
@@ -207,7 +202,7 @@ class TestWeightMovesByDeclaredDecay:
         identical and the delta assertion fails.
         """
         sdk = fresh_sdk()
-        src, claim, op_id = make_impl_chain(sdk)
+        _src, claim, op_id = make_impl_chain(sdk)
 
         conf_unmitigated = get_conf(run_ep(sdk), claim["id"])
         sdk.mitigate_operator(op_id, "major counter-evidence", 0.50)
@@ -221,7 +216,6 @@ class TestWeightMovesByDeclaredDecay:
         assert delta >= STRONG_DELTA_MIN, (
             f"weight move did not reach the posterior: delta {delta:.4f} < {STRONG_DELTA_MIN}"
         )
-        assert src["id"]
 
 
 class TestNegativeControl:
@@ -289,10 +283,7 @@ class TestNonOperatorTargetRefused:
         with pytest.raises(ValueError, match="not an operator"):
             sdk.mitigate_operator(plain["id"], "must be refused", 0.30)
 
-        # No dead structure was created, and no weight moved.
-        assert count_mitigated_by(sdk) == 0, (
-            "a refused mitigation must not leave a mitigated_by edge"
-        )
+        # No weight moved.
         after = resolved_weight(sdk, other_op, claim["id"])
         assert after == pytest.approx(base), (
             f"a refused non-operator mitigation moved an operator weight: {base} -> {after}"
@@ -370,7 +361,6 @@ class TestBatchComposition:
                 params={"mid": mid, "o": op_id},
             )
 
-        assert count_mitigated_by(sdk) == 3
         observed = resolved_weight(sdk, op_id, claim["id"])
 
         max_governs = IMPL_BASE_WEIGHT * mitigation_dampening_factor(0.50)
