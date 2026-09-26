@@ -18585,9 +18585,12 @@ class TortoiseSDK:
         # straight through `SET n += $props`, so a list-valued `search_keys`
         # landed as an ARRAY; FalkorDB's fulltext index does not index
         # array-valued properties, so the Point became permanently unfindable
-        # by `queryNodes` while the write reported success. Flattening before
-        # the per-label loop also keeps the journal's `state` (the write's own
-        # keys, read back from the graph) consistent with what is stored.
+        # by `queryNodes` while the write reported success. Flattening once,
+        # before the per-label loop, covers every write site below: each
+        # derives its props from this dict on a later line.
+        # NOTE: on the Point branch this write is live-only — `PointRevised`
+        # carries the annotator dims, not `search_keys` — so a replay does not
+        # restore it. That is pre-existing (#4094) and unchanged here.
         _flatten_search_keys_prop(props)
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
