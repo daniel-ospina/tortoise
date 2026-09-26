@@ -53,6 +53,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.entity_identity import (  # #3633 route-then-refuse
+    display_holder_ids, record_non_folded)
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
 __all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
@@ -547,13 +549,65 @@ def docker_resolver_port(sdk) -> ResolverPort:
     # batch content-fetch degradation, which is what drops ``status``.
 
     def exact_objects(names: list[str]) -> list[dict]:
-        rows = proj.g.query(
+        # #3633 §B.1 route-then-refuse, per ref: the single
+        # `o.name IN $names OR o.id IN $names` union mixed the id space and the
+        # name space in ONE name-keyed coordinate and silently returned both.
+        # The arms are resolved APART — an exact id match is unambiguous and
+        # wins; a NAME-form ref resolves only when exactly ONE Object holds it.
+        # Two or more same-name carriers is a refusal (the non-folded entry is
+        # recorded, the ref is dropped), never a union.
+        #
+        # STATUS NOTE: the predicate here is the port-local
+        # `_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES` (`{retracted}`), NOT
+        # `entity_identity`'s `_terminal_excluded` — deliberately, because this
+        # leg is assembly's resolve-time Object-search surface (#3317/#2977),
+        # so a `superseded` Object can still resolve by name here. "Exactly one"
+        # is about HOLDER COUNT, not about widening the status set.
+        id_rows = proj.g.query(
             "MATCH (o:Object) "
-            "WHERE (o.name IN $names OR o.id IN $names) "
+            "WHERE o.id IN $names "
             f"{status_filter}"
             "RETURN o.id, o.name",
             params={"names": names}).result_set
-        return [{"id": r[0], "name": r[1]} for r in rows]
+        name_rows = proj.g.query(
+            "MATCH (o:Object) "
+            "WHERE o.name IN $names "
+            f"{status_filter}"
+            "RETURN o.id, o.name",
+            params={"names": names}).result_set
+        by_id: dict[str, list] = {}
+        for r in id_rows:
+            if r[0]:
+                by_id.setdefault(r[0], []).append((r[0], r[1]))
+        by_name: dict[str, list] = {}
+        for r in name_rows:
+            by_name.setdefault(r[1], []).append((r[0], r[1]))
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        for ref in names:
+            id_hits = by_id.get(ref, [])
+            if len(id_hits) > 1:
+                # two nodes claiming one id — corruption, never a candidate.
+                record_non_folded("Object", ref,
+                                  display_holder_ids([h[0] for h in id_hits]),
+                                  shape="duplicate-id")
+                continue
+            if id_hits:
+                row = id_hits[0]
+            else:
+                hits = by_name.get(ref, [])
+                if len(hits) > 1:
+                    record_non_folded("Object", ref,
+                                      display_holder_ids([h[0] for h in hits]))
+                    continue
+                if not hits:
+                    continue
+                row = hits[0]
+            if row in seen:
+                continue
+            seen.add(row)
+            out.append({"id": row[0], "name": row[1]})
+        return out
 
     def fts_objects(term: str, limit: int = 8) -> list[dict]:
         # raises on embedded (no fulltext index) — the resolver degrades

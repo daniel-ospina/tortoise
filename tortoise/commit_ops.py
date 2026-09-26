@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import logging
 
+from .entity_identity import (  # #3633 structured non-folded record
+    display_holder_ids,
+    record_non_folded,
+)
 from .live import is_terminal_status  # #2498 shared terminal vocabulary
 
 _logger = logging.getLogger(__name__)
@@ -369,10 +373,26 @@ def _supersession_fold_order(proj, records):
     # folds them by name but they are id-less, and only id-carrying nodes
     # can be visible successors).
     refs_sorted = sorted({ref for _, ref, _ in entity})
-    tgt_rows = proj.g.query(
-        "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
-        "RETURN o.id, o.name",
-        params={"ids": refs_sorted, "names": refs_sorted}).result_set
+    # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` disjunction is a
+    # name-keyed union that mixed two identity spaces in one probe. Resolve the
+    # arms APART and dedupe by NODE IDENTITY (``ID(o)``) — so a node matched by
+    # BOTH its id and its name is still one row, and two distinct id-less
+    # same-name nodes stay two rows. The discipline below is unchanged: an
+    # id-form ref wins; a name-form ref resolves only via a SINGLE carrier
+    # (>1 = never-guess).
+    _id_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id IN $ids RETURN ID(o), o.id, o.name",
+        params={"ids": refs_sorted}).result_set
+    _name_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.name IN $names RETURN ID(o), o.id, o.name",
+        params={"names": refs_sorted}).result_set
+    _seen_nodes: set = set()
+    tgt_rows = []
+    for _row in list(_id_rows) + list(_name_rows):
+        if _row[0] in _seen_nodes:
+            continue
+        _seen_nodes.add(_row[0])
+        tgt_rows.append((_row[1], _row[2]))
     by_id: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for oid, name in tgt_rows:
@@ -388,7 +408,12 @@ def _supersession_fold_order(proj, records):
             target_id[ref] = by_id[ref][0][0]
         elif len(by_name.get(ref, [])) == 1:
             target_id[ref] = by_name[ref][0][0] or None  # legacy id-less → None
-        # else ambiguous (>1 name) or dangling → the loop skips → no edges
+        # else ambiguous (>1 name) or dangling → no fold edge is derived, so
+        # this record fails SOFT to payload order (order is cosmetic). The
+        # RECORD of the refusal is not here: this pre-pass is a pure ordering
+        # heuristic with no refusal semantics. The fold itself re-probes per
+        # record and is where ambiguity is surfaced — `apply_supersessions`
+        # warns `"… skipped (never-guess)"` for the same ref.
     # Edges over ORIGINAL record indices: R must fold before S when S's
     # fold terminalizes an object R's fold needs visible (S.target ∈ R's
     # successor-name candidates). Plan-review P0: the edge runs NEEDER→
@@ -585,11 +610,27 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # pre-fix rows, pinned by
         # test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name.
         # No truncation happens here — only at the compare (legacy tolerance).
-        rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
-            "RETURN o.id, o.name, o.status, o.supersededBy",
-            params={"ids": [ref], "names": [ref]},
+        # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` union is split
+        # into two probes, deduped by NODE IDENTITY (``ID(o)``) — the
+        # disambiguation below is unchanged (an id match is unambiguous and
+        # wins; the >1-name never-guess stays).
+        _id_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id = $ref "
+            "RETURN ID(o), o.id, o.name, o.status, o.supersededBy",
+            params={"ref": ref},
         ).result_set
+        _name_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.name = $ref "
+            "RETURN ID(o), o.id, o.name, o.status, o.supersededBy",
+            params={"ref": ref},
+        ).result_set
+        _seen_nodes: set = set()
+        rows = []
+        for _row in list(_id_rows) + list(_name_rows):
+            if _row[0] in _seen_nodes:
+                continue
+            _seen_nodes.add(_row[0])
+            rows.append(list(_row[1:]))
         if not rows:
             warn(f"supersession ref {ref!r} not found in the graph — "
                  f"skipped (fail-open)")
@@ -605,6 +646,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         by_id = [r for r in rows if r[0] == ref]
         if len(by_id) > 1:
             # two nodes claim the same id — raw-corruption artifact.
+            record_non_folded("Object", ref, [r[0] for r in by_id],
+                              shape="duplicate-id")
             warn(f"supersession ref {ref!r} matches {len(by_id)} Objects "
                  f"by id — skipped (never-guess)")
             continue
@@ -615,6 +658,9 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             if len(by_name) > 1:
                 # never-guess: two Objects claim the same name, do not pick
                 # one (a blind LIMIT 1 would fold an arbitrary carrier).
+                record_non_folded("Object", ref,
+                                  display_holder_ids([r[0] for r in by_name]),
+                                  shape="ambiguous-name")
                 warn(f"supersession ref {ref!r} matches {len(by_name)} Objects "
                      f"by name — skipped (never-guess)")
                 continue
