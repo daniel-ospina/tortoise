@@ -8053,3 +8053,157 @@ class TestE2E10ReadPathDisplaySupabase2600:
             assert rd.json()["actor_display"] is None, rd.json()
         finally:
             gen.close()
+
+
+class TestBackupWatcherStartPath:
+    """#2851: the backup-watcher start guard in ``_lifespan`` read the module
+    ``os`` BEFORE the function-local ``import os`` further down in the same
+    function bound it. That local import made ``os`` a local for the WHOLE
+    function, so the guard raised ``UnboundLocalError`` on every boot with a
+    valid backup config. The surrounding ``except`` swallowed it into a single
+    warning line, so the hosted watcher (#305/R2 backups) never started and
+    nothing else in the process surfaced it.
+
+    A bare ``import tortoise.hosted_api`` cannot catch this: the failure only
+    occurs when the watcher start path actually executes. These tests drive the
+    REAL ``_lifespan`` + the REAL ``_backup_config_safe()`` env contract, with
+    only the network/DB/embedder seams stubbed, and asserts the start path runs
+    to completion (the watcher thread is started) without that warning.
+
+    ``force_sparse_tfidf`` pins the embedder off: the real ``_lifespan`` also
+    spawns the embedding pre-warm daemon thread, whose ``EmbeddingModel.get``
+    would otherwise import torch/HF in the background and mutate class state
+    that ``monkeypatch`` does not roll back.
+    """
+
+    @staticmethod
+    def _enabled_backup_env() -> dict[str, str]:
+        import base64
+
+        return {
+            "BACKUP_SWEEP_ENABLED": "true",
+            "TORTOISE_BACKUP_KEY": base64.b64encode(b"k" * 32).decode(),
+            "REGISTRY_STREAM_KEY": base64.b64encode(b"r" * 32).decode(),
+            "R2_ACCOUNT_ID": "acct-2851",
+            "R2_ACCESS_KEY_ID": "ak-2851",
+            "R2_SECRET_ACCESS_KEY": "sk-2851",
+            "R2_BUCKET": "bucket-2851",
+            "TELEGRAM_BOT_TOKEN": "123456:token-2851",
+            "TELEGRAM_CHAT_ID": "42",
+            "BACKUP_ALERT_ASSIGNEE": "daniel",
+            "DR_ISSUES_PAT": "ghp_2851",
+            # Park the retention loop so the boot pass only creates the task.
+            "TORTOISE_EVENT_RETENTION_INTERVAL": "3600",
+        }
+
+    def _boot_lifespan(self, monkeypatch, caplog, *, gc_raises: bool) -> list[object]:
+        """Run the REAL ``_lifespan`` boot with every I/O seam stubbed.
+
+        Returns the watchers whose thread was started. Callers request
+        ``force_sparse_tfidf`` so the embedder pre-warm stays off.
+        """
+        import asyncio
+        import contextlib
+        import logging
+        import types
+
+        import tortoise.backup_watcher as bw_mod
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc_mod
+
+        for name, value in self._enabled_backup_env().items():
+            monkeypatch.setenv(name, value)
+        # The guard must still be evaluated (only its `os` lookup was broken).
+        monkeypatch.delenv("BACKUP_WATCHER_DISABLED", raising=False)
+
+        # The config is the REAL production contract — if the enable guard
+        # ever stops producing a truthy config this test fails loudly instead
+        # of vacuously passing.
+        cfg = ha_mod._backup_config_safe()
+        assert cfg is not None and cfg.enabled
+
+        # ── I/O seams only (no network, no DB, no real watcher thread) ──────
+        monkeypatch.setattr(ha_mod, "_backup_storage", lambda: object())
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda _cfg: object())
+        fake_sdk = types.SimpleNamespace(
+            _get_registry=lambda: object(),
+            _get_proj=lambda: types.SimpleNamespace(db=object()),
+        )
+        monkeypatch.setattr(ha_mod, "_registry_sdk", lambda: fake_sdk)
+
+        def _boot_gc(*_a, **_k):
+            if gc_raises:
+                raise RuntimeError("drill-graph GC boom")
+
+        monkeypatch.setattr(ha_mod, "_boot_gc_drill_graphs", _boot_gc)
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        monkeypatch.setattr(ha_mod, "_purge_deleted_teams", lambda: None)
+        monkeypatch.setattr(sc_mod, "is_supabase_enabled", lambda: False)
+
+        started: list[object] = []
+
+        monkeypatch.setattr(bw_mod, "BackupWatcher", lambda *a, **k: object())
+
+        class _FakeThread:
+            def __init__(self, watcher, *, interval_seconds):
+                self.watcher = watcher
+                self.interval_seconds = interval_seconds
+
+            def start(self):
+                started.append(self.watcher)
+
+        monkeypatch.setattr(bw_mod, "WatcherThread", _FakeThread)
+
+        @contextlib.asynccontextmanager
+        async def _noop_lifespan(_app):
+            yield
+
+        # FastMCP's StreamableHTTPSessionManager lifespan is a read-only
+        # property on the class — replace it at the class level (restored by
+        # monkeypatch) so the boot path runs without a real session manager.
+        monkeypatch.setattr(
+            type(ha_mod.mcp_http_app), "lifespan", property(lambda _self: _noop_lifespan)
+        )
+
+        app_stub = types.SimpleNamespace(state=types.SimpleNamespace())
+
+        async def _boot():
+            async with ha_mod._lifespan(app_stub):
+                pass
+            task = getattr(app_stub.state, "_event_retention_task", None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        previous_watcher = ha_mod._WATCHER
+        try:
+            with caplog.at_level(logging.WARNING):
+                asyncio.run(_boot())
+        finally:
+            ha_mod._WATCHER = previous_watcher
+
+        return started
+
+    def test_watcher_start_path_completes_without_unbound_os(
+            self, monkeypatch, caplog, force_sparse_tfidf):
+        started = self._boot_lifespan(monkeypatch, caplog, gc_raises=False)
+
+        assert "backup watcher could not start" not in caplog.text, caplog.text
+        assert len(started) == 1, (
+            "backup watcher start path did not run to completion — the watcher "
+            "was never started (the #2851 silent no-op)"
+        )
+
+    def test_drill_graph_gc_failure_is_not_reported_as_watcher_failure(
+            self, monkeypatch, caplog, force_sparse_tfidf):
+        """The boot drill-graph GC runs AFTER ``_WATCHER.start()`` but inside
+        the same ``try`` as the watcher start. Now that a start failure logs at
+        ERROR (captured by Sentry's default LoggingIntegration), a GC failure
+        must not masquerade as a dead watcher — that would page on a false
+        cause while backups are actually running."""
+        started = self._boot_lifespan(monkeypatch, caplog, gc_raises=True)
+
+        assert len(started) == 1, "the watcher never started"
+        assert "drill-graph GC at boot failed: drill-graph GC boom" in caplog.text, caplog.text
+        assert "backup watcher could not start" not in caplog.text, caplog.text

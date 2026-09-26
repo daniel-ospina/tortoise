@@ -403,8 +403,6 @@ async def _lifespan(app):
 
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
-            import threading
-
             def _probe_loaded_model_id(model) -> str | None:
                 """Best-effort extraction of the loaded HF model id from a
                 sentence-transformers object (probe state). The presence-only
@@ -469,7 +467,7 @@ async def _lifespan(app):
         global _WATCHER
         try:
             cfg = _backup_config_safe()
-            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":  # noqa: F823
+            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
@@ -548,17 +546,30 @@ async def _lifespan(app):
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
                 if not is_supabase_enabled():
-                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    # #2851 review: keep the boot drill-graph GC OUT of the
+                    # start's except — it runs after `_WATCHER.start()`, so a
+                    # GC failure here must not be reported as "backup watcher
+                    # could not start" (the watcher IS running).
+                    try:
+                        _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    except Exception as gc_exc:
+                        _logger.warning("drill-graph GC at boot failed: %s", gc_exc)
         except Exception as exc:
-            _logger.warning("backup watcher could not start: %s", exc)
+            # #2851: a failed start is NOT cosmetic — it means hosted backups
+            # (#305/R2) are silently not running and nothing else reports it.
+            # Log at ERROR with the traceback so the boot log carries the real
+            # cause instead of a one-line warning nobody greps for.
+            _logger.error("backup watcher could not start: %s", exc, exc_info=True)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
         # here we sweep once at boot and then on an asyncio interval.
         try:
-            import asyncio
-            import os
-
+            # NOTE: do NOT re-import asyncio/os here. A function-local import
+            # makes the name local for the ENTIRE function, so every earlier
+            # read (the BACKUP_WATCHER_DISABLED guard above) raises
+            # UnboundLocalError — the #2851 silent backup-watcher no-op. Both
+            # modules are imported at module scope (lines 17/23).
             def _sweep_events() -> None:
                 try:
                     from tortoise.event_store import purge_expired, purge_overflow
