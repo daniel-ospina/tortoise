@@ -21,6 +21,10 @@ response_fields:
   field: status
   emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
   unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
+- response: tortoise_session_capture
+  field: capture_redactions
+  emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
+  unchanged_when_off: 'n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)'
 counts:
   tools: 82
   sdk_public_methods: 150
