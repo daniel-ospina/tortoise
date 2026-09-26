@@ -610,6 +610,80 @@ def test_no_successor_record_name_only_and_degraded_false(sdk, monkeypatch):
     assert res2["retrieval_degraded"] is False
 
 
+def test_long_successor_fold_stored_full_and_verified(sdk, monkeypatch):
+    """#5370: a >200-char successor is stored VERBATIM by the supersession
+    fold, VERIFIED by the ask-path successor probe (name-keyed on the stored
+    value), and rendered as a full supersession clause — never the false
+    "no successor record found" name-only annotation.
+
+    Pre-fix the fold stored ``supersededBy = str(successor)[:200]`` — a
+    200-char prefix that names NO Object — so ``_probe_visible_successors``
+    (``MATCH (o:Object) WHERE o.name IN $names``) matched nothing and the
+    renderer reported the successor missing while it existed and was live.
+    """
+    from tortoise.assembly import (
+        AssemblyShape,
+        AssemblySlices,
+        _probe_visible_successors,
+        docker_walker_port,
+        synthesize_hits,
+    )
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    assert len(long_name) > 200
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "long-src")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "long-src", "supersedes_by": long_name,
+          "evidence": "#5370 regression"}],
+        session_id="s5370", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    # (a) stored VERBATIM — the full successor name, not a 200-char prefix.
+    oid, status, stored = proj.g.query(
+        "MATCH (o:Object {name:'long-src'}) "
+        "RETURN o.id, o.status, o.supersededBy").result_set[0]
+    assert status == "superseded", (status, stored)
+    assert stored == long_name, (
+        f"stored supersededBy is {len(stored)} chars, expected the full "
+        f"{len(long_name)}-char successor name")
+
+    # (b) the ask-path probe verifies it and the renderer emits the verified
+    #     clause — never the false "no successor record found".
+    slices = AssemblySlices(
+        state_rows=tuple(docker_walker_port(sdk).state_rows([oid])),
+        timeline_rows=(), evidence_rows=(), admission={})
+    verified = _probe_visible_successors(sdk, slices)
+    assert long_name in verified, sorted(verified)
+    hits = synthesize_hits(slices, shape=AssemblyShape.CURRENT_STATE,
+                           successors_verified=verified)
+    content = hits[0]["content"]
+    assert "no successor record found" not in content, content
+    assert content.startswith("STATE (long-src): superseded by "), content
+
+    # (c) the same holds on the fired ask path (the probe is WIRED in, not
+    #     merely callable) — evidence carries the verified clause. Pin
+    #     supersededAt BEFORE the question date: the live fold stamps it with
+    #     the current time, and the renderer's as-of rule would otherwise
+    #     (correctly) render the pre-supersession state.
+    proj.g.query("MATCH (o:Object {name:'long-src'}) "
+                 "SET o.supersededAt='2026-09-01T00:00:00Z'")
+    # The fleet shell carries TORTOISE_API_URL; the eval lane needs a LOCAL
+    # graph (same hermetic step as tests/test_ask_sdk.py).
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+    _install_fake(sdk, monkeypatch, reply="GOLD")
+    res = run_ask_lane(sdk, "what is the current status of long-src?",
+                       question_date=Q_DATE)
+    assert "STATE (long-src): superseded by " in res["evidence"]
+    assert "no successor record found" not in res["evidence"], res["evidence"]
+
+
 def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
     """Malformed stored date (garbage when + SENTINEL createdAt) anchored to
     a subject → SINGLE pinned outcome: undated-tier row renders, never a
@@ -807,3 +881,42 @@ def test_r14_drift_guard(sdk, monkeypatch):
         run_ask_assembled(
             sdk, "what is the current status of the couch?",
             question_date=Q_DATE)
+
+
+def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
+    """#5370 review round 3 (P2): the issue's verification table names the
+    SDK OBJECT READ (``tortoise_fts_query(entity_type='object')``) as a
+    surface where ``superseded_by`` must equal the stored FULL successor
+    name. Every other #5370 test reads the property through Cypher directly,
+    so that agent-facing contract was left unpinned.
+
+    The read path is ``sdk.py``'s ``entity_type == "object"`` branch, which
+    echoes ``n.supersededBy`` unchanged — this test exists so a future
+    truncation introduced THERE (rather than in the fold) cannot land
+    silently, which the Cypher-level tests could not catch.
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("r" * 240)
+    assert len(long_name) > 200
+    sdk.create_entity("object", "read-src")
+    sdk.create_entity("object", long_name)
+
+    warns: list[str] = []
+    applied = apply_supersessions(
+        sdk._get_proj(), sdk,
+        [{"superseded": "read-src", "supersedes_by": long_name,
+          "evidence": "#5370 sdk object read"}],
+        session_id="s5370_read", warn=warns.append)
+    assert applied == 1, f"the fold must apply: {warns}"
+
+    hits = sdk.tortoise_fts_query("read-src", entity_type="object",
+                                  limit=25)
+    hit = next((h for h in hits if h.get("content") == "read-src"), None)
+    assert hit is not None, (
+        "the SDK object read returned no hit for the folded Object: "
+        f"{[h.get('content') for h in hits]!r}")
+    got = hit.get("superseded_by", "")
+    assert got == long_name, (
+        f"the SDK object read returned {len(got)} chars, expected the full "
+        f"{len(long_name)}-char successor name")
