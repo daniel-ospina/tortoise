@@ -969,8 +969,10 @@ def test_uri_and_org_census_read_the_same_graph(monkeypatch, capsys):
     monkeypatch.setattr(edge_census, "_org_capped_points",
                         lambda _org, _sdk: 2000)
 
+    # `--accept-schema-writes` is required: this path runs _ensure_indexes()
+    # on the censused graph. See test_org_over_uri_is_refused_by_default.
     rc = edge_census.main(["census", "--uri", "docker://:pw@host:6379/g",
-                           "--org", _ORG, "--json"])
+                           "--org", _ORG, "--accept-schema-writes", "--json"])
 
     assert rc == 0
     view = json.loads(capsys.readouterr().out)
@@ -984,6 +986,121 @@ def test_uri_and_org_census_read_the_same_graph(monkeypatch, capsys):
     assert seen[0] == "exists", (
         f"the existence check must run BEFORE the SDK open (the SDK would "
         f"create a missing graph): {seen}")
+
+
+def test_org_over_uri_is_refused_by_default(monkeypatch, capsys):
+    """`--org` over `--uri` must not write schema unless asked in writing.
+
+    The cap's own count runs through `sdk._get_proj()`, and constructing that
+    projection runs `_ensure_indexes()` — CREATE/DROP INDEX DDL on the graph
+    being *measured*, including a 384-dim VECTOR index on `Point`. Measured on
+    a live graph: 6 indexes with `--uri` + `--org`, 0 with `--uri` alone.
+
+    The DDL is NOT avoidable by opening the graph a different way — it lives
+    inside the cap's own function — so this tool cannot promise "read, change
+    nothing" and also offer `--org` silently. It refuses instead.
+
+    The load-bearing assertion is `opens == []`: a refusal that happened
+    AFTER the SDK was opened would already have written the schema, which is
+    the whole thing this guards.
+    """
+    opens: list[Any] = []
+
+    def fake_open(*_a, **_k):
+        opens.append("sdk")
+        raise AssertionError(
+            "the refusal must precede the SDK open — reaching _open_sdk means "
+            "_ensure_indexes() has already been free to write schema")
+
+    monkeypatch.setattr(edge_census, "_open_sdk", fake_open)
+    monkeypatch.setattr(edge_census, "_assert_graph_exists",
+                        lambda *_a, **_k: None)
+
+    rc = edge_census.main(["census", "--uri", "docker://:pw@host:6379/g",
+                           "--org", _ORG, "--json"])
+
+    assert rc == 2, "a schema-writing path must not succeed silently"
+    assert opens == [], "the SDK was opened before the refusal"
+    err = capsys.readouterr().err
+    assert "--accept-schema-writes" in err, (
+        f"the refusal must name the way to proceed deliberately: {err!r}")
+
+
+def test_org_without_a_uri_is_still_refused_not_crashed():
+    """`--org` alone has no graph to read, and must say so as exit 2.
+
+    Guards the new gate's branch ordering: the refusal is keyed on
+    `uri and args.org`, so an `--org` with no `--uri` falls through to the
+    tool's own "census needs --uri, --embedded, or TORTOISE_DB_URI"
+    diagnostic rather than an AttributeError on a missing `args.accept_schema_writes`
+    or a traceback from an SDK opened with no URI.
+    """
+    rc = edge_census.main(["census", "--org", _ORG, "--json"])
+
+    assert rc == 2
+
+
+def test_a_refused_connection_is_exit_2_not_a_traceback(monkeypatch, capsys):
+    """A broker that is DOWN is a diagnostic, not a crash.
+
+    `redis` raises its own family — ``ConnectionError -> RedisError ->
+    Exception`` — which is NEITHER a RuntimeError NOR a ValueError, so this
+    escaped `main()`'s handler as a traceback and exit 1, in a tool whose
+    contract is exit 2 for anything it cannot answer honestly. Reproduced
+    against a closed port before the fix:
+
+        --uri docker://:falkordb@localhost:65533/tortoise_xyz
+        redis.exceptions.ConnectionError: Error 61 connecting ... EXIT=1
+
+    The exception is raised here rather than dialled so the test does not
+    depend on a free port staying free.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    def refuse(*_a, **_k):
+        raise RedisConnectionError(
+            "Error 61 connecting to localhost:65533. Connection refused.")
+
+    monkeypatch.setattr(edge_census, "_assert_graph_exists", refuse)
+
+    rc = edge_census.main(["census", "--uri",
+                           "docker://:falkordb@localhost:65533/tortoise_xyz",
+                           "--json"])
+
+    assert rc == 2, (
+        "a refused socket escaped the handler — the tool tracebacked instead "
+        "of reporting exit 2")
+    assert "could not reach the graph" in capsys.readouterr().err
+
+
+def test_an_unrelated_exception_still_surfaces_as_a_crash(monkeypatch):
+    """The transport handler must not swallow a genuine defect.
+
+    `main()` now has an `except Exception` clause so the redis family can be
+    translated. If it caught everything, a real bug in the tool would be
+    reported as "could not reach the graph" and exit 2 — worse than a
+    traceback, because it would read as an environment problem. The clause is
+    narrowed to `RedisError` and re-raises anything else; this pins that.
+
+    The bug raised is deliberately NOT a RuntimeError or ValueError: those two
+    are already claimed by the clause above, which treats them as ordinary bad
+    input (`resolve_db_endpoint` on a bad scheme, `TortoiseSDK` on an empty
+    URI). A RuntimeError here would be answered by that clause and this test
+    would pass for the wrong reason — it did, on the first attempt.
+    """
+
+    class _RealBug(Exception):
+        pass
+
+    def boom(*_a, **_k):
+        raise _RealBug("not a transport failure")
+
+    monkeypatch.setattr(edge_census, "_assert_graph_exists", boom)
+
+    with pytest.raises(_RealBug):
+        edge_census.main(["census", "--uri",
+                          "docker://:falkordb@localhost:6379/tortoise_xyz",
+                          "--json"])
 
 
 def test_printable_neutralises_a_terminal_control_sequence():

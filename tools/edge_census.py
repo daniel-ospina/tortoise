@@ -26,12 +26,23 @@ worth stating exactly:
   application does the same at startup) and may run a health recovery. The
   ``--embedded`` path therefore writes schema and must not be pointed at a
   database you need left untouched.
-- **`--org`** also opens the **SDK**, on either path, because the cap's count
+- **`--org`** also opens the **SDK**, either path, because the cap's count
   must come from the cap's own function rather than a second implementation of
   its predicate. With ``--uri`` the SDK is the **only** handle — the census is
   taken from that same handle, so the edge count and the cap count can never
   describe two different graphs. A read against a production graph you do not
   own should therefore use a URI and no ``--org``.
+- ⛔ **`--org` over `--uri` writes schema, and cannot be made not to.** The cap
+  count runs through ``sdk._get_proj()``, and constructing the projection runs
+  ``_ensure_indexes()`` unconditionally — so the DDL is not a side effect of
+  *this* tool's handle choice; it is inside the cap's own function (measured:
+  ``--uri`` with ``--org`` created 6 indexes on the target graph, including a
+  384-dim VECTOR index on ``Point``; ``--uri`` without ``--org`` created 0).
+  Because it cannot be avoided by opening the graph differently, it is instead
+  **refused by default**: ``--uri`` + ``--org`` exits 2 unless
+  ``--accept-schema-writes`` is passed. The ``--embedded`` path needs no flag
+  — the embedded backend *is* the SDK, so that lane is already understood to
+  ensure indexes.
 - A graph that **does not exist** is REFUSED, never created. FalkorDB
   materialises the keyspace on the first query, so a mistyped graph name would
   otherwise be created by the act of measuring it; ``--create-if-missing`` is
@@ -69,13 +80,13 @@ Two subcommands
 Both subcommands print their **raw** readings alongside the derived figures,
 and every marginal carries the ``N`` it was divided by: a per-element number
 without its N is not reproducible (measurements at N=20,000 and N=5,000 gave
-101.8 B and 174.6 B for the same bare-node shape — allocation granularity, not
+101.8 B and 173.6 B for the same bare-node shape — allocation granularity, not
 a contradiction).
 
 Usage::
 
     python3 tools/edge_census.py census --uri docker://:falkordb@localhost:6379/mygraph
-    python3 tools/edge_census.py census --uri ... --org org_abc123
+    python3 tools/edge_census.py census --uri ... --org org_abc123 --accept-schema-writes
     python3 tools/edge_census.py probe --n 5000
     python3 tools/edge_census.py probe --json > receipt.json
 
@@ -608,7 +619,7 @@ def run_probe(
                 dressed_edge / kw_point_total, 3) if kw_point_total else None,
         },
         "caveat": ("every marginal is delta / per_element at THIS n; the "
-                   "bare-node figure moved 101.8 B (n=20000) to 174.6 B "
+                   "bare-node figure moved 101.8 B (n=20000) to 173.6 B "
                    "(n=5000) between runs — allocation granularity, so a "
                    "figure without its n is not reproducible"),
     }
@@ -793,6 +804,14 @@ def _build_parser() -> argparse.ArgumentParser:
     census.add_argument("--embedded", help="embedded DB path (no URI)")
     census.add_argument("--org", help="org id — also read the cap's own count")
     census.add_argument(
+        "--accept-schema-writes", action="store_true",
+        help="accept that --org over --uri runs the SDK, which ensures "
+             "indexes on the censused graph (CREATE/DROP INDEX, incl. a "
+             "vector index). The cap's own count goes through the same "
+             "projection, so this DDL cannot be avoided by choosing a "
+             "different handle — without this flag the tool refuses instead "
+             "of writing schema you did not agree to")
+    census.add_argument(
         "--create-if-missing", action="store_true",
         help="accept that reading a NON-EXISTENT graph creates it (FalkorDB "
              "materialises the keyspace on the first query); without this the "
@@ -868,18 +887,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a traceback here is a contract deviation, not extra information.
         print(f"edge_census: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        # ⛔ A broker that is DOWN is not a crash. `redis` raises its own
+        # exception family — ``ConnectionError -> RedisError -> Exception`` —
+        # which is NEITHER a RuntimeError NOR a ValueError, so a refused
+        # socket escaped the two clauses above as a traceback and exit 1, in a
+        # tool whose contract says exit 2. Reproduced against a closed port:
+        # ``--uri docker://:falkordb@localhost:65533/...`` raised
+        # ``redis.exceptions.ConnectionError`` straight past this handler.
+        #
+        # Narrowed to that family before translating, so a genuine defect still
+        # surfaces as a traceback rather than being reported as bad input.
+        from redis.exceptions import RedisError
+        if not isinstance(exc, RedisError):
+            raise
+        print(f"edge_census: could not reach the graph: {exc}",
+              file=sys.stderr)
+        return 2
 
 
 def _run_census(args: Any, uri: str | None) -> int:
     """Run the census, keeping the SDK — and its schema writes — optional.
 
     A **URI** census WITHOUT ``--org`` touches the graph through the raw client
-    only, so it issues no DDL at all. ``--org`` has to open the SDK, because the
-    cap count must come from the cap's own function rather than a second
-    implementation of its predicate. ``--embedded`` opens the SDK on every
+    only, so it issues no DDL at all. ``--embedded`` opens the SDK on every
     path, ``--org`` or not — the embedded backend IS the SDK, so that lane
-    always ensures indexes. The SDK is closed again on the way out.
+    always ensures indexes.
+
+    ``--org`` over a **URI** has to open the SDK, because the cap count must
+    come from the cap's own function rather than a second implementation of its
+    predicate — and that path runs ``_ensure_indexes()``. That DDL is therefore
+    NOT something this function can decline on the caller's behalf, so it is
+    refused unless ``--accept-schema-writes`` says the schema write is wanted.
+
+    The SDK is closed again on the way out.
     """
+    if uri and args.org and not args.accept_schema_writes:
+        raise CensusError(
+            "--org needs the SDK, and opening the SDK runs "
+            "_ensure_indexes() — CREATE/DROP INDEX DDL on the very graph "
+            "being censused (a 384-dim VECTOR index among them). That "
+            "cannot be avoided by opening the graph another way, because "
+            "the cap's own count runs through the same projection. Re-run "
+            "with --accept-schema-writes if that write is acceptable, or "
+            "drop --org to census the graph without touching its schema")
     sdk = None
     try:
         if args.embedded or (uri and args.org):

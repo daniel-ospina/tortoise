@@ -23,8 +23,13 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 > indexes on that graph, idempotently, and on an embedded database may run a health recovery):
 > `--embedded`, whose backend *is* the SDK, and `--uri` **combined with `--org`** — the cap count
 > must come from the cap's own function rather than a reimplementation of its predicate, and the
-> census is then taken from that one SDK handle so both halves describe the same graph. A read
-> against a production graph you do not own should therefore use a **URI and no `--org`**.
+> census is then taken from that one SDK handle so both halves describe the same graph. That DDL is
+> not a side effect of the tool's handle choice — it happens inside the cap's own function, so it
+> **cannot** be avoided by opening the graph another way — and the tool therefore refuses
+> `--uri` + `--org` unless `--accept-schema-writes` says the write is wanted. Measured on a live
+> graph: `--uri` + `--org` created **6 indexes** (including a 384-dim VECTOR index on `Point`),
+> `--uri` alone created **0**. A read against a production graph you do not own should therefore
+> use a **URI and no `--org`**.
 > Relationship-type names read from the graph are never interpolated into a Cypher pattern: the
 > census returns them as **values** (`RETURN type(r), count(r)`), so there is no interpreter for a
 > crafted name to reach — stronger than binding it as `$rtype`, which still requires the name to be
@@ -168,7 +173,7 @@ the absence is visible rather than inferred:
 
 ```
 $ python3 tools/edge_census.py census --uri 'docker://:falkordb@localhost:6379' \
-      --graph probe4503_a --org org_edge_accounting_4503
+      --graph probe4503_a --org org_edge_accounting_4503 --accept-schema-writes
 relationships: 2000
   by type  IMPL                     2000
   by slot  msg_alpha                0
