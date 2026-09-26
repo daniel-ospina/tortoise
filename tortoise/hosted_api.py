@@ -12138,19 +12138,33 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # (zero writes).
     _check_org_limit(org, "sessions")
     # #4051 — the org points gate (the second half of step [4a]). The sessions
-    # gate above is VACUOUS since #4010 (sessions unlimited for every tier),
-    # and `_count_resource("points")` excludes the chain this lane mints —
-    # :Session, :Event and the transcript `documentKind='transcript'` :Source
-    # (D10: a document is a :Source; the :Document label is retired). Without
-    # this gate the endpoint's total node growth was bounded by nothing: even a
-    # `points: []` payload mints the three-node chain, and a caller looping
-    # with a fresh session_id grows the graph with no quota counting it. Same
-    # pre-write site as the sessions gate (after every replay return above) so
-    # an idempotent re-POST is never gated — a replay writes no nodes and must
-    # never 402 (#1727's lesson); the budget 402 below is unchanged. Same
-    # shipped machinery + structured `quota_refusal_payload` as the
-    # /v1/points-class gates (#4614), off the event loop via the #3773 seam (a
-    # full tenant-graph count on a billing hot path).
+    # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+    #
+    # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
+    # gap it leaves: this bounds the COUNTED share of what the lane writes
+    # (value Points, plus the :Object/:Subject nodes entities mint), because
+    # `_count_resource("points")` counts exactly
+    # `(n:Point AND non-episodic) OR n:Object OR n:Subject` (tortoise/quota.py).
+    # It does NOT bound the lane's total node growth and it CANNOT close the
+    # uncounted loop this issue is about: a `points: []` commit mints :Session
+    # + transcript :Source (D10 — a document is a :Source; :Document is
+    # retired) + :Event, none of which match that predicate, so the count never
+    # moves and this gate can never trip. MEASURED: four fresh-session
+    # `points: []` commits all returned 200, minting 4 Sessions + 4 Sources + 4
+    # Events while the points count stayed 0. Closing that needs `max_points`
+    # widened to include those labels (a meaning change for every existing
+    # tenant, needing a migration) or a new limit (a pricing decision) — both
+    # OWNER decisions, tracked on #4051, deliberately not taken here.
+    #
+    # What it buys: parity with every other write endpoint's points gate
+    # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
+    # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
+    # (after every replay return above) so an idempotent re-POST is never gated
+    # — a replay writes no nodes and must never 402 (#1727's lesson); the
+    # budget 402 below is unchanged. Same shipped machinery + structured
+    # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
+    # event loop via the #3773 seam (a full tenant-graph count on a billing hot
+    # path).
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
 
