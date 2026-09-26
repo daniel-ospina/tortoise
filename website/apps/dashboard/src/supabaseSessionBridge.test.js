@@ -81,6 +81,24 @@ const futureExpiry = (ms = DAY_MS) => Math.floor((Date.now() + ms) / 1000)
 function oversizedSession() {
   return session({ access_token: 'A'.repeat(COOKIE_BYTE_CAP + 200) })
 }
+// #3951: a session over SIZE_GUARD (3800 encoded bytes) whose size-guard
+// transform strips provider tokens / identities / metadata bloat and then LANDS
+// inside the cap. This is the shape the old `readCookie(COOKIE_NAME) !== legacy`
+// check misread as "not stored": the cookie holds a DIFFERENT (transformed)
+// string, so the equality was false and the early return skipped the trailing
+// stale-secret cleanup.
+function lossySession(overrides = {}) {
+  return session({
+    provider_token: 'PROVIDER-TOKEN-SECRET-VALUE',
+    provider_refresh_token: 'PROVIDER-REFRESH-TOKEN-SECRET-VALUE',
+    user: {
+      id: 'u1',
+      identities: [{ id: 'identity-1' }],
+      user_metadata: { display_name: 'D', blob: 'x'.repeat(6000) },
+    },
+    ...overrides,
+  })
+}
 
 // ── the browser stub ────────────────────────────────────────────────────────
 function makeCookieJar({ cap = COOKIE_BYTE_CAP } = {}) {
@@ -480,4 +498,366 @@ test('#3485 (body path): an expired legacy never displaces a valid cookie', () =
   sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
   assert.equal(JSON.parse(cookieValue(sb, COOKIE_NAME)).access_token, 'cookie-live',
     'the body path must apply the same expiry guard as the gate path')
+})
+
+// ── #3951: a LOSSY-BUT-LANDED write must still clean up ─────────────────────
+//
+// migrateLegacySession()/migrateLegacyKeysToCookie() documented a hygiene step
+// ("drop [the legacy key] whether or not a cookie was already present") that
+// its own control flow contradicted: the equality check
+// `readCookie(COOKIE_NAME) !== legacy` is FALSE for every session the size
+// guard transforms (the strip makes the stored value a different string), so
+// the early return fired and the trailing removeItem never ran. The legacy key
+// — the UNTRANSFORMED copy, carrying provider_token / provider_refresh_token /
+// identities — stayed readable in localStorage indefinitely.
+//
+// The check must key on whether the write LANDED, not on whether it
+// round-tripped byte-identically. The safety direction is unchanged and is what
+// the two cases below separate: a landed write (lossy or not) means the new
+// credential is durably stored, so the stale-secret original goes; a REFUSED
+// write means the original is still the only copy, so it stays (#3503) — but
+// its stale provider tokens are stripped in place when that scrub can be
+// performed, so no post-migration path this code controls leaves a provider
+// leaves a provider token readable.
+
+test('#3951 (body path): a lossy-but-landed write drops the legacy key and its provider tokens', () => {
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  const s = lossySession({ access_token: 'lossy-access', refresh_token: 'lossy-refresh' })
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(s))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  const stored = cookieValue(sb, COOKIE_NAME)
+  assert.ok(stored, 'the transformed session must still land in the cookie')
+  assert.notEqual(stored, JSON.stringify(s),
+    'precondition: the size guard transformed the value, so it is NOT byte-identical to the legacy string')
+  const parsed = JSON.parse(stored)
+  assert.equal(parsed.access_token, 'lossy-access',
+    'the size guard keeps the session credential (access_token)')
+  assert.equal(parsed.refresh_token, 'lossy-refresh',
+    'the size guard keeps the session credential (refresh_token)')
+  assert.equal(parsed.provider_token, undefined, 'the size guard strips the provider token')
+
+  assert.equal(sb.ls.api.getItem(PROD_LEGACY_KEY), null,
+    'a write that LANDED (even lossily) must drop the legacy key — it is the only copy of the ' +
+    'stale provider token the hygiene step exists to remove')
+})
+
+test('#3951 (gate path): a lossy-but-landed write drops the legacy key too', () => {
+  const sb = makeSandbox()
+  const s = lossySession({ access_token: 'gate-lossy-access', refresh_token: 'gate-lossy-refresh' })
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(s))
+
+  const got = sb.window.readValidSession()
+  assert.ok(got, 'the landed session must be readable from the cookie')
+  assert.equal(got.access_token, 'gate-lossy-access', 'the gate reads the transformed session')
+  assert.equal(sb.ls.api.getItem(PROD_LEGACY_KEY), null,
+    'the gate path (migrateLegacyKeysToCookie) has the same defect and must drop the legacy key')
+})
+
+test('#3951 (body path): a REFUSED write keeps the only copy but strips its provider tokens', () => {
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  const s = session({
+    access_token: 'S'.repeat(COOKIE_BYTE_CAP + 200), // still over cap after the size guard
+    refresh_token: 'refused-refresh',
+    provider_token: 'REFUSED-PROVIDER-SECRET',
+    provider_refresh_token: 'REFUSED-PROVIDER-REFRESH-SECRET',
+  })
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(s))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(cookieValue(sb, COOKIE_NAME), null, 'the refused write must not have landed')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'the only surviving copy of the credential must not be destroyed (#3503)')
+  const parsed = JSON.parse(kept)
+  assert.equal(parsed.refresh_token, 'refused-refresh',
+    'the session credential survives, so the visitor is recoverable rather than stranded')
+  assert.equal(parsed.provider_token, undefined,
+    'the stale provider token must not be left readable in localStorage')
+  assert.equal(parsed.provider_refresh_token, undefined,
+    'the stale provider refresh token must not be left readable either')
+})
+
+test('#3951 (gate path): a REFUSED write keeps the session but strips its provider tokens', () => {
+  const sb = makeSandbox()
+  const s = session({
+    access_token: 'G'.repeat(COOKIE_BYTE_CAP + 200),
+    refresh_token: 'gate-refused-refresh',
+    provider_token: 'GATE-REFUSED-PROVIDER-SECRET',
+  })
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(s))
+
+  assert.equal(sb.window.readValidSession(), null,
+    'a session the cookie cannot hold is not reported as shared')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'the gate path must not destroy the only copy')
+  const parsed = JSON.parse(kept)
+  assert.equal(parsed.refresh_token, 'gate-refused-refresh', 'the credential survives')
+  assert.equal(parsed.provider_token, undefined, 'the stale provider token is stripped')
+})
+
+// ── #3951 review round 1: the `else` branches, and "did THIS write land" ────
+//
+// Round-1 reviewers found two gaps the first four tests did not cover:
+//  (a) both `else` branches (cookie PRESENT, legacy NEWER) carry the same
+//      defect and were untested — reverting only those two sites left the suite
+//      green; and
+//  (b) a read-back-only confirmation cannot tell "the write I just issued
+//      landed" from "an equivalent session was already in the cookie", so a
+//      REFUSED or browser-DROPPED write over a matching cookie would destroy the
+//      only copy of the newer credential — a #3503 regression. The confirmation
+//      now requires the cookie to have CHANGED, which is what distinguishes
+//      them (`writeLanded`'s token comparison corroborates but is not decisive).
+//
+// `padding` below is a NON-STRIPPABLE top-level field: the size guard removes
+// provider tokens / identities / metadata, so only bulk it does not know about
+// can still exceed the cap and force a refusal while the cookie holds the same
+// access_token/refresh_token pair.
+
+test('#3951 (body path, cookie present + newer legacy): a lossy-but-landed write drops the legacy key', () => {
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  seedCookie(sb, JSON.stringify(session({ access_token: 'cookie-stale', expires_at: futureExpiry(3600_000) })))
+  const s = lossySession({ access_token: 'lossy-newer', refresh_token: 'lossy-newer-r', expires_at: futureExpiry(2 * DAY_MS) })
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(s))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(JSON.parse(cookieValue(sb, COOKIE_NAME)).access_token, 'lossy-newer',
+    'the newer legacy session must take over the cookie')
+  assert.equal(sb.ls.api.getItem(PROD_LEGACY_KEY), null,
+    'the else branch (cookie present, legacy newer) has the same defect and must drop the legacy key')
+})
+
+test('#3951 (gate path, cookie present + newer legacy): a lossy-but-landed write drops the legacy key', () => {
+  const sb = makeSandbox()
+  seedCookie(sb, JSON.stringify(session({ access_token: 'cookie-stale', expires_at: futureExpiry(3600_000) })))
+  const s = lossySession({ access_token: 'gate-lossy-newer', refresh_token: 'gate-lossy-newer-r', expires_at: futureExpiry(2 * DAY_MS) })
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(s))
+
+  assert.equal(sb.window.readValidSession().access_token, 'gate-lossy-newer',
+    'the newer legacy session must take over the cookie')
+  assert.equal(sb.ls.api.getItem(PROD_LEGACY_KEY), null,
+    'the gate else branch must drop the legacy key too')
+})
+
+test('#3951: a REFUSED write over an equivalent pre-existing session must NOT destroy the legacy copy (#3503)', () => {
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  // The cookie already holds THIS session (same access_token + refresh_token)
+  // but an older expires_at, so a read-back-only confirmation would see the
+  // matching cookie and call the write "landed", then destroy the only copy of
+  // the newer expiry. The write is REFUSED (non-strippable padding keeps it over
+  // the cap), so the copy must survive — scrubbed.
+  seedCookie(sb, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'same-refresh', expires_at: futureExpiry(3600_000),
+  })))
+  const newerExp = futureExpiry(2 * DAY_MS)
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'same-refresh', expires_at: newerExp,
+    padding: 'x'.repeat(6000), provider_token: 'SAME-TOKENS-PROVIDER-SECRET',
+  })))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(JSON.parse(cookieValue(sb, COOKIE_NAME)).access_token, 'same-access',
+    'precondition: the cookie is byte-unchanged by the refused write')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'a REFUSED write must not destroy the only copy of the newer credential (#3503)')
+  const parsed = JSON.parse(kept)
+  assert.equal(parsed.expires_at, newerExp, 'the newer credential is the copy that survives')
+  assert.equal(parsed.provider_token, undefined,
+    'and its stale provider token is still scrubbed — the copy is not the leak')
+})
+
+test('#3951: a REFUSED write over a cookie sharing access_token but NOT refresh_token keeps the legacy', () => {
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  // #3485 discipline: a prior cookie sharing the access_token but carrying a
+  // DIFFERENT refresh_token is NOT this write — the only copy of the NEW
+  // refresh_token must survive. This fixture reaches the refusal via the size
+  // guard, so it pins the REFUSED path. `writeLanded`'s token comparison is
+  // corroborating only: a changed cookie carrying different tokens needs a
+  // concurrent writer, which the single-threaded harness cannot stage.
+  seedCookie(sb, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'OLD-refresh', expires_at: futureExpiry(3600_000),
+  })))
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'NEW-refresh', expires_at: futureExpiry(2 * DAY_MS),
+    padding: 'x'.repeat(6000), provider_token: 'REFRESH-MISMATCH-PROVIDER-SECRET',
+  })))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(JSON.parse(cookieValue(sb, COOKIE_NAME)).refresh_token, 'OLD-refresh',
+    'the refused write left the pre-existing cookie in place')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'the only copy of the NEW refresh_token must survive a refused write')
+  assert.equal(JSON.parse(kept).refresh_token, 'NEW-refresh', 'the new refresh token is preserved')
+  assert.equal(JSON.parse(kept).provider_token, undefined, 'and the stale provider token is scrubbed')
+})
+
+test('#3951: an unencodable legacy value (setItem throws) still gets its provider token scrubbed', () => {
+  const sb = makeSandbox()
+  // JSON.parse accepts the lone high surrogate, so the value IS a session — but
+  // encodeURIComponent inside the write throws URIError. That is a write that
+  // did not land, so the legacy copy is kept... and its provider token must not
+  // be left readable just because the write path threw past the scrub.
+  const legacy =
+    '{"access_token":"throw-access","refresh_token":"r","expires_at":' +
+    futureExpiry(2 * DAY_MS) + ',"provider_token":"THROW-PATH-PROVIDER-SECRET","note":"\uD800"}'
+  assert.doesNotThrow(() => JSON.parse(legacy), 'the fixture is valid JSON (parses)')
+  assert.throws(() => encodeURIComponent(legacy), /URIError|malformed/,
+    'the fixture must trigger the URIError the write path has to absorb')
+  sb.ls.api.setItem(PROD_LEGACY_KEY, legacy)
+
+  assert.doesNotThrow(() => sb.window.readValidSession(),
+    'an unencodable legacy value must never escape the bridge')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'nothing landed, so the copy is kept')
+  assert.equal(JSON.parse(kept).provider_token, undefined,
+    'the stale provider token is scrubbed even on the throw path — it is never left readable')
+})
+
+test('#3951 (gate path, cookie present + newer legacy): a REFUSED write keeps the newer credential', () => {
+  const sb = makeSandbox()
+  // The gate `else` branch is the one site whose REFUSED outcome the landed
+  // tests above do not reach. Dropping the `continue` there would fall through
+  // to removeItem() and destroy the only copy of the newer credential — the
+  // exact #3503 class — while the cookie already holds an equivalent session.
+  seedCookie(sb, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'same-refresh', expires_at: futureExpiry(3600_000),
+  })))
+  const newerExp = futureExpiry(2 * DAY_MS)
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'same-refresh', expires_at: newerExp,
+    padding: 'x'.repeat(6000), provider_token: 'GATE-ELSE-REFUSED-PROVIDER-SECRET',
+  })))
+  sb.window.readValidSession()
+
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'the gate else branch must retain the only copy of the newer credential on a refused write')
+  const parsed = JSON.parse(kept)
+  assert.equal(parsed.expires_at, newerExp, 'the newer credential is the copy that survives')
+  assert.equal(parsed.provider_token, undefined, 'and its stale provider token is scrubbed')
+})
+
+test('#3951: a write the browser DROPS (cap below the derived limit) is not a landed write', () => {
+  // The stub's setItem exposes no write-issued signal, so the drop is detected
+  // solely by the cookie being left UNCHANGED. A browser enforcing a smaller
+  // per-cookie cap than the 4096 the code derives SIZE_CAP from can drop an
+  // issued write; the confirmation must catch that: this is not the write, and
+  // the legacy copy (the only place the NEW refresh_token lives) must survive —
+  // scrubbed.
+  const sb = makeSandbox({ cap: 1000, supabase: { createClient: () => ({}) } })
+  seedCookie(sb, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'OLD-refresh', expires_at: futureExpiry(3600_000),
+  })))
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'NEW-refresh', expires_at: futureExpiry(2 * DAY_MS),
+    filler: 'x'.repeat(1200), provider_token: 'DROPPED-WRITE-PROVIDER-SECRET',
+  })))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(JSON.parse(cookieValue(sb, COOKIE_NAME)).refresh_token, 'OLD-refresh',
+    'precondition: the browser dropped the issued write, so the cookie is unchanged')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'a dropped write is not a landed write — the only copy of the NEW refresh_token must survive')
+  assert.equal(JSON.parse(kept).refresh_token, 'NEW-refresh', 'the new refresh token is preserved')
+  assert.equal(JSON.parse(kept).provider_token, undefined, 'and the stale provider token is scrubbed')
+})
+
+test('#3951: a DROPPED write over an EXPIRED equivalent cookie keeps the only gate-usable copy', () => {
+  // The cookie already holds this session's token pair but is EXPIRED, and the
+  // issued write is DROPPED (browser cap below the code's derived limit), so the
+  // cookie is unchanged. A read-back that only checked the tokens would call it
+  // landed and delete the legacy — the only copy the gate (which rejects an
+  // expired session) would ever accept. The write must have CHANGED the cookie.
+  const sb = makeSandbox({ cap: 1000, supabase: { createClient: () => ({}) } })
+  seedCookie(sb, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'same-refresh', expires_at: pastExpiry(),
+  })))
+  const newerExp = futureExpiry(2 * DAY_MS)
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(session({
+    access_token: 'same-access', refresh_token: 'same-refresh', expires_at: newerExp,
+    filler: 'x'.repeat(1200), provider_token: 'EXPIRED-EQUIVALENT-PROVIDER-SECRET',
+  })))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  const cookie = JSON.parse(cookieValue(sb, COOKIE_NAME))
+  assert.ok(cookie.expires_at * 1000 <= Date.now(),
+    'precondition: the surviving cookie is expired, so the gate rejects it')
+  const kept2 = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept2, 'the only gate-usable copy of the credential must survive a dropped write')
+  assert.equal(JSON.parse(kept2).expires_at, newerExp, 'the unexpired copy is preserved')
+  assert.equal(JSON.parse(kept2).provider_token, undefined, 'and the stale provider token is scrubbed')
+})
+
+test('#3951: a DROPPED write over a cookie sharing refresh_token but not access_token keeps the legacy', () => {
+  // The mirror of the test above on the access_token dimension: the surviving
+  // cookie shares only the refresh_token, so the changed-cookie check must
+  // still refuse to call the dropped write a landing.
+  const sb = makeSandbox({ cap: 1000, supabase: { createClient: () => ({}) } })
+  seedCookie(sb, JSON.stringify(session({
+    access_token: 'OLD-access', refresh_token: 'same-refresh', expires_at: futureExpiry(3600_000),
+  })))
+  sb.ls.api.setItem(PROD_LEGACY_KEY, JSON.stringify(session({
+    access_token: 'NEW-access', refresh_token: 'same-refresh', expires_at: futureExpiry(2 * DAY_MS),
+    filler: 'x'.repeat(1200), provider_token: 'ACCESS-MISMATCH-PROVIDER-SECRET',
+  })))
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(JSON.parse(cookieValue(sb, COOKIE_NAME)).access_token, 'OLD-access',
+    'precondition: the dropped write left the cookie unchanged')
+  const kept = sb.ls.api.getItem(PROD_LEGACY_KEY)
+  assert.ok(kept, 'the only copy of NEW-access must survive')
+  assert.equal(JSON.parse(kept).access_token, 'NEW-access', 'the new access token is preserved')
+  assert.equal(JSON.parse(kept).provider_token, undefined, 'and the stale provider token is scrubbed')
+})
+
+test('#3951: the scrub must not clobber a concurrent tab\u2019s newer legacy session', () => {
+  // localStorage is shared across tabs, and this migration already assumes a
+  // stale cached tab can write a NEWER legacy session. The scrub's write-back
+  // must act only on the value it actually inspected: if a concurrent tab has
+  // replaced it, the newer session must survive untouched rather than be
+  // reverted to a scrubbed snapshot (which would destroy its only copy).
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  const oldLegacy = JSON.stringify(session({
+    access_token: 'H'.repeat(COOKIE_BYTE_CAP + 200), // over cap → refused, so the scrub runs
+    refresh_token: 'old-refresh', expires_at: futureExpiry(2 * DAY_MS),
+    provider_token: 'OLD-TAB-PROVIDER-SECRET',
+  }))
+  const newerLegacy = JSON.stringify(session({
+    access_token: 'CONCURRENT-new-access', refresh_token: 'concurrent-refresh',
+    expires_at: futureExpiry(2 * DAY_MS),
+  }))
+  sb.ls.api.setItem(PROD_LEGACY_KEY, oldLegacy)
+  // Simulate the concurrent tab: the migration's FIRST read sees the old value,
+  // and the replace happens right after it — so the scrub's re-read sees the
+  // newer session and must decline to write.
+  const api = sb.ls.api
+  const realGetItem = api.getItem // capture the fn — window.localStorage IS api
+  let firstRead = true
+  sb.window.localStorage.getItem = (k) => {
+    if (k === PROD_LEGACY_KEY && firstRead) {
+      firstRead = false
+      api.setItem(PROD_LEGACY_KEY, newerLegacy)
+      return oldLegacy
+    }
+    return realGetItem.call(api, k)
+  }
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(sb.ls.api.getItem(PROD_LEGACY_KEY), newerLegacy,
+    'a concurrent tab\u2019s newer session must not be reverted to the scrubbed snapshot')
+  assert.equal(JSON.parse(sb.ls.api.getItem(PROD_LEGACY_KEY)).access_token, 'CONCURRENT-new-access',
+    'the newer credential survives — the only copy is not destroyed')
+})
+
+test('#3951: a refused write with nothing to scrub leaves the legacy bytes untouched', () => {
+  // Non-canonical (spaced) JSON with no provider token: there is nothing to
+  // scrub, so the retained copy is left byte-identical rather than needlessly
+  // re-serialized (and its non-canonical bytes normalized).
+  const sb = makeSandbox({ supabase: { createClient: () => ({}) } })
+  const raw = '{ "access_token":"' + 'H'.repeat(COOKIE_BYTE_CAP + 200) +
+    '", "refresh_token":"r", "expires_at":' + futureExpiry(2 * DAY_MS) + ' }'
+  sb.ls.api.setItem(PROD_LEGACY_KEY, raw)
+  sb.window.createTortoiseSupabaseClient(PROD_URL, 'anon-key')
+
+  assert.equal(cookieValue(sb, COOKIE_NAME), null, 'the oversized write did not land')
+  assert.equal(sb.ls.api.getItem(PROD_LEGACY_KEY), raw,
+    'nothing to strip → the retained bytes are left exactly as they were')
 })
