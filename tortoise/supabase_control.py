@@ -3053,10 +3053,16 @@ def org_billing_state(cp, org_id: str) -> dict:
     ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and
     the portal read. A registry-graph read here would miss the authoritative
     row the webhook wrote post-#669.
+
+    ``subscription_id`` (0006 base) was added for ``billing.reconcile_org``
+    (#4726), which reads the SAME identifiers the mirror writes — it must not
+    construct a registry-namespaced SDK in Supabase mode (the #878
+    resurrection vector).
     """
     row = _orgs_row_fail_soft(
         cp, org_id,
-        select=["stripe_customer_id", "subscription_status", "customer_email"],
+        select=["stripe_customer_id", "subscription_id",
+                "subscription_status", "customer_email"],
         additive_tiers=[_ORG_ADDITIVE_BILLING_TIER],
     )
     return row or {}
