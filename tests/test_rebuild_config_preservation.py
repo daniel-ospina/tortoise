@@ -1264,3 +1264,218 @@ def test_staged_marker_that_fails_to_restore_stays_in_the_verification(graph,
     assert result["config_expected"] == 0
     assert result["config_restored"] == 0
     assert result["config_reset_read_failed"] is False
+
+
+# ── #3049: the sidecar is keyed to a GRAPH, not to a log directory ──────────
+#
+# The sidecar path is `join(log_dir, ".tortoise-prewipe-snapshot.json")` — a
+# pure function of the directory — but the wipe is per-GRAPH. Two graphs
+# rebuilt from one event-log dir therefore used to absorb each other: graph B
+# merged graph A's rescue payload and then RETIRED the file, so A's retry
+# replayed a journal with no event for its graph-only Points. These tests pin
+# the safety property on the EMBEDDED lane, where both graphs share the
+# default `graph_name='tortoise'` and only the db path distinguishes them.
+#
+# MUST NEVER HAPPEN: a rebuild of graph B must never (i) merge a pre-wipe
+# sidecar written by graph A, nor (ii) retire, unlink or overwrite a sidecar
+# it did not write. A's rescue payload may be the only copy of A's graph-only
+# Points.
+
+
+def _interrupt_graph_a(tmp_path, monkeypatch):
+    """Leave graph A's rescue sidecar on disk after an interrupted rebuild.
+
+    Embedded A (`graph_name='tortoise'`, `a.db`) has a graph-only Point with
+    no journal event; its rebuild is killed on the first replay write — i.e.
+    AFTER `DETACH DELETE` — so the sidecar is the ONLY copy of that Point.
+    Returns `(sdk_a, events_dir, sidecar_path, a_only_id)`.
+    """
+    from tortoise.projection import FalkorProjection
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk_a = TortoiseSDK(
+        db_path=str(tmp_path / "a.db"), graph_name="tortoise",
+        event_log_path=str(events / "events.jsonl"))
+    a_only = "a-only-point"
+    sdk_a._get_proj().g.query(
+        "CREATE (n:Point {id:$id, content:'A only', status:'live', "
+        "pointKind:'statement', createdAt:'2026-08-01T00:00:00Z'})",
+        params={"id": a_only})
+    # One genuinely journaled event — the JSONL half of the rebuild.
+    (events / "events.jsonl").write_text(json.dumps({
+        "type": "PointAdded",
+        "point": {"id": "evt-001", "content": "journaled claim",
+                  "pointKind": "statement", "status": "live",
+                  "createdAt": "2026-08-01T00:00:00Z"},
+        "projection_version": 2, "initiated_by": "extractor"}) + "\n")
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("injected mid-replay failure (#3049)")
+
+    with mock.patch.object(FalkorProjection, "_upsert_point_props", _boom), \
+            pytest.raises(RuntimeError, match="injected mid-replay"):
+        sdk_a._get_proj().rebuild_all(str(events))
+    return sdk_a, events, events / ".tortoise-prewipe-snapshot.json", a_only
+
+
+def _point_count(sdk, point_id: str) -> int:
+    return sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)",
+        params={"id": point_id}).result_set[0][0]
+
+
+def test_foreign_sidecar_is_neither_merged_nor_retired_3049(tmp_path, monkeypatch):
+    """#3049: B's rebuild must not absorb or retire A's rescue file.
+
+    Both graphs are embedded, share `graph_name='tortoise'` AND one event-log
+    dir, so only the db path separates them.
+
+    FAILS before the fix (no identity is recorded, so B merges A's
+    ``a-only`` Point into B and clears the sidecar; A then loses it forever)
+    and PASSES after it (B aborts before the wipe, A's file is byte-identical,
+    and A's own retry still recovers).
+    """
+    sdk_a, events, sidecar, a_only = _interrupt_graph_a(tmp_path, monkeypatch)
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert any(e.get("point", {}).get("id") == a_only
+                   for e in payload["synthetic_events"]), (
+            "the interrupted rebuild must have captured A's graph-only Point")
+        before = sidecar.read_bytes()
+
+        sdk_b = TortoiseSDK(
+            db_path=str(tmp_path / "b.db"), graph_name="tortoise",
+            event_log_path=str(events / "events.jsonl"))
+        try:
+            # The rebuild REFUSES before the wipe, naming the foreign graph.
+            with pytest.raises(RuntimeError, match="refusing to wipe the graph"):
+                sdk_b._get_proj().rebuild_all(str(events))
+
+            # (i) B did NOT absorb A's payload ...
+            assert _point_count(sdk_b, a_only) == 0, (
+                "graph B absorbed A's graph-only Point — cross-graph "
+                "contamination (#3049)")
+            # ... and B's own wipe never ran.
+            assert sdk_b._get_proj().g.query(
+                "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
+            # (ii) A's sidecar is untouched — not retired, not overwritten.
+            assert sidecar.exists(), "B retired A's rescue file (#3049)"
+            assert sidecar.read_bytes() == before, (
+                "B overwrote a sidecar it did not write (#3049)")
+            # The sidecar names the graph it belongs to, so the operator can
+            # finish THAT rebuild instead of guessing.
+            assert payload["graph_identity"]["graph_name"] == "tortoise", payload
+            assert payload["graph_identity"]["db_path"].endswith("a.db"), payload
+        finally:
+            sdk_b.close()
+
+        # A's own retry (identity matches) still recovers its Point.
+        sdk_a._get_proj().rebuild_all(str(events))
+        rows = sdk_a._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content",
+            params={"id": a_only}).result_set
+        assert rows and rows[0][0] == "A only", (
+            "A's graph-only Point was NOT recoverable after B's rebuild — "
+            "permanent loss by absorption (#3049)")
+        assert not sidecar.exists(), (
+            "A's completed rebuild retires its own sidecar")
+    finally:
+        sdk_a.close()
+
+
+def test_legacy_sidecar_without_identity_still_merges_3049(tmp_path):
+    """#3049 migration: a pre-fix rescue file has no identity → proceed.
+
+    The filename is unchanged, so an existing sidecar is NOT orphaned by this
+    fix — but it carries no `graph_identity`, read as identity-UNKNOWN. That
+    must behave exactly as before (union it, then retire on success), because
+    refusing would itself be a recovery-blocking loss window. The retry then
+    re-stamps the file with THIS graph's identity.
+    """
+    from tortoise.projection import _write_prewipe_snapshot
+
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "events.jsonl").write_text("")
+    legacy_only = "legacy-only-point"
+    sidecar = events / ".tortoise-prewipe-snapshot.json"
+    _write_prewipe_snapshot(str(sidecar), _sidecar_payload(
+        version=2,  # pre-#3049: no `graph_identity` key at all
+        synthetic_events=[{
+            "type": "PointAdded",
+            "point": {"id": legacy_only, "content": "legacy rescue",
+                      "status": "live", "pointKind": "statement",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+        }]))
+
+    sdk = TortoiseSDK(
+        db_path=str(tmp_path / "c.db"), graph_name="tortoise",
+        event_log_path=str(events / "events.jsonl"))
+    try:
+        sdk._get_proj().rebuild_all(str(events))
+        assert _point_count(sdk, legacy_only) == 1, (
+            "an identity-unknown legacy sidecar must still merge (#3049)")
+        assert not sidecar.exists(), "the completed rebuild retires it"
+    finally:
+        sdk.close()
+
+
+def test_prewipe_identity_mismatch_tristate():
+    """#3049: the identity comparison — unknown proceeds, distinct refuses.
+
+    `graph_name` alone is insufficient (every embedded graph is 'tortoise'),
+    so the embedded db path is part of the key and the comparison is exact.
+    """
+    from tortoise.projection import _prewipe_identity_mismatch
+
+    cur = {"graph_name": "tortoise", "db_path": "/x/B.db"}
+    assert _prewipe_identity_mismatch({}, **cur) is None
+    assert _prewipe_identity_mismatch({"version": 2}, **cur) is None
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": "not-a-dict"}, **cur) is None
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": {"graph_name": None}}, **cur) is None
+    # Same graph: name AND path agree.
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": cur}, **cur) is None
+    # Same name, DIFFERENT embedded path — the #3049 case.
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": {"graph_name": "tortoise", "db_path": "/x/A.db"}},
+        **cur) == ("tortoise", "/x/A.db")
+    # Different name.
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": {"graph_name": "other", "db_path": "/x/B.db"}},
+        **cur) == ("other", "/x/B.db")
+    # Embedded vs server (null path) is a real difference, both directions.
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": {"graph_name": "tortoise", "db_path": None}},
+        **cur) == ("tortoise", None)
+    assert _prewipe_identity_mismatch(
+        {"graph_identity": cur},
+        graph_name="tortoise", db_path=None) == ("tortoise", "/x/B.db")
+
+
+def test_prewipe_db_path_identity_normalizes(tmp_path):
+    """#3049: the recorded path is a normalized realpath, not a spelling.
+
+    A false mismatch would block the recovery the sidecar exists for, so the
+    same file reached as `dir/../dir/x.db` or through a symlinked directory
+    must compare equal; a server/`:memory:` graph carries no path at all.
+    """
+    from tortoise.projection import _prewipe_db_path_identity
+
+    db = tmp_path / "x.db"
+    db.write_text("")
+    assert _prewipe_db_path_identity(str(db)) == str(db.resolve())
+    assert _prewipe_db_path_identity(
+        str(tmp_path / "sub" / ".." / "x.db")) == str(db.resolve())
+    link = tmp_path / "link.db"
+    try:
+        os.symlink(db, link)
+    except OSError:
+        pass  # platform without symlink support — the abspath legs suffice
+    else:
+        assert _prewipe_db_path_identity(str(link)) == str(db.resolve())
+    assert _prewipe_db_path_identity(None) is None
+    assert _prewipe_db_path_identity(":memory:") is None
