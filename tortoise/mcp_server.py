@@ -4309,8 +4309,9 @@ def _preview_retract_point(sdk, id: str) -> dict:
 
 def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
     """Preview `tortoise_invalidate` — outdate ONE point, add ONE CORRECTS
-    edge. Both lifecycle guards run first, mirroring the write's validation
-    order and messages."""
+    edge. Both lifecycle guards AND the writer's #5358 inverted-window
+    precondition run first, mirroring the write's validation order and
+    messages."""
     if id == corrected_by_id:
         raise ValueError(
             f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
@@ -4326,6 +4327,15 @@ def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
         )
     sdk._assert_lifecycle_guard(
         corrected_by_id, method="invalidation", role="corrector")
+    # #5358: mirror the writer's inverted-window precondition — the SAME
+    # shared check `invalidate_point` runs — so the preview cannot report
+    # "would invalidate" for an input the write refuses (#4057's contract:
+    # a preview over an input the write would reject must reject it too).
+    # `_preview_supersede(transfer_edges=False)` reuses this function, so it
+    # inherits the check.
+    from datetime import datetime, timezone
+    sdk._assert_window_start_not_inverted(
+        id, datetime.now(timezone.utc).isoformat())  # noqa: UP017
     # The writer is `MATCH (a:Point {id:$new}), (b:Point {id:$old}) MERGE
     # (a)-[:CORRECTS]->(b)` — it binds EVERY matching pair, stamps EVERY
     # matching old node, and the MERGE adds only pairs that lack the edge.

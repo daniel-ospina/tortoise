@@ -27,7 +27,7 @@ not by inspecting props alone — props are asserted only for the
 "nothing was mutated" half of the contract.
 
 Runnable with:
-  TORTOISE_DB_URI='docker://:falkordb@localhost:16640/tortoise_test_matrix' \\
+  TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
     uv run pytest tests/test_invalidate_inverted_window_5358.py -v
 """
 from __future__ import annotations
@@ -46,7 +46,12 @@ from tortoise.sdk import TortoiseSDK
 
 @pytest.fixture
 def sdk():
-    """SDK on a fresh temp DB (redirected to TORTOISE_DB_URI when set)."""
+    """SDK on a fresh temp DB.
+
+    The explicit temp path wins at the SDK constructor (#139), but under a
+    supported ``TORTOISE_DB_URI`` the projection redirect (#1647) still targets
+    that server — so the suite runs on the configured lane either way.
+    """
     db_path = os.path.join(
         tempfile.mkdtemp(prefix="tortoise_inv5358_test_"), "test.db"
     )
@@ -219,29 +224,75 @@ def test_unparseable_valid_from_does_not_refuse(sdk):
     stamps as before.  (That point's window already covers no PARSEABLE instant,
     so the write cannot newly hide it.)
     """
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
     old = _make_point(sdk, content="undecidable", validFrom="not-a-date")
     repl = _make_point(sdk, content="replacement")
+
+    # the documented outcome IS honest absence, before and after the write —
+    # the write cannot newly hide the point from any PARSEABLE query instant
+    assert sdk.restore_point_at(old["id"], now_iso)["found"] is False
 
     res = sdk.invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["outdated"] is True
     assert op["validTo"] == op["expiredAt"]
+    assert sdk.restore_point_at(old["id"], now_iso)["found"] is False
 
 
 def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):
-    """``validFrom = 0`` is PRESENT, not absent: the epoch-0 instant.
+    """``validFrom = 0`` is a real PAST window bound, not treated as future.
 
-    The guard's presence predicate is ``is not None`` (the read path's —
-    ``_covers`` gates on ``vf is not None``), so a falsey-but-present start is
-    a real window bound.  ``_created_sort_key(0)`` parses to epoch 0, which is
-    in the past, so invalidation proceeds normally (never a spurious refusal).
+    ``_created_sort_key(0)`` parses to the epoch-0 instant, so the guard's
+    decidable-inversion branch is not taken and invalidation proceeds
+    normally.  NOTE: this does NOT pin ``is not None`` over truthiness — every
+    falsey ``validFrom`` maps to a key that cannot satisfy the refusal
+    predicate (``None`` skips under both predicates; ``0`` → epoch 0, past;
+    ``""`` → unparseable), so the presence predicate is not observable from
+    this guard's behaviour; the READ-PATH outcome is what is pinned here.
     """
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
     old = _make_point(sdk, content="epoch-zero", validFrom=0)
     repl = _make_point(sdk, content="replacement")
+
+    assert sdk.restore_point_at(old["id"], now_iso)["found"] is True
 
     res = sdk.invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["validFrom"] == 0
     assert op["outdated"] is True
+    # the closed window still resolves at an instant before the write's now
+    after = sdk.restore_point_at(old["id"], now_iso)
+    assert after["found"] is True
+    assert after["valid_point"]["id"] == old["id"]
+
+
+# ── The route the refusal names must actually work ─────────────────────
+
+def test_retract_point_is_the_window_agnostic_route_after_refusal(sdk):
+    """After the refusal, the route the error names works and leaves the
+    window intact.
+
+    The refusal's whole justification is the escape hatch it names
+    (``retract_point``), so the way forward is CHECKED, not just promised: it
+    must not touch ``validTo``/``expiredAt``, and the future-dated window must
+    still resolve through the read path afterwards.
+    """
+    now = _dt.datetime.now(_dt.timezone.utc)
+    future = (now + _dt.timedelta(days=30)).replace(microsecond=0)
+    old = _make_point(sdk, content="future claim", validFrom=future.isoformat())
+    repl = _make_point(sdk, content="replacement")
+
+    with pytest.raises(ValueError, match="retract_point"):
+        sdk.invalidate_point(old["id"], repl["id"])
+
+    sdk.retract_point(old["id"])
+    op = _props(sdk, old["id"])
+    assert op["status"] == "retracted"
+    assert "validTo" not in op
+    assert "expiredAt" not in op
+    out = sdk.restore_point_at(
+        old["id"], (future + _dt.timedelta(days=15)).isoformat())
+    assert out["found"] is True
+    assert out["valid_point"]["id"] == old["id"]

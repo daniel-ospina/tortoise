@@ -516,12 +516,6 @@ surfaces:
   # and no workflow runs the generator's `--check` standalone. Correcting that
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
-  # #5358: fail-closed refusal for an INVERTED predecessor window in
-  # invalidate_point (a future-dated validFrom would be stamped validTo=now).
-  # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
-  # owns it; `core` is the default home, beside the E6 window suite
-  # (test_validity_windows.py).
-  - test_invalidate_inverted_window_5358.py
   - test_mcp_rename_table.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
@@ -1067,6 +1061,12 @@ surfaces:
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
+  # #5358: fail-closed refusal for an INVERTED predecessor window in
+  # invalidate_point (a future-dated validFrom would be stamped validTo=now).
+  # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
+  # owns it; `core` is the default home, the same surface as the E6 window
+  # suite directly above.
+  - test_invalidate_inverted_window_5358.py
   - test_value_extractor.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall
