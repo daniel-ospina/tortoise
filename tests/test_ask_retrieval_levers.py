@@ -101,6 +101,7 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
         apply_evidence_boost,
+        ask_session_key,
         assemble_context,
         dedup_pool,
         resolve_ask_boost_multipliers,
@@ -118,14 +119,10 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
         question, limit=limit, pool_size=120, include_terminal=True,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf)
     annotated = sdk.annotate_ask_hits(hits)
-
-    def _session_key(h: dict) -> str:
-        return (h.get("session_id") or h.get("session_date")
-                or f"idx:{h.get('lme_session_index', -1)}")
-
+    # #4155: the lane's key verbatim — the mirror must not hold a stale copy.
     deduped = dedup_pool(
         annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
-        session_key=_session_key)
+        session_key=ask_session_key)
     if evidence_boost:
         mult = resolve_ask_boost_multipliers()
         deduped, _ = apply_evidence_boost(
