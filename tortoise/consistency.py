@@ -974,7 +974,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
         raised — the caller decides fail-loud policy. Torn trailing lines
         (crash mid-append) are skipped, not fatal.
 
-    Returns {recovered, log_points, db_points, reason}.
+    Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`,
+    the trigger flag set whenever a completed replay left the graph's onboarding
+    state NOT confirmed intact (non-zero for a confirmed loss, an unverified
+    restore, OR a state-UNKNOWN rescue file), plus `onboarding_state_unknown`,
+    set ONLY for the rescue-file shape (#4641). `reason` carries an ADDITIVE
+    clause naming which of the three applies. `recovered` is still True in
+    every one of those cases: the rebuild did complete and refusing to open the
+    store would be strictly worse, so the signal is PROPAGATED for the caller
+    to branch on rather than swallowed into a success-shaped result.
     """
     import json as _json
     import os
@@ -1060,11 +1068,61 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # the #990 half (a quarantined :Batch with no Points), and reporting
         # that as `recovered: False` makes the caller (`_recover_or_raise`)
         # refuse to open a DB whose quarantine state was just restored.
-        return {"recovered": True,
-                "log_points": events,
-                "db_points": nodes,
-                "reason": ("rebuilt from the pending pre-wipe snapshot "
-                           f"(#2943): {nodes} nodes, {edges} edges")}
+        #
+        # `rebuild_all` CAN, however, complete with a gap it could not close
+        # (#4641): onboarding state/edges are raw writes no journal event
+        # carries, so a post-wipe raise would strand the store empty (#2943).
+        # Reporting `recovered: True` while swallowing that gap is the silent
+        # partial loss itself, so the counts are PROPAGATED — the new
+        # `onboarding_gap` key is additive, but note this is NOT a
+        # purely-value-preserving change: `reason` has a suffix APPENDED below
+        # for the gap case (in-repo callers only log it). `recovered` itself is
+        # unchanged, exactly as the sticky config-reset marker is.
+        # The projection returns the shapes as canonical counts — it owns the
+        # definitions. Summing the granular keys here double-counted a single
+        # destroyed org (it lands in BOTH `onboarding_restore_failures` and
+        # `onboarding_missing_orgs`) and let a transient restore failure read
+        # as loss. `onboarding_gap` is the trigger (non-zero for all three
+        # shapes) and `onboarding_missing_total` discriminates a real loss from
+        # an UNKNOWN/unverified one, so a caller that must not describe all
+        # three as loss reads the key it needs rather than re-deriving either
+        # from the granular keys (#4641 review rounds 6-7).
+        onboarding_gap = int(counts.get("onboarding_gap") or 0)
+        onboarding_missing_total = int(
+            counts.get("onboarding_missing_total") or 0)
+        onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
+        result = {"recovered": True,
+                  "log_points": events,
+                  "db_points": nodes,
+                  "reason": ("rebuilt from the pending pre-wipe snapshot "
+                             f"(#2943): {nodes} nodes, {edges} edges")}
+        if onboarding_gap:
+            result["onboarding_gap"] = onboarding_gap
+            # Additive, not a chain: a confirmed partial loss and a
+            # pre-preservation UNKNOWN can coexist, and one must not suppress
+            # the other (#4641 review round 7).
+            if counts.get("onboarding_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the onboarding post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's onboarding state "
+                    "is UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — see #4641")
+            if onboarding_missing_total:
+                result["reason"] += (
+                    f"; WARNING: {onboarding_missing_total} onboarding "
+                    "state/edge restore gap(s) the replay could not close — "
+                    "see the rebuild ERROR log (#4641)")
+            if onboarding_unknown:
+                result["onboarding_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not "
+                    "carry a usable onboarding record — it either predates "
+                    "onboarding preservation, carries only one of the two "
+                    "onboarding sections, or inherits a state-UNKNOWN marker "
+                    "from an earlier interrupted rebuild — so this graph's "
+                    "onboarding state is UNKNOWN (not confirmed absent) — "
+                    "see #4641")
+        return result
 
     if not files:
         return {"recovered": False, "log_points": 0, "db_points": 0,
