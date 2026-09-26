@@ -2144,6 +2144,7 @@ durations:
   test_runner_ports_6673.py: 4.3  # unmeasured (new file, #6673 — no CI junit yet)
   test_4503_edge_relationship_accounting.py: 46.1  # unmeasured — #4503: locally measured (11 tests, embedded FiDB); refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
   test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (22 tests; 52.8s wall-pytest, 70s process; earlier revisions of this file read 14-21s, so the figure is variable and errs high); refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
+  test_4503_edge_relationship_accounting.py: 53.0  # unmeasured — #4503: locally measured (28 tests; ~41s wall-pytest, ~53s process, in BOTH the embedded carve-out and the docker lane); earlier revisions of this file read 14-21s, so the figure is variable and errs high; refresh from CI junit — no leg of the sweep's four source runs carried it (the file did not exist then).
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
