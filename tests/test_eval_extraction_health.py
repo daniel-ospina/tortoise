@@ -509,7 +509,7 @@ def test_key_limit_403_from_the_classifier_fires_the_run_killer_gate():
     Before the fix the same 403 recorded ``fatal_403_forbidden`` — outside
     the killer set, and with an embed list present there is no
     ``empty_embed_list`` fallback — so the billing event was invisible and the
-    run could certify (#4860: all 7 captures aborted on an exhausted key)."""
+    run could certify."""
     from tools.longmem_eval.report import EXTRACTION_KILLER_CENSUS_CLASSES
     from tortoise import extractor_v2
 
