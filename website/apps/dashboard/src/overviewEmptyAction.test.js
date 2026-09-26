@@ -251,7 +251,15 @@ test('#4637 wiring: main.jsx renders the guarded action set with the derived for
   const actionTags = mainCode.match(/<GraphMissingEmptyStateActions[\s\S]*?\/>/g) || []
   assert.equal(actionTags.length, 1,
     `the graph-missing card must render the guarded action set once — found ${actionTags.length}`)
-  assert.match(actionTags[0], /buildFork=\{isBuildFork\}/,
+  // The binding is compared by VALUE, not matched as a substring: a presence
+  // match accepts `buildFork={isBuildFork === false} data-decoy="buildFork={isBuildFork}"`
+  // — the #4637 defect (a build fork routed through the agent-connection
+  // chooser) with the suite green. Exactly one `buildFork` binding is required,
+  // so a decoy is a failure instead of a second chance to match.
+  const forkBindings = actionTags[0].match(/(?:^|\s)buildFork=\{([^}]*)\}/g) || []
+  assert.equal(forkBindings.length, 1,
+    `the action set must carry exactly one buildFork binding — got ${forkBindings.length} in ${actionTags[0]}`)
+  assert.equal(actionTags[0].match(/(?:^|\s)buildFork=\{([^}]*)\}/)[1].trim(), 'isBuildFork',
     `the action set must take the derived fork — got ${actionTags[0]}`)
   assert.match(actionTags[0], /onGoToKeys=\{/,
     `the first-party API Keys handler must stay wired — got ${actionTags[0]}`)

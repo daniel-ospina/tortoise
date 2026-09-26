@@ -1508,8 +1508,14 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   // (The derivation is pinned HERE, once — the note test owns what the arms pass
   // it. That pin runs on the shared quote-aware stripped source, so a `//` or
   // `/* … */` comment cannot satisfy it.)
-  assert.match(stripComments(mainJsx), /const keyIsLive = ownerKeyLive\(connectGate\.mode\)/,
-    'the re-entry Overview routes its live-key claim through the gate')
+  //
+  // The RHS is compared TOKEN-FOR-TOKEN, not matched as a substring: a presence
+  // match accepts `ownerKeyLive(connectGate.mode) || !!snippetKey`, which puts a
+  // second authority back into the claim and renders "Your Organization's API
+  // key is live" in mode 'loading' (mutation-proven green before this anchor).
+  const keyIsLiveRhs = (stripComments(mainJsx).match(/^[ \t]*const keyIsLive = (.+)$/m) || [])[1]
+  assert.equal((keyIsLiveRhs || '').trim(), 'ownerKeyLive(connectGate.mode)',
+    'the re-entry Overview routes its live-key claim through the gate and nothing else')
   assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
     'the member arm of the re-entry card still consults the gate for its key state')
   // BOTH keyed arms render the derived affordance (no drift between them)

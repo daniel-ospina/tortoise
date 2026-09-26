@@ -363,10 +363,22 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   // ownerKeyLive(connectGate.mode)` kept the gate-authority pin green. That hole
   // is asserted closed at the end of this file. ⚠️ Residue: a STRING or template
   // literal is code, so a pin phrased as bare text presence can still be
-  // satisfied by a quoted decoy — the pins that guard a #4637 CARRIER therefore
-  // assert the expression inside a JSX expression position (quote-excluding
-  // lookbehind), not a bare substring.
+  // satisfied by a quoted decoy — so every pin whose target is a BINDING also
+  // asserts the binding's exact value (below), and each #4637 carrier carries a
+  // pin on the DEFECT form as well, which a decoy can only help trip.
   const mainCode = stripComments(mainJsx)
+  // The value of an attribute in a JSX tag, as written. `buildFork={isBuildFork}`
+  // must be EXACTLY that — a presence match accepted
+  // `buildFork={isBuildFork === false} data-decoy="buildFork={isBuildFork}"`
+  // (mutation-proven green before this extraction), i.e. the #4637 defect with a
+  // passing suite. One occurrence per attribute is required, so a second
+  // (decoy) occurrence is a failure rather than a second chance to match.
+  const attrValue = (tag, name) => {
+    const hits = tag.match(new RegExp(`(?:^|\\s)${name}=\\{([^}]*)\\}`, 'g')) || []
+    assert.equal(hits.length, 1,
+      `each note/action tag must carry exactly one ${name} binding — got ${hits.length} in ${tag}`)
+    return tag.match(new RegExp(`(?:^|\\s)${name}=\\{([^}]*)\\}`))[1]
+  }
   // ALL note sites must use the derived boolean. The pins are PROP-SET based,
   // not layout based: a source-text regex anchored on the attribute ORDER or on
   // the newline comes apart the moment a prop moves or a formatter reflows the
@@ -378,10 +390,8 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   assert.equal(memberTags.length, 3,
     `all three member arms must render the note — found ${memberTags.length}`)
   for (const tag of memberTags) {
-    assert.match(tag, /buildFork=\{isBuildFork\}/,
+    assert.equal(attrValue(tag, 'buildFork').trim(), 'isBuildFork',
       `every member site must pass the derived boolean — got ${tag}`)
-    assert.ok(!/buildFork=\{(?!isBuildFork\})/.test(tag),
-      `no member site may re-decide the fork — got ${tag}`)
   }
   assert.ok(mainCode.includes("const isBuildFork = wizardFork === 'build'"),
     'the fork predicate must stay the strict comparison to the literal build (stripped source: a commented-out predicate must not satisfy this)')
@@ -455,9 +465,11 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     `both owner arms must render the owner note — found ${ownerTags.length}`)
   for (const tag of ownerTags) {
     assert.match(tag, /variant="(?:reentry|graph-missing)"/, `variant must be a card name — got ${tag}`)
-    assert.match(tag, /buildFork=\{isBuildFork\}/, `buildFork must be the derived boolean — got ${tag}`)
-    assert.match(tag, /connectGateMode=\{connectGate\.mode\}/, `the gate mode must be passed — got ${tag}`)
-    assert.match(tag, /keyLive=\{keyIsLive\}/,
+    assert.equal(attrValue(tag, 'buildFork').trim(), 'isBuildFork',
+      `buildFork must be the derived boolean — got ${tag}`)
+    assert.equal(attrValue(tag, 'connectGateMode').trim(), 'connectGate.mode',
+      `the gate mode must be passed — got ${tag}`)
+    assert.equal(attrValue(tag, 'keyLive').trim(), 'keyIsLive',
       `keyLive must be the gate-derived boolean — got ${tag}`)
   }
   // …the derivation itself (`const keyIsLive = ownerKeyLive(connectGate.mode)`) is
@@ -465,26 +477,27 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   // gate-authority pin from #3783, and a second copy here would be an
   // unowned duplicate that a fix in one file could silently weaken. This file
   // owns what the ARMS pass, above.
-  // …and the owner arms may not go back to deciding it themselves: no bare
-  // `keyLive` shorthand (which is `true`), no `snippetKey`-based or
-  // single-mode expression
-  for (const tag of ownerTags) {
-    assert.ok(!/keyLive(?!=\{keyIsLive\})/.test(tag),
-      `an owner arm may not shorthand or re-decide keyLive — got ${tag}`)
-    assert.ok(!/snippetKey/.test(tag),
-      `an owner arm may not read the in-memory snippet — got ${tag}`)
-  }
+  // …and the owner arms may not go back to deciding it themselves: the values
+  // are compared as identifiers (above), so a bare `keyLive` shorthand (which is
+  // `true`) or a single-mode expression changes the extracted value and fails
+  // there. The extra pins below catch the DEFECT FORMS wherever they appear in
+  // the stripped source — a decoy string cannot disarm them, it only adds an
+  // occurrence. The `=` exclusion keeps attribute positions
+  // (`snippetKey={snippetKey}` on the D5 card, a different fact) out of scope.
+  assert.ok(!/(?<!['"`=])\{\s*\(?\s*snippetKey\b/.test(mainCode),
+    'no card branch may decide anything from `snippetKey` alone (the gate is the authority)')
+  assert.ok(!/(?<!['"`=])\{!snippetKey\b/.test(mainCode),
+    'no card branch may gate a surface on `snippetKey` alone')
+  assert.ok(!/graphMissingCta\(false\)/.test(mainCode),
+    'the snippet-branch CTA must not be pinned to the self-fork arm')
   // The graph-missing card's key-present branch is the OTHER "the key is live"
   // surface on these two cards, and it reads the GATE's own held plaintext — one
   // fact, not a conjunction of two (a stale reveal plus some other usable row
   // used to pass a `snippetKey && keyIsLive` test and print a dead key as live).
-  // The lookbehind keeps the pinned EXPRESSION out of a string/template literal:
-  // a decoy `'{connectGate.key ?'` must not satisfy a pin (the comment-stripper
-  // cannot help here — strings are code by design).
+  // The presence pin is BACKED by the defect-form negatives above, which a decoy
+  // cannot disarm.
   assert.match(mainCode, /(?<!['"`])\{connectGate\.key \?/,
     'the graph-missing snippet branch must be gated on the gate\'s own held plaintext')
-  assert.ok(!/\{snippetKey \?/.test(mainCode),
-    'no branch may render the snippet from `snippetKey` alone')
   // …and the API Keys affordance is on the same fact: the owner clause names that
   // tab exactly when the gate holds no usable key, so the button must be there
   // then (the old `!snippetKey` gate withheld it in the stale-reveal state)
