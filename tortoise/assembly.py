@@ -53,6 +53,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.entity_identity import record_non_folded  # #3633 route-then-refuse
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
 __all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
@@ -502,7 +503,7 @@ def resolve_subjects(port: ResolverPort, terms: list[str], *,
 
 def docker_resolver_port(sdk) -> ResolverPort:
     """Adapter over a live TortoiseSDK: exact probe via the projection's
-    Object id/name index (one batched query), FTS via
+    Object id/name index (TWO arm probes — id space, name space), FTS via
     ``tortoise_fts_query(entity_type='object')``, alias via one anchored
     search_keys query. Function-level imports keep the module import-safe
     (no sdk import at module scope).
@@ -513,7 +514,8 @@ def docker_resolver_port(sdk) -> ResolverPort:
     the sibling Object-anchor resolvers — ``aggregate.py``,
     ``coverage_loop.py`` — remain status-blind; #2977 Task 5 owns the
     search-lane vocabulary.) The exact + alias legs carry it as a Cypher
-    conjunct (the graph filters; the batched exact probe stays one query).
+    conjunct (the graph filters; each arm of the exact probe is its own
+    query).
     The FTS leg CANNOT take that conjunct — ``search_engine`` gates its
     terminal clause on ``label == 'Point'`` so an Object FTS hit still
     carries a terminal status — and its rows are filtered here instead,
@@ -547,13 +549,66 @@ def docker_resolver_port(sdk) -> ResolverPort:
     # batch content-fetch degradation, which is what drops ``status``.
 
     def exact_objects(names: list[str]) -> list[dict]:
-        rows = proj.g.query(
+        # #3633 §B.1 route-then-refuse, per ref: the single
+        # `o.name IN $names OR o.id IN $names` union mixed the id space and the
+        # name space in ONE name-keyed coordinate and silently returned both.
+        # The arms are resolved APART — an exact id match is unambiguous and
+        # wins; a NAME-form ref resolves only when exactly ONE non-`retracted`
+        # Object holds it (`status_filter` is #3317's Object vocabulary, NOT the
+        # full D2 terminal set). Two or more same-name carriers is a refusal
+        # (the non-folded entry is recorded, the ref is dropped), never a union.
+        # OVERRIDES: D2's live-holder ambiguity count — a name held by one live
+        # + one terminal (superseded/deprecated/archived) Object REFUSES here
+        # rather than resolving to the live one. #3317 owns this port's Object
+        # vocabulary (only `retracted` is excluded; D2's full set is #2977 Task
+        # 5, still open), so the port's own candidate set defines "more than one
+        # candidate", and refusing is fail-closed. See #3633's OVERRIDES
+        # comment.
+        id_rows = proj.g.query(
             "MATCH (o:Object) "
-            "WHERE (o.name IN $names OR o.id IN $names) "
+            "WHERE o.id IN $names "
             f"{status_filter}"
             "RETURN o.id, o.name",
             params={"names": names}).result_set
-        return [{"id": r[0], "name": r[1]} for r in rows]
+        name_rows = proj.g.query(
+            "MATCH (o:Object) "
+            "WHERE o.name IN $names "
+            f"{status_filter}"
+            "RETURN o.id, o.name",
+            params={"names": names}).result_set
+        by_id: dict[str, list] = {}
+        for r in id_rows:
+            if r[0]:
+                by_id.setdefault(r[0], []).append((r[0], r[1]))
+        by_name: dict[str, list] = {}
+        for r in name_rows:
+            by_name.setdefault(r[1], []).append((r[0], r[1]))
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        for ref in names:
+            id_hits = by_id.get(ref, [])
+            if id_hits:
+                # Two live Objects claiming ONE id is raw corruption: refuse,
+                # never keep the last (mirrors resolve_entity_id's >1-id
+                # refusal). A value-keyed dict would silently drop the other.
+                if len(id_hits) > 1:
+                    record_non_folded("Object", ref,
+                                      [h[0] for h in id_hits])
+                    continue
+                row = id_hits[0]
+            else:
+                hits = by_name.get(ref, [])
+                if len(hits) > 1:
+                    record_non_folded("Object", ref, [h[0] for h in hits])
+                    continue
+                if not hits:
+                    continue
+                row = hits[0]
+            if row in seen:
+                continue
+            seen.add(row)
+            out.append({"id": row[0], "name": row[1]})
+        return out
 
     def fts_objects(term: str, limit: int = 8) -> list[dict]:
         # raises on embedded (no fulltext index) — the resolver degrades

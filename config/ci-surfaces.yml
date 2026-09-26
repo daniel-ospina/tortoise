@@ -522,6 +522,7 @@ surfaces:
   # counts. Editing any of those selected NO surface, so the drift gate never ran
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
+  - test_entity_identity.py
   - test_graph_name_ownership.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
@@ -1251,6 +1252,13 @@ surfaces:
   # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
   - test_env_truthy.py
+  # #3633: the name-keyed-identity read sweep and the `find_subject_by_name`
+  # route-then-refuse guard import `tortoise/onboarding/seed.py`, and an
+  # `onboarding` surface match REPLACES the `core` fallback
+  # (tools/ci_selection.py) — so the guard needs this arm too (same reason as
+  # test_env_truthy.py above). Dual-registered with `core`, like
+  # test_bridge_table.py: a seed.py-only change must not drop the guard.
+  - test_entity_identity.py
   - test_admin_return_to.py
   # #4171: the retired admin origin's single-hop redirect (executes
   # website/functions/_middleware.ts under Node) and the console's move to the

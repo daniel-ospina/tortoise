@@ -27,6 +27,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..entity_identity import AmbiguousEntityName
+from ..live import _terminal_excluded
+
 # ── ontology vocabulary (ONTOLOGY.md §4.2/§5, §3.6) ──────────
 
 ORG_ANCHOR_KIND = "organization"
@@ -142,18 +145,35 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
 
 
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
-    """Existing Subject node props with the given ``name`` (None when
-    absent). Subject-only: an Object/Statement with the same name is a
-    different label and can never collide with an anchor (B1)."""
-    res = _run(handle, "MATCH (s:Subject {name: $name}) RETURN properties(s) "
-                       "LIMIT 1", {"name": name})
-    if not res.result_set:
+    """The single LIVE Subject props holding ``name`` (None when absent).
+
+    #3633 route-then-refuse (the #3590 plan's §B.1 disposition): a name is a
+    natural key over LIVE Subjects, and same-name coexistence is legal (D2).
+    Zero live holders -> None; exactly one -> its props; two or more ->
+    ``AmbiguousEntityName``. The old ``LIMIT 1`` returned an ARBITRARY carrier,
+    so a same-name pair could claim — or collide against — the wrong identity.
+    Subject-only: an Object/Statement with the same name is a different label
+    and can never collide with an anchor (B1)."""
+    res = _run(handle,
+               "MATCH (s:Subject {name: $name}) "
+               f"WHERE {_terminal_excluded('s.status')} "
+               "RETURN properties(s)",
+               {"name": name})
+    rows = getattr(res, "result_set", None) or []
+    if not rows:
         return None
-    raw = res.result_set[0][0]
-    if isinstance(raw, dict):
-        return dict(raw)
-    props = getattr(raw, "properties", None)
-    return dict(props) if isinstance(props, dict) else {}
+    props: list[dict[str, Any]] = []
+    for row in rows:
+        raw = row[0]
+        if isinstance(raw, dict):
+            props.append(dict(raw))
+        else:
+            existing = getattr(raw, "properties", None)
+            props.append(dict(existing) if isinstance(existing, dict) else {})
+    if len(props) > 1:
+        raise AmbiguousEntityName(
+            "Subject", name, [p.get("id") for p in props])
+    return props[0]
 
 
 # ── two-Subject seed ─────────────────────────────────────────
@@ -242,7 +262,20 @@ def _classify_anchor(sdk: Any, *, name: str, kind: str,
     {"subject": props} = OURS (reuse + normalize on match); raises
     ``SubjectCollision`` when a same-name Subject exists that is not ours
     (identity-unprovable or ref-mismatch). Zero writes."""
-    existing = find_subject_by_name(sdk, name)
+    try:
+        existing = find_subject_by_name(sdk, name)
+    except AmbiguousEntityName as exc:
+        # #3633: a name held by two live Subjects has no single identity to
+        # classify — refuse through the seed's OWN contract (callers map
+        # SubjectCollision to a disambiguation response) rather than adding an
+        # arbitrary carrier to the graph.
+        raise SubjectCollision(
+            name=name, kind=kind, existing_id=None,
+            reason=("same-name Subject is ambiguous — "
+                    f"{len(exc.candidate_ids)} live carriers "
+                    f"{list(exc.candidate_ids)}; never a silent pick, "
+                    "disambiguate (suffix/canonical key)"),
+            refs={}) from exc
     if existing is None:
         return None
     if not is_own_subject(existing, **ours_refs):

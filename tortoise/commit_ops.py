@@ -369,10 +369,36 @@ def _supersession_fold_order(proj, records):
     # folds them by name but they are id-less, and only id-carrying nodes
     # can be visible successors).
     refs_sorted = sorted({ref for _, ref, _ in entity})
-    tgt_rows = proj.g.query(
-        "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
-        "RETURN o.id, o.name",
-        params={"ids": refs_sorted, "names": refs_sorted}).result_set
+    # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` disjunction is a
+    # name-keyed union that mixed two identity spaces in one probe. Resolve the
+    # arms APART (a node matched by both is one row, hence the dedupe) — the
+    # discipline below is unchanged: an id-form ref wins; a name-form ref
+    # resolves only via a SINGLE carrier (>1 = never-guess).
+    # OVERRIDES: D2's live-holder ambiguity count — no `live._terminal_excluded`
+    # filter is applied here, so one live + one terminal same-name carrier is
+    # TWO candidates and REFUSES rather than resolving to the live one. A fold
+    # target may itself be terminal (an idempotent re-supersession), so a
+    # live-only filter would turn a re-application into "not found" and change
+    # documented fold behaviour. Fail-closed either way. See #3633's OVERRIDES
+    # comment.
+    _id_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id IN $ids RETURN ID(o), o.id, o.name",
+        params={"ids": refs_sorted}).result_set
+    _name_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.name IN $names RETURN ID(o), o.id, o.name",
+        params={"names": refs_sorted}).result_set
+    # Dedupe by NODE identity, never by the projected (id, name) pair: two
+    # DISTINCT id-less same-name Objects both project (None, name), so a
+    # value-keyed dedupe collapses the pair to ONE row and hands the loop a
+    # single "carrier" — re-folding by name exactly the ambiguity this split
+    # exists to refuse (pre-split the OR-union returned both rows and the
+    # >1-name never-guess caught it).
+    _merged: dict[object, tuple] = {}
+    for _row in _id_rows:
+        _merged[_row[0]] = (_row[1], _row[2])
+    for _row in _name_rows:
+        _merged.setdefault(_row[0], (_row[1], _row[2]))
+    tgt_rows = list(_merged.values())
     by_id: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for oid, name in tgt_rows:
@@ -600,11 +626,33 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # pre-fix rows, pinned by
         # test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name.
         # No truncation happens here — only at the compare (legacy tolerance).
-        rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
-            "RETURN o.id, o.name, o.status, o.supersededBy",
-            params={"ids": [ref], "names": [ref]},
+        # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` union is split
+        # into two probes (deduped) — the disambiguation below is unchanged
+        # (an id match is unambiguous and wins; the >1-name never-guess stays).
+        # OVERRIDES: D2's live-holder ambiguity count — see the twin marker in
+        # `_supersession_fold_order`: a live + terminal same-name pair is TWO
+        # candidates here and REFUSES, because the fold target itself may be
+        # terminal. See #3633's OVERRIDES comment.
+        _id_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id = $ref "
+            "RETURN ID(o), o.id, o.name, o.status, o.supersededBy",
+            params={"ref": ref},
         ).result_set
+        _name_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.name = $ref "
+            "RETURN ID(o), o.id, o.name, o.status, o.supersededBy",
+            params={"ref": ref},
+        ).result_set
+        # Dedupe by NODE identity (see _supersession_fold_order): a value-keyed
+        # dedupe collapses two DISTINCT id-less same-name Objects into one row
+        # and hides the >1-carrier never-guess below.
+        _merged: dict[object, tuple] = {}
+        for _row in _id_rows:
+            _merged[_row[0]] = (_row[1], _row[2], _row[3], _row[4])
+        for _row in _name_rows:
+            _merged.setdefault(
+                _row[0], (_row[1], _row[2], _row[3], _row[4]))
+        rows = list(_merged.values())
         if not rows:
             warn(f"supersession ref {ref!r} not found in the graph — "
                  f"skipped (fail-open)")
