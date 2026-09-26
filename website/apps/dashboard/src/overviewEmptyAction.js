@@ -94,9 +94,12 @@ export function OverviewEmptyActions({ snippetKey }) {
 // and the BUILD fork renders no such route at all (its step 2 is the SDK block,
 // `main.jsx` `wizardStep === 2 && (isBuildFork ?`), so the card offered a
 // build-fork organization a route that branch never creates. This module owns
-// that derivation: ONE function of the SAME `buildFork` main.jsx already
-// derives, consumed by the action below — not a second surface deciding for
-// itself what the fork offers (#4637's mechanism).
+// that ACTION — its label and its destination; the PROSE that names the same
+// route lives with the lead-ins it belongs to (`onboardingEmptyStateKeyNote.js`,
+// which owns `SELF_ROUTE_CLAUSE`), and both derive from the same `buildFork`
+// main.jsx derives. They are two registers of one fact (a button label and a
+// clause inside a sentence), so they are asserted to take the same arm per fork
+// rather than forced into one string (note test, cross-module).
 //
 // The build arm names the route the build fork's OWN step-2 block offers (the
 // SDK documentation anchor there), so the two cannot promise different things.
@@ -112,6 +115,12 @@ export function OverviewEmptyActions({ snippetKey }) {
 //     those literals are not consolidated here (that module is owned by another
 //     in-flight change) and the SDK_DOCS_HREF claim is scoped to the two
 //     `main.jsx` surfaces this change unifies.
+// #4637: the SDK documentation URL. It is owned HERE because this is the module
+// that ships it to an action a user can click; its consumers are this file's
+// build arm and `main.jsx`'s two wizard docs anchors (step 2's "SDK
+// documentation →" and the closing card's "Read the docs"), which import it
+// rather than re-typing the URL. It is NOT the only literal of that URL in the
+// repo — see the ⚠️ above.
 export const SDK_DOCS_HREF = 'https://tortoise.premiselabs.co/docs'
 // The agent-connection route the self/undecided arm has always offered. Named
 // for what it IS (the onboarding funnel's url), not for the surface it is

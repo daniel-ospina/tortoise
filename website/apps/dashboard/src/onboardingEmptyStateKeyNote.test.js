@@ -38,6 +38,8 @@ import {
   graphMissingCta,
 } from './onboardingEmptyStateKeyNote.js'
 import { HARNESS_NAMES, HARNESS_OAUTH } from './harnesses.js'
+import { connectKeyGate } from './sessionKey.js'
+import { emptyStateActionRoute, SDK_DOCS_HREF } from './overviewEmptyAction.js'
 
 // react-dom/server escapes `'` to `&#x27;`; normalize so assertions pin the
 // copy a user READS, and so a negative assertion on an apostrophe phrase is not
@@ -164,12 +166,25 @@ const renderOwner = (variant,
   renderToStaticMarkup(React.createElement(OwnerEmptyStateKeyNote,
     { variant, buildFork, connectGateMode, keyLive })).replace(/&#x27;/g, "'")
 const GATE_MODES = ['mint', 'existing', 'embed', 'loading', 'error']
-const OWNER_CREATE_CLAUSE = 'one is created on the connect step when you get there'
+const OWNER_CREATE_CLAUSE = 'one is created on the connect step when you get there, or in the API Keys tab'
 // The two clauses the note derives from the GATE MODE alone (never from the
 // card's `snippetKey` branch), per fork on the live arms.
 const OWNER_LIVE_EMBED = 'the setup step shows your new key'
-const OWNER_LIVE_EXISTING = 'the setup step uses the key your organization already has'
-const OWNER_UNKNOWN_STEP = 'the connect step works it out from the keys your organization holds'
+const OWNER_LIVE_EXISTING = 'the setup step can use a key your Organization already has, or create a new one if your plan has room'
+const OWNER_UNKNOWN_STEP = 'the connect step works it out from the keys your Organization holds'
+
+// The gate's own vocabulary, DERIVED from the gate rather than re-typed: drive
+// `connectKeyGate`'s five return paths (sessionKey.js) and collect the modes it
+// actually returns. A hand-maintained list here would keep this file green after
+// the gate grew a sixth mode (and would leave the note's maps silently partial),
+// which is the opposite of what the assert below claims.
+const gateModes = () => new Set([
+  connectKeyGate('wk_live', [], true, false).mode,                        // embed
+  connectKeyGate('', [], false, false).mode,                              // loading
+  connectKeyGate('', [], false, true).mode,                               // error
+  connectKeyGate('', [{ key_prefix: 'wk_live2', enabled: true }], true, false).mode, // existing
+  connectKeyGate('', [], true, false).mode,                               // mint
+])
 
 // The owner arms' "a key is already live" fact — ONE derivation, executed here.
 // RED direction: widening it (e.g. `mode !== 'mint'`) or narrowing it to
@@ -182,11 +197,13 @@ test('#4637: `ownerKeyLive` admits exactly the two modes that resolve a usable k
   for (const mode of ['mint', 'loading', 'error', '', null, undefined, 'EMBED', 'nonsense']) {
     assert.equal(ownerKeyLive(mode), false, `${mode}: no usable key is resolved`)
   }
-  // and it is the GATE's vocabulary, not an open test: every mode the gate can
-  // return is classified above (sessionKey.js `connectKeyGate`)
-  for (const mode of GATE_MODES) {
-    assert.equal(typeof ownerKeyLive(mode), 'boolean', `${mode} must be classifiable`)
-  }
+  // …and it is the GATE's vocabulary, not an open test: the derivation above is
+  // TOTAL over every mode the gate can actually return, which is what makes the
+  // maps in the note module complete. A sixth gate mode fails HERE rather than
+  // silently rendering the fallback sentence.
+  const modes = gateModes()
+  assert.deepEqual([...modes].sort(), [...GATE_MODES].sort(),
+    'connectKeyGate returned a mode this suite does not know — classify it (ownerKeyLive + the note maps)')
 })
 
 // (a) the key promise. The gate's own contract: only 'mint' may create a key;
@@ -209,9 +226,9 @@ test('#4637: only the mint gate promises a key creation on the connect step', ()
       `${variant}/absent: a missing gate mode must not promise a creation — got ${absent}`)
     // the two unresolved modes still say what the step does instead
     assert.match(renderOwner(variant, { connectGateMode: 'error' }),
-      /reads your organization's keys again/)
+      /reads your Organization's keys again/)
     assert.match(renderOwner(variant, { connectGateMode: 'loading' }),
-      /once it has read the keys your organization holds/)
+      /once it has read the keys your Organization holds/)
   }
 })
 
@@ -319,6 +336,19 @@ test('#4637: the graph-missing snippet-branch call to action is fork-derived', (
   assert.ok(!/connect your agent/i.test(graphMissingCta(true)))
 })
 
+// The prose that names the route (this module) and the action label that offers
+// it (`overviewEmptyAction.js`) are two registers of ONE fact and neither module
+// can see the other's table, so their agreement is asserted here instead of left
+// to a comment (#4637's mechanism was two surfaces each deciding it).
+test('#4637: the CTA prose and the action route take the same arm for every fork spelling', () => {
+  for (const rawFork of [true, false, undefined, null, 'build', 'self', 1, 0]) {
+    const proseTookBuildArm = graphMissingCta(rawFork) === graphMissingCta(true)
+    const actionTookBuildArm = emptyStateActionRoute(rawFork).href === SDK_DOCS_HREF
+    assert.equal(proseTookBuildArm, actionTookBuildArm,
+      `fork ${JSON.stringify(rawFork)}: the prose and the action must describe the same fork arm`)
+  }
+})
+
 test('#3729 wiring: main.jsx renders the guarded note at all three member arms with the derived boolean', () => {
   const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
   // Props/branches are checked on COMMENT-STRIPPED source, so a comment between
@@ -329,8 +359,10 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   // not layout based: a source-text regex anchored on the attribute ORDER or on
   // the newline comes apart the moment a prop moves or a formatter reflows the
   // tag — it would then pass while the binding is wrong, or fail while it is
-  // right. Extract each tag and check the bindings it carries.
-  const memberTags = mainJsx.match(/<MemberEmptyStateKeyNote[\s\S]*?\/>/g) || []
+  // right. Extract each tag and check the bindings it carries — from the
+  // COMMENT-STRIPPED source, so a JSX comment quoting a tag cannot inflate the
+  // count and a commented-out real site cannot satisfy a pin.
+  const memberTags = mainCode.match(/<MemberEmptyStateKeyNote[\s\S]*?\/>/g) || []
   assert.equal(memberTags.length, 3,
     `all three member arms must render the note — found ${memberTags.length}`)
   for (const tag of memberTags) {
@@ -339,8 +371,8 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     assert.ok(!/buildFork=\{(?!isBuildFork\})/.test(tag),
       `no member site may re-decide the fork — got ${tag}`)
   }
-  assert.ok(mainJsx.includes("const isBuildFork = wizardFork === 'build'"),
-    'the fork predicate must stay the strict comparison to the literal build')
+  assert.ok(mainCode.includes("const isBuildFork = wizardFork === 'build'"),
+    'the fork predicate must stay the strict comparison to the literal build (stripped source: a commented-out predicate must not satisfy this)')
   assert.ok(!/You'll need an API key/.test(mainJsx),
     'the categorical member claim must be gone from main.jsx')
   // the member lead-ins survive AND are attached to the guarded note — the
@@ -352,8 +384,10 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     'the graph-missing member lead-in stays attached to the note')
   assert.ok(/REENTRY_SELF_LEAD_IN\}\s*<MemberEmptyStateKeyNote/.test(mainCode),
     'the re-entry member lead-in stays attached to the note')
-  assert.ok(/"You're in — finish the setup below to connect your agent\. "\}\s*<MemberEmptyStateKeyNote/.test(mainCode),
-    'the existing-key member lead-in stays attached to the note')
+  assert.ok(/REENTRY_KEYED_LEAD_IN\}\s*<MemberEmptyStateKeyNote/.test(mainCode),
+    'the existing-key member lead-in is the shared constant, attached to the note')
+  assert.ok(!mainCode.includes("\"You're in — finish the setup below to connect your agent. \""),
+    'the existing-key member lead-in must not be re-typed inline in main.jsx')
   assert.ok(!mainJsx.includes('paste the key an owner or admin shared with you'),
     'the old key-only member sentence is gone')
   // the re-entry BUILD lead-in is ONE literal (now imported from the note
@@ -375,16 +409,17 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   // (it asks them to find an owner). Each card renders both families from ONE
   // `isOwnerAdmin` ternary: 2 owner arms (`isOwnerAdmin ? <OwnerEmptyState…`,
   // one per card — the re-entry card used to render it twice, once per key
-  // state) and 3 member arms, each opening a fork-selected fragment in the
-  // member branch.
+  // state) and 3 member arms, each opening a fork-selected fragment. The two
+  // counts are taken independently (no distance-bounded regex: a longer
+  // intervening expression is a reformat, not a regression).
   const ownerArms = mainCode.match(/isOwnerAdmin\s*\?\s*<OwnerEmptyStateKeyNote/g) || []
   assert.equal(ownerArms.length, 2,
     `one owner arm per card, gated on isOwnerAdmin — found ${ownerArms.length}`)
   assert.equal((mainCode.match(/<OwnerEmptyStateKeyNote/g) || []).length, ownerArms.length,
     'every owner note must sit in an isOwnerAdmin arm')
-  const memberArms = mainCode.match(/[?:]\s*<>\{isBuildFork[\s\S]{0,200}?<MemberEmptyStateKeyNote/g) || []
-  assert.equal(memberArms.length, 3,
-    `three member arms, each opening a fork-selected fragment — found ${memberArms.length}`)
+  const memberForkArms = mainCode.match(/[?:]\s*<>\{isBuildFork/g) || []
+  assert.equal(memberForkArms.length, 3,
+    `three member arms, each opening a fork-selected fragment — found ${memberForkArms.length}`)
   // #4637: the OWNER note is wired at BOTH owner arms (one per card) with the
   // derived facts. A count alone is not enough — every site must pass main.jsx's
   // single `isBuildFork`, the gate mode the wizard's own key affordance switches
@@ -398,21 +433,28 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     assert.match(tag, /variant="(?:reentry|graph-missing)"/, `variant must be a card name — got ${tag}`)
     assert.match(tag, /buildFork=\{isBuildFork\}/, `buildFork must be the derived boolean — got ${tag}`)
     assert.match(tag, /connectGateMode=\{connectGate\.mode\}/, `the gate mode must be passed — got ${tag}`)
-    assert.match(tag, /keyLive=\{ownerKeyIsLive\}/,
-      `keyLive must be the ownerKeyLive derivation — got ${tag}`)
+    assert.match(tag, /keyLive=\{keyIsLive\}/,
+      `keyLive must be the gate-derived boolean — got ${tag}`)
   }
-  // …the derivation itself: ONE call, of the gate's mode, in main.jsx
-  assert.ok(mainCode.includes('const ownerKeyIsLive = ownerKeyLive(connectGate.mode)'),
-    'main.jsx must derive the key-live fact from the gate through ownerKeyLive')
+  // …the derivation itself (`const keyIsLive = ownerKeyLive(connectGate.mode)`) is
+  // pinned ONCE, by `wizardConnectTripwire.test.js` — that file owns the
+  // gate-authority pin from #3783, and a second copy here would be an
+  // unowned duplicate that a fix in one file could silently weaken. This file
+  // owns what the ARMS pass, above.
   // …and the owner arms may not go back to deciding it themselves: no bare
   // `keyLive` shorthand (which is `true`), no `snippetKey`-based or
   // single-mode expression
   for (const tag of ownerTags) {
-    assert.ok(!/keyLive(?!=\{ownerKeyIsLive\})/.test(tag),
+    assert.ok(!/keyLive(?!=\{keyIsLive\})/.test(tag),
       `an owner arm may not shorthand or re-decide keyLive — got ${tag}`)
     assert.ok(!/snippetKey/.test(tag),
       `an owner arm may not read the in-memory snippet — got ${tag}`)
   }
+  // The graph-missing card's key-present branch is the OTHER "the key is live"
+  // surface on these two cards, and it is gated on the same derivation: the
+  // snippet needs a plaintext to print AND the gate's word that it is usable.
+  assert.match(mainCode, /\{snippetKey && keyIsLive \?/,
+    'the graph-missing snippet branch must also require the gate-derived liveness')
   // the graph-missing card's key-present call to action names the same route,
   // so it consumes the same derivation instead of hard-coding ONE fork's prose
   assert.ok(mainCode.includes('{graphMissingCta(isBuildFork)}'),

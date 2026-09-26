@@ -127,12 +127,17 @@ export function MemberEmptyStateKeyNote({ variant, buildFork }) {
 //       read is unresolved too — the connect step's own affordance
 //       (`wizardKeysUnavailableKeyAffordance`) states that nothing is created
 //       until the rows can be read.
-//   (b) they named the chooser route ("connect your agent") on a BUILD fork,
-//       whose step 2 is the SDK block and renders no chooser.
+//   (b) they named the agent-connection route ("connect your agent") on a BUILD
+//       fork, whose step 2 is the SDK block and renders no chooser.
 //
 // Both are DERIVED facts, consumed here, never re-decided:
-//   * `buildFork` — main.jsx's single `wizardFork === 'build'` derivation (the
-//     same boolean the member note consumes);
+//   * `buildFork` — main.jsx's canonical `wizardFork === 'build'` derivation
+//     (the same boolean the member note consumes). Two sibling sites still
+//     re-derive the fact inline (`main.jsx` `onboarding.fork === 'build'`);
+//     they are equivalent today only because `wizardFork = wizardForkChosen ||
+//     (onboarding && onboarding.fork)` happens to distribute over `||` — filed
+//     as #5437, out of this change's scope; this module consumes the canonical
+//     one only;
 //   * `connectGateMode` — `connectKeyGate`'s mode (sessionKey.js): the gate the
 //     wizard's OWN key affordance switches on. Its own contract, in sessionKey
 //     .js's words: a key may be minted ONLY on 'mint'; 'loading'/'error' are
@@ -140,15 +145,21 @@ export function MemberEmptyStateKeyNote({ variant, buildFork }) {
 //     promises creation outside 'mint' promises what the branch withholds.
 //
 // The lead-ins live HERE, beside the notes they introduce, because the lead-in
-// IS where the chooser route is named — the route half of #4637. main.jsx's
-// member arms and the owner note below consume these same literals (and the
-// key-live lead-ins below build on the same clause), so a surface cannot
-// re-decide what the fork offers (the #4637 mechanism was two surfaces each
-// deciding it). A route clause kept per-surface is exactly how the build fork
-// came to be told to "connect your agent".
-// The self/undecided fork's route clause, per card — ONE copy of the chooser
-// wording, consumed by the shared lead-ins AND the key-live lead-ins below, so
-// the phrase cannot be re-typed per arm and drift.
+// IS where the agent-connection route is named — the route half of #4637.
+// main.jsx's member arms and the owner note below consume these same literals
+// (and the key-live lead-ins below build on the same clause), so a surface
+// cannot re-decide what the fork offers (the #4637 mechanism was two surfaces
+// each deciding it). A route clause kept per-surface is exactly how the build
+// fork came to be told to "connect your agent".
+//
+// ⚠️ Scope of the single-sourcing: it covers the four lead-in constants and the
+// key-live lead-ins below (all built from `SELF_ROUTE_CLAUSE`). It does NOT
+// cover the action module's route LABEL ('Connect your agent →' in
+// `overviewEmptyAction.js`), a different register for a different artifact; the
+// two are asserted to take the same arm per fork (see the cross-module test).
+// The self/undecided fork's route clause, per card — ONE copy of the wording,
+// consumed by all four lead-ins below, so the phrase cannot be re-typed per arm
+// and drift.
 const SELF_ROUTE_CLAUSE = {
   reentry: ' to connect your agent',
   'graph-missing': ' — connect your agent below',
@@ -156,14 +167,19 @@ const SELF_ROUTE_CLAUSE = {
 export const REENTRY_BUILD_LEAD_IN = 'Your Organization is live — finish the setup below. '
 export const REENTRY_SELF_LEAD_IN =
   `Your Organization is live — finish the setup below${SELF_ROUTE_CLAUSE.reentry}. `
+// The re-entry card's member arm for a key the Organization already has. Same
+// route clause as its siblings — it used to be an inline literal in main.jsx,
+// which is how a member arm could be re-worded without the owner arms following.
+export const REENTRY_KEYED_LEAD_IN =
+  `You're in — finish the setup below${SELF_ROUTE_CLAUSE.reentry}. `
 export const GRAPH_MISSING_BUILD_LEAD_IN = 'Your Organization is live. '
 export const GRAPH_MISSING_SELF_LEAD_IN =
   `Your Organization is live${SELF_ROUTE_CLAUSE['graph-missing']}. `
 
-// The graph-missing card's key-present (snippet) branch names the same connect
-// route in prose, so it is fork-derived too: the build fork sets up the SDK and
-// has no chooser to connect through. A plain string with ONE consumer, rendered
-// by main.jsx from this function (the guard executes the function).
+// The graph-missing card's key-present (snippet) branch names the same route in
+// prose, so it is fork-derived too: the build fork sets up the SDK and has no
+// chooser to connect through. A plain string with ONE consumer, rendered by
+// main.jsx from this function (the guard executes the function).
 export function graphMissingCta(buildFork) {
   return buildFork === true
     ? 'Call the Tortoise SDK from your app, or add a memory yourself:'
@@ -178,32 +194,45 @@ export function graphMissingCta(buildFork) {
 // credential and no outcome (a resolved read may find an existing key, may
 // create one, or may find nothing to show).
 const OWNER_NO_KEY_AT_STEP = {
-  mint: 'one is created on the connect step when you get there',
-  loading: 'the connect step decides whether to show or create a key once it has read the keys your organization holds',
-  error: "the connect step reads your organization's keys again before creating anything",
+  mint: 'one is created on the connect step when you get there, or in the API Keys tab',
+  loading: 'the connect step decides whether to show or create a key once it has read the keys your Organization holds',
+  error: "the connect step reads your Organization's keys again before creating anything",
 }
 
 // A key the Organization already HOLDS, per gate mode — the two modes the
 // wizard's own key affordance distinguishes: 'embed' (a plaintext is held in
 // this browser and the step shows it) and 'existing' (a usable durable row
-// whose value is shown once, so the step routes to using it).
+// whose value is shown once, so the step routes to using it, and offers a fresh
+// mint as an explicit alternative — `wizardExistingKeyAffordance`). The clause
+// names both, because the affordance offers both.
+//
+// ⚠️ Neither clause is CAP-AWARE: `connectKeyGate` resolves 'mint'/'existing'
+// without consulting the plan's key allowance, and the card does not receive
+// `capNotice`/`wizardDurableCapped`. The pre-change copy had the same blind spot
+// ('one is created on the connect step' / 'can mint up to your plan's key
+// limit'), so this is a known pre-existing limit, not one this change
+// introduces.
 const OWNER_LIVE_KEY_AT_STEP = {
   embed: 'the setup step shows your new key',
-  existing: 'the setup step uses the key your organization already has',
+  existing: 'the setup step can use a key your Organization already has, or create a new one if your plan has room',
 }
 
 // Any mode neither map admits is UNCLASSIFIED — the sentence then describes the
 // step's process and promises nothing. Fail-safe direction: a mode nobody has
 // taught these maps about can never make the copy assert a credential.
-const OWNER_AT_STEP_FALLBACK = 'the connect step works it out from the keys your organization holds'
+const OWNER_AT_STEP_FALLBACK = 'the connect step works it out from the keys your Organization holds'
 
 // Is the Organization's key already RESOLVED (the card's key-live state)? ONE
-// derivation, consumed by main.jsx and by the note below — `snippetKey` alone is
-// not the answer: a plaintext left over from the wizard (a stale `welcomeKey`,
-// or a pasted `apiKey` the gate does not read) is truthy while the gate may
-// resolve 'mint' — i.e. while the organization provably holds no usable key
-// (sessionKey.js `connectKeyGate`). The gate is the authority on the key's
-// state; the card's branch is derived from it.
+// derivation, consumed by main.jsx (both owner arms, and the graph-missing
+// card's snippet branch) and by the note below. `snippetKey` alone is not the
+// answer: it is `welcomeKey || apiKey` (main.jsx) — `welcomeKey` is the
+// in-memory reveal, and a reveal whose row was later revoked/disabled/rotated
+// is FALSY at the gate (`durableConnectKey`'s row-truth check) while still
+// truthy in memory. So the card could claim a key was live while the connect
+// step had none to offer. The gate is the authority on the key's state; the
+// card's branch is derived from it. (Nothing here reads localStorage: the
+// legacy key slot was removed in #2246 and `mintTripwire.test.js` pins its
+// absence.)
 export function ownerKeyLive(connectGateMode) {
   return connectGateMode === 'embed' || connectGateMode === 'existing'
 }
@@ -220,6 +249,14 @@ function ownerLiveLeadIn(variant, buildFork) {
 // The owner/admin empty-state note. `keyLive` is main.jsx's `ownerKeyLive` of
 // the gate mode; `variant` selects the lead-in; `buildFork` and `connectGateMode`
 // are the two derived facts documented above.
+//
+// The `keyLive` PROP is deliberate: this component is told the state, it does not
+// infer it, so the state main.jsx derived is visible at the call site and pinned
+// by the wiring test, and the render tests can exercise arms main.jsx cannot
+// currently reach (defense in depth). The trade-off is that a caller could pass
+// `keyLive` disagreeing with `connectGateMode`; no call site does (one derivation,
+// one prop), and an unreachable disagreement falls back to the promise-free
+// sentence rather than to a credential claim.
 //
 // Rendered as one component for the same reason the member note is: the guard
 // is an EXECUTED render of the live sentence, not a source-text grep.

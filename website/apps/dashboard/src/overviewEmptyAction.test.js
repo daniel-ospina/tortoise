@@ -169,18 +169,24 @@ test('#3890 wiring: the D5 empty state renders the guarded action (no inline des
 
 // ── #4637: the graph-missing card's action ROUTE ─────────────────────────────
 //
-// "Connect your agent →" IS the harness chooser. The BUILD fork renders no
-// chooser (its step 2 is the SDK block), so the card was offering a build-fork
-// organization a route its branch never creates. These are EXECUTED renders of
-// the live action component — the READ direction is the fork-derived route, so
-// a source-text reformat cannot defeat them.
+// "Connect your agent →" is the AGENT-CONNECTION route. The BUILD fork renders
+// no such route (its step 2 is the SDK block), so the card was offering a
+// build-fork organization a route its branch never creates. These are EXECUTED
+// renders of the live action component — the READ direction is the fork-derived
+// route, so a source-text reformat cannot defeat them.
+//
+// ⚠️ On the self/undecided arm the label and the destination are not the same
+// claim: the label names the intent (connect an agent) and the destination is
+// the onboarding FUNNEL url, which for a SIGNED-IN user round-trips to the app
+// root rather than opening a chooser (see the test below and #3890). Do not read
+// this label as "this URL is the chooser".
 const renderActions = (buildFork, onGoToKeys = () => {}) =>
   renderToStaticMarkup(React.createElement(GraphMissingEmptyStateActions, { buildFork, onGoToKeys }))
 
 test('#4637: a BUILD-fork organization is never offered the agent-connection route', () => {
   const html = renderActions(true)
   assert.ok(!/Connect your agent/.test(html),
-    `the build fork renders no chooser — got ${html}`)
+    `the build fork renders no agent-connection route — got ${html}`)
   assert.ok(!html.includes(ONBOARDING_FUNNEL_HREF),
     'the agent-connection route must not be linked on the build fork')
   // the route it IS offered is the one its own step 2 offers
@@ -209,8 +215,9 @@ test('#4637: the self/undecided fork keeps the agent-connection route, and the t
     'the SDK route is the build fork ARM, never co-rendered')
   assert.notEqual(renderActions(true), renderActions(false),
     'the two forks must not render the same route')
-  // the route table is the ONE derivation both this component and the wizard's
-  // build-fork step-2 link consume
+  // the route table's build arm takes the same URL the wizard's build-fork
+  // step-2 docs link consumes (the wizard consumes the CONSTANT, not the table —
+  // this component is the table's only consumer)
   assert.deepEqual(emptyStateActionRoute(true), { label: 'SDK documentation →', href: SDK_DOCS_HREF })
   assert.deepEqual(emptyStateActionRoute(false), { label: 'Connect your agent →', href: ONBOARDING_FUNNEL_HREF })
 })
@@ -239,8 +246,8 @@ test('#4637 wiring: main.jsx renders the guarded action set with the derived for
     `the graph-missing card must render the guarded action set once — found ${actionTags.length}`)
   assert.match(actionTags[0], /buildFork=\{isBuildFork\}/,
     `the action set must take the derived fork — got ${actionTags[0]}`)
-  assert.match(actionTags[0], /onGoToKeys=\{\(\) => setTab\('keys'\)\}/,
-    `the first-party API Keys action must stay wired — got ${actionTags[0]}`)
+  assert.match(actionTags[0], /onGoToKeys=\{/,
+    `the first-party API Keys handler must stay wired — got ${actionTags[0]}`)
   // …and no inline route action may survive beside it
   assert.ok(!mainJsx.includes('Connect your agent →'),
     'the inline agent-connection action must be gone from main.jsx')

@@ -1494,12 +1494,15 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
   // #4637: the Overview's live-key claim is now ONE derivation — `ownerKeyLive`
-  // of the gate's mode — consumed by BOTH owner arms, so the gate remains its
-  // only authority (the old form tested the gate but ALSO the in-memory
-  // `snippetKey`, which a stale localStorage plaintext can satisfy while the
-  // gate resolves 'mint'). The member arm keeps its own key-state branch: its
-  // two lead-ins assert nothing about which key is usable.
-  assert.match(src, /const ownerKeyIsLive = ownerKeyLive\(connectGate\.mode\)/,
+  // of the gate's mode — consumed by both owner arms AND by the graph-missing
+  // card's snippet branch, so the gate remains its only authority. The old form
+  // tested the gate but ALSO the in-memory `snippetKey`, which stays truthy after
+  // its row is revoked (the gate's `durableConnectKey` row-truth check drops it),
+  // so the card could claim a key was live with nothing usable behind it. The
+  // member arm keeps its own key-state branch: its two lead-ins assert nothing
+  // about which key is usable. (The derivation is pinned HERE, once — the note
+  // test owns what the arms pass it.)
+  assert.match(src, /const keyIsLive = ownerKeyLive\(connectGate\.mode\)/,
     'the re-entry Overview routes its live-key claim through the gate')
   assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
     'the member arm of the re-entry card still consults the gate for its key state')
