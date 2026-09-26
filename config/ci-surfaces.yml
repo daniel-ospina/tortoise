@@ -788,6 +788,7 @@ surfaces:
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
+  - test_entity_identity.py   # #3633 name-keyed Object/Subject reads route-then-refuse (core: entity_identity.py + sdk.py)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
   # #4097: the env-truthiness contract + the non-divergence guard. The guard scans
@@ -1270,6 +1271,12 @@ surfaces:
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
+  # #3633: the seed's ambiguity refusal (`SubjectCollision(ambiguous=True)`) and
+  # its live-filtered `find_subject_by_name`. DUAL-registered from `core` because
+  # an `onboarding` surface match REPLACES the `core` fallback (tools/ci_selection.py),
+  # and `test_onboarding_seed.py`'s `_FakeSDK.query` ignores the Cypher `WHERE`,
+  # so it cannot pin either (#2938 convention).
+  - test_entity_identity.py
   # #2006 (W11): the funnel-event exact-once guard (emission gated on the
   # COMPLETED_STEP edge's new creation). Registered here for the
   # `tortoise/onboarding/state.py` `created` contract this feature depends on;

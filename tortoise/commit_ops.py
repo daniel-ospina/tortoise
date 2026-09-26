@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 
+from .entity_identity import record_non_folded  # #3633 route-then-refuse
 from .live import is_terminal_status  # #2498 shared terminal vocabulary
 
 _logger = logging.getLogger(__name__)
@@ -369,10 +370,28 @@ def _supersession_fold_order(proj, records):
     # folds them by name but they are id-less, and only id-carrying nodes
     # can be visible successors).
     refs_sorted = sorted({ref for _, ref, _ in entity})
-    tgt_rows = proj.g.query(
-        "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
-        "RETURN o.id, o.name",
-        params={"ids": refs_sorted, "names": refs_sorted}).result_set
+    # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` disjunction is a
+    # name-keyed union that mixed two identity spaces in one probe. Resolve the
+    # arms APART — the discipline below is unchanged: an id-form ref wins; a
+    # name-form ref resolves only via a SINGLE carrier (>1 = never-guess).
+    # Dedupe ACROSS the arms only (a node matched by both is one row); never
+    # WITHIN the name arm — two DISTINCT id-less carriers share every visible
+    # column, and collapsing them would hide the >1-name never-guess.
+    #
+    # OVERRIDES: D2's live-holder ambiguity count — this probe carries NO
+    # status filter and counts EVERY same-name carrier, because it resolves a
+    # supersession FOLD TARGET, which may itself be terminal (an idempotent
+    # re-application), so a live-only filter would turn a re-supersession into
+    # "not found". §B.1's disposition for this site is "route then refuse, per
+    # ref", and refusing is the safe direction. Do NOT narrow it to live
+    # holders. Recorded on #3633.
+    _id_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id IN $ids RETURN o.id, o.name",
+        params={"ids": refs_sorted}).result_set
+    _name_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.name IN $names RETURN o.id, o.name",
+        params={"names": refs_sorted}).result_set
+    tgt_rows = list(_id_rows) + [r for r in _name_rows if r not in _id_rows]
     by_id: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for oid, name in tgt_rows:
@@ -384,11 +403,20 @@ def _supersession_fold_order(proj, records):
     for ref in refs_sorted:
         if by_id.get(ref):
             if len(by_id[ref]) > 1:  # duplicate id claim — loop never-guesses
+                record_non_folded("Object", ref,
+                                  [o for o, _ in by_id[ref] if o],
+                                  carrier_count=len(by_id[ref]))
                 continue
             target_id[ref] = by_id[ref][0][0]
         elif len(by_name.get(ref, [])) == 1:
             target_id[ref] = by_name[ref][0][0] or None  # legacy id-less → None
-        # else ambiguous (>1 name) or dangling → the loop skips → no edges
+        elif len(by_name.get(ref, [])) > 1:
+            # >1 name carrier never-guesses (no edge); record the non-fold so
+            # the fold path is not the one silent refusal (#3633).
+            record_non_folded("Object", ref,
+                              [o for o, _ in by_name[ref] if o],
+                              carrier_count=len(by_name[ref]))
+        # else dangling → the loop skips → no edges
     # Edges over ORIGINAL record indices: R must fold before S when S's
     # fold terminalizes an object R's fold needs visible (S.target ∈ R's
     # successor-name candidates). Plan-review P0: the edge runs NEEDER→
@@ -585,11 +613,29 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # pre-fix rows, pinned by
         # test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name.
         # No truncation happens here — only at the compare (legacy tolerance).
-        rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
+        # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` union is split
+        # into two probes — the disambiguation below is unchanged (an id match
+        # is unambiguous and wins; the >1-name never-guess stays). Dedupe
+        # ACROSS the arms only: two DISTINCT id-less carriers share every
+        # visible column, so deduping within the name arm would collapse them
+        # into one row and defeat the never-guess.
+        #
+        # OVERRIDES: D2's live-holder ambiguity count — like
+        # ``_supersession_fold_order`` above, this probe is unfiltered by
+        # status (the fold target may be terminal) and counts every same-name
+        # carrier; §B.1's "route then refuse, per ref" is the disposition.
+        # Recorded on #3633.
+        _id_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id = $ref "
             "RETURN o.id, o.name, o.status, o.supersededBy",
-            params={"ids": [ref], "names": [ref]},
+            params={"ref": ref},
         ).result_set
+        _name_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.name = $ref "
+            "RETURN o.id, o.name, o.status, o.supersededBy",
+            params={"ref": ref},
+        ).result_set
+        rows = list(_id_rows) + [r for r in _name_rows if r not in _id_rows]
         if not rows:
             warn(f"supersession ref {ref!r} not found in the graph — "
                  f"skipped (fail-open)")
@@ -605,6 +651,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         by_id = [r for r in rows if r[0] == ref]
         if len(by_id) > 1:
             # two nodes claim the same id — raw-corruption artifact.
+            record_non_folded("Object", ref, [r[0] for r in by_id if r[0]],
+                              carrier_count=len(by_id))
             warn(f"supersession ref {ref!r} matches {len(by_id)} Objects "
                  f"by id — skipped (never-guess)")
             continue
@@ -615,6 +663,9 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             if len(by_name) > 1:
                 # never-guess: two Objects claim the same name, do not pick
                 # one (a blind LIMIT 1 would fold an arbitrary carrier).
+                record_non_folded("Object", ref,
+                                  [r[0] for r in by_name if r[0]],
+                                  carrier_count=len(by_name))
                 warn(f"supersession ref {ref!r} matches {len(by_name)} Objects "
                      f"by name — skipped (never-guess)")
                 continue

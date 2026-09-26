@@ -51,6 +51,8 @@ import logging
 import re
 from typing import Any
 
+from .live import _terminal_excluded  # #3633 the canonical live-holder predicate
+
 _logger = logging.getLogger("tortoise.session_link")
 
 # github.com/{org}/{repo}/issues/{n}
@@ -149,10 +151,15 @@ def _resolve_targets(proj, refs: list[dict[str, str]]) -> list[str]:
             # `{org}/{repo}#{n}`); bare `#n` matches any pm:issue Object whose
             # name ends with `#{n}`. EXACTLY-ONE rule: a single match links;
             # zero OR multiple matches ⇒ no-op (honest — the suffix cannot
-            # disambiguate org).
+            # disambiguate org). #3633: the match set is LIVE holders only —
+            # the module docstring's "never dangles on supersede" claim is
+            # only true if a lone TERMINAL holder cannot satisfy it (D2's
+            # `single_terminal_holder_reference` vector: refuse, never return
+            # a terminal id).
             suffix = f"{ref['repo']}#{num}" if ref["repo"] else f"#{num}"
             rows = proj.g.query(
                 "MATCH (o:Object) WHERE o.objectKind='pm:issue' "
+                f"AND {_terminal_excluded('o.status')} "
                 "AND o.name ENDS WITH $suffix RETURN o.id",
                 params={"suffix": suffix},
             ).result_set

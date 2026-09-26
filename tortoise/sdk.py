@@ -43,6 +43,8 @@ from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contra
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .entity_identity import (  # #3633 route-then-refuse identity resolution
+    resolve_document_target_id, resolve_entity_id)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
@@ -10128,29 +10130,30 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         proj = self._get_proj()
 
-        # 1. Validate approver Subject exists (fail loudly, not silently)
-        r = proj.g.query(
-            "MATCH (s:Subject) WHERE s.id = $id OR s.name = $id RETURN s.id",
-            params={"id": approver_id},
-        ).result_set
-        if not r:
+        # 1. Validate approver Subject exists (fail loudly, not silently).
+        # #3633 route-then-refuse: the old `s.id = $id OR s.name = $id` probe
+        # passed on an ARBITRARY row when two live Subjects shared a name, then
+        # wired the raw coordinate. Resolve id-or-name to EXACTLY ONE live id
+        # (>=2 -> AmbiguousEntityName) and rebind so every downstream write uses
+        # the id, never the name.
+        resolved_approver = resolve_entity_id(proj.g, "Subject", approver_id)
+        if resolved_approver is None:
             raise ValueError(
                 f"Cannot file human approval: Subject {approver_id!r} does not exist"
             )
+        approver_id = resolved_approver
 
         # 2. Validate artifact exists (Object, or a document Source — a
         #    document is a :Source since D10, ONTOLOGY v3.15 §4.4).
-        r = proj.g.query(
-            "MATCH (n) WHERE (n:Object OR "
-            "  (n:Source AND n.documentKind IS NOT NULL)) "
-            "AND (n.id = $id OR n.name = $id OR n.url = $id) "
-            "RETURN labels(n), n.id",
-            params={"id": artifact_id},
-        ).result_set
-        if not r:
+        # #3633: same route-then-refuse resolution (id > url > one live name).
+        # The ORIGINAL string is kept for the human-facing display strings.
+        artifact_ref = artifact_id
+        resolved_artifact = resolve_document_target_id(proj.g, artifact_id)
+        if resolved_artifact is None:
             raise ValueError(
                 f"Cannot file human approval: artifact {artifact_id!r} does not exist"
             )
+        artifact_id = resolved_artifact
 
         # 3. Validate point_ids exist and are non-operator Points
         if not point_ids:
@@ -10170,7 +10173,7 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # 4. Decision Point (pointKind humanApproval) — epistemic weight carrier
-        content = decision_content or f"Approved: {artifact_id}"
+        content = decision_content or f"Approved: {artifact_ref}"
         decision = self.create_point(
             "humanApproval",
             content,
@@ -10181,7 +10184,7 @@ class TortoiseSDK:
 
         # 5. Event (eventKind humanApproval) — the occurrence record
         event = self.create_event(
-            name=f"human approval of {artifact_id}",
+            name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
             eventStatus="completed",
@@ -10327,9 +10330,21 @@ class TortoiseSDK:
         if not author:
             return chain
         proj = self._get_proj()
+        # #3633 route-then-refuse: the old `toLower(s.name) = toLower($n)` probe
+        # had NO live filter and took `rows[0]`, so with two live same-name
+        # Subjects it served an ARBITRARY carrier's delegation chain (and a
+        # terminal holder could satisfy it). `authoredBy` may hold an id (the
+        # identity `file_human_approval` rebinds) or a name; resolve it to
+        # exactly one LIVE Subject — case-insensitively, preserving the
+        # documented contract (`test_provenance_case_insensitive_match`) — and
+        # refuse on >=2 carriers rather than pick one.
+        resolved = resolve_entity_id(proj.g, "Subject", author,
+                                     case_insensitive=True)
+        if resolved is None:
+            return {**chain, "subject": None}
         rows = proj.g.query(
-            "MATCH (s:Subject) WHERE toLower(s.name) = toLower($n) RETURN properties(s)",
-            params={"n": author},
+            "MATCH (s:Subject {id:$sid}) RETURN properties(s)",
+            params={"sid": resolved},
         ).result_set
         if not rows:
             return {**chain, "subject": None}
@@ -21420,17 +21435,19 @@ class TortoiseSDK:
         Returns {mean, total_events, impl_count, nand_count, alpha, beta, outcomes}.
         """
         proj = self._get_proj()
-        # Try exact id match first, fall back to name if no id match (#152).
-        # Prevents merging outcomes from Subject A (id='alice') with Subject B
-        # (name='alice') when a subject_id collides with another Subject's name.
-        id_check = proj.g.query(
-            "MATCH (s:Subject {id: $sid}) RETURN count(s) > 0",
-            params={"sid": subject_id},
-        ).result_set
-        if id_check and id_check[0][0]:  # noqa: SIM108
-            match_clause = "s.id = $sid"
-        else:
-            match_clause = "s.name = $sid"
+        # #3633 route-then-refuse (replaces #152's id-then-name fallback).
+        # #152 kept Subject A (id='alice') from merging with Subject B
+        # (name='alice') by preferring the id; the `else` arm still keyed
+        # `s.name = $sid`, so TWO live same-name Subjects unioned BOTH carriers'
+        # outcomes into one score. The resolver now returns exactly one live id
+        # (id match still wins) and REFUSES on >=2 same-name carriers; a dead
+        # coordinate resolves to None and yields the vacuous posterior.
+        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
+        if resolved_sid is None:
+            return {"mean": 0.5, "total_events": 0, "impl_count": 0,
+                    "nand_count": 0, "alpha": 1.0, "beta": 1.0,
+                    "outcomes": []}
+        match_clause = "s.id = $sid"
 
         # Direct: Event connects directly to claim Points via IMPL/NAND
         # (Operators connect ONLY epistemic targets per ONTOLOGY: Event→Point, Point→Point)
@@ -21442,7 +21459,7 @@ class TortoiseSDK:
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         ).result_set
         nand_rows = proj.g.query(
             "MATCH (s:Subject)-[:performs]->(e:Event) "
@@ -21452,7 +21469,7 @@ class TortoiseSDK:
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
             "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         ).result_set
 
         # Collect outcomes
@@ -21534,14 +21551,17 @@ class TortoiseSDK:
     def get_owned_entities(self, subject_id: str) -> list:
         """Return all entities owned by a Subject (governance query)."""
         proj = self._get_proj()
-        # Issue #327: start from the labeled, indexed Subject (both id and name
-        # are RANGE-indexed -> OR uses the index) and traverse ownedBy inward.
-        # Narrowing: ownedBy/memberOf targets are canonically Subject (#216);
-        # non-Subject targets are out of contract.
+        # Issue #327: start from the labeled, indexed Subject and traverse
+        # ownedBy inward. Narrowing: ownedBy/memberOf targets are canonically
+        # Subject (#216); non-Subject targets are out of contract.
+        # #3633 route-then-refuse: the `s.id = $sid OR s.name = $sid` start
+        # unioned BOTH same-name carriers' owned entities. Resolve to exactly
+        # one live id (>=2 -> AmbiguousEntityName), then traverse from that id.
+        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
         r = proj.g.query(
-            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (s:Subject) WHERE s.id = $sid "
             "MATCH (s)<-[:ownedBy]-(e) RETURN properties(e) LIMIT 100",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         )
         return [dict(row[0]) for row in r.result_set]
 
@@ -21613,17 +21633,20 @@ class TortoiseSDK:
         gap.
         """
         proj = self._get_proj()
-        # Issue #327: labeled Subject start (id|name OR both indexed -> Index
-        # Scan) then traverse outward; roles filters the source Subject p.
+        # #3633 route-then-refuse: the `id = $sid OR name = $sid` starts unioned
+        # BOTH same-name carriers' members and roles. Resolve once to exactly
+        # one live id (>=2 -> AmbiguousEntityName); a dead coordinate resolves
+        # to None and both legs simply return nothing.
+        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
         members = proj.g.query(
-            "MATCH (s:Subject) WHERE s.id = $sid OR s.name = $sid "
+            "MATCH (s:Subject) WHERE s.id = $sid "
             "MATCH (p:Subject)-[:memberOf]->(s) RETURN properties(p)",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         )
         roles = proj.g.query(
-            "MATCH (p:Subject) WHERE p.id = $sid OR p.name = $sid "
+            "MATCH (p:Subject) WHERE p.id = $sid "
             "MATCH (p)-[:holdsRole]->(r:Subject) RETURN properties(r)",
-            params={"sid": subject_id},
+            params={"sid": resolved_sid},
         )
         out = {
             "members": [dict(row[0]) for row in members.result_set],

@@ -21856,14 +21856,22 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                     "kind": exc.kind, "name": exc.name,
                     "existing_id": exc.existing_id, "reason": exc.reason,
                     "existing_refs": exc.refs,
+                    "ambiguous": exc.ambiguous,
                 }],
                 "org_name": org_display,
                 "org_name_source": org_source,
                 "person_name_source": person_source,
-                "question": (f"A Subject named {exc.name!r} already exists "
-                              "and is not this org/user. Provide a "
-                              "disambiguated name (suffix/canonical key) — "
-                              "distinct identities are never merged."),
+                "question": (
+                    (f"A Subject named {exc.name!r} is held by more than "
+                     "one live Subject, so the seed cannot resolve it to a "
+                     "single identity. Provide a disambiguated name "
+                     "(suffix/canonical key) — a carrier is never picked "
+                     "by guess.")
+                    if exc.ambiguous else
+                    (f"A Subject named {exc.name!r} already exists "
+                     "and is not this org/user. Provide a "
+                     "disambiguated name (suffix/canonical key) — "
+                     "distinct identities are never merged.")),
             }
         # node ↔ anchor link (DM-1) + first-points-filed step edge + gate
         legacy_mirror = bool(_get_onboarding_state(org_id).get(
@@ -22031,6 +22039,7 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
                     "kind": exc.kind, "name": exc.name,
                     "existing_id": exc.existing_id, "reason": exc.reason,
                     "existing_refs": exc.refs,
+                    "ambiguous": exc.ambiguous,
                 }],
                 "org_name": org_display,
                 "person_name_source": "provided" if include_person else None,

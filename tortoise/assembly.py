@@ -53,6 +53,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.entity_identity import record_non_folded  # #3633 route-then-refuse
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
 __all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
@@ -547,13 +548,69 @@ def docker_resolver_port(sdk) -> ResolverPort:
     # batch content-fetch degradation, which is what drops ``status``.
 
     def exact_objects(names: list[str]) -> list[dict]:
-        rows = proj.g.query(
+        # #3633 §B.1 route-then-refuse, per ref: the single
+        # `o.name IN $names OR o.id IN $names` union mixed the id space and the
+        # name space in ONE name-keyed coordinate and silently returned both.
+        # The arms are resolved APART — an exact id match is unambiguous and
+        # wins; a NAME-form ref resolves only when exactly ONE live Object
+        # holds it. Two or more live same-name carriers is a refusal (the
+        # non-folded entry is recorded, the ref is dropped), never a union.
+        #
+        # OVERRIDES: D2's live-holder ambiguity count — this port counts the
+        # candidates ITS OWN vocabulary admits (``status_filter``, #3317:
+        # ``retracted`` only), so one live + one ``superseded`` holder is two
+        # candidates and the ref REFUSES. Rationale: #3317 scoped this port's
+        # Object vocabulary deliberately narrow (D2's ``_terminal_excluded``
+        # delegation is #2977 Task 5's search-lane work), and §B.1's
+        # disposition for this site is "route then refuse, per ref" — a
+        # refusal is the safe direction. Do NOT widen this to the Point
+        # predicate to "fix" it. Recorded on #3633.
+        id_rows = proj.g.query(
             "MATCH (o:Object) "
-            "WHERE (o.name IN $names OR o.id IN $names) "
+            "WHERE o.id IN $names "
             f"{status_filter}"
             "RETURN o.id, o.name",
             params={"names": names}).result_set
-        return [{"id": r[0], "name": r[1]} for r in rows]
+        name_rows = proj.g.query(
+            "MATCH (o:Object) "
+            "WHERE o.name IN $names "
+            f"{status_filter}"
+            "RETURN o.id, o.name",
+            params={"names": names}).result_set
+        by_id: dict[str, list] = {}
+        for r in id_rows:
+            if r[0]:
+                by_id.setdefault(r[0], []).append((r[0], r[1]))
+        by_name: dict[str, list] = {}
+        for r in name_rows:
+            by_name.setdefault(r[1], []).append((r[0], r[1]))
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        for ref in names:
+            if ref in by_id:
+                id_hits = by_id[ref]
+                if len(id_hits) > 1:
+                    # Two nodes claim one id is raw corruption, never a
+                    # resolvable read (parity with resolve_entity_id).
+                    record_non_folded("Object", ref,
+                                      [h[0] for h in id_hits if h[0]])
+                    continue
+                row = id_hits[0]
+            else:
+                hits = by_name.get(ref, [])
+                if len(hits) > 1:
+                    record_non_folded("Object", ref,
+                                      [h[0] for h in hits if h[0]],
+                                      carrier_count=len(hits))
+                    continue
+                if not hits:
+                    continue
+                row = hits[0]
+            if row in seen:
+                continue
+            seen.add(row)
+            out.append({"id": row[0], "name": row[1]})
+        return out
 
     def fts_objects(term: str, limit: int = 8) -> list[dict]:
         # raises on embedded (no fulltext index) — the resolver degrades
