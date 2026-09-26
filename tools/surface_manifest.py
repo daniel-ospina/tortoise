@@ -1127,23 +1127,40 @@ def cmd_render(args: argparse.Namespace) -> int:
     for r in sdk:
         classes.setdefault(r.get("class") or "?", []).append(r)
 
-    called_tools: set[str] = set()
-    try:
-        import json as _json
+    # THE USAGE SIGNAL COMES FROM THE FROZEN BASELINE, NEVER FROM A MACHINE-LOCAL
+    # CALL LOG (#5205). `~/.tortoise/analytics_fallback.jsonl` is a property of the
+    # MACHINE, not of the tree: a CI runner has none, so its render dropped every
+    # `in use` / `never called` marker and the `git diff --exit-code` below reddened
+    # on EVERY pull request, while a developer's render (log present) matched the
+    # committed list. Two renders of one commit produced two documents — exactly what
+    # a guard that "observes a property of the tree" must not do.
+    #
+    # The manifest already FREEZES the same signal, per row, in `used_by`: `cut`
+    # writes the `agents` / `never called` prefix from the log ONCE, at a stated
+    # commit. So the committed baseline is the reproducible input, and reading it
+    # here makes the rendered list a pure function of the checked-in artifact (the
+    # thing `check` re-derives from the code). The log is not consulted at all.
+    #
+    # This is NOT a weakening of the guard: the render is still diffed against the
+    # committed list, so a hand-edit or a stale render still reds. It only removes
+    # the render's dependence on the machine that happened to run it.
+    def _observed_call(row: dict) -> bool | None:
+        """What the FROZEN baseline records about this row's call history.
 
-        log = Path.home() / ".tortoise" / "analytics_fallback.jsonl"
-        if log.exists():
-            for line in log.read_text(errors="ignore").splitlines():
-                if '"mcp_tool_call"' in line:
-                    try:
-                        rec = _json.loads(line)
-                    except Exception:
-                        continue
-                    name = (rec.get("properties") or {}).get("tool_name") or rec.get("tool") or ""
-                    if name:
-                        called_tools.add(name)
-    except Exception:
-        called_tools = set()
+        `used_by` carries the `agents` / `never called` prefix `build_doc` writes
+        from the call signal at cut time (`None` when there was no signal at all).
+        Reading both branches from the same field is deliberate: the marker can
+        then never contradict the `Used by` column rendered beside it.
+        """
+        used_by = str(row.get("used_by") or "")
+        if used_by.startswith("agents"):
+            return True
+        if used_by.startswith("never called"):
+            return False
+        return None
+
+    called_tools = {r["name"] for r in tools if _observed_call(r) is True}
+    never_called = {r["name"] for r in tools if _observed_call(r) is False}
 
     out: list[str] = []
     add = out.append
@@ -1315,9 +1332,9 @@ def cmd_render(args: argparse.Namespace) -> int:
             # the 64 tools with zero observed calls were labelled "in use" and the 35 that
             # actually appear were labelled "never called" — contradicting both the legend
             # and each row's own `used_by` cell.
-            if called_tools and r["name"] in called_tools:
+            if r["name"] in called_tools:
                 flags.append("in use")
-            elif called_tools:
+            elif r["name"] in never_called:
                 flags.append("never called")
             if r.get("proposed"):
                 flags.append(f"**proposed: move to `{r['recommended_family']}`**")
@@ -1531,8 +1548,17 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("argument, both ways, with the weak parts named.")
     add("")
     add("**The case for pinning a small advertised set.** Two thirds of what we advertise has never been")
-    _never = [r for r in tools if not called_tools or r["name"] not in called_tools]
-    add(f"called by anything, including us ({len(_never)} of {len(tools)}). Mainstream clients cap the tools they will show — a")
+    _never = [r for r in tools if r["name"] in never_called]
+    # When the baseline records no call signal at all (a `cut` made without a log),
+    # "we never called it" is a NEGATIVE NOBODY VERIFIED — do not assert it. The
+    # sentence is identical when a signal exists, which is what the committed
+    # baseline carries.
+    _usage_sentence = (
+        f"called by anything, including us ({len(_never)} of {len(tools)})."
+        if (called_tools or never_called)
+        else "called by anyone — the baseline records no call signal, so we do not claim one."
+    )
+    add(f"{_usage_sentence} Mainstream clients cap the tools they will show — a")
     add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
     add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
@@ -1566,7 +1592,10 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("")
     RENDERED_FILE.parent.mkdir(parents=True, exist_ok=True)
     RENDERED_FILE.write_text("\n".join(out), encoding="utf-8")
-    print(f"wrote {RENDERED_FILE.relative_to(ROOT)} ({len(tools)} tools, {len(sdk)} SDK methods)")
+    # `_display`, not `.relative_to(ROOT)`: a caller (a test, or a future `--out`) may point
+    # the render outside the checkout, where `relative_to` raises — and a PRINT must not be
+    # what fails. `_display` exists for exactly this and `cmd_cut` already uses it.
+    print(f"wrote {_display(RENDERED_FILE)} ({len(tools)} tools, {len(sdk)} SDK methods)")
     return 0
 
 
