@@ -508,6 +508,32 @@ class Hit:
     strength: str  # "strong" (issue number / closing reference) | "weak"
 
 
+def _short_branch(ref: str) -> str:
+    """The bare branch name behind any ref spelling the tool EMITS.
+
+    `refs/heads/x/y` and `refs/remotes/origin/x/y` both collapse to `x/y`.
+    Exactly one component is dropped, and only from the REMOTE prefix: the
+    remote namespace is the one with an extra `<remote>` component to remove.
+
+    ⛔ Dropping a component from `refs/heads/` was a real bug here — a branch
+    name may itself contain slashes, so `refs/heads/fix/3061-mine` became
+    `3061-mine` and stopped matching the declaration, leaving the caller's OWN
+    branch blocking. Caught by the test for exactly that case.
+
+    A bare `origin/x` is deliberately NOT rewritten: it is indistinguishable
+    from a local branch literally named `origin/x`, and guessing would suppress
+    a real hit. Declare the short name or a full ref.
+    """
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    for prefix in ("refs/remotes/", "remotes/"):
+        if ref.startswith(prefix):
+            rest = ref[len(prefix):]
+            head, sep, tail = rest.partition("/")
+            return tail if sep else rest
+    return ref
+
+
 @dataclass
 class Identity:
     """Who is running this pre-flight.
@@ -556,15 +582,26 @@ class Identity:
         )
 
     def owns_branch(self, ref: str | None) -> bool:
-        """True when `ref` names one of the caller's own branches. The
-        comparison is on the SHORT name (`refs/heads/x` == `x`) or the full ref,
-        so a caller may pass either."""
+        """True when `ref` names one of the caller's own branches.
+
+        ⛔ BOTH sides are normalised, and the REMOTE namespace is normalised too.
+        A lane that pushes its branch has its own work appear as
+        `refs/remotes/origin/<branch>`, which is a *different string* from the
+        `refs/heads/<branch>` it declared. Stripping only `refs/heads/` left the
+        remote copy comparing unequal and therefore BLOCKING, so the lane's own
+        pushed branch refused its own dispatch — #3504 class 4 surviving in the
+        one namespace every lane actually populates.
+
+        Normalising both sides also removes the one-directional asymmetry the
+        old docstring papered over: it claimed "a caller may pass either", which
+        held for a full candidate against a short declaration but NOT for a
+        short candidate against a full declaration.
+        """
         if not ref:
             return False
-        if ref in self.self_branches:
-            return True
-        short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
-        return short in self.self_branches
+        if not self.self_branches:
+            return False
+        return _short_branch(ref) in {_short_branch(b) for b in self.self_branches}
 
     def owns_worktree(self, path: str | None) -> bool:
         """True when `path` names one of the caller's own worktrees. Both sides
@@ -587,6 +624,16 @@ class RepoTarget:
     path: str | None = None
     source: str = "unresolved"
     requested: bool = False
+    # Whether `path` is a checkout the CALLER chose, rather than one the tool
+    # FOUND by searching for a clone of the requested slug. This gates the
+    # best-effort self-identity detection and it is a correctness flag, not
+    # bookkeeping: a checkout that was searched for is typically the canonical
+    # hub clip sitting on `main`, and auto-declaring ITS current branch as the
+    # caller's own makes a PR whose head branch is `main` (the ordinary shape
+    # for a fork PR) read as "your own PR" and suppress a real hit — the
+    # fail-OPEN direction. A checkout you are STANDING IN is yours; a checkout
+    # somebody's search handed you is not.
+    caller_checkout: bool = False
 
 
 @dataclass
@@ -1511,7 +1558,8 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
         f"repos/{slug}/pulls?state=closed&per_page={page_size}",
         "--jq",
         "map({number, title, body, state, url, "
-        "headRefName: .head.ref, mergedAt: .merged_at})",
+        "headRefName: .head.ref, headSha: (.head.sha // \"\"), "
+        "mergedAt: .merged_at})",
     ]
     rc, out, err, timed_out = _run([gh_bin, *args], cwd, timeout)
     if rc != 0:
@@ -2240,8 +2288,12 @@ def run_preflight(
                 )
                 for _pr in prs:
                     if _pr.get("merged_at") or _pr.get("mergedAt"):
-                        _sha = ((_pr.get("head") or {}).get("sha")
-                                if isinstance(_pr.get("head"), dict) else None)
+                        # `headSha` is the PROJECTED key this sample actually
+                        # carries (see `_closed_pr_sample`'s jq filter). Reading
+                        # a nested `head.sha` here was a silent no-op: the
+                        # projection never emits it, so the set stayed empty and
+                        # the squash-merge test never ran in production.
+                        _sha = _pr.get("headSha")
                         if _sha:
                             merged_head_shas.add(str(_sha))
                 # `use_closing_field=False`: this payload is REST `/pulls`, which
@@ -2314,6 +2366,10 @@ def run_preflight(
     # 3. Branch surfaces. Remote refs are number-matched ONLY: the
     #    remote-tracking namespace carries hundreds of stale branches and
     #    keyword-scanning it produced 878 false hits on a real run.
+    # The local-branch walk, kept so the worktree surface can REUSE it rather
+    # than re-issuing the identical query (and so its unavailability is
+    # reported once, consistently, on every surface that depends on it).
+    ancestor_merged_local: set[str] | None = None
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -2333,6 +2389,8 @@ def run_preflight(
             # stays fail-closed, but the note says so rather than reporting an
             # inability as "nothing is merged".
             ancestor_merged = _ancestor_merged_refs(git_bin, cwd, namespace, timeout)
+            if namespace == "refs/heads":
+                ancestor_merged_local = ancestor_merged
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas, ancestor_merged,
             )
@@ -2371,11 +2429,22 @@ def run_preflight(
                 1 for ln in out.splitlines() if ln.startswith("worktree ")
             ):
                 raise SurfaceError("worktree porcelain parse lost an entry (refusing partial scan)")
-            _wt_ancestor = _ancestor_merged_refs(git_bin, cwd, "refs/heads", timeout)
+            # Reuse the LOCAL-BRANCH walk instead of repeating the identical
+            # `for-each-ref --merged=origin/main refs/heads` query, and carry
+            # its availability through: when the walk could not run, the
+            # branch surfaces say so, and this surface claiming a plain
+            # "untruncated" enumeration implied the terminal test had run.
+            _wt_ancestor = ancestor_merged_local
             scan_worktree_surface(
                 surface, blocks, issue, identity, merged_head_shas, _wt_ancestor,
             )
             surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
+            if _wt_ancestor is None:
+                surface.note += (
+                    "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "
+                    "--merged failed) — already-merged refs are NOT downgraded by "
+                    "that test (the squash-merge test still applies)"
+                )
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
 
@@ -2522,17 +2591,42 @@ def format_report(
                     f"more hit(s) on this surface (total {len(surface_hits)})"
                 )
     if weak and not strong:
+        # ⛔ The heading must not describe only the PROSE kind. Since identity
+        # and terminal detection landed, `weak` also carries hits that plainly
+        # ARE work but cannot block: the caller's own branch/worktree, a
+        # terminal branch, and an assignee equal to the shared fleet account.
+        # Calling all of them "prose-only cross-references" made the report
+        # contradict its own contents — the "unverifiable verdict" class this
+        # change exists to remove (#3504 class 2).
         lines.append("")
-        lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
-        lines.append(
-            f"  {len(weak)} prose-only cross-reference(s) of #{issue}; no title / "
-            "branch / worktree / closing-reference match. These do NOT block."
-        )
+        lines.append("WEAK SIGNALS (reported, non-blocking — these do NOT block)")
+        prose_only = [h for h in weak if "prose" in h.detail]
+        if prose_only:
+            lines.append(
+                f"  {len(prose_only)} prose-only cross-reference(s) of #{issue}; "
+                "no title / branch / worktree / closing-reference match."
+            )
+        rest = len(weak) - len(prose_only)
+        if rest:
+            lines.append(
+                f"  {rest} further non-blocking hit(s) that are NOT prose — your "
+                "own work, a terminal branch/PR, or the shared fleet account."
+            )
+        lines.append("  These do NOT block a dispatch.")
     if incomplete:
         lines.append("")
         lines.append("INCOMPLETE SURFACES")
         for surface in incomplete:
-            lines.append(f"  [{surface.name}] {surface.truncation_note or surface.note}")
+            # BOTH reasons are printed, never `truncation_note or note`: a
+            # surface can be INCOMPLETE *and* truncated, and the `or` form
+            # silently dropped the incompleteness reason — the same
+            # "the report misdescribes what it measured" defect already fixed
+            # once in this change (where an unguarded note assignment clobbered
+            # `incomplete()`'s message).
+            parts = [p for p in (surface.note, surface.truncation_note) if p]
+            lines.append(
+                f"  [{surface.name}] " + (" — ".join(parts) if parts else "unreadable")
+            )
     if advisory:
         lines.append("")
         lines.append(
@@ -2682,13 +2776,19 @@ def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
         # resolved slug is what is sent to gh).
         if current and current.lower() == slug_explicit.lower():
             target.path = path
+            target.caller_checkout = True
         else:
             target.path = find_local_clone(slug_explicit, args.git, timeout, roots)
+            # Searched for, NOT chosen by the caller (`caller_checkout` stays
+            # False). See the field's docstring: this is the fail-open case.
     else:
         slug, how = resolve_slug(args.gh, args.git, path, timeout)
         target.slug = slug
         target.path = path
         target.source = f"{source} ({how})"
+        # `--repo` omitted (path == cwd) or `--repo PATH` (the caller named it):
+        # either way the caller chose this checkout.
+        target.caller_checkout = True
     return target, 0
 
 
@@ -2911,24 +3011,36 @@ def main(argv: list[str] | None = None) -> int:
     # `self_branches` / `self_worktrees` are the caller's OWN refs, and they are
     # the half that fixes #3504: the caller's own artifacts are excluded by
     # IDENTITY rather than by inspecting a string. `--self-branch` /
-    # `--self-worktree` are authoritative; the current branch and the checkout
-    # root are added best-effort below, because failing to detect them is
-    # fail-CLOSED (it can only leave more hits) and must never be a gate.
+    # `--self-worktree` are ALWAYS authoritative and are never second-guessed.
+    #
+    # The best-effort auto-detection below is a different matter, and it is
+    # gated on `caller_checkout` deliberately. Adding a ref to the self set
+    # REMOVES hits, so "it can only leave more hits" — the claim this block used
+    # to make — is false: it is the FAIL-OPEN direction. And the checkout is not
+    # always the caller's. With `--repo owner/name`, `_resolve_target` searches
+    # for a clone; when the cwd is a different repo it finds the canonical hub
+    # checkout, typically sitting on `main`. Declaring `main` as a self-branch
+    # then suppresses a PR whose head branch is `main` — the ordinary shape for
+    # a fork PR — and reports CLEAN on real in-flight work.
+    #
+    # So: auto-declare only for a checkout the CALLER chose. Omitting
+    # `--self-branch` remains fail-closed, and a caller whose checkout was
+    # searched for can always pass it explicitly.
     cwd_for_identity = target.path or os.getcwd()
     self_branches = {b.strip() for b in args.self_branch if b and b.strip()}
     self_worktrees = {
         w.strip().rstrip("/") for w in args.self_worktree if w and w.strip()
     }
-    if target.path:
+    if target.path and target.caller_checkout:
         self_worktrees.add(target.path.rstrip("/"))
-    rc, out, _err, _to = _run(
-        [args.git, "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd_for_identity, args.timeout,
-    )
-    if rc == 0 and out.strip() and out.strip() != "HEAD":
-        # `HEAD` means detached (no branch) — nothing to declare. A failure here
-        # is not reported: it can only leave hits blocking.
-        self_branches.add(out.strip())
+        rc, out, _err, _to = _run(
+            [args.git, "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd_for_identity, args.timeout,
+        )
+        if rc == 0 and out.strip() and out.strip() != "HEAD":
+            # `HEAD` means detached (no branch) — nothing to declare. A failure
+            # here is not reported: it can only leave hits blocking.
+            self_branches.add(out.strip())
 
     identity = Identity(
         login=None,

@@ -690,27 +690,34 @@ class CollisionPreflightTest(unittest.TestCase):
         # substring occurs inside it by chance. The SHAPE of the containing run
         # decides it — no vocabulary, no stop-word list.
         #
-        # CYCLE 2 CAUGHT THIS TEST BEING VACUOUS: its fixtures carried no `3061`
-        # at all, so it passed because NOTHING matched rather than because the
-        # guard fired. Every fixture below now contains the issue number strictly
-        # INTERIOR to a hex run, which is the only condition under which a green
-        # result can mean the guard worked.
+        # ⛔ THE GUARD MUST BE TESTED WHERE IT CAN MATTER. An earlier version put
+        # the digest in the PR BODY, where a number match is only a WEAK,
+        # non-blocking prose signal — so every assertion passed with
+        # `_inside_hex_digest` monkeypatched to `return False`. The test could
+        # not fail. The digest now sits in the TITLE, which is a STRONG path:
+        # delete the guard and the title match makes this a COLLISION. The body
+        # is asserted separately, so both paths are pinned.
         for digest in ("3f1a4889d6a3061b2e0c7f9a1d4b8e2c5a3f6d9b0e1c4a7f2b5d8e1a4c7f0",
                        "sig=deadbeef3061cafe",
                        "a3061bcd"):
             with self.subTest(digest=digest):
                 self.gh_fixtures(open_prs=[{
-                    "number": 9995, "title": "chore: re-attest the review",
-                    "body": f"{digest}", "headRefName": "chore/9995-attest",
+                    "number": 9995,
+                    "title": f"chore: re-attest the review {digest}",
+                    "body": f"attestation {digest}",
+                    "headRefName": "chore/9995-attest",
                     "state": "open",
                 }])
                 rc, out = self.run_tool()
                 self.assertEqual(rc, 0, f"digest={digest!r}\n{out}")
                 self.assertIn("VERDICT: CLEAN", out)
                 self.assertNotIn("do NOT dispatch", out)
-                # The guard FIRED: the number is present in the fixture, so a
-                # green run cannot be a fixture artefact.
+                # The guard FIRED on the STRONG path: the number IS present in
+                # the fixture, so a green run cannot be a fixture artefact.
                 self.assertNotIn("matched issue-number (3061)", out)
+                # ...and the body path is pinned too: the digest must not even
+                # produce a weak prose signal.
+                self.assertNotIn("prose mention of #3061", out)
 
     def test_number_after_a_non_hex_letter_still_matches(self):
         # The guard must not over-fire. `w3061` is a reference: `w` is not a hex
@@ -951,6 +958,35 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
 
+    def test_own_pushed_branch_is_not_a_claim(self):
+        # P2-2. A lane that pushes has its own work in TWO namespaces: the local
+        # `refs/heads/<branch>` it declared, and the remote-tracking
+        # `refs/remotes/origin/<branch>` the push created. Stripping only
+        # `refs/heads/` left the remote copy comparing unequal, so it still
+        # blocked STRONGLY and the lane refused its own dispatch — #3504 class 4
+        # surviving in the one namespace every lane actually populates.
+        ref = f"fix/{ISSUE}-pushed"
+        _git(self.repo, "branch", ref)
+        _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+
+        # (a) UNDECLARED: both namespaces are hits.
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[remote branches]", out)
+
+        # (b) DECLARED by its SHORT name: BOTH namespaces must demote.
+        rc, out = self.run_tool(self_branches=(ref,))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+        # (c) ...and a FULL ref declaration must match the short candidate too —
+        # the asymmetry the old docstring claimed away.
+        rc, out = self.run_tool(self_branches=(f"refs/heads/{ref}",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+
     def test_remote_branch_number_match_still_blocks(self):
         # The remote-branch surface is number-matched ONLY, and that is now the
         # only matching that exists anywhere. Two properties, both pinned:
@@ -1054,12 +1090,38 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("your own worktree", out)
 
     def test_self_pr_is_decided_before_any_match_test(self):
-        # #4567's ordering root cause. The self-suppression used to sit AFTER
-        # the keyword test, which `continue`d unconditionally, so it was DEAD
-        # CODE whenever both matched and `exit 0` was unreachable for any issue
-        # whose number is also a PR. This PR matches on every axis at once —
-        # number == issue, head branch, AND a closing reference — and must still
-        # be weak, because the PR for an issue is not a competing claim on it.
+        # #4567's ordering root cause, SELF arm. The suppression used to sit
+        # after the keyword test, which `continue`d unconditionally, so it was
+        # DEAD CODE whenever both matched.
+        #
+        # ⛔ The head branch is DECLARED here. An earlier version of this test
+        # left it undeclared, so the self arm never fired and the PR was decided
+        # by the "PR *is* the issue" arm instead — the test passed while covering
+        # the wrong branch, and its comment ("the self message wins") was false.
+        # Found by review. The sibling test below pins the OTHER arm.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"feat: do the thing (#{ISSUE})",
+            "body": f"Closes #{ISSUE}",
+            "headRefName": f"feat/{ISSUE}-self",
+            "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool(self_branches=(f"feat/{ISSUE}-self",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own PR", out)
+        # ORDER IS OBSERVABLE: the self decision wins over the three match tests
+        # that would otherwise have fired (title number, head number, closing
+        # reference). A re-ordering mutant makes one of these appear.
+        hits_block = out.split("HITS", 1)[1].split("VERDICT", 1)[0]
+        self.assertNotIn("matched issue-number", hits_block)
+        self.assertNotIn("closingIssuesReferences", hits_block)
+
+    def test_pr_that_is_the_issue_is_decided_before_any_match_test(self):
+        # The OTHER ordering arm (#4567). A PR whose NUMBER is the issue is that
+        # issue's own PR, not separate in-flight work — and it must be decided
+        # before any match test, so an undeclared head branch does not turn it
+        # into a COLLISION.
         self.gh_fixtures(open_prs=[{
             "number": ISSUE, "title": f"feat: do the thing (#{ISSUE})",
             "body": f"Closes #{ISSUE}",
@@ -1071,10 +1133,53 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("*is* the issue", out)
-        # ...and the ORDER is observable: the self message wins over the three
-        # match messages that would otherwise have fired first.
-        self.assertNotIn("matched issue-number", out.split("HITS")[1].split("VERDICT")[0]
-                         if "HITS" in out else "matched issue-number")
+        hits_block = out.split("HITS", 1)[1].split("VERDICT", 1)[0]
+        self.assertNotIn("matched issue-number", hits_block)
+
+    def test_found_clone_is_not_the_callers_checkout(self):
+        # P1-2, and it is the FAIL-OPEN direction. With `--repo owner/name` and a
+        # cwd inside a DIFFERENT repo, `_resolve_target` SEARCHES for a clone of
+        # the requested slug instead of using the cwd. The checkout it finds is
+        # typically the canonical hub clone sitting on `main`, and its current
+        # branch is NOT the caller's. Auto-declaring that branch suppresses a PR
+        # whose head branch happens to be `main` — the ordinary shape for a fork
+        # PR — and reports CLEAN on real in-flight work.
+        #
+        # `other-repo` is a SIBLING of `self.repo` under the same temp root, so
+        # the search finds `self.repo` while the cwd's own slug is different.
+        # That is exactly the production mechanism, reproduced.
+        _git(self.repo, "checkout", "-q", "main")
+        other = self.tmp / "other-repo"
+        other.mkdir()
+        _git(other, "init", "-q", "-b", "main", "--template=")
+        _git(other, "remote", "add", "origin",
+             "https://github.com/other-owner/other-repo.git")
+        (other / "seed.txt").write_text("seed\n")
+        _git(other, "add", "seed.txt")
+        _git(other, "commit", "-qm", "seed")
+
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing",
+            "body": "", "headRefName": "main", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        rc, out = self.run_tool(repo_arg="test-owner/test-repo", cwd=other)
+        # A PR on `main` that closes the issue is REAL work; `main` was never
+        # the caller's branch, so it must not be suppressed.
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own PR", out)
+
+    def test_caller_checkout_still_auto_declares(self):
+        # The other half: a checkout the CALLER chose (here `--repo PATH`, and
+        # the `--repo`-omitted case sets the same flag) keeps the best-effort
+        # auto-detection. Without this, the P1-2 fix could be "disable
+        # auto-detection entirely" and the suite would not notice.
+        _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-mine")
+        rc, out = self.run_tool()          # `--repo <self.repo>` == an explicit PATH
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
 
     # ── a PR whose head branch the caller DECLARED is its own work ──────────
 
@@ -1099,12 +1204,24 @@ class CollisionPreflightTest(unittest.TestCase):
     # ── terminal branches: squash-merge residue cannot block (#5186) ────────
 
     def _merged_pr_fixture(self, ref: str) -> dict:
-        """A REST-shaped closed PR whose head sha IS the ref's tip."""
+        """A closed PR payload in the shape the tool ACTUALLY receives.
+
+        ⛔ `headSha`, not a nested `head.sha`. `_closed_pr_sample` runs the REST
+        response through a `gh api --jq` projection, and that filter is what
+        re-keys the payload — so the only shape the scanner can ever see is the
+        projected one. This fixture previously supplied `head: {ref, sha}`, a
+        nested object the projection never produces: the harvest read
+        `_pr.get("head")`, always got None, and `merged_head_shas` was ALWAYS
+        EMPTY IN PRODUCTION. #5186's primary predicate was therefore dead code,
+        and these tests passed anyway because the `gh` stub cats its fixture and
+        never executes `--jq`. A fixture must model the wire, not the wish.
+        """
         return {
             "number": 4242, "title": f"land {ref}",
             "body": "", "state": "closed",
-            "merged_at": "2026-09-01T00:00:00Z",
-            "head": {"ref": ref, "sha": self._git_out("rev-parse", ref)},
+            "headRefName": ref,
+            "headSha": self._git_out("rev-parse", ref),
+            "mergedAt": "2026-09-01T00:00:00Z",
         }
 
     def test_squash_merged_branch_is_terminal_and_cannot_block(self):
@@ -1130,7 +1247,11 @@ class CollisionPreflightTest(unittest.TestCase):
         ref = f"docs/research-{ISSUE}-4333"
         _git(self.repo, "branch", ref)
         pr = self._merged_pr_fixture(ref)
-        pr["merged_at"] = None
+        # The PROJECTED key is `mergedAt` (camelCase) — that is what the jq
+        # filter emits and therefore all the harvest can ever read. Clearing the
+        # snake_case name instead left `mergedAt` set, so the fixture was still
+        # merged and the test asserted COLLISION on a CLEAN run.
+        pr["mergedAt"] = None
         self.gh_fixtures(closed_prs=[pr])
         rc, out = self.run_tool(issue=ISSUE)
         self.assertNotEqual(rc, 0, out)
@@ -1579,6 +1700,13 @@ class CollisionPreflightTest(unittest.TestCase):
         # both: REST reports `state: "closed"` for merged and unmerged PRs
         # alike, and `mergedAt` is the only field that names a merge.
         self.assertIn("mergedAt: .merged_at", argv)
+        # ⛔ AND THE HEAD SHA. #5186's squash-merge predicate compares a branch
+        # tip against a merged PR's head sha. The projection is the ONLY place
+        # that re-keys the REST payload, so dropping `.head.sha` from it makes
+        # the predicate silently inert — every other test stays green, because
+        # the stub never executes `--jq` and feeds its fixture straight to the
+        # scanner. It happened once; this assertion is what makes it loud.
+        self.assertIn("headSha: (.head.sha", argv)
 
     # ── target repo: never certify a scope you did not establish (#4027) ────
 
