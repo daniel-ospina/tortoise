@@ -70,6 +70,7 @@ import logging
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Literal
 
 _logger = logging.getLogger(__name__)
 
@@ -353,7 +354,7 @@ class _Meted:
     def __enter__(self) -> EmbedTally:
         return self._install()
 
-    def __exit__(self, *exc) -> bool:
+    def __exit__(self, *exc) -> Literal[False]:
         with contextlib.suppress(Exception):
             self._finish()
         return False
@@ -362,7 +363,7 @@ class _Meted:
     async def __aenter__(self) -> EmbedTally:
         return self._install()
 
-    async def __aexit__(self, *exc) -> bool:
+    async def __aexit__(self, *exc) -> Literal[False]:
         tally, org, token = self._tally, self._org, self._token
         if token is not None:
             with contextlib.suppress(Exception):
