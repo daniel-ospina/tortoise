@@ -25,6 +25,11 @@ import { dirname, join } from 'node:path'
 // #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
 // the guards below can assert the RENDERED prompt instead of parsing source.
 import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
+// #4637: the pin below asserts against the SHARED quote-aware stripper rather
+// than the local `stripBlockAndWholeLineComments` above, which does not remove
+// inline/trailing `//` — a trailing comment carrying the pinned text kept that
+// pin green (the file-wide unification is #3102's).
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -1494,15 +1499,16 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
   // #4637: the Overview's live-key claim is now ONE derivation — `ownerKeyLive`
-  // of the gate's mode — consumed by both owner arms AND by the graph-missing
-  // card's snippet branch, so the gate remains its only authority. The old form
-  // tested the gate but ALSO the in-memory `snippetKey`, which stays truthy after
-  // its row is revoked (the gate's `durableConnectKey` row-truth check drops it),
-  // so the card could claim a key was live with nothing usable behind it. The
-  // member arm keeps its own key-state branch: its two lead-ins assert nothing
-  // about which key is usable. (The derivation is pinned HERE, once — the note
-  // test owns what the arms pass it.)
-  assert.match(src, /const keyIsLive = ownerKeyLive\(connectGate\.mode\)/,
+  // of the gate's mode — consumed by both owner arms, so the gate remains its
+  // only authority. The old form tested the gate but ALSO the in-memory
+  // `snippetKey`, which stays truthy after its row is revoked (the gate's
+  // `durableConnectKey` row-truth check drops it), so the card could claim a key
+  // was live with nothing usable behind it. The member arm keeps its own
+  // key-state branch: its two lead-ins assert nothing about which key is usable.
+  // (The derivation is pinned HERE, once — the note test owns what the arms pass
+  // it. That pin runs on the shared quote-aware stripped source, so a `//` or
+  // `/* … */` comment cannot satisfy it.)
+  assert.match(stripComments(mainJsx), /const keyIsLive = ownerKeyLive\(connectGate\.mode\)/,
     'the re-entry Overview routes its live-key claim through the gate')
   assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
     'the member arm of the re-entry card still consults the gate for its key state')

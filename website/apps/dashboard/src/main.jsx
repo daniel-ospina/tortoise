@@ -8925,7 +8925,16 @@ function claimIntentInFlight() {
               <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
-              {!snippetKey && (
+              {(!snippetKey || !keyIsLive) && (
+                // #4637: the gate, not `snippetKey`, decides this affordance too.
+                // The owner no-key clause names the API Keys tab, and that clause
+                // renders exactly when the gate holds no usable key — so the
+                // button must be there whenever `!keyIsLive`, including the stale
+                // reveal case (`snippetKey` truthy, gate says 'mint'), where the
+                // old `!snippetKey` gate withheld it in the same render that told
+                // the owner to go there. The `!snippetKey` half is kept so the
+                // pre-existing affordance for a key-less organization is
+                // unchanged.
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>
                   Go to API Keys →
                 </button>
@@ -8938,13 +8947,26 @@ function claimIntentInFlight() {
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
             <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
-            {snippetKey && keyIsLive ? (
+            {connectGate.key ? (
               // #1831 P2-1: only show the copyable snippet when a real key
               // exists — after a recoverable mint failure (#1830) the state
               // is '' and the snippet would render `Bearer ` with an empty
               // key (and the "key is live" copy would be false). #2246: the
               // key source is snippetKey (welcomeKey || apiKey) — the
               // first-timer's in-memory reveal, never a localStorage read.
+              // #4637: the condition is the GATE's own held plaintext,
+              // `connectGate.key` — ONE fact, not the conjunction of two. It is
+              // exactly the key `firstDataSnippet` prints: `connectKeyGate`
+              // returns the validated `welcomeKey` here and nothing in any other
+              // mode, so `snippetKey` (welcomeKey || apiKey) equals it whenever
+              // this branch renders. Keying the branch on `snippetKey` alone
+              // printed "Your Organization and API key are live" over a reveal
+              // whose row was revoked/rotated, and even `snippetKey &&
+              // keyIsLive` let that through whenever the Organization happened
+              // to hold a DIFFERENT usable row (mode 'existing'): the gate then
+              // holds no plaintext at all, so any truthy `snippetKey` is stale.
+              // If the gate holds no plaintext the card renders the note below,
+              // which takes its own live/no-key arm from the same gate mode.
               // #4637: BOTH halves are required. `snippetKey` alone is an
               // in-memory reveal that survives its own row being revoked, so
               // the card would print "Your Organization and API key are live"

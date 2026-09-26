@@ -140,9 +140,12 @@ export function MemberEmptyStateKeyNote({ variant, buildFork }) {
 //     one only;
 //   * `connectGateMode` — `connectKeyGate`'s mode (sessionKey.js): the gate the
 //     wizard's OWN key affordance switches on. Its own contract, in sessionKey
-//     .js's words: a key may be minted ONLY on 'mint'; 'loading'/'error' are
-//     UNRESOLVED and must offer neither a mint nor a paste. A sentence that
-//     promises creation outside 'mint' promises what the branch withholds.
+//     .js's words: the gate's mint CTA is offered ONLY on 'mint' (that is the
+//     affordance mode 'mint' selects; 'existing' instead routes to the reuse
+//     path and offers a MANUAL fresh mint — `wizardExistingKeyAffordance`'s
+//     "Create a new key instead"); 'loading'/'error' are UNRESOLVED and offer
+//     neither a mint nor a paste. A sentence that promises the step's
+//     automatic creation outside 'mint' promises what the branch withholds.
 //
 // The lead-ins live HERE, beside the notes they introduce, because the lead-in
 // IS where the agent-connection route is named — the route half of #4637.
@@ -152,14 +155,16 @@ export function MemberEmptyStateKeyNote({ variant, buildFork }) {
 // each deciding it). A route clause kept per-surface is exactly how the build
 // fork came to be told to "connect your agent".
 //
-// ⚠️ Scope of the single-sourcing: it covers the four lead-in constants and the
-// key-live lead-ins below (all built from `SELF_ROUTE_CLAUSE`). It does NOT
-// cover the action module's route LABEL ('Connect your agent →' in
-// `overviewEmptyAction.js`), a different register for a different artifact; the
-// two are asserted to take the same arm per fork (see the cross-module test).
+// ⚠️ Scope of the single-sourcing: it covers the FIVE lead-in constants below
+// and the key-live lead-ins (three of the five build on `SELF_ROUTE_CLAUSE`; the
+// two BUILD lead-ins are plain literals because the build fork names no route).
+// It does NOT cover the action module's route LABEL ('Connect your agent →' in
+// `overviewEmptyAction.js`), a different register for a different artifact: the
+// cross-module test asserts only that `graphMissingCta` and
+// `emptyStateActionRoute` take the same arm per fork, NOT that the lead-ins do.
 // The self/undecided fork's route clause, per card — ONE copy of the wording,
-// consumed by all four lead-ins below, so the phrase cannot be re-typed per arm
-// and drift.
+// consumed by the three self-fork lead-ins and by `ownerLiveLeadIn`, so the
+// phrase cannot be re-typed per arm and drift.
 const SELF_ROUTE_CLAUSE = {
   reentry: ' to connect your agent',
   'graph-missing': ' — connect your agent below',
@@ -223,8 +228,8 @@ const OWNER_LIVE_KEY_AT_STEP = {
 const OWNER_AT_STEP_FALLBACK = 'the connect step works it out from the keys your Organization holds'
 
 // Is the Organization's key already RESOLVED (the card's key-live state)? ONE
-// derivation, consumed by main.jsx (both owner arms, and the graph-missing
-// card's snippet branch) and by the note below. `snippetKey` alone is not the
+// derivation, consumed by main.jsx (both owner arms) and passed into the note
+// below as its `keyLive` prop. `snippetKey` alone is not the
 // answer: it is `welcomeKey || apiKey` (main.jsx) — `welcomeKey` is the
 // in-memory reveal, and a reveal whose row was later revoked/disabled/rotated
 // is FALSY at the gate (`durableConnectKey`'s row-truth check) while still
@@ -240,7 +245,12 @@ export function ownerKeyLive(connectGateMode) {
 // The key-live lead-in, fork-aware the same way the shared lead-ins are: the
 // build fork renders no chooser, so it is not told to "connect" through one.
 function ownerLiveLeadIn(variant, buildFork) {
-  const connect = buildFork === true ? '' : SELF_ROUTE_CLAUSE[variant]
+  // Total over `variant`, like the other arm's ternary: an untaught variant takes
+  // the graph-missing clause rather than interpolating `undefined` into a
+  // user-visible sentence.
+  const connect = buildFork === true
+    ? ''
+    : (SELF_ROUTE_CLAUSE[variant] || SELF_ROUTE_CLAUSE['graph-missing'])
   return variant === 'reentry'
     ? `Your Organization's API key is live — finish the setup below${connect} `
     : `Your Organization's API keys are live${connect} `
@@ -251,12 +261,13 @@ function ownerLiveLeadIn(variant, buildFork) {
 // are the two derived facts documented above.
 //
 // The `keyLive` PROP is deliberate: this component is told the state, it does not
-// infer it, so the state main.jsx derived is visible at the call site and pinned
-// by the wiring test, and the render tests can exercise arms main.jsx cannot
-// currently reach (defense in depth). The trade-off is that a caller could pass
-// `keyLive` disagreeing with `connectGateMode`; no call site does (one derivation,
-// one prop), and an unreachable disagreement falls back to the promise-free
-// sentence rather than to a credential claim.
+// infer it (it does not call `ownerKeyLive` itself) — so the state main.jsx
+// derived is visible at the call site and pinned by the wiring test, and the
+// render tests can exercise arms main.jsx cannot currently reach (defense in
+// depth). The trade-off is that a caller could pass `keyLive` disagreeing with
+// `connectGateMode`; no call site does (one derivation, one prop), and an
+// unreachable disagreement falls back to the promise-free sentence rather than to
+// a credential claim.
 //
 // Rendered as one component for the same reason the member note is: the guard
 // is an EXECUTED render of the live sentence, not a source-text grep.

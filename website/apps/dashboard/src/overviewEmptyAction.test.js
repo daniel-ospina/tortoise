@@ -32,6 +32,7 @@ import {
   resolveSectionHash,
   focusDeepLinkTarget,
 } from './overviewEmptyAction.js'
+import { stripComments } from './testSupport.js'
 
 const render = (snippetKey) =>
   renderToStaticMarkup(React.createElement(OverviewEmptyActions, { snippetKey }))
@@ -237,11 +238,17 @@ test('#4637: the action set still drives the API Keys tab (the primary surface)'
 
 test('#4637 wiring: main.jsx renders the guarded action set with the derived fork', () => {
   const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
+  // The pins below run on COMMENT-STRIPPED source (the shared, quote-aware
+  // `stripComments`): without it a trailing `//` or an inline `/* … */` carrying
+  // the pinned text satisfied the pin while the live binding said something else
+  // (`<GraphMissingEmptyStateActions /* buildFork={isBuildFork} */
+  // buildFork={wizardFork} …>` restored the defect with the suite green).
+  const mainCode = stripComments(mainJsx)
   // PROP-SET based, not order/formatted based: extract the tag, then check the
   // bindings (a regex anchored on the attribute ORDER or on the line break
   // passes while the binding is wrong, or fails when it is right and a
   // formatter reflows the tag)
-  const actionTags = mainJsx.match(/<GraphMissingEmptyStateActions[\s\S]*?\/>/g) || []
+  const actionTags = mainCode.match(/<GraphMissingEmptyStateActions[\s\S]*?\/>/g) || []
   assert.equal(actionTags.length, 1,
     `the graph-missing card must render the guarded action set once — found ${actionTags.length}`)
   assert.match(actionTags[0], /buildFork=\{isBuildFork\}/,
@@ -249,17 +256,17 @@ test('#4637 wiring: main.jsx renders the guarded action set with the derived for
   assert.match(actionTags[0], /onGoToKeys=\{/,
     `the first-party API Keys handler must stay wired — got ${actionTags[0]}`)
   // …and no inline route action may survive beside it
-  assert.ok(!mainJsx.includes('Connect your agent →'),
+  assert.ok(!mainCode.includes('Connect your agent →'),
     'the inline agent-connection action must be gone from main.jsx')
-  assert.ok(!mainJsx.includes(ONBOARDING_FUNNEL_HREF),
+  assert.ok(!mainCode.includes(ONBOARDING_FUNNEL_HREF),
     'main.jsx must not re-type the agent-connection URL — the action module owns it')
   // the wizard's build-fork SDK links consume the SAME route constant, so the
   // Overview action and the branch it describes cannot drift
-  const docsHrefLinks = mainJsx.match(/<a[^>]*href=\{SDK_DOCS_HREF\}[^>]*>/g) || []
+  const docsHrefLinks = mainCode.match(/<a[^>]*href=\{SDK_DOCS_HREF\}[^>]*>/g) || []
   assert.equal(docsHrefLinks.length, 2,
     `both SDK docs anchors (the wizard's step-2 block and its closing card) must consume SDK_DOCS_HREF — found ${docsHrefLinks.length}`)
-  assert.match(mainJsx, /href=\{SDK_DOCS_HREF\}[^>]*>\s*SDK documentation →/,
+  assert.match(mainCode, /href=\{SDK_DOCS_HREF\}[^>]*>\s*SDK documentation →/,
     'the step-2 SDK anchor must still label the route the Overview build-fork action names')
-  assert.ok(!mainJsx.includes('tortoise.premiselabs.co/docs'),
+  assert.ok(!mainCode.includes('tortoise.premiselabs.co/docs'),
     'main.jsx must not re-type the SDK docs URL — it consumes SDK_DOCS_HREF')
 })

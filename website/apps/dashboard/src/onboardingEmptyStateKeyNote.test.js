@@ -39,6 +39,7 @@ import {
 } from './onboardingEmptyStateKeyNote.js'
 import { HARNESS_NAMES, HARNESS_OAUTH } from './harnesses.js'
 import { connectKeyGate } from './sessionKey.js'
+import { stripComments } from './testSupport.js'
 import { emptyStateActionRoute, SDK_DOCS_HREF } from './overviewEmptyAction.js'
 
 // react-dom/server escapes `'` to `&#x27;`; normalize so assertions pin the
@@ -197,10 +198,12 @@ test('#4637: `ownerKeyLive` admits exactly the two modes that resolve a usable k
   for (const mode of ['mint', 'loading', 'error', '', null, undefined, 'EMBED', 'nonsense']) {
     assert.equal(ownerKeyLive(mode), false, `${mode}: no usable key is resolved`)
   }
-  // …and it is the GATE's vocabulary, not an open test: the derivation above is
-  // TOTAL over every mode the gate can actually return, which is what makes the
-  // maps in the note module complete. A sixth gate mode fails HERE rather than
-  // silently rendering the fallback sentence.
+  // …and it is the GATE's vocabulary, not an open test: the five tuples above are
+  // the gate's own documented modes (sessionKey.js `connectKeyGate`), so a sixth
+  // mode appears here as a mismatch. The tuples are hand-picked, so this is not a
+  // proof of totality over ALL inputs — what protects an unclassified mode is the
+  // FALLBACK sentence below (`OWNER_AT_STEP_FALLBACK`), which promises nothing and
+  // is asserted for unknown modes in the render tests.
   const modes = gateModes()
   assert.deepEqual([...modes].sort(), [...GATE_MODES].sort(),
     'connectKeyGate returned a mode this suite does not know — classify it (ownerKeyLive + the note maps)')
@@ -209,7 +212,7 @@ test('#4637: `ownerKeyLive` admits exactly the two modes that resolve a usable k
 // (a) the key promise. The gate's own contract: only 'mint' may create a key;
 // 'loading'/'error' are UNRESOLVED reads that must offer neither a mint nor a
 // paste (sessionKey.js `connectKeyGate`).
-test('#4637: only the mint gate promises a key creation on the connect step', () => {
+test('#4637: only the mint gate promises an AUTOMATIC creation on the connect step', () => {
   for (const variant of VARIANTS) {
     assert.ok(renderOwner(variant, { connectGateMode: 'mint' }).includes(OWNER_CREATE_CLAUSE),
       `${variant}/mint: the modal case still says the step creates the key`)
@@ -353,8 +356,13 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
   // Props/branches are checked on COMMENT-STRIPPED source, so a comment between
   // the branch test and the tag cannot defeat a pin (and a pin cannot be
-  // satisfied by prose).
-  const mainCode = mainJsx.replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/^\s*\/\/.*$/gm, '')
+  // satisfied by prose). The stripper is the SHARED, quote-aware one
+  // (`testSupport.js`, used by 11 other suites) — a home-made stripper that only
+  // removed JSX comments left trailing `//` and inline `/* … */` able to satisfy
+  // a pin: `x // const keyIsLive = ownerKeyLive(connectGate.mode)` kept the
+  // gate-authority pin green. That hole is asserted closed at the end of this
+  // file (the `stripComments` regression test).
+  const mainCode = stripComments(mainJsx)
   // ALL note sites must use the derived boolean. The pins are PROP-SET based,
   // not layout based: a source-text regex anchored on the attribute ORDER or on
   // the newline comes apart the moment a prop moves or a formatter reflows the
@@ -451,10 +459,18 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
       `an owner arm may not read the in-memory snippet — got ${tag}`)
   }
   // The graph-missing card's key-present branch is the OTHER "the key is live"
-  // surface on these two cards, and it is gated on the same derivation: the
-  // snippet needs a plaintext to print AND the gate's word that it is usable.
-  assert.match(mainCode, /\{snippetKey && keyIsLive \?/,
-    'the graph-missing snippet branch must also require the gate-derived liveness')
+  // surface on these two cards, and it reads the GATE's own held plaintext — one
+  // fact, not a conjunction of two (a stale reveal plus some other usable row
+  // used to pass a `snippetKey && keyIsLive` test and print a dead key as live).
+  assert.match(mainCode, /\{connectGate\.key \?/,
+    'the graph-missing snippet branch must be gated on the gate\'s own held plaintext')
+  assert.ok(!/\{snippetKey \?/.test(mainCode),
+    'no branch may render the snippet from `snippetKey` alone')
+  // …and the API Keys affordance is on the same fact: the owner clause names that
+  // tab exactly when the gate holds no usable key, so the button must be there
+  // then (the old `!snippetKey` gate withheld it in the stale-reveal state)
+  assert.match(mainCode, /\{\(!snippetKey \|\| !keyIsLive\) && \(/,
+    'the API Keys affordance must appear whenever the gate holds no usable key')
   // the graph-missing card's key-present call to action names the same route,
   // so it consumes the same derivation instead of hard-coding ONE fork's prose
   assert.ok(mainCode.includes('{graphMissingCta(isBuildFork)}'),
@@ -469,4 +485,27 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
     'the graph-missing owner creation promise must be gone from main.jsx')
   assert.ok(!/API keys are live — connect your agent below/.test(mainJsx),
     'the owner graph-missing key-live literal must be gone from main.jsx')
+})
+
+// The stripper this file's pins run on must actually close the prose hole: a
+// trailing `//` or an inline `/* … */` carrying a pinned line must not satisfy
+// the pin. This is the regression guard for the fix that replaced a home-made
+// stripper (which left both classes working) with the shared `stripComments`.
+test('#4637: the pins run on source where no comment class can satisfy them', () => {
+  const cases = [
+    'const x = 1 // const keyIsLive = ownerKeyLive(connectGate.mode)',
+    '/* const keyIsLive = ownerKeyLive(connectGate.mode) */',
+    'f(/* const keyIsLive = ownerKeyLive(connectGate.mode) */)',
+    'const y = 2 // <OwnerEmptyStateKeyNote variant="reentry" keyLive={keyIsLive} />',
+  ]
+  for (const source of cases) {
+    const stripped = stripComments(source)
+    assert.ok(!stripped.includes('ownerKeyLive(connectGate.mode)'),
+      `a comment must not satisfy a pin — got ${JSON.stringify(stripped)}`)
+    assert.ok(!stripped.includes('<OwnerEmptyStateKeyNote'),
+      `a comment must not register a note site — got ${JSON.stringify(stripped)}`)
+  }
+  // …and it does not eat real code (a `//` inside a string literal is not a comment)
+  assert.ok(stripComments("const u = 'https://x/y' // note").includes("'https://x/y'"),
+    'a comment marker inside a string literal must not truncate the code')
 })
