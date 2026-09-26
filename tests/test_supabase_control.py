@@ -1589,6 +1589,24 @@ class TestRealQueryParamEncoding:
         with pytest.raises(ValueError, match="collides"):
             cp.query("t", filters=[("and", "gt", 1), ("and", "lt", 2)])
 
+    def test_order_is_transmitted_verbatim(self):
+        """#4037: the wire ``order`` param is exactly what the caller passed.
+        `SupabaseAbuseStore`'s three sites are pinned to ``created_at.desc`` by
+        ``tests/test_abuse.py::TestAbuseOrderParam``; this pins the seam's half
+        — no translation, no ``-col`` → ``col.desc`` rewrite."""
+        cp, seen = self._capturing_cp()
+        cp.query("abuse_events", order="created_at.desc")
+        assert seen["params"]["order"] == "created_at.desc", seen["params"]
+
+    def test_legacy_dash_order_is_not_translated(self):
+        """The seam is a deliberate pass-through: it does NOT rewrite the
+        invalid ``-col`` dialect (that 400 is PostgREST's to give). Validation
+        lives in the double + the wire-param tests, so a future "helpful"
+        translation reds here."""
+        cp, seen = self._capturing_cp()
+        cp.query("abuse_events", order="-created_at")
+        assert seen["params"]["order"] == "-created_at", seen["params"]
+
 
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────
 
