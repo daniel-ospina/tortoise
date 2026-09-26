@@ -123,6 +123,13 @@ SHARED_MODULES = (
     # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
     "tests/_tmpdir_hygiene.py",
     "tests/_embedded.py",
+    # #5049: the verdict contract (`tests/_verdict.py`) is imported at conftest
+    # MODULE level and hands the suite-wide per-test process-global reset to
+    # every surface's tests. It is not a `test_*.py` file, so the manifest never
+    # classifies it; without this entry a change to the contract would select
+    # `core` only and a break it induced in an api/eval/ep test would never run
+    # on the PR that made it (the #1349/#3332/#3910 under-selection class).
+    "tests/_verdict.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

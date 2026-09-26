@@ -46,6 +46,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 POSTS_FUNCTION = REPO_ROOT / "website" / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 
@@ -118,13 +120,16 @@ CASES: dict[str, dict] = {
 
 @pytest.fixture(scope="module")
 def results() -> dict[str, dict]:
+    # #4916: a *missing* Node still FAILs (this is a security guard, and a
+    # skipped guard looks like a passing one — the file's recorded decision),
+    # but a PRESENT node older than the `--experimental-strip-types` floor is a
+    # host-capability gap and SKIPs.
+    require_node_floor(
+        NODE_FLOOR_STRIP_TYPES,
+        what="the blog agent DELETE guard",
+        absent="fail",
+    )
     node = shutil.which("node")
-    if not node:
-        pytest.fail(
-            "no node runtime for the blog agent DELETE guard — need node >= 22.6 "
-            "(--experimental-strip-types); refusing to skip, because a skipped "
-            "guard looks like a passing one"
-        )
     import tempfile
 
     order = list(CASES)
