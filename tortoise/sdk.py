@@ -440,8 +440,9 @@ class _InMemoryEventLog:
 # non-whitelist property — `validFrom`, mapped from the `when` slot
 # (docs/ONTOLOGY.md §4.7: one slot, two spellings). It is intentionally
 # outside this declaration and outside the dedup read-back/response surface:
-# the whitelist stays the source of truth for the *E3 passthrough* fields
-# only. Do NOT "fix" the divergence by adding `validFrom` here — that would
+# the whitelist stays the source of truth for the passthrough fields only —
+# E3 quote/when/search_keys/source_turn_id plus E4 span_start/span_end.
+# Do NOT "fix" the divergence by adding `validFrom` here — that would
 # widen the public capture response and re-open the #2949 create/dedup
 # response-parity asymmetry.
 _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
@@ -5086,12 +5087,13 @@ class TortoiseSDK:
                         # Source (mirrors the M2 EventAPI provenance;
                         # create_point wires the extractedFrom edge).
                         extractedFrom=f"session:{session_id}",
-                        # #2813: persist the E3 passthrough fields on the node
-                        # (quote/when/search_keys/source_turn_id) — the exact
-                        # fields the response whitelist below advertises — plus
-                        # #3945's `validFrom` when `when` supplied it.
-                        # `validFrom` is deliberately NOT in that whitelist, so
-                        # the response advertises only the E3 fields.
+                        # #2813: persist the whitelisted passthrough fields on
+                        # the node (the `_CAPTURE_PASSTHROUGH_PROPS` E3 fields
+                        # quote/when/search_keys/source_turn_id plus the E4
+                        # span_start/span_end) — exactly the fields the response
+                        # read-back advertises — plus #3945's `validFrom` when
+                        # `when` supplied it. `validFrom` is deliberately NOT in
+                        # that whitelist, so the response never advertises it.
                         **create_props,
                     )
                 pid = resolved
