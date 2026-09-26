@@ -20,41 +20,47 @@
 #   workflow requires a `merge_group:` trigger.
 #
 # CONFIGURATION CONTRACT — read before editing
-#   1. Every check named here MUST also be a *required* status check, and every
-#      required status check MUST be named here. A required check that the queue
-#      branch never reports on **deadlocks the queue** for every PR.
-#   2. The live required set is the source of truth for the list below:
+#   1. The invariant is over BOTH condition lists, not one:
+#        live required contexts == queue_conditions ∪ merge_conditions (checks),
+#        each required check named in EXACTLY ONE of the two lists.
+#      `queue_conditions` gates ENTRY (evaluated against the PR head);
+#      `merge_conditions` gates the MERGE (evaluated against the queue branch).
+#      A check named in `merge_conditions` that the queue branch never reports on
+#      **deadlocks the queue** for every PR. A required check named in NEITHER
+#      list is still known to Mergify — see point 4 — so naming it is not what
+#      makes it enforced.
+#   2. The live required set is the source of truth:
 #        gh api repos/daniel-ospina/tortoise/branches/main/protection \
-#          -q '.required_status_checks.contexts[]'
+#          --jq '.required_status_checks.contexts[]'
 #      Re-read it when it changes; a stale list is a silent deadlock.
 #   3. `check-success` is deliberate, never `check-pending` or `-check-failure`:
 #      a skipped or neutral check must not read as a pass.
+#   4. ⛔ REMOVING A LINE FROM `queue_conditions` DOES NOT REMOVE IT FROM THE
+#      ENTRY GATE. Mergify injects branch-protection rules as conditions itself,
+#      and `branch_protection_injection_mode` defaults to `queue` — injected for
+#      *queuing and merging*. A required context is therefore an entry condition
+#      whether or not this file names it. The entry gate is changed ONLY by
+#      `branch_protection_injection_mode` (set on the rule below), never by
+#      editing the list.
 #
-# Last reconciled with the live required set: 2026-09-24
-#   pricing-artifact, docs, test-isolation, license-surface, legal-e2e,
-#   python-ci-gate
+# Last reconciled with the live required set: 2026-09-26
+#   queue_conditions (entry) : pricing-artifact, docs, test-isolation,
+#                              license-surface, legal-e2e
+#   merge_conditions (merge) : python-ci-gate
 
 queue_rules:
   - name: main
-    # Entry gate — evaluated against the PR, before it is queued.
+    # Entry gate — evaluated against the PR head, before it is queued.
     #
-    # ⛔ THE HEAVY CHECK IS DELIBERATELY ABSENT HERE — do not add it back.
-    # A verdict's durability depends on what it is a FUNCTION OF:
-    #   * the five below are DIFF-DERIVED (path-selected by tools/ci_selection.py),
-    #     so they stay true while main moves — a PR earns them once and keeps them;
-    #   * `python-ci-gate` is TREE-DERIVED (it observes the test legs on the merged
-    #     tree, #5227), so it is void the moment main advances. Requiring it here
-    #     forces EVERY PR to re-validate on EVERY main change — the treadmill that
-    #     made the queue look broken while it was working correctly.
-    # It is enforced in `merge_conditions` below, against the queue branch — the
-    # tree that will actually merge. That is the one durable validation, and
-    # validating the same change twice buys nothing the second time.
+    # The five below are cheap and repo-wide: they run their own workflow bodies
+    # in `ci.yml`, and `tools/ci_selection.py` selects legs for the Python suite,
+    # not for these. The heavy check is deliberately not listed here — per
+    # contract point 4 it would be an entry condition anyway under the default
+    # injection mode, which is the treadmill this change removes. It is named in
+    # `merge_conditions` below, where it is re-run against the queue branch.
     #
-    # Contract note: the file's "every named check must also be required" rule is
-    # satisfied — `python-ci-gate` remains NAMED, in `merge_conditions`.
-    # Verified before this change: the five below report `success` (never
-    # `skipped`) across every sampled PR, so `check-success` cannot deadlock entry
-    # for a PR whose diff does not select their surfaces.
+    # Verified: these five report `success` (never `skipped`) across every sampled
+    # PR, so `check-success` cannot deadlock entry.
     queue_conditions:
       - base=main
       - -draft
@@ -72,24 +78,34 @@ queue_rules:
     # five required checks are enforced by branch protection on the queue-branch
     # head instead. Adding a check that the queue branch never reports on would
     # block the merge forever — the deadlock this file's contract warns about.
+    #
+    # ⛔ THE LINE THAT MAKES ENTRY CHEAP IS THIS ONE, NOT THE LIST ABOVE.
+    # `queue` (the default) injects every required context as a condition for
+    # QUEUING AND MERGING, so deleting a line from `queue_conditions` is a no-op —
+    # the check is re-added for us. `merge` injects them for the merge only, so
+    # they are checked on the batch, which is the tree that actually lands.
+    # Verified live: queue PRs `mergify/merge-queue/<sha>` do report
+    # `python-ci-gate`, so naming it here does not deadlock.
+    branch_protection_injection_mode: merge
     merge_conditions:
       - check-success=python-ci-gate
     merge_method: squash
     # Speculative batching: PRs that merge cleanly together are tested as one
     # group, so a single CI cycle can certify several merges.
     #
-    # Raised 2 -> 6 (2026-09-25) now that the behaviour the old value was waiting
-    # on HAS BEEN OBSERVED. Both of the first two batches died on a RED BASE
-    # (`test (a)`/`test (b)` — main's own red, on a batch of ONE), not on a bad
-    # PR. So BASE HEALTH, not batch size, is the batch-failure driver — which
-    # frees batch size to be the throughput dial it is meant to be.
+    # Raised 2 -> 4 (2026-09-26). The two observed batch failures were both on a
+    # batch of ONE and both caused by main's own red (`test (a)`/`test (b)`), so
+    # they say nothing whatever about multi-PR batch size — they are NOT evidence
+    # that a larger batch is safe, and an earlier draft of this comment read them
+    # as if they were.
     #
-    # Sizing: a CI cycle is ~26-31 min, so batch 6 sustains ~11 merges/hour (≈ the
-    # 200/day target, #5215); batch 2 sustained ~4. A failing batch is re-tested
-    # bisected, so WATCH THE BISECTION RATE at this size: if failures stop being
-    # base-driven and bisection starts dominating, drop back to 4. Batch 8 is the
-    # Shopify-scale figure and the next step if 6 stays clean.
-    batch_size: 6
+    # Sizing: a full CI cycle is ~37 min measured on recent green runs (`test (a)`
+    # 36.4 and 37.2 min; `python-ci-gate` ~36.8 min after `changes`), so batch 4
+    # sustains ~6.5 merges/hour against batch 2's ~3.2. A failing batch is
+    # re-tested bisected, so the COST of a failure grows with the size and that
+    # cost is still unmeasured here. Do NOT raise this again until a genuine
+    # multi-PR batch failure has been observed and the bisection cost measured.
+    batch_size: 4
     batch_max_wait_time: 5 min
 
 pull_request_rules:
