@@ -393,10 +393,33 @@ def _supersession_fold_order(proj, records):
     # folds them by name but they are id-less, and only id-carrying nodes
     # can be visible successors).
     refs_sorted = sorted({ref for _, ref, _ in entity})
-    tgt_rows = proj.g.query(
-        "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
-        "RETURN o.id, o.name",
-        params={"ids": refs_sorted, "names": refs_sorted}).result_set
+    # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` disjunction is a
+    # name-keyed union that mixed two identity spaces in one probe. Resolve the
+    # arms APART (a node matched by both is one row, hence the dedupe) — the
+    # discipline below is unchanged: an id-form ref wins; a name-form ref
+    # resolves only via a SINGLE carrier (>1 = never-guess).
+    _id_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id IN $ids RETURN o.id, o.name",
+        params={"ids": refs_sorted}).result_set
+    _name_rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.name IN $names RETURN o.id, o.name",
+        params={"names": refs_sorted}).result_set
+    # Cross-arm duplication is removed ONE-FOR-ONE (a node matching by id AND by
+    # name is ONE node), while each arm's OWN multiplicity is PRESERVED: two rows
+    # identical in every projected field from one arm are two nodes claiming one
+    # id, and the duplicate-id never-guess below must still see them (a plain
+    # dict-dedupe collapsed them and hid that corruption case).
+    tgt_rows = list(_id_rows)
+    _id_left: dict[tuple, int] = {}
+    for _row in _id_rows:
+        _k = (_row[0], _row[1])
+        _id_left[_k] = _id_left.get(_k, 0) + 1
+    for _row in _name_rows:
+        _k = (_row[0], _row[1])
+        if _id_left.get(_k):
+            _id_left[_k] -= 1
+            continue
+        tgt_rows.append(_row)
     by_id: dict[str, list] = {}
     by_name: dict[str, list] = {}
     for oid, name in tgt_rows:
@@ -624,11 +647,33 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # pre-fix rows, pinned by
         # test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name.
         # No truncation happens here — only at the compare (legacy tolerance).
-        rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
+        # #3633 §B.1: the `o.id IN $ids OR o.name IN $names` union is split
+        # into two probes (deduped) — the disambiguation below is unchanged
+        # (an id match is unambiguous and wins; the >1-name never-guess stays).
+        _id_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id = $ref "
             "RETURN o.id, o.name, o.status, o.supersededBy",
-            params={"ids": [ref], "names": [ref]},
+            params={"ref": ref},
         ).result_set
+        _name_rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.name = $ref "
+            "RETURN o.id, o.name, o.status, o.supersededBy",
+            params={"ref": ref},
+        ).result_set
+        # Cross-arm duplication removed ONE-FOR-ONE (one node matched by both
+        # arms is one node); each arm's OWN multiplicity is preserved so two
+        # nodes claiming one id still trip the never-guess below.
+        rows = list(_id_rows)
+        _id_left: dict[tuple, int] = {}
+        for _row in _id_rows:
+            _k = (_row[0], _row[1], _row[2], _row[3])
+            _id_left[_k] = _id_left.get(_k, 0) + 1
+        for _row in _name_rows:
+            _k = (_row[0], _row[1], _row[2], _row[3])
+            if _id_left.get(_k):
+                _id_left[_k] -= 1
+                continue
+            rows.append(_row)
         if not rows:
             warn(f"supersession ref {ref!r} not found in the graph — "
                  f"skipped (fail-open)")

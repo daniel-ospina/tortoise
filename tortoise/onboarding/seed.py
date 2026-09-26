@@ -27,6 +27,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..entity_identity import AmbiguousEntityName, record_non_folded
+from ..live import _terminal_excluded
+
 # ── ontology vocabulary (ONTOLOGY.md §4.2/§5, §3.6) ──────────
 
 ORG_ANCHOR_KIND = "organization"
@@ -117,11 +120,18 @@ class SubjectCollision(Exception):
     merge distinct identities."""
 
     def __init__(self, *, name: str, kind: str, existing_id: str | None,
-                 reason: str, refs: dict[str, Any] | None = None):
+                 reason: str, refs: dict[str, Any] | None = None,
+                 question: str | None = None):
         self.name = name
         self.kind = kind
         self.existing_id = existing_id
         self.reason = reason
+        # #3633: an optional caller-facing sentence that REPLACES the default
+        # "already exists and is not this org/user" wording, which is false for
+        # the two refusals this change adds (a name held by several live
+        # Subjects, and a name held only by a terminal one). The default stays
+        # for the ownership-mismatch refusal it was written for.
+        self.question = question
         self.refs = refs or {}
         super().__init__(f"seed collision on {name!r}: {reason}")
 
@@ -142,18 +152,73 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
 
 
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
-    """Existing Subject node props with the given ``name`` (None when
-    absent). Subject-only: an Object/Statement with the same name is a
-    different label and can never collide with an anchor (B1)."""
-    res = _run(handle, "MATCH (s:Subject {name: $name}) RETURN properties(s) "
-                       "LIMIT 1", {"name": name})
-    if not res.result_set:
+    """The single LIVE Subject props holding ``name`` (None when absent).
+
+    #3633 route-then-refuse (the #3590 plan's §B.1 disposition): a name is a
+    natural key over LIVE Subjects, and same-name coexistence is legal (D2).
+    Zero live holders -> None; exactly one -> its props; two or more ->
+    ``AmbiguousEntityName``. The old ``LIMIT 1`` returned an ARBITRARY carrier,
+    so a same-name pair could claim — or collide against — the wrong identity.
+    Subject-only: an Object/Statement with the same name is a different label
+    and can never collide with an anchor (B1)."""
+    res = _run(handle,
+               "MATCH (s:Subject {name: $name}) "
+               f"WHERE {_terminal_excluded('s.status')} "
+               "RETURN properties(s)",
+               {"name": name})
+    rows = getattr(res, "result_set", None) or []
+    if not rows:
         return None
-    raw = res.result_set[0][0]
-    if isinstance(raw, dict):
-        return dict(raw)
-    props = getattr(raw, "properties", None)
-    return dict(props) if isinstance(props, dict) else {}
+    props: list[dict[str, Any]] = []
+    for row in rows:
+        raw = row[0]
+        if isinstance(raw, dict):
+            props.append(dict(raw))
+        else:
+            existing = getattr(raw, "properties", None)
+            props.append(dict(existing) if isinstance(existing, dict) else {})
+    if len(props) > 1:
+        candidates = [p.get("id") for p in props if p.get("id")]
+        # Record the non-folded entry BEFORE raising: the log line IS the
+        # non-folded record the module's discipline requires, and it must
+        # survive a caller that catches the exception.
+        record_non_folded("Subject", name, candidates, holder_count=len(props))
+        raise AmbiguousEntityName("Subject", name, candidates,
+                                  holder_count=len(props))
+    return props[0]
+
+
+def terminal_subject_props(handle: Any, name: str) -> list[dict[str, Any]]:
+    """Props of every TERMINAL Subject holding ``name`` (superseded/…).
+
+    ``find_subject_by_name`` resolves LIVE holders only (the D2 natural-key
+    predicate), so it returns ``None`` for a name whose only carrier is
+    superseded/retracted/outdated. On this base that ``None`` is NOT "safe to
+    create": the create path still ``MERGE``s a Subject on ``{name}``
+    (``projection/entities.py``), so creating would ADOPT the terminal node,
+    rewrite its id and persist ``status='live'``.
+
+    That is why the pre-#3633 classification still has to see these holders —
+    OURS is idempotently reused, NOT ours is refused — instead of treating the
+    name as free. The old code did that with ``LIMIT 1`` and picked an
+    ARBITRARY carrier; returning ALL of them lets the caller refuse when there
+    is more than one, which is the same never-guess rule the live path uses.
+    """
+    res = _run(handle,
+               "MATCH (s:Subject {name: $name}) "
+               f"WHERE NOT {_terminal_excluded('s.status')} "
+               "RETURN properties(s)",
+               {"name": name})
+    rows = getattr(res, "result_set", None) or []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        raw = row[0]
+        if isinstance(raw, dict):
+            out.append(dict(raw))
+        else:
+            existing = getattr(raw, "properties", None)
+            out.append(dict(existing) if isinstance(existing, dict) else {})
+    return out
 
 
 # ── two-Subject seed ─────────────────────────────────────────
@@ -242,7 +307,50 @@ def _classify_anchor(sdk: Any, *, name: str, kind: str,
     {"subject": props} = OURS (reuse + normalize on match); raises
     ``SubjectCollision`` when a same-name Subject exists that is not ours
     (identity-unprovable or ref-mismatch). Zero writes."""
-    existing = find_subject_by_name(sdk, name)
+    try:
+        existing = find_subject_by_name(sdk, name)
+    except AmbiguousEntityName as exc:
+        # #3633: a name held by two live Subjects has no single identity to
+        # classify — refuse through the seed's OWN contract (callers map
+        # SubjectCollision to a disambiguation response) rather than adding an
+        # arbitrary carrier to the graph.
+        raise SubjectCollision(
+            name=name, kind=kind, existing_id=None,
+            reason=("same-name Subject is ambiguous — "
+                    f"{exc.holder_count} live carriers "
+                    f"{list(exc.candidate_ids)}; never a silent pick, "
+                    "disambiguate (suffix/canonical key)"),
+            refs={},
+            question=(f"{name!r} is held by more than one live Subject"
+                      + (" (one or more of them carries no id)"
+                         if exc.holder_count > len(exc.candidate_ids) else "")
+                      + ", so there is no single identity to reuse or "
+                      "compare. Provide a disambiguated name "
+                      "(suffix/canonical key) — distinct identities are "
+                      "never merged.")) from exc
+    if existing is None:
+        # #3633: no LIVE holder. A terminal same-name Subject is still NOT a
+        # free name on this base — a create MERGEs by name, adopts it and flips
+        # it live — so the pre-#3633 classification still applies to it: OURS
+        # is idempotently reused (and the name-keyed create revives it, exactly
+        # as before), NOT ours is refused. What must NOT happen is the old
+        # `LIMIT 1` ARBITRARY pick when several terminal holders exist.
+        terminals = terminal_subject_props(sdk, name)
+        if len(terminals) > 1:
+            raise SubjectCollision(
+                name=name, kind=kind, existing_id=None,
+                reason=("same-name Subject is ambiguous — "
+                        f"{len(terminals)} terminal carriers, no live holder; "
+                        "the old LIMIT 1 picked one arbitrarily, which is the "
+                        "guess #3633 forbids; disambiguate (suffix/canonical "
+                        "key)"),
+                refs={},
+                question=(f"{name!r} is held by more than one terminal "
+                          "Subject and no live one, so there is no single "
+                          "identity to reuse or compare. Provide a "
+                          "disambiguated name (suffix/canonical key) — "
+                          "distinct identities are never merged."))
+        existing = terminals[0] if terminals else None
     if existing is None:
         return None
     if not is_own_subject(existing, **ours_refs):

@@ -22064,10 +22064,11 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                 "org_name": org_display,
                 "org_name_source": org_source,
                 "person_name_source": person_source,
-                "question": (f"A Subject named {exc.name!r} already exists "
-                              "and is not this org/user. Provide a "
-                              "disambiguated name (suffix/canonical key) — "
-                              "distinct identities are never merged."),
+                "question": exc.question or (
+                    f"A Subject named {exc.name!r} already exists "
+                    "and is not this org/user. Provide a "
+                    "disambiguated name (suffix/canonical key) — "
+                    "distinct identities are never merged."),
             }
         # node ↔ anchor link (DM-1) + first-points-filed step edge + gate
         legacy_mirror = bool(_get_onboarding_state(org_id).get(
@@ -22225,10 +22226,13 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
                 person_name=person, user_id=person_user_id,
                 person_email=person_email, include_person=include_person)
         except _seed.SubjectCollision as exc:
-            # A same-name Subject that is NOT this org/user (rare on a fresh
-            # org) → surfaced, zero writes for that anchor, retry-safe. The
+            # A same-name Subject that is NOT this org/user — OR a name held by
+            # several Subjects (live, or terminal with no live holder) (#3633)
+            # → surfaced, zero writes for that anchor, retry-safe. The
             # provisioning caller logs + keeps the org usable (mirrors the
-            # W3 runner's all-or-nothing contract).
+            # W3 runner's all-or-nothing contract). This payload carries
+            # `reason` (the #3633-specific wording lives there); unlike
+            # `_run_onboarding_seed` it has no `question` field.
             return {
                 "status": "collision",
                 "collisions": [{
