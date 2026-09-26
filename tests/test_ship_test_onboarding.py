@@ -267,8 +267,10 @@ def test_reader_returns_absent_when_no_connection_surface_rendered() -> None:
 
 
 def test_reader_reports_which_surface_produced_the_state() -> None:
-    """The two surfaces use DIFFERENT derivations, so the walk must know which
-    one it judged."""
+    """The two surfaces render the state in different DOM nodes, so the walk
+    must know WHERE it read it. #4646: they now share ONE derivation
+    (``connectionObservation.js::harnessConnectionObserved``), so this reports
+    the location — it does not select a vocabulary."""
     assert connection_surface_kind(_StubPage({_CARD: ["Not connected"]})) == "card"
     assert connection_surface_kind(_StubPage({".welcome-title": ["Create your Organization"]})) \
         == "wizard"
@@ -298,16 +300,26 @@ def test_verdict_is_never_passed_without_the_positive_direction_proven() -> None
     assert verdict_for(neg, True, judge(CONNECTED, OBSERVED), **signed) == "passed"
 
 
-# ── the per-surface decision seam (cycle-2: the call sites needed coverage) ──
+# ── the connection-verdict seam (cycle-2: the call sites needed coverage) ───
 
 def test_connection_verdict_promotes_a_smuggled_positive_claim() -> None:
     """T5: a negative card must not hide a positive claim elsewhere on the
-    page. The promotion lived at an untested call site; it lives here now."""
-    v = connection_verdict(NOT_CONNECTED, "card", UNOBSERVED,
+    page. The promotion lived at an untested call site; it lives here now.
+
+    #4646 round 6: the UNAVAILABLE case is asserted separately because narrowing
+    the promotion to `ui == NOT_CONNECTED` left the whole suite green while a
+    graph-down screen that also claims a connection was laundered into
+    `honest-negative` — the instrument's own read can be fine while the client
+    renders its outage card."""
+    v = connection_verdict(NOT_CONNECTED, UNOBSERVED,
                            "No connection observed yet — but your agent is connected.")
     assert v.ui == CONNECTED
     assert v.ok is False
     assert v.rule == "claim-without-observation"
+    u = connection_verdict(UNAVAILABLE, UNOBSERVED,
+                           "Couldn't load — refresh to retry. Your agent is connected.")
+    assert u.ui == CONNECTED and u.ok is False
+    assert u.rule == "claim-without-observation"
 
 
 def test_connection_verdict_sweeps_the_untruncated_body() -> None:
@@ -316,7 +328,7 @@ def test_connection_verdict_sweeps_the_untruncated_body() -> None:
     page = "x" * 5000 + " Your agent is connected to this Organization."
     assert claims_connection(recorded_body(_StubPage({"body": [page]}))) is False
     assert claims_connection(page) is True
-    v = connection_verdict(NOT_CONNECTED, "card", UNOBSERVED, page)
+    v = connection_verdict(NOT_CONNECTED, UNOBSERVED, page)
     assert v.ui == CONNECTED and v.ok is False
 
 
@@ -327,21 +339,30 @@ def test_page_body_is_untruncated_but_the_recorded_copy_is_bounded() -> None:
     assert len(recorded_body(page)) == 4000
 
 
-def test_connection_verdict_judges_each_surface_with_its_own_vocabulary() -> None:
-    """F3: the wizard is edge-only, the Overview accepts the wire-complete
-    forms. The same server truth must resolve differently per surface."""
+def test_connection_verdict_uses_the_one_edge_only_vocabulary() -> None:
+    """#4646: the shipped client has ONE edge-only connection predicate
+    (`connectionObservation.js::harnessConnectionObserved`, consumed by
+    `overview.js` and `main.jsx`), so the guard applies that one vocabulary — and
+    `connection_verdict` deliberately takes NO surface argument, so a surface
+    cannot select one. A card claiming a connection for a wire-complete org with
+    NO observed edge is now CAUGHT (it passed while the card accepted the
+    wire-complete forms). The walk records WHICH DOM surface produced the state
+    separately (see `test_reader_reports_which_surface_produced_the_state`)."""
     grandfathered = {"status": "complete", "completed_steps": []}
-    wizard = connection_verdict(NOT_CONNECTED, "wizard", grandfathered,
-                                "No connection observed yet")
-    card = connection_verdict(CONNECTED, "card", grandfathered, "Connected ✓")
-    assert wizard.ok is True and wizard.rule == "honest-negative"
-    assert card.ok is True and card.rule == "observed-and-shown"
-    # a wizard claiming a connection its own edge-only derivation cannot see:
-    assert connection_verdict(CONNECTED, "wizard", grandfathered, "Connected ✓").ok is False
+    assert connection_verdict(NOT_CONNECTED, grandfathered,
+                              "No connection observed yet").rule == "honest-negative"
+    # a claim on an org whose connection the server never observed:
+    v = connection_verdict(CONNECTED, grandfathered, "Connected ✓")
+    assert v.ok is False and v.rule == "claim-without-observation"
+    # the observed edge is still accepted, and still required to be shown:
+    observed = {"completed_steps": ["harness-connected"]}
+    assert connection_verdict(CONNECTED, observed, "Connected ✓").ok is True
+    assert connection_verdict(NOT_CONNECTED, observed,
+                              "No connection observed yet").ok is False
 
 
 def test_connection_verdict_never_promotes_an_absent_surface_into_a_claim() -> None:
-    v = connection_verdict(ABSENT, "card", UNOBSERVED, "your agent is connected")
+    v = connection_verdict(ABSENT, UNOBSERVED, "your agent is connected")
     assert v.ui == ABSENT and v.rule == "surface-missing" and v.ok is False
 
 
@@ -390,36 +411,54 @@ def test_server_observation_reads_the_canonical_step_edge() -> None:
 
 
 def test_server_observation_accepts_the_servers_own_wire_complete_forms() -> None:
-    """PARITY DECISION, pinned explicitly. The shipped client derives connected
-    from the same three forms (`overview.js::overviewConnection`), and
-    `onboarding/state.py::resolve_wire_completion` accepts the grandfathered
-    wire-complete forms (node status complete, or jsonb onboarding_complete with
-    zero agent edges) for the legacy cohort. The guard asks "does the screen
-    claim more than the server's own projection?", so it accepts exactly what
-    the server accepts — a UI rendering what the server reports is honest even
-    for a grandfathered org. This test pins that the grandfathered form is
-    accepted WITH NO STEP EDGE, so the choice is visible rather than implied."""
-    assert server_observed({"status": "complete"}) is True
-    assert server_observed({"onboarding_complete": True}) is True
-    assert server_observed({"status": "complete", "completed_steps": []}) is True
-    # ... and the guard therefore passes a screen that mirrors it.
-    assert judge(CONNECTED, {"status": "complete", "completed_steps": []}).ok is True
+    """PARITY DECISION, pinned explicitly — SERVER-side. The server's own
+    COMPLETION rule (`onboarding/state.py::resolve_wire_completion`) accepts the
+    grandfathered wire-complete forms (node status complete, or jsonb
+    onboarding_complete with zero agent edges). #4646: that is NOT the shipped
+    client's connection predicate — the card is edge-only now, exactly like the
+    wizard — so the guard never judges a screen with it. The probe is therefore
+    spelled out explicitly instead of being the default."""
+    assert server_observed({"status": "complete"}, accept_wire_complete=True) is True
+    assert server_observed({"onboarding_complete": True}, accept_wire_complete=True) is True
+    assert server_observed({"status": "complete", "completed_steps": []},
+                           accept_wire_complete=True) is True
+    # Its BOUNDARY, pinned so the difference is explicit rather than implied: the
+    # probe is a NAMED-FORM check and does NOT re-implement
+    # `resolve_wire_completion`'s zero-agent-edge condition (`_NON_AGENT_STEPS` =
+    # team-named, connection-written). On a REAL projection that condition is
+    # already applied, because the served `onboarding_complete` IS that
+    # function's output (`hosted_api.py`) — so this shape is NOT server-
+    # producible. It pins what the probe does with a hand-built dict, and that
+    # leaving the rule to the server is deliberate. Do NOT "tighten" it by
+    # duplicating `_NON_AGENT_STEPS` here: that is a third copy of a server
+    # constant to drift.
+    assert server_observed({"status": "active", "onboarding_complete": True,
+                            "completed_steps": ["first-points-filed"]},
+                           accept_wire_complete=True) is True
+    # ... while the CONNECTION question (the default, and what a screen is judged
+    # against) is edge-only, so the server observed nothing for that org:
+    assert server_observed({"status": "complete", "completed_steps": []}) is False
+    assert server_observed({"onboarding_complete": True}) is False
+    # and a screen claiming a connection for it is a false claim:
+    assert judge(CONNECTED, {"status": "complete", "completed_steps": []}).ok is False
 
 
-def test_server_observation_can_be_restricted_to_the_wizards_edge_only_form() -> None:
-    """The two shipped derivations DIFFER: the wizard requires the
-    `harness-connected` edge (`main.jsx::serverHarnessConnected`). Judging the
-    wizard screen with the Overview vocabulary reports a FALSE failure for a
-    grandfathered org that honestly renders the wizard's negative."""
+def test_the_connection_vocabulary_is_edge_only_and_the_wire_complete_probe_is_explicit() -> None:
+    """#4646: the shipped client's ONE connection predicate is edge-only, so the
+    guard's default is edge-only for BOTH surfaces; the wire-complete forms are
+    reachable only through the explicit server-contract probe. Before #4646 the
+    card accepted the wire-complete forms, so this test pinned a per-surface
+    split — the split is gone, and with it the false failure it existed to
+    prevent: an honest card negative is now simply honest."""
     grandfather = {"status": "complete", "completed_steps": []}
-    assert server_observed(grandfather, accept_wire_complete=False) is False
-    # the wizard honestly says "No connection observed yet" for that org:
-    assert judge(NOT_CONNECTED, grandfather, accept_wire_complete=False).ok is True
-    # the edge-only form still counts:
-    assert server_observed({"completed_steps": ["harness-connected"]},
-                            accept_wire_complete=False) is True
-    # and the Overview vocabulary still requires a shown connection:
-    assert judge(NOT_CONNECTED, grandfather, accept_wire_complete=True).ok is False
+    assert server_observed(grandfather) is False
+    assert server_observed(grandfather, accept_wire_complete=True) is True
+    # the honest negative for that org is GREEN:
+    assert judge(NOT_CONNECTED, grandfather).ok is True
+    # the observed edge still counts:
+    assert server_observed({"completed_steps": ["harness-connected"]}) is True
+    # and a claim with no observed edge is still RED:
+    assert judge(CONNECTED, grandfather).ok is False
 
 
 def test_server_observation_is_false_for_a_missing_or_malformed_projection() -> None:
@@ -1498,7 +1537,7 @@ class _FakeSyncPlaywright:
 
 
 def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
-                   mcp_tools_call, surface="card", skip_write=False,
+                   mcp_tools_call, surface="card", surface_sequence=None, skip_write=False,
                    org_create=False, org_click_raises=False, org_name=None,
                    keep_org=False, front_door_hittable=True,
                    playwright_available=True, launch_raises=False,
@@ -1564,7 +1603,13 @@ def _run_fake_walk(monkeypatch, tmp_path, *, plan, ui_sequence,
     monkeypatch.setattr(mod, "deployed_bundle", lambda base_url: "assets/index-x.js")
     monkeypatch.setattr(mod, "front_door_probe",
                         lambda page, **k: {"hittable": front_door_hittable})
-    monkeypatch.setattr(mod, "connection_surface_kind", lambda page, **k: surface)
+    # `surface_sequence` feeds a DIFFERENT answer per call, so the two verdict
+    # reads can be distinguished. A constant stub cannot catch a stale re-read
+    # (step 7 reusing step 5's value) or a per-site constant (#4646 round 5).
+    _surfaces = list(surface_sequence) if surface_sequence else [surface]
+    monkeypatch.setattr(mod, "connection_surface_kind",
+                        lambda page, **k: _surfaces.pop(0) if len(_surfaces) > 1
+                        else _surfaces[0])
     monkeypatch.setattr(mod, "page_body", lambda page: "")
     monkeypatch.setattr(mod, "recorded_body", lambda page: "")
     ui_values = list(ui_sequence)
@@ -1673,6 +1718,101 @@ def test_walk_happy_path_passes_and_only_ever_reads_through_the_session(monkeypa
         assert data is None
     # the instrument never read the browser's cookie jar directly
     assert ctx.cookies == []
+
+
+def test_walk_records_which_dom_surface_produced_each_verdict(monkeypatch, tmp_path):
+    """#4646: the walk records the surface it judged (`extra["surface"]`). No
+    other test distinguishes the recorded values, so a dropped key, a hard-coded
+    'card', or a STALE RE-READ would pass unnoticed. The two reads are given
+    DIFFERENT surfaces here (step 5 judges the wizard's final screen; step 7
+    reloads `/` into the Overview and judges the card), so a constant — or step 7
+    reusing step 5's value — cannot satisfy both assertions."""
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("POST", "/api/v1/team/keys"): [(200, {"key": "tt_minted"})],
+        ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED, _PROJ_OBSERVED,
+                                             _PROJ_OBSERVED],
+    }
+    obs, _ctx, _ = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, surface_sequence=["wizard", "card"],
+        ui_sequence=[NOT_CONNECTED, CONNECTED], mcp_tools_call=_MCP_OK)
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
+    by_name = {s.name: s for s in obs.steps}
+    assert by_name["before-observation"].extra["surface"] == "wizard"
+    assert by_name["after-observation"].extra["surface"] == "card", (
+        "step 7 must re-read the surface, not reuse step 5's")
+
+
+def test_walk_is_judged_edge_only_on_a_wire_complete_org(monkeypatch, tmp_path):
+    """#4646 round 7/8: the walk's call site must use the ONE edge-only vocabulary,
+    on EVERY surface.
+
+    A wire-complete org with no observed edge is rendered HONESTLY by the
+    edge-only client as the observation phrase, so the rule at both connection
+    steps must be `honest-negative`. Re-introducing a per-surface vocabulary at
+    the walk's CALL SITE (the pre-#4646 `accept = surface_kind == "card"`) made
+    that honest screen `observation-not-shown` — a FAILED walk on exit 1 — with
+    the whole unit suite and both self-checks green, because every other walk
+    fixture is either unobserved-and-edge-less or observed-with-the-edge. The
+    switch is keyed on the surface, so BOTH polarities are pinned: the card run
+    and the wizard run (step 5 IS the wizard read). This is the regression the
+    round-2 self-check rows used to catch before the surface parameter was
+    removed, pinned here where it is still reachable."""
+    grandfather = (200, {"onboarding": {"status": "complete", "completed_steps": []}})
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("POST", "/api/v1/team/keys"): [(200, {"key": "tt_minted"})],
+        ("GET", "/api/v1/onboarding/state"): [grandfather] * 40,
+    }
+    for surface in ("card", "wizard"):
+        obs, ctx, mod = _run_fake_walk(
+            monkeypatch, tmp_path / surface, plan=plan, surface=surface,
+            ui_sequence=[NOT_CONNECTED, NOT_CONNECTED], mcp_tools_call=_MCP_OK)
+        by_name = {s.name: s for s in obs.steps}
+        assert by_name["after-observation"].extra["rule"] == "honest-negative", \
+            (surface, by_name["after-observation"].extra)
+        # ... and the walk must NOT blame the product for the honest negative. The
+        # `rule` above is the SCREEN's verdict; these pin the WALK's own reason,
+        # which is computed from the separate post-write `server_observed` poll —
+        # widening THAT probe turns this honest run into `positive_not_shown`
+        # ("the screen hid a connection the server observed") while every other
+        # assertion, and the self-check, still pass.
+        assert obs.reason == mod.REASON_SERVER_DID_NOT_OBSERVE, (surface, obs.reason)
+        assert obs.verdict == mod.INCOMPLETE_NO_OBSERVATION, (surface, obs.verdict)
+        assert obs.steps[-1].observed is False, (surface, obs.steps[-1].observed)
+        # ... nor may it call the honest run a product failure:
+        assert not obs.verdict.startswith("failed:"), (surface, obs.verdict, obs.reason)
+
+
+def test_walk_waits_for_the_observed_edge_after_a_wire_complete_read(monkeypatch, tmp_path):
+    """#4646 round 10: the post-write poll must wait for the EDGE, not for completion.
+
+    The poll's break criterion is the same question as the probe that decides the
+    walk's reason, so a wire-complete acceptance reintroduced THERE ends the wait
+    on the first read for an org that never observed the edge. Today the MCP write
+    cannot file that edge for a grandfathered org, so this is latent rather than
+    reachable — but the site rides on a default, and the flip is exactly the
+    per-surface widening this instrument exists to refuse. Pin the WAIT: read #1
+    and #2 are wire-complete AND edge-less, read #3 carries the edge, so a
+    completion-keyed break records `observed` from read #1 and reports the honest
+    `server_did_not_observe` for a run that did in fact observe."""
+    wc_no_edge = (200, {"onboarding": {"status": "complete", "completed_steps": [],
+                                      "onboarding_complete": True}})
+    wc_edge = (200, {"onboarding": {"status": "complete",
+                                    "completed_steps": ["harness-connected"],
+                                    "onboarding_complete": True}})
+    plan = {
+        ("GET", "/api/session"): _SESSION_200,
+        ("POST", "/api/v1/team/keys"): [(200, {"key": "tt_minted"})],
+        ("GET", "/api/v1/onboarding/state"):
+            [wc_no_edge, wc_no_edge, wc_edge] + [wc_edge] * 40,
+    }
+    obs, _ctx, _ = _run_fake_walk(
+        monkeypatch, tmp_path, plan=plan, surface="card",
+        ui_sequence=[NOT_CONNECTED, CONNECTED], mcp_tools_call=_MCP_OK)
+    by_name = {s.name: s for s in obs.steps}
+    assert by_name["agent-write"].observed is True, (obs.verdict, obs.reason)
+    assert obs.verdict == "passed", (obs.verdict, obs.reason)
 
 
 def test_walk_without_a_session_is_an_instrument_error_and_writes_nothing(monkeypatch, tmp_path):
@@ -1898,7 +2038,7 @@ def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
         ("GET", "/api/v1/onboarding/state"): [_PROJ_UNOBSERVED],
     }
     obs, ctx, mod = _run_fake_walk(
-        monkeypatch, tmp_path, plan=plan, ui_sequence=[ABSENT],
+        monkeypatch, tmp_path, plan=plan, ui_sequence=[ABSENT], surface="card",
         mcp_tools_call=_MCP_OK, org_create=True, org_name=_RUN_ORG)
 
     assert obs.verdict == mod.INCOMPLETE_NO_SURFACE
@@ -1912,6 +2052,10 @@ def test_walk_that_never_reaches_a_connection_surface_is_incomplete_no_surface(
     # ...and the step is this exit's, not the claim-failure exit's: that one
     # carries `page_claims_connection`, this one does not.
     assert "page_claims_connection" not in obs.steps[-1].extra
+    # The ABSENT branch records the surface too — and the harness answers `card`
+    # here on purpose, so a hard-coded `"none"` at that site fails (the `none`
+    # VALUE is pinned by the reader test instead).
+    assert obs.steps[-1].extra["surface"] == "card", obs.steps[-1].extra
     _assert_teardown_recorded_fail_closed(obs, mod)
 
 
