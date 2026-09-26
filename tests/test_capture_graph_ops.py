@@ -195,6 +195,15 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
         sdk.capture_session(CONV, session_id="warmup_000")
         issued["n"] = 0  # measure ONLY the capture below
         res = sdk.capture_session(CONV, session_id="gops_000")
+        # Snapshot HERE, before ``close()`` — the close is teardown, not
+        # capture. It issues guarded queries (12 in the docker lane, 0 in the
+        # embedded one) and they are NOT metered, because no capture phase is
+        # active: ``record_graph_op`` returns early on an inactive phase. Read
+        # after the close instead and the oracle compares a capture-sized
+        # numerator against a capture-plus-teardown denominator — which is how
+        # this test first went red in CI (65 recorded for 77 issued) while
+        # passing locally, i.e. it asserted an accident of the embedded lane.
+        measured = issued["n"]
     finally:
         sdk.close()
 
@@ -218,10 +227,16 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch):
         "commit bucket")
     assert ops["by_phase"]["belief"]["total"] > 0
     # No op is double-counted — checked against the guarded queries ACTUALLY
-    # ISSUED, not against a restatement of the counter's own definition.
-    assert ops["total"] == issued["n"], (
-        f"{ops['total']} ops recorded for {issued['n']} guarded queries — a "
-        "double count at the choke point shows exactly here")
+    # ISSUED **during the capture**, not against a restatement of the
+    # counter's own definition (``total`` is BY CONSTRUCTION
+    # ``sum(by_phase)``, so that comparison moves both sides together and
+    # cannot fail). ``measured`` is exact, not a bound: within an active
+    # capture phase every guarded query is recorded, so equality is the right
+    # assertion and a double count lands on exactly 2x.
+    assert ops["total"] == measured, (
+        f"{ops['total']} ops recorded for {measured} guarded queries issued "
+        "during the capture — a double count at the choke point shows exactly "
+        "here (2x), and a dropped record shows as an under-count")
 
 
 def test_record_graph_op_is_fail_soft_on_an_unknown_phase():
