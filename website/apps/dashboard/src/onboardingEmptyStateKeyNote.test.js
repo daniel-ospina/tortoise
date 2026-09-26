@@ -1,15 +1,21 @@
-// onboardingEmptyStateKeyNote.test.js — #3729, run with node --test.
+// onboardingEmptyStateKeyNote.test.js — #3729 and #4637, run with node --test.
 //
 // Two Overview empty states told a member "You'll need an API key: ask an
 // owner or admin to share one". The key-less OAuth connectors need no key and
 // are reachable by every role, so a member on one of those leaves was told
 // they were blocked by something they do not need.
 //
-// This guard is EXECUTED, not a source-text grep: it RENDERS the live note
-// component with react-dom/server. The RED direction is the old categorical
-// sentence — restoring it fails the first test. A supplementary WIRING
-// assertion at the end proves main.jsx renders the guarded component at all
-// three member arms with the derived boolean (the render tests above are the
+// #4637: the OWNER/admin arms of the same two cards were the un-migrated
+// halves. They promised a key UNCONDITIONALLY (false for a key-less leaf and
+// contradicted while the keys read is unresolved) and named the chooser route
+// "connect your agent" on a BUILD fork, whose step 2 is the SDK block and
+// renders no chooser at all.
+//
+// This guard is EXECUTED, not a source-text grep: it RENDERS the live notes
+// with react-dom/server. The RED direction is the old categorical sentence —
+// restoring it fails the first test. A supplementary WIRING assertion at the
+// end proves main.jsx renders the guarded components at all six arms (three
+// member, three owner) with the derived booleans (the render tests above are the
 // behaviour guard).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -20,6 +26,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   MemberEmptyStateKeyNote,
+  OwnerEmptyStateKeyNote,
   chooserLeafIds,
   keylessChooserConnectorNames,
   keylessConnectorClause,
@@ -146,6 +153,98 @@ test('#3729: the clause helper is grammar-safe for zero/one/many names', () => {
   assert.equal(joinConnectorNames([]), 'a key-less connector')
 })
 
+// ── #4637: the OWNER/admin arms ──────────────────────────────────────────────
+const renderOwner = (variant,
+  { buildFork = false, connectGateMode = 'mint', keyLive = false } = {}) =>
+  renderToStaticMarkup(React.createElement(OwnerEmptyStateKeyNote,
+    { variant, buildFork, connectGateMode, keyLive })).replace(/&#x27;/g, "'")
+const GATE_MODES = ['mint', 'existing', 'embed', 'loading', 'error']
+const OWNER_CREATE_CLAUSE = 'one is created on the connect step when you get there'
+
+// (a) the key promise. The gate's own contract: only 'mint' may create a key;
+// 'loading'/'error' are UNRESOLVED reads that must offer neither a mint nor a
+// paste (sessionKey.js `connectKeyGate`).
+test('#4637: only the mint gate promises a key creation on the connect step', () => {
+  for (const variant of VARIANTS) {
+    assert.ok(renderOwner(variant, { connectGateMode: 'mint' }).includes(OWNER_CREATE_CLAUSE),
+      `${variant}/mint: the modal case still says the step creates the key`)
+    for (const connectGateMode of ['loading', 'error', null, 'nonsense']) {
+      const html = renderOwner(variant, { connectGateMode })
+      assert.ok(!/created on the connect step/.test(html),
+        `${variant}/${connectGateMode}: an unresolved (or unknown) gate must not promise a creation — got ${html}`)
+    }
+    // …including an ABSENT mode (a call site that forgot the prop must not fall
+    // back to the creation promise)
+    const absent = renderToStaticMarkup(React.createElement(OwnerEmptyStateKeyNote,
+      { variant, buildFork: false, keyLive: false })).replace(/&#x27;/g, "'")
+    assert.ok(!/created on the connect step/.test(absent),
+      `${variant}/absent: a missing gate mode must not promise a creation — got ${absent}`)
+    // the two unresolved modes still say what the step does instead
+    assert.match(renderOwner(variant, { connectGateMode: 'error' }),
+      /reads your organization's keys again/)
+    assert.match(renderOwner(variant, { connectGateMode: 'loading' }),
+      /once it has read the keys your organization holds/)
+  }
+})
+
+// (b) the route. The BUILD fork's step 2 is the SDK block and renders no
+// chooser, so no owner arm may name one — in any of its states.
+test('#4637: NO owner arm tells a build-fork organization to "connect your agent"', () => {
+  for (const variant of VARIANTS) {
+    for (const keyLive of [false, true]) {
+      for (const connectGateMode of GATE_MODES) {
+        const html = renderOwner(variant, { buildFork: true, connectGateMode, keyLive })
+        assert.ok(!/connect your agent/i.test(html),
+          `${variant}/build/${connectGateMode}/keyLive=${keyLive}: the build fork renders no chooser — got ${html}`)
+        for (const name of keylessChooserConnectorNames()) {
+          assert.ok(!html.includes(name),
+            `${variant}/build: must not name the chooser leaf ${name} — got ${html}`)
+        }
+      }
+    }
+    // …and the self/undecided arm still names the route it DOES have, so the
+    // two forks cannot collapse into one (a universal claim either way)
+    assert.match(renderOwner(variant, { connectGateMode: 'mint' }), /connect your agent/)
+    assert.match(renderOwner(variant, { connectGateMode: 'existing', keyLive: true }), /connect your agent/)
+  }
+})
+
+test('#4637: the owner self/undecided arm states the key CONDITIONALLY and names the key-less route', () => {
+  assert.equal(renderOwner('reentry', { connectGateMode: 'mint' }),
+    `Your Organization is live — finish the setup below to connect your agent. If your setup needs an API key, ${OWNER_CREATE_CLAUSE}. ${KEYLESS}`)
+  assert.equal(renderOwner('graph-missing', { connectGateMode: 'mint' }),
+    `Your Organization is live — connect your agent below. If your setup needs an API key, ${OWNER_CREATE_CLAUSE}. ${KEYLESS}`)
+})
+
+test('#4637: the owner BUILD arm states the SDK key as required, never conditionally', () => {
+  assert.equal(renderOwner('reentry', { buildFork: true, connectGateMode: 'mint' }),
+    `Your Organization is live — finish the setup below. You'll need an API key to call the Tortoise SDK: ${OWNER_CREATE_CLAUSE}.`)
+  assert.equal(renderOwner('graph-missing', { buildFork: true, connectGateMode: 'mint' }),
+    `Your Organization is live. You'll need an API key to call the Tortoise SDK: ${OWNER_CREATE_CLAUSE}.`)
+  // 'graph-missing' carries no locative: that card renders no SDK setup below
+  assert.ok(!/set up the Tortoise SDK below/.test(renderOwner('graph-missing', { buildFork: true })))
+})
+
+test('#4637: the key-LIVE owner arms keep their sentence and drop only the chooser route on the build fork', () => {
+  assert.equal(renderOwner('reentry', { connectGateMode: 'existing', keyLive: true }),
+    "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one).")
+  assert.equal(renderOwner('reentry', { buildFork: true, connectGateMode: 'existing', keyLive: true }),
+    "Your Organization's API key is live — finish the setup below (the setup step shows a fresh key, or you can use an existing one).")
+  assert.equal(renderOwner('graph-missing', { connectGateMode: 'existing', keyLive: true }),
+    "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one).")
+  assert.equal(renderOwner('graph-missing', { buildFork: true, connectGateMode: 'existing', keyLive: true }),
+    "Your Organization's API keys are live (the setup step can mint up to your plan's key limit, or use an existing one).")
+  // a FAILED keys read contradicts "shows a fresh key"/"can mint" too — the
+  // live arms are gated on the same mode, so they cannot contradict it
+  for (const variant of VARIANTS) {
+    for (const connectGateMode of ['loading', 'error']) {
+      const html = renderOwner(variant, { connectGateMode, keyLive: true })
+      assert.ok(!/shows a fresh key|can mint/.test(html),
+        `${variant}/${connectGateMode}: the key is not on screen while the read is unresolved — got ${html}`)
+    }
+  }
+})
+
 test('#3729 wiring: main.jsx renders the guarded note at all three member arms with the derived boolean', () => {
   const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
   // ALL note sites must use the derived boolean — a count of the note plus an
@@ -166,28 +265,63 @@ test('#3729 wiring: main.jsx renders the guarded note at all three member arms w
   assert.ok(!/You'll need an API key/.test(mainJsx),
     'the categorical member claim must be gone from main.jsx')
   // the member lead-ins survive AND are attached to the guarded note — the
-  // owner arms contain the same phrases, so pin the note-adjacent form
-  assert.ok(mainJsx.includes("'Your Organization is live — connect your agent below. '}<MemberEmptyStateKeyNote"),
+  // #4637 change moved the literals into the note module (one home for the
+  // empty-state copy), so the pins now name the imported constants. The
+  // note-adjacent form is what matters: the lead-in cannot drift from the note
+  // it introduces.
+  assert.ok(mainJsx.includes('GRAPH_MISSING_SELF_LEAD_IN}<MemberEmptyStateKeyNote'),
     'the graph-missing member lead-in stays attached to the note')
-  assert.ok(mainJsx.includes("'Your Organization is live — finish the setup below to connect your agent. '}<MemberEmptyStateKeyNote"),
+  assert.ok(mainJsx.includes('REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote'),
     'the re-entry member lead-in stays attached to the note')
   assert.ok(mainJsx.includes("\"You're in — finish the setup below to connect your agent. \"}<MemberEmptyStateKeyNote"),
     'the existing-key member lead-in stays attached to the note')
   assert.ok(!mainJsx.includes('paste the key an owner or admin shared with you'),
     'the old key-only member sentence is gone')
-  // the re-entry BUILD lead-in is ONE literal, referenced by both re-entry arms
+  // the re-entry BUILD lead-in is ONE literal (now imported from the note
+  // module), referenced by both member re-entry arms — the import is one of the
+  // three occurrences
   assert.equal((mainJsx.match(/REENTRY_BUILD_LEAD_IN/g) || []).length, 3,
-    'the build lead-in must be defined once and referenced by both re-entry arms')
+    'the build lead-in must be imported once and referenced by both re-entry arms')
+  assert.ok(!/const REENTRY_BUILD_LEAD_IN/.test(mainJsx),
+    'the lead-in literals live in the note module, never re-declared in main.jsx')
   // the graph-missing BUILD lead-in carries no locative: that card renders no
-  // SDK setup below it (only the API Keys / Connect-your-agent actions)
-  assert.ok(mainJsx.includes("? 'Your Organization is live. '"),
+  // SDK setup below it (its actions are the API Keys tab and, on a self fork,
+  // the chooser route)
+  assert.ok(mainJsx.includes('? GRAPH_MISSING_BUILD_LEAD_IN'),
     'the graph-missing build-fork lead-in states only the org fact')
   assert.ok(!/set up the Tortoise SDK below/.test(mainJsx),
     'the graph-missing card must not point "below" at an SDK setup it does not render')
-  // ROLE GATE: each note renders in the member (else) branch of an
-  // `isOwnerAdmin` ternary, opened by `: <>{isBuildFork` (the owner arms are
-  // plain string literals in the `?` branch).
+  // ROLE GATE: each member note renders in the member (else) branch of an
+  // `isOwnerAdmin` ternary, opened by `: <>{isBuildFork`; the owner notes sit in
+  // the `?` branch.
   const memberArms = mainJsx.match(/: <>\{isBuildFork/g) || []
   assert.equal(memberArms.length, 3,
-    `each of the three note sites must open a member (else) branch — found ${memberArms.length}`)
+    `each of the three member note sites must open a member (else) branch — found ${memberArms.length}`)
+  // #4637: the OWNER note is wired at all THREE owner arms with the derived
+  // facts. A count alone is not enough — every site must pass main.jsx's single
+  // `isBuildFork` and the gate mode the wizard's own key affordance switches on
+  // (a site re-deciding either fact is exactly the #4637 mechanism).
+  const ownerSites = mainJsx.match(/<OwnerEmptyStateKeyNote /g) || []
+  assert.equal(ownerSites.length, 3,
+    `all three owner arms must render the owner note — found ${ownerSites.length}`)
+  const ownerDerived = mainJsx.match(
+    /<OwnerEmptyStateKeyNote [^>]*buildFork=\{isBuildFork\}[^>]*connectGateMode=\{connectGate\.mode\}/g) || []
+  assert.equal(ownerDerived.length, ownerSites.length,
+    `every owner site must pass the derived fork + gate mode — ${ownerSites.length} sites, ${ownerDerived.length} derived`)
+  // …and the cards' two key-live states are still distinguished (the live arms
+  // are the ones whose sentence must not claim a creation the step withholds)
+  assert.equal((mainJsx.match(/<OwnerEmptyStateKeyNote [^>]*keyLive=\{false\}/g) || []).length, 1,
+    'the no-key re-entry arm must declare keyLive={false}')
+  assert.equal((mainJsx.match(/<OwnerEmptyStateKeyNote [^>]*keyLive=\{connectGate\.mode === 'existing'\}/g) || []).length, 1,
+    'the graph-missing owner arm keys on the existing-gate mode')
+  assert.equal((mainJsx.match(/<OwnerEmptyStateKeyNote [^>]*connectGateMode=\{connectGate\.mode\} keyLive \/>/g) || []).length, 1,
+    'the live-key re-entry arm must declare keyLive')
+  // the unconditional owner promises are GONE from main.jsx (executed render
+  // tests above prove they cannot come back through the component)
+  assert.ok(!/One is created on the connect step/.test(mainJsx),
+    'the unconditional owner creation promise must be gone from main.jsx')
+  assert.ok(!/its key is created on the connect step/.test(mainJsx),
+    'the graph-missing owner creation promise must be gone from main.jsx')
+  assert.ok(!/API keys are live — connect your agent below/.test(mainJsx),
+    'the owner graph-missing key-live literal must be gone from main.jsx')
 })

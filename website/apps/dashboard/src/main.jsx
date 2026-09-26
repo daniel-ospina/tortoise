@@ -33,12 +33,18 @@ import { overviewConnection, overviewDigest, overviewNextAction } from './overvi
 // hash→tab deep-link resolver, and the focus mover. Extracted so the suite
 // can RENDER the live action (react-dom/server) and execute the handler
 // instead of grepping source text.
-import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
+import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
 // #3729: the member empty-state key note — the key requirement stated as
 // CONDITIONAL plus the chooser-reachable key-less route, extracted as a
 // createElement component so the suite RENDERS it (react-dom/server) instead
 // of grepping the two inline strings (onboardingEmptyStateKeyNote.test.js).
-import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
+// #4637: the OWNER note and the four empty-state lead-ins live in the same
+// module — the lead-in is where the chooser route is named, so the owner arms
+// consume the same literals the member arms do instead of deciding for
+// themselves what the fork offers.
+import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote,
+  REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN,
+  GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
@@ -6880,8 +6886,9 @@ function claimIntentInFlight() {
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
   // The build-fork re-entry lead-in is used by BOTH re-entry arms (existing-key
-  // and no-key) — one literal, so they cannot drift.
-  const REENTRY_BUILD_LEAD_IN = 'Your Organization is live — finish the setup below. '
+  // and no-key) — one literal, so they cannot drift. #4637: it now lives in
+  // `onboardingEmptyStateKeyNote.js` beside the notes (and the owner arms) that
+  // consume it, together with the other three lead-ins.
   // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
   // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
@@ -7552,7 +7559,7 @@ function claimIntentInFlight() {
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                               {wizardConnectBusy ? 'Checking…' : "I've set it up — Continue →"}
                             </button>
-                            <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
+                            <a className="ghost" href={SDK_DOCS_HREF} target="_blank" rel="noreferrer">
                               SDK documentation →
                             </a>
                           </div>
@@ -8288,7 +8295,7 @@ function claimIntentInFlight() {
                       </div>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
-                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                        <a className="ghost" href={SDK_DOCS_HREF} target="_blank" rel="noreferrer">Read the docs</a>
                       </div>
                       {welcomeKey && team && (
                         <div className="welcome-plans" style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border,#1e293b)' }}>
@@ -8889,15 +8896,17 @@ function claimIntentInFlight() {
             <p className="dim">
               {snippetKey || connectGate.mode === 'existing'
                 ? (isOwnerAdmin
-                    ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
+                    ? <OwnerEmptyStateKeyNote variant="reentry" buildFork={isBuildFork}
+                        connectGateMode={connectGate.mode} keyLive />
                     : <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
                         : "You're in — finish the setup below to connect your agent. "}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)
                 : (isOwnerAdmin
-                    ? "Your Organization is live — finish the setup below to connect your agent. No API key yet? One is created on the connect step when you get there."
+                    ? <OwnerEmptyStateKeyNote variant="reentry" buildFork={isBuildFork}
+                        connectGateMode={connectGate.mode} keyLive={false} />
                     : <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
-                        : 'Your Organization is live — finish the setup below to connect your agent. '}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
+                        : REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
             </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
@@ -8950,21 +8959,20 @@ function claimIntentInFlight() {
               // one click away for owners (their only first-party surface).
               <p className="dim">
                 {isOwnerAdmin
-                  ? (connectGate.mode === 'existing'
-                      ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
-                      : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
+                  ? <OwnerEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork}
+                      connectGateMode={connectGate.mode} keyLive={connectGate.mode === 'existing'} />
                   : <>{isBuildFork
-                      ? 'Your Organization is live. '
-                      : 'Your Organization is live — connect your agent below. '}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
+                      ? GRAPH_MISSING_BUILD_LEAD_IN
+                      : GRAPH_MISSING_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
               </p>
             )}
             <div className="empty-actions">
-              <button type="button" className="btn-primary" onClick={() => setTab('keys')}>
-                Go to API Keys →
-              </button>
-              <a className="ghost" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
-                Connect your agent →
-              </a>
+              {/* #4637: the second action names a ROUTE — the harness chooser —
+                  which the BUILD fork never renders. The action set is a
+                  component (overviewEmptyAction.js), derived from the same
+                  `isBuildFork` the notes consume, so a build-fork organization
+                  is offered the SDK route its own step 2 offers. */}
+              <GraphMissingEmptyStateActions buildFork={isBuildFork} onGoToKeys={() => setTab('keys')} />
             </div>
           </section>
         )}

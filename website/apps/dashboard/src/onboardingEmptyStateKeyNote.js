@@ -1,4 +1,5 @@
-// #3729 — the member empty-state key note.
+// #3729 — the member empty-state key note. #4637 — the OWNER arms of the same
+// two cards, and the lead-ins they share (below).
 //
 // Two Overview empty states (the re-entry card and the graph-missing card)
 // told a member "You'll need an API key: ask an owner or admin to share one".
@@ -111,4 +112,114 @@ export function MemberEmptyStateKeyNote({ variant, buildFork }) {
     middle,
     keylessConnectorClause(),
   )
+}
+
+// ── #4637: the empty states' LEAD-INS and the OWNER arms ────────────────────
+//
+// The owner/admin arms were the un-migrated halves of #3729. Two claims were
+// blind to what the branch actually does:
+//
+//   (a) they promised a key UNCONDITIONALLY — "No API key yet? One is created
+//       on the connect step when you get there" and "…(its key is created on
+//       the connect step, or in the API Keys tab)". False for an owner who
+//       picks a key-less route: the chooser is open to every role (#2865) and a
+//       HARNESS_OAUTH leaf creates no key at all. Contradicted while the keys
+//       read is unresolved too — the connect step's own affordance
+//       (`wizardKeysUnavailableKeyAffordance`) states that nothing is created
+//       until the rows can be read.
+//   (b) they named the chooser route ("connect your agent") on a BUILD fork,
+//       whose step 2 is the SDK block and renders no chooser.
+//
+// Both are DERIVED facts, consumed here, never re-decided:
+//   * `buildFork` — main.jsx's single `wizardFork === 'build'` derivation (the
+//     same boolean the member note consumes);
+//   * `connectGateMode` — `connectKeyGate`'s mode (sessionKey.js): the gate the
+//     wizard's OWN key affordance switches on. Its own contract, in sessionKey
+//     .js's words: a key may be minted ONLY on 'mint'; 'loading'/'error' are
+//     UNRESOLVED and must offer neither a mint nor a paste. A sentence that
+//     promises creation outside 'mint' promises what the branch withholds.
+//
+// The lead-ins live HERE, beside the notes they introduce, because the lead-in
+// IS where the chooser route is named — the route half of #4637. main.jsx's
+// member arms and the owner note below consume these same literals, so a
+// surface cannot re-decide what the fork offers (the #4637 mechanism was two
+// surfaces each deciding it). A route clause kept per-surface is exactly how
+// the build fork came to be told to "connect your agent".
+export const REENTRY_BUILD_LEAD_IN = 'Your Organization is live — finish the setup below. '
+export const REENTRY_SELF_LEAD_IN =
+  'Your Organization is live — finish the setup below to connect your agent. '
+export const GRAPH_MISSING_BUILD_LEAD_IN = 'Your Organization is live. '
+export const GRAPH_MISSING_SELF_LEAD_IN =
+  'Your Organization is live — connect your agent below. '
+
+// What the connect step does about a key the Organization does NOT have yet,
+// per gate mode. 'mint' is the only mode that may CREATE one; 'loading' and
+// 'error' say only what the step will do, and create nothing.
+const OWNER_KEY_AT_STEP = {
+  mint: 'one is created on the connect step when you get there',
+  existing: 'the connect step uses the key your organization already has',
+  embed: 'the connect step shows your key',
+  loading: 'the connect step shows it once it has read the keys your organization holds',
+  error: 'the connect step reads your organization\'s keys again before creating anything',
+}
+
+// The KEY-LIVE arms' clause — the Organization already holds a key, so the
+// sentence is about the key the setup step puts in front of you. The two modes
+// whose affordance contradicts "shows a fresh key" get their own honest
+// sentence; every other mode keeps the wording these arms have always had.
+const OWNER_LIVE_KEY_DEFAULT = {
+  reentry: 'the setup step shows a fresh key, or you can use an existing one',
+  'graph-missing': "the setup step can mint up to your plan's key limit, or use an existing one",
+}
+
+function ownerLiveKeyClause(variant, connectGateMode) {
+  if (connectGateMode === 'loading') {
+    return 'the setup step shows your key once it has read the keys your organization holds'
+  }
+  if (connectGateMode === 'error') {
+    return 'the setup step reads your organization\'s keys again before it shows or creates a key'
+  }
+  return OWNER_LIVE_KEY_DEFAULT[variant] || OWNER_LIVE_KEY_DEFAULT.reentry
+}
+
+// The key-live lead-in, fork-aware the same way the shared lead-ins are: the
+// build fork renders no chooser, so it is not told to "connect" through one.
+function ownerLiveLeadIn(variant, buildFork) {
+  const connect = buildFork === true
+    ? ''
+    : (variant === 'reentry' ? ' to connect your agent' : ' — connect your agent below')
+  return variant === 'reentry'
+    ? `Your Organization's API key is live — finish the setup below${connect} `
+    : `Your Organization's API keys are live${connect} `
+}
+
+// The owner/admin empty-state note. `keyLive` is main.jsx's own branch
+// (`snippetKey || connectGate.mode === 'existing'` on the re-entry card, and
+// `mode === 'existing'` on the graph-missing one) — the state the card is in,
+// passed in, never inferred here. `variant` selects the lead-in (and, for the
+// live-key arms, the arm's own key wording); `buildFork` and `connectGateMode`
+// are the two derived facts documented above.
+//
+// Rendered as one component for the same reason the member note is: the guard
+// is an EXECUTED render of the live sentence, not a source-text grep.
+export function OwnerEmptyStateKeyNote({ variant, buildFork, connectGateMode, keyLive }) {
+  if (keyLive === true) {
+    return React.createElement(
+      React.Fragment,
+      null,
+      ownerLiveLeadIn(variant, buildFork),
+      `(${ownerLiveKeyClause(variant, connectGateMode)}).`,
+    )
+  }
+  const leadIn = buildFork === true
+    ? (variant === 'reentry' ? REENTRY_BUILD_LEAD_IN : GRAPH_MISSING_BUILD_LEAD_IN)
+    : (variant === 'reentry' ? REENTRY_SELF_LEAD_IN : GRAPH_MISSING_SELF_LEAD_IN)
+  const atStep = OWNER_KEY_AT_STEP[connectGateMode] || OWNER_KEY_AT_STEP.loading
+  // The BUILD fork sets up the SDK, which needs a key by construction. On the
+  // self/undecided fork the requirement stays CONDITIONAL: the chooser offers
+  // the key-less OAuth leaves, so the key-less clause is named here too.
+  const keyClause = buildFork === true
+    ? `You'll need an API key to call the Tortoise SDK: ${atStep}.`
+    : `If your setup needs an API key, ${atStep}. ${keylessConnectorClause()}`
+  return React.createElement(React.Fragment, null, leadIn, keyClause)
 }

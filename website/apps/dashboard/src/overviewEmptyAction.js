@@ -1,5 +1,7 @@
 // #3890 — the D5 "connected and genuinely empty" Overview empty state's ONE
 // primary action, and the deep-link wiring that makes it land on a REAL screen.
+// #4637 — the graph-missing empty state's action set, whose second action names
+// a ROUTE and must therefore read what the build fork actually offers.
 //
 // The owner-approved copy (d5-copy-v2.md ③) names its two ways to add memory:
 // **Integrations** (where the agent-session recorder lives) and **Tortoise
@@ -83,5 +85,49 @@ export function OverviewEmptyActions({ snippetKey }) {
           ),
         )
       : null,
+  )
+}
+
+// ── #4637: the graph-missing card's ACTION ROUTE ───────────────────────────
+//
+// The graph-missing card's second action is a ROUTE to "connect your agent" —
+// which IS the harness chooser. The BUILD fork renders no chooser at all (its
+// step 2 is the SDK block, `main.jsx` `wizardStep === 2 && (isBuildFork ?`), so
+// the card offered a build-fork owner a route that branch never creates. This
+// module owns that derivation: ONE function of the SAME `buildFork` main.jsx
+// already derives, consumed by the action below — not a second surface deciding
+// for itself what the fork offers (#4637's mechanism).
+//
+// The build arm names the route the build fork's OWN step-2 block offers (the
+// SDK documentation anchor there), so the two cannot promise different things.
+export const SDK_DOCS_HREF = 'https://tortoise.premiselabs.co/docs'
+export const CHOOSER_ROUTE_HREF = 'https://tortoise.premiselabs.co/welcome'
+
+export function emptyStateActionRoute(buildFork) {
+  return buildFork === true
+    ? { label: 'SDK documentation →', href: SDK_DOCS_HREF }
+    : { label: 'Connect your agent →', href: CHOOSER_ROUTE_HREF }
+}
+
+// The graph-missing empty state's action set: the API Keys tab (a real
+// first-party surface on every branch) plus the fork-derived route above. A
+// component rather than two inline elements so the suite can render the LIVE
+// route per fork and assert what a build-fork organization is actually offered
+// (the rest of this file's pattern).
+export function GraphMissingEmptyStateActions({ buildFork, onGoToKeys }) {
+  const route = emptyStateActionRoute(buildFork)
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(
+      'button',
+      { type: 'button', className: 'btn-primary', onClick: onGoToKeys },
+      'Go to API Keys →',
+    ),
+    React.createElement(
+      'a',
+      { className: 'ghost', href: route.href, target: '_blank', rel: 'noreferrer' },
+      route.label,
+    ),
   )
 }
