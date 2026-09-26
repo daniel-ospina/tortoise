@@ -1009,10 +1009,10 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
         # ``not org_id`` — ``record_embedding_usage`` included. Arming a tally
         # with no org would make the write's encodes non-empty and
         # unattributable, so ``flush_tally`` would fire an UNMETERED_INCREMENT
-        # incident on EVERY stdio write that encodes, telling the operator to
-        # investigate a window that was never unresolvable. Guarding here matches
-        # the write-op metering below (`if org_id:`) and the writer's own
-        # exemption contract.
+        # incident on EVERY stdio write that encodes — a permanent false alarm
+        # about attribution on a lane that has no tenant BY DESIGN. Guarding
+        # here matches the write-op metering below (`if org_id:`) and the
+        # writer's own exemption contract.
         if org_id:
             with _embed_metering.meted(org_id):
                 result = fn(*args, **kwargs)
