@@ -3736,8 +3736,14 @@ def _canonicalise_coordinations(text: str) -> str:
     found by neither alone and stays two stray ``as`` tokens.  Both variants
     share one ``src`` map, so a match from either splices back at its own raw
     span; coinciding spans are merged before the (reversed) splice.
+
+    The sentinel a dropped mark leaves is a character a claim could also
+    CONTAIN, so the raw text is read with it replaced first — a literal NUL
+    becomes a separator and never a word gap, which keeps the sentinel
+    unproducible from outside (one char for one char, so every splice index
+    still addresses the caller's text).
     """
-    out = text
+    out = text.replace(_PHRASE_MARK_GAP, " ")
     for pattern, operator in _COORDINATION_PHRASE_RE:
         out = pattern.sub(f" {operator} ", out)
     for pattern, operator in _COORDINATION_PHRASE_RE:

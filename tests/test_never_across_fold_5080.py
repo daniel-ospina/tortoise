@@ -1112,6 +1112,16 @@ class TestDistinguishingDifference:
             phrase = f"we ship the server {spelled} the client"
             assert v2._connective_slots(phrase)[0] == frozenset({"and"}), \
                 spelled
+        # The gap's sentinel must ALSO be unproducible from the claim itself: a
+        # literal NUL is a character content can contain (a PDF or a JSON
+        # escape), and if it reached the phrase's word gap it would spell the
+        # same false `and` a contraction does.
+        for injected in ("we ship the server as we\x00ll, as the plan unfolds",
+                         "we ship the server as we\x00ll as it goes"):
+            assert v2._connective_slots(injected)[0] == frozenset({"as"}), \
+                injected
+            assert not v2.fold_allowed(
+                injected, "we ship the server and the plan unfolds"), injected
 
     def test_a_connective_swap_between_two_slots_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent (#5325).
