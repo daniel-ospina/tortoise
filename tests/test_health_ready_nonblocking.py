@@ -1447,12 +1447,97 @@ def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
     )
     # STRICTLY above the LOOSE outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``
     # — deliberately an OVER-ESTIMATE of probe_db's real total, NOT the exact
-    # inner total — PLUS the nominal acquisition budget) — equality would still
-    # be a race. This does NOT cover the embedded acquisition prefix.
+    # inner total — PLUS the acquisition budget). Since #3446 BOTH terms are
+    # enforced deadlines (``probe_db(acquire=…)`` bounds the acquisition), so
+    # this is a real ordering rather than an alignment against a nominal
+    # charge. Equality would still be a race.
     assert mod.DB_PROBE_HARD_TIMEOUT > \
         PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET, (
         "DB_PROBE_HARD_TIMEOUT must sit strictly above PROBE_DB_TOTAL_TIMEOUT + "
         "the SDK-acquisition budget, or the outer bound can win the race"
+    )
+
+
+def test_db_probe_inner_path_is_a_sum_of_enforced_deadlines():
+    """#3446: the outer DB bound is DERIVED above a sum the code ENFORCES.
+
+    The pre-#3446 defect was never the arithmetic — ``PROBE_HARD_TIMEOUT`` has
+    always been ``PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET +
+    PROBE_DB_BOUND_MARGIN_S``. It was that ONE of the summed terms named a
+    phase NOTHING bounded: the SDK acquisition ran inline on the coordinator's
+    own thread. An outer bound can only be PROVEN above a sum of deadlines the
+    code actually imposes, so the derivation was unsound while the constant
+    looked right — which is why the previous test's ordering assertion passed
+    and proved nothing.
+
+    ``probe_db(acquire=…)`` closes that by making the acquisition a bounded
+    phase. This test pins the resulting arithmetic; the ENFORCEMENT is pinned
+    behaviourally in
+    ``tests/test_monitoring.py::TestProbeDbBoundedAcquisition`` (the phase is
+    abandoned at its budget, on the shared worker, exactly once per call) and
+    the WIRING in ``tests/test_hosted_api.py``'s ``probe_db`` spy plus
+    ``test_selfhost_health_probe_executor``'s AST check — deliberately not
+    duplicated here.
+
+    LOAD-BEARING — this test reads CONSTANTS only, so it can pin the derivation
+    but cannot observe the enforcement. Its red is a constant move: set
+    ``PROBE_DB_BOUND_MARGIN_S = 0.0`` (verified) and the derivation lock and
+    the positive-margin assertion both red, which is what forces a re-derivation
+    rather than a silent drift. The ENFORCEMENT itself is reddened where it is
+    observable —
+    ``tests/test_monitoring.py::TestProbeDbBoundedAcquisition`` (mutation:
+    ``future.result(timeout=budget)`` -> ``future.result()``) — and the WIRING
+    in ``tests/test_hosted_api.py``'s ``probe_db`` spy (mutation: revert
+    ``_probe_db`` to ``probe_db(_probe_sdk)``) plus
+    ``test_selfhost_health_probe_executor``'s AST check, neither duplicated
+    here. A new phase added inside ``probe_db`` is NOT caught by any of them —
+    see the warning in ``probe_db``'s docstring.
+    """
+    import tortoise.hosted_api as mod
+    from tortoise.monitoring import (
+        PROBE_DB_BOUND_MARGIN_S,
+        PROBE_DB_TOTAL_TIMEOUT,
+        PROBE_HARD_TIMEOUT,
+        PROBE_RETRY_DELAY,
+        PROBE_SDK_ACQUISITION_BUDGET,
+        PROBE_TIMEOUT,
+    )
+
+    # (1) DERIVATION LOCK — the outer bound IS this sum, not a literal that
+    # happens to match it. Moving any contributor moves the bound with it.
+    assert PROBE_HARD_TIMEOUT == (
+        PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
+        + PROBE_DB_BOUND_MARGIN_S), (
+        "PROBE_HARD_TIMEOUT drifted from the sum it is defined as "
+        "(PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET + "
+        "PROBE_DB_BOUND_MARGIN_S)"
+    )
+    assert PROBE_DB_TOTAL_TIMEOUT == 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY, (
+        "PROBE_DB_TOTAL_TIMEOUT drifted from the alignment structure it "
+        "describes (2 x PROBE_TIMEOUT + PROBE_RETRY_DELAY)"
+    )
+    # A zero/negative margin would let the outer bound equal the inner sum —
+    # the worker's own timeout and the coordinator's deadline would fire in the
+    # same instant and the worker still needs a moment to record its result.
+    assert PROBE_DB_BOUND_MARGIN_S > 0, (
+        "the strict-above margin must be positive, or '> inner' degenerates "
+        "into '== inner' and the race returns"
+    )
+
+    # (2) THE ENFORCED INNER TOTAL — the PLATFORM shape's real inner path is
+    # the acquisition phase plus probe_db's single combined deadline. Since
+    # #3446 both are deadlines ``probe_db`` imposes, so this is the sum the
+    # outer bound has to clear; the loose PROBE_DB_TOTAL_TIMEOUT figure above
+    # is deliberately an OVER-estimate and is the STRICTER check.
+    platform_inner = PROBE_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
+    assert platform_inner < mod.DB_PROBE_HARD_TIMEOUT, (
+        f"DB_PROBE_HARD_TIMEOUT ({mod.DB_PROBE_HARD_TIMEOUT}s) must exceed the "
+        f"platform shape's enforced inner total ({platform_inner}s = "
+        f"PROBE_TIMEOUT {PROBE_TIMEOUT}s + the acquisition phase "
+        f"{PROBE_SDK_ACQUISITION_BUDGET}s)"
+    )
+    assert mod.DB_PROBE_HARD_TIMEOUT > PROBE_DB_TOTAL_TIMEOUT, (
+        "the outer bound must also clear probe_db's own single deadline"
     )
 
 

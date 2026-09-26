@@ -1,7 +1,9 @@
 """Tests for monitoring — health checks, Prometheus metrics, cost tracking."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -496,6 +498,187 @@ class TestProbeDb:
         assert result["ok"] is False
         # ...but its inconclusive setup timeout must not mask the real cause.
         assert result["error"] == "NXDOMAIN / connection refused", result["error"]
+
+
+class TestProbeDbBoundedAcquisition:
+    """#3446 — the SDK-acquisition phase is BOUNDED by ``probe_db(acquire=…)``.
+
+    The defect this closes: the acquisition ran on the coordinator's own
+    thread with nothing bounding it, so the outer coordinator bound — which is
+    DERIVED by summing an inner budget that includes
+    ``PROBE_SDK_ACQUISITION_BUDGET`` — mixed one enforced term with one
+    unenforced one. An inequality can only be PROVEN above a sum of deadlines
+    the code actually imposes, so the constant was nominal and the derivation
+    was "best-effort alignment".
+
+    These tests are the enforcement, not the arithmetic: a deadline that
+    nothing observes is exactly the property that re-stales.
+    """
+
+    def test_acquisition_phase_is_abandoned_at_its_own_budget(self, monkeypatch):
+        """An acquisition that overruns is REPORTED at its budget.
+
+        LOAD-BEARING (mutation: call ``_acquire_on_probe_worker`` with
+        ``budget=None``, or drop the ``timeout=`` from ``future.result``): the
+        wait becomes the acquisition's own duration, so ``probe_db`` returns
+        the stub probe's verdict after ~1.0s instead of the acquisition-phase
+        timeout at ~0.05s — both assertions below red.
+
+        The acquire callable sleeps well inside the (patched) budget's
+        overshoot tolerance rather than racing it: ``time.sleep`` can
+        overshoot but never undershoot, so the UPPER backstop is what proves
+        the wait was abandoned early, and the message pins WHICH phase
+        reported.
+        """
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "PROBE_SDK_ACQUISITION_BUDGET", budget)
+        acquired = {"n": 0}
+
+        def slow_acquire():
+            acquired["n"] += 1
+            time.sleep(1.0)  # 20x the budget: unmistakably past the deadline
+            return FakeSDK(db_ok=True)
+
+        start = time.monotonic()
+        result = monitoring.probe_db(acquire=slow_acquire)
+        elapsed = time.monotonic() - start
+
+        assert acquired["n"] == 1, "the acquisition phase did not run"
+        assert result["ok"] is False, result
+        assert result["error"] == (f"probe sdk acquisition timeout after {budget}s"), (
+            f"the acquisition phase must report ITS OWN spelling — got "
+            f"{result['error']!r}. A phase that reports another phase's error "
+            "makes the fault unattributable (#3446)"
+        )
+        assert elapsed < 0.5, (
+            f"probe_db waited {elapsed:.3f}s for an acquisition bounded at "
+            f"{budget}s — the phase deadline is NOMINAL, not enforced, and the "
+            "outer bound's derivation is unsound again"
+        )
+
+    def test_acquisition_runs_on_the_shared_probe_worker(self):
+        """The phase runs on the probe worker, NOT the caller's thread.
+
+        That is what bounds it: the worker is the same process-lifetime daemon
+        ``_probe_once`` submits its two phases to, so a hung acquisition is
+        abandoned rather than leaked as a thread per probe (#2850).
+
+        LOAD-BEARING (mutation: acquire inline — call the callable on the
+        caller's thread instead of submitting it): the recorded thread name
+        becomes the caller's and this reds.
+        """
+        seen: dict = {}
+
+        def acquiring():
+            seen["thread"] = threading.current_thread().name
+            return FakeSDK(db_ok=True)
+
+        result = monitoring.probe_db(acquire=acquiring)
+        assert result["ok"] is True, result
+        assert seen["thread"].startswith("tortoise-probe-worker"), (
+            f"the acquisition ran on {seen['thread']!r} — an acquisition that "
+            "does not run on the bounded probe worker has no enforced deadline "
+            "(#3446)"
+        )
+
+    def test_acquisition_is_one_phase_even_when_the_probe_retries(self):
+        """The #1565 retry must NOT re-acquire the SDK.
+
+        ``probe_db`` retries the PROBE on a transient connect failure; the SDK
+        handle is a phase of its own and must be acquired exactly once, or a
+        flapping DB pays the acquisition cost twice inside a deadline sized for
+        one of each phase.
+
+        LOAD-BEARING (mutation: re-run the acquisition before the retry —
+        ``sdk = _acquire_on_probe_worker(acquire, …)[0]`` added just above the
+        ``_probe_once(sdk, timeout=remaining, …)`` call): ``calls['acquire']``
+        becomes 2 and this reds.
+        """
+        calls = {"acquire": 0, "probe": 0}
+
+        def acquiring():
+            calls["acquire"] += 1
+            return TransientOnceSDK(calls)
+
+        result = monitoring.probe_db(acquire=acquiring)
+        assert result["ok"] is True, result
+        assert calls["acquire"] == 1, (
+            f"the SDK was acquired {calls['acquire']} times — the retry must ride "
+            "the SAME handle, not re-pay the acquisition phase (#3446)"
+        )
+        assert calls["probe"] == 2, "the transient retry did not happen"
+
+    def test_raising_acquisition_never_escapes(self):
+        """A raising acquisition callable is classified, not propagated.
+
+        ``probe_db``'s contract for the DB path is NEVER raise — /health must
+        degrade rather than 500 (#1384).
+
+        LOAD-BEARING (mutation: drop the ``except Exception`` around
+        ``_acquire_on_probe_worker``): the RuntimeError escapes and this reds.
+        """
+        def broken():
+            raise RuntimeError("no handle for you")
+
+        result = monitoring.probe_db(acquire=broken)
+        assert result["ok"] is False
+        assert result["error"] == "no handle for you", result
+
+    def test_refused_submission_reports_the_workers_own_message(self, monkeypatch):
+        """A saturated backlog is NOT a phase timeout.
+
+        ``_WorkerBacklogFull`` IS a ``concurrent.futures.TimeoutError`` on
+        py3.12, so the deadline handler catches it; ``future.done()`` is what
+        tells the two apart. The worker's own message must survive, or the
+        remedy for a wedged worker reads as "the acquisition was slow".
+
+        LOAD-BEARING (mutation: drop the ``if future.done()`` branch): the
+        message becomes the synthesized acquisition timeout and this reds.
+        """
+        def refusing(_fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            future.set_exception(monitoring._WorkerBacklogFull(
+                "tortoise-probe-worker backlog full (32) — worker wedged"))
+            return future
+
+        monkeypatch.setattr(monitoring, "_probe_worker",
+                            lambda: SimpleNamespace(submit=refusing))
+        result = monitoring.probe_db(acquire=lambda: FakeSDK())
+        assert result["ok"] is False
+        assert "backlog full" in result["error"], result
+        assert "acquisition timeout" not in result["error"], result
+
+    def test_ambiguous_phase_ownership_is_rejected(self):
+        """Passing BOTH an sdk and an acquire callable is a CALL error.
+
+        The phase needs exactly one owner; silently preferring one would leave
+        the other's cost unbounded while looking handled.
+
+        LOAD-BEARING (mutation: replace the ``if sdk is not None: raise`` guard
+        with ``pass``): the ambiguity is silently resolved and this reds.
+        """
+        with pytest.raises(ValueError):
+            monitoring.probe_db(FakeSDK(), acquire=lambda: FakeSDK())
+        with pytest.raises(ValueError):
+            monitoring.probe_db()
+
+
+class TransientOnceSDK:
+    """First ``_get_proj`` fails transiently, the second succeeds — the #1565
+    retry shape, with a counter so the test can prove how many PROBES ran."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def _get_proj(self):
+        import redis.exceptions as redis_exc
+
+        self._calls["probe"] += 1
+        if self._calls["probe"] == 1:
+            raise redis_exc.ConnectionError("transient connect refused")
+        proj = MagicMock()
+        proj.g.query.return_value = MagicMock(result_set=[[1]])
+        return proj
 
 
 class TestProbeSetupTimeoutResolution:

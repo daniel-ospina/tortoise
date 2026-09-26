@@ -183,8 +183,12 @@ def probe_setup_timeout() -> float:
 # than chosen independently (the pre-#2988 2.0s literal sat below the 3.1s
 # total — see PROBE_HARD_TIMEOUT).
 # Deriving it lifts the default above the part of the inner path that IS
-# statically bound; it does NOT make the outer>inner ordering provable (see
-# the guarantee summary at ``PROBE_MAX_SUPERSEDES``).
+# statically bound. Since #3446 that part is the WHOLE DB probe path: the SDK
+# acquisition is an enforced phase too (``probe_db(acquire=…)``), so for a
+# caller that hands its acquisition in, the outer>inner ordering IS provable as
+# an inequality between enforced deadlines — see the guarantee summary at
+# ``PROBE_MAX_SUPERSEDES`` for exactly what that does and does not cover.
+# ``PROBE_STALE_AFTER`` itself is about freshness, not bounds.
 PROBE_STALE_AFTER = 30.0
 # A wedged probe worker may be superseded at most this many times per WEDGE
 # EPISODE — enough to notice a genuine recovery. NOT a process-lifetime cap:
@@ -213,22 +217,53 @@ PROBE_STALE_AFTER = 30.0
 #       across episodes until each one's underlying call returns per (c). Nor
 #       is it a process-lifetime cap.
 #
-# The INNER worst case is NOT statically bounded, so "outer above inner"
-# cannot be PROVEN — only approximated. httpx's ``read`` timeout applies PER
-# READ OPERATION (a slowly-dribbling server can outlive the sum of the phases
-# indefinitely; a reviewer measured a response surviving 5.3x the configured
-# ``read`` phase), and the embedded SDK-acquisition prefix runs real queries
-# bounded by the redis READ timeout (10s default, clampable to 60s) with
-# redis-py's default 10 retries (a reviewer measured ~26.8s for one such
-# query). The LAYERED TIMEOUT — keep a coordinator's ``timeout`` ABOVE the
-# probe function's own statically-known total for THAT caller's shape (the
-# platform liveness shape's real total is ~``PROBE_TIMEOUT``; the #3143
-# explicit-allowance shape's is ``setup_timeout + PROBE_TIMEOUT``;
+# The DB-PLANE INNER PATH is now a SUM OF ENFORCED DEADLINES (#3446), so the
+# layered timeout above it is an inequality between quantities the code
+# actually imposes rather than an approximation of a worst case:
+#
+#   * SDK acquisition — ``probe_db(acquire=…)`` bounds the phase at
+#     ``PROBE_SDK_ACQUISITION_BUDGET`` on the shared probe worker;
+#   * projection cold start — ``setup_timeout`` (``_probe_once``);
+#   * ``RETURN 1`` reachability query, plus the one #1565 retry riding the
+#     remainder — the caller's single ``timeout``.
+#
+# ``PROBE_HARD_TIMEOUT`` (and therefore ``hosted_api.DB_PROBE_HARD_TIMEOUT``
+# and selfhost's liveness bound) is DERIVED strictly above the sum of those
+# enforced terms for each caller's shape (platform total ~``PROBE_TIMEOUT``;
+# the #3143 explicit-allowance shape's is ``setup_timeout + PROBE_TIMEOUT``;
 # ``PROBE_DB_TOTAL_TIMEOUT`` is only a loose OVER-ESTIMATE of the former, see
-# its definition) — is therefore a BEST-EFFORT ALIGNMENT that
-# reduces how often a worker is stranded. It is NOT, and cannot be, a
-# guarantee. Do not add another constant or another margin trying to make it
-# one. Abandoning a probe does not stop its thread (CPython #87185).
+# its definition). For a shape with a coordinator above it that ordering is
+# now PROVABLE — and it is pinned by tests that recompute both sides, so it
+# cannot re-stale into prose.
+#
+# WHAT IS STILL NOT PROVABLE — stated here so nobody re-derives a "proof" from
+# the paragraph above:
+#   * A phase that overruns its ENFORCED deadline is ABANDONED, not cancelled
+#     (CPython #87185; ``asyncio.wait_for`` cancels the awaitable, not the
+#     thread). The WAIT is bounded; the WORKER is not. That is guarantee (c) —
+#     stranding — and it is the standing residual, not a bug in the sum.
+#   * ``probe_db`` only enforces an acquisition deadline when its caller passes
+#     ``acquire=``. A caller that acquires the SDK itself (``metrics()`` / the
+#     MCP health tool) still owns that phase's cost.
+#   * The CONTROL plane's request is NOT bounded by construction: httpx's
+#     ``read`` timeout applies PER READ OPERATION, so a slowly-dribbling server
+#     can outlive the sum of the phases (a reviewer measured a response
+#     surviving 5.3x the configured ``read`` phase). ``CONTROL_PLANE_HARD_TIMEOUT``
+#     remains a safety net over an unenforceable request bound.
+#   * On the EMBEDDED lane the enforced deadline is a bound on the PHASE, not a
+#     small static ceiling on its interior: ``TortoiseSDK.__init__`` runs the
+#     unbounded cross-process ``_probe_embedded_busy`` liveness probe
+#     (``tortoise/sdk.py``) and ``_make_sdk``'s anchor connects EAGERLY and runs
+#     real queries. #3350 capped the redis retry MULTIPLIER at
+#     ``1 + projection._EMBEDDED_RETRY_COUNT`` (ONE retry, NOT this client's
+#     own multi-retry default — the figure that used to sit here, "10 retries /
+#     ~26.8s", described the upstream library's default rather than this repo's
+#     pinned one and is retired with it), so the stale figure is gone; what
+#     remains is that the per-operation multiplier is now known.
+#     ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff``, and the NUMBER
+#     of sequential operations in the prefix is graph-size dependent. Bounding
+#     the phase from outside is what stops that interior from becoming a
+#     WHOLE-probe unbounded phase.
 PROBE_MAX_SUPERSEDES = 4
 PROBE_POLL_INTERVAL = 0.02
 
@@ -260,6 +295,14 @@ PROBE_RETRY_DELAY = 0.1
 #: indistinguishable from a real unreachability except for that string.
 _PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
 
+#: Prefix of ``probe_db``'s synthesized SDK-ACQUISITION-phase timeout (#3446).
+#: A THIRD spelling, for the third phase: the acquisition is neither the
+#: projection cold start nor the reachability query, so collapsing it into
+#: either would misattribute the fault. Same status shape as the other two —
+#: ``ok=False`` -> ``metrics()`` reports ``degraded`` + ``graph_size=0`` —
+#: with only the text telling the phases apart.
+_PROBE_ACQUISITION_TIMEOUT_MSG = "probe sdk acquisition timeout after "
+
 #: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
 #: shape (no explicit ``setup_timeout``): the figure a DB-plane coordinator is
 #: sized ABOVE. It is deliberately an OVER-ESTIMATE, not the function's exact
@@ -284,21 +327,37 @@ PROBE_DB_TOTAL_TIMEOUT = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY
 #: ``projection._socket_timeouts()``). A test pins this literal to that
 #: default so the two cannot drift silently.
 #:
-#: ⚠️ This is NOT an upper bound on the whole acquisition prefix, and the
-#: comment must not be read as one:
+#: #3446: since ``probe_db`` grew its ``acquire=`` seam this is not just a
+#: nominal charge — it is the ENFORCED deadline of the SDK-acquisition PHASE
+#: (the wait on the shared probe worker, exactly as ``_probe_once`` bounds its
+#: own two phases). That is what makes the layered-timeout derivation sound:
+#: the outer coordinator bound was always DERIVED by summing this figure into
+#: the inner total, but the phase it named ran on the coordinator's own thread
+#: with nothing bounding it, so the sum mixed an enforced term with an
+#: unbounded one and the ordering could not be proven.
+#:
+#: ⚠️ It bounds the PHASE (the wait), NOT the acquisition's INTERIOR, and must
+#: not be read as a ceiling on the latter:
 #:   * URI mode (``TORTOISE_DB_URI`` set — the hosted steady state):
 #:     ``_make_sdk(namespace=None)`` returns an SDK whose projection is LAZY,
 #:     so the prefix is ~free and the connect happens INSIDE ``probe_db``'s
-#:     own per-attempt worker bound. The 2.0s charge is just the nominal
-#:     connect leg.
+#:     own per-attempt worker bound. The 2.0s budget is then pure headroom.
 #:   * EMBEDDED mode: the anchor path connects EAGERLY and runs real queries
 #:     (auto-health-recover, version probe, index creation) bounded by the
 #:     redis READ timeout — 10s by default and clampable to 60s via
-#:     ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` — with redis-py's default 10
-#:     retries. A reviewer measured ~26.8s for one such query. This constant
-#:     does NOT bound that prefix, so on the embedded path no outer bound can
-#:     be shown to exceed the worker's real total. See the guarantee summary
-#:     at ``PROBE_MAX_SUPERSEDES``.
+#:     ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` — and ``TortoiseSDK.__init__``
+#:     runs the unbounded cross-process ``_probe_embedded_busy`` liveness
+#:     probe first. #3350 capped the retry MULTIPLIER at
+#:     ``1 + projection._EMBEDDED_RETRY_COUNT`` (ONE retry, not this client's
+#:     own multi-retry default — see ``projection._embedded_retry()`` for the
+#:     one that is actually installed; do NOT restate an upstream default
+#:     number here, the pin is version-dependent), so the per-OPERATION ceiling is
+#:     ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff`` — but the
+#:     number of sequential operations is graph-size dependent, so the prefix
+#:     has no small static ceiling of its own. An embedded acquisition that
+#:     cannot finish inside this deadline is REPORTED as a failed probe phase
+#:     (and its worker abandoned, never cancelled) instead of outlasting the
+#:     coordinator. See the guarantee summary at ``PROBE_MAX_SUPERSEDES``.
 #:
 #: The env override ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can also raise the
 #: connect leg itself (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s), so
@@ -311,10 +370,11 @@ PROBE_SDK_ACQUISITION_BUDGET = 2.0
 #: a race — the worker's own timeout and the coordinator's deadline fire at
 #: the same instant — and after the inner bound fires the worker still needs a
 #: moment to store and notify its result. 0.5s is ~25x ``PROBE_POLL_INTERVAL``
-#: and ample for scheduler jitter on a loaded box. NOTE it is a margin against
-#: the bound that CAN be computed, not evidence that the outer bound exceeds
-#: the worker's real worst case — the acquisition prefix is unbounded (see
-#: ``PROBE_SDK_ACQUISITION_BUDGET``).
+#: and ample for scheduler jitter on a loaded box. Since #3446 both terms it
+#: sits above are ENFORCED deadlines (the acquisition phase and ``probe_db``'s
+#: own), so it is a margin on a real inequality rather than on an estimate —
+#: the residual is stranding (a phase that overruns is abandoned, not
+#: cancelled), see the guarantee summary at ``PROBE_MAX_SUPERSEDES``.
 PROBE_DB_BOUND_MARGIN_S = 0.5
 
 #: The ``HealthProbe`` constructor DEFAULT — a safety net for any future
@@ -331,12 +391,14 @@ PROBE_DB_BOUND_MARGIN_S = 0.5
 #: stranded a worker thread on every timeout (CPython #87185 —
 #: ``asyncio.wait_for`` cancels the awaitable, not the thread).
 #:
-#: What this does and does not buy: it lifts the default above the part of
-#: the path that IS statically bound, so a DB-backed probe's inner bound
-#: normally fires first. It does NOT make that ordering provable — the
-#: acquisition prefix is unbounded on the embedded path and the env override
-#: can raise the connect leg (see ``PROBE_SDK_ACQUISITION_BUDGET`` and the
-#: guarantee summary at ``PROBE_MAX_SUPERSEDES``).
+#: What this does and does not buy: it lifts the default above the SUM OF
+#: ENFORCED inner deadlines (#3446) — the acquisition phase's and
+#: ``probe_db``'s own — so the inner bound normally fires first AND the
+#: ordering is now provable for a caller that hands ``probe_db`` its
+#: acquisition via ``acquire=``. It still does not bound the acquisition's
+#: interior, and the env override can raise the connect leg (see
+#: ``PROBE_SDK_ACQUISITION_BUDGET`` and the guarantee summary at
+#: ``PROBE_MAX_SUPERSEDES``).
 #:
 #: Note this constant is now used as a real bound by NO production
 #: coordinator: every hosted coordinator (``_HEALTH_PROBE`` / ``_READY_PROBE``
@@ -1275,7 +1337,44 @@ def _probe_once(sdk, timeout=None,
         return False, str(e)[:200], _is_transient_connect_error(e)
 
 
-def probe_db(sdk, setup_timeout=None) -> dict:
+def _acquire_on_probe_worker(acquire, budget):
+    """Run ``acquire`` on the shared probe worker under its OWN deadline (#3446).
+
+    The SDK-acquisition phase used to run on the coordinator's own thread with
+    nothing bounding it, so the layered-timeout derivation mixed one enforced
+    term (``probe_db``'s single caller deadline) with one unenforced one — and
+    an outer bound can only be PROVEN above a sum of ENFORCED terms. Submitting
+    the phase here gives it exactly the treatment ``_probe_once`` gives its own
+    two phases: a bounded ``Future.result`` wait on the process-lifetime daemon
+    worker, so an acquisition that never returns cannot add a thread per probe
+    (#2850) and cannot outlast the coordinator silently.
+
+    Returns ``(value, None)`` on success, ``(None, message)`` when the deadline
+    expired or the submission was refused. A callable that RAISES propagates to
+    the caller, which applies the same never-raise classification
+    ``_probe_once`` uses for its phases.
+    """
+    future = _probe_worker().submit(acquire)
+    try:
+        return future.result(timeout=budget), None
+    except concurrent.futures.TimeoutError as exc:
+        if future.done():
+            # ``done()`` is True for two different causes and so cannot be read
+            # as "the deadline expired": (a) the worker refused the submission
+            # (saturated backlog) — the Future already carries its own message;
+            # (b) the callable itself raised a TimeoutError, which on py3.12 IS
+            # this exception class. Its own message, never a synthesized phase
+            # timeout — the same discrimination ``_probe_once`` applies to its
+            # setup phase.
+            return None, (str(exc)[:200]
+                          or f"{_PROBE_ACQUISITION_TIMEOUT_MSG}{budget}s")
+        # A genuine overrun of the enforced phase deadline. The worker is
+        # ABANDONED, never cancelled (#2850 / CPython #87185) — the wait is
+        # bounded, the worker is not; that is guarantee (c).
+        return None, f"{_PROBE_ACQUISITION_TIMEOUT_MSG}{budget}s"
+
+
+def probe_db(sdk=None, setup_timeout=None, *, acquire=None) -> dict:
     """Deep-check graph-DB connectivity through an SDK's projection.
 
     Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
@@ -1298,9 +1397,42 @@ def probe_db(sdk, setup_timeout=None) -> dict:
       deadline of ``setup_timeout + PROBE_TIMEOUT`` — the cold-start allowance
       plus one reachability budget; the retry rides the remainder of THAT.
 
-    That says nothing about the SDK-acquisition prefix that runs BEFORE this
-    function (see ``PROBE_SDK_ACQUISITION_BUDGET``), so an outer bound sized
-    against it is best-effort alignment, not a proven ordering.
+    #3446 — ``acquire``: the SDK handle may be handed in either way. ``sdk``
+    is the historical shape, where the CALLER acquired it and therefore owns
+    that cost (the MCP leg in ``metrics()`` does this). ``acquire`` is a
+    zero-arg callable that ``probe_db`` runs ITSELF, as a bounded THIRD phase
+    under ``PROBE_SDK_ACQUISITION_BUDGET`` on the shared probe worker. Use it
+    whenever a coordinator's outer bound is derived from this function's total:
+    it is what makes that outer bound exceed a sum of deadlines the code
+    actually ENFORCES, instead of a sum that silently includes an unbounded
+    phase. Passing both ``sdk`` and ``acquire`` is a programming error and
+    raises ``ValueError``.
+
+    ⚠️ WHAT ENFORCING THIS PHASE COSTS (declared, not hidden): the phase runs
+    on the SAME single-slot ``_probe_worker()`` that ``_probe_once`` submits
+    its own phases to. Before #3446 a hung acquisition held only the
+    coordinator's own daemon thread, so it could not starve a concurrent
+    probe; now its overrun holds the shared slot and concurrent probes queue
+    behind it. That is the same contention class tracked at #3683 ("false
+    degrades a reachable graph when the shared probe slot is occupied ≥ the
+    setup allowance") and #4608 (probe-SDK reset racing an in-flight probe),
+    and it is the accepted price of having a deadline at all — the alternative
+    is the unbounded phase this closes. Two consequences to state plainly: the
+    phase's clock starts at SUBMISSION, so under a wedge its error names the
+    WAIT rather than a callable that ran; and it is a SECOND occupant of a
+    one-slot worker, so capacity has not been widened, only bounded.
+
+    ⚠️ THE DERIVATION IS A SUM OVER A KNOWN PHASE SET: the acquisition, the
+    projection setup, and the reachability query. A FOURTH bounded phase added
+    inside this function would raise the real inner total without moving
+    ``PROBE_HARD_TIMEOUT``, and no constant-vs-constant test can see that —
+    extend the outer bound's derivation deliberately when adding one.
+
+    That says nothing about the acquisition's INTERIOR (an unbounded
+    cross-process probe plus real queries on the embedded lane — see
+    ``PROBE_SDK_ACQUISITION_BUDGET``), so an outer bound sized against this
+    function is an inequality between enforced WAITS; the residual is
+    stranding, not an unenforced phase.
 
     #3143: callers may pass a ``setup_timeout`` — the projection-cold-start
     allowance that bears the ``sdk._get_proj()`` cost (connect + a
@@ -1320,8 +1452,9 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     # worker TIMEOUT and is NEVER retried.
 
     Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
-    NEVER raises, so /health can report ``status: degraded`` instead of
-    crashing the process.
+    NEVER raises on a probe failure (``ValueError`` is reserved for a malformed
+    CALL, never for the DB), so /health can report ``status: degraded`` instead
+    of crashing the process.
 
     #3143: ``setup_timeout`` is the projection-cold-start allowance (see
     ``_probe_once``). When it is not given, the cold-start and the query SHARE
@@ -1338,11 +1471,38 @@ def probe_db(sdk, setup_timeout=None) -> dict:
     ONE spelling per phase in ``error``: a cold-start that overran its
     allowance, OR consumed the whole shared budget so the reachability query
     never ran, reports ``probe setup timeout after Ns``; only a query that
-    actually RAN and overran reports ``probe timeout after Ns``. The setup
-    spelling is also the prefix ``probe_db`` uses to keep the first attempt's
-    real error when the retry's own remainder was eaten by the cold-start.
+    actually RAN and overran reports ``probe timeout after Ns``; and the
+    acquisition phase reports ``probe sdk acquisition timeout after Ns``
+    (#3446). The setup spelling is also the prefix ``probe_db`` uses to keep
+    the first attempt's real error when the retry's own remainder was eaten by
+    the cold-start.
     """
     start = time.monotonic()
+    if acquire is not None:
+        if sdk is not None:
+            raise ValueError(
+                "probe_db takes either an already-acquired sdk or an acquire "
+                "callable, never both — the phase's owner must be unambiguous")
+        try:
+            # May raise: an acquisition callable that itself fails is classified
+            # here so this function keeps its never-raise contract for the DB.
+            sdk, acquire_error = _acquire_on_probe_worker(
+                acquire, PROBE_SDK_ACQUISITION_BUDGET)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            return {
+                "ok": False,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                "error": str(exc)[:200],
+            }
+        if acquire_error is not None:
+            return {
+                "ok": False,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                "error": acquire_error,
+            }
+    elif sdk is None:
+        raise ValueError(
+            "probe_db needs an already-acquired sdk or an acquire callable")
     # Resolve at CALL time so the module-global stays monkeypatchable.
     attempt_timeout = PROBE_TIMEOUT
     total_budget = (attempt_timeout if setup_timeout is None
@@ -1407,10 +1567,13 @@ class HealthProbe:
        loose outer-alignment figure, and the per-attempt figure is NEVER the
        right one) so the inner timeout normally fires first and the
        worker returns by itself, making abandonment the exception instead of
-       the norm. This is a BEST-EFFORT ALIGNMENT, not a proven ordering — the
-       inner worst case is unbounded; see the guarantee summary at
-       ``PROBE_MAX_SUPERSEDES``. Abandoning a probe does not stop its thread
-       (CPython #87185).
+       the norm. Since #3446 that total is a sum of ENFORCED deadlines for a
+       probe function that hands ``probe_db`` its SDK acquisition, so the
+       ordering is provable for those callers — but PROVABLE is not
+       ACHIEVED: a phase that overruns its own deadline is still abandoned,
+       not cancelled. Abandoning a probe does not stop its thread
+       (CPython #87185), so stranding remains the residual — see the guarantee
+       summary at ``PROBE_MAX_SUPERSEDES``.
     4. **Honest staleness.** While a probe is wedged, the last *good* result
        stops being reported as live once it is older than ``stale_after``
        (or once a superseded probe has been in flight that long) — /health

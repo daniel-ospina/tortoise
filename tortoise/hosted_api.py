@@ -3147,6 +3147,21 @@ def _probe_sdk() -> TortoiseSDK:
     return sdk
 
 
+def _acquire_probe_sdk() -> TortoiseSDK:
+    """``_probe_sdk`` with its cache-invalidating failure path (#3446).
+
+    Handed to ``probe_db(acquire=…)`` so the acquisition runs as a BOUNDED
+    phase on the shared probe worker instead of inline on the coordinator's
+    thread. The reset must survive the move: a half-built handle is dropped so
+    the next probe rebuilds rather than reusing it.
+    """
+    try:
+        return _probe_sdk()
+    except Exception:
+        _probe_sdk_reset()
+        raise
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the reused probe connection (#1384).
 
@@ -3154,13 +3169,17 @@ def _probe_db() -> dict:
     monitoring.probe_db — never raises. ``probe_db`` itself is statically
     bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
     delay, ~3.1s, because a transient connect failure is retried once). The
-    ``_probe_sdk()`` prefix that runs BEFORE it is only NOMINALLY charged at
-    ``PROBE_SDK_ACQUISITION_BUDGET`` — that is the redis CONNECT leg, and on
-    the embedded path the acquisition runs real queries bounded by the redis
-    READ timeout (10s default, clampable to 60s) with redis-py's default 10
-    retries, which the budget does not cover. ``DB_PROBE_HARD_TIMEOUT`` below
-    is therefore the best-effort bound a caller should clear, NOT a proof that
-    it exceeds this worker's real total. The probe target is
+    ``_probe_sdk()`` prefix that runs BEFORE it is, since #3446, its OWN
+    bounded phase: it is handed to ``probe_db`` as ``acquire=`` and abandoned
+    at ``PROBE_SDK_ACQUISITION_BUDGET`` (2.0s) rather than running unbounded on
+    this coordinator's thread. That is what makes ``DB_PROBE_HARD_TIMEOUT`` an
+    outer bound PROVABLY above a sum of ENFORCED inner deadlines instead of an
+    alignment against a guess. It is still not a ceiling on the acquisition's
+    INTERIOR — on the embedded path the anchor connects eagerly, runs real
+    queries, and ``TortoiseSDK.__init__`` runs the unbounded cross-process
+    ``_probe_embedded_busy`` liveness probe; an acquisition that cannot finish
+    inside the budget is REPORTED as a failed phase (and its worker abandoned,
+    never cancelled — CPython #87185). The probe target is
     ``_make_sdk(namespace=None)``: the default-graph connection shares the DB
     server with every org/registry endpoint, so a stopped FalkorDB (NXDOMAIN,
     #1381) fails it too.
@@ -3170,12 +3189,7 @@ def _probe_db() -> dict:
     registry_control_plane on every health check.
     """
     from tortoise.monitoring import probe_db
-    try:
-        sdk = _probe_sdk()
-    except Exception as exc:
-        _probe_sdk_reset()
-        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return probe_db(sdk)
+    return probe_db(acquire=_acquire_probe_sdk)
 
 
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
@@ -3185,18 +3199,22 @@ def _probe_db() -> dict:
 # connect failure, so its statically-known ceiling is
 # ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
 # only the per-attempt figure is what inverted the ordering in the
-# #2850/#2988 merge. Two honest caveats:
-#   * the ``_probe_sdk()`` prefix that runs BEFORE ``probe_db`` is charged at
-#     ``PROBE_SDK_ACQUISITION_BUDGET`` (the redis CONNECT leg). In URI mode
-#     that prefix is ~free (lazy projection, connect happens inside
-#     ``probe_db``'s own per-attempt bound); on the EMBEDDED path it runs real
-#     queries bounded by the redis READ timeout (10s default, clampable to
-#     60s) with redis-py's default 10 retries, which the budget does NOT cover;
+# #2850/#2988 merge. Since #3446 the acquisition prefix is no longer an
+# unenforced term: ``_probe_db`` hands ``_probe_sdk`` to
+# ``probe_db(acquire=…)``, which bounds it at ``PROBE_SDK_ACQUISITION_BUDGET``
+# on the shared probe worker. Both terms of the sum are therefore ENFORCED
+# deadlines and this ordering is provable for this plane. Two honest caveats,
+# neither of them a missing deadline:
+#   * the acquisition's INTERIOR is not bounded by that budget — the embedded
+#     anchor connects eagerly, runs real queries, and ``TortoiseSDK.__init__``
+#     runs the unbounded cross-process ``_probe_embedded_busy`` liveness
+#     probe. An overrun is REPORTED (the phase fails at the budget), and its
+#     worker is abandoned, never cancelled (CPython #87185);
 #   * ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can raise even the connect leg
 #     the budget models (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s).
-# So this is a best-effort ALIGNMENT that reduces how often a worker is
-# stranded; it is not a proof that the outer bound exceeds the worker's real
-# total. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+# So this remains an ordering over WAITS, and the residual is stranding, not
+# an unenforced phase. See the guarantee summary at
+# ``monitoring.PROBE_MAX_SUPERSEDES``.
 DB_PROBE_HARD_TIMEOUT = PROBE_HARD_TIMEOUT
 
 
@@ -3323,12 +3341,14 @@ CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_M
 # each plane's statically-known inner TOTAL, not a single global number.
 # FalkorDB's ``probe_db`` retries one transient failure, so the bound that CAN
 # be computed is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT +
-# PROBE_RETRY_DELAY) plus the nominal SDK-acquisition budget plus a
+# PROBE_RETRY_DELAY) plus the ENFORCED SDK-acquisition phase plus a
 # strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
-# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. The embedded acquisition prefix is NOT covered
-# by that computation, so this ordering is a best-effort alignment that
-# reduces how often a worker is stranded — see the guarantee summary at
-# ``monitoring.PROBE_MAX_SUPERSEDES``.
+# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. Since
+# #3446 the acquisition prefix is itself a bounded phase
+# (``probe_db(acquire=…)``), so BOTH terms of that sum are deadlines the code
+# enforces; the ordering is provable for this plane, and the residual is
+# stranding — a phase that overruns its deadline is abandoned, not cancelled.
+# See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
 _CONTROL_PLANE_PROBE = HealthProbe(
     lambda: _probe_control_plane(),
     timeout=CONTROL_PLANE_HARD_TIMEOUT,
@@ -3488,10 +3508,9 @@ async def health_ready():
     # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
     # NOT the liveness refresher's, so a readiness call cannot join a probe
     # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
-    # (a best-effort alignment: the ~3.1s ``probe_db`` TOTAL plus the nominal
-    # SDK-acquisition budget; the embedded acquisition prefix is not covered),
-    # and it never raises, so a dead DB degrades the result instead of the
-    # process.
+    # (an ordering between ENFORCED deadlines: the ~3.1s ``probe_db`` TOTAL
+    # plus the bounded SDK-acquisition phase, since #3446), and it never
+    # raises, so a dead DB degrades the result instead of the process.
     # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
     # auto-creates the graph on select, so a registry-namespaced probe
     # RECREATED the deleted registry_control_plane on every health check

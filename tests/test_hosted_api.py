@@ -343,13 +343,21 @@ class TestHealthEndpoints:
         seen = {}
         real_probe_db = mon.probe_db
 
-        def _spy_probe_db(sdk, setup_timeout=None):
+        def _spy_probe_db(sdk=None, setup_timeout=None, *, acquire=None):
             seen["setup_timeout"] = setup_timeout
-            return real_probe_db(sdk, setup_timeout=setup_timeout)
+            seen["acquire"] = acquire
+            return real_probe_db(sdk, setup_timeout=setup_timeout,
+                                 acquire=acquire)
 
         monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
         result = ha_mod._probe_db()
         assert seen["setup_timeout"] is None, seen
+        assert seen["acquire"] is not None, (
+            "#3446: _probe_db must hand the SDK acquisition to probe_db as "
+            "acquire= so it runs as a BOUNDED phase — passing an "
+            "already-acquired sdk leaves the phase unbounded on this "
+            "coordinator's thread and makes DB_PROBE_HARD_TIMEOUT unprovable"
+        )
         assert "ok" in result
 
     def test_health_degraded_when_db_down(self, client, monkeypatch):

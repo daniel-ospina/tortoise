@@ -305,11 +305,32 @@ def _probe_sdk():
     return sdk
 
 
+def _acquire_probe_sdk():
+    """``_probe_sdk`` with its cache-invalidating failure path (#3446).
+
+    Handed to ``probe_db(acquire=…)`` so the SDK lookup runs as a BOUNDED phase
+    on the shared probe worker instead of inline on this coordinator's own
+    thread. Mirrors ``hosted_api._acquire_probe_sdk``; the reset must survive
+    the move, and the caches are per-module, so the two wrappers stay local
+    rather than sharing one another's cache state.
+    """
+    try:
+        return _probe_sdk()
+    except Exception:
+        _probe_sdk_reset()
+        raise
+
+
 def _probe_db() -> dict:
     """Deep-check the selfhost graph, WITH the #3243 cold-start allowance.
 
     Uses the REUSED ``_probe_sdk()`` connection (above) and runs the shared,
     never-raising ``monitoring.probe_db``.
+
+    #3446: the SDK lookup is handed to ``probe_db`` as ``acquire=`` so it is a
+    bounded phase (``PROBE_SDK_ACQUISITION_BUDGET``) rather than an unbounded
+    prefix running on this coordinator's thread — which is what makes
+    ``_liveness_probe_hard_timeout()`` a bound over ENFORCED deadlines.
 
     The allowance is resolved HERE, at call time, for the same reason
     ``probe_setup_timeout`` is a function: ``mcp_server._load_dotenv()`` runs
@@ -319,14 +340,8 @@ def _probe_db() -> dict:
     """
     from tortoise.monitoring import probe_db, probe_setup_timeout  # lazy
 
-    try:
-        sdk = _probe_sdk()
-    except Exception as exc:  # noqa: BLE001, RUF100 — probe_db never raises
-        # Mirrors ``hosted_api._probe_db``; shares the close/query residual
-        # tracked by #4608.
-        _probe_sdk_reset()
-        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return probe_db(sdk, setup_timeout=probe_setup_timeout())
+    return probe_db(acquire=_acquire_probe_sdk,
+                    setup_timeout=probe_setup_timeout())
 
 
 def _liveness_probe_hard_timeout() -> float:
@@ -339,8 +354,9 @@ def _liveness_probe_hard_timeout() -> float:
     (``hosted_api.DB_PROBE_HARD_TIMEOUT``): a ``HealthProbe`` bound BELOW its
     probe's total would return before the verdict it is waiting for and strand
     its daemon worker on every cold start. ``PROBE_SDK_ACQUISITION_BUDGET`` is
-    charged too, matching the hosted bound: the SDK lookup happens before
-    ``probe_db`` (and, with the reused connection, only on the FIRST probe).
+    charged too, matching the hosted bound: since #3446 the SDK lookup is a
+    BOUNDED phase of ``probe_db`` itself (``acquire=_acquire_probe_sdk``), so
+    both terms of this sum are deadlines the code enforces.
 
     Resolved once at import, like the hosted bound. In production this is safe
     to freeze: ``tortoise.selfhost`` imports ``tortoise.mcp_server`` (which
