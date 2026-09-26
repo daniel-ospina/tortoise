@@ -945,13 +945,15 @@ def duplicate_entries(manifest: dict) -> list[str]:
 
     `select()` unions surfaces, so a same-surface duplicate is invisible to
     selection and to :func:`integrity` (which only asks "is it classified?").
-    Surfaced as a non-fatal `--integrity` note rather than a gate failure — the
-    duplicate is a manifest edit to clean up, and the gate must stay green while
-    it is. Cross-surface (dual) registration is deliberate; only same-surface
-    repeats are reported.
+
+    #5373: this is a GATE FAILURE, not a note. `config/ci-surfaces.yml` carries
+    `merge=union`, which keeps BOTH sides' lines for a conflicting hunk — so a
+    duplicate same-surface entry is exactly what union emits when two lanes append
+    the same registration, and a note would let it in silently. Cross-surface (dual)
+    registration is still deliberate; only same-surface repeats are reported.
 
     Each offending name is reported ONCE however many times it repeats, so the
-    note's count is a count of distinct problems.
+    count is a count of distinct problems.
     """
     dupes: list[str] = []
     for surface, files in manifest.get("surfaces", {}).items():
@@ -2227,7 +2229,7 @@ def main() -> int:
         # raise at all.)
         problems = missing + slow_file_issues(manifest) \
             + duration_issues(manifest) + leg_coverage_issues(manifest) \
-            + duration_coverage_issues(manifest)
+            + duration_coverage_issues(manifest) + duplicate_entries(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (space-joined matrix_* outputs) — when they do, the #1266
         # halves-parse tie check is
@@ -2253,10 +2255,6 @@ def main() -> int:
             sample = ", ".join(absent[:8])
             print(f"⚠️  {len(absent)} manifest fast files are in NO half "
                   f"(full-matrix coverage hole, #1266): {sample} …")
-        dupes = duplicate_entries(manifest)
-        if dupes:
-            print(f"⚠️  {len(dupes)} duplicate manifest entr(y/ies) — invisible "
-                  f"to select(), #2913: {', '.join(dupes)}")
         print("✅ integrity: all test files classified; slow_files consistent; halves consistent")
         return 0
 

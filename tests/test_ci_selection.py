@@ -983,8 +983,9 @@ def test_register_already_present_in_surface_is_reported_noop(capsys):
 
 def test_duplicate_entries_reports_same_surface_repeats():
     """#2913: a same-surface duplicate is invisible to select() (it unions
-    surfaces) and to integrity() (it only asks "classified?") — the new
-    duplicate_entries() check surfaces it for the --integrity note."""
+    surfaces) and to integrity() (it only asks "classified?") — duplicate_entries()
+    surfaces it, and since #5373 it FAILS `--integrity` (a union-merged registry
+    would otherwise absorb it silently)."""
     from tools.ci_selection import duplicate_entries
     m = {"surfaces": {"core": ["test_a.py", "test_a.py", "test_b.py"],
                       "api": ["test_a.py"]}}
@@ -998,6 +999,34 @@ def test_duplicate_entries_reports_same_surface_repeats():
     ) == ["core: test_a.py"]
     # a value that is None (empty surface block) must not raise
     assert duplicate_entries({"surfaces": {"core": None}}) == []
+
+
+def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
+    """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
+
+    `config/ci-surfaces.yml` carries `merge=union`, which keeps BOTH sides' lines for
+    a conflicting hunk — so a same-surface duplicate is the exact shape union emits
+    when two lanes register the same test. It used to be a ⚠️ note; a note on a
+    union-merged registry lets the duplicate in silently.
+    """
+    import tools.ci_selection as cs
+
+    manifest = {"surfaces": {"core": ["test_a.py", "test_a.py"]}}
+    monkeypatch.setattr(cs, "load_manifest", lambda: manifest)
+    # All the OTHER integrity legs are neutralised so the duplicate is the only
+    # possible cause of the non-zero exit; each is a pure function of the manifest.
+    for leg in ("integrity", "slow_file_issues", "duration_issues",
+                "leg_coverage_issues", "duration_coverage_issues",
+                "workflow_matrix_issues"):
+        monkeypatch.setattr(cs, leg, lambda *a, **k: [])
+    monkeypatch.setattr(cs, "push_legs", lambda *a, **k: {"half_a": [], "half_b": []})
+    monkeypatch.setattr(cs, "workflow_halves_issues", lambda *a, **k: [])
+    monkeypatch.setattr(cs, "fast_files_absent_from_halves", lambda *a, **k: [])
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+
+    rc = cs.main()
+    assert rc == 1, "a duplicate same-surface entry must redden --integrity"
+    assert "core: test_a.py" in capsys.readouterr().out
 
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
@@ -2107,9 +2136,17 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert not _defaults_shell(workflow) and not _defaults_shell(drift), (
         "a `defaults.run.shell` can swallow the integrity exit code (#2656)")
 
+    # The DRIFT GATE is the step that invokes ci_selection. The job also carries the
+    # `merge=union` registry validator (#5373), which is a different check and must
+    # not be held to the drift gate's direct-invocation/no-silencing rule — matching
+    # on "integrity" alone swept it in and false-redded.
     integrity_steps = [s for s in drift.get("steps", [])
-                       if "integrity" in _code(s)]
+                       if "ci_selection" in _code(s)]
     assert integrity_steps, "the drift job must run the integrity check"
+    assert any("tools/registry_integrity.py" in _code(s)
+               for s in drift.get("steps", [])), (
+        "the drift job must also run the union registry validator (#5373): the "
+        "unioned registries are only safe while a validator fails closed on them")
     for step in integrity_steps:
         run = step["run"].replace("\\\n", " ")
         tokens = shlex.split(run)

@@ -536,6 +536,7 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  - test_registry_integrity.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing

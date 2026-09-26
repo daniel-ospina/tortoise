@@ -28,9 +28,47 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "sdk_rename_table.py"
+# The generator's default output path. It is NO LONGER COMMITTED (#5373) — every
+# reader below goes through the session fixture, which rebinds this to a freshly
+# rendered temp copy. Keeping the name `DOC` means the ~40 existing readers are
+# unchanged; the artifact they read is now guaranteed current instead of
+# guaranteed-possibly-stale.
 DOC = ROOT / "docs" / "product" / "sdk-rename-table.md"
 BETA = ROOT / "docs" / "product" / "beta-sdk-surface.md"
 CANON = ROOT / "docs" / "product" / "canonical-sdk-methods.md"
+
+_DOC_PATH: Path | None = None
+
+
+def _render_doc() -> Path:
+    """Render the rename table into a temp dir, once per session.
+
+    The file is generated ON DEMAND because committing it was the defect (#5373): it
+    is a function of `sdk.py` line numbers, so any two concurrent `sdk.py` PRs
+    conflicted on it — 8 of the 44 unclean PRs measured 2026-09-26, and normalising
+    `sdk.py:\\d+` made the two sides byte-identical. Rendering here is STRONGER than
+    reading a committed copy: the asserted content cannot be a stale artifact, and
+    the ~40 independent AST/doc oracles below still check every row.
+    """
+    global _DOC_PATH
+    if _DOC_PATH is None:
+        import tempfile
+
+        out = Path(tempfile.mkdtemp(prefix="sdk-rename-table-")) / "sdk-rename-table.md"
+        proc = subprocess.run(
+            [sys.executable, str(GENERATOR), "--out", str(out)],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"the generator failed:\n{proc.stderr}"
+        _DOC_PATH = out
+    return _DOC_PATH
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _generated_doc() -> None:
+    """Point `DOC` at the rendered copy before any test in this module reads it."""
+    global DOC
+    DOC = _render_doc()
 
 # One Part A row: `| 1 | \`name\` | \`sdk.py:123\` | R1 | \`target\` | stated | citation |`.
 # The citation cell is captured greedily to the final pipe so escaped (`\|`) pipes
@@ -495,9 +533,14 @@ def generator_module():
 # THE GATE — `--check` must be clean, and must RED on drift
 # ─────────────────────────────────────────────────────────────────────
 def test_check_mode_is_clean() -> None:
-    """The committed doc must equal a fresh render. This is the CI form."""
+    """`--check` must be clean against the render it just produced, and stable.
+
+    It no longer compares a COMMITTED copy (there is none, #5373) — it asserts the
+    render is DETERMINISTIC, which is what makes `--check` meaningful for a local
+    copy at all. The drifted-copy test below still proves `--check` reds.
+    """
     proc = subprocess.run(
-        [sys.executable, str(GENERATOR), "--check"],
+        [sys.executable, str(GENERATOR), "--check", "--out", str(_render_doc())],
         cwd=ROOT, capture_output=True, text=True,
     )
     assert proc.returncode == 0, (
