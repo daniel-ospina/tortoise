@@ -5423,11 +5423,27 @@ def _cmd_verify(args):
     from .projection import FalkorProjection
     proj = FalkorProjection.from_uri(args.db)
     try:
-        proj.apply([{"type": "PointAdded", "point": {"id": "test-verify", "content": "verify", "pointKind": "observation", "createdAt": "2026-01-01T00:00:00Z"}}])
+        # #3600: apply() takes ONE event dict. This passed a one-element list;
+        # _norm() degrades a non-dict to {} and the type guard then skips it, so
+        # the write was a silent no-op.
+        proj.apply({"type": "PointAdded", "point": {"id": "test-verify", "content": "verify", "pointKind": "observation", "createdAt": "2026-01-01T00:00:00Z"}})
+        # Confirm the write landed before reporting it. The original printed
+        # "✓ write OK" unconditionally, which is the same silent-success defect
+        # the list argument caused — a health check must be able to fail.
+        written = proj.g.query("MATCH (p:Point {id: 'test-verify'}) RETURN p").result_set
+        if not written:
+            print("✗ write FAILED")
+            return 1
         print("✓ write OK")
-        result = proj.db.query("MATCH (p:Point {id: 'test-verify'}) RETURN p")
-        print("✓ read OK" if result.result_set else "✗ read FAILED")
-        proj.db.query("MATCH (p:Point {id: 'test-verify'}) DELETE p")
+        # Read leg asserts the properties round-trip, not merely that the node
+        # exists (the write probe above already covers existence) — and it must
+        # affect the exit code, which it previously did not.
+        result = proj.g.query("MATCH (p:Point {id: 'test-verify'}) RETURN p.content")
+        if not result.result_set or result.result_set[0][0] != "verify":
+            print("✗ read FAILED")
+            return 1
+        print("✓ read OK")
+        proj.g.query("MATCH (p:Point {id: 'test-verify'}) DELETE p")
         print("✓ delete OK")
     except Exception as e:
         print(f"✗ {e}")
