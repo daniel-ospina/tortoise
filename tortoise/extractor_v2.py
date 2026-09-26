@@ -116,7 +116,15 @@ CHAINS = {
     },
 }
 
-PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:", "agent-ops:")
+# #5165: there is deliberately NO ``PACK_NS`` tuple here. The pack-kind set
+# is DERIVED from the compiled value brief (``_build_master_from_brief``),
+# which after #2714 is graph-gated to the packs THIS graph installs — the
+# brief is the single authority. A second, hardcoded namespace allowlist was
+# the narrower of the two: a catalog pack whose namespace was not listed had
+# its kinds present in the gated brief and silently dropped from
+# ``pack_kinds`` (never offered by the prompt, never writable by the minted-
+# kind gate), and installing a pack required an edit to engine code — the
+# "domain behaviour living in engine code" defect #1026 exists to remove.
 
 # E2 (#1534): the USER-PERSONAL-STATE vocabulary — the operative criterion for
 # the Tier-A classification hint (personal bests, schedules, preferences). The
@@ -326,22 +334,43 @@ def _desc(brief: dict, key: str) -> str:
 _MASTER_LIST_CACHE: dict | None = None
 
 
-def _build_master_from_brief(brief: dict,
-                             pack_prefixes: tuple[str, ...] = PACK_NS) -> dict:
+def _build_master_from_brief(brief: dict) -> dict:
     """The master-list sections from a compiled value brief (#2031 refactor
-    of the build_master_list loop body — the section semantics are
-    byte-identical to pre-#2031). ``pack_prefixes`` is the namespace
-    allowlist for the pack_kinds section: the DEFAULT path passes the
-    starter set; the hosted tenant path passes starter + that tenant's
-    namespaces. Loop semantics preserved exactly: the memory_granularity
-    skip precedes the prefix check, and pack_kinds keeps the brief's
-    insertion order (prompt-visible)."""
+    of the build_master_list loop body).
+
+    The pack_kinds section is **derived from the brief itself** (#5165):
+    every namespaced key that is not part of a fixed section (``objects`` =
+    ``CORE_OBJECT_KEYS``; ``memory_granularity``) is a pack kind. There is no
+    second namespace allowlist on either leg, so a filter here can only ever
+    DROP a pack the brief carries. (How the brief was narrowed is
+    ``compile_value_brief``'s business: on the ``sdk`` path it is gated to the
+    graph's installed packs when that graph has ``:PackInstall`` records, and
+    falls back to the ungated catalog union when it has none — indicator 3;
+    on the ``sdk=None`` path it is the ungated catalog union by contract. The
+    legacy starter tuple ``product-strategy``/``dev``/``marketing``/``pm``/
+    ``agent-ops`` was a second copy of that gate, and agreed with it only
+    while the catalog happened to hold exactly those five namespaces.)
+
+    Core is handled by NAMESPACE: a ``core:*`` key the brief carries is
+    seeded into ``objects`` — which every render mode emits and
+    ``master_kind_forms`` reads — never into ``pack_kinds``, even when it is
+    not one of the canonical ``CORE_OBJECT_KEYS`` (defense-in-depth for a
+    legacy/bypass ``core`` manifest, or a brief whose core dict outgrew
+    ``CORE_OBJECT_KEYS``). ``render_s2_prompt`` derives the core-only
+    prompt's pack-namespace list from exactly ``pack_kinds``, so a ``core:``
+    entry there would tell the model that ``core:`` is a PACK namespace whose
+    content must be emitted as ``unclassified`` — contradicting the same
+    prompt's "core kinds are in-context".
+
+    Loop semantics preserved: the ``memory_granularity`` skip comes first,
+    and pack_kinds keeps the brief's insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
-    for k, v in brief.items():  # noqa: B007
+    for k in brief:
         if k == "memory_granularity":
             continue
-        if not k.startswith(pack_prefixes):
+        if k in CORE_OBJECT_KEYS or k.startswith("core:"):
+            objects.setdefault(k, _desc(brief, k))
             continue
         pack_kinds[k] = _desc(brief, k)
     return {
@@ -371,9 +400,12 @@ def build_master_list(sdk=None) -> dict:
 
     #2031 hosted tenant path (``sdk``): the master compiles from the
     memoized tenant view's brief (shared catalog + THIS tenant's
-    :PackManifest manifests) with the pack_kinds allowlist extended to the
-    tenant's namespaces — so tenant A's pack kinds reach A's extraction
-    prompts and write gates while tenant B's never do. The tenant identity
+    :PackManifest manifests), narrowed by the graph's #2714 APPROVAL set when
+    that graph has ``:PackInstall`` records (a graph with none falls back to
+    the catalog union — indicator 3) — so tenant A's pack kinds reach A's
+    extraction prompts and write gates while tenant B's never do, and no
+    second namespace allowlist is applied on top (#5165). The ``sdk=None``
+    path stays the ungated catalog union by contract. The tenant identity
     is the SDK's resolved graph (pass the tenant-scoped SDK,
     ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global
@@ -389,13 +421,12 @@ def build_master_list(sdk=None) -> dict:
             return copy.deepcopy(_MASTER_LIST_CACHE)
         from tortoise.value_extractor import compile_value_brief
         brief = compile_value_brief()
-        master = _build_master_from_brief(brief, PACK_NS)
+        master = _build_master_from_brief(brief)
         _MASTER_LIST_CACHE = copy.deepcopy(master)
         return master
     from tortoise.pack_manifest_store import tenant_view
     view = tenant_view(sdk)
-    tenant_prefixes = tuple(f"{m['namespace']}:" for m in view["tenant"])
-    return _build_master_from_brief(view["brief"], PACK_NS + tenant_prefixes)
+    return _build_master_from_brief(view["brief"])
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -469,11 +500,16 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     for k, v in pack_kinds.items():
         ns = k.split(":")[0] + ":"
         triggers = _PACK_TRIGGERS.get(ns)
-        # #2031: a namespace with NO trigger entry cannot be story-selected —
-        # always include it (per-tenant custom packs; dropping them would
-        # silently strip the tenant's own kinds from their compact prompt).
-        # All five starter namespaces have trigger entries, so the DEFAULT
-        # path behavior is unchanged (byte-identical).
+        # A namespace with NO trigger entry cannot be story-selected —
+        # always include it (per-tenant custom packs AND, since #5165, any
+        # catalog pack shipped without a trigger entry; dropping them would
+        # silently strip their kinds from the compact prompt). The five
+        # shipped catalog namespaces all HAVE entries, so the default
+        # render's selection is unchanged for them — but the byte-identity
+        # argument is about those entries, not about a starter-set
+        # restriction: a new catalog pack is injected whole in compact mode
+        # until it is given a trigger entry (the remaining engine edit, and
+        # a deliberate, fail-open one).
         if triggers is None or any(t in low for t in triggers):
             selected[k] = v
     return selected or dict(pack_kinds)  # nothing matched → all (safe)
