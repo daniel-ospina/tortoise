@@ -231,6 +231,10 @@ def test_turn_write_cypher_embedding_overwrite_lands(tmp_path):
             proj.g.query(_TURN_WRITE_CYPHER, params={
                 "sid": "turn-4524",
                 "now": "2026-01-01T00:00:00Z",
+                # #4911: the statement carries a required `$redactions` param
+                # (the per-session redaction count), so every driver of the
+                # production constant must bind it.
+                "redactions": 0,
                 "turns": [{"id": "turn-1", "c": f"text-{i}", "k": "turn",
                            "speaker": "user", "s": "completed",
                            "ch": f"h-{i}", "emb": list(vec)}],
