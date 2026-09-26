@@ -1990,6 +1990,12 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_org_sdk().get_point, id)
+    # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
+    # the non-operator guard below would match a failed call and fabricate a
+    # domain fact ('is not an operator'), discarding the real cause. Surface
+    # the typed failure FIRST (#4576; same pattern as #3926).
+    if isinstance(point, _SafeError):
+        return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
     return point
