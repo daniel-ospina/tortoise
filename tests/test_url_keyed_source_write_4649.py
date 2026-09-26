@@ -93,6 +93,13 @@ def _stub(proj, url: str):
     return rows[0]
 
 
+def _graph_shape(sdk) -> tuple[int, int]:
+    """(node count, edge count) — a dry run must leave this untouched."""
+    proj = sdk._get_proj()
+    return (_rows(proj, "MATCH (n) RETURN count(n)")[0][0],
+            _rows(proj, "MATCH ()-[r]->() RETURN count(r)")[0][0])
+
+
 def _corpus_source(sdk, tmp_path, source_url: str, doc_id: str) -> None:
     """Create the corpus ``:Source`` the way the ingest route does.
 
@@ -242,6 +249,36 @@ class TestDeletePreviewAgreesWithTheWriter:
         assert preview["nodes_removed"] == 1, preview
         assert preview["found"] is True, preview
 
+    def test_the_delete_dispatcher_previews_the_url_only_source(self, env):
+        """The DISPATCHER behind the canonical destructive tool
+        (``tortoise_delete(dry_run=True)`` → ``_preview_delete``), not just the
+        leaf preview. It resolves the label itself, so it needs the same
+        ``by_url`` the writer got — otherwise it reports ``found=False`` for a
+        node ``sdk.delete`` deletes (a dry run that lies on an irreversible
+        op), while the (already OR-set-aware) leaf preview disagrees.
+
+        (1) Failing values are ``found is False`` / ``nodes_removed == 0`` and
+        a dry run that mutated the graph; (2) reachable through the
+        ``extractedFrom`` stub."""
+        from tortoise.mcp_server import _preview_delete, _preview_delete_entity
+
+        sdk, _ = env
+        url = "https://example.com/report"
+        sdk.create_point("statement", "the claim", extractedFrom=url)
+        before = _graph_shape(sdk)
+
+        preview = _preview_delete(sdk, url)
+
+        assert preview["found"] is True, (
+            "tortoise_delete(dry_run=True) reported the url-keyed Source as "
+            "absent while sdk.delete(url) deletes it — the dispatcher resolves "
+            "without by_url (#4649)")
+        assert preview["nodes_removed"] == 1, preview
+        assert preview["nodes_removed"] == _preview_delete_entity(
+            sdk, url)["nodes_removed"], (
+            "the dispatcher and the leaf preview must agree on the blast radius")
+        assert _graph_shape(sdk) == before, "a dry run must never write"
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # The fold honours the same OR-set (replay parity)
@@ -385,6 +422,47 @@ class TestNoRegressionOnExistingShapes:
                      "MATCH (p:Point {id:$i}) RETURN p.annotator_bias",
                      i=pid)[0][0] == 0.77
         assert [r for r in _mutations(events) if r.get("label") == "Source"] == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The write OR-set and the READ router cannot drift
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestIdentityTablesCannotDrift:
+    def test_the_read_router_covers_every_write_identity_key(self, env):
+        """Every key in the write OR-set must have an ENABLED read branch, or
+        the silent no-op this issue fixes is rebuilt for the new key: the
+        writers (and both folds) would match it while `sdk.update`/`delete`
+        resolution could not route to the node.
+
+        (1) The failing state is a declared write-identity key that
+        `_resolve_entity(..., by_url=True)` cannot return; (2) reachability is
+        by construction — the loop iterates the DECLARED tables
+        (`_CANONICAL_ENTITY_ID_PROPS` + `_CANONICAL_ENTITY_SECONDARY_ID_PROPS`)
+        and the fixture creates one minimal node per declared key.
+        """
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            _CANONICAL_ENTITY_SECONDARY_ID_PROPS,
+        )
+
+        sdk, _ = env
+        proj = sdk._get_proj()
+        declared = (*_CANONICAL_ENTITY_ID_PROPS,
+                    *_CANONICAL_ENTITY_SECONDARY_ID_PROPS)
+        assert (
+            "Source", "url") in declared, (
+            "the Source/url identity this suite fixes is no longer declared")
+        for i, (label, prop) in enumerate(declared):
+            value = f"route-probe-{i}"
+            proj.g.query(f"CREATE (n:{label} {{{prop}:$v}})",
+                         params={"v": value})
+            resolved = proj._resolve_entity(value, by_id=True, by_eventId=True,
+                                            by_url=True)
+            assert any(r["label"] == label and r["key"] == prop
+                       for r in resolved), (
+                f"the write/fold identity ({label}, {prop}) has no enabled "
+                f"read branch — a write to it would silently no-op (#4649)")
 
 
 # ══════════════════════════════════════════════════════════════════════════
