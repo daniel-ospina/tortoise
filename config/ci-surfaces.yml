@@ -395,6 +395,13 @@ surfaces:
   # rather than PROVEN on rc=0 with no downstream effect. Same dual
   # registration as test_session_verify.py (mechanism = core; CLI = api).
   - test_4314_inert_hooks.py
+  # #3797: the hook-run observation — the shipped `session-start.sh` records
+  # that the hook RAN (even unconfigured) and the credential-free
+  # `tortoise hooks status` reads it. Its sources are the hook script
+  # (`tortoise/claude-hooks/`, no named surface → `core`) plus the
+  # `hooks status` wiring in `tortoise/__main__.py`, which selects `api`.
+  # Same dual registration as test_4314_inert_hooks.py.
+  - test_hook_run_observation.py
   # #4675: the post-commit confirmation — a client-side refusal whose effect
   # LANDED. Its source is tortoise/session_confirm.py (an ENGINE path matching
   # no SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
@@ -760,6 +767,10 @@ surfaces:
   # rather than PROVEN on rc=0 with no downstream effect. Same dual
   # registration as test_session_verify.py (mechanism = core; CLI = api).
   - test_4314_inert_hooks.py
+  # #3797: the hook-run observation — the CLI half lives in
+  # `tortoise/__main__.py` (`hooks status`), an `api`-classified source. See
+  # the core entry for the mechanism half.
+  - test_hook_run_observation.py
   # #4675: the post-commit confirmation — a client-side refusal whose effect
   # LANDED. Its sources are `tortoise/session_confirm.py` and the client paths
   # it re-arms in `tortoise/__main__.py` (the `session import` / spool drain
