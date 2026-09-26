@@ -503,7 +503,8 @@ def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     Supported resources: points, api_keys, sessions, users, graphs,
     documents (#1726: the document-bearing :Source count with the transcript
     discriminator — D10, ONTOLOGY v3.15 §4.4).
-    ``points`` counts non-episodic Points + Object/Subject nodes (#1911).
+    ``points`` counts non-episodic Points + Object/Subject nodes (#1911) +
+    non-episodic Event nodes (#1977).
     """
     return _count_resource(org_id, resource, sdk=sdk)
 
@@ -519,7 +520,9 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
       them, R-18) PLUS all Object/Subject nodes (#1911 — the /v1/objects
       + /v1/subjects gates check this resource, and Object/Subject carry
       only their own labels, so they must be counted here or the cap is
-      vacuous for those writes)
+      vacuous for those writes) PLUS non-episodic Event nodes (#1977 — the
+      SAME vacuity on `tortoise_create_event`; the SAME fail-closed flag rule,
+      so capture-minted Events stamped ``is_episodic: true`` stay excluded)
     - api_keys: LIVE (non-revoked, non-expired) API keys that COUNT against
       max_api_keys. A bootstrap (24h session) credential is cap-EXEMPT
       (R13/#4140) and excluded; a NULL/legacy ``created_via`` is a DURABLE
@@ -696,10 +699,41 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # after which all points-gated writes 402 until upgrade — the
         # intended "0 uncapped object/subject growth" posture. A future
         # indexer preflight (follow-up) would gate the job itself.
+        #
+        # #1977 (code-review gate on PR #1974): the SAME vacuity recurred on the
+        # Event label — `tortoise_create_event` is `_quota_gated("points")`
+        # (mcp_server.py), but a DIRECT call defaults to `is_episodic=None` and
+        # mints a flag-less Event this query never saw, so a free org could mint
+        # unbounded Events without ever 402ing (the gate was decoration — its
+        # failure mode was indistinguishable from its success mode). Events are
+        # graph NODES and ``max_points`` IS the pricing ``max_graph_nodes`` cap
+        # (the recorded GAP-B / MAIN-DELTA 2 decision,
+        # docs/plans/2026-08-08-310-stripe-billing.md — "the points counter
+        # counts graph nodes"), and #1911 resolved the identical finding for
+        # Object/Subject by ADDING the missing label rather than dropping the
+        # gate — dropping it here would re-open the unbounded-growth hole for
+        # one more writer. So the Event branch carries the SAME fail-closed
+        # R-18 predicate as Point: a MISSING flag counts as non-episodic.
+        #
+        # Events reaching this branch carry ``is_episodic`` UNSET, which is
+        # why they ARE charged. Only three writers stamp it true: the
+        # ``sessionCaptured`` Event minted by ``sdk.capture_session`` and by
+        # the hosted capture path (both pass ``is_episodic=True`` to
+        # ``create_event``), and the hosted commit path, which sets
+        # ``e.is_episodic=true`` on its AgentSession Event and on its
+        # extracted occurrence Events. Those stay EXCLUDED — that exclusion is
+        # what keeps this change from re-charging the capture users the #947
+        # backfill exists for. It is NOT a kind allowlist: the discriminator
+        # stays the ``is_episodic`` flag, exactly as for Points. Conversely,
+        # ``_session_event_write`` (the session index path — its docstring
+        # pins "no is_episodic on the index path") and a direct
+        # ``create_event`` without the explicit kwarg (``tortoise_create_event``)
+        # leave the flag unset and their Events therefore COUNT.
         rows = sdk._get_proj().g.query(
             "MATCH (n) "
             "WHERE (n:Point AND (n.is_episodic IS NULL OR n.is_episodic = false)) "
             "   OR n:Object OR n:Subject "
+            "   OR (n:Event AND (n.is_episodic IS NULL OR n.is_episodic = false)) "
             "RETURN count(n)",
         ).result_set
         return int(rows[0][0])
