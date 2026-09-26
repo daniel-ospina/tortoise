@@ -5336,8 +5336,10 @@ async def _check_ip_bucket_rate_limit(
 
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
-    outcome (success/401/403), so a server fault (5xx) never consumes the
-    user's budget and cannot mask an incident with an hour-long 429.
+    outcome, so a server fault (5xx) never consumes the user's budget and
+    cannot mask an incident with an hour-long 429. (session_login charges
+    on success/401/403; the sensitive-op family #2051 charges on any
+    non-5xx terminal — success or a 4xx client error.)
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -5776,12 +5778,21 @@ def _check_dashboard_key_login(org: dict, request: Request) -> None:
         )
 
 
-async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
+async def _check_sensitive_op_rate_limit(
+    request: Request, op: str, *, defer_charge: bool = False,
+) -> tuple | None:
     """Per-IP hourly budget for sensitive org ops (export / org_delete /
-    import / pack_manifest)."""
+    import / pack_manifest).
+
+    #2051: the family is on the #1719 deferred-terminal doctrine. With
+    ``defer_charge=True`` this only prunes + 429-checks (no append) and
+    returns the ``(ip, op)`` charge key for
+    ``_charge_sensitive_op_rate_limit`` at the TERMINAL outcome; the default
+    ``False`` keeps the check-time append for any non-migrated caller.
+    """
     max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
     if max_per_hour is None:
-        return
+        return None
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -5795,7 +5806,106 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
         limit=max_per_hour, window_s=3600,
         key=(_ip, op),
         detail=f"Rate limit exceeded for {op}. Please try again later.",
-        retry_after_s=3600)
+        retry_after_s=3600,
+        defer_charge=defer_charge)
+    if not defer_charge or _ip is None:
+        return None
+    return (_ip, op)
+
+
+async def _charge_sensitive_op_rate_limit(
+    key: tuple | None, op: str,
+) -> None:
+    """#2051: append ONE terminal charge to the sensitive-op bucket store.
+
+    The deferred counterpart of the #1719 session_login shape — called once
+    when the terminal outcome is non-5xx (success or a 4xx client error); a
+    5xx passes through uncharged. ``_charge_ip_bucket`` carries the #1738
+    burst bound, so the 429 boundary stays at the limiter's limit.
+    """
+    limit = _SENSITIVE_OP_LIMITS.get(op)
+    if key is None or limit is None or key[0] is None:
+        return
+    await _charge_ip_bucket(
+        _SENSITIVE_BUCKETS, _SENSITIVE_LOCK, key,
+        limit=limit, window_s=3600)
+
+
+async def _terminal_charge(key: tuple | None, op: str) -> None:
+    """#2051: the ONE shielded terminal charge for the sensitive-op family.
+
+    #2051 (review P2): the charge runs under ``asyncio.shield`` so a
+    cancellation delivered while it waits on the contended
+    ``_SENSITIVE_LOCK`` — ONE global lock shared by all four ops and all
+    IPs, so an attacker can manufacture the contention — cannot DROP a
+    charge for an operation that ALREADY EXECUTED. Un-shielded, the
+    cancellation propagated out of the wrapper and the append never
+    happened: the same evasion class the ``CancelledError`` branch closes,
+    left open on the success and 4xx paths. ``shield`` keeps the charge in
+    its own task, so a second cancellation cannot drop it either. The
+    best-effort guard keeps a charge-side fault from masking the underlying
+    outcome (a charge is telemetry, never a failure path), and it does NOT
+    swallow ``CancelledError`` (a ``BaseException``), so the cancellation
+    still propagates after the charge is committed.
+
+    All three terminal branches — success, non-5xx ``HTTPException`` and
+    cancellation — charge through this helper so they cannot diverge again.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.shield(_charge_sensitive_op_rate_limit(key, op))
+
+
+def _deferred_sensitive_op(op: str):
+    """#2051: deferred-terminal charging for a sensitive-op endpoint.
+
+    Factors the exact #1719 (Task 5) sequence session_login established —
+    prune + 429-check on admission (``defer_charge=True``), then charge ONCE
+    at the TERMINAL outcome — over the whole sensitive-op family. Charge iff
+    the endpoint returned normally, raised a non-5xx ``HTTPException`` (a
+    client error is terminal), or was CANCELLED mid-flight (a disconnect /
+    shutdown is a terminal non-5xx outcome, and an uncharged one is an
+    evasion path — see the ``CancelledError`` branch); a 5xx — including an
+    unhandled exception the global handler renders as one — passes through
+    UNCHARGED, so a control-plane/graph fault cannot burn the caller's
+    hourly budget and mask the underlying 5xx with a stale 429 (#1719
+    Task 5). The admission check still runs BEFORE the body (cheapest
+    rejection), and a 429 raised by it is a refusal and charges nothing.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            request = kwargs.get("request")
+            if request is None:
+                request = next(
+                    (a for a in args if isinstance(a, Request)), None)
+            key = None
+            if request is not None:
+                key = await _check_sensitive_op_rate_limit(
+                    request, op, defer_charge=True)
+            try:
+                result = await fn(*args, **kwargs)
+            except HTTPException as exc:
+                if exc.status_code < 500:
+                    await _terminal_charge(key, op)
+                raise
+            except asyncio.CancelledError:
+                # #2051 (review P2): a request cancelled mid-flight (client
+                # disconnect, server shutdown) is a terminal NON-5xx
+                # outcome and MUST charge. Left uncharged, a client could
+                # disconnect before every response and obtain unlimited
+                # uncharged executions of the heavy ``import``/``export``
+                # ops; the pre-migration check-time behaviour charged this
+                # class, so charging here restores parity (it REMOVES a
+                # limits change, it is not one). ``_terminal_charge`` is
+                # shielded, so a SECOND cancellation cannot drop it while it
+                # waits on the bucket lock. The cancellation is re-raised
+                # below, so it still reaches the caller.
+                await _terminal_charge(key, op)
+                raise
+            await _terminal_charge(key, op)
+            return result
+        return wrapper
+    return decorator
 
 
 async def _check_signup_ip_rate_limit(request: Request) -> None:
@@ -6973,6 +7083,7 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
 
 
 @app.post("/v1/packs/manifests", status_code=201)
+@_deferred_sensitive_op("pack_manifest")
 async def upload_pack_manifest(
     request: Request,
     org: dict = Depends(get_current_org_gated),  # noqa: B008
@@ -6988,10 +7099,11 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307). Per-IP rate
     budget (429) — checked BEFORE the body is read (cheapest rejection,
-    mirrors import #1389/#1230). Check-time charging (the sensitive-op
-    family doctrine; #1719's deferred terminal charge is session-login
-    only) — a server fault (503) consumes budget; a family-wide
-    defer_charge migration is tracked separately. The MCP install tool
+    mirrors import #1389/#1230). #2051: the family is now on the #1719
+    deferred-terminal doctrine — the budget is charged once at the terminal
+    outcome (success / 4xx), and a server fault (5xx/503) passes through
+    uncharged, so an outage cannot mask itself with a stale 429. The MCP
+    install tool
     (tortoise_pack_install) calls upsert_tenant_manifest in-process and
     is NOT covered by this REST budget (tracked separately).
 
@@ -7006,7 +7118,6 @@ async def upload_pack_manifest(
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
-    await _check_sensitive_op_rate_limit(request, "pack_manifest")
     _reject_graph_bound_org_surface(org, "pack catalog upload")
     # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
     # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
@@ -16844,6 +16955,7 @@ def _export_graph_snapshot(graph_name: str):
 
 
 @app.get("/v1/organizations/{org_id}/export")
+@_deferred_sensitive_op("export")
 async def export_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only JSON export of the org graph + control plane.
@@ -16860,7 +16972,6 @@ async def export_org(org_id: str, request: Request,
     actor_user_id); idempotent by nature (GET). The graph read runs on a
     worker thread (never blocks the event loop).
     """
-    await _check_sensitive_op_rate_limit(request, "export")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -17623,6 +17734,7 @@ def _rebuild_import_indexes(sdk, graph_name: str) -> None:
 
 
 @app.post("/v1/organizations/{org_id}/import")
+@_deferred_sensitive_op("import")
 async def import_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """Ingest a ``tortoise-export-v1`` artifact into the org graph (#1230).
@@ -17644,7 +17756,6 @@ async def import_org(org_id: str, request: Request,
     retryable/rollback-able; a pack-application failure 422s AFTER the swap
     (the graph holds the restored dump, the vocabulary is not live).
     """
-    await _check_sensitive_op_rate_limit(request, "import")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
@@ -17967,6 +18078,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 
 
 @app.delete("/v1/organizations/{org_id}", status_code=202)
+@_deferred_sensitive_op("team_delete")
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
@@ -17992,7 +18104,6 @@ async def delete_org(org_id: str, request: Request,
     a user can own multiple orgs (per-org deletion must not cascade to
     the account).
     """
-    await _check_sensitive_op_rate_limit(request, "team_delete")
     org_node = await _org_node(org_id)
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
