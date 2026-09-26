@@ -90,10 +90,13 @@ def _script_after(html: str, marker: str) -> str:
     assert end != -1, f"unterminated <script> after marker {marker!r}"
     body = html[start + len("<script>") : end]
     # A duplicated <script> BODY (same marker, one count) is not covered by the
-    # count above — the body must itself be unique in the page.
-    assert html.count(body) == 1, (
-        f"the script body after marker {marker!r} is not unique — the page "
-        "contains a second copy the browser would execute after this one"
+    # count above. Judged on the COMMENT-STRIPPED page: a copy inside `<!-- -->`
+    # is inert (the browser never runs it), so counting it would be a false red
+    # (cycle-8 review).
+    assert _strip_comments(html).count(body) == 1, (
+        f"the script body after marker {marker!r} appears more than once in the "
+        "live page — the browser would execute the LATER copy, so a pin on this "
+        "one would be pinning dead code"
     )
     return body
 
@@ -1182,11 +1185,14 @@ def test_the_anon_team_funnel_prefers_the_console_return_to() -> None:
 
     That call site sits inside the big script, which no harness extracts — so the
     expression could be reverted to the pre-#3930
-    `window.__ADMIN_RETURN_TO || claimCardUrl()` (which sends a still-signed-out
-    console visitor to the claim card, and a /team visitor to /team where the
-    SPA mount gate bounces them straight back to /auth) with every test still
-    green. It is a NAMED helper (`claimFunnelUrl`) precisely so it can be driven
-    here; the pre-#3930 expression reds this test.
+    `window.location.href = window.__ADMIN_RETURN_TO || (window.__DASHBOARD_BASE_URL + "/?claim=1")`
+    with every test still green. What that actually broke is the NON-console rows:
+    for a console visitor the old expression returned the truthy `/admin` (so the
+    console was fine), while a `/team` or `/welcome` visitor was sent to
+    `DASHBOARD_URL + "?claim=1"` — i.e. to `/team/?claim=1`, where the SPA mount
+    gate bounces them straight back to `/auth`. The claim card was only the
+    no-return-to fallback. It is a NAMED helper (`claimFunnelUrl`) precisely so it
+    can be driven here; the pre-#3930 expression reds rows 4-5 of this test.
     """
     rows = _run({"funnel": [
         ["/admin", "", None],

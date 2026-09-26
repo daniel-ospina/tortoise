@@ -535,7 +535,11 @@ def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
             start = text.index(body)
             spans.append((start, start + len(body)))
         spans.sort()
-        for wm in re.finditer(r"document\.cookie\s*=", text):
+        # `=(?!=)` — an ASSIGNMENT only. A bare `document\.cookie\s*=` also matches
+        # the READ comparators (`document.cookie === ''`), so a legitimate guard in
+        # a reader was reported as an unwatched WRITE (cycle-8 review; same root
+        # cause as `_cookie_templates` below).
+        for wm in re.finditer(r"document\.cookie\s*=(?!=)", text):
             wpos = wm.start()
             assert any(a <= wpos < b for a, b in spans), (
                 f"{path.name}: document.cookie write at offset {wpos} is NOT inside a "
@@ -690,15 +694,23 @@ def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     # whole file also picked up `domainAttr`'s own `'; Domain='`, and then an
     # unrelated `; Foo=1` in a COMMENT shifted the slice and false-red the guard.
     def _cookie_templates(text: str) -> list[str]:
-        """The `document.cookie` statements, joined across their wrapped lines."""
+        """The `document.cookie = …` WRITE/REMOVE statements, joined across their
+        wrapped lines.
+
+        Matches an assignment only (`=(?!=)`) so the READ comparators
+        `document.cookie == ""` / `=== ""` are not parsed as malformed writes
+        (cycle-8 review), and tolerates any spacing around the `=`.
+        """
         out: list[str] = []
+        write_re = re.compile(r"document\.cookie\s*=(?!=)")
         lines = text.splitlines()
         for n, line in enumerate(lines):
-            if "document.cookie =" in line:
-                # join the wrapped statement up to its terminating `;` (statements
-                # span 2-3 lines in these files)
+            if write_re.search(line):
+                # join the wrapped statement up to its terminating `;`. The cap is
+                # generous (12 lines) because the previous 5-line window silently
+                # truncated a legitimately reflowed template (cycle-8 review).
                 parts: list[str] = []
-                for nxt in lines[n : n + 5]:
+                for nxt in lines[n : n + 12]:
                     parts.append(nxt)
                     if nxt.rstrip().endswith(";"):
                         break
@@ -709,6 +721,15 @@ def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     tpl_shared = _cookie_templates(_strip_js_comments(shared))
     tpl_oauth = _cookie_templates(_strip_js_comments(oauth))
     assert tpl_shared and tpl_oauth, "no document.cookie templates found — this guard is vacuous"
+    # Non-vacuity: every write/remove statement must have been FOUND, or a
+    # statement that slipped the matcher would simply stop being checked (cycle-8
+    # review: a `document.cookie=` without the space escaped the order guard).
+    assert len(tpl_shared) == len(re.findall(r"document\.cookie\s*=(?!=)", _strip_js_comments(shared))), (
+        "a shared document.cookie write was not captured"
+    )
+    assert len(tpl_oauth) == len(re.findall(r"document\.cookie\s*=(?!=)", _strip_js_comments(oauth))), (
+        "an oauth document.cookie write was not captured"
+    )
     for label, templates in (("shared", tpl_shared), ("oauth", tpl_oauth)):
         for t in templates:
             is_remove = "Max-Age=0" in t

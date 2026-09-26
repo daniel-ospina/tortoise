@@ -27,9 +27,10 @@
     // protocol-relative host, a backslash/whitespace-obfuscated host, an absolute
     // foreign host, and an opaque-scheme URL (`blob:`/`filesystem:`/`javascript:`/
     // `data:`). NOTE: an opaque scheme is not automatically foreign —
-    // `blob:https://app.premiselabs.co/x` carries THIS page's own origin, which is
-    // why the rule is `new URL(raw)` in ONE argument (absolute only, inner context
-    // ignored) rather than a base-relative parse.
+    // `blob:https://app.premiselabs.co/x` carries THIS page's own origin. The
+    // ONE-argument `new URL(raw)` below is not about that case (both arities agree
+    // on every ABSOLUTE input); it is so a RELATIVE or malformed string cannot
+    // resolve against this origin and be mistaken for a trusted absolute one.
     // Provenance, precisely: the ORIGIN is page-controlled. The VALUE is not —
     // the early block below appends the URL-derived, allowlist-checked `ret` to
     // it — which is exactly why every read goes through these two helpers.
