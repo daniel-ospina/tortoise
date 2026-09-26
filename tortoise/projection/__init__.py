@@ -5997,6 +5997,279 @@ class FalkorProjection(
                     f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
         return out
 
+    #: #4465 — the RANGE index set ``_ensure_indexes`` guarantees, as
+    #: ``(label, property, kind)``. Every entry is created unconditionally on
+    #: every backend, so a graph missing any of them is NOT bootstrapped.
+    _REQUIRED_RANGE_INDEXES = (
+        ("Point", "id", "RANGE"),
+        ("Point", "pointKind", "RANGE"),
+        ("Point", "content_hash", "RANGE"),
+        ("Point", "lastDreamedAt", "RANGE"),
+        ("Document", "id", "RANGE"),
+        ("Document", "documentKind", "RANGE"),
+        ("Subject", "id", "RANGE"),
+        ("Subject", "name", "RANGE"),
+        ("Object", "id", "RANGE"),
+        ("Object", "name", "RANGE"),
+        ("Event", "eventId", "RANGE"),
+        ("Source", "id", "RANGE"),
+        ("Source", "url", "RANGE"),
+        ("Source", "canonicalUrl", "RANGE"),
+        ("Session", "actor_user_id", "RANGE"),
+        ("Session", "id", "RANGE"),
+    )
+
+    #: #4465 — the FULLTEXT index set, required only on engines that support
+    #: it (``_ver is None or _ver[0] >= 4`` — the same gate the DDL sweep
+    #: uses). The FIELD SET is the migration contract: a legacy one-field
+    #: index (``Point.content`` only / ``Event.subject`` only) is missing here
+    #: on purpose, so such a graph takes the full path and its drop→recreate
+    #: migration still runs.
+    _REQUIRED_FULLTEXT_INDEXES = (
+        ("Point", "content", "FULLTEXT"),
+        ("Point", "search_keys", "FULLTEXT"),
+        ("Event", "subject", "FULLTEXT"),
+        ("Event", "name", "FULLTEXT"),
+        ("Subject", "name", "FULLTEXT"),
+        ("Object", "name", "FULLTEXT"),
+        ("Document", "_searchText", "FULLTEXT"),
+    )
+
+    def _schema_is_current(self) -> bool:
+        """#4465: is this graph already indexed?
+
+        ``_ensure_indexes`` is idempotent but pays ~26 round-trips of
+        already-satisfied DDL on every construction, and one hosted capture
+        constructs ~12 projections (7 of them on the event-loop thread).
+        Measured before this guard, on an unchanged schema: 182 of the
+        capture's 219 on-loop queries (180 of 217 embedded) were that repeated
+        DDL.
+
+        The answer is read from the GRAPH, never from process memory. A
+        process-wide "already bootstrapped" flag keyed on the graph name is a
+        correctness bug: a graph dropped and re-created in-process (org-graph
+        deletion, ``GRAPH.COPY``, embedded recovery, the GC drill) would be
+        remembered as indexed while carrying no indexes, and
+        ``required_embedding_dim`` would then claim a vector index that does
+        not exist. A per-graph catalogue read cannot go stale and cannot
+        collide across tenants.
+
+        **Fail-safe, not fail-open.** Any error — an engine without
+        ``db.indexes()``, a row whose per-property KINDS are not reported —
+        returns ``False`` and runs the full sweep. A probe that cannot PROVE
+        the schema is current must never be able to skip the work.
+
+        ⭐ THE TRADE THIS CHANGE MAKES. Trusting the ``point_fts_v2`` marker
+        FAILS OPEN. The marker records that the data fixup was handled at
+        MINT time, and a later ``update_entity`` (``SET n += $props``, no
+        flatten — #5482) invalidates that fact, so a graph could be certified
+        current while holding array-valued ``search_keys``: permanently
+        invisible to FTS, and silent. (The export/DR surface does read the
+        marker, as a migration watermark — that is unaffected.)
+
+        So the fixup's real precondition is tested instead:
+
+            an array-valued ``search_keys`` anywhere, or — for the legacy
+            single-field index — a Point FULLTEXT index still missing
+            ``search_keys``.
+
+        That check is CORRECT but NOT CHEAP. It is an unindexed label scan
+        over ``:Point`` (``EXPLAIN`` → ``Node By Label Scan``; no RANGE index
+        on ``search_keys``, and ``typeof()`` cannot use the FULLTEXT one),
+        linear in the Point count and paid on every fast-path probe. Measured
+        on docker FalkorDB 4.20.4: 1.4 ms @1k, 8.1 ms @30k, 26.9 ms @120k,
+        66.2 ms @300k (≈0.2 µs/point). #5444 carries removing that cost (a
+        write-maintained signal); #5482 carries restoring the invariant that
+        would make the marker trustworthy. Until one of them lands, this is
+        what not losing points silently costs.
+
+        ``event_fts_v2`` is deliberately NOT consulted: no data fixup rides it
+        (it guards only the drop→recreate churn), and a fresh graph sets the
+        Event two-field index WITHOUT setting that marker — only the
+        "already indexed" path sets it.
+        """
+        try:
+            rows = self.g.query("CALL db.indexes()").result_set
+        except Exception:  # a probe that cannot run is not a pass
+            return False
+        if not rows:
+            return False
+        present: set[tuple[str, str, str]] = set()
+        for row in rows:
+            # ``CALL db.indexes()`` rows are [label, properties,
+            # {prop: [kind, ...]}, ...] on every engine this store opens. A
+            # row without the kinds map cannot answer the RANGE/FULLTEXT
+            # question, so it fails the probe rather than guessing.
+            if not row or len(row) < 3 or not isinstance(row[2], dict):
+                return False
+            label, props, kinds = str(row[0]), row[1] or (), row[2]
+            # #3154: a boolean is_operator index is never VALID — its presence
+            # (single or composite, so either column can carry it) means the
+            # purge below still has work to do. Match the property name
+            # EXACTLY: a substring test also matches an unrelated property such
+            # as ``is_operator_flag``, and because a false positive returns
+            # False FOREVER for that graph the fast path would be permanently
+            # disabled — the exact churn #4465 exists to remove. The sibling
+            # detector this purge feeds (``hosted_backup
+            # ._audit_copied_boolean_indexes``) matches exactly for the same
+            # reason; the DROP below only targets the two exact forms.
+            if any(str(p) == "is_operator" for p in props):
+                return False
+            for prop, prop_kinds in kinds.items():
+                if str(prop) == "is_operator":
+                    return False
+                for kind in prop_kinds or ():
+                    present.add((label, str(prop), str(kind).upper()))
+        required = set(self._REQUIRED_RANGE_INDEXES)
+        _ver = getattr(self, "_falkordb_version", None)
+        fts_required = _ver is None or _ver[0] >= 4
+        if fts_required:
+            required |= set(self._REQUIRED_FULLTEXT_INDEXES)
+        # The FIELD SET proves the indexes EXIST, not that the one-time DATA
+        # FIXUP is done (#5444): it flattens array-valued ``search_keys``
+        # because the fulltext index does not index array properties, so a
+        # Point left as an array is permanently unfindable by ``queryNodes``.
+        # Test that precondition itself — no array ⇒ nothing owed, whatever
+        # the marker says. The check's cost, and the trade it makes, are
+        # documented on this method.
+        if (required <= present and fts_required
+                and self._array_valued_search_keys_exist()):
+            return False
+        return required <= present
+
+    #: Cap-immune fixup precondition. ``typeof`` is a per-row predicate and
+    #: the read takes a single bounded row, so FalkorDB's server-global
+    #: ``RESULTSET_SIZE`` (default 10 000) cannot truncate it into a FALSE
+    #: NEGATIVE. A client-side read of every ``search_keys`` returns only the
+    #: first ``RESULTSET_SIZE`` rows, so on a large graph an array beyond the
+    #: cap was invisible and the fixup was skipped again — the #5444 symptom
+    #: surviving precisely where the data volume is real (measured on docker
+    #: 4.20.4: 10 050 Points with arrays only in rows 10 001-10 050 → a plain
+    #: read returns 10 000 rows and 0 array-typed; this probe finds them).
+    _ARRAY_SEARCH_KEYS_PROBE = (
+        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+        "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
+    )
+
+    def _point_fts_search_keys_field_missing(self) -> bool:
+        """Is the Point FULLTEXT index still the legacy single-field form?
+
+        The SCHEMA half of the legacy branch's precondition (#5444).
+        That branch exists to drop→recreate ``Point(content)`` into
+        ``Point(content, search_keys)``, and gating it on the DATA precondition
+        alone meant a legacy graph whose data is already FLAT never upgraded:
+        the field stayed missing, the probe stayed not-current, and every
+        construction re-ran the whole sweep — #4465's churn, permanently, with
+        ``search_keys`` never indexed.
+
+        A probe that cannot run returns True (repair, never assume done).
+        """
+        try:
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if row and row[0] == "Point":
+                    return "search_keys" not in (row[2] or {})
+            return True
+        except Exception:
+            return True
+
+    def _array_valued_search_keys_exist(self) -> bool:
+        """Does any Point still store ``search_keys`` as an ARRAY?
+
+        The one-time fixup's real precondition, and the probe's ONLY extra
+        read: FalkorDB's fulltext index does not index array-valued properties,
+        so such Points are invisible to ``queryNodes`` until ``_ensure_indexes``
+        flattens them.
+
+        Fails CLOSED on any error — including an engine without ``typeof``.
+        Both supported engines have it (verified on embedded FalkorDBLite 4.18.3
+        and docker FalkorDB 4.20.4), and the previous fallback was an unbounded
+        untyped scan, whose ``RESULTSET_SIZE`` false negative a caller would
+        MINT the marker on, freezing the owed fixup forever.
+        Assuming owed is the correct polarity: it costs a sweep, not
+        permanent unfindability.
+        """
+        try:
+            return bool(self.g.query(self._ARRAY_SEARCH_KEYS_PROBE).result_set)
+        except Exception:
+            return True
+
+    def _array_search_keys_rows(self) -> list:
+        """``(id, search_keys)`` for Points whose ``search_keys`` is an array.
+
+        Cap-aware: the ``typeof`` predicate means the ``RESULTSET_SIZE`` cap can
+        only truncate the BATCH, never hide arrays behind string rows — so the
+        caller loops until this returns empty. Returns ``[]`` on error (never an
+        untyped scan): the caller re-checks ``_array_valued_search_keys_exist``
+        before minting, and that check fails closed, so an engine which cannot
+        answer never gets a marker minted over an owed fixup.
+        """
+        try:
+            return self.g.query(
+                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+                "AND typeof(n.search_keys) = 'List' "
+                "RETURN n.id, n.search_keys"
+            ).result_set
+        except Exception:
+            return []
+
+    def _fix_point_search_keys(self) -> None:
+        """The ONE-TIME Point data fixup, callable from EITHER create branch.
+
+        Flattens array-valued ``search_keys`` to a space-joined string, then
+        drop→recreates the Point FTS index and mints ``point_fts_v2``.
+
+        A shared helper so BOTH branches flatten identically: a RESTORE/DR
+        graph — array-valued ``search_keys`` with no index (the dump carries
+        no indexes and skips the marker) — reaches the FRESH-CREATE branch,
+        which would otherwise mint the marker without flattening. That cements
+        "current" over an owed fixup and makes it undetectable by the probe.
+
+        Batched: the read is bounded by ``RESULTSET_SIZE``, so loop until no
+        array rows remain rather than assuming one pass sees them all.
+        """
+        try:
+            for _ in range(200):  # bounded; 200 × RESULTSET_SIZE rows
+                rows = self._array_search_keys_rows()
+                if not rows:
+                    break
+                flattened = 0
+                for nid, sk in rows:
+                    if not isinstance(sk, (list, tuple)):
+                        continue
+                    flat = " ".join(
+                        str(k).strip() for k in sk if str(k).strip()
+                    )
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.search_keys = $flat",
+                        params={"id": nid, "flat": flat},
+                    )
+                    flattened += 1
+                if flattened == 0:
+                    break  # no progress — never spin
+
+            # Do NOT mint over an owed fixup. The loop above counts
+            # SET ATTEMPTS, not verified writes, and is capped at 200 batches;
+            # an unverified SET, the ceiling, or an engine that cannot answer
+            # would otherwise leave arrays behind AND cement a marker that makes
+            # them permanently invisible. Re-verify first.
+            if self._array_valued_search_keys_exist():
+                return
+
+            for drop_proc in ("db.idx.fulltext.drop",
+                              "db.idx.fulltext.dropIndex"):
+                try:
+                    self.g.query(f"CALL {drop_proc}('Point')")
+                    break
+                except Exception:
+                    continue
+            self.g.query(
+                "CALL db.idx.fulltext.createNodeIndex("
+                "'Point', 'content', 'search_keys')"
+            )
+            self.g.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+        except Exception:
+            pass
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -6025,7 +6298,26 @@ class FalkorProjection(
         staleness ordering. See the purge block below and
         ``hosted_backup._audit_copied_boolean_indexes`` for the copy-path
         verification.
+
+        #4465: the sweep is GUARDED by ``_schema_is_current()``, which
+        answers the same question this DDL answers ("is the
+        schema already there?"). A fully-indexed graph skips straight to the
+        vector-API handle below; a graph with any missing index, any
+        forbidden ``is_operator`` index, or an unreadable index catalogue
+        takes the full sweep exactly as before. The bootstrap is never
+        skipped, only the repeat of work already done.
         """
+        if self._schema_is_current():
+            # #4465 fast path. Everything the sweep would do is already true
+            # of this graph; only the vector-index API handle has to be
+            # re-derived, because it is a property of the ENGINE's index API
+            # (procedure vs Cypher-native) that ``CALL db.indexes()`` does not
+            # report. The existing index is never reconciled here (same as the
+            # sweep) and a MISSING one is still created — so a server graph
+            # that lost only its vector index still gets it back.
+            self._ensure_vector_index_api()
+            return
+
         # ── Range indexes (always safe, pre-4.x compatible) ──
         # NOTE: no index on `is_operator` is created here on ANY backend —
         # see the boolean-index policy in the docstring and the #3154 purge
@@ -6246,12 +6538,25 @@ class FalkorProjection(
                         # index directly — mark the migration done so a later
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
-                        try:  # noqa: SIM105
-                            self.g.query(
-                                "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
-                            )
-                        except Exception:
-                            pass
+                        #
+                        # Mint the marker ONLY when nothing is owed. A
+                        # RESTORE/DR graph reaches THIS branch too —
+                        # array-valued search_keys with no index, because the
+                        # dump carries no indexes and skips the marker — so an
+                        # unconditional marker here would record "fixup done"
+                        # over an owed fixup. Consumers read that marker as the
+                        # migration watermark (`docs/durability-posture.md`,
+                        # the DR checks), so minting it over owed work is false
+                        # bookkeeping regardless of who reads it.
+                        if self._array_valued_search_keys_exist():
+                            self._fix_point_search_keys()
+                        else:
+                            try:  # noqa: SIM105
+                                self.g.query(
+                                    "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
+                                )
+                            except Exception:
+                                pass
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
@@ -6277,41 +6582,18 @@ class FalkorProjection(
                             # flat space-joined string (the sdk write path
                             # already stores flat; this fixes existing nodes).
                             try:
-                                done = self.g.query(
-                                    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
-                                ).result_set
-                                if not done:
-                                    rows = self.g.query(
-                                        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-                                        "RETURN n.id, n.search_keys"
-                                    ).result_set
-                                    for nid, sk in rows:
-                                        if isinstance(sk, (list, tuple)):
-                                            flat = " ".join(
-                                                str(k).strip() for k in sk
-                                                if str(k).strip()
-                                            )
-                                            self.g.query(
-                                                "MATCH (n:Point {id:$id}) "
-                                                "SET n.search_keys = $flat",
-                                                params={"id": nid, "flat": flat},
-                                            )
-                                    for drop_proc in ("db.idx.fulltext.drop",
-                                                      "db.idx.fulltext.dropIndex"):
-                                        try:
-                                            self.g.query(
-                                                f"CALL {drop_proc}('Point')"
-                                            )
-                                            break
-                                        except Exception:
-                                            continue
-                                    self.g.query(
-                                        "CALL db.idx.fulltext.createNodeIndex("
-                                        "'Point', 'content', 'search_keys')"
-                                    )
-                                    self.g.query(
-                                        "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
-                                    )
+                                # Gate on BOTH preconditions (#5444).
+                                # The data half (an array still owed) is the
+                                # fixup's real precondition and replaces the
+                                # unsound marker check. The SCHEMA half is what
+                                # this branch exists for in the first place — a
+                                # legacy single-field index whose data is
+                                # already flat still needs the drop→recreate,
+                                # and without it the probe stays not-current and
+                                # every construction re-runs the full sweep.
+                                if (self._array_valued_search_keys_exist()
+                                        or self._point_fts_search_keys_field_missing()):
+                                    self._fix_point_search_keys()
                             except Exception:
                                 pass
                         elif label == "Event":
@@ -6342,62 +6624,79 @@ class FalkorProjection(
                             "Failed to create fulltext index on %s.%s: %s", label, fields, e)
 
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
-            # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
-            # HNSW requires RediSearch module, not bundled with redislite.
-            # #1359: the engine's index API varies by version — try the
-            # RediSearch-style procedure first, fall back to the Cypher-native
-            # form on engines that don't register it (verified: falkordblite
-            # 0.10.0's bundled module exposes `CREATE VECTOR INDEX ... OPTIONS`
-            # but NOT `db.idx.vector.createNodeIndex`). Record which API
-            # succeeded on self._vector_index_api for the query path.
-            if not getattr(self, '_is_embedded', False):
-                # #4194/#4280: the width is the ONE constant the STORE declares
-                # (`FalkorProjection.required_embedding_dim`), so a FRESH index
-                # creation and the write path cannot disagree — a bare literal
-                # here plus a rotated `EMBEDDING_DIM` would bless vectors the
-                # index cannot hold (the mismatched-vector trap).
-                # ⛔ This single-sources CREATION only: an EXISTING index is
-                # never reconciled (both 'already' branches below assume it is
-                # correct). A dimension change is still the documented
-                # drop-and-recreate operation, not a constant edit.
-                from ..embeddings import EMBEDDING_DIM
-                try:
-                    self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
-                        f"{EMBEDDING_DIM}, 'HNSW')"
-                    )
-                    self._vector_index_api = 'procedure'
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "already" in msg:
-                        # Index already exists (prior startup). Assume the
-                        # procedure API — it either created it or the engine
-                        # is procedure-capable (docker/server image v4.16.7).
-                        self._vector_index_api = 'procedure'
-                    else:
-                        # Unknown procedure / not registered / invalid args →
-                        # Cypher-native form (the modern falkordb client's own
-                        # create_node_vector_index emits exactly this).
-                        try:
-                            self.g.query(
-                                "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
-                                "similarityFunction: 'cosine'}"
-                            )
-                            self._vector_index_api = 'cypher'
-                        except Exception as e2:
-                            msg2 = str(e2).lower()
-                            if "already" in msg2:
-                                self._vector_index_api = 'cypher'
-                            else:
-                                import logging
-                                logging.getLogger(__name__).warning(
-                                    "Failed to create vector index on Point.embedding: %s", e2)
+            self._ensure_vector_index_api()
         else:
             import logging
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    def _ensure_vector_index_api(self) -> None:
+        """Resolve ``_vector_index_api`` — the engine's vector-index API.
+
+        #4465: extracted from ``_ensure_indexes`` unchanged so the schema fast
+        path can re-derive the handle without re-running the DDL sweep. The
+        handle is NOT recoverable from ``CALL db.indexes()``: the catalogue
+        says an index EXISTS, not whether the engine registers the
+        ``db.idx.vector.createNodeIndex`` procedure or only the Cypher-native
+        ``CREATE VECTOR INDEX ... OPTIONS`` form. The attempts below answer
+        exactly that in one round trip on a graph whose index already exists
+        (the procedure raises "already"), and CREATE the index on a graph that
+        lacks it — both paths are the #1359/#4194/#4280 semantics verbatim.
+
+        Embedded mode (redislite) uses brute-force vec.euclideanDistance
+        instead — HNSW requires the RediSearch module, which redislite does not
+        bundle — and engines below 4.x skip the whole block, so both leave the
+        handle ``None`` (``required_embedding_dim`` documents the three
+        ``None`` lanes).
+        """
+        _ver = getattr(self, "_falkordb_version", None)
+        if _ver is not None and _ver[0] < 4:
+            return
+        if getattr(self, '_is_embedded', False):
+            return
+        # #4194/#4280: the width is the ONE constant the STORE declares
+        # (`FalkorProjection.required_embedding_dim`), so a FRESH index
+        # creation and the write path cannot disagree — a bare literal
+        # here plus a rotated `EMBEDDING_DIM` would bless vectors the
+        # index cannot hold (the mismatched-vector trap).
+        # ⛔ This single-sources CREATION only: an EXISTING index is
+        # never reconciled (both 'already' branches below assume it is
+        # correct). A dimension change is still the documented
+        # drop-and-recreate operation, not a constant edit.
+        from ..embeddings import EMBEDDING_DIM
+        try:
+            self.g.query(
+                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                f"{EMBEDDING_DIM}, 'HNSW')"
+            )
+            self._vector_index_api = 'procedure'
+        except Exception as e:
+            msg = str(e).lower()
+            if "already" in msg:
+                # Index already exists (prior startup). Assume the
+                # procedure API — it either created it or the engine
+                # is procedure-capable (docker/server image v4.16.7).
+                self._vector_index_api = 'procedure'
+            else:
+                # Unknown procedure / not registered / invalid args →
+                # Cypher-native form (the modern falkordb client's own
+                # create_node_vector_index emits exactly this).
+                try:
+                    self.g.query(
+                        "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                        f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                        "similarityFunction: 'cosine'}"
+                    )
+                    self._vector_index_api = 'cypher'
+                except Exception as e2:
+                    msg2 = str(e2).lower()
+                    if "already" in msg2:
+                        self._vector_index_api = 'cypher'
+                    else:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Failed to create vector index on Point.embedding: %s", e2)
 
     @property
     def required_embedding_dim(self) -> int | None:

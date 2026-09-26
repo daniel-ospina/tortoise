@@ -1565,23 +1565,30 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
 #
 # WHY THESE ASSERTIONS AND NOT A WALL-CLOCK GAP: a full-request loop-gap
 # budget is not a valid discriminator on a shared/loaded runner. Measured on
-# this box, the whole-request worst gap is 6-15s for a 2-TURN capture — the
-# floor is dominated by per-request SDK/projection schema bootstraps (~15
-# on-loop `_get_proj()` constructions, ~430 on-loop queries — the issue's own
-# "~450 non-turn queries") plus runner scheduling, neither of which scales
-# with the turn count and neither of which is this issue's seam. A gap budget
-# therefore passes and fails the same way pre- and post-fix, which is exactly
-# the "a green test that measures a different window is not evidence" trap.
-# These tests instead measure the SAME whole-request window and assert the
-# property that actually regressed: the work the capture puts ON the event
-# loop must not scale with the number of turns.
+# this box, the whole-request worst gap is 6-15s for a 2-TURN capture — a
+# floor dominated by per-request setup (projection construction + the
+# synchronous capture gates) and by runner scheduling, neither of which
+# scales with the turn count and neither of which is this issue's seam. A gap
+# budget therefore passes and fails the same way pre- and post-fix, which is
+# exactly the "a green test that measures a different window is not evidence"
+# trap. These tests instead measure the SAME whole-request window and assert
+# the property that actually regressed: the work the capture puts ON the
+# event loop must not scale with the number of turns.
+#
+# (#4465 later removed the largest FIXED contributor to that floor — the
+# per-construction schema bootstrap. Re-measured on current main: 12
+# projections per 2-turn capture, 7 on the loop, 219 on-loop queries on the
+# docker lane / 217 embedded, 182/180 of them that repeated DDL. Post-#4465:
+# 44 / 35 on-loop. The wall-clock rationale above is unchanged — the floor is
+# still not a turn-count signal — and the numbers here are what
+# `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` pins.)
 CAPTURE_TURNS_LARGE = 500
 CAPTURE_TURNS_SMALL = 50
-# The on-loop query count is dominated by the fixed SDK/projection bootstraps
-# (~430), identical for both sizes. The per-turn loop added ~2 queries per
-# turn, so the pre-fix delta between these two sizes was ~900; a batched store
-# adds a constant. 60 is generous for a constant and an order of magnitude
-# below the per-row shape it must catch.
+# The on-loop query count is dominated by that fixed per-request setup,
+# identical for both sizes. The per-turn loop added ~2 queries per turn, so
+# the pre-fix delta between these two sizes was ~900; a batched store adds a
+# constant. 60 is generous for a constant and an order of magnitude below the
+# per-row shape it must catch.
 ON_LOOP_QUERY_DELTA_BUDGET = 60
 # Same reasoning as a TIME bound: 900 on-loop round-trips at the ~2.6ms/query
 # the issue measured is ~2.3s of hard blocking, versus a constant that is
@@ -1606,6 +1613,17 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
     threads have their own names) is counted: that is precisely the work a
     stalled loop cannot interleave.
     """
+    resp, records, writer_threads = _measure_capture_graph_work(
+        monkeypatch, turns, sid)
+    on_loop = [d for name, _, d in records if name == "MainThread"]
+    return (resp, len(on_loop), sum(on_loop), writer_threads,
+            [c for _, c, _ in records])
+
+
+def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
+    """Like ``_measure_on_loop_graph_work``, but returns the per-thread
+    ``(thread_name, cypher, duration)`` records so a caller can assert on
+    WHICH statements the loop ran, not just how many (#4465)."""
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
 
@@ -1615,8 +1633,7 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
 
     graph_cls = type(ha_mod._make_sdk(namespace="registry")._get_proj().g)
     orig_query = graph_cls.query
-    records: list[tuple[str, float]] = []
-    cyphers: list[str] = []
+    records: list[tuple[str, str, float]] = []
     writer_threads: list[str] = []
     orig_writer = ha_mod._write_capture_turns
 
@@ -1626,8 +1643,8 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
             return orig_query(self, cypher, *args, **kwargs)
         finally:
             records.append((threading.current_thread().name,
+                            " ".join(cypher.split()),
                             time.perf_counter() - started))
-            cyphers.append(" ".join(cypher.split()))
 
     def _wrapped_writer(*args, **kwargs):
         writer_threads.append(threading.current_thread().name)
@@ -1647,8 +1664,7 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
     monkeypatch.setattr(ha_mod, "_write_capture_turns", orig_writer)
-    on_loop = [d for name, d in records if name == "MainThread"]
-    return resp, len(on_loop), sum(on_loop), writer_threads, cyphers
+    return resp, records, writer_threads
 
 
 def test_capture_write_does_not_scale_loop_blocking_with_turns(
@@ -1788,3 +1804,79 @@ def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
     assert is_operator is False, is_operator
     assert has_hash is True, "the turn carries no content_hash"
     assert content.startswith("[user] turn 0 "), content
+
+
+# ── #4465: the capture must not re-run the schema bootstrap per projection ──
+#
+# Every on-loop `_get_proj()` construction used to re-run the projection's
+# whole schema bootstrap (~26 idempotent DDL statements, already satisfied).
+# A hosted capture constructs ~12 projections (7 of them on the event loop),
+# so the SAME 26 statements ran 7 times ON the loop for a schema that had not
+# changed: measured on the docker lane, 182 of the capture's 219 on-loop
+# queries (180 of 217 embedded). #3086 fixed what SCALED with turns; this is
+# the constant it left behind.
+#
+# The fix is a one-round-trip completeness probe that lets the sweep run only
+# when it has work to do (tortoise/projection/__init__.py::_schema_is_current).
+# The assertion below is deliberately about WHICH statements the loop ran, not
+# a raw count: a count budget is sensitive to unrelated capture-path changes,
+# whereas "the repeated DDL is gone" is the defect itself and is lane-stable
+# (0 repeats after, vs once per on-loop construction before).
+_SCHEMA_SWEEP_PREFIXES = (
+    "CREATE INDEX FOR",   # range DDL: Point/Document/entity/Session
+    "DROP INDEX ON",      # the #3154 boolean purge
+)
+
+#: A capture touches at most TWO graphs that can be cold — the tenant graph
+#: and the control-plane registry — so any statement appearing more often than
+#: that was a REPEATED sweep, not a second graph's first bootstrap. (In the
+#: measured runs both graphs are already warm, so the real count is 0.)
+_MAX_GRAPHS_PER_CAPTURE = 2
+
+
+def _is_schema_sweep(cypher: str) -> bool:
+    """Statements that a fully-indexed graph makes redundant.
+
+    The vector-index API probe (`CALL db.idx.vector.createNodeIndex` and its
+    Cypher-native fallback) is NOT here: distinguishing the two APIs is 1–2
+    round trips that `CALL db.indexes()` cannot answer, and it is not
+    *repeated schema* work.
+    """
+    return (cypher.startswith(_SCHEMA_SWEEP_PREFIXES)
+            or "fulltext.createNodeIndex" in cypher
+            or "fulltext.drop" in cypher)
+
+
+def test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop(
+        client, monkeypatch):
+    """#4465: the capture must not re-run the schema sweep per projection.
+
+    Pre-fix every on-loop projection construction re-ran the full sweep, so
+    each of the 26 statements appeared once per construction (7x on the
+    docker lane, measured). Post-fix the first construction on a cold graph
+    may sweep and every later one probes, so no statement may appear more
+    than once per graph the capture actually opened.
+
+    Mutation check (must stay true): removing the `_schema_is_current()`
+    guard from `_ensure_indexes` makes this fail — measured 7x repetition,
+    168 sweep statements on the loop (182 including the health probes).
+    """
+    resp, records, _ = _measure_capture_graph_work(
+        monkeypatch, CAPTURE_TURNS_SMALL, "loop-bootstrap-4465")
+    assert resp.status_code == 200, resp.text[:300]
+
+    on_loop = [c for name, c, _ in records if name == "MainThread"]
+    assert on_loop, (
+        "the capture put NO graph work on the event loop — the graph class's "
+        "`query` was not instrumented, so this run proves nothing")
+
+    sweep = [c for c in on_loop if _is_schema_sweep(c)]
+    repeated = sorted({c for c in sweep
+                       if sweep.count(c) > _MAX_GRAPHS_PER_CAPTURE})
+    assert repeated == [], (
+        f"the capture re-ran already-satisfied schema DDL on the event loop: "
+        f"{repeated[:4]} (each repeated "
+        f"{sweep.count(repeated[0])}x; {len(sweep)} sweep statement(s) in "
+        f"total, cap {_MAX_GRAPHS_PER_CAPTURE} = one first bootstrap for the "
+        f"tenant graph and one for the registry) — every projection "
+        f"construction is bootstrapping again (#4465)")
