@@ -29,6 +29,11 @@ These tests pin:
    aliasing remain out of reach.
 4. **Helper decode** — each of the six converted ``graph-scripts`` parsers is
    exercised for real (the guard cannot see a plumbing regression).
+5. **Consumer plumbing (#3067)** — ``session_indexer._graph_entity_keywords``
+   DROPPED the userinfo (it parsed only hostname/port), so an auth-required
+   server answered ``AuthenticationError`` and the broad handler swallowed it
+   as "no entities". The lookup now forwards the decoded credentials and a
+   failure is logged, never silent.
 """
 
 from __future__ import annotations
@@ -342,6 +347,35 @@ def test_double_encoded_percent_decodes_exactly_once():
     assert decoded == "p%40ss"
 
 
+def test_raw_uri_userinfo_normalises_like_the_decoded_helper():
+    """#3067 (P2): the raw pair must keep the SAME sentinel shape as the decoded one.
+
+    ``raw_uri_userinfo`` is the pair the #3039 guard forces client-constructing
+    modules through, so its contract is relied on by later consumers. ``urlparse``
+    yields ``''`` (not ``None``) for an empty component, so without normalisation
+    ``docker://:pw@host`` — the canonical credentialed form in this repo — would
+    return ``('', 'pw')`` while :func:`parse_uri_userinfo` returns ``(None, 'pw')``.
+    """
+    from tortoise.config import parse_uri_userinfo, raw_uri_userinfo
+
+    # Anonymous user, real password (the canonical local docker form).
+    assert raw_uri_userinfo(f"docker://:pw@h:6379/{TEST_GRAPH}") == (None, "pw")
+    # No userinfo at all, and empty userinfo on both sides.
+    assert raw_uri_userinfo(f"docker://h:6379/{TEST_GRAPH}") == (None, None)
+    assert raw_uri_userinfo(f"docker://:@h:6379/{TEST_GRAPH}") == (None, None)
+    # The ENCODED form is preserved — this helper must NOT unquote.
+    assert raw_uri_userinfo(f"docker://admin:p%40ss@h:6379/{TEST_GRAPH}") == (
+        "admin", "p%40ss")
+    # ``None``/absent agreement with the decoded helper across the shapes the
+    # boundary table exercises; only the payment differs (encoded vs decoded).
+    for uri in (f"docker://:pw@h:6379/{TEST_GRAPH}",
+                f"docker://h:6379/{TEST_GRAPH}",
+                "localhost:6379/test_g"):
+        raw = raw_uri_userinfo(uri)
+        decoded = parse_uri_userinfo(uri)
+        assert tuple(v is None for v in raw) == tuple(v is None for v in decoded), uri
+
+
 # ── 3. Source guard ──────────────────────────────────────────────────────
 
 _PARSE_CALLS = {"urlparse", "urlsplit"}
@@ -365,6 +399,16 @@ _GUARDED_DIRS = ("tortoise", "graph-scripts")
 #     assert ``registered == presented`` for a loopback redirect URI (after
 #     ``_unsafe_redirect_uri_bytes``); the values are compared, never handed to
 #     a client. Main-added; same class as the entries above.
+#
+# ``tortoise/session_indexer.py`` is deliberately NOT here. Its
+# ``_graph_entity_keywords`` CONSTRUCTS a ``FalkorDB`` client — the exact
+# consumer class this guard exists to protect — so exempting it (the guard's
+# ``continue`` is FILE-WIDE) blinded the guard in the one file that matters: a
+# raw ``FalkorDB(..., username=parsed.username, password=parsed.password)``
+# appended there still passed. The redactor's raw (percent-ENCODED) pair was
+# therefore moved into ``tortoise.config.raw_uri_userinfo`` — the module that
+# already owns the rule — so the file needs no exemption and stays fully
+# scanned (#3067).
 _ALLOWED = {
     "tortoise/config.py",
     "graph-scripts/connectivity_gate.py",
@@ -488,6 +532,27 @@ def test_no_raw_urlparse_userinfo_read_in_guarded_dirs():
         "raw urlparse userinfo read(s) found — route them through "
         "tortoise.config.parse_uri_userinfo (#3039):\n" + "\n".join(violations)
     )
+
+
+def test_guard_exemption_set_excludes_the_client_constructing_module():
+    """#3067: ``tortoise/session_indexer.py`` must NOT be exempt from the guard.
+
+    ``_graph_entity_keywords`` constructs a ``FalkorDB`` client — the exact
+    consumer class this guard protects — and the exemption is FILE-WIDE (a
+    ``continue`` per file, not per line), so an entry for it blinded the guard
+    to a raw ``FalkorDB(..., username=parsed.username, password=parsed.password)``
+    added anywhere in the file. The raw read now lives in ``tortoise.config``
+    (``raw_uri_userinfo``), which is the sanctioned exemption, so the set stays
+    at the four display/rule modules.
+    """
+    assert "tortoise/session_indexer.py" not in _ALLOWED
+    expected = {
+        "tortoise/config.py",
+        "graph-scripts/connectivity_gate.py",
+        "tortoise/cimd.py",
+        "tortoise/oauth.py",
+    }
+    assert expected == _ALLOWED
 
 
 def test_guard_detects_the_pre_fix_pattern(tmp_path):
@@ -692,3 +757,282 @@ def test_graph_script_helpers_decode_credentials(module_name):
     assert cfg["password"] == "p@ss", f"{module_name} did not decode userinfo"
     assert cfg["host"] == "localhost"
     assert cfg["graph"] == TEST_GRAPH
+
+
+# ── 5. session-indexer graph lookup (#3067) ──────────────────────────────
+
+def _fake_falkordb(captured: dict, error: Exception | None = None):
+    """A FalkorDB stand-in: records ctor kwargs, serves ``select_graph().query()``."""
+    class _Result:
+        result_set = (("SiblingParser",), ("UnrelatedThing",))
+
+    class _Graph:
+        def query(self, cypher, *args, **kwargs):
+            if error is not None:
+                raise error
+            return _Result()
+
+    class _FalkorDB:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def select_graph(self, name):
+            captured["graph"] = name
+            return _Graph()
+
+    return _FalkorDB
+
+
+def test_session_indexer_forwards_decoded_credentials(monkeypatch):
+    """#3067: ``_graph_entity_keywords`` dropped the URI's userinfo entirely.
+
+    It parsed only hostname/port and built ``FalkorDB(host=..., port=...)``,
+    so an auth-required server (the canonical ``docker://:pw@host`` config)
+    answered ``AuthenticationError`` and the broad handler swallowed it as
+    "the graph has no matching entities".
+    """
+    import falkordb
+
+    from tortoise import session_indexer as si
+
+    captured: dict = {}
+    monkeypatch.setenv("TORTOISE_DB_URI", _uri("p@ss", user="admin"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(falkordb, "FalkorDB", _fake_falkordb(captured))
+
+    keywords = si._graph_entity_keywords("SiblingParser is discussed here")
+
+    assert captured["host"] == "db.example.com"
+    assert captured["port"] == 6379
+    assert captured["username"] == "admin"
+    assert captured["password"] == "p@ss"  # decoded, not the %40 form
+    assert captured["ssl"] is False
+    # Entity matching still works end to end on the same call.
+    assert "SiblingParser" in keywords
+
+
+def test_session_indexer_lookup_failure_is_logged_not_silent(monkeypatch, caplog):
+    """#3067: a failed lookup must not masquerade as "the graph has no entities".
+
+    The injected error carries the credential-bearing URI, the decoded password,
+    and — separately — the percent-encoded userinfo fragment with no ``://``
+    before it, which ``redact_error``'s span regex cannot reach. That is the
+    shape a client produces when it echoes the DSN it was handed. An earlier
+    version injected ``"Authentication required."``, a message with no
+    credential in it, so ``assert "p@ss" not in caplog.text`` could not fail
+    even if the logger leaked; the redaction assertions below are now capable of
+    failing (verified by reverting ``_redact_exc`` in ``session_indexer`` to log
+    the raw exception).
+    """
+    import falkordb
+    import redis
+
+    from tortoise import session_indexer as si
+
+    uri = _uri("p@ss", user="admin")
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    monkeypatch.setattr(si, "_graph_db", None)
+    # The first failure per process is the WARNING; reset the latch so this test
+    # is independent of what ran before it in the suite (#3067 review note).
+    monkeypatch.setattr(si, "_graph_warned", False)
+    # Two shapes at once: the full URI (userinfo inside a ``://…@`` span, which
+    # ``redact_error`` masks) and the bare ``user:password@host`` fragment,
+    # which has no ``://`` before it and so escapes that span entirely.
+    monkeypatch.setattr(
+        falkordb, "FalkorDB",
+        _fake_falkordb({}, error=redis.exceptions.AuthenticationError(
+            f"Authentication required for {uri} (user=admin password=p@ss; "
+            f"userinfo=admin:p%40ss@db.example.com:6379)")))
+
+    with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
+        assert si._graph_entity_keywords("anything") == []
+
+    assert "AuthenticationError" in caplog.text
+    assert "db.example.com" in caplog.text
+    # A credential must never reach the log line — neither the percent-escaped
+    # form (inside the URI span AND bare outside it) nor the decoded form the
+    # client may echo.
+    assert "p%40ss" not in caplog.text
+    assert "p@ss" not in caplog.text
+
+
+def test_redact_exc_scrubs_both_uri_credential_forms():
+    r"""#3067 (P2): the scrub must cover the ENCODED form outside a URI span.
+
+    ``redact_error`` only masks ``://[^@\s]*@``; a client that echoes the
+    credentials it was handed prints them with no scheme in front, and in
+    either the decoded (``p@ss``) or the percent-encoded (``p%40ss``) form.
+    """
+    from tortoise.session_indexer import _redact_exc
+
+    secrets = ("admin", "p@ss", "admin", "p%40ss")
+    assert _redact_exc(
+        Exception("auth failed password=p%40ss"), secrets) == (
+        "Exception: auth failed password=***")
+    assert _redact_exc(
+        Exception("admin:p%40ss@db.example.com:6379"), secrets) == (
+        "Exception: ***:***@db.example.com:6379")
+    # Idempotent: scrubbing an already-scrubbed string does not re-expand the mask.
+    assert _redact_exc(
+        Exception("auth failed password=***"), secrets) == (
+        "Exception: auth failed password=***")
+
+
+def test_redact_exc_short_secrets_do_not_mangle_the_class_name():
+    """#3067 (P2): a 1-2 char secret is not scrubbed — it would destroy the
+    diagnostic (``PermissionError`` -> ``P***rmissionError``) and, if all
+    ``*``, re-expand the mask on a second pass."""
+    from tortoise.session_indexer import _redact_exc
+
+    msg = _redact_exc(PermissionError("Authentication required"), ("e", "x"))
+    assert msg == "PermissionError: Authentication required"
+    assert _redact_exc(PermissionError("boom"), ("**",)) == "PermissionError: boom"
+
+
+def test_redact_exc_scrubs_a_prefix_overlapping_credential():
+    """#3067 (P2): scrub LONGEST-first, or a prefix secret leaks a partial.
+
+    The secrets arrive as ``(decoded_user, decoded_pw, raw_user, raw_pw)``. In a
+    fixed order a shorter secret that is a PREFIX of a longer one consumes the
+    longer secret's first occurrence: scrubbing ``user`` before ``userpass``
+    turns the password into ``***pass``, retaining half the credential on the
+    log line — which the function's own contract forbids.
+    """
+    from tortoise.session_indexer import _redact_exc
+
+    secrets = ("user", "userpass", "user", "userpass")
+    out = _redact_exc(Exception("auth failed password=userpass"), secrets)
+    # ``***pass`` (the partial leak) would fail this equality; the fixture's own
+    # word "password" is why the check is the whole string, not a substring.
+    assert out == "Exception: auth failed password=***", out
+    assert "userpass" not in out
+    # The ordering fix must not break the mixed-shape case it was built for.
+    mixed = _redact_exc(
+        Exception("auth pa%ss@wo:rd"), ("u", "pa%ss@wo:rd", "u", "pa%25ss%40wo"))
+    assert "pa%ss@wo:rd" not in mixed, mixed
+
+
+def test_redact_exc_scrubs_before_truncating():
+    """#3067 (P2): the scrub must run BEFORE the 200-char cap.
+
+    ``redact_error`` truncates to ``msg[:200]``. A literal replace on that
+    already-cut string can only match the WHOLE secret, so a credential
+    straddling the boundary survived as a fragment — ``secretpw`` starting at
+    offset 195 logged ``secre``. This is the same half-credential class the
+    prefix-overlap fix addressed, so it is pinned at every straddling offset.
+    """
+    from tortoise.session_indexer import _redact_exc
+
+    secret = "secretpw"
+    for offset in (0, 189, 190, 195, 196, 199, 200, 205):
+        out = _redact_exc(Exception("x" * offset + secret), (secret,))
+        assert secret not in out, (offset, out)
+        # No fragment may survive either — that is the whole point.
+        assert secret[:3] not in out, (offset, out)
+
+
+def test_session_indexer_warns_again_after_a_recovery(monkeypatch, caplog):
+    """#3067 (P2): the outage latch RE-ARMS, so a later outage warns again.
+
+    A per-process latch downgraded every outage after the first to DEBUG — which
+    ``logging.lastResort`` drops at default configuration, i.e. the SILENT
+    failure mode #3067 exists to remove. The latch must clear once the graph is
+    demonstrably healthy, so ``outage -> recovery -> outage`` warns twice.
+    """
+    import falkordb
+    import redis
+
+    from tortoise import session_indexer as si
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", _uri("pw", user="admin", host="rearm.example"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(si, "_graph_warned", False)
+
+    # ``state`` makes the fault controllable, so one fake can drive BOTH outages
+    # and the recovering success between them.
+    state: dict = {"error": redis.exceptions.ConnectionError("first outage")}
+
+    class _Result:
+        result_set = (("SiblingParser",), ("UnrelatedThing",))
+
+    class _Graph:
+        def query(self, cypher, *args, **kwargs):
+            if state["error"] is not None:
+                raise state["error"]
+            return _Result()
+
+    class _FalkorDB:
+        def __init__(self, **kwargs):
+            pass
+
+        def select_graph(self, name):
+            return _Graph()
+
+    monkeypatch.setattr(falkordb, "FalkorDB", _FalkorDB)
+
+    with caplog.at_level("WARNING", logger="tortoise.session_indexer"):
+        assert si._graph_entity_keywords("SiblingParser") == []   # 1st outage
+        first = [r.levelname for r in caplog.records]
+        caplog.clear()
+
+        state["error"] = None                                     # recovery
+        assert si._graph_entity_keywords("SiblingParser") == ["SiblingParser"]
+        assert [r.levelname for r in caplog.records] == []
+        caplog.clear()
+
+        state["error"] = redis.exceptions.ConnectionError("second outage")
+        assert si._graph_entity_keywords("SiblingParser") == []   # 2nd outage
+        second = [r.levelname for r in caplog.records]
+
+    assert first == ["WARNING"], first
+    assert second == ["WARNING"], (
+        "the second outage was downgraded — the latch did not re-arm: "
+        f"{second}")
+
+
+def test_session_indexer_failure_log_names_real_endpoint_on_cache_hit(
+        monkeypatch, caplog):
+    """#3067 (P2): the endpoint in the diagnostic must survive the connection cache.
+
+    ``_graph_db`` is a process-wide cache, so a long-lived process normally
+    takes the cache-HIT branch. Host/port were assigned only inside
+    ``if _graph_db is None``, so the SECOND failure logged the placeholder
+    ``localhost:None`` — defeating the observability this diagnostic exists
+    to add.
+    """
+    import falkordb
+    import redis
+
+    from tortoise import session_indexer as si
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", _uri("p@ss", user="admin", host="cache.hit.example"))
+    monkeypatch.setattr(si, "_graph_db", None)
+    monkeypatch.setattr(si, "_graph_warned", False)
+    monkeypatch.setattr(
+        falkordb, "FalkorDB",
+        _fake_falkordb({}, error=redis.exceptions.ConnectionError("boom")))
+
+    # DEBUG so the cache-HIT failure — downgraded from WARNING after the first
+    # failure per process (#3067 review note) — is still captured; the endpoint
+    # assertion below is about the message, not its level.
+    with caplog.at_level("DEBUG", logger="tortoise.session_indexer"):
+        assert si._graph_entity_keywords("anything") == []   # cache MISS
+        assert si._graph_db is not None                      # cache populated
+        miss_log = caplog.text
+        miss_levels = {r.levelname for r in caplog.records}
+        caplog.clear()
+        assert si._graph_entity_keywords("anything") == []   # cache HIT
+        hit_log = caplog.text
+        hit_levels = {r.levelname for r in caplog.records}
+
+    assert "cache.hit.example:6379" in miss_log
+    assert "cache.hit.example:6379" in hit_log, (
+        "cache-hit failure log named the placeholder endpoint instead of the "
+        f"real one: {hit_log!r}")
+    assert "localhost:None" not in hit_log
+    # Once per process: the first failure WARNs, the next is DEBUG-only — the
+    # broken client stays cached, so a repeated WARNING is one per session file.
+    assert miss_levels == {"WARNING"}
+    assert hit_levels == {"DEBUG"}
