@@ -15,7 +15,7 @@ WHAT IT MEASURES (retrieval only — no reader, no provider keys):
                             (limit 40, item cap 40, 8k tokens, 32 KiB bytes
                             — the ask lane's pre-#4105 default, NOT what
                             ``resolve_ask_retrieval_caps()`` ships today:
-                            200/200/16000/derived). Kept literal on purpose
+                            200/400/200/16000/128000). Kept literal on purpose
                             so this bench stays the pre-#4105 baseline of
                             record; the modern lane is measured with
                             ``tools/ask_shape_rate.py``.

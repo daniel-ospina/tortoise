@@ -318,7 +318,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
     the D8 supersession markers reach the reader; cost-bounded by the
     resolved caps — ``resolve_ask_retrieval_caps()``, default
-    200/200/16000/derived) → ask-path annotation (session-date join + speaker)
+    200/400/200/16000/128000) → ask-path annotation (session-date join + speaker)
     → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
     → A5 evidence-mark boost (default ON — reorders the deduped pool by
     stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
@@ -361,8 +361,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
         ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` /
         ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` /
-        ``TORTOISE_ASK_POOL_SIZE`` (defaults 200/200/16000/derived(128000 bytes)/200
-        since #4105; the retrieval-window limit is threaded IN TANDEM with the
+        ``TORTOISE_ASK_POOL_SIZE`` (resolved defaults 200/400/200/16000/128000
+        — limit/pool/item-cap/token-cap/byte-cap — since #4105, with the pool
+        raised to the SDK's ``limit*2`` candidate floor by #4235; the
+        retrieval-window limit is threaded IN TANDEM with the
         assembly caps and the pool floor, and the byte ceiling is resolved
         rather than hard-coded — raising only the assemble cap changes
         nothing, and a byte ceiling that cannot be raised is now impossible:

@@ -123,10 +123,22 @@ def test_pool_applies_the_sdk_limit_2_candidate_floor(monkeypatch):
     """#4235: the lane hands ``tortoise_fts_query`` an EXPLICIT
     ``pool_size``, which the SDK's ``resolve_pool_size(exact=True)`` contract
     treats as an exact override — so the SDK's own ``limit*2`` candidate floor
-    never runs on this path. The lane applies it itself, so the resolved pool
-    is never narrower than what the SDK would have resolved."""
+    never runs on this path. The lane applies it itself, clamped to the
+    engine bound (10000).
+
+    Two guarantees, asserted at their boundary: ``pool_size >= limit`` ALWAYS
+    (``limit`` is clamped to 10000, so the clamp can never undercut it), and
+    ``pool_size >= limit * 2`` exactly while ``limit * 2 <= 10000``. Above the
+    bound the engine clamps the pool — so a limit of 5001 resolves to 10000,
+    not 10002 — and THAT is what this test pins, so a floor that is silently
+    broken in the reachable range FAILS here instead of passing on the clamp.
+    """
     from tortoise.retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
     caps = resolve_ask_retrieval_caps()
+    assert caps["limit"] == 200
+    # 200/200 defaults: the SDK would resolve max(120, 200*2) = 400, and so
+    # does the lane — the floor is live at the shipped window.
+    assert caps["pool_size"] == 400
     sdk_would_resolve = resolve_pool_size(
         caps["limit"] * 2, pool_size=None, env_name="TORTOISE_POOL_FLOOR",
         default=DEFAULT_POOL_SIZE, exact=True)
@@ -137,15 +149,30 @@ def test_pool_applies_the_sdk_limit_2_candidate_floor(monkeypatch):
     assert resolve_ask_retrieval_caps()["pool_size"] == caps["limit"] * 3
     monkeypatch.setenv(ASK_POOL_SIZE_ENV, "1")
     assert resolve_ask_retrieval_caps()["pool_size"] == caps["limit"] * 2
-    # the floor is clamped to the SDK's own 1..10000 validation bound, so it
-    # never hands ``tortoise_fts_query`` a value it rejects (and the
-    # ``pool_size >= limit`` invariant still holds after the clamp)
-    monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, "10000")
-    monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, "10000")
-    high = resolve_ask_retrieval_caps()
-    assert high["limit"] == 10000
-    assert high["pool_size"] == 10000
-    assert high["pool_size"] >= high["limit"]
+    # The reachable-range boundary. `limit` is env-settable up to 10000, so
+    # these rows are the case the fix must NOT silently break: while
+    # limit*2 <= 10000 the pool IS the floor; past it the pool is the ENGINE
+    # BOUND (10000), and the always-true floor is pool_size >= limit.
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, "1")
+    for limit, floor, expected in (
+            (4999, 9998, 9998),
+            (5000, 10000, 10000),
+            (5001, 10002, 10000),
+            (6000, 12000, 10000),
+            (10000, 20000, 10000)):
+        monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, str(limit))
+        monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, str(limit))
+        row = resolve_ask_retrieval_caps()
+        assert row["limit"] == limit, limit
+        assert row["pool_size"] == expected, (limit, row["pool_size"])
+        assert row["pool_size"] >= row["limit"], limit
+        if floor <= 10000:
+            # the SDK floor must be MET in the range the fix guarantees
+            assert row["pool_size"] >= floor, (limit, row["pool_size"])
+        else:
+            # past the engine bound it cannot be met — pin the bound exactly
+            assert row["pool_size"] == 10000, limit
+            assert floor > 10000, limit
 
 
 def test_token_raise_raises_the_derived_byte_ceiling(monkeypatch):

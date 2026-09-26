@@ -194,9 +194,10 @@ _POOL_CLAMP = (1, 10000)
 #: changes NOTHING (the gold is cut at ``result_ids[:limit]`` INSIDE
 #: ``tortoise_fts_query`` before dedup/assemble); raising only the window
 #: floods the reader budget. The pre-#4105 defaults were the historical
-#: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised them to
-#: 200/200/16000 (byte ceiling derived) so the ranked-but-unread gold turns
-#: reach the reader. #4105 also adds the POOL depth and the BYTE ceiling to
+#: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised the
+#: limit/item/token caps to 200/200/16000 (byte ceiling derived) so the
+#: ranked-but-unread gold turns reach the reader. #4105 also adds the POOL
+#: depth and the BYTE ceiling to
 #: that same resolution: the pool applies the SDK's own ``limit*2`` candidate
 #: floor (#4235 — the lane passes an explicit ``pool_size``, which the SDK
 #: treats as an exact override, so the lane must apply the floor itself,
@@ -303,13 +304,23 @@ def resolve_ask_retrieval_caps() -> dict:
     * ``limit >= context_item_cap`` — the retrieval call cuts at
       ``result_ids[:limit]`` BEFORE assembly, so an item cap above the
       window could never be honoured; the window is raised to admit it.
-    * ``pool_size >= limit * 2`` — ``run_ask_lane`` passes an EXPLICIT
-      ``pool_size``, which the SDK's ``resolve_pool_size(exact=True)``
+    * ``pool_size >= limit`` — ALWAYS holds. ``run_ask_lane`` passes an
+      EXPLICIT ``pool_size``, which the SDK's ``resolve_pool_size(exact=True)``
       contract treats as an exact override, so the SDK's own candidate floor
-      never applies on this path. The lane applies it itself: the fused
-      per-leg candidate window is never narrower than ``limit * 2`` (the
-      SDK's floor), so a window raise is never cut by a pool the SDK would
-      have widened.
+      never applies on this path; the lane applies ``max(env_pool, limit * 2)``
+      itself and then clamps to ``_POOL_CLAMP[1]``. Because ``limit`` is
+      clamped to that same bound, the clamp can never push the pool below the
+      window.
+    * ``pool_size >= limit * 2`` — the SDK's candidate floor, applied **only
+      while it fits the engine bound**. The resolved pool is clamped to
+      ``_POOL_CLAMP[1]`` (10000 — the value ``tortoise_fts_query`` validates
+      ``pool_size`` against, and FalkorDB's own default ``RESULTSET_SIZE``),
+      so for ``limit > 5000`` the floor is truncated at 10000 rather than
+      honoured (``limit=10000`` resolves to pool 10000, not 20000). Above the
+      bound the guarantee that still holds is ``pool_size >= limit``; the
+      clamp — not a lowered floor — is what caps it. This is stated, not
+      silent: it is asserted at the boundaries in
+      ``tests/test_ask_retrieval_budget.py``.
     * ``context_byte_cap`` is resolved (env), not a literal, and when NOT
       set explicitly it is DERIVED from the token cap
       (``max(DEFAULT_CONTEXT_BYTE_CAP, token_cap * BYTES_PER_TOKEN_FLOOR)``)
@@ -332,15 +343,28 @@ def resolve_ask_retrieval_caps() -> dict:
     # hands ``tortoise_fts_query`` an EXPLICIT ``pool_size``, which the SDK's
     # ``resolve_pool_size(exact=True)`` contract treats as an exact override —
     # so the SDK's ``limit*2`` floor never runs on this path. The lane applies
-    # it itself (``max(env_pool, limit*2)``; 400 at the 200/200 defaults), so
-    # the per-leg candidate window is never narrower than the floor the SDK
-    # would have resolved, and ``TORTOISE_ASK_POOL_SIZE`` can only RAISE it.
+    # it itself (``max(env_pool, limit*2)``; 400 at the 200/200 defaults), and
+    # ``TORTOISE_ASK_POOL_SIZE`` can only RAISE it.
     #
     # The resolved value is clamped to the SAME bound the SDK validates
     # ``pool_size`` against (1..10000), so the floor can never hand the SDK a
     # value it rejects (which would fail every ask with a retrieval error).
     # ``limit`` is clamped to that bound too, so ``pool_size >= limit`` still
     # holds after the clamp.
+    #
+    # HONESTY (#4235): the clamp means the SDK floor is applied only WHILE IT
+    # FITS THE ENGINE BOUND. For ``limit > 5000`` the ``limit*2`` floor is
+    # truncated at 10000 (``limit=10000`` -> pool 10000, not 20000). The
+    # guarantee that ALWAYS holds is ``pool_size >= limit``; the guarantee
+    # ``pool_size >= limit*2`` holds exactly while ``limit*2 <= 10000``, which
+    # is the range the fix exists to cover. Rejecting above the bound was
+    # rejected as a behaviour: >5000 is reachable via
+    # ``TORTOISE_ASK_RETRIEVAL_LIMIT`` / ``TORTOISE_ASK_CONTEXT_ITEM_CAP``
+    # (both accept up to 10000), so raising would fail every ask there, and
+    # the bound cannot simply be raised — 10000 is the engine's
+    # ``RESULTSET_SIZE`` default and the SDK's own ``pool_size`` validation
+    # ceiling. Stated here and asserted at the boundaries in
+    # ``tests/test_ask_retrieval_budget.py``.
     pool_size = min(_POOL_CLAMP[1], max(
         ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000),
         limit * 2))

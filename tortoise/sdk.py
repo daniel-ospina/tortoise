@@ -14087,7 +14087,8 @@ class TortoiseSDK:
         taking the ``:Session`` ``CONTAINS`` edge id as a ``session_id`` — the
         eval ingest writes those with INTERNAL ``lme:{qid}:s{si}`` ids)
         re-buckets the pool and changes which hits fit the resolved ask-lane
-        reader window (200/200/16000/derived since #4105; 8k/32KiB before it).
+        reader window (200/400/200/16000/128000 since #4105/#4235; 8k/32KiB
+        before it).
         #4106 adds ONE source, the session's own recorded
         ``created_at``, and it is read for ``session_date`` ONLY — the
         attached ``session_id`` set is byte-identical with and without it
