@@ -234,8 +234,8 @@ def test_classify_error_vocabulary_is_the_pinned_nine_classes():
 
 
 def test_classify_error_generic_limit_403_is_billing_broad_by_design():
-    """#4959 review (P1): the census INHERITS the rotation seam's deliberately
-    broad ``"limit exceeded"`` signature (#4952), so a 403 whose body carries a
+    """The census INHERITS the rotation seam's deliberately broad
+    ``"limit exceeded"`` signature (#4952), so a 403 whose body carries a
     GENERIC provider-limit phrasing — rate / organization / token limit — also
     records ``fatal_402_billing`` and degrades the run.
 
