@@ -49,18 +49,30 @@ except Exception:
 fi
 
 # ── The ONE HOME-scoped local-state derivation (#3797) ───────────────────
-# Every writer of HOME-scoped Tortoise state resolves its directory HERE.
+# The two HOME-scoped writers in THIS script — the capture-error breadcrumb
+# and the hook-run observation — resolve their directory here, so they cannot
+# disagree about where the state tree is.  The sibling harness hooks
+# (`session-end.sh`, `codex-hooks/`, `cursor-hooks/`) still carry their own
+# copies of this surgery and must be kept in step with it.
 # The subtle half is the base: `$TORTOISE_IMPORT_RECEIPT_DIR` names the
 # RECEIPT dir, so the base is its `.parent`, and that must match pathlib's
 # `Path(x).parent` — a TRAILING SLASH is dropped first (a bare `${x%/*}`
 # leaves `…/import-receipts/` → `…/import-receipts`, the #4373 false-PROVEN),
-# and a slash-less relative value has no parent at all.  ONE derivation is
-# what stops two writers of the same tree from disagreeing about where it is.
+# a trailing `/.` is dropped too (pathlib reads `Path('/a/b/.')` as `/a/b`,
+# whose parent is `/a`, while `${x%/*}` would say `/a/b` — reader and writer
+# would then look in two different trees for the SAME run), and a slash-less
+# relative value has no parent at all.
 _tortoise_state_dir() {
   local leaf="$1" receipt_dir
   receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
-  while [ "${receipt_dir%/}" != "$receipt_dir" ] && [ "$receipt_dir" != "/" ]; do
-    receipt_dir="${receipt_dir%/}"
+  while :; do
+    case "$receipt_dir" in
+      "/") break ;;
+      */) receipt_dir="${receipt_dir%/}" ;;
+      */.) receipt_dir="${receipt_dir%/.}" ;;
+      *) break ;;
+    esac
+    if [ -z "$receipt_dir" ]; then receipt_dir="/"; fi
   done
   case "$receipt_dir" in
     */*) printf '%s' "${receipt_dir%/*}/$leaf" ;;
@@ -84,8 +96,8 @@ _record_breadcrumb() {
   # a breadcrumb write can never break the exit-0 contract.
   local harness="$1" detail="$2"
   # The directory derivation lives in `_tortoise_state_dir` — ONE derivation
-  # for every HOME-scoped writer (#3797), including the trailing-slash and
-  # slash-less cases.
+  # for the two HOME-scoped writers in this script (#3797), including the
+  # trailing-slash, trailing-`/.` and slash-less cases.
   local crumb_dir stamp
   crumb_dir="$(_tortoise_state_dir capture-errors)"
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
