@@ -39,8 +39,14 @@ Plus the census tool's own arithmetic (``tools/edge_census.py``) and the
 helper and through ``edge_census.main()`` — which is what makes the measurement
 re-runnable *and* honest.
 
-Lane: the graph fixtures are EMBEDDED (explicit ``db_path``), so this file runs
-in both the default docker lane and the ``TORTOISE_TEST_CARVE_OUT=1`` lane. No
+Lane: the graph fixtures request an EMBEDDED db via an explicit ``db_path``,
+which is exact in the ``TORTOISE_TEST_CARVE_OUT=1`` lane. This file is **not**
+in ``tests/_embedded.py``'s ``TEST_NO_REDIRECT_STEMS``, so in the DOCKER lane
+(``TORTOISE_DB_URI`` set + ``TORTOISE_TEST_MODE=1``) the projection's test
+redirect re-points those two fixtures at the server graph — the tests still
+pass there, but they exercise server semantics rather than embedded. The two
+``--org`` guards deliberately ``delenv`` the URI so they stay embedded in both
+lanes (declared in ``tests/test_uri_env_mutations_declared.py``). No
 ``namespace=`` literal is used — ``count_org_usage`` accepts the SDK directly,
 so no ``tests/test_markers.py`` ``ROUTED_NAMESPACES`` entry is needed.
 
@@ -53,6 +59,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 
 import pytest
 
@@ -67,9 +74,10 @@ from tools.edge_census import (
     node_census,
     probe_marginals,
     relationship_census,
+    run_probe,
 )
 from tortoise.ep import TortoiseEP
-from tortoise.quota import count_org_usage
+from tortoise.quota import QuotaCheckError, count_org_usage
 from tortoise.sdk import TortoiseSDK
 
 #: An org id is only used by ``count_org_usage`` when ``sdk`` is None (it then
@@ -174,15 +182,22 @@ def _build_edge_graph(sdk: TortoiseSDK, n: int = 3) -> list[str]:
 
 def test_cap_count_is_invariant_to_edge_state_growth(sdk):
     """The cap's `points` count is invariant to BOTH axes the edge class grows
-    on: the relationship COUNT (read 2) and the edge STATE (read 3). Both are
-    read because they fail differently — a cap term keyed on edge count would
-    leave read 1 == read 2, while a term keyed on edge state would leave read 2
-    == read 3.
+    on: the relationship COUNT (read 1 -> read 2) and the edge STATE (read 2 ->
+    read 3). Both are read because they fail differently — a cap term keyed on
+    edge count breaks read 1 == read 2, while a term keyed on edge state
+    breaks read 2 == read 3.
     """
     ids = _claims(sdk, 3)
 
     # Read 1: nodes only, no relationships yet.
     nodes_only = count_org_usage(_ORG, "points", sdk=sdk)
+    # ANCHOR the base count. Without it a `count_org_usage` that returned any
+    # constant would satisfy all three equalities and this pin would be green
+    # against a broken cap — indistinguishable from a correctly-ignoring one.
+    assert nodes_only == len(ids), (
+        f"the cap's base `points` count for {len(ids)} non-episodic Points "
+        f"read {nodes_only} — the pin below compares three reads to this "
+        f"number, so a wrong base makes every comparison meaningless")
 
     for a, b in itertools.pairwise(ids):
         _direct_impl_edge(sdk, a, b)
@@ -245,14 +260,21 @@ def test_ep_edge_flush_journals_no_edge_slot(journaled_sdk):
         r.get("posterior_alpha") is not None for r in node_records
     ), f"the node flush committed nothing: {node_records}"
 
-    # THE FINDING: no record carries any edge message slot.
+    # THE FINDING: no record carries any edge message slot — in its TOP-LEVEL
+    # keys (the `**extra` emit style, sdk._emit_event's `event.update(extra)`)
+    # NOR in a nested point snapshot (the other shape the same emitter can
+    # write). Checking only the top level would let a snapshot-style journal
+    # entry for #5380 pass this pin vacuously — and the pin's whole job is to
+    # be the thing that fails when #5380 lands.
     for record in records:
+        scopes = [record, record.get("point") or {}]
         for slot in EP_EDGE_SLOTS:
-            assert slot not in record, (
-                f"an edge message slot reached the journal: {slot!r} in "
-                f"{record.get('type')!r}. If #5380 landed, this pin is "
-                f"superseded — update it to assert the slot IS journaled "
-                f"rather than deleting it.")
+            for scope in scopes:
+                assert slot not in scope, (
+                    f"an edge message slot reached the journal: {slot!r} in "
+                    f"{record.get('type')!r}. If #5380 landed, this pin is "
+                    f"superseded — update it to assert the slot IS journaled "
+                    f"rather than deleting it.")
 
 
 # ── (c) rebuild loses the edge messages, keeps the node belief ─────────────
@@ -275,6 +297,8 @@ def test_rebuild_all_loses_edge_messages_while_node_belief_survives(
     _run_ep(sdk, ids, emit=sdk._emit_event)
 
     proj = sdk._get_proj()
+    total_before = proj.g.query(
+        "MATCH (:Point)-[r:IMPL]->(:Point) RETURN count(r)").result_set[0][0]
     edges_before = proj.g.query(
         "MATCH (:Point)-[r:IMPL]->(:Point) "
         "WHERE r.msg_alpha IS NOT NULL RETURN count(r)").result_set[0][0]
@@ -283,6 +307,16 @@ def test_rebuild_all_loses_edge_messages_while_node_belief_survives(
         "RETURN count(n)").result_set[0][0]
     assert edges_before > 0, "precondition: EP wrote no edge message state"
     assert node_before > 0, "precondition: EP wrote no node belief state"
+    # PIN the proxy. `edges_before` counts DRESSED edges and `edges_after`
+    # counts every IMPL edge, so comparing them is only sound while the fixture
+    # dresses all of them. Asserting it here is what stops a future
+    # under-dressed fixture (EP reaching an edge outside max_hops) from making
+    # `edges_after == edges_before` true by coincidence — which would silently
+    # turn the `msg_after == 0` assertion below into a statement about nothing.
+    assert edges_before == total_before, (
+        f"the fixture left {total_before - edges_before} of {total_before} "
+        f"IMPL edges undressed, so the restored-edge equality below would be "
+        f"a proxy that can pass while an edge is genuinely lost")
 
     proj.rebuild_all(str(events))
 
@@ -295,13 +329,10 @@ def test_rebuild_all_loses_edge_messages_while_node_belief_survives(
         "MATCH (n:Point) WHERE n.posterior_alpha IS NOT NULL "
         "RETURN count(n)").result_set[0][0]
 
-    # NOTE: `edges_before` counts only the DRESSED edges (msg_alpha present)
-    # while `edges_after` counts every IMPL edge, so this equality is a proxy.
-    # It is exact here only because the fixture dresses all of them
-    # (verified: edges_before == the total IMPL edge count).
-    # The edge is RESTORED (the journal carries the operator) …
-    assert edges_after == edges_before, (
-        f"the IMPL edges did not survive the rebuild ({edges_before} -> "
+    # The edge is RESTORED (the journal carries the operator) — compared
+    # against the TOTAL, which the pin above proved equals the dressed count …
+    assert edges_after == total_before, (
+        f"the IMPL edges did not survive the rebuild ({total_before} -> "
         f"{edges_after}); then the property assertion below would be about a "
         f"missing edge, not lost state")
     # … and the NODE belief survives (the #2884 fix) …
@@ -357,9 +388,23 @@ def test_relationship_census_reports_zero_on_an_empty_graph(sdk):
 
 def test_node_census_counts_nodes_but_never_the_cap_denominator(sdk):
     ids = _build_edge_graph(sdk)
-    nodes = node_census(sdk._get_proj().g)
+    graph = sdk._get_proj().g
+    nodes = node_census(graph)
     assert nodes["point_label"] == len(ids)
-    assert nodes["resident"] >= len(ids)
+    # EXACT, not `>=`: a loose bound is satisfied by `point_label` itself (and
+    # by any undercount), so it could not fail on a broken `resident` read —
+    # the one count this test exists to pin. `resident` is every node, so it is
+    # the internal `:Meta` node plus the Points (and their Objects/Subjects).
+    expected_resident = graph.query(
+        "MATCH (n) WHERE NOT n:Point RETURN count(n)").result_set[0][0] \
+        + len(ids)
+    assert nodes["resident"] == expected_resident, (
+        f"`resident` read {nodes['resident']}, expected every non-Point node "
+        f"plus the {len(ids)} Points = {expected_resident}")
+    assert nodes["resident"] > nodes["point_label"], (
+        "resident must count MORE than :Point — otherwise the two "
+        "denominators are the same number and the census cannot show the "
+        "disagreement it exists to expose")
     # The cap's own predicate is deliberately NOT re-implemented here — a
     # second implementation is the drift this finding is about.
     assert "capped_points" not in nodes
@@ -475,3 +520,320 @@ def test_probe_marginals_refuses_to_report_a_false_zero():
         ])
     with pytest.raises(CensusError):
         probe_marginals([])
+
+
+# ── the probe's plumbing, and the tool's fail-loud contract ────────────────
+# The `probe` subcommand is the source of every headline per-edge figure, and
+# its stage construction / cleanup lives in code the arithmetic tests never
+# reach. These fakes drive it without docker.
+
+class _Res:
+    """Minimal FalkorDB result: ``.result_set`` is all ``_scalar`` reads."""
+
+    def __init__(self, rows: list) -> None:
+        self.result_set = rows
+
+
+class _FakeGraph:
+    """A graph that returns queued results and records every query."""
+
+    def __init__(self, results: list) -> None:
+        self._results = list(results)
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def query(self, cypher: str, params: dict | None = None) -> _Res:
+        self.calls.append((cypher, params))
+        return _Res(self._results.pop(0))
+
+
+class _FakeProc:
+    def __init__(self, returncode: int = 0, stdout: str = "",
+                 stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_relationship_census_binds_type_names_instead_of_interpolating():
+    """⛔ The injection regression guard.
+
+    Relationship-type names are READ FROM THE GRAPH. Interpolating one into
+    `MATCH ()-[r:TYPE]->()` lets a crafted name close the pattern and inject
+    clauses: review demonstrated a type stored as
+    ``IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r`` producing a query that
+    DELETED the graph's relationships and returned the deletion count as a
+    "count". The tool must bind the name, never splice it.
+    """
+    evil = "IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r"
+    graph = _FakeGraph([
+        [[2]],            # total
+        [["OK"], [evil]],  # CALL db.relationshipTypes()
+        [[1]],            # by_type['IMPL]->() ...'] (sorted first: 'I' < 'O')
+        [[1]],            # by_type['OK']
+        [[0]], [[0]], [[0]], [[0]],   # by_slot x4
+        [[0]],            # ep_bearing
+        [[0]],            # all_four_slots
+    ])
+
+    census = relationship_census(graph)
+
+    for cypher, _params in graph.calls:
+        assert "DELETE" not in cypher, (
+            f"a graph-sourced type name reached the query TEXT: {cypher!r}")
+        assert evil not in cypher, (
+            f"a graph-sourced type name was interpolated into a Cypher "
+            f"pattern: {cypher!r}")
+    bound = [p for _c, p in graph.calls if p]
+    assert {"rtype": evil} in bound, (
+        f"the type name was never bound as a parameter — bound params were "
+        f"{bound!r}")
+    assert census["by_type"] == {evil: 1, "OK": 1}
+
+
+def test_relationship_census_refuses_a_breakdown_that_does_not_reconcile():
+    # 3 relationships, but the per-type counts only account for 2 — an empty or
+    # partial `by_type` beside a non-zero total reads to a human as "there are
+    # relationships and none of any type". Fail closed instead.
+    graph = _FakeGraph([
+        [[3]],            # total
+        [["IMPL"], ["NAND"]],
+        [[1]],            # IMPL
+        [[1]],            # NAND  (1 + 1 != 3)
+        [[0]], [[0]], [[0]], [[0]],
+        [[0]],
+        [[0]],
+    ])
+    with pytest.raises(CensusError, match="do not reconcile"):
+        relationship_census(graph)
+
+
+def test_scalar_refuses_every_unreadable_result_shape():
+    # Empty result, and a result whose first row is empty.
+    with pytest.raises(CensusError, match="no rows"):
+        edge_census._scalar(_FakeGraph([[]]), "MATCH (n) RETURN count(n)")
+    with pytest.raises(CensusError, match="no rows"):
+        edge_census._scalar(_FakeGraph([[[]]]), "MATCH (n) RETURN count(n)")
+    # A non-integer (including a bool, which IS an int in Python) is not a
+    # count, and must not be coerced or printed as one.
+    with pytest.raises(CensusError, match="not return an integer"):
+        edge_census._scalar(_FakeGraph([["2000"]]), "MATCH (n) RETURN count(n)")
+    with pytest.raises(CensusError, match="not return an integer"):
+        edge_census._scalar(_FakeGraph([[[True]]]), "MATCH (n) RETURN count(n)")
+
+    class _Raising:
+        def query(self, cypher, params=None):
+            raise RuntimeError("connection reset")
+
+    with pytest.raises(CensusError, match="query failed"):
+        edge_census._scalar(_Raising(), "MATCH (n) RETURN count(n)")
+
+
+def test_relationship_types_refuses_an_unreadable_type_listing():
+    class _NoResultSet:
+        def query(self, cypher, params=None):
+            return object()          # no `.result_set` at all
+
+    with pytest.raises(CensusError, match="no result set"):
+        edge_census._relationship_types(_NoResultSet())
+
+
+def test_container_query_treats_a_server_side_error_as_a_failure(monkeypatch):
+    """`redis-cli` exits 0 on a server-side error — the exit code is not enough.
+
+    Verified against a live FalkorDB: `GRAPH.QUERY g "THIS IS NOT CYPHER"` comes
+    back exit 0 with `errMsg: ...` on STDOUT. Accepting that leaves the stage's
+    `used_memory` delta attributed to a write that never happened.
+    """
+    monkeypatch.setattr(
+        edge_census, "_docker",
+        lambda *a, check=True: _FakeProc(
+            0, "errMsg: Invalid input 'THIS IS NOT CYPHER'", ""))
+    with pytest.raises(CensusError, match="probe query failed"):
+        edge_census._container_query("c", "g", "THIS IS NOT CYPHER")
+
+    monkeypatch.setattr(edge_census, "_docker",
+                        lambda *a, check=True: _FakeProc(1, "", "boom"))
+    with pytest.raises(CensusError, match="probe query failed"):
+        edge_census._container_query("c", "g", "GOOD CYPHER")
+
+
+def test_probe_marginals_refuses_a_declared_stage_that_did_not_grow():
+    """The mirror of the false-zero guard: the one that is easy to miss.
+
+    A stage that DECLARES elements while `used_memory` did not move at all did
+    not run. `marginal_bytes: 0.0` there is not a small number — it is an
+    absent measurement wearing a number's clothes, and adding N>=100 elements
+    to a fresh instance always grows `used_memory`.
+    """
+    with pytest.raises(CensusError, match="did not move"):
+        probe_marginals([
+            Stage("baseline", 1_000, 0),
+            Stage("declared but absent", 1_000, 5_000),
+        ])
+
+
+def test_run_probe_builds_the_stage_sequence_and_removes_the_container(
+        monkeypatch):
+    """The probe's plumbing: stage order, N, isolation flags, and teardown."""
+    docker_calls: list[tuple] = []
+    readings = iter([1_000, 6_000, 7_000, 8_000, 9_000, 10_000])
+
+    def fake_docker(*args, check=True):
+        docker_calls.append((args, check))
+        if args[:2] == ("exec",) or args[0] == "exec":
+            return _FakeProc(0, "PONG", "")
+        return _FakeProc(0, "", "")
+
+    queries: list[str] = []
+    monkeypatch.setattr(edge_census, "docker_available", lambda: True)
+    monkeypatch.setattr(edge_census, "_docker", fake_docker)
+    monkeypatch.setattr(edge_census, "_container_used_memory",
+                        lambda _c: next(readings))
+    monkeypatch.setattr(edge_census, "_container_query",
+                        lambda _c, _g, cypher: queries.append(cypher))
+
+    result = run_probe(n=5_000)
+
+    run_args = [a for a, _c in docker_calls if a[0] == "run"]
+    assert len(run_args) == 1, f"expected exactly one container start: {run_args}"
+    flags = run_args[0]
+    assert "--rm" in flags, "the probe container must remove itself"
+    assert "--network" in flags and "none" in flags, (
+        "the probe must not share a network with the caller's containers — "
+        "the documented local URI is itself a bridge container")
+    assert any(str(f).startswith("edge-census-probe=") for f in flags), (
+        "an orphaned probe container must be identifiable (SIGKILL leaves one)")
+    # Teardown ran, on the same container that was started.
+    name = flags[flags.index("--name") + 1]
+    assert (("rm", "-f", name), False) in docker_calls, (
+        f"the container was not removed: {docker_calls}")
+
+    assert [s["label"] for s in result["raw_stages"]] == [
+        "baseline (fresh instance)",
+        "bare :Point node (label + id only)",
+        "+ keyword-only Point props",
+        "bare :IMPL edge (no properties)",
+        "+ real IMPL attrs (direction,confidence,weight,label,batch_id)",
+        "+ the four EP message slots",
+    ]
+    assert result["n_edges"] == 4_999, "edges is n-1, not n"
+    assert all(q.startswith(("UNWIND", "MATCH")) for q in queries)
+
+
+def test_run_probe_removes_the_container_when_a_stage_fails(monkeypatch):
+    """Teardown must survive a failing stage — the container start is inside
+    the try for the same reason: the failure paths are where orphans come from."""
+    docker_calls: list[tuple] = []
+
+    def fake_docker(*args, check=True):
+        docker_calls.append((args, check))
+        return _FakeProc(0, "PONG", "")
+
+    def boom(_c, _g, _cypher):
+        raise CensusError("stage refused")
+
+    monkeypatch.setattr(edge_census, "docker_available", lambda: True)
+    monkeypatch.setattr(edge_census, "_docker", fake_docker)
+    monkeypatch.setattr(edge_census, "_container_used_memory", lambda _c: 1_000)
+    monkeypatch.setattr(edge_census, "_container_query", boom)
+
+    with pytest.raises(CensusError, match="stage refused"):
+        run_probe(n=5_000)
+
+    removed = [a for a, _c in docker_calls if a[0] == "rm"]
+    assert removed, "a failing stage left the probe container behind"
+    # Removal is best-effort on the way out — never fatal, never silent.
+    assert all(check is False for a, check in docker_calls if a[0] == "rm")
+
+
+def test_main_returns_exit_2_when_the_cap_count_cannot_be_read(
+        monkeypatch, capsys):
+    """A fail-closed cap read must reach the tool's exit-2 path, not a traceback."""
+    class _FakeProj:
+        g = _FakeGraph([
+            [[0]],            # total
+            [["IMPL"]],       # types (reconciled: 0 == 0)
+            [[0]],            # by_type['IMPL']
+            [[0]], [[0]], [[0]], [[0]],
+            [[0]],
+            [[0]],
+            [[0]], [[0]],     # node_census: resident, point_label
+        ])
+
+    class _FakeSDK:
+        def _get_proj(self):
+            return _FakeProj()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(edge_census, "_open_sdk", lambda *a, **k: _FakeSDK())
+
+    def unreadable(_org, _sdk):
+        raise QuotaCheckError("registry unreachable")
+
+    monkeypatch.setattr(edge_census, "_org_capped_points", unreadable)
+
+    rc = edge_census.main(["census", "--embedded", "/nonexistent",
+                           "--org", _ORG, "--json"])
+
+    assert rc == 2
+    assert "cap's own count could not be read" in capsys.readouterr().err
+
+
+def test_open_sdk_restores_the_callers_uri(monkeypatch):
+    """`main()` is called in-process, so an SDK open must not re-point the
+    caller's environment for the next invocation."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/before")
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+    import tortoise.sdk as sdk_mod
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+
+    edge_census._open_sdk("docker://:other@localhost:6379/after", None, None)
+
+    assert os.environ["TORTOISE_DB_URI"] == \
+        "docker://:pw@localhost:6379/before", (
+        "the SDK open left the caller's TORTOISE_DB_URI mutated")
+
+
+def test_uri_census_without_org_never_constructs_the_sdk(monkeypatch, capsys):
+    """The read-only boundary the docstring promises, pinned.
+
+    A **URI** census with no `--org` must not open the SDK at all — that is
+    precisely what makes it DDL-free. Opening the SDK constructs a projection,
+    which runs `_ensure_indexes()` (CREATE INDEX / DROP INDEX) against the
+    target graph, so a regression here silently puts schema writes back on a
+    graph the tool advertises itself as only reading.
+    """
+    graph = _FakeGraph([
+        [[0]],            # total
+        [["IMPL"]],       # types (reconciled: 0 == 0)
+        [[0]],            # by_type['IMPL']
+        [[0]], [[0]], [[0]], [[0]],   # by_slot x4
+        [[0]],            # ep_bearing
+        [[0]],            # all_four_slots
+        [[0]], [[0]],     # node_census: resident, point_label
+    ])
+    monkeypatch.setattr(edge_census, "_raw_graph_from_uri",
+                        lambda _uri, _graph: graph)
+
+    def no_sdk(*_args, **_kwargs):
+        raise AssertionError(
+            "a URI census without --org opened the SDK — that path issues "
+            "CREATE INDEX DDL against the target graph, which is the exact "
+            "overclaim this boundary exists to prevent")
+
+    monkeypatch.setattr(edge_census, "_open_sdk", no_sdk)
+
+    rc = edge_census.main(["census", "--uri", "docker://:pw@host:6379/g",
+                           "--json"])
+
+    assert rc == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["nodes"]["capped_points"] is None, (
+        "a URI census without --org must not report a cap denominator — "
+        "reading it would require the SDK")
