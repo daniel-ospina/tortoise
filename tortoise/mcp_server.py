@@ -2985,23 +2985,33 @@ _OVERVIEW_SECTIONS = (
 )
 
 
-#: #3510 — in the no-arg combined summary, `sources` is reported as counts,
-#: never the full [{url, sourceKind, points}] array. Source registration is the
-#: one orient section whose size grows with INGESTION HISTORY rather than graph
-#: shape (one row per registered URL, nearly all `points: 0`), so returning it
-#: wholesale made the orientation call more expensive than the list_* calls it
-#: was built to replace — measured 35,190 of 36,498 bytes (96.4%) on a
-#: 300-source graph. The full array stays reachable via section='sources'.
-_SOURCES_SUMMARY_TOP_KINDS = 20
+#: #3510 — the no-arg combined summary reports DATA-PROPORTIONAL orient
+#: sections as bounded counts, never as their full row array. A section is
+#: data-proportional when it yields one row per graph row rather than one row
+#: per graph-shape token (a fixed vocabulary), and four are: `sources` (one row
+#: per registered URL), `tags` (one row per :Tag node), `pointkinds` (one row
+#: per pointKind PRESENT) and `structure_check` (one row per violating Point).
+#: Returning any of them wholesale made the orientation call more expensive
+#: than the list_* calls it was built to replace — measured on an embedded
+#: graph: `sources` 35,190 of 36,498 bytes (96.4%) at 300 sources, `tags`
+#: 14,000 of 15,187 bytes (92.2%) at 400 tags, `structure_check` 73,490 of
+#: 93,829 bytes (78.3%) at 400 orphaned drafts, `pointkinds` 19,200 bytes at
+#: 400 distinct kinds. Each wrapped section keeps its full array reachable via
+#: its own section=.
+_OVERVIEW_SUMMARY_TOP = 20
 
 
-def _sources_summary(rows: Any) -> Any:
-    """Bounded counts summary of the sources section (#3510).
+def _overview_summary(rows: Any, group_field: str, out_field: str,
+                      count_field: str | None = None) -> Any:
+    """Bounded counts summary of a data-proportional orient section (#3510).
 
-    Returns {total, with_points, by_kind} — never the rows. `by_kind` keeps
-    the _SOURCES_SUMMARY_TOP_KINDS largest kinds (ties broken by name) and
-    folds any remainder into "other", so the payload is bounded by the kind
-    vocabulary rather than by the source registry.
+    Returns {total, with_points, <out_field>} — never the rows. `<out_field>`
+    groups the rows by `group_field` and keeps the _OVERVIEW_SUMMARY_TOP
+    largest groups, folding any remainder into "other", so the payload is
+    bounded by the group vocabulary rather than by the graph's row count. The
+    fold is a partition: sum(<out_field>.values()) == total, always.
+    `with_points` counts rows whose `count_field` is a positive number; it is
+    omitted for a section whose rows carry no magnitude (`count_field=None`).
 
     A non-list input is an error envelope from _safe (or a mocked shape) and
     is passed through unchanged.
@@ -3009,22 +3019,33 @@ def _sources_summary(rows: Any) -> Any:
     if not isinstance(rows, list):
         return rows
     with_points = 0
-    kinds: dict[str, int] = {}
+    groups: dict[str, list[int]] = {}
     for row in rows:
         row = row if isinstance(row, dict) else {}
-        points = row.get("points")
-        if isinstance(points, (int, float)) and points > 0:
-            with_points += 1
-        kind = row.get("sourceKind")
-        key = kind if isinstance(kind, str) and kind else "unknown"
-        kinds[key] = kinds.get(key, 0) + 1
-    top = sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))
-    by_kind = dict(top[:_SOURCES_SUMMARY_TOP_KINDS])
-    rest = sum(n for _, n in top[_SOURCES_SUMMARY_TOP_KINDS:])
+        magnitude = 0
+        if count_field is not None:
+            value = row.get(count_field)
+            if isinstance(value, (int, float)) and value > 0:
+                with_points += 1
+                magnitude = int(value)
+        raw = row.get(group_field)
+        key = raw if isinstance(raw, str) and raw else "unknown"
+        bucket = groups.setdefault(key, [0, 0])
+        bucket[0] += 1
+        bucket[1] += magnitude
+    # Group size first, then the group's summed magnitude, then name. A tag
+    # name is its own group, so for `tags` the magnitude is what ranks the
+    # top-N (most-used tags first); `sources`/`pointkinds` rank by row count.
+    top = sorted(groups.items(), key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]))
+    bounded = {k: n for k, (n, _m) in top[:_OVERVIEW_SUMMARY_TOP]}
+    rest = sum(n for _, (n, _m) in top[_OVERVIEW_SUMMARY_TOP:])
     if rest:
-        by_kind["other"] = by_kind.get("other", 0) + rest
-    return {"total": len(rows), "with_points": with_points,
-            "by_kind": by_kind}
+        bounded["other"] = bounded.get("other", 0) + rest
+    summary: dict[str, Any] = {"total": len(rows)}
+    if count_field is not None:
+        summary["with_points"] = with_points
+    summary[out_field] = bounded
+    return summary
 
 
 def _overview_section(section: str, entity_id: str | None,
@@ -3073,11 +3094,13 @@ def tortoise_overview(section: str | None = None,
     Each section returns exactly what the legacy tool returned.
 
     Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id). `sources` is the one
-    section whose size grows with ingestion history rather than graph shape,
-    so the combined summary returns COUNTS for it — {total, with_points,
-    by_kind}, never the rows (#3510). Pass section='sources' for the full
-    unbounded [{url, sourceKind, points}] array.
+    section except topics (which requires entity_id). Sections whose size
+    grows with the graph's ROWS rather than its shape (a fixed vocabulary) are
+    reported as bounded counts, never as rows, so the summary stays compact as
+    the graph grows (#3510): `sources` → {total, with_points, by_kind},
+    `tags` → {total, with_points, by_name}, `pointkinds` → {total,
+    with_points, by_kind}, `structure_check` → {total, by_rule}. Pass the
+    matching section= for the full array.
 
     topics: entityProfile lite for an entity — requires entity_id.
     stale: Points not updated in N days — honors days/limit.
@@ -3088,9 +3111,18 @@ def tortoise_overview(section: str | None = None,
             if sec == "topics":
                 continue  # requires entity_id — not part of the default summary
             result = _overview_section(sec, entity_id, days, limit)
+            # #3510: every data-proportional section is folded to bounded
+            # counts here — the rows themselves stay behind the explicit
+            # section= calls.
             if sec == "sources":
-                # #3510: bounded counts, not the unbounded rows.
-                result = _sources_summary(result)
+                result = _overview_summary(result, "sourceKind", "by_kind",
+                                           "points")
+            elif sec == "tags":
+                result = _overview_summary(result, "name", "by_name", "count")
+            elif sec == "pointkinds":
+                result = _overview_summary(result, "kind", "by_kind", "count")
+            elif sec == "structure_check":
+                result = _overview_summary(result, "type", "by_rule")
             combined[sec] = result
         return combined
     if not isinstance(section, str):
