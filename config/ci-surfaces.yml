@@ -577,6 +577,12 @@ surfaces:
   - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
+  # #3470: the pytest-attribution reporter (`.github/scripts/pytest-attribution.sh`,
+  # called from python-ci.yml). It reads the workflow, the reporter script and the
+  # rail's parser (`scripts/ci_exemption.py`) and needs no DB, so `core` — the
+  # default surface — is where it runs when nothing else matched. Registered here
+  # because `integrity()` requires every `tests/**/test_*.py` to be classified.
+  - test_pytest_attribution.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;

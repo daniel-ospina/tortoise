@@ -671,6 +671,14 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. Read the summary from the
+          # FULL log instead, and name the INCOMPLETE case out loud so an
+          # unattributable leg is a NAMED failure rather than a silent gap in
+          # the #3467 failure set. One definition: pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -1134,6 +1142,14 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. Read the summary from the
+          # FULL log instead, and name the INCOMPLETE case out loud so an
+          # unattributable leg is a NAMED failure rather than a silent gap in
+          # the #3467 failure set. One definition: pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -1330,6 +1346,14 @@ jobs:
           rc=$?
           echo "==================== pytest summary (tail) ===================="
           tail -n 120 /tmp/pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. Read the summary from the
+          # FULL log instead, and name the INCOMPLETE case out loud so an
+          # unattributable leg is a NAMED failure rather than a silent gap in
+          # the #3467 failure set. One definition: pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -1491,7 +1515,16 @@ jobs:
             -o junit_family=xunit1 > /tmp/trackb.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+          # #3470: a BLIND `tail -25` is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut. This leg is
+          # a must-pass gate member whose log the rail reads (its capture is
+          # `gh run view --log-failed`, across EVERY job), and it carries no
+          # FAILED/ERROR nodeid grep, so the tail was its ONLY attribution
+          # channel. Read the summary from the FULL log instead, and name the
+          # INCOMPLETE case out loud. One definition: pytest-attribution.sh.
           tail -25 /tmp/trackb.log
+          bash .github/scripts/pytest-attribution.sh --log /tmp/trackb.log --rc "$rc"
           echo "track-b rc=$rc (must-pass — gate member)"
           exit $rc
       - name: Skip-fail guard (track-b, epic #1647 Task 9)
@@ -1616,6 +1649,14 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 200 /tmp/pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. Read the summary from the
+          # FULL log instead, and name the INCOMPLETE case out loud so an
+          # unattributable leg is a NAMED failure rather than a silent gap in
+          # the #3467 failure set. One definition: pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
