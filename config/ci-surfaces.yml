@@ -1,6 +1,14 @@
 version: 1
 surfaces:
   api:
+  # #3561/#3359: per-capture graph-op accounting. Dual-registered because NO
+  # single arm covers every file the change touches: `hosted_api.py` and
+  # `metering.py` are SOURCE_PATTERNS["api"], `graph_ops.py` matches no named
+  # surface and falls through to `core`, and a `sdk.py`/`projection/__init__.py`
+  # change selects the FULL matrix. Without this `api` arm a hosted_api-only PR
+  # would never run the emit-site guard; without the `core` arm (below) a
+  # graph_ops.py-only PR would not either.
+  - test_capture_graph_ops.py
   - test_1162_add_operator_local_svbp.py
   - test_3926_error_prop_guard.py  # #3926: the MCP error-prop success-path guard; same `api` surface as test_bridge_mcp.py / test_mcp_server_auth_modes.py (tortoise/mcp_server.py is a SHARED_MODULE — full matrix)
   - test_abuse.py
@@ -513,6 +521,11 @@ surfaces:
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
+  # #3561/#3359: per-capture graph-op accounting. DB-free units (verb
+  # classification, the ContextVar plumbing) plus one embedded capture through
+  # the offline MockModel extractor asserting a NON-ZERO, phase-attributed op
+  # count. No DB, no network — default `core` surface is correct.
+  - test_capture_graph_ops.py
   - test_4716_capture_operator_ref_remap.py
   - test_ask_eval_only.py
   - test_backfill_ghost_members_guard.py

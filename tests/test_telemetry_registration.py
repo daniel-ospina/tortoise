@@ -736,7 +736,12 @@ def test_every_emitted_prop_key_is_allowlisted():
     # does NOT change the count — the collector resolves that helper's args
     # exactly like the direct calls it replaced. main's #3773 added a sixth
     # emitter, hence 12 here (11 before it).
-    assert len(calls) == 12, (
+    # #3359/#3561: the ``capture_graph_ops`` per-session row (owned by lane 7)
+    # is the 13th site — it emits the physical graph-op count beside the
+    # ``capture_cost`` row, and its props (``graph_ops_total``/
+    # ``graph_ops_read``/``graph_ops_write``/``graph_ops_turns``/
+    # ``graph_ops_by_phase``) are registered in ``_ALLOWED_ANALYTICS_PROPS``.
+    assert len(calls) == 13, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (

@@ -1192,6 +1192,12 @@ class _GuardedGraph:
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
+        # #3359: count the op as ISSUED to the raw handle, AFTER the destructive
+        # guard — a refused bulk wipe is not work the capture caused, and the
+        # count is "ops issued", not "ops succeeded" (a query that raises on a
+        # dead socket is still an op the capture generated). No-op (one
+        # ContextVar read) when no capture is active.
+        record_graph_op(cypher)
         return self._g.query(cypher, params=params, timeout=timeout)
 
     def __getattr__(self, name):
@@ -1199,6 +1205,7 @@ class _GuardedGraph:
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
+from tortoise.graph_ops import record_graph_op  # noqa: E402  #3359: per-capture graph-op accounting
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with

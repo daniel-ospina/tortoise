@@ -52,6 +52,7 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
+from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
@@ -1945,6 +1946,7 @@ def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     return [r[0] for r in rows]
 
 
+@phased("belief")
 def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                              warn=None) -> None:
     """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
@@ -4072,6 +4074,7 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False, "error": str(e),
                     "payload": payload, "guards": guards, "delta": delta}
 
+    @counts_capture_ops
     def capture_session(
         self,
         conversation: list[dict[str, str]],
@@ -4965,6 +4968,7 @@ class TortoiseSDK:
             _logger.warning("capture_observation emit failed: %s", e)
         return resp
 
+    @phased("extract")
     def _extract_session_llm(
         self,
         conversation: list[dict[str, str]],
@@ -5176,6 +5180,7 @@ class TortoiseSDK:
                 zip(_CAPTURE_PASSTHROUGH_ORDER, rows[0], strict=True)
                 if v is not None}
 
+    @phased("extract")
     def _extract_session_v2(
         self,
         conversation: list[dict[str, str]],

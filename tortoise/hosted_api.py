@@ -69,6 +69,10 @@ from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
 )
+from tortoise.graph_ops import (  # #3359: per-capture graph-op accounting
+    GraphOpsCounter,
+    counts_capture_ops_async,
+)
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -9869,9 +9873,11 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
             "same-session retry would legacy-replay (#3129)", session_id)
 
 
+@counts_capture_ops_async  # #3359: count graph ops for the whole capture
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 org: dict, slot: _CaptureSlot,
-                                state: dict | None = None) -> dict:
+                                state: dict | None = None,
+                                _graph_ops: GraphOpsCounter | None = None) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -11320,6 +11326,37 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         import logging  # function-local convention (see the turn-cap site)
         logging.getLogger("tortoise.api").exception(
             "capture_observation emit failed (non-fatal)")
+    # #3359: one ``capture_graph_ops`` analytics row per GENUINE capture (a
+    # replay writes no new nodes, so it is not a measured capture — the same
+    # guard the write-op meter uses). Emitted here, at the END of the write
+    # path, so the ~28% belief-propagation leg (the ingest EP pass above) is
+    # included; the #3508 ``capture_cost`` row (LLM spend) is emitted earlier
+    # and is complementary — this is the graph-op term of the same per-session
+    # cost picture. ``_emit_analytics_off_loop`` is the #4015 seam: off the
+    # event loop on the dedicated telemetry pool, best-effort EXCEPT the
+    # #3821 strict-mode ``UnregisteredTelemetryKey``, which must propagate —
+    # so this site does NOT wrap it in a swallow-all handler.
+    # ⚠️ The ``capture_cost`` ledger emit **in the ``_emit_capture_ledger``
+    # helper this write path calls** DOES swallow everything ("never block
+    # capture") — the two conventions sit far apart in this file, so the
+    # divergence is called out here rather than left to be discovered. It is
+    # deliberate on this side (#3821 is a convention with its own rationale,
+    # and this row is new), and reconciling `capture_cost` to it is a separate
+    # decision about an existing billing-adjacent site — not something to
+    # change as a side effect of adding a measurement.
+    if _graph_ops is not None and (
+            not session_existed or retry_failed_capture):
+        _ops_props = _capture_graph_ops_props(
+            session_id, len(body.conversation), _graph_ops)
+        try:
+            await _emit_analytics_off_loop(
+                org["org_id"], "capture_graph_ops", _ops_props)
+        except UnregisteredTelemetryKey:
+            raise  # #3821: the strict-mode guard must propagate
+        except Exception:  # noqa: BLE001, RUF100 — never block a committed capture
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture_graph_ops analytics emit failed (non-fatal)")
     return build_write_verb(
         source_session=session_id,
         source_harness=capture_harness or "unknown",
@@ -22585,6 +22622,14 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3359: capture_graph_ops — the per-session physical graph work.
+    # NAMESPACED (``graph_ops_*``) so these generic names do not widen the
+    # global filter for EVERY event: the flat allowlist has no per-event
+    # scoping, so a bare ``total``/``read``/``write`` would authorise those
+    # names at every emit site. Nested ``by_phase`` survives — the PII filter
+    # tests top-level keys only.
+    "graph_ops_total", "graph_ops_read", "graph_ops_write",
+    "graph_ops_turns", "graph_ops_by_phase",
     # #3824: provider calls the capture made that NO roll-up accounted for.
     # Without this key in the allowlist the counter is stripped here — the
     # documented #3359 loss mode — and F2 stays invisible even though the
@@ -23755,6 +23800,37 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     await _cp_offload(
         lambda: _track_analytics_event(org_id, event_name, properties),
         op="analytics_event", best_effort=True)
+
+
+def _capture_graph_ops_props(session_id: str, turns: int,
+                             counter: GraphOpsCounter) -> dict:
+    """#3359: the per-session graph-op accounting as an analytics
+    ``properties`` dict.
+
+    Shape (one row per captured ATTEMPT in ``analytics_events``):
+    ``session_id``, ``graph_ops_turns``, ``graph_ops_total``,
+    ``graph_ops_read``, ``graph_ops_write``, and ``graph_ops_by_phase``
+    (``session_store``/``extraction``/``commit``/``belief``, each
+    ``{read, write, total}``). The ``graph_ops_`` prefix keeps these generic
+    names from widening the FLAT global PII allowlist for every event. This
+    is MEASUREMENT, not the billed unit — the bill still counts API calls
+    (see ``tortoise/metering.py``).
+
+    A retried capture emits a second row with the same ``session_id``; the
+    reader's ``sessions`` counts rows, ``distinct_sessions`` dedupes.
+
+    Known gap: registry/control-plane graph handles are outside
+    ``_GuardedGraph`` and are not counted (see ``tortoise/graph_ops.py``).
+    """
+    ops = counter.as_dict()
+    return {
+        "session_id": session_id,
+        "graph_ops_turns": int(turns),
+        "graph_ops_total": ops["total"],
+        "graph_ops_read": ops["read"],
+        "graph_ops_write": ops["write"],
+        "graph_ops_by_phase": ops["by_phase"],
+    }
 
 
 async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
