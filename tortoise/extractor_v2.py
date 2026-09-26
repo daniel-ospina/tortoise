@@ -336,32 +336,31 @@ _MASTER_LIST_CACHE: dict | None = None
 
 def _build_master_from_brief(brief: dict) -> dict:
     """The master-list sections from a compiled value brief (#2031 refactor
-    of the build_master_list loop body — the section semantics are
-    byte-identical to pre-#2031 for every input whose pack namespaces were in
-    the legacy starter tuple, which today's catalog is).
+    of the build_master_list loop body).
 
     The pack_kinds section is **derived from the brief itself** (#5165):
     every namespaced key that is not part of a fixed section (``objects`` =
     ``CORE_OBJECT_KEYS``; ``memory_granularity``) is a pack kind. There is no
-    second namespace allowlist — on the ``sdk`` path the brief is already
-    gated to the graph's installed packs by ``compile_value_brief`` (#2714),
-    so a filter here can only ever DROP a pack the graph installed; on the
-    ``sdk=None`` path the brief is the ungated catalog union by contract.
-    The legacy starter tuple (``product-strategy``/``dev``/``marketing``/
-    ``pm``/``agent-ops``) was exactly that narrower list, so the two agree
-    only while the catalog happens to hold exactly those five namespaces.
+    second namespace allowlist on either leg, so a filter here can only ever
+    DROP a pack the brief carries. (How the brief was narrowed is
+    ``compile_value_brief``'s business: on the ``sdk`` path it is gated to the
+    graph's installed packs when that graph has ``:PackInstall`` records, and
+    falls back to the ungated catalog union when it has none — indicator 3;
+    on the ``sdk=None`` path it is the ungated catalog union by contract. The
+    legacy starter tuple ``product-strategy``/``dev``/``marketing``/``pm``/
+    ``agent-ops`` was a second copy of that gate, and agreed with it only
+    while the catalog happened to hold exactly those five namespaces.)
 
-    Core is handled by NAMESPACE, not by ``CORE_OBJECT_KEYS`` membership
-    alone: a ``core:*`` key the brief carries but ``objects`` was not seeded
-    with (defense-in-depth for a legacy/bypass ``core`` manifest, or a brief
-    whose core dict outgrew ``CORE_OBJECT_KEYS``) is added to ``objects`` —
-    which every render mode emits and ``master_kind_forms`` reads — rather
-    than dropped from every section or mis-sectioned into ``pack_kinds``.
-    ``render_s2_prompt`` derives the core-only prompt's pack-namespace list
-    from exactly ``pack_kinds``, so a ``core:`` entry there would tell the
-    model that ``core:`` is a PACK namespace whose content must be emitted
-    as ``unclassified`` — contradicting the same prompt's "core kinds are
-    in-context".
+    Core is handled by NAMESPACE: a ``core:*`` key the brief carries is
+    seeded into ``objects`` — which every render mode emits and
+    ``master_kind_forms`` reads — never into ``pack_kinds``, even when it is
+    not one of the canonical ``CORE_OBJECT_KEYS`` (defense-in-depth for a
+    legacy/bypass ``core`` manifest, or a brief whose core dict outgrew
+    ``CORE_OBJECT_KEYS``). ``render_s2_prompt`` derives the core-only
+    prompt's pack-namespace list from exactly ``pack_kinds``, so a ``core:``
+    entry there would tell the model that ``core:`` is a PACK namespace whose
+    content must be emitted as ``unclassified`` — contradicting the same
+    prompt's "core kinds are in-context".
 
     Loop semantics preserved: the ``memory_granularity`` skip comes first,
     and pack_kinds keeps the brief's insertion order (prompt-visible)."""
@@ -401,11 +400,12 @@ def build_master_list(sdk=None) -> dict:
 
     #2031 hosted tenant path (``sdk``): the master compiles from the
     memoized tenant view's brief (shared catalog + THIS tenant's
-    :PackManifest manifests), already narrowed by the graph's #2714
-    APPROVAL set — so tenant A's pack kinds reach A's extraction prompts and
-    write gates while tenant B's never do, and no second namespace allowlist
-    is applied on top (#5165). The ``sdk=None`` path stays the ungated
-    catalog union by contract. The tenant identity
+    :PackManifest manifests), narrowed by the graph's #2714 APPROVAL set when
+    that graph has ``:PackInstall`` records (a graph with none falls back to
+    the catalog union — indicator 3) — so tenant A's pack kinds reach A's
+    extraction prompts and write gates while tenant B's never do, and no
+    second namespace allowlist is applied on top (#5165). The ``sdk=None``
+    path stays the ungated catalog union by contract. The tenant identity
     is the SDK's resolved graph (pass the tenant-scoped SDK,
     ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global

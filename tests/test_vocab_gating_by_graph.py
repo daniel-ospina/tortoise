@@ -471,7 +471,7 @@ class TestPackKindDerivationFromBrief:
         master = build_master_list()
         brief = compile_value_brief()
         expected = [k for k in brief
-                    if k != "memory_granularity" and k not in CORE_OBJECT_KEYS]
+                    if k != "memory_granularity" and not k.startswith("core:")]
         assert expected, "fixture: the hermetic brief must have pack kinds"
         assert list(master["pack_kinds"]) == expected, \
             "pack_kinds must be exactly the brief's non-core keys, in order"
@@ -530,9 +530,12 @@ class TestPackKindDerivationFromBrief:
         core key set; nothing else pins that equality.
 
         FAIL-ON: `compile_value_brief`'s core dict gains or renames a key
-        while `CORE_OBJECT_KEYS` (the `objects` seed AND the `pack_kinds`
-        skip set) stays put — the stray key is then mis-sectioned with no
-        other test noticing.
+        while `CORE_OBJECT_KEYS` stays put. The consequence is NOT
+        mis-sectioning — a `core:`-prefixed key is routed into `objects`
+        either way — it is that the `objects` seed and the brief disagree:
+        a canonical kind the brief no longer carries renders with an empty
+        description, and a kind the brief adds loses its seeded position.
+        No other test pins this equality.
         REACHABLE: the real brief carries 16 core keys, and the comparison is
         a SET equality, so an addition and a removal each red it.
         """
