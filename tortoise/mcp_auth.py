@@ -2,7 +2,8 @@
 
 Serves as the auth/rate-limit boundary for the MCP Streamable HTTP endpoint
 mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
-starlette — mcp_server imports from here (one-directional; no circular import).
+starlette + tortoise.body_limits (starlette-only by design) — mcp_server
+imports from here (one-directional; no circular import).
 
 Design: per-request org-scoped SDK via ContextVar. OrgResolutionMiddleware
 validates the Bearer tt_/tk_ token (API_KEY_PREFIXES) against the control
@@ -30,6 +31,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from tortoise.body_limits import BodyTooLargeError, read_capped_body
 from tortoise.sdk import TortoiseSDK
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
@@ -849,19 +851,37 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 class RequestBodySizeMiddleware(BaseHTTPMiddleware):
-    """Reject POST bodies > 1MB (D13).
+    """Cap request bodies at 1 MB (D13) — INCLUDING chunked bodies (#2048).
 
-    Caveat: chunked transfer-encoding has NO content-length header — the
-    header check misses it. Infrastructure layer (Fly/nginx client_max_body_size
-    or uvicorn limit) is the primary defense; this middleware is best-effort.
+    The parent FastAPI app's middleware does NOT propagate into this mounted
+    sub-app's stack, so the cap lives here. The original implementation checked
+    the ``content-length`` HEADER only: a chunked ``Transfer-Encoding`` body
+    (RFC 7230 §3.3.3 — it overrides Content-Length; HTTP/2 has no CL framing)
+    carried no header and bypassed the check entirely. This middleware streams
+    the body under the same 1 MB cap instead.
+
+    REPLAY MECHANISM. Assigning ``request._body`` after the capped read hands
+    the cached bytes downstream via Starlette's ``_CachedRequest`` — the SAME
+    path ``await request.body()`` uses. A raw-ASGI receive wrapper is brittle
+    here: a downstream ``BaseHTTPMiddleware`` whose app has consumed the
+    request calls ``receive`` again on the response path expecting
+    ``http.disconnect``, and a synthetic ``http.request`` there raises
+    ``RuntimeError: Unexpected message received`` (it broke the SSE response
+    path). ``_body`` is the private field ``Request.body()`` itself populates.
+
+    POST-only, preserving the original scope: the Streamable-HTTP JSON-RPC
+    carrier is POST; GET (SSE listener / metadata) and DELETE carry no body.
     """
 
     MAX_BODY = 1_000_000
+    MAX_BODY_DETAIL = "Request body too large (max 1MB)"
 
     async def dispatch(self, request: Request, call_next):
         if request.method == "POST":
-            length = request.headers.get("content-length")
-            if length and int(length) > self.MAX_BODY:
-                return _jsonrpc_error(-32600, "Request body too large (max 1MB)",
-                                      status=413)
+            try:
+                request._body = await read_capped_body(
+                    request, self.MAX_BODY, self.MAX_BODY_DETAIL)
+            except BodyTooLargeError:
+                return _jsonrpc_error(
+                    -32600, self.MAX_BODY_DETAIL, status=413)
         return await call_next(request)

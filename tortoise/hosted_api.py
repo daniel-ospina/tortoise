@@ -44,6 +44,7 @@ import tortoise
 # #3834: the wait-bound vocabulary's single home — read as a module attribute so
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
+from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -1482,6 +1483,64 @@ async def _lifespan(app):
 
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
+
+# ── #2048: the residual body-buffering class ──────────────────────────────
+# The endpoints that declare `body: XxxRequest` / `body: dict` buffer the WHOLE
+# wire body inside FastAPI's `get_request_handler` BEFORE any dependency or
+# handler runs — upstream of where #2032's per-site capped read could sit.
+# `CappedBodyMiddleware` caps them where the body is still a stream and replays
+# under-cap bytes to the router. Registered FIRST so it lands INNERMOST (inside
+# CORS + the response-header middlewares), giving its 413 the SAME
+# `{"detail": ...}` body and the same response headers as a handler 413.
+#
+# Exemptions: every route that already applies its OWN `_read_capped_body` cap
+# (the #2032 sweep table + the manifest/import/stripe paths), and `/mcp` (the
+# sub-app's own middleware stack). Reading those here would either truncate a
+# legal body or MOVE an already-documented read ahead of its rate-limit / auth
+# / 503 gate (e.g. #2032's register rate-limit-before-parse and oauth
+# 503-before-parse ordering, and the `/v1/internal/` auth-ordering property
+# #4939). The middleware's scope is therefore exactly the class that had NO cap
+# before #2048: the declared `body: XxxRequest` / `body: dict` parameters, plus
+# the `/v1/sessions` capture override. Note `/v1/team/keys` is exempt by EXACT
+# path (the handler-capped POST) — the PATCH on `/v1/team/keys/{key_id}` is a
+# pydantic-body route and stays covered by the default cap.
+_APP_BODY_CAP_EXEMPT_REGEXES = (
+    # #2032 sweep sites (per-site caps live at each call site).
+    re.compile(r"^/v1/register/?$"),
+    re.compile(r"^/v1/session/login/?$"),
+    re.compile(r"^/v1/signup/email/?$"),
+    re.compile(r"^/v1/team/keys/?$"),
+    re.compile(r"^/v1/team/keys/[^/]+/rotate/?$"),
+    re.compile(r"^/v1/claim/?$"),
+    re.compile(r"^/v1/agent/signup/?$"),
+    re.compile(r"^/v1/agent/recover/?$"),
+    re.compile(r"^/v1/agent/token/revoke/?$"),
+    re.compile(r"^/oauth/consent/?$"),
+    re.compile(r"^/oauth/token/?$"),
+    re.compile(r"^/oauth/revoke/?$"),
+    re.compile(r"^/register/?$"),                     # OAuth DCR
+    # Handler-capped larger surfaces.
+    re.compile(r"^/v1/sessions/commit/?$"),           # _COMMIT_SESSION_MAX_BYTES (8 MiB)
+    re.compile(r"^/v1/packs/manifests/?$"),           # MANIFEST_WIRE_CAP_BYTES (~388 KiB)
+    re.compile(r"^/webhooks/stripe/?$"),              # _STRIPE_WEBHOOK_MAX_BYTES (1 MiB)
+    re.compile(r"^/v1/organizations/[^/]+/import/?$"),  # _IMPORT_MAX_BYTES (64 MiB)
+)
+app.add_middleware(
+    _body_limits.CappedBodyMiddleware,
+    default_max_bytes=_body_limits.BODY_MAX_BYTES,
+    default_detail=_body_limits.BODY_413_DETAIL,
+    # /v1/sessions carries session content (schema-unbounded per-turn text):
+    # the #2032 small-surface cap would false-413 a legal capture — see the
+    # CAPTURE_SESSION_MAX_BYTES note in tortoise/body_limits.py.
+    path_caps={
+        "/v1/sessions": (
+            _body_limits.CAPTURE_SESSION_MAX_BYTES,
+            _body_limits.CAPTURE_SESSION_413_DETAIL,
+        ),
+    },
+    exempt_prefixes=("/mcp", "/internal", "/v1/internal"),
+    exempt_regexes=_APP_BODY_CAP_EXEMPT_REGEXES,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -16745,7 +16804,14 @@ class _ImportVerifyError(Exception):
 # expanded invoice/dispute payloads — the bound primarily protects the
 # HMAC/verify path and defends against oversized replay bodies; note a 413
 # is non-2xx, so Stripe retries with backoff, hence the generous headroom) (1 MiB).
-_BODY_MAX_BYTES = 256 * 1024
+#
+# #2048: the 256 KiB DEFAULT is aliased from the shared module (it is also the
+# cap `CappedBodyMiddleware` applies to the pydantic/dict-body endpoints, which
+# are capped at the middleware layer — see the registration block at the top of
+# this file); the alias keeps ONE literal for the shared default. The detail
+# string is the same object the middleware emits, so a middleware 413 and a
+# handler 413 are byte-identical.
+_BODY_MAX_BYTES = _body_limits.BODY_MAX_BYTES
 _COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
 _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 
@@ -16756,7 +16822,7 @@ _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 # from the enforced test cap); production caps are import-time constants,
 # so the message stays truthful under source-level cap changes. The literal
 # values are pinned by TestDetailConstantsPinned (test_body_cap_sweep.py).
-_BODY_413_DETAIL = f"request body exceeds the size cap ({_BODY_MAX_BYTES // 1024} KiB)"
+_BODY_413_DETAIL = _body_limits.BODY_413_DETAIL
 _COMMIT_SESSION_413_DETAIL = (
     f"commit session request body exceeds the size cap "
     f"({_COMMIT_SESSION_MAX_BYTES // (1024 * 1024)} MiB)"
@@ -16777,15 +16843,16 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
     pack-manifest upload path (#2029), and every request-body read swept in
     #2032 (register/login/signup/claim/keys/agent/oauth/commit/stripe — the
     caps + detail strings live in the constants block directly above).
+
+    The streaming core lives in ``tortoise.body_limits`` (#2048) so the
+    ``/mcp`` sub-app's middleware can enforce the SAME semantics without
+    importing this module (a cycle); this wrapper keeps the #2032 call sites'
+    ``HTTPException(413)`` contract.
     """
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status_code=413, detail=detail)
-        chunks.append(chunk)
-    return b"".join(chunks)
+    try:
+        return await _body_limits.read_capped_body(request, max_bytes, detail)
+    except _body_limits.BodyTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=exc.detail) from None
 
 
 async def _read_internal_json_body(request: Request, *, required: bool = False) -> dict:
