@@ -6913,8 +6913,10 @@ def _classify_error(e: BaseException) -> str:
     are produced by the stage callers, not here.
 
     Duck-typed (``e.response.status_code``) so the extractor stays free of a
-    hard ``requests`` import — semantically identical to P2's taxonomy table
-    (#1530: 401/402/403 fatal, 429/5xx transient, other 4xx fatal).
+    hard ``requests`` import — the fatal/transient mapping matches P2's
+    taxonomy table for every status BOTH readers can see (#1530: 401/402/403
+    fatal, 429/5xx transient, other 4xx fatal). The one shape they do not
+    share is the urllib one — see SCOPE OF THE STATUS READ below.
 
     #4959 — the ONE body-sensitive carve-out: a 403 whose response BODY
     carries the provider's key-limit signature is the SAME condition as a
@@ -6969,8 +6971,13 @@ def _is_fatal_error(e: BaseException) -> bool:
     Consumes P2's taxonomy export (``tortoise.model_adapters.is_fatal`` —
     401/402/403 FATAL + 400/404/other-4xx FATAL_CONFIG are permanent; never
     retried, MECE fix #1524). The local ``_classify_error`` fallback mirrors
-    the same semantics (the ``fatal_*`` census prefix) so the retry decision
-    can never diverge from the census classes (GATE-1: one taxonomy)."""
+    the same semantics (the ``fatal_*`` census prefix), so the retry decision
+    and the census classes agree on every error whose status BOTH readers can
+    see (GATE-1: one taxonomy). They DIVERGE only for the urllib shape
+    (``urllib.error.HTTPError``: status on ``.code``, no ``.response``) —
+    ``is_fatal`` reads it fatally while ``_classify_error`` censuses
+    ``transient_unknown`` (#5525). That is the pre-existing transport
+    divergence, not a second taxonomy."""
     try:
         from tortoise.model_adapters import is_fatal
         return is_fatal(e)
