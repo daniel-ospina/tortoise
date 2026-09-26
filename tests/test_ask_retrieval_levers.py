@@ -336,7 +336,7 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         caps = resolve_ask_retrieval_caps()
         assert caps == {
             "limit": 200,
-            "pool_size": 200,
+            "pool_size": 400,
             "context_item_cap": 200,
             "context_token_cap": 16000,
             "context_byte_cap": 128000,

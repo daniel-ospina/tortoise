@@ -21,13 +21,17 @@ WHAT IT MEASURES (retrieval only — no reader, no provider keys):
                             ``tools/ask_shape_rate.py``.
   * gold-in-context@120   — the same assembly under the A6-raised caps
                             (limit 120, item cap 120) — what the cap review
-                            would buy for in-pool gold. NOTE: this arm still
-                            assembles under the frozen 32 KiB byte ceiling,
-                            so it measures a window a raised item/token cap
-                            cannot fully buy — the exact silent no-op #4105
-                            removes from the product lane (filed as a
-                            follow-up; the product lane derives the ceiling
-                            from the token cap instead).
+                            would buy for in-pool gold. The RAISED arm
+                            derives its byte ceiling from its own token cap
+                            (``resolve_byte_cap_from_caps``), exactly as the
+                            #4105 product lane does, so the frozen 32 KiB
+                            literal can no longer silently refuse the hits a
+                            raised item/limit was meant to admit. The
+                            per-arm byte ceiling and the binding-bound
+                            census (``dropped_by_byte_cap`` / ``stopped_by``)
+                            are recorded per row. The @40 arm KEEPS the
+                            frozen literal — it is the pre-#4105 baseline of
+                            record.
 
 SEEDING PARITY (verifier-fix): ingestion mirrors ``tools/longmem_eval/
 ingest.py`` (search_keys + has_answer + embeddings + session props + the
@@ -92,11 +96,29 @@ logger = logging.getLogger("ask_recall_bench")
 RECORDED_FAILURES = ["ceb54acb", "1de5cff2", "gpt4_d84a3211", "1d4e3b97"]
 
 #: HISTORICAL ask-lane caps (the pre-#4105 8k/40/32KiB budget) and the
-#: A6-raised measurement caps. Frozen literals: this bench IS the pre-#4105
-#: baseline of record, and the product lane now resolves
-#: 200/200/16000/derived (``resolve_ask_retrieval_caps``, #4105).
+#: A6-raised measurement caps. ``CONTEXT_TOKEN_CAP`` and ``BYTE_CAP`` are the
+#: FROZEN history the @40 arm reproduces — this bench IS the pre-#4105
+#: baseline of record. The product lane now resolves
+#: 200/400/200/16000/derived (``resolve_ask_retrieval_caps``; #4105 plus the
+#: #4235 ``limit*2`` pool floor). The RAISED arm derives its byte ceiling
+#: from ``CONTEXT_TOKEN_CAP`` (``resolve_byte_cap_from_caps``, #4235) so the
+#: frozen literal cannot cap it.
 CONTEXT_TOKEN_CAP = 8000
 BYTE_CAP = 32768
+
+
+def _raised_byte_cap() -> int:
+    """The A6-raised arm's byte ceiling, DERIVED from its own token cap.
+
+    #4235: assembling the raised arm under the frozen ``BYTE_CAP`` literal
+    made a raised item/limit a silent no-op — the byte ceiling refused the
+    hits the raise admitted. The same resolution the #4105 product lane uses
+    (``resolve_byte_cap_from_caps``) is applied here, so the arm's byte bound
+    tracks its token bound (with an explicit
+    ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` still winning, as on the product lane).
+    """
+    from tortoise.retrieval import resolve_byte_cap_from_caps
+    return resolve_byte_cap_from_caps({"context_token_cap": CONTEXT_TOKEN_CAP})
 
 
 def _dataset_path() -> str:
@@ -181,10 +203,17 @@ def _retrieve_pipeline(sdk, question: str, *, limit: int, item_cap: int,
                        keep_numeric: bool, search_keys_prf: bool,
                        fusion_weights: dict | None, fusion_k: int,
                        evidence_boost: bool,
+                       byte_cap: int = BYTE_CAP,
+                       stats: dict | None = None,
                        question_date: str | None = None) -> list[dict]:
     """Replicate the ask lane's retrieval→annotation→dedup→A5 boost→assemble
     pipeline (no reader call — the bench grades retrieval). Returns the
-    assembled context hits (ids are the recall surface)."""
+    assembled context hits (ids are the recall surface).
+
+    ``byte_cap`` is the arm's ceiling: the @40 baseline of record passes the
+    frozen ``BYTE_CAP`` literal, the A6-raised arm passes the DERIVED
+    ``_raised_byte_cap()`` (#4235). ``stats`` receives ``assemble_context``'s
+    binding-bound census so the caller can record WHICH bound cut the pool."""
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
         apply_evidence_boost,
@@ -216,7 +245,7 @@ def _retrieve_pipeline(sdk, question: str, *, limit: int, item_cap: int,
         deduped, top_k=item_cap,
         max_context_tokens=CONTEXT_TOKEN_CAP,
         question_date=question_date,
-        context_item_cap=item_cap, byte_cap=BYTE_CAP)
+        context_item_cap=item_cap, byte_cap=byte_cap, stats=stats)
 
 
 def _recall(gold: set[str], hits: list[dict]) -> float:
@@ -240,17 +269,23 @@ def _measure_question(sdk, question: dict, *, keep_numeric: bool,
     gold_pool = gold & set(pool_ids)
     gold_pool_rank = [
         (i + 1) for i, pid in enumerate(pool_ids) if pid in gold]
-    # context@40 (historical caps) + context@cap_item (A6 measurement caps)
+    # context@40 (historical caps, frozen 32 KiB baseline) + context@cap_item
+    # (A6 measurement caps, byte ceiling DERIVED from its own token cap —
+    # #4235: the frozen literal made the raise a silent no-op).
     ctx40 = _retrieve_pipeline(
         sdk, q, limit=40, item_cap=40, keep_numeric=keep_numeric,
         search_keys_prf=search_keys_prf, fusion_weights=fusion_weights,
         fusion_k=fusion_k, evidence_boost=evidence_boost,
+        byte_cap=BYTE_CAP,
         question_date=question.get("question_date") or None)
+    cap_byte_cap = _raised_byte_cap()
+    cap_stats: dict = {}
     ctxN = _retrieve_pipeline(
         sdk, q, limit=cap_limit, item_cap=cap_item,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
         fusion_weights=fusion_weights, fusion_k=fusion_k,
         evidence_boost=evidence_boost,
+        byte_cap=cap_byte_cap, stats=cap_stats,
         question_date=question.get("question_date") or None)
     return {
         "question_id": question["question_id"],
@@ -261,6 +296,9 @@ def _measure_question(sdk, question: dict, *, keep_numeric: bool,
         "recall_context_40": _recall(gold, ctx40),
         "recall_context_cap": _recall(gold, ctxN),
         "context_cap": cap_item,
+        "cap_byte_cap": cap_byte_cap,
+        "cap_dropped_by_byte_cap": cap_stats.get("dropped_by_byte_cap"),
+        "cap_stopped_by": cap_stats.get("stopped_by"),
         "n_pool": len(pool_ids),
         "n_ctx40": len(ctx40),
         "n_ctx_cap": len(ctxN),
@@ -451,6 +489,18 @@ def main() -> int:
         mean = (sum(vals) / len(vals)) if vals else float("nan")
         print(f"aggregate recall[{k}] = {mean:.3f} "
               f"({len(vals)}/{len(results)} questions with gold)")
+
+    # #4235: WHICH bound cut the raised arm. The @40 arm keeps the frozen
+    # literal; the raised arm's ceiling is derived from its token cap, so a
+    # `stopped_by=byte_cap` here would mean the raise is still byte-bound.
+    print(f"\nbyte ceiling: @40 arm = {BYTE_CAP} (frozen literal); "
+          f"raised arm = {_raised_byte_cap()} (derived from the "
+          f"{CONTEXT_TOKEN_CAP}-token cap)")
+    for r in results:
+        print(f"  {r['question_id']:<16} ctx@cap byte_cap="
+              f"{r['cap_byte_cap']} dropped_by_byte_cap="
+              f"{r['cap_dropped_by_byte_cap']} "
+              f"stopped_by={r['cap_stopped_by']}")
 
     # machine-readable JSON (the runbook's before/after record)
     out = {
