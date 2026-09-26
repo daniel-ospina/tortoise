@@ -107,6 +107,37 @@ export function wizardStageLabel(step, { hasOrg = false, paused = false, connect
   return WIZARD_STEPS[step]?.label ?? ''
 }
 
+// #3725: the header LEDE (`.welcome-lede`, the step's own `sub`) is
+// `wizardStageLabel`'s sibling — the same pure-decision treatment, for the
+// same reason (#2912): a render condition inlined in main.jsx cannot be
+// unit-tested, so a heading-vs-body contradiction on that line survives every
+// source-text grep. Returns the `sub` string to render, or `null` when the
+// header must render no lede at all (the card body then carries the state).
+//
+// The null arms are BOTH "the body already says it" cases:
+//   - step 0 on an org-holding account is a read-only summary whose body opens
+//     "You're set up in <org>…";
+//   - step 3 without a server-observed connection: the <h1> already names the
+//     state (wizardStageLabel's not-connected / paused arms) and the body
+//     carries the recovery.
+// #3725 adds the third: step 3 on the BUILD fork WITH a connection. Its body
+// says "Connected" + "Keep calling the SDK from your app." — so the step's own
+// sub ("Your agent takes over from here.") names an agent the build-fork user
+// does not have. The contradiction is the same one #2912 fixed for the paused
+// arm: two lines in one viewport saying opposite things. Suppress the lede
+// rather than invent a third fork-specific sentence to restate the body.
+// `hasOrg`/`connected` default fail-honest (false), matching
+// `wizardStageLabel`: a caller that forgets an input understates, never
+// over-claims.
+export function wizardStepSub(step, { hasOrg = false, connected = false, buildFork = false } = {}) {
+  if (step === 0 && hasOrg) return null
+  if (step === 3) {
+    if (!connected) return null
+    if (buildFork) return null
+  }
+  return WIZARD_STEPS[step]?.sub ?? null
+}
+
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
 // nudge-not-force — NEVER a billing gate. Fork SEMANTICS are W2-owned;
 // W1 renders the shell + persists the set-once fork via the checkpoint.
