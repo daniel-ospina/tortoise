@@ -245,6 +245,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
             event_id=str(ulid()),
             source_path=str(transcript),
             needs_extraction=True,
+            about_entities=_s7_document_entities(text, source_id, api, args),
         )
 
         stats = extract_from_document(
@@ -390,6 +391,7 @@ def _do_upgrade_all(proj, api, args):
                 event_id=str(ulid()),
                 source_path=str(filepath),
                 needs_extraction=True,
+                about_entities=_s7_document_entities(text, source_id, api, args),
             )
 
             stats = extract_from_document(
@@ -441,6 +443,56 @@ def build_model(spec: str, *, reasoning: bool = False):
     return OpenAICompatModel(id=model, base_url=base_url, api_key_env=api_key_env)
 
 
+def _s7_document_entities(text, source_id, api, args, extractor=None):
+    """#4938: run S7 and return the document's Subject names (wiring targets).
+
+    The names are handed to ``add_document(about_entities=...)`` so the
+    document Source gets its ``aboutSubject`` edges through the sanctioned
+    ``_upsert_document → _create_about_edges`` route. Returns ``[]`` when S7 is
+    opted out, in capture-metadata mode, or when the entity stage fails before
+    creating any Subject (a later failure returns the partial list — below).
+
+    FAIL-OPEN (deliberate): ``begin_ingest`` has already claimed the content
+    hash when this runs, so letting an entity-stage failure escape would leave
+    the document unwritten AND make a plain re-run SKIP ("already processed") —
+    the document would be silently lost. Per-SECTION failures are tolerated by
+    the stage itself (``skip_on_failure=True``); a NON-section failure (e.g. a
+    graph/journal write during a mint) propagates, but ``extract_entities``
+    attaches the names whose ``add_subject`` had already returned as
+    ``partial_subject_names``, and those are still returned and wired. The
+    guarantee is exactly that: returned-by-``add_subject`` names are wired; a
+    call that raises after its MERGE committed is not in the list and can
+    still leave a durable Subject unwired.
+    """
+    if not (args.semantic_extract and not args.capture_metadata):
+        return []
+    if extractor is None:
+        extractor = LLMExtractor(build_model(args.point_model),
+                                 build_model(args.relation_model, reasoning=True))
+    try:
+        ent_stats = extractor.extract_entities(
+            text, source_id, api, domain=args.domain, skip_on_failure=True)
+    except Exception as e:
+        # #4938: Subjects created earlier in this run are still durable (the
+        # journal is written before the projection), so wire THEM rather than
+        # leaving Subjects no document points at.
+        partial = list(getattr(e, "partial_subject_names", []))
+        print(f"warning: S7 entity extraction failed "
+              f"({type(e).__name__}: {e}) — "
+              + (f"wiring the {len(partial)} Subject(s) already minted"
+                 if partial else
+                 "continuing without document→Subject wiring"))
+        return partial
+    print(f"entities: {ent_stats['subjects']} Subjects, "
+          f"{ent_stats['objects']} Objects")
+    failed = ent_stats.get("failed_sections") or []
+    if failed:
+        print(f"warning: S7 entity extraction failed for {len(failed)} "
+              f"section(s) ({', '.join(failed)}) — their Subjects are "
+              f"omitted; the minted Subjects are still wired")
+    return ent_stats["subject_names"]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Tortoise live ingest")
     ap.add_argument("transcript", type=Path, nargs='?', default=None,
@@ -458,8 +510,16 @@ def main(argv=None):
                     help="cap utterances (0=all) — for exploration; relations don't scale yet")
     ap.add_argument("--domain", type=str, default=None,
                     help="domain ontology key for domain-specific kind values (e.g. product-strategy)")
-    ap.add_argument("--semantic-extract", action="store_true",
-                    help="run S7 semantic extraction (Subjects + Objects + aboutEntities) after points")
+    ap.add_argument("--semantic-extract", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="run S7 semantic extraction (Subjects + Objects + "
+                         "aboutEntities) before the document write, and wire "
+                         "the document's aboutSubject edges from it; ON by "
+                         "default since #4938 — the document path's only "
+                         "Subject producer, and the owner's "
+                         "document→Source+Subjects model requires it. Pass "
+                         "--no-semantic-extract to skip it (one extra model "
+                         "call per section).")
     ap.add_argument("--capture-metadata", action="store_true",
                     help="#125 metadata-only capture: emit document Source + "
                          "sessionCaptured Event, SKIP LLM point extraction "
@@ -564,6 +624,18 @@ def main(argv=None):
                 # requests otherwise.
                 needs_extraction = (True if args.capture_metadata
                                     else bool(fm.get("needs_extraction", False)))
+                # S7 (#4938, default-ON): extract the document's Subjects +
+                # Objects BEFORE the DocumentCreated event, so the Subjects it
+                # names can be wired to the document through `about_entities`
+                # (the sanctioned `_upsert_document` → `_create_about_edges`
+                # route). Running S7 after the write — as it did behind the
+                # opt-in flag — left the document's Subject producer minting
+                # nodes it never connected to the document. `--capture-metadata`
+                # deliberately SKIPS all LLM extraction (a metadata-only op);
+                # `--no-semantic-extract` opts out of S7 alone. Fail-open —
+                # see `_s7_document_entities`.
+                doc_about_entities = _s7_document_entities(
+                    text, source_id, api, args, extractor)
                 api.add_document(
                     doc_id=source_id,
                     title=fm.get("title", args.transcript.stem),
@@ -583,6 +655,7 @@ def main(argv=None):
                     event_id=event_id,
                     source_path=str(args.transcript),
                     needs_extraction=needs_extraction,
+                    about_entities=doc_about_entities,
                 )
                 if args.capture_metadata:
                     # #125 metadata-only: emit sessionCaptured Event with uses→Skill,
@@ -616,15 +689,6 @@ def main(argv=None):
                 # #1157: shared helper — priors from stored confidence only;
                 # refuses (loud flag) when the graph has none.
                 _run_ep_propagation(proj, api, label="EP")
-
-                # S7: Semantic extraction (Subjects + Objects + aboutEntities)
-                if args.semantic_extract and is_doc:
-                    ent_stats = extractor.extract_entities(
-                        text, source_id, api,
-                        domain=args.domain,
-                    )
-                    print(f"entities: {ent_stats['subjects']} Subjects, "
-                          f"{ent_stats['objects']} Objects")
             else:
                 extractor.run(text, source_id, api, max_utterances=args.max_utterances)
 

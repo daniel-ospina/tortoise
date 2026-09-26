@@ -512,6 +512,411 @@ def test_main_transcript_no_document():
 
 
 # ---------------------------------------------------------------------------
+# #4938 — the document path produces Subjects by default
+# ---------------------------------------------------------------------------
+
+_DOC_SUBJECT_FIXTURE = """---
+title: Vendor Evaluation
+type: research
+---
+
+## Background
+
+Alice Rivera met the Acme Organisation to review the proposal.
+The Design Team owns the rollout plan.
+
+## Decision
+
+We adopt the approach because it is cheaper.
+"""
+
+
+class _PersonOrgModel(MockModel):
+    """Deterministic stand-in whose entity stage names a person and an org.
+
+    ``MockModel`` only promotes multi-word capitalized names containing
+    "team"/"org"/"group"/"dept" to Subjects, so it cannot express the
+    issue's "a markdown file naming a person and an organisation" fixture.
+    This subclass pins ONLY the S7 entity output (one natural person + one
+    organisation + one object) and delegates every other stage (points,
+    relations) to ``MockModel`` so the rest of the pipeline stays the
+    ordinary offline stand-in.
+    """
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "extract_entities" in system:
+            import json
+            return json.dumps({
+                "subjects": [
+                    {"name": "Alice Rivera", "subjectKind": "naturalPerson"},
+                    {"name": "Acme Organisation", "subjectKind": "organization"},
+                ],
+                "objects": [{"name": "FalkorDB", "objectKind": "database"}],
+                "aboutEntities": ["Alice Rivera", "Acme Organisation",
+                                  "FalkorDB"],
+            })
+        return super().complete(system=system, user=user)
+
+
+def _person_org_build_model(spec, *, reasoning=False):
+    """``build_model`` replacement returning the pinned person+org stand-in."""
+    return _PersonOrgModel(spec)
+
+
+class _FailingEntityModel(MockModel):
+    """Stand-in whose S7 entity stage always fails (points still succeed)."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "extract_entities" in system:
+            raise RuntimeError("simulated entity-stage failure")
+        return super().complete(system=system, user=user)
+
+
+def _failing_entity_build_model(spec, *, reasoning=False):
+    return _FailingEntityModel(spec)
+
+
+class _SecondSectionFailingEntityModel(MockModel):
+    """S7 succeeds on the first section, then fails on the second.
+
+    Models the partial-failure shape: section 1's Subjects are already minted
+    when section 2 raises, so the document must still be wired to them (no
+    orphan Subjects) and the failure must be reported.
+    """
+
+    def __init__(self, id: str = "mock"):
+        super().__init__(id)
+        self._calls = 0
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "extract_entities" in system:
+            self._calls += 1
+            if self._calls >= 2:
+                raise RuntimeError("simulated entity-stage failure on section 2")
+        return super().complete(system=system, user=user)
+
+
+def _second_section_failing_build_model(spec, *, reasoning=False):
+    return _SecondSectionFailingEntityModel(spec)
+
+
+def _ingest_doc_fixture(tmp_path, extra_args=()):
+    """Run the CLI once on ``_DOC_SUBJECT_FIXTURE``; return (db, journal)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out, *extra_args]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _person_org_build_model):
+        _run_main(None)
+    return db, log
+
+
+def _document_counts(db):
+    """The counts #4938's two indicators speak about, read from the graph."""
+    proj = FalkorProjection(db)
+    try:
+        def one(q):
+            return proj.g.query(q).result_set[0][0]
+        return {
+            "subjects": one("MATCH (s:Subject) RETURN count(s)"),
+            "about_subject": one(
+                "MATCH ()-[:aboutSubject]->() RETURN count(*)"),
+            "sources": one("MATCH (s:Source) RETURN count(s)"),
+            "documents": one(
+                "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+                "RETURN count(s)"),
+            "points": one("MATCH (p:Point) RETURN count(p)"),
+        }
+    finally:
+        proj.close()
+
+
+def test_4938_default_document_ingest_files_subjects(tmp_path):
+    """Indicator 1 (#4938): a DEFAULT document ingest (no flag) of a markdown
+    file naming a person and an organisation yields >=1 ``:Subject`` node and
+    >=1 ``aboutSubject`` edge — the owner's document -> Source + Subjects model
+    is on by default.
+
+    Fails if: S7 stays opt-in (0 Subjects); the Subjects are minted but the
+    document->Subject edges are never wired (0 aboutSubject); the wired names
+    do not match the document's own content entities.
+    """
+    db, _log = _ingest_doc_fixture(tmp_path)
+    counts = _document_counts(db)
+    assert counts["subjects"] >= 1, f"no :Subject minted by default: {counts}"
+    assert counts["about_subject"] >= 1, (
+        f"no aboutSubject edge written by default: {counts}")
+    proj = FalkorProjection(db)
+    try:
+        names = {r[0] for r in proj.g.query(
+            "MATCH (s:Source)-[:aboutSubject]->(sub:Subject) "
+            "RETURN sub.name").result_set}
+    finally:
+        proj.close()
+    assert {"Alice Rivera", "Acme Organisation"} <= names, names
+    print(f"PASS test_4938_default_document_ingest_files_subjects ({counts})")
+
+
+def test_4938_document_source_and_point_counts_unchanged(tmp_path):
+    """Indicator 2 (#4938) — the regression guard: the ``:Source`` / document /
+    ``:Point`` counts of the SAME ingest are IDENTICAL with S7 on (default) and
+    S7 off (``--no-semantic-extract``). Subjects and aboutSubject edges are the
+    only difference, so default-on S7 cannot inflate the metered layers.
+
+    The DIFFERENTIAL form is the point: an absolute-count assertion would still
+    pass if both runs changed together; this one fails the moment the default
+    run gains or loses a Source, document or Point relative to the opt-out run.
+
+    Fails if: the default is not actually on (0 Subjects); the opt-out does not
+    disable it (Subjects without the flag); or the metered counts diverge.
+    """
+    on_db, _ = _ingest_doc_fixture(tmp_path / "on")
+    off_db, _ = _ingest_doc_fixture(tmp_path / "off",
+                                    ["--no-semantic-extract"])
+    on = _document_counts(on_db)
+    off = _document_counts(off_db)
+    assert off["subjects"] == 0 and off["about_subject"] == 0, (
+        f"--no-semantic-extract did not disable the Subject path: {off}")
+    assert on["subjects"] >= 1 and on["about_subject"] >= 1, (
+        f"the default document ingest filed no Subjects: {on}")
+    for key in ("sources", "documents", "points"):
+        assert on[key] == off[key], (
+            f"{key} changed with S7 on: default={on[key]} opt-out={off[key]}"
+            f" (indicator 2 regression guard)")
+    assert on["points"] > 0, "vacuous fixture: the ingest extracted no Points"
+    print(f"PASS test_4938_document_source_and_point_counts_unchanged "
+          f"(on={on}, off={off})")
+
+
+def test_4938_document_subjects_survive_journal_rebuild(tmp_path):
+    """Verification-checklist row 2 (#4938): the default document ingest's
+    ``SubjectAdded`` events and the document->Subject edges survive a
+    journal-only rebuild — live counts == rebuilt counts.
+
+    Fails if: the reorder puts ``SubjectAdded`` AFTER ``DocumentCreated`` in the
+    journal (replay would then resolve no Subject and drop the edge); or the
+    edge is written by a raw non-journaled query (live != rebuild).
+    """
+    db, log = _ingest_doc_fixture(tmp_path)
+    live = _document_counts(db)
+    rebuild_db = str(tmp_path / "rebuilt.db")
+    proj = FalkorProjection(rebuild_db)
+    try:
+        proj.rebuild_all(str(log.parent))
+        rebuilt_subjects = proj.g.query(
+            "MATCH (s:Subject) RETURN count(s)").result_set[0][0]
+        rebuilt_about = proj.g.query(
+            "MATCH ()-[:aboutSubject]->() RETURN count(*)").result_set[0][0]
+    finally:
+        proj.close()
+    assert live["subjects"] >= 1 and live["about_subject"] >= 1, live
+    assert rebuilt_subjects == live["subjects"], (
+        f"Subjects live={live['subjects']} rebuilt={rebuilt_subjects}")
+    assert rebuilt_about == live["about_subject"], (
+        f"aboutSubject live={live['about_subject']} rebuilt={rebuilt_about}")
+    print(f"PASS test_4938_document_subjects_survive_journal_rebuild "
+          f"(subjects={rebuilt_subjects}, aboutSubject={rebuilt_about})")
+
+
+def test_4938_document_edge_does_not_clear_the_point_marker(tmp_path):
+    """#4938 verification-checklist row 4 is WRONG as written: the #4889 read
+    marker must NOT clear on a document ingest.
+
+    ``subject_binding_available`` probes the ``(Point|Event)-[:aboutSubject]->
+    (:Subject)`` shapes that ``fetch_point_epistemic_state`` actually reads, so
+    the document's ``(Source)-[:aboutSubject]->(:Subject)`` edge — indicator 1 —
+    cannot make the Point ``subject`` field resolvable. Clearing the marker on
+    a Source-sourced edge would make it lie about exactly the field it
+    advertises.
+
+    Fails if: the document ingest starts writing Point/Event-sourced edges
+    (the ungated path #1370 owns), or the probe is widened to any source label.
+    """
+    from tortoise.search_engine import subject_binding_available
+    db, _log = _ingest_doc_fixture(tmp_path)
+    counts = _document_counts(db)
+    assert counts["about_subject"] >= 1, counts
+    proj = FalkorProjection(db)
+    try:
+        point_sourced = proj.g.query(
+            "MATCH (n:Point)-[:aboutSubject]->(:Subject) RETURN count(n) AS c "
+            "UNION ALL "
+            "MATCH (m:Event)-[:aboutSubject]->(:Subject) RETURN count(m) AS c"
+        ).result_set
+        assert sum(r[0] for r in point_sourced) == 0, point_sourced
+        assert subject_binding_available(proj.g) is False, (
+            "a document-Source aboutSubject edge must NOT clear the "
+            "Point/Event-scoped read marker (#4889)")
+    finally:
+        proj.close()
+    print("PASS test_4938_document_edge_does_not_clear_the_point_marker")
+
+
+def test_4938_entity_stage_failure_does_not_sink_the_document(tmp_path):
+    """#4938 durability guard: S7 is an enrichment, and ``begin_ingest`` has
+    already claimed the content hash when it runs — so a failed entity stage
+    must NOT abort before the document is written. If it did, the Source would
+    never be created AND a plain re-run would SKIP ("already processed"),
+    silently losing the document.
+
+    This is the TOTAL-failure shape (every section fails): the Source + Points
+    are still written and the failure is reported.
+
+    Fails if: the ingest raises; the Source/Points are not written; or the
+    failure is silent (no warning printed).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _failing_entity_build_model):
+        stdout = _run_main(None, capture=True)
+    counts = _document_counts(db)
+    assert counts["sources"] == 1 and counts["documents"] == 1, counts
+    assert counts["points"] > 0, counts
+    assert counts["subjects"] == 0, counts
+    assert "warning: S7 entity extraction failed" in stdout, stdout
+    print("PASS test_4938_entity_stage_failure_does_not_sink_the_document")
+
+
+def test_4938_partial_entity_failure_leaves_no_orphan_subjects(tmp_path):
+    """#4938 review P2: when S7 mints section 1's Subjects and then section 2
+    fails, those Subjects must still be wired to the document — otherwise the
+    graph holds Subjects no document is about, and the operator is told they
+    were not extracted.
+
+    Fails if: the partial failure aborts the ingest; the minted Subjects are
+    not returned/wired (``about_subject < subjects``); or the skipped section
+    is not reported.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model",
+                  _second_section_failing_build_model):
+        stdout = _run_main(None, capture=True)
+    counts = _document_counts(db)
+    assert counts["sources"] == 1 and counts["points"] > 0, counts
+    assert counts["subjects"] >= 1, (
+        f"section 1's Subjects were lost on the section-2 failure: {counts}")
+    assert counts["about_subject"] == counts["subjects"], (
+        f"orphan Subjects: {counts['subjects']} minted but only "
+        f"{counts['about_subject']} wired: {counts}")
+    assert "warning: S7 entity extraction failed" in stdout, stdout
+    print(f"PASS test_4938_partial_entity_failure_leaves_no_orphan_subjects "
+          f"({counts})")
+
+
+def test_4938_graph_write_failure_does_not_orphan_minted_subjects(tmp_path):
+    """#4938 review P2 (residual): a NON-section failure — a graph/journal
+    write inside the mint loop — must not leave the Subjects created earlier in
+    the run unpointed-at.
+
+    ``seen_subjects`` is written only after ``add_subject`` returns, so a raise
+    from the SECOND call leaves the FIRST Subject already created. The names
+    whose call returned are attached as ``partial_subject_names`` and the
+    fail-open caller still wires them, so the document is about the Subjects
+    this run actually created.
+
+    Fails if: the created Subject is left unwired (a Subject exists while no
+    document points at it), the document is not written, or the failure is
+    silent. Scope: this covers a raise from the call itself; a raise after the
+    MERGE committed is out of scope (see ``_attach_partial_subjects``).
+    """
+    from tortoise.api import EventAPI
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    real_add_subject = EventAPI.add_subject
+    calls = {"n": 0}
+
+    def flaky_add_subject(self, name, subject_kind="other"):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            # Fail BEFORE journaling, so exactly one Subject is durable.
+            raise RuntimeError("simulated graph-write failure on 2nd Subject")
+        return real_add_subject(self, name, subject_kind)
+
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _person_org_build_model), \
+            patch("tortoise.api.EventAPI.add_subject", flaky_add_subject):
+        stdout = _run_main(None, capture=True)
+    counts = _document_counts(db)
+    assert counts["sources"] == 1 and counts["documents"] == 1, counts
+    assert counts["points"] > 0, counts
+    assert counts["subjects"] >= 1, (
+        f"the minted Subject was lost on the write failure: {counts}")
+    assert counts["about_subject"] == counts["subjects"], (
+        f"orphan Subjects after a non-section failure: {counts['subjects']} "
+        f"minted, {counts['about_subject']} wired: {counts}")
+    assert "warning: S7 entity extraction failed" in stdout, stdout
+    print("PASS test_4938_graph_write_failure_does_not_orphan_minted_subjects "
+          f"({counts})")
+
+
+def test_4938_upgrade_path_files_subjects(tmp_path):
+    """#4938 review P2: the capture→upgrade path (``--upgrade``) is the
+    supported full-extraction route for captured documents, so S7 must run
+    there too — otherwise 'on by default' holds for only one entry point and an
+    upgraded document still yields 0 ``:Subject`` / 0 ``aboutSubject``.
+
+    Fails if: the upgrade path does not run S7 (0 Subjects), or it runs S7
+    without wiring the document's aboutSubject edges.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = str(tmp_path / "events.jsonl")
+    out = str(tmp_path / "graph.html")
+    seed = FalkorProjection(db)
+    try:
+        seed.g.query(
+            "CREATE (s:Source {url:$id, id:$id, title:'Vendor Evaluation', "
+            "documentKind:'research', needs_extraction:true, sourcePath:$sp})",
+            params={"id": t.name, "sp": str(t)})
+    finally:
+        seed.close()
+    argv = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--upgrade", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _person_org_build_model):
+        _run_main(None)
+    counts = _document_counts(db)
+    assert counts["subjects"] >= 1, f"upgrade path minted no Subjects: {counts}"
+    assert counts["about_subject"] >= 1, (
+        f"upgrade path wired no aboutSubject edge: {counts}")
+    print(f"PASS test_4938_upgrade_path_files_subjects ({counts})")
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
