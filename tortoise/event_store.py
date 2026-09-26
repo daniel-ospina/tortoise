@@ -185,6 +185,16 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
     and ``capture_watermark`` refuses to carry one; this is the sink-side half of
     the same guard.
 
+    A counter node missing one of its two properties is the legacy shape
+    ``hosted_backup._restore_event_meta`` (#3902) already repairs by falling
+    back to ``last_seq + 1`` for a missing ``first_seq``, so this write REPLACES
+    a NULL rather than preserving it — the monotone clause is ``IS NULL OR <``
+    for exactly that reason. A property of some OTHER type (a string, a list)
+    cannot be compared and is left in place by Cypher's ``CASE``, so it is
+    REFUSED after the write instead: reporting the proposed value for it would
+    claim a repair that never happened (a NULL ``last_seq`` was reported as a
+    restored watermark, and the next ``next_seq`` then evaluated ``null + 1``).
+
     The caller owns error handling: this runs after the wipe, so a raise here
     would leave the store without its watermark — ``rebuild_all``/``rebuild``
     catch and log the consequence rather than propagate it (#2943 "no loss
@@ -240,34 +250,56 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
     # exists to prevent, reintroduced by the repair. `ON CREATE`/`ON MATCH`
     # with the `m.last_seq < $last` guard makes the write take the MAXIMUM, and
     # the RETURN reports what is ACTUALLY stored rather than what was proposed.
+    #
+    # The guard is `IS NULL OR <`, never a bare `<`: #3902's sibling already
+    # treats a counter missing one of its two properties as a legacy shape
+    # (`_restore_event_meta` falls back to `last_seq + 1` for a missing
+    # `first_seq`), and a bare `<` against NULL evaluates to NULL — so the ELSE
+    # branch would KEEP the NULL, the write would report a value it did not
+    # store, and a NULL `last_seq` would then make `next_seq` evaluate
+    # `null + 1`. NULL is the one live value that must be REPLACED, not
+    # preserved: it carries no position to preserve.
     # `first_seq` is raised, never lowered (see the docstring), and its `CASE`
     # reads the PRE-clause value — Cypher evaluates a SET clause against the
     # state before it.
     rows = proj.g.query(
         "MERGE (m:GraphEventMeta) "
         "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
-        "ON MATCH SET m.last_seq = CASE WHEN m.last_seq < $last THEN $last "
-        "ELSE m.last_seq END, "
-        "m.first_seq = CASE WHEN m.first_seq < $first THEN $first "
-        "ELSE m.first_seq END "
+        "ON MATCH SET m.last_seq = CASE WHEN m.last_seq IS NULL "
+        "OR m.last_seq < $last THEN $last ELSE m.last_seq END, "
+        "m.first_seq = CASE WHEN m.first_seq IS NULL "
+        "OR m.first_seq < $first THEN $first ELSE m.first_seq END "
         "RETURN m.last_seq",
         params={"last": last_seq, "first": first_seq},
     ).result_set
-    if rows and rows[0][0] is not None:
-        stored = int(rows[0][0])
-        # The third input: a live counter the monotone clause preserved. It can
-        # itself be out of domain, in which case nothing was written AND the
-        # store is left as it was — refused loudly rather than silently
-        # reported as repaired.
-        if not 0 <= stored <= MAX_SEQ:
-            raise ValueError(
-                f"the stored :GraphEventMeta.last_seq is {stored}, outside the "
-                f"event-store integer domain (0 <= last_seq <= {MAX_SEQ}) — a "
-                f"live counter already held that value and this write is "
-                f"monotone, so it was preserved rather than lowered; the "
-                f"allocator must be repaired before it can be used")
-        return stored
-    return last_seq
+    raw = rows[0][0] if rows else None
+    # A NON-NUMERIC stored value is refused, not coerced. `bool` is excluded for
+    # the same reason `_validate_event_meta_entry` excludes it. Reaching here
+    # means the monotone clause could not compare the live property (Cypher's
+    # `'5' < $last` is neither true nor false, so the ELSE branch kept it) or the
+    # driver returned no row — and returning the PROPOSED `last_seq` for either
+    # (the pre-review behaviour) reported a repair that never happened.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(
+            f"the :GraphEventMeta write stored {raw!r} "
+            f"({type(raw).__name__}), not a numeric last_seq — the monotone "
+            f"clause only compares numbers, so a counter property of another "
+            f"type is preserved rather than replaced and the store is left "
+            f"without a usable allocator; repair the counter node before "
+            f"rebuilding")
+    stored = int(raw)
+    # The third input: a live counter the monotone clause preserved. It can
+    # itself be out of domain, in which case nothing was written AND the
+    # store is left as it was — refused loudly rather than silently
+    # reported as repaired.
+    if not 0 <= stored <= MAX_SEQ:
+        raise ValueError(
+            f"the stored :GraphEventMeta.last_seq is {stored}, outside the "
+            f"event-store integer domain (0 <= last_seq <= {MAX_SEQ}) — a "
+            f"live counter already held that value and this write is "
+            f"monotone, so it was preserved rather than lowered; the "
+            f"allocator must be repaired before it can be used")
+    return stored
 
 
 def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,

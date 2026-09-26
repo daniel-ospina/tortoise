@@ -563,6 +563,39 @@ def test_rebuild_all_refuses_before_the_wipe_when_capture_fails(
     assert _meta(sdk) == (1, 1), "the counter must be untouched"
 
 
+def test_event_meta_only_write_failure_names_the_watermark(
+        tmp_path, monkeypatch):
+    """A watermark-only refusal must name the mark, not "0 of everything".
+
+    FAILING VALUE: the pre-wipe write fails while the ONLY section pending is
+    the new `event_meta` one (the Points are journaled, so `synthetic_events`
+    stays empty) — and the refusal must say so. Without the name the message
+    reads "Wiping now would destroy 0 graph-only Point event(s), 0 :Batch
+    marker(s), ... and the 0 captured authoritative config entr(y/ies)", i.e.
+    it claims to protect nothing while refusing the rebuild.
+
+    REACHABLE: `_write_prewipe_snapshot` is monkeypatched to raise OSError,
+    which is the disk-full/permission failure the refusal exists for.
+    """
+    from tortoise import projection as pr
+
+    sdk, events = _mk_sdk(tmp_path)
+    sdk.create_point("statement", "journaled, so no graph-only snapshot")
+
+    def boom(path, payload):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(pr, "_write_prewipe_snapshot", boom)
+    with pytest.raises(RuntimeError) as exc:
+        sdk._get_proj().rebuild_all(str(events))
+    msg = str(exc.value)
+    assert "aborted BEFORE the graph wipe" in msg
+    assert "event-log high-water mark" in msg, (
+        "the refusal must name the one section that made the snapshot pending "
+        "(#4653), or it reads as protecting 0 of everything")
+    assert _seen_points(sdk) == 1, "the wipe must not have run"
+
+
 def test_rebuild_all_degrades_when_the_watermark_restore_fails(
         tmp_path, monkeypatch, caplog):
     """A post-wipe restore failure must not turn a completed rebuild into a raise.
@@ -700,6 +733,89 @@ def test_reestablish_watermark_raises_the_first_seq_floor_on_a_live_counter(
     assert _meta(sdk) == (5, 6), (
         "the floor must be raised above the truncated stream — preserving 1 "
         "would starve a subscriber parked under it")
+
+
+def test_reestablish_watermark_repairs_a_legacy_counter_missing_last_seq(
+        tmp_path):
+    """A counter node with no ``last_seq`` must be REPLACED, not preserved.
+
+    FAILING VALUE: `reestablish_watermark(proj, 5)` returned 5 while the stored
+    `last_seq` stayed NULL — a bare `CASE WHEN m.last_seq < $last` evaluates
+    NULL, so the ELSE branch kept it, the function returned the PROPOSED value
+    for a write that stored nothing, the caller logged the success INFO, and
+    the next `next_seq` then raised `TypeError: int() argument must be ... not
+    'NoneType'`. #3902's sibling already treats a counter missing one of its
+    two properties as a legacy shape (`_restore_event_meta` falls back to
+    `last_seq + 1` for a missing `first_seq`), so it is repaired here.
+
+    REACHABLE: the node is created with the label but no `last_seq`, which is
+    the hand-written/legacy shape `next_seq` cannot repair either.
+    """
+    from tortoise.event_store import reestablish_watermark
+
+    sdk, _events = _mk_sdk(tmp_path)
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (m:GraphEventMeta {first_seq: 0})")
+    assert _meta(sdk) == (None, 0), "the fixture must really lack last_seq"
+
+    assert reestablish_watermark(proj, 5) == 5
+    assert _meta(sdk) == (5, 6), (
+        "the NULL must be replaced — reporting 5 while storing NULL was a "
+        "false success, and the next `next_seq` evaluated `null + 1`")
+    assert event_store.next_seq(proj) == 6, "the repaired allocator must work"
+
+
+def test_reestablish_watermark_repairs_a_legacy_counter_missing_first_seq(
+        tmp_path):
+    """The other half of the legacy shape: a NULL ``first_seq`` gets the floor.
+
+    FAILING VALUE: with the counter at `last_seq = 5` and no `first_seq`,
+    `reestablish_watermark(proj, 3)` left `first_seq = NULL`, so
+    `events_poll`'s guard (`if first_seq is not None and after_seq <
+    int(first_seq)`) was skipped and a subscriber parked below the truncation
+    read `[]` forever instead of the truthful 410. #3902's fallback is
+    `last_seq + 1`.
+
+    REACHABLE: the node is created with `last_seq` only, and the live counter
+    the monotone write preserves leaves the floor unset.
+    """
+    from tortoise.event_store import reestablish_watermark
+
+    sdk, _events = _mk_sdk(tmp_path)
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (m:GraphEventMeta {last_seq: 5})")
+    assert _meta(sdk) == (5, None)
+
+    assert reestablish_watermark(proj, 3) == 5
+    assert _meta(sdk) == (5, 6), (
+        "a NULL first_seq disables events_poll's 410 floor entirely")
+    with pytest.raises(ValueError, match="cursor expired"):
+        sdk.events_poll(after=sdk._encode_cursor(1))
+
+
+def test_reestablish_watermark_refuses_a_non_numeric_stored_counter(tmp_path):
+    """A counter property Cypher cannot compare is refused, not coerced.
+
+    FAILING VALUE: a live `last_seq` of `'5'` cannot satisfy `'5' < $last`
+    (neither true nor false), so the monotone `CASE` keeps the string; the
+    pre-review code then `int()`-coerced it, passed the domain check and
+    reported a watermark at 5 while the node still held the string —
+    `next_seq` would then concatenate or fail on it. The store is refused
+    loudly instead.
+
+    REACHABLE: the property is written directly, which is what an external or
+    legacy writer leaves behind.
+    """
+    from tortoise.event_store import reestablish_watermark
+
+    sdk, _events = _mk_sdk(tmp_path)
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (m:GraphEventMeta {last_seq: '5', first_seq: 1})")
+
+    with pytest.raises(ValueError, match="numeric"):
+        reestablish_watermark(proj, 3)
+    assert _meta(sdk)[0] == "5", (
+        "the unrepairable value is left in place, never reported as restored")
 
 
 def test_reestablish_watermark_refuses_a_counter_corrupted_mid_write(tmp_path):
