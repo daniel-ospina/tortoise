@@ -16,6 +16,7 @@ import asyncio
 import re
 
 import pytest
+from fastapi import Depends, Request
 from fastapi.testclient import TestClient
 from starlette.routing import Mount, Route
 
@@ -74,8 +75,13 @@ async def _drive(middleware, scope, *, inner=None, drop_response=False):
     return sent
 
 
-def _compute_label_values(path):
-    """The set of (org, path) children currently recorded."""
+def _compute_label_values():
+    """The set of (org, path) children currently recorded.
+
+    Deliberately takes no path: an earlier signature accepted one and ignored it.
+    Dropping it is what makes the four single-child unpacking sites honest — they
+    assert the path they expect right after the call, so nothing is lost.
+    """
     values = set()
     for family in monitoring.COMPUTE_REQUESTS.collect():
         for sample in family.samples:
@@ -143,7 +149,7 @@ class TestBoundedCardinality:
         cap = monitoring.COMPUTE_MAX_PATHS
         for i in range(cap + 3):
             monitoring.record_compute("org-a", f"/v1/route-{i}", 0.001)
-        paths = {p for (_o, p) in _compute_label_values("/v1/x")}
+        paths = {p for (_o, p) in _compute_label_values()}
         assert monitoring.COMPUTE_OVERFLOW in paths
         assert len(paths) == cap + 1
 
@@ -229,14 +235,14 @@ class TestMiddleware:
         route = Route("/v1/points/{pid}", endpoint=lambda: None)
         scope = _scope("/v1/points/abc", org="org-a", route=route)
         asyncio.run(_drive(ComputeAttributionMiddleware, scope))
-        (_o, path), = _compute_label_values("/v1/points/abc")
+        (_o, path), = _compute_label_values()
         assert path == "/v1/points/{pid}"
         assert monitoring.compute_by_org()["org-a"]["requests"] == 1.0
 
     def test_unmatched_path_falls_to_the_single_unrouted_constant(self):
         scope = _scope("/nope/whatever/123", org="org-a")
         asyncio.run(_drive(ComputeAttributionMiddleware, scope))
-        (_o, path), = _compute_label_values("/nope/whatever/123")
+        (_o, path), = _compute_label_values()
         assert path == monitoring.COMPUTE_UNROUTED
 
     def test_declared_mount_prefix_is_boundary_aware(self):
@@ -267,7 +273,7 @@ class TestMiddleware:
 
     def test_empty_path_folds_to_unrouted(self):
         monitoring.record_compute("org-a", "", 0.1)
-        (_o, path), = _compute_label_values("")
+        (_o, path), = _compute_label_values()
         assert path == monitoring.COMPUTE_UNROUTED
 
     def test_a_mount_is_never_the_serving_template(self):
@@ -286,7 +292,7 @@ class TestMiddleware:
         route = Route("/v1/points/{pid}", endpoint=lambda: None)
         scope = _scope("/root/v1/points/abc", org="org-a", route=route, root_path="/root")
         asyncio.run(_drive(ComputeAttributionMiddleware, scope))
-        (_o, path), = _compute_label_values("/root/v1/points/abc")
+        (_o, path), = _compute_label_values()
         assert path == "/v1/points/{pid}"
 
     def test_org_resolved_midrequest_is_still_attributed(self):
@@ -378,3 +384,83 @@ class TestProductionWiring:
         snap = monitoring.compute_by_org()
         assert snap, "a real request through the real app recorded nothing"
         assert sum(v["requests"] for v in snap.values()) >= 1.0
+
+    def test_a_real_app_request_attributes_to_the_resolved_org(self):
+        """END-TO-END: a resolved org must reach the LABEL, not just the total.
+
+        The test above proves a hook is alive, but `/openapi.json` is SKIP_AUTH,
+        so no org ever resolves and every request would still satisfy it by
+        collapsing into the "" child. That is precisely the misattribution this
+        issue exists to prevent, so the link the real lanes depend on —
+        auth resolution -> `request.state.org_id` -> `scope["state"]` -> label —
+        is walked through the REAL app and the REAL middleware stack.
+
+        The probe route is added to the real app (and removed afterwards) so the
+        request runs under the whole real stack. It depends on
+        `get_current_org_session_ungated` — the same DI-usable resolver `/v1/team`
+        uses — driven through the app's own override seam, and the override
+        writes `request.state.org_id` because that write is exactly what the two
+        real lanes do.
+
+        (Not `Depends(get_current_org)`: that name is called DIRECTLY everywhere in
+        this module rather than resolved by DI, so a probe declaring it would be
+        testing a wiring production does not use. The probe takes the resolver
+        production routes actually declare.)
+
+        What this pins is the state -> label hop. What it does not pin is the
+        bodies of the two publishing lanes, which cannot run without key auth —
+        ``test_the_org_publishing_lanes_still_publish`` covers that half.
+        """
+        import tortoise.hosted_api as ha
+
+        monitoring._reset_compute()
+
+        async def _probe(org: dict = Depends(ha.get_current_org_session_ungated)):  # noqa: B008
+            return {"org": org.get("org_id")}
+
+        async def _override(request: Request):
+            request.state.org_id = "org-e2e"
+            return {"org_id": "org-e2e", "key_id": None, "tier": "free",
+                    "delegation_depth": None, "scopes": []}
+
+        path = "/__compute_attribution_probe__"
+        real_app.add_api_route(path, _probe, methods=["GET"])
+        real_app.dependency_overrides[ha.get_current_org] = _override
+        try:
+            client = TestClient(real_app)
+            resp = client.get(path)
+        finally:
+            real_app.dependency_overrides.pop(ha.get_current_org, None)
+            real_app.router.routes = [
+                r for r in real_app.router.routes
+                if getattr(r, "path", None) != path]
+
+        # The probe proves the dependency really ran and was handed the org.
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"org": "org-e2e"}
+        snap = monitoring.compute_by_org()
+        assert "org-e2e" in snap, (
+            "a resolved org did not reach the label — attribution collapsed to "
+            f"the unattributed child; got {sorted(snap)}")
+        assert snap["org-e2e"]["requests"] >= 1.0
+
+    def test_the_org_publishing_lanes_still_publish(self):
+        """The other half of attribution: the lanes that RESOLVE an org must
+        publish it to `request.state`.
+
+        `test_a_real_app_request_attributes_to_the_resolved_org` pins the
+        state -> label hop with an override. This pins the lane -> state hop,
+        which no test can drive without real key auth: deleting the
+        `request.state.org_id = …` line from either lane would silently collapse
+        every authenticated request into the "" child with the suite green.
+        """
+        import inspect
+
+        import tortoise.hosted_api as ha
+
+        for lane in (ha.get_current_org, ha._get_current_org_supabase):
+            src = inspect.getsource(lane)
+            assert "request.state.org_id" in src, (
+                f"{lane.__name__} no longer publishes the resolved org to "
+                "request.state — every request it authenticates would be "
+                "attributed to the '' child")
