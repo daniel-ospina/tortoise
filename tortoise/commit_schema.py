@@ -184,6 +184,18 @@ def compile_vocab(packs_dir: Path | str | None = None,
     per-graph approval on the live commit path. What remains is the
     per-graph pack SELECTION surface (#2728).
 
+    **Scope of that claim — verified by the #5339 security review, do NOT
+    read it as "object kinds are gated":** Layer-1 gates
+    ``points[].pointKind``, ``events[].eventKind`` and
+    ``sources[].sourceKind``. It does **not** gate ``entities[].kind``, which
+    the hosted door persists verbatim (``hosted_api``:
+    ``objectKind=er.entity.kind``) — an off-vocabulary object kind is still
+    written (#5202). Separately, the approval set this gate is handed is
+    itself writable through the unvalidated ``objectKind`` field on
+    ``POST /v1/objects`` (#5475), so it is not (yet) an authorization
+    boundary. This function gates the vocab it is GIVEN; it does not make the
+    write path's object kinds closed-vocab.
+
     Memoized per gate (#5163 review, P1). ``compile_vocab`` runs
     ``PackRegistry.load_all()`` — a filesystem walk + YAML parse of every
     manifest, measured at ~40 ms — and the hosted commit door is
@@ -239,9 +251,15 @@ _vocab_cache: Vocab | None = None
 
 #: Gate-keyed memo (#5163 review, P1): without it the hosted commit door pays
 #: ~40 ms of registry load + YAML parse per request ON THE EVENT LOOP. ``None``
-#: is a real key — the ungated catalogue union. Bounded in practice by the
-#: number of distinct installed-namespace sets (see the LRU note on
-#: ``_PACK_*_FORMS``); cleared by ``refresh_vocab``.
+#: is a real key — the ungated catalogue union. Cleared by ``refresh_vocab``.
+#:
+#: !! UNBOUNDED — one entry per distinct installed-namespace set and nothing
+#: evicts it (#5339 security review, P2). The key space is tenant-growable
+#: (``graph_kind_namespaces`` unions namespaces found in the graph's data), so
+#: this needs a cap in the style of ``pack_manifest_store._MAX_TENANT_VIEWS``.
+#: The same applies to ``value_extractor._VOCAB_CACHE`` /
+#: ``_KIND_SPEC_CACHE`` and ``extractor_v2._PACK_OBJECT_FORMS`` /
+#: ``_PACK_EVENT_FORMS``.
 _vocab_gate_cache: dict[frozenset[str] | None, Vocab] = {}
 
 

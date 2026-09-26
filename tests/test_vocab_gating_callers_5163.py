@@ -376,8 +376,13 @@ class TestS5WritePathGateIsGraphScoped:
 
     FAIL-ON: the write gate unions every pack's declared kinds into the
     accepted set, so a dev-only graph accepts ``marketing:campaign``.
-    REACHABLE: the direct-write capture path calls these helpers with the
-    graph's own master — the master built from that graph's gated brief.
+    REACHABLE: the S5 repair path calls these helpers with the master it is
+    handed, and when that master came from ``build_master_list(sdk)`` it
+    carries the graph's resolved installed set. NOTE (review finding, #5202):
+    the SDK write entry points (``_commit_session_v2``, ``capture_session``)
+    do NOT currently thread a gated master, so on those paths
+    ``execute_embed`` still falls back to the ungated ``build_master_list()``.
+    These tests pin the HELPER contract, not that wiring.
     """
 
     @staticmethod
