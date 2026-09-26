@@ -72,7 +72,12 @@ def _run_hook(hook: Path, stdin_data: str, path: Path,
     env = dict(os.environ)
     env["PATH"] = f"{path}:{env.get('PATH', '')}"
     env.pop("TORTOISE_SRC_DIR", None)
-    for var in ("TORTOISE_CAPTURE", "TORTOISE_API_KEY", "TORTOISE_API_URL"):
+    for var in ("TORTOISE_CAPTURE", "TORTOISE_API_KEY", "TORTOISE_API_URL",
+                # #3797: the shipped hooks now write a local ``hook-run``
+                # observation, so an inherited receipt dir would put it
+                # OUTSIDE this test's tmp HOME — the "never touch the real
+                # $HOME" contract this helper exists to keep.
+                "TORTOISE_IMPORT_RECEIPT_DIR"):
         env.pop(var, None)
     home = path.parent / "home"
     home.mkdir(exist_ok=True)
