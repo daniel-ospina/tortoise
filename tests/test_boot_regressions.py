@@ -614,6 +614,72 @@ def test_ruff_config_does_not_ignore_f823():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def test_jwks_prewarm_is_a_task_in_the_startup_half_never_awaited():
+    """#3284: the JWKS pre-warm must be SCHEDULED, before ``yield``.
+
+    Two failure modes this pins, both of which look fine in review:
+
+    - ``await prewarm_jwks()`` before ``yield`` — uvicorn binds only after
+      ``lifespan.startup()`` returns, so a network call awaited in the startup
+      half means NO listening socket at all (#2953). The pre-warm must be a
+      task.
+    - creating the task AFTER ``yield`` (the shutdown half) — it would never
+      run at startup and the first request would pay the fetch again, i.e. the
+      original bug with extra steps.
+
+    Static/AST on purpose: this file imports no app (see the module docstring).
+    """
+    lifespan = _lifespan_fn()
+    assign_line: int | None = None
+    yield_line: int | None = None
+    is_create_task = False
+    for node in ast.walk(lifespan):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and node.targets[0].attr == "_jwks_prewarm_task"
+        ):
+            assign_line = node.lineno
+            value = node.value
+            is_create_task = (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "create_task"
+            )
+        if isinstance(node, ast.Yield):
+            yield_line = node.lineno
+
+    assert assign_line is not None, (
+        "no `_jwks_prewarm_task` assignment found in _lifespan — the #3284 "
+        "cold-start pre-warm was dropped"
+    )
+    assert is_create_task, (
+        "`_jwks_prewarm_task` is not assigned from a `create_task(...)` call — "
+        "awaiting the pre-warm in the startup half stops uvicorn binding (#2953)"
+    )
+    assert yield_line is not None, "no yield found in _lifespan"
+    assert assign_line < yield_line, (
+        f"_jwks_prewarm_task is created at line {assign_line}, AFTER the yield "
+        f"at line {yield_line} — it would never run at startup"
+    )
+
+
+@pytest.mark.parametrize("keyword", ["_fetch_hard_timeout", "prewarm_jwks"])
+def test_session_auth_exposes_the_cold_start_bound(keyword: str):
+    """#3284: the bound and the pre-warm must exist in session_auth.
+
+    A cheap presence pin so a future refactor that drops either half fails
+    loudly here as well as in the behavioural tests. Case-insensitive because
+    the bound is an uppercase constant and the pre-warm is a function.
+    """
+    source = (TORTOISE_PKG / "session_auth.py").read_text()
+    assert keyword.lower() in source.lower(), (
+        f"tortoise/session_auth.py no longer defines {keyword!r} — the #3284 "
+        f"cold-start fix has been removed"
+    )
+
+
 def test_boot_sweeps_are_scheduled_before_the_retention_interval_parse():
     """Round-3 review P2: a malformed ``TORTOISE_EVENT_RETENTION_INTERVAL``
     must not cancel the one-time boot sweeps.
@@ -691,6 +757,10 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         "_health_probe_task",
         "_boot_sweep_task",
         "_event_retention_task",
+        # #3284: the JWKS pre-warm is one-shot but bounded-NETWORK and armed in
+        # the startup half, so a re-entry/shutdown must cancel an in-flight
+        # fetch rather than leave it racing the next lifespan's cache write.
+        "_jwks_prewarm_task",
     }
     attr_tuple: tuple[str, ...] | None = None
     for node in ast.walk(tree):

@@ -44,11 +44,71 @@ _JWKS_URL = f"{_SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
 _JWKS_TTL = float(os.environ.get("TORTOISE_JWKS_TTL", "300"))  # seconds
 _FETCH_TIMEOUT = float(os.environ.get("TORTOISE_JWKS_TIMEOUT", "5"))  # seconds
 _COOLDOWN_S = float(os.environ.get("TORTOISE_JWKS_COOLDOWN", "30"))  # failure/miss cooldown
+
+# ── #3284: the fetch's REAL bound ─────────────────────────────────────────
+#
+# ``httpx``'s ``timeout=`` is applied PER PHASE (connect / read / write /
+# pool) — it is NOT a total deadline, and ``read`` restarts for each read
+# operation, so a server that accepts the connection and dribbles bytes holds
+# the request arbitrarily long. Measured on this repo: a 0.5s per-phase timeout
+# allowed a 4.97s response (9.9x). ``_FETCH_TIMEOUT`` is therefore only the
+# per-phase budget we ASK FOR; the actual bound is the asyncio deadline below,
+# which sits strictly ABOVE it — the same layered-timeout pattern the
+# control-plane probe uses (``hosted_api.CONTROL_PLANE_PROBE_TOTAL_S``).
+#
+# This matters more here than anywhere else in the repo: a COLD process has no
+# last-good key set (``self._keys is None``), so the first
+# session-authenticated request pays the entire fetch while every other request
+# queues behind the single-flight lock. Unbounded, that is the observed "first
+# request after a cold start returns nothing" symptom (#3284): even the
+# documented `_FETCH_TIMEOUT = 5` was not a real bound.
+
+_JWKS_BOUND_MARGIN_S = 1.0
+#: Wall-clock ceiling for ONE JWKS fetch attempt. Keep it comfortably inside a
+#: client's connect budget: Pi's mcp-client uses 15s, monitors commonly 10s.
+#: Default 5 (per-phase) + 1 (margin) = 6s worst case per fetch attempt.
+_FETCH_HARD_TIMEOUT = float(
+    os.environ.get(
+        "TORTOISE_JWKS_HARD_TIMEOUT", str(_FETCH_TIMEOUT + _JWKS_BOUND_MARGIN_S)
+    )
+)
 _MAX_JWKS_BYTES = 65536  # post-buffer JWKS body cap (defense-in-depth; httpx buffers first)
 _MAX_TOKEN_BYTES = 16000  # repo-enforced token cap — BELOW the server's ~16KB
 # header-line limit (uvicorn/h11 max_incomplete_event_size) so the repo guard —
 # not a raw server 400/431 without CORS headers — is the first line of rejection
 # (pyjwt 2.13 has no max_length kwarg). Code-review #1467 P2.
+
+
+def _retry_after_seconds() -> int:
+    """The advertised back-off window, read at REQUEST time so a deployment
+    that raises ``TORTOISE_JWKS_COOLDOWN`` reports the real recovery window.
+
+    Floored at 1s: ``Retry-After: 0`` invites a hot retry loop against an
+    upstream that is already unavailable.
+    """
+    return max(1, round(_COOLDOWN_S))
+
+
+def _verification_unavailable() -> HTTPException:
+    """The single 'no last-good keys' 503 — bounded, legible, retryable.
+
+    #3284: a cold-start client must be able to tell 'temporarily unavailable,
+    back off' from 'broken, stop'. Without ``Retry-After`` the failure is
+    indistinguishable from an outage and automated retry/backoff is defeated.
+    The JSON ``detail`` body rides along via FastAPI's default handler, which
+    preserves ``exc.headers``.
+
+    Fleet note (#3144): this is the APP-layer 503. A proxy-synthesized 503 —
+    Fly's ``[PR01] no known healthy instances`` — is generated BEFORE the app
+    sees the request and can carry neither a body nor this header; that one is
+    only fixable by never de-registering the machine, which is a different
+    defect (#3062/#3063).
+    """
+    return HTTPException(
+        status_code=503,
+        detail="Session verification unavailable",
+        headers={"Retry-After": str(_retry_after_seconds())},
+    )
 
 
 class _JWKSCache:
@@ -95,10 +155,14 @@ class _JWKSCache:
             # one fetch attempt per cooldown window under concurrency).
             if self._last_failure_at is not None and now - self._last_failure_at < _COOLDOWN_S:
                 if self._keys is None:
-                    raise HTTPException(status_code=503, detail="Session verification unavailable")
+                    raise _verification_unavailable()
                 return self._keys
             try:
-                content = await _fetch_jwks()
+                # The asyncio deadline is what actually bounds this fetch —
+                # httpx's per-phase timeout is not a total (see
+                # ``_FETCH_HARD_TIMEOUT``).
+                async with asyncio.timeout(_FETCH_HARD_TIMEOUT):
+                    content = await _fetch_jwks()
                 if len(content) > _MAX_JWKS_BYTES:
                     raise ValueError("JWKS response exceeds size cap")
                 parsed = _parse_jwks(content)
@@ -130,13 +194,27 @@ class _JWKSCache:
                     )
             except HTTPException:
                 raise
+            except TimeoutError as exc:
+                # ``asyncio.timeout``'s deadline — a distinct failure mode from
+                # a transport error, and ``str(TimeoutError())`` is empty, so
+                # it is logged explicitly rather than folded into the generic
+                # clause below (whose message would be blank).
+                self._last_failure_at = time.monotonic()
+                if self._keys is None:
+                    logger.warning(
+                        "JWKS fetch exceeded its %.1fs bound (cold) — 503",
+                        _FETCH_HARD_TIMEOUT,
+                    )
+                    raise _verification_unavailable() from exc
+                logger.warning(
+                    "JWKS fetch exceeded its %.1fs bound — serving stale",
+                    _FETCH_HARD_TIMEOUT,
+                )
             except Exception as exc:  # network, json, shape, size, filter errors
                 self._last_failure_at = time.monotonic()
                 if self._keys is None:
                     logger.warning("JWKS unavailable (cold) — 503: %s", exc)
-                    raise HTTPException(
-                        status_code=503, detail="Session verification unavailable"
-                    ) from exc
+                    raise _verification_unavailable() from exc
                 logger.warning("JWKS fetch failed — serving stale: %s", exc)
             return self._keys
 
@@ -177,6 +255,43 @@ async def _fetch_jwks() -> bytes:
 
 
 _jwks = _JWKSCache()
+
+
+async def prewarm_jwks() -> bool:
+    """Pre-pay the JWKS first contact from the application's startup half (#3284).
+
+    The cache's TTL / stale-serve / kid-aware single-flight / cooldown
+    behaviour is already correct. The one thing it cannot do by itself is pay
+    its FIRST fetch off the request path: on a cold process the first
+    session-authenticated request waits for the whole fetch while every other
+    request queues behind the single-flight lock, so a client with a 10s budget
+    sees nothing at all rather than a fast 401.
+
+    Callers MUST schedule this as a background TASK and never ``await`` it
+    before the listener binds — uvicorn only binds after
+    ``lifespan.startup()`` returns, so awaiting a network call in that window
+    means no listening socket at all (#2953).
+
+    Never raises (except cancellation, which is the shutdown/re-entry disarm
+    and must propagate). A failed warm-up is not fatal: it only means the first
+    request pays the fetch itself — now bounded by ``_FETCH_HARD_TIMEOUT`` and
+    answered with a bounded 503 + ``Retry-After`` if it cannot complete.
+
+    Returns True when the cache holds at least one usable key afterwards.
+    """
+    try:
+        await _jwks.get(force=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # 503 HTTPException, transport, parse — all non-fatal here
+        logger.info(
+            "JWKS pre-warm did not complete (%s: %s) — the first session "
+            "request will pay the bounded fetch instead",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return bool(_jwks._keys)
 
 
 def _b64url_decode(part: str) -> bytes:

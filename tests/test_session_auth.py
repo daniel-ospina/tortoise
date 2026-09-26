@@ -95,6 +95,27 @@ class FetchStub:
         return self.body
 
 
+class SlowFetchStub(FetchStub):
+    """A JWKS upstream that ACCEPTS the request and then stalls.
+
+    This is the #3284 shape: not a refused connection (which fails fast), but a
+    remote that holds the socket open — a cold, slow or retrying Supabase JWKS
+    endpoint. Without a wall-clock deadline the caller waits the entire stall,
+    which is exactly how the first post-deploy request produced `000`.
+    """
+
+    def __init__(self, stall_s: float, body: bytes | None = None):
+        super().__init__(body=body)
+        self.stall_s = stall_s
+
+    async def __call__(self) -> bytes:
+        self.count += 1
+        await asyncio.sleep(self.stall_s)
+        if self.body is None:
+            raise AssertionError("SlowFetchStub: no body configured")
+        return self.body
+
+
 def ec_jwks_bytes(kid: str = "kid-1") -> bytes:
     priv, pub = u.make_ec_keypair()  # noqa: RUF059
     return json.dumps(u.build_ec_jwks(pub, kid)).encode()
@@ -649,6 +670,11 @@ class TestCacheHardening:
         with pytest.raises(HTTPException) as ei:
             verify_ok(tok)
         assert ei.value.status_code == 503
+        # #3284: the cold 503 must be RETRYABLE, not an opaque outage — a
+        # non-empty JSON detail plus a Retry-After window.
+        assert ei.value.headers.get("Retry-After") == str(
+            max(1, round(sa._COOLDOWN_S)))
+        assert ei.value.detail
 
     def test_cooldown_skipped_no_last_good_503(self, monkeypatch):
         # After a failure the cooldown is armed; a cooldown-skipped fetch with
@@ -892,6 +918,188 @@ class TestCacheHardening:
         with pytest.raises(HTTPException) as ei:
             verify_ok(tok)
         assert ei.value.status_code == 503
+
+
+# ── #3284: cold-start bound + startup pre-warm ───────────────────────────
+#
+# The symptom: the FIRST session-authenticated request on a cold process waits
+# the whole JWKS fetch (and every request arriving meanwhile queues behind the
+# single-flight lock), so a client with a 10s budget sees nothing at all rather
+# than a fast 401. Two properties are pinned here: (1) the fetch has a real
+# WALL-CLOCK bound even against an upstream that accepts and stalls, and the
+# failure is a bounded 503 + Retry-After; (2) the first fetch can be pre-paid
+# at startup so the first request never pays it.
+
+
+class TestColdStartBound:
+    #: A stall far beyond any plausible client budget; the bound must cut it.
+    STALL_S = 8.0
+    #: The bound as exercised in tests (the production default is 6s).
+    BOUND_S = 0.2
+    #: Generous ceiling: proves the bound fired, not that the stub errored.
+    CEILING_S = 3.0
+
+    def _bound(self, monkeypatch):
+        monkeypatch.setattr(sa, "_FETCH_HARD_TIMEOUT", self.BOUND_S)
+
+    def test_cold_stalling_jwks_returns_bounded_503(self, monkeypatch):
+        """THE regression test for #3284.
+
+        Cold cache + an upstream that accepts and stalls: the request must come
+        back with a bounded 503 (with Retry-After) well inside the budget —
+        NOT hang for the stall. Without the asyncio deadline this test takes
+        STALL_S (8s) and fails the elapsed assertion.
+        """
+        self._bound(monkeypatch)
+        stub = SlowFetchStub(self.STALL_S)
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        t0 = time.monotonic()
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(tok)
+        elapsed = time.monotonic() - t0
+
+        assert ei.value.status_code == 503
+        assert ei.value.headers.get("Retry-After")
+        assert ei.value.detail  # non-empty body, never a zero-byte hang
+        # Bounded: waited for the deadline (not an instant error), and nowhere
+        # near the stall or a 10s client budget.
+        assert self.BOUND_S * 0.5 < elapsed < self.CEILING_S, (
+            f"cold request took {elapsed:.2f}s against a {self.BOUND_S}s bound "
+            f"(stall {self.STALL_S}s) — the fetch is not bounded")
+        assert stub.count == 1  # single-flight: one attempt, not one per request
+
+    def test_cold_stalling_jwks_single_flight_bounds_concurrency(self, monkeypatch):
+        """Concurrent cold requests all return bounded — none queues past it."""
+        self._bound(monkeypatch)
+        stub = SlowFetchStub(self.STALL_S)
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        async def burst():
+            return await asyncio.gather(
+                *[sa.verify_session_jwt(make_request(tok)) for _ in range(5)],
+                return_exceptions=True,
+            )
+
+        t0 = time.monotonic()
+        outcomes = _run(burst())
+        elapsed = time.monotonic() - t0
+
+        assert all(
+            isinstance(o, HTTPException) and o.status_code == 503 for o in outcomes
+        )
+        assert elapsed < self.CEILING_S, f"5 cold requests took {elapsed:.2f}s"
+        assert stub.count == 1
+
+    def test_warm_stalling_jwks_serves_stale_within_bound(self, monkeypatch):
+        """A warm cache still answers during a stall — bounded, via last-good."""
+        priv, pub = u.make_ec_keypair()
+        seed_keys(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
+        _run(sa._jwks.get())  # initial fetch, fast — cache now holds kid-1
+        stub = SlowFetchStub(self.STALL_S)  # subsequent fetches stall
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        self._bound(monkeypatch)
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # force TTL expiry
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+
+        t0 = time.monotonic()
+        assert verify_ok(tok)["user_id"] == "user-123"  # stale-serve
+        elapsed = time.monotonic() - t0
+        assert elapsed < self.CEILING_S, (
+            f"warm request took {elapsed:.2f}s during a {self.STALL_S}s stall")
+        assert stub.count == 1
+
+    def test_timeout_arms_cooldown_no_per_request_refetch(self, monkeypatch):
+        """A bounded-out fetch arms the cooldown — a stall cannot be retried
+        once per request (the forged-kid-flood / stampede guard stays intact)."""
+        self._bound(monkeypatch)
+        stub = SlowFetchStub(self.STALL_S)
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        for _ in range(3):
+            with pytest.raises(HTTPException) as ei:
+                verify_ok(tok)
+            assert ei.value.status_code == 503
+        assert stub.count == 1  # cooldown-skipped after the first bound-out
+
+    def test_available_503_carries_body_and_retry_after_to_the_client(self, monkeypatch):
+        """The header and body survive the HTTP layer.
+
+        A raise-site header is only real if the response the CLIENT sees keeps
+        it — FastAPI serves HTTPException through its default handler, which
+        preserves ``exc.headers``. Rendered here rather than booting the app.
+        """
+        from fastapi.exception_handlers import http_exception_handler
+
+        exc = sa._verification_unavailable()
+        resp = _run(http_exception_handler(make_request("x"), exc))
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == str(
+            max(1, round(sa._COOLDOWN_S)))
+        assert resp.body  # non-empty JSON detail
+        assert b"unavailable" in resp.body
+
+    def test_retry_after_tracks_cooldown_at_request_time(self, monkeypatch):
+        monkeypatch.setattr(sa, "_COOLDOWN_S", 7.0)
+        assert sa._verification_unavailable().headers["Retry-After"] == "7"
+        monkeypatch.setattr(sa, "_COOLDOWN_S", 0.0)
+        assert sa._verification_unavailable().headers["Retry-After"] == "1"  # floored
+
+
+class TestStartupPrewarm:
+    """#3284: the first fetch can be pre-paid at startup."""
+
+    def test_prewarm_fills_cache_so_first_request_pays_nothing(self, monkeypatch):
+        priv, pub = u.make_ec_keypair()
+        stub = FetchStub(body=json.dumps(u.build_ec_jwks(pub, "kid-1")).encode())
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+
+        assert sa._jwks._keys is None  # cold
+        assert _run(sa.prewarm_jwks()) is True
+        assert stub.count == 1
+        assert "kid-1" in sa._jwks._keys
+
+        # The first session request adds NO fetch — it never paid the
+        # first-contact cost.
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        assert verify_ok(tok)["user_id"] == "user-123"
+        assert stub.count == 1
+
+    def test_prewarm_failure_is_not_fatal(self, monkeypatch):
+        stub = FetchStub(error=OSError("jwks down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        assert _run(sa.prewarm_jwks()) is False  # never raises
+
+    def test_prewarm_is_bounded_against_a_stall(self, monkeypatch):
+        """A stalling upstream cannot hold the warm-up (or the boot) open."""
+        monkeypatch.setattr(sa, "_FETCH_HARD_TIMEOUT", 0.2)
+        monkeypatch.setattr(sa, "_fetch_jwks", SlowFetchStub(8.0))
+        t0 = time.monotonic()
+        assert _run(sa.prewarm_jwks()) is False
+        assert time.monotonic() - t0 < 3.0
+
+    def test_prewarm_propagates_cancellation(self, monkeypatch):
+        """Shutdown/re-entry disarm must be able to cancel an in-flight warm-up."""
+        monkeypatch.setattr(sa, "_fetch_jwks", SlowFetchStub(30.0))
+
+        async def go():
+            task = asyncio.create_task(sa.prewarm_jwks())
+            await asyncio.sleep(0)  # let it enter the fetch
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        _run(go())
+
+    def test_prewarm_success_is_false_on_zero_usable_keys(self, monkeypatch):
+        """Zero usable keys is a failure verdict, not a warm cache."""
+        monkeypatch.setattr(sa, "_fetch_jwks", FetchStub(body=b'{"keys": []}'))
+        assert _run(sa.prewarm_jwks()) is False
 
 
 # ── Concurrency ───────────────────────────────────────────────────────────

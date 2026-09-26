@@ -99,7 +99,7 @@ from tortoise.sdk import (
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
-from tortoise.session_auth import get_current_user, verify_session_jwt
+from tortoise.session_auth import get_current_user, prewarm_jwks, verify_session_jwt
 from tortoise.transport import ask_exposure_enabled
 
 _logger = logging.getLogger(__name__)
@@ -891,6 +891,11 @@ _LIVENESS_TASK_ATTRS = (
     "_health_probe_task",
     "_boot_sweep_task",
     "_event_retention_task",
+    # #3284: one-shot, but bounded-network and armed in the startup half — the
+    # same disarm discipline applies (a re-entry or shutdown must cancel an
+    # in-flight fetch rather than leave it racing the new lifespan's cache
+    # write). Registered here so it cannot be silently orphaned.
+    "_jwks_prewarm_task",
 )
 
 
@@ -961,6 +966,38 @@ async def _stop_liveness(app) -> None:
     if pending:
         with suppress(Exception):
             await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def _session_jwks_prewarm() -> None:
+    """Warm the session-auth JWKS cache behind the listener (#3284).
+
+    Gated on Supabase being the control plane: session JWTs (the dashboard's
+    two-tier auth, D1 #568) only exist there, so a self-host/embedded boot —
+    and every TestClient boot in the default registry-mode test lane — issues
+    no pointless network fetch.
+
+    Scheduled as a TASK and never awaited before ``yield``: uvicorn binds only
+    after ``lifespan.startup()`` returns, so awaiting a network call in the
+    startup half means no listening socket at all (#2953). ``prewarm_jwks``
+    never raises except on cancellation, so this cannot take the boot down.
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+
+        if not is_supabase_enabled():
+            _logger.debug(
+                "session JWKS pre-warm skipped — control plane is not Supabase")
+            return
+        if await prewarm_jwks():
+            _logger.info("session JWKS pre-warm ready")
+        else:
+            _logger.info(
+                "session JWKS pre-warm deferred — the first session request "
+                "will pay the bounded fetch")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # belt-and-suspenders: a warm-up is never fatal
+        _logger.warning("session JWKS pre-warm failed: %s", exc)
 
 
 @asynccontextmanager
@@ -1278,6 +1315,20 @@ async def _lifespan(app):
                 _health_probe_loop())
         except Exception as exc:
             _logger.warning("health probe refresher not started: %s", exc)
+
+        # ── #3284: pre-pay the session-auth (JWKS) first contact. The cache's
+        # TTL / stale-serve / single-flight behaviour is already right; the one
+        # thing it cannot do is pay its FIRST fetch off the request path. On a
+        # cold process the first session-authenticated request otherwise waits
+        # the whole fetch while every other request queues behind the
+        # single-flight lock — the "first request after a cold start returns
+        # nothing" symptom. Scheduled as a TASK, never awaited (see
+        # ``_session_jwks_prewarm``).
+        try:
+            app.state._jwks_prewarm_task = asyncio.get_event_loop().create_task(
+                _session_jwks_prewarm())
+        except Exception as exc:
+            _logger.warning("session JWKS pre-warm not started: %s", exc)
         yield
 
         # ── shutdown: disarm the watchdog before the heartbeat task is
