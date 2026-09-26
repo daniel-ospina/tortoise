@@ -352,6 +352,13 @@ def currency_status(remembered: str, current: str) -> str:
     readers can disagree about the same link. The comparison is exact string
     equality — the versions are content hashes, so there is no ordering to get
     wrong and no "newer" to infer.
+
+    ⚠ IT COMPARES **ONE LINK'S** PAIR. A Point's own currency is an AGGREGATE
+    across its links (ONTOLOGY §4.6: stale if ANY link is behind, current only
+    when EVERY link is), so a Point-level verdict is NOT derivable from a single
+    pair — a caller that collapses several links into one call here can report
+    ``current`` for a Point another link makes stale. Aggregate per §4.6 at the
+    call site; never assume this helper speaks for the Point.
     """
     if not remembered or not current:
         return "unknown"
@@ -406,13 +413,6 @@ class SearchResult:
     # byte-identical to pre-change output.
     source_ref: Any = None  # Point.extractedFrom — the Source/document link
     captured_at: str = ""   # Point.createdAt — when the fact entered memory
-    # #5199 — the version note, read (never stored). ``source_version`` is the
-    # version this hit's link recorded it was read at; ``source_current_version``
-    # is the source's version now; ``to_dict`` derives ``currency`` from the pair
-    # via :func:`currency_status`. Additive and flag-gated like the two fields
-    # above: emitted only when present, so a default call is byte-identical.
-    source_version: str = ""          # the note itself (README: the link's anchor)
-    source_current_version: str = ""  # the source's version now (contentHash)
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -466,20 +466,12 @@ class SearchResult:
         # Provenance (#3837 owner decision: source + when learned). Additive —
         # emitted only when a value is present, so an unflagged call and an
         # unflagged empty-provenance hit both stay byte-identical.
-        if self.source_ref or self.captured_at or self.source_version or self.source_current_version:
+        if self.source_ref or self.captured_at:
             prov: dict[str, Any] = {}
             if self.source_ref:
                 prov["source"] = self.source_ref
             if self.captured_at:
                 prov["captured_at"] = self.captured_at
-            # #5199: the note and its currency. `currency` is DERIVED here (a
-            # read), never stored, and is the honest `unknown` whenever either
-            # version is missing — see `currency_status`.
-            if self.source_version or self.source_current_version:
-                prov["sourceVersion"] = self.source_version
-                prov["sourceCurrentVersion"] = self.source_current_version
-                prov["currency"] = currency_status(
-                    self.source_version, self.source_current_version)
             d["provenance"] = prov
         return d
 

@@ -14868,7 +14868,6 @@ class TortoiseSDK:
             fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
             search_provenance_enabled,
-            currency_status,
             subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
@@ -15388,40 +15387,6 @@ class TortoiseSDK:
                     edge_sid = (row[5] or "") if len(row) > 5 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
-                if _prov and entity_data:
-                    # #5199 — the version NOTE, read (never stored). Fetched in
-                    # its own query so the row shape above is untouched (which
-                    # row wins for a Point contained by several :Session nodes is
-                    # plan-sensitive, and that must not change here). The whole
-                    # block is inside the flag gate, so the default path still
-                    # issues exactly zero extra queries.
-                    #
-                    # NOTE (honest scope): on THIS branch the note on the
-                    # ``extractedFrom`` link is written by #5256, which is stacked
-                    # on this branch and not yet merged — so production Points
-                    # report ``unknown`` here until it lands, and that is the
-                    # correct answer, not a bug: nothing has recorded a version
-                    # for them yet.
-                    _note_rows = graph.query(
-                        "MATCH (n:Point) WHERE n.id IN $ids "
-                        "OPTIONAL MATCH (n)-[ef:extractedFrom]->(src:Source) "
-                        "RETURN n.id, src.contentHash, ef.sourceVersion",
-                        params={"ids": result_ids},
-                    ).result_set
-                    _pairs: dict[str, list[tuple[str, str]]] = {}
-                    for _pid, _cur, _rem in _note_rows:
-                        _pairs.setdefault(_pid, []).append((_rem or "", _cur or ""))
-                    for _pid, _entries in _pairs.items():
-                        _entry = entity_data.get(_pid)
-                        if _entry is None:
-                            continue
-                        # Prefer a link that actually CARRIES a note; break ties
-                        # by value, so engine plan order can never change the
-                        # answer a caller sees.
-                        _rem, _cur = sorted(
-                            _entries, key=lambda t: (t[0] == "", t[0], t[1]))[0]
-                        _entry["source_version"] = _rem
-                        _entry["source_current_version"] = _cur
                 for pid, entry in entity_data.items():
                     # D3: no fabrication, and an EXPLICIT identity wins: the
                     # Point's own ``sessionId`` prop is taken when it is
@@ -15609,8 +15574,6 @@ class TortoiseSDK:
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),
                 captured_at=pt.get("captured_at", ""),
-                source_version=pt.get("source_version", ""),
-                source_current_version=pt.get("source_current_version", ""),
             )
             results.append(result)
 
@@ -22022,6 +21985,15 @@ class TortoiseSDK:
         as ``entity`` rather than dropping the row. Rows that DO resolve a
         reference are preferred, so a Point extracted from several sources
         keeps returning a referenced entity whenever one exists.
+
+        #5199 — among several references the one **carrying a version note** is
+        preferred, so the note on the ``source -[references]-> entity`` link is
+        readable whenever it exists. Without that preference the winner is plan
+        order: `hosted_api` gives one Source a document derivation link AND
+        external containment links, and a bare containment link winning would
+        report ``unknown`` for a chain whose note is right there. The pair
+        returned is one hop's, and its ``currency`` speaks for THAT link, never
+        for the Point (ONTOLOGY §4.6 aggregates across links).
         """
         proj = self._get_proj()
         from .search_engine import currency_status
@@ -22029,7 +22001,15 @@ class TortoiseSDK:
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
             "OPTIONAL MATCH (src)-[ref_edge:references]->(ref) "
-            "WITH src, ref_edge, ref ORDER BY ref IS NULL LIMIT 1 "
+            "WITH src, ref_edge, ref "
+            # (1) a resolved reference beats the self-terminal fallback;
+            # (2) an ANNOTATED reference beats an unannotated one — this is what
+            #     makes the note reachable at all;
+            # (3) a value tie-break, so engine plan order can never decide the
+            #     answer a caller sees.
+            "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
+            "coalesce(ref.url, ref.id, '') "
+            "LIMIT 1 "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
             "labels(coalesce(ref, src)) as labels, "
