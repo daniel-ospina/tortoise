@@ -5314,7 +5314,7 @@ def _normalize_mapped_ipv6(ip):
 
 
 async def _check_ip_bucket_rate_limit(
-    request: Request, *,
+    request: Request | None = None, *,
     buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
     detail: str | dict, retry_after_s: int | None = None,
     key: Hashable | None = None, max_entries: int = 10_000,
@@ -5334,6 +5334,17 @@ async def _check_ip_bucket_rate_limit(
     test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
     computes time-until-oldest-entry-expires (sliding-window precision).
 
+    #2050: widening this helper for a Request-FREE caller (the MCP dispatch
+    point, key-authenticated per team — no client address exists there) must
+    not widen it for the HTTP callers that already pass a Request. The
+    Request is therefore consulted FIRST: a Request with no client address
+    has no identity to bucket on and returns, exactly as before #2050. Only
+    when NO Request is passed does an explicit `key` stand alone as the
+    bucket identity. An HTTP caller's `key` is a composite that CONTAINS the
+    client IP, so admitting it on a client-less Request would collide the
+    per-IP dimension of invite-accept / invite-otp into one shared
+    (…, "ip", None) bucket across unrelated callers (#5397 review).
+
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
     outcome (success/401/403), so a server fault (5xx) never consumes the
@@ -5341,13 +5352,25 @@ async def _check_ip_bucket_rate_limit(
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
-        return
-    ip = key if key is not None else request.client.host
+    if request is None:
+        # Request-free arm (#2050): `key` alone is the bucket identity. There
+        # is no client address to fall back to, so a missing key is the only
+        # reason to return.
+        if key is None:
+            return
+    else:
+        # Pre-#2050 guard, restored for EVERY Request-carrying caller: a
+        # client-less request has no identity to bucket on, whether or not a
+        # `key` was supplied. This is what keeps every existing caller's
+        # behaviour identical to the merge-base.
+        if not request.client or not request.client.host:
+            return
+        if key is None:
+            key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles both dotted-quad
     # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
         bucket = buckets[ip]
@@ -5776,12 +5799,33 @@ def _check_dashboard_key_login(org: dict, request: Request) -> None:
         )
 
 
+def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
+    """Admission kwargs for `_check_ip_bucket_rate_limit`, keyed by `bucket_key`.
+
+    The op → limit / window / refusal-copy mapping is stated ONCE, here. Both
+    arms of the budget — the REST per-IP arm and the MCP per-team arm (#2050)
+    — pass their own bucket identity through this seam, so the limit and the
+    refusal contract cannot drift between the two surfaces that enforce it.
+    Two implementations of one limit is how a budget stops being one.
+
+    Returns None when the op carries no budget: `_SENSITIVE_OP_LIMITS` is the
+    only authority for what is budgeted.
+    """
+    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
+    if max_per_hour is None:
+        return None
+    return {
+        "buckets": _SENSITIVE_BUCKETS, "lock": _SENSITIVE_LOCK,
+        "limit": max_per_hour, "window_s": 3600,
+        "key": bucket_key,
+        "detail": f"Rate limit exceeded for {op}. Please try again later.",
+        "retry_after_s": 3600,
+    }
+
+
 async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     """Per-IP hourly budget for sensitive org ops (export / org_delete /
     import / pack_manifest)."""
-    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
-    if max_per_hour is None:
-        return
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -5790,12 +5834,42 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
     _ip = _normalize_mapped_ipv6(_ip)
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
-        limit=max_per_hour, window_s=3600,
-        key=(_ip, op),
-        detail=f"Rate limit exceeded for {op}. Please try again later.",
-        retry_after_s=3600)
+    # An unknown client has no identity to bucket on, and this composite key
+    # must never be built around a None IP. _check_ip_bucket_rate_limit
+    # enforces the same requirement for every Request-carrying caller (#5397
+    # review restored it); stated here as well so the invariant is explicit
+    # at the one place this key is formed.
+    if _ip is None:
+        return
+    kwargs = _sensitive_op_budget(op, (_ip, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(request, **kwargs)
+
+
+async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
+    """#2050: the SAME sensitive-op budget, keyed by an explicit identity.
+
+    The MCP dispatch point (``mcp_server._wrapped_call_tool``) has no Request:
+    it is authenticated per TEAM, and a per-IP frame would be wrong there even
+    if one existed — an MCP caller is an agent server whose egress address is
+    shared with unrelated tenants (the #2866 DCR trusted-CIDR discussion). So
+    the MCP arm passes ``(scope_key, op)`` — the team id — as the bucket key
+    into the SAME shared ``_SENSITIVE_BUCKETS`` store, under the SAME
+    ``_SENSITIVE_OP_LIMITS`` entry and the SAME refusal contract, via the SAME
+    ``_check_ip_bucket_rate_limit`` implementation. One budget per op, enforced
+    on BOTH first-class pack-install surfaces.
+
+    ``scope_key`` must never be None: a None key would collapse to a single
+    shared bucket across every tenant. Callers without a scope (stdio, the
+    selfhost placeholder) must skip the call rather than pass one.
+    """
+    if scope_key is None:
+        raise ValueError("scope_key is required — a None key merges tenants")
+    kwargs = _sensitive_op_budget(op, (scope_key, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(None, **kwargs)
 
 
 async def _check_signup_ip_rate_limit(request: Request) -> None:
