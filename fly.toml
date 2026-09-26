@@ -192,6 +192,11 @@ primary_region = "iad"
   # edges (and the rest of the write surface) are journal-backed and
   # `tortoise rebuild --dir` reconstructs them; unset, the lane journals
   # nothing (pre-#4240) and a rebuild silently loses the live-only edges.
+  # Record writes are fail-soft (the graph mutation stands), so entrypoint.sh
+  # probes this dir for WRITABILITY at boot — a dir that exists but cannot be
+  # written (mode 500) fails the boot loudly. A journal that starts failing
+  # AFTER that probe (foreseeable trigger: ENOSPC once the journal grows) is
+  # counted/logged and disclosed on the capture receipt, never fatal (#5612).
   # NOT a durability claim — see docs/durability-posture.md.
   TORTOISE_EVENT_LOG_BASE_DIR = "/data/events"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)

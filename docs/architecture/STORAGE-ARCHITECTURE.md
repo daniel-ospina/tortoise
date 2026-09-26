@@ -227,7 +227,7 @@ The general rule (research, 2026-09-23):
 - It is consistent with the field: GraphRAG-class systems treat the graph as a **derived, rebuildable index**, not the record (Microsoft GraphRAG persists to Parquet; only Cognee and Neo4j physically separate the two).
 
 ### What is already in the code
-The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(log)` — and an **`InMemoryProjection`** already exists as a second implementation. The architecture is **event-sourced by construction**; the hosted write path simply does not journal (`#4240: no event_log_path`) — a **wiring gap, not a design gap**.
+The store sits behind a **two-method Protocol** — `apply(event)` and `rebuild(log)` — and an **`InMemoryProjection`** already exists as a second implementation. The architecture is **event-sourced by construction**; the hosted write path does not journal unless `TORTOISE_EVENT_LOG_BASE_DIR` is set (`#4240` wired the per-graph journal) — a **wiring gap, not a design gap**.
 
 ---
 

@@ -137,8 +137,20 @@ if [ "$_IS_SERVER" = "1" ]; then
     mkdir -p "$TORTOISE_INGEST_BASE_DIR"
     # #4240: pre-create the journal base dir beside the ingest sandbox — it is
     # on the same persistent volume and a missing/unwritable volume is a
-    # misconfigured machine, not a retryable condition.
+    # misconfigured machine, not a retryable condition. #4240 review F1: the
+    # check must be WRITABILITY, not creation — `mkdir -p` succeeds on a dir
+    # that already exists but is not writable (mode 500), which is exactly the
+    # state that lets every journal append fail silently while the boot guard
+    # passes. A per-record append failure is fail-soft by design (the graph
+    # mutation stands), so this boot probe is the only place the misconfig can
+    # fail LOUD.
     mkdir -p "$TORTOISE_EVENT_LOG_BASE_DIR"
+    if ! : > "$TORTOISE_EVENT_LOG_BASE_DIR/.write-probe" 2>/dev/null; then
+        echo "tortoise: FATAL — TORTOISE_EVENT_LOG_BASE_DIR is not writable: $TORTOISE_EVENT_LOG_BASE_DIR" >&2
+        echo "tortoise: the hosted lane's journal cannot record — its aboutObject edges would be live-only and a rebuild would lose them." >&2
+        exit 1
+    fi
+    rm -f "$TORTOISE_EVENT_LOG_BASE_DIR/.write-probe"
     echo "tortoise: uvicorn server — embedding pre-warm runs in-app (non-blocking, degraded-but-alive)"
 else
     echo "tortoise: skipping embedding pre-warm (non-server command: release check)"

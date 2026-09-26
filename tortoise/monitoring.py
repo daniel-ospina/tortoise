@@ -476,6 +476,18 @@ ANALYTICS_OUTCOME_COUNT = Counter(
     "Analytics writes by terminal outcome (#3820)",
     ["outcome"],
 )
+# #4240 review F1: a configured JSONL rebuild journal whose append failed. The
+# append swallow is deliberate (the graph mutation stands, and raising would
+# fail a write that persisted), so this counter is what makes the failure
+# observable instead of a log line nothing watches: a journal that cannot
+# record makes the derived graph LIVE-ONLY, and the next `rebuild_all`
+# reconstructs only what the journal holds. The single writer is
+# `record_journal_write_failure` (called from `TortoiseSDK._emit_event`), so
+# the counter is never touched directly (the #501/#3677 house shape).
+JOURNAL_WRITE_FAILURE_COUNT = Counter(
+    "tortoise_journal_write_failures_total",
+    "JSONL rebuild-journal append failures on a configured journal (#4240)",
+)
 # #3498 item 1: event-loop LAG = how late each heartbeat tick actually fired
 # relative to its requested interval. The heartbeat (below) already proves the
 # loop is SCHEDULING; this histogram records HOW FAR off schedule it is, so a
@@ -501,6 +513,26 @@ def record_ingest() -> None:
 
 def record_error() -> None:
     ERROR_COUNT.inc()
+
+
+def record_journal_write_failure() -> None:
+    """Count one failed append to a CONFIGURED rebuild journal (#4240).
+
+    Called by ``TortoiseSDK._emit_event`` when ``log.append`` raises. The append
+    is fail-soft on purpose (the graph mutation already succeeded), so this is
+    the observable degradation signal: the record is absent from the journal and
+    a later rebuild cannot restore it.
+    """
+    JOURNAL_WRITE_FAILURE_COUNT.inc()
+
+
+def journal_write_failure_count() -> int:
+    """In-process snapshot of ``JOURNAL_WRITE_FAILURE_COUNT`` (#4240).
+
+    ``/metrics`` carries the Prometheus text form; this is the readable form,
+    used by ``metrics()`` and by tests (mirrors ``analytics_outcome_counts``).
+    """
+    return _counter_val(JOURNAL_WRITE_FAILURE_COUNT)
 
 
 def record_cost(team: str, cents: int) -> None:
@@ -2755,6 +2787,10 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         "graph_size": graph_size,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),
+        # #4240 review F1: a configured rebuild journal that cannot record is a
+        # real degradation (the derived graph becomes live-only), so it rides
+        # the health/metrics surface rather than a log line nothing watches.
+        "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
         "uptime": round(time.monotonic() - _start, 2),
     }
 
