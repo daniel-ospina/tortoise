@@ -930,3 +930,65 @@ class TestPreviewToolSetIsDeclared:
         for name in sorted(m._dry_run_tool_names()):
             assert "dry_run" in inspect.signature(
                 getattr(m, name)).parameters, name
+
+
+# ── #4021: the preview must not preview a write the writer refuses ────
+
+class TestSupersedeWindowParity:
+    """#4021 — ``_preview_supersede`` re-implements the writer's window
+    resolution, so a predecessor window whose END would precede its own
+    ``validFrom`` must be refused by BOTH. A preview that reports a clean
+    blast radius for a write that then raises is the fail-open direction of
+    the same defect: the caller reads "safe to apply" and gets an error (or,
+    before the fix, silent corruption).
+
+    Verdict parity is the contract; the MESSAGE is compared only where the
+    successor's window start is deterministic (a dated successor). An undated
+    successor resolves through the clock (``_now_iso()`` in the preview, the
+    writer's own ``now``), so those two instants differ and only the verdict
+    can be asserted.
+    """
+
+    def _pair(self, sdk, predecessor_start, successor_start=None):
+        old = sdk.create_point("statement", "claim v1",
+                               validFrom=predecessor_start)["id"]
+        kw = {} if successor_start is None else {"validFrom": successor_start}
+        new = sdk.create_point("statement", "claim v2", **kw)["id"]
+        return old, new
+
+    def test_supersede_preview_refuses_a_retroactive_successor(self, mcp, sdk):
+        old, new = self._pair(sdk, "2026-06-10", "2026-06-01")
+        before = _graph_counts(sdk)
+
+        result = mcp.tortoise_supersede(old, new, dry_run=True)
+
+        assert result.get("error"), result
+        assert "inverted window" in result["error"], result
+        assert _graph_counts(sdk) == before, "the refused preview wrote"
+
+    def test_supersede_preview_verdict_matches_writer(self, mcp, sdk):
+        """Differential on the MCP surface: both paths scrub through
+        ``_scrub_error``, so equality here is the byte-level parity contract —
+        a dated successor makes ``succ_vf`` deterministic."""
+        old, new = self._pair(sdk, "2026-06-10", "2026-06-01")
+
+        preview = mcp.tortoise_supersede(old, new, dry_run=True)
+        applied = mcp.tortoise_supersede(old, new)
+
+        assert preview.get("error"), preview
+        assert applied.get("error"), applied
+        assert preview["error"] == applied["error"], (
+            "preview and writer disagree on the refusal")
+
+    def test_supersede_preview_refuses_undated_successor_case(self, mcp, sdk):
+        """An undated successor resolves its window through the clock, so the
+        preview and the writer take ``now`` at different instants — the verdict
+        is asserted, not the message."""
+        old, new = self._pair(sdk, "2099-01-01", None)
+        before = _graph_counts(sdk)
+
+        result = mcp.tortoise_supersede(old, new, dry_run=True)
+
+        assert result.get("error"), result
+        assert "inverted window" in result["error"], result
+        assert _graph_counts(sdk) == before, "the refused preview wrote"

@@ -530,3 +530,48 @@ def test_ingest_events_dup_resume_self_heals_edges(sdk_factory,
         "MATCH (e:Event {lme_question_id:'qr8'}) "
         "RETURN count(DISTINCT e.lme_event_id)").result_set[0][0]
     assert evs == 1, "re-ingest must not mint a duplicate Event"
+
+
+def test_ingest_retroactive_supersession_warns_and_skips(sdk_factory):
+    """#4021 / #5365 — a retroactive ``pt_`` supersession now FAILS OPEN here.
+
+    ``apply_supersessions`` wraps the point write in ``except Exception →
+    warn()``, so the new inverted-window refusal turns a record that
+    previously *succeeded* (while corrupting the predecessor's window into an
+    unresolvable one) into a warned skip: the old point stays live with no
+    CORRECTS edge.  That is a deliberate, disclosed posture change on an
+    input class the ingest path could not previously reach, and it is pinned
+    here so it cannot change silently.
+
+    The alternative — propagating the refusal — would abort a whole commit for
+    one bad record; #5365 owns that decision, not this fix.
+    """
+    sdk = sdk_factory()
+    from tortoise.commit_ops import apply_supersessions
+
+    old_content, new_content = "gym at 6pm", "gym at 5pm"
+    old_id, new_id = _pid(old_content), _pid(new_content)
+    sdk.create_point("statement", old_content, id=old_id,
+                     validFrom="2026-06-10")
+    sdk.create_point("statement", new_content, id=new_id,
+                     validFrom="2026-06-01")
+    proj = sdk._get_proj()
+
+    warnings: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": old_id, "supersedes_by": new_id}],
+        session_id="lme:q1:s0", warn=warnings.append)
+
+    assert applied == 0, "a refused supersession must not count as applied"
+    assert any("inverted window" in w for w in warnings), warnings
+    # fail-open: the predecessor is still LIVE and no CORRECTS edge exists
+    status, outdated = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, coalesce(n.outdated,false)",
+        params={"id": old_id}).result_set[0]
+    assert status != "superseded"
+    assert outdated is False
+    n_corrects = proj.g.query(
+        "MATCH (:Point {id:$n})-[:CORRECTS]->() RETURN count(*)",
+        params={"n": new_id}).result_set[0][0]
+    assert n_corrects == 0, "the refused supersession still wrote CORRECTS"

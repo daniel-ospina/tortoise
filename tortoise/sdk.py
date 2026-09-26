@@ -2614,6 +2614,73 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _supersede_window_end(*, old_id, new_id, old_vf, valid_from,
+                          stored_vf, successor_created_at, now):
+    """Resolve the predecessor's window END and refuse an inverted window (#4021).
+
+    #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
+    window start and never read the predecessor's own ``validFrom``, so a
+    successor dated earlier than its predecessor persisted
+    ``validTo < validFrom``.  ``restore_point_at``'s ``_covers``
+    (``sdk.py``) then rejects an inverted window for EVERY query instant, so
+    the predecessor became unreachable from every read surface with no error
+    anywhere — a silent, permanent loss of the old fact.
+
+    Resolution order is unchanged and is the ONE home for it::
+
+        str(valid_from) → stored_vf (truthiness) → successor_created_at → now
+
+    Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
+    ``str()``): a numeric stored value must keep keying as ``(0, float)``
+    (``_created_sort_key`` documents numeric epochs as supported and seeded
+    corpora carry them) — passing it through ``str()`` makes it unparseable
+    ``(1, text)`` and REINTRODUCES the unbounded predecessor window the
+    ``valid_from``-agreement guard exists to prevent.
+
+    Refuses when ``old_vf is not None`` and
+    ``_created_sort_key(succ_vf) < _created_sort_key(old_vf)`` — the same
+    measure and the same ``is not None`` presence predicate ``_covers``
+    uses, so the guard's boundary IS the read path's.  Strictly-before only:
+    equality (a zero-length predecessor window) is well-formed and accepted.
+
+    Raises ``ValueError`` BEFORE any mutation at either call site, so no
+    event is journaled and no half-write survives a refusal.
+
+    Scope: this refuses the **inverted** direction.  An **unparseable**
+    resolved end (a truthy-but-unparseable stored successor ``validFrom``
+    with no kwarg) is a SEPARATE residual — the orderability gap on the
+    no-kwarg path — deliberately NOT absorbed here.
+
+    The ``valid_from``-vs-successor agreement guard is NOT here: it is
+    reachable only when a kwarg is passed, and it stays inline at its
+    reviewed call site.
+    """
+    from .search_engine import _created_sort_key  # lazy — import cycle
+    if valid_from is not None:
+        succ_vf = str(valid_from)
+    elif stored_vf:
+        succ_vf = stored_vf
+    elif successor_created_at:
+        succ_vf = successor_created_at
+    else:
+        succ_vf = now  # monotone fallback — never a gap
+    if old_vf is not None and _created_sort_key(succ_vf) < _created_sort_key(old_vf):
+        # Wording is pinned by two tests: the literal substring "inverted
+        # window", and scrub-stability under mcp_server._scrub_error, whose
+        # `(host=|at |to )[\w.-]+` rule rewrites any word ending in at/to
+        # followed by a space — a scrubbed hint reaches the caller as `***`.
+        raise ValueError(
+            f"supersede_point: refusing supersede {old_id!r} - {new_id!r} - "
+            f"the successor's window start {succ_vf!r} precedes the "
+            f"predecessor's validFrom {old_vf!r}; persisting it would leave "
+            f"an inverted window (validTo < validFrom), which no query "
+            f"instant resolves. Give the successor a validFrom on-or-after "
+            f"{old_vf!r}, or use `retract_point()` (window-agnostic) for "
+            f"withdrawal of the predecessor"
+        )
+    return succ_vf
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -6491,8 +6558,13 @@ class TortoiseSDK:
         window START is its own ``validFrom`` (the create path, D3), or the
         optional ``valid_from`` kwarg when the caller knows it (else read
         the successor's ``validFrom``, fall back to its ``createdAt``, fall
-        back to now — monotone, never a gap). Additive-only: no behavior
-        change for callers that don't pass the kwarg.
+        back to now — monotone, never a gap). Additive-only for callers that
+        stay inside the predecessor's window: a successor whose resolved start
+        sorts strictly BEFORE the predecessor's own ``validFrom`` is refused
+        (``ValueError``, before any mutation — an inverted window is satisfiable
+        by no query instant, so the old fact would be silently unreachable from
+        every read surface; #4021). Equality (a zero-length predecessor window)
+        is legal.
 
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
@@ -6635,14 +6707,22 @@ class TortoiseSDK:
                     f"validTo gaps or overlaps the chain (read paths use "
                     f"the stored window start)"
                 )
-        if valid_from is not None:
-            succ_vf = str(valid_from)
-        elif stored_vf:
-            succ_vf = stored_vf
-        elif vf_rows and vf_rows[0][1]:
-            succ_vf = vf_rows[0][1]
-        else:
-            succ_vf = now  # monotone fallback — never a gap
+        # #4021: the resolution above plus the INVERTED-window refusal live in
+        # ONE home, shared with the MCP dry-run preview (parity by construction).
+        # This read of the predecessor's own start is the one the defect was
+        # missing: the stamp below used the successor's start without ever
+        # comparing it to the window it was truncating.
+        old_vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+            params={"id": old_id},
+        ).result_set
+        old_vf = old_vf_rows[0][0] if old_vf_rows else None
+        succ_vf = _supersede_window_end(
+            old_id=old_id, new_id=new_id, old_vf=old_vf,
+            valid_from=valid_from, stored_vf=stored_vf,
+            successor_created_at=(vf_rows[0][1] if vf_rows else None),
+            now=now,
+        )
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the

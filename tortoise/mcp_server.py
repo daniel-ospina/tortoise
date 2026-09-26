@@ -22,7 +22,8 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
-                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS)
+                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
+                          _supersede_window_end, _now_iso)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -4465,6 +4466,27 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             created.append({"type": rtype, "from": op_id, "to": new_id})
             handled_old_edge_ids.add(op_rid)
 
+    # #4021 parity — a window whose resolved END precedes the predecessor's own
+    # validFrom is refused by the writer before it mutates anything, so the
+    # preview must refuse it too (a `dry_run` that reports success on a write
+    # that will raise is the fail-open direction of the same defect).
+    # Placed AFTER the 2a loop and BEFORE `succ_rows`: the writer validates
+    # every relationship type before its window guard, so an undeclared rel
+    # type must win in BOTH. Own queries — `succ_rows` returns ID(n) only and
+    # its `[0]` indexing is relied on by every pass below.
+    win_rows = proj.g.query(
+        "MATCH (o:Point {id:$old}), (n:Point {id:$new}) "
+        "RETURN o.validFrom, n.validFrom, n.createdAt",
+        params={"old": old_id, "new": new_id},
+    ).result_set
+    if win_rows:
+        _supersede_window_end(
+            old_id=old_id, new_id=new_id, old_vf=win_rows[0][0],
+            valid_from=None,  # the MCP surface exposes no valid_from kwarg
+            stored_vf=win_rows[0][1],
+            successor_created_at=win_rows[0][2],
+            now=_now_iso(),   # the writer's clock, not a new one
+        )
     succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
                             params={"id": new_id}).result_set
     # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a
