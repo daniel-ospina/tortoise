@@ -6131,32 +6131,21 @@ class FalkorProjection(
         # precondition is exact: no array ⇒ nothing owed, whatever the marker
         # says.
         #
-        # The marker is consulted FIRST, purely as a cheap skip: a graph that
-        # recorded the fixup keeps a metadata-only probe and never runs the
-        # array query. Both arms are short-circuited behind
-        # ``required <= present``, so neither query runs on a graph that still
-        # needs building.
+        # The MARKER IS DELIBERATELY NOT CONSULTED (review P1). It was tried
+        # as a cheap skip, and it is unsound: "marker present" does not mean
+        # "fixup done", because more than one writer controls it. The public
+        # entity-update path (`sdk.update_entity`, the `surface.update_entity`
+        # MCP tool) writes caller props with a raw `SET n += $p` and does NOT
+        # flatten, so it can store an array-valued `search_keys` on a graph
+        # whose marker is already set. Short-circuiting on the marker made that
+        # state permanently invisible to this probe — the #5444 defect itself,
+        # merely relocated. The array check is the REAL precondition and, being
+        # a cap-immune single-row `typeof` test, it is cheap enough to be the
+        # only check.
         if (required <= present and fts_required
-                and not self._point_fts_marker_present()
                 and self._array_valued_search_keys_exist()):
             return False
         return required <= present
-
-    def _point_fts_marker_present(self) -> bool:
-        """Is the one-time ``point_fts_v2`` marker recorded on this graph?
-
-        Used only as a cheap SKIP for the array check — never as proof the
-        fixup ran, because the fresh-create path swallows a failed marker
-        write (#5444). A probe that cannot run reports ABSENT, so the array
-        check still runs: a query we cannot answer must not be able to skip
-        work.
-        """
-        try:
-            return bool(self.g.query(
-                "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1 LIMIT 1"
-            ).result_set)
-        except Exception:
-            return False
 
     #: Cap-immune fixup precondition (#5312 review, P1). ``typeof`` is a
     #: per-row predicate and the read takes a single bounded row, so
@@ -6176,39 +6165,33 @@ class FalkorProjection(
     def _array_valued_search_keys_exist(self) -> bool:
         """Does any Point still store ``search_keys`` as an ARRAY?
 
-        The one-time fixup's real precondition: FalkorDB's fulltext index does
-        not index array-valued properties, so such Points are invisible to
-        ``queryNodes`` until ``_ensure_indexes`` flattens them.
+        The one-time fixup's real precondition, and the probe's ONLY extra
+        read: FalkorDB's fulltext index does not index array-valued properties,
+        so such Points are invisible to ``queryNodes`` until ``_ensure_indexes``
+        flattens them.
 
-        A probe that cannot run returns True — assume the fixup is owed rather
-        than skip work we cannot prove unnecessary.
+        Fails CLOSED on any error — including an engine without ``typeof``.
+        Both supported engines have it (verified on embedded FalkorDBLite 4.18.3
+        and docker FalkorDB 4.20.4), and the previous fallback was an unbounded
+        untyped scan, whose ``RESULTSET_SIZE`` false negative a caller would
+        MINT the marker on, freezing the owed fixup forever (review P2).
+        Assuming owed is the correct polarity: it costs a sweep, not
+        permanent unfindability.
         """
         try:
             return bool(self.g.query(self._ARRAY_SEARCH_KEYS_PROBE).result_set)
         except Exception:
-            pass
-        # An engine without ``typeof`` (both supported engines have it —
-        # verified on embedded and FalkorDB 4.20.4): fall back to the
-        # client-side scan, which ``RESULTSET_SIZE`` can truncate. Kept as the
-        # pre-#5444 behaviour rather than fail-closed, which would re-bootstrap
-        # every marker-less graph.
-        try:
-            rows = self.g.query(
-                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-                "RETURN n.search_keys"
-            ).result_set
-        except Exception:
             return True
-        return any(isinstance(row[0], (list, tuple)) for row in rows if row)
 
     def _array_search_keys_rows(self) -> list:
         """``(id, search_keys)`` for Points whose ``search_keys`` is an array.
 
-        Cap-aware (#5312 review, P1): the ``typeof`` predicate means the
-        ``RESULTSET_SIZE`` cap can only truncate the BATCH, never hide arrays
-        behind string rows — so a caller may loop until this returns empty.
-        Falls back to the untyped read on an engine without ``typeof`` (where
-        the cap can still hide arrays; caller beware).
+        Cap-aware: the ``typeof`` predicate means the ``RESULTSET_SIZE`` cap can
+        only truncate the BATCH, never hide arrays behind string rows — so the
+        caller loops until this returns empty. Returns ``[]`` on error (never an
+        untyped scan): the caller re-checks ``_array_valued_search_keys_exist``
+        before minting, and that check fails closed, so an engine which cannot
+        answer never gets a marker minted over an owed fixup.
         """
         try:
             return self.g.query(
@@ -6217,10 +6200,7 @@ class FalkorProjection(
                 "RETURN n.id, n.search_keys"
             ).result_set
         except Exception:
-            return self.g.query(
-                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-                "RETURN n.id, n.search_keys"
-            ).result_set
+            return []
 
     def _fix_point_search_keys(self) -> None:
         """The ONE-TIME Point data fixup, callable from EITHER create branch.
@@ -6257,6 +6237,15 @@ class FalkorProjection(
                     flattened += 1
                 if flattened == 0:
                     break  # no progress — never spin
+
+            # Do NOT mint over an owed fixup (review P2). The loop above counts
+            # SET ATTEMPTS, not verified writes, and is capped at 200 batches;
+            # an unverified SET, the ceiling, or an engine that cannot answer
+            # would otherwise leave arrays behind AND cement a marker that makes
+            # them permanently invisible. Re-verify first.
+            if self._array_valued_search_keys_exist():
+                return
+
             for drop_proc in ("db.idx.fulltext.drop",
                               "db.idx.fulltext.dropIndex"):
                 try:
@@ -6573,10 +6562,15 @@ class FalkorProjection(
                             # flat space-joined string (the sdk write path
                             # already stores flat; this fixes existing nodes).
                             try:
-                                done = self.g.query(
-                                    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
-                                ).result_set
-                                if not done:
+                                # Gate on the fixup's REAL precondition, not
+                                # the marker (#5312 review, P1). Gating on the
+                                # marker here left the same hole as the
+                                # fresh-create branch: a graph whose marker was
+                                # set over an owed fixup skipped it forever.
+                                # The array check is sound and, when nothing is
+                                # owed, costs one bounded read instead of the
+                                # drop→recreate churn this branch must avoid.
+                                if self._array_valued_search_keys_exist():
                                     self._fix_point_search_keys()
                             except Exception:
                                 pass

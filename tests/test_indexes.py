@@ -618,14 +618,15 @@ def _is_repeated_schema_work(cypher: str) -> bool:
             or "SET n.search_keys" in cypher)
 
 
-#: The ONLY extra statements the fast path may issue (#5444): the cheap marker
-#: skip, then the cap-immune fixup precondition. Pinned to the EXACT literals
-#: rather than by prefix (#5312 review, P2): a prefix match classifies ANY
-#: reworded statement as a permitted "read" — including a destructive one such
-#: as ``MATCH (n:Point) WHERE n.search_keys IS NOT NULL DETACH DELETE n`` — so
-#: it would hide behind the allowance below.
+#: The ONLY extra statement the fast path may issue (#5444): the cap-immune
+#: fixup precondition. It is the only arm left — the ``point_fts_v2`` marker is
+#: deliberately NOT consulted, because "marker present" does not mean "fixup
+#: done": `sdk.update_entity` (the `surface.update_entity` MCP tool) writes raw
+#: `SET n += $p` props without flattening. Pinned to the EXACT literal rather
+#: than by prefix (#5312 review, P2): a prefix match classifies ANY reworded
+#: statement as a permitted "read" — including a destructive one such as
+#: ``MATCH (n:Point) WHERE n.search_keys IS NOT NULL DETACH DELETE n``.
 _FAST_PATH_READS = (
-    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1 LIMIT 1",
     "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
     "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1",
 )
@@ -797,9 +798,9 @@ def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
     # and never a write, so the check above cannot be evaded by probing via
     # rebuilding.
     reads = [c for c in seen if _is_fast_path_read(c)]
-    assert len(reads) <= 2, (
+    assert len(reads) <= 1, (
         f"the fast path issued {len(reads)} precondition read(s): {reads} — "
-        "bounded to the marker read plus one array read (#5444)")
+        "bounded to the single cap-immune array read (#5444)")
 
     # NO statement at all may write: the fixup belongs to the first sweep. This
     # replaces a `" SET "`/`" MERGE "` blacklist applied to the reads only,
@@ -869,6 +870,18 @@ def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
     assert proj._schema_is_current() is False, (
         "a graph whose search_keys is still an array owes the one-time "
         "fixup and must not read as current (#5444)")
+
+    # (c) The marker must NOT be able to certify an owed fixup. This is the
+    # state that falsified the design's invariant: `sdk.update_entity` (the
+    # `surface.update_entity` MCP tool) writes raw `SET n += $p` props without
+    # flattening, so a graph whose marker is already set can still hold an
+    # array. Consulting the marker in the probe (tried, then reverted) made
+    # this state permanently invisible — the #5444 defect, relocated.
+    g.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+    assert proj._schema_is_current() is False, (
+        "the point_fts_v2 marker must not be able to hide an owed fixup: a "
+        "supported write path stores array search_keys without flattening "
+        "(#5312 review, P1)")
 
     proj._ensure_indexes()
 
