@@ -155,30 +155,67 @@ function tagAttrs(html, from, end) {
   let quote = null
   for (let i = from; i < end; i++) {
     const ch = html[i]
-    if (quote !== null) {
-      if (ch === quote) { quote = null; flush(); state = 'beforeName' }
-      else value += ch
+    if (state === 'quoted') {
+      if (ch === quote) { quote = null; state = 'afterQuoted' } else value += ch
       continue
     }
     if (state === 'unquoted') {
-      if (HTML_WS.test(ch)) { flush(); state = 'beforeName' }
-      else value += ch
+      if (HTML_WS.test(ch)) { flush(); state = 'beforeName' } else value += ch
       continue
     }
-    if (HTML_WS.test(ch)) { if (state === 'name') state = 'afterName'; continue }
+    if (state === 'afterQuoted') {
+      // afterAttributeValueQuoted: whitespace or `/` ends the attribute; any
+      // other character is a parse error the spec resolves by RECONSUMING it as
+      // the start of a new attribute.
+      flush()
+      state = 'beforeName'
+      if (!HTML_WS.test(ch) && ch !== '/') i--
+      continue
+    }
+    if (state === 'afterName') {
+      // afterAttributeName: whitespace is ignored, `/` is the self-closing
+      // marker, `=` opens the value — and ANYTHING ELSE starts a new attribute,
+      // flushing the pending one. Not flushing here merged `<script defer
+      // src=…>` into a single attribute `defersrc`, so the off-origin refusal
+      // never saw the src at all (review cycle 8; a regression against the regex
+      // this replaced, which did read that src).
+      if (HTML_WS.test(ch)) continue
+      if (ch === '/') { flush(); state = 'beforeName'; continue }
+      if (ch === '=') { state = 'beforeValue'; value = ''; continue }
+      flush()
+      state = 'beforeName'
+      i--
+      continue
+    }
     if (state === 'beforeValue') {
-      if (ch === '"' || ch === "'") quote = ch
-      else { state = 'unquoted'; value = ch }
+      if (HTML_WS.test(ch)) continue
+      if (ch === '"' || ch === "'") { quote = ch; state = 'quoted' } else { value = ch; state = 'unquoted' }
       continue
     }
-    if (ch === '=' && state !== 'beforeName') { state = 'beforeValue'; value = ''; continue }
-    if (ch === '/' && state !== 'name') continue // the self-closing marker
-    state = 'name'
+    if (state === 'beforeName') {
+      if (HTML_WS.test(ch) || ch === '/') continue
+      name = ch === '=' ? '=' : ch // the spec's attribute literally named `=`
+      state = 'name'
+      continue
+    }
+    // attributeName. `/` ends the name (the spec emits the attribute even when
+    // the self-closing marker is not followed by `>`).
+    if (HTML_WS.test(ch)) { state = 'afterName'; continue }
+    if (ch === '/') { flush(); state = 'beforeName'; continue }
+    if (ch === '=') { state = 'beforeValue'; value = ''; continue }
     name += ch
   }
-  if (quote !== null || state === 'unquoted') out.push([name.toLowerCase(), value])
-  else if (state === 'name' || state === 'afterName' || state === 'beforeValue') out.push([name.toLowerCase(), ''])
+  if (state === 'beforeName') return out
+  flush()
   return out
+}
+
+// #3787: the URL parser's OWN leading/trailing trim — C0 controls and space, not
+// JS `String.prototype.trim()`, which also strips NBSP that the URL parser keeps
+// (review cycle 8). Both URL comparisons below need it: `src=" http://evil"` IS
+// fetched, off-origin, by a browser.
+function urlTrim(s) {
+  return s.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
 }
 
 // #3787: the first pair's value for `name` (lower-cased) in a parsed attribute
@@ -238,12 +275,12 @@ function tagEnd(html, from) {
 // `src` is a BEST-EFFORT reading of the attribute slice (see `firstAttr`), used
 // only for local-reference resolution and for the supabase-name clause — both
 // backstopped by the whole-document probes. It is deliberately NOT what clause
-// 2(d)'s off-origin refusal reads: a browser oracle fuzz (3,840 tag shapes) found
-// spellings where this reading differs from the `src` the browser loads, and an
-// over-approximating raw scan is used there instead. A tag carrying a `src` is
-// never treated as an inline body, and a tag whose text is discarded by that rule
-// (a `src` tag with no closing tag swallows the rest of the document as its
-// ignored text) is discarded here too, because that is what the browser does.
+// 2(d)'s off-origin refusal reads: that clause enumerates raw `<script`
+// OCCURRENCES instead, because this element walk can desync on a `<script`
+// literal in a comment and let a phantom element swallow the next real one
+// (review cycle 7). A tag whose text is discarded by that rule (a `src` tag with
+// no closing tag swallows the rest of the document as its ignored text) is
+// discarded here too, because that is what the browser does.
 function scriptTags(html) {
   const out = []
   const open = /<script(?=[\t\n\f\r />])/gi
@@ -685,13 +722,19 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      is a real loader whose raw text carries none of the probe literals
   //      (reproduced with the guard green, cycle 4). NOT closed — the decoder that
   //      closed it is the withdrawal note on `pageContexts` above.
-  //   8. the page `<script>` reader (`tagEnd`/`firstAttr`) is a BEST-EFFORT reader,
-  //      not a conformant HTML parser: fuzzing 3,840 start-tag shapes against a
-  //      browser oracle found spellings where it reads a different `src`. Its
-  //      consumers are backstopped (see the `p.srcs` note), and the one clause
-  //      that could not be — the off-origin refusal — reads a raw over-approximate
-  //      scan instead. Exotic malformed tags can still mislead the LOCAL-reference
-  //      and supabase-name readings; they cannot open an off-origin load.
+  //   8. the page `<script>` reader (`tagEnd`/`tagAttrs`/`firstAttr`) is a
+  //      BEST-EFFORT reader, not a conformant HTML parser: a browser-oracle fuzz
+  //      over start-tag shapes finds spellings where it reads a different `src`.
+  //      The LOCAL-reference and supabase-name consumers are backstopped (see the
+  //      `p.srcs` note); the off-origin refusal enumerates `<script` occurrences
+  //      independently of the element walk, so a desync cannot hide one — but a
+  //      MISREAD ATTRIBUTE still can, and item 9 records the direction of the
+  //      differences that remain.
+  //   9. clause 2(d) refuses a `src` the browser never FETCHES: a data block
+  //      (`type="text/template"`/`application/json`/`text/html`), a `nomodule`
+  //      script, a `<script>` inside `<template>` (inert content), and an
+  //      `<svg>`/`<math>` `<script>` (foreign content uses `href`). All fail
+  //      closed, and none of them is in the built site.
   //
   // Class-B (the lane's doctrine): each message names the value that makes it
   // fail, and each context is REACHABLE — these are the scripts and pages the
@@ -763,17 +806,20 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //     file is not scanned twice (the whole-dist walk already covers every
   //     executable), and a missed supabase-looking page reference is caught by
   //     clause 2(b)/(c) over the page's own document text;
-  //   * the OFF-ORIGIN refusal has no backstop — an off-origin URL naming
-  //     neither supabase nor `vendor/` is invisible to every content probe — so
-  //     it is asserted from a raw scan that cannot desync (see below).
+  //   * the OFF-ORIGIN refusal below is NOT read off `p.srcs`: a desync there is
+  //     not backstopped by any content probe, because an off-origin URL naming
+  //     neither supabase nor `vendor/` is invisible to them. It enumerates
+  //     `<script` occurrences instead (below). The only backstop `p.srcs` gives it
+  //     is incidental — a spelling that reaches `p.srcs` but is not itself refused
+  //     falls through to the dangling-local check and reds there.
   const refs = new Map()
   const dangling = []
   for (const p of pages) {
     for (const raw of p.srcs) {
-      // `.trim()` mirrors the URL parser, which strips leading/trailing
-      // whitespace: `<script src=" /consent.js ">` LOADS that local file, and
-      // without this the guard reds it as a dangling reference (review cycle 7).
-      const ref = raw.trim()
+      // `urlTrim` is the URL parser's own trim: `<script src=" /consent.js ">`
+      // LOADS that local file, and without this the guard reds it as a dangling
+      // reference (review cycles 7 and 8).
+      const ref = urlTrim(raw)
       if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:') || ref.startsWith('blob:')) continue
       const rel = ref.replace(/^\//, '')
       const abs = join(dist, rel)
@@ -799,9 +845,10 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // merely followed a `<script` and red an UNTERMINATED tag the browser discards.
   // Enumerating occurrences means a phantom element cannot hide a later one, a
   // tag-bounded window cannot reach an `<img>`, and `tagEnd === -1` is inert. A
-  // `<script` literal in a comment or RCDATA is still read as a tag — an
-  // over-approximation that can only fail closed, the same fail-closed side as the
-  // page-document prose probe (residual 4). 0 hits on all five shipped pages.
+  // `<script` literal in a comment or RCDATA is still read as a tag, a data block
+  // and a `nomodule`/`<template>`/foreign-namespace script are refused although
+  // the browser never fetches them — over-approximations that can only fail
+  // closed, the same side as the page-document prose probe (residuals 4 and 9).
   const OFF_ORIGIN = /^(?:https?:)?\/\//i
   const offOrigin = []
   for (const p of pages) {
@@ -810,8 +857,8 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
     while ((o = opener.exec(p.html)) !== null) {
       const end = tagEnd(p.html, opener.lastIndex)
       if (end === -1) continue // the browser emits no element for an unterminated tag
-      const src = firstAttr(tagAttrs(p.html, opener.lastIndex, end), 'src')
-      if (src !== null && OFF_ORIGIN.test(src)) offOrigin.push(`${p.name} → ${src}`)
+      const raw = firstAttr(tagAttrs(p.html, opener.lastIndex, end), 'src')
+      if (raw !== null && OFF_ORIGIN.test(urlTrim(raw))) offOrigin.push(`${p.name} → ${urlTrim(raw)}`)
     }
   }
   assert.deepEqual(offOrigin, [],
