@@ -1,4 +1,14 @@
+// tortoise-hook-version: 1
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
+//
+// The `tortoise-hook-version` marker above is the install-contract generation
+// for this seam (see tortoise/hook_install.py): column-0, one per file, bumped
+// on ANY behavioural edit. It is what lets `tortoise session verify --harness
+// pi` tell an already-installed copy that it is stale — before #4680 the Pi
+// seam carried no marker at all, so a copy predating a seam change kept
+// capturing with the old logic: `session verify` called it UNVERIFIABLE-IN-CI
+// rather than STALE, and `tortoise doctor` printed no freshness row for it at
+// all. Generation 1 is the first contract for this seam.
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -354,6 +364,8 @@ export const SPOOL_MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 /** Exponential backoff for TRANSIENT failures only (network / 5xx / retryable 4xx). */
 export const RETRY_BASE_MS = 30_000;
 export const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+/** Mirrors the Python leg's `_MAX_ATTEMPTS`: the backoff saturates long before. */
+export const MAX_ATTEMPTS = 64;
 
 /** Discard reasons — every one is written to `discarded.jsonl` (observable). */
 export const DISCARD_ENTRY_TOO_LARGE = "entry_too_large";
@@ -426,6 +438,14 @@ export interface FlushSummary {
   deferred: number;
   /** Entries not attempted: already filed, or still inside a backoff window. */
   skipped: number;
+  /**
+   * Entries INSIDE their backoff window — deferred by a previous refusal, not
+   * by anything wrong now. Counted separately from `skipped` because since
+   * #4714 moved 402 from "discard" to "defer", a quota-blocked spool reaches a
+   * steady state where EVERY flush skips and nothing is attempted: without this
+   * counter the flush logs nothing at all and captures sit unfiled invisibly.
+   */
+  heldByBackoff: number;
   /**
    * Entries deliberately NOT attempted because they are the session that is
    * LIVE right now (`excludeSessionId`). Counted separately from `skipped`:
@@ -789,8 +809,15 @@ export function writeSpoolEntry(
     turns_count: snapshot.turns.length,
     content_digest: contentDigest(snapshot.turns),
     capture_key: captureKey(snapshot.sessionId, snapshot.turns),
-    attempts: 0,
-    next_attempt_at_ms: 0,
+    // The backoff belongs to the ENTRY, not to one snapshot. A session that
+    // keeps growing writes a new meta on EVERY turn; resetting these here
+    // re-armed the retry window each time, so a deferred 402 was re-POSTed at
+    // turn cadence with no backoff at all (#4714) — the "capped cadence" this
+    // module promises held only for a STATIC entry. A new turn is not a new
+    // upload attempt, so carry them forward. The filing path resets them
+    // (attempts=0) and a genuinely fresh entry starts at zero.
+    attempts: clampAttempts(prior?.attempts),
+    next_attempt_at_ms: carriedWindow(prior?.next_attempt_at_ms),
     ...(prior?.filed_key && prior.content_digest === contentDigest(snapshot.turns)
       ? { filed_key: prior.filed_key, filed_at: prior.filed_at }
       : {}),
@@ -917,7 +944,15 @@ export function pruneSpool(
  *
  * TRANSIENT (retry with backoff): no status (network / timeout), 5xx, 3xx (a
  * redirect on a stored api_url must not delete the capture), the retryable 4xx
- * family (408 request-timeout, 425 too-early, 429 rate-limit), and EVERY 409.
+ * family (402 quota-refusal, 408 request-timeout, 425 too-early, 429
+ * rate-limit), and EVERY 409.
+ *
+ * "No status" is TOTAL, and it has to be: `undefined` (the fetch never
+ * resolved), `null` (a transport/fetchImpl that models absence as null), and a
+ * non-finite value (an unparseable status). JS's `null >= 300` and `null >= 500`
+ * are both FALSE, so `null` used to fall through to "permanent" -> discardEntry
+ * -> unlink the capture, while the Python leg returned "retry" for the same
+ * input. A missing status is a network condition, never a server verdict.
  *
  * On this idempotent upsert a 409 is either #3713's in-flight concurrency
  * condition (retry then replays) or a policy state (recording disabled) that
@@ -926,21 +961,74 @@ export function pruneSpool(
  * avoided: the client ships independently of the server, so a reworded detail
  * would silently turn #3713's benign 409 into a lost write.
  *
+ * 402 is TRANSIENT (#4714), and the Python leg already classifies it so. The
+ * hosted quota gate refuses a capture whose *estimated* point cost would cross
+ * the org's cap, and `est` is computed from the INCOMING capture — so the
+ * identical capture succeeds the moment a node is freed or the tier changes,
+ * exactly the "becomes valid by waiting" property that defines transient here.
+ * Classified permanent, `flushSpool` routed it to `discardEntry`, which
+ * UNLINKS the meta and the turn log. Both legs share ONE spool directory
+ * (`~/.tortoise/capture-spool`), so leaving 402 permanent here re-opens the
+ * data loss the Python fix closes: a capture the Python drain correctly defers
+ * is destroyed by the next Pi drain. Retry is bounded by the spool's count/byte
+ * bound and the ENTRY's `backoffDelay` — carried across turns, so an
+ * actively-growing session is retried on the backoff clock rather than once per
+ * turn. That bound is real but finite: sustained over-quota still evicts
+ * oldest-first at the count/byte ceiling, with a recorded reason, so the two
+ * legs describe the same policy (`capture_spool.py`).
+ *
+ * ⚠️ #4614 gave the refusal a machine-readable CATEGORY
+ * (`detail.code === "quota_exceeded"`) so a caller no longer has to match the
+ * message text. This classifier still keys on the STATUS, deliberately: the
+ * category is for REPORTING and for surfaces that can act on it, and treating
+ * a `quota_exceeded` 402 as terminal here would re-open #4714's data loss. The
+ * two legs must keep answering this the same way (`capture_spool.py`).
+ *
  * PERMANENT (discard + record): every other 4xx — a malformed payload or an
  * out-of-range turn count never becomes valid by waiting.
  */
-export function classifyFailure(status: number | undefined, detail?: string): "retry" | "permanent" {
-  if (status === undefined) return "retry";
+export function classifyFailure(
+  status: number | null | undefined,
+  detail?: string,
+): "retry" | "permanent" {
+  if (status === undefined || status === null || !Number.isFinite(status)) return "retry";
   if (status >= 300 && status < 400) return "retry";
   if (status >= 500) return "retry";
-  if (status === 408 || status === 425 || status === 429) return "retry";
+  if (status === 402 || status === 408 || status === 425 || status === 429) return "retry";
   if (status === 409) return "retry";
   return "permanent";
 }
 
+/** `attempts` as a small non-negative int, however corrupt the stored value is.
+ *  Clamped because `backoffDelay` computes `2 ** (n - 1)` from it; the backoff
+ *  saturates (30 s * 2**10 > 6 h) long before this bound. */
+export function clampAttempts(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.min(Math.floor(value), MAX_ATTEMPTS)
+    : 0;
+}
+
+/** `next_attempt_at_ms` as a FINITE epoch-ms value — 0 means "retry now".
+ *  A non-finite window is not a window: `Infinity > nowMs` is true forever, and
+ *  the carry-forward would preserve it across every turn, making a growing
+ *  session permanently un-fileable while every surface says "will retry". */
+export function clampWindow(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** The prior entry's window, bounded to what the write path can produce.
+ *  `clampWindow` makes it finite; this makes it PLAUSIBLE. A legitimate window
+ *  is at most `written_at + RETRY_MAX_MS` (`backoffDelay` saturates there), so
+ *  anything further out is corrupt — and because it is CARRIED forward it would
+ *  be re-written on every turn and strand the entry permanently, silently. */
+export function carriedWindow(value: unknown): number {
+  const window = clampWindow(value);
+  return window <= Date.now() + RETRY_MAX_MS ? window : 0;
+}
+
 /** Exponential backoff for attempt N (1-based), capped at RETRY_MAX_MS. */
 export function backoffDelay(attempts: number): number {
-  const exp = Math.max(0, attempts - 1);
+  const exp = Math.max(0, clampAttempts(attempts) - 1);
   return Math.min(RETRY_BASE_MS * 2 ** exp, RETRY_MAX_MS);
 }
 
@@ -985,6 +1073,7 @@ export async function flushSpool(
     filed: 0,
     deferred: 0,
     skipped: 0,
+    heldByBackoff: 0,
     heldBack: 0,
     discarded: [],
   };
@@ -1003,7 +1092,16 @@ export async function flushSpool(
       summary.skipped += 1;
       continue;
     }
-    if (meta.next_attempt_at_ms > nowMs) {
+    let window = clampWindow(meta.next_attempt_at_ms);
+    if (window > nowMs + RETRY_MAX_MS) {
+      // No legitimately-written window is further out than now + RETRY_MAX:
+      // `backoffDelay` saturates there. Beyond it the value is corrupt, and the
+      // safe reading of an unusable window is "retry now" — honouring it would
+      // strand the entry indefinitely.
+      window = 0;
+    }
+    if (window > nowMs) {
+      summary.heldByBackoff += 1;
       summary.skipped += 1;
       continue;
     }
@@ -1069,7 +1167,16 @@ export async function flushSpool(
       // Re-read before the backoff write-back for the same reason as the CAS
       // above: never clobber newer turns written while the POST was in flight.
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
-      pending.attempts = (meta.attempts ?? 0) + 1;
+      if (pending.filed_key && pending.filed_key === pending.capture_key) {
+        // A CONCURRENT flush already filed this exact content while our POST was
+        // in flight. Re-arming the backoff here would attach a window to content
+        // that was never refused — and since writeSpoolEntry now CARRIES the
+        // window, the next turn's NEW content would inherit it and wait up to
+        // RETRY_MAX_MS with no attempt behind it (#4714 cycle-7 review).
+        summary.skipped += 1;
+        continue;
+      }
+      pending.attempts = clampAttempts(meta.attempts) + 1;
       pending.next_attempt_at_ms = nowMs + backoffDelay(pending.attempts);
       writeMeta(dir, pending);
       summary.deferred += 1;
@@ -1146,12 +1253,15 @@ function warn(message: string): void {
   console.warn(`[tortoise-capture] ${message}`);
 }
 
-/** Report a flush outcome — success lines only on 2xx, every discard named. */
+/** Report a flush outcome — success lines on 2xx, every discard named. */
 function reportFlush(summary: FlushSummary, where: string): void {
-  if (summary.filed > 0) {
+  // Deferrals are reported too: a quota-blocked spool is otherwise a steady
+  // state that logs NOTHING while captures sit unfiled (#4714 review).
+  if (summary.filed > 0 || summary.deferred > 0 || summary.heldByBackoff > 0) {
     log(
       `spool flush (${where}): filed ${summary.filed}, deferred ${summary.deferred}, ` +
-        `skipped ${summary.skipped}, held back ${summary.heldBack}`,
+        `skipped ${summary.skipped} (${summary.heldByBackoff} waiting on backoff), ` +
+        `held back ${summary.heldBack}`,
     );
   }
   for (const d of summary.discarded) {

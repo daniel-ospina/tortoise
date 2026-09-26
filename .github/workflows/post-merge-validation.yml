@@ -316,6 +316,17 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         with:
           python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
+      - uses: actions/setup-node@v4
+        # #4620: this job runs the whole fast suite, which collects
+        # tests/test_pi_capture_hooks.py (its two installed-artifact checks FAIL
+        # rather than skip when node is absent or below the default-on
+        # type-stripping floor, 22.18) and
+        # tests/test_session_bridge_fragment_retention.py (whose own node gate
+        # fails rather than skips), so provision the toolchain here instead of
+        # inheriting it from the runner image.
+        if: needs.dedup-check.outputs.skip != 'true'
+        with:
+          node-version: '22'  # `.ts` type stripping + syntax detection is DEFAULT-ON from 22.18; these checks pass no flag
       - name: Install
         if: needs.dedup-check.outputs.skip != 'true'
         run: |

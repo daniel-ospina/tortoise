@@ -28,6 +28,7 @@ from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import _as_dt
 from tortoise import cohort_cost as _cc
 from tortoise import hosted_api as _ha
+from tortoise import operator_alert as oa
 from tortoise.alert_store import AlertStore
 from tortoise.hosted_api import app, get_current_org
 from tortoise.hosted_backup import MemoryStorage
@@ -153,7 +154,16 @@ class _Channels:
 
 @pytest.fixture()
 def incidents(monkeypatch):
-    """Point the cap's alert sink at a REAL AlertStore over fake transport."""
+    """Point the alert channel at a REAL AlertStore over fake transport.
+
+    ONE patch covers both ways a cap incident reaches the channel: the cap
+    FIRING (``file_cohort_cost_incident`` -> ``_cc._alert_store`` -> here) and
+    the UNENFORCEABLE alert (``report_unenforceable_cap`` -> ``alert_operator``
+    -> here). ``_cc._alert_store`` now DELEGATES to ``operator_alert.alert_store``
+    (#3981), so patching the seam it delegates to is what keeps this fixture
+    honest; patching ``_cc._alert_store`` alone would leave the unenforceable
+    alert un-injected and silently unfiled.
+    """
     channels = _Channels()
     store = AlertStore(
         MemoryStorage(),
@@ -164,8 +174,41 @@ def incidents(monkeypatch):
         repo="daniel-ospina/tortoise",
         assignee="daniel-ospina",
     )
-    monkeypatch.setattr(_cc, "_alert_store", lambda: store)
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
     return channels
+
+
+def _op_channels_for(monkeypatch):
+    """A recording operator-alert store, injected at the seam ``incidents`` uses.
+
+    Returns ``(store, channels)``; ``store`` is an ``AlertStore`` over the fake
+    transport so the assertion can read the FILED title, and its calls are
+    recorded through the channels. Distinct from ``incidents`` only in not being
+    a fixture, so a test that must avoid the HTTP endpoint can inject it too.
+    """
+    channels = _Channels()
+    store = AlertStore(
+        MemoryStorage(),
+        file_issue=channels.file_issue,
+        close_issue=channels.close_issue,
+        search_open=channels.search_open,
+        push_telegram=channels.push_telegram,
+        repo="daniel-ospina/tortoise",
+        assignee="daniel-ospina",
+    )
+
+    class _Recording:
+        def __init__(self, inner):
+            self.inner = inner
+            self.calls: list[tuple] = []
+
+        def open_incident_state(self, kind, org_id="", detail=None):
+            self.calls.append((kind, org_id, dict(detail or {})))
+            return self.inner.open_incident_state(kind, org_id, detail)
+
+    recording = _Recording(store)
+    monkeypatch.setattr(oa, "alert_store", lambda: recording)
+    return recording, channels
 
 
 @pytest.fixture()
@@ -219,15 +262,25 @@ def test_over_cap_cohort_capture_refused_402_no_extraction_no_write(
 
     assert r.status_code == 402, r.text
     detail = r.json()["detail"]
-    assert "Cohort LLM spend cap reached" in detail, detail
+    # #4614: the cohort refusal is a structured detail with its OWN code. Both
+    # halves matter: the `message` is what a human reads, and the code is what
+    # a caller branches on — a spend cap read as `quota_exceeded` would send
+    # the user to buy a plan that cannot lift it.
+    assert isinstance(detail, dict), (
+        f"the spend-cap refusal is still prose — indistinguishable from a "
+        f"plan-limit refusal by any caller: {detail!r}")
+    assert detail["code"] == "cohort_cost_cap", detail
+    assert detail["code"] != "quota_exceeded", detail
+    message = detail["message"]
+    assert "Cohort LLM spend cap reached" in message, detail
     # The TENANT-VISIBLE body must NOT carry the cohort-wide aggregate: it is
     # the SUM across every org in the cohort, so publishing it would disclose
     # the other tenants' COGS (and, against a tenant's own observable
     # run-rate, theirs by subtraction). The figure belongs to the internal
     # sinks — the AlertStore incident and the server-side log. REDs on:
     # interpolating ``spent``/``len(ids)`` back into the message.
-    assert f"{CAP_USD + 1.0:.4f}" not in detail, detail
-    assert "$" not in detail, detail
+    assert f"{CAP_USD + 1.0:.4f}" not in message, detail
+    assert "$" not in message, detail
     assert capture_env.extraction_calls == [], (
         "the cap must refuse BEFORE any extraction is dispatched")
     assert _session_count(COHORT_ORG) == 0, "nothing may be written"
@@ -256,6 +309,68 @@ def test_over_cap_refusal_is_observable_as_an_alert_incident(
     body = next(iter(incidents.bodies.values()))
     assert str(CAP_USD + 2.0) in body, body
     assert incidents.telegram, "the incident must also push, not only file"
+
+
+def test_cap_firing_files_with_the_sweep_disabled(
+        monkeypatch, real_operator_alert_store):
+    """D5a: a cap that FIRES files on a backups-disabled deployment.
+
+    Pins the REAL builder, NOT the injected ``incidents`` seam: routing this
+    through the seam makes it GREEN even if ``_cc._alert_store`` is reverted to
+    the sweep-gated body, which would void the regression guard. The autouse
+    ``_operator_alert_isolation`` would substitute ``lambda: None`` — hence the
+    ``real_operator_alert_store`` opt-out.
+
+    The object store is the MEMORY seam (``TORTOISE_BACKUP_STORAGE=memory``)
+    rather than a patched ``ha._backup_storage``: the light leg builds its own
+    store from env, so patching the hosted module's storage would leave the
+    ``R2_*`` vars to decide the outcome and the test would measure the wrong
+    builder.
+    """
+    from tortoise import github_issue as gi
+    from tortoise import telegram_push as tp
+
+    monkeypatch.delenv("BACKUP_SWEEP_ENABLED", raising=False)
+    monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "memory")
+    monkeypatch.setenv("DR_ISSUES_PAT", "pat-test-only")
+    monkeypatch.setenv("GH_REPO", "daniel-ospina/tortoise")
+    monkeypatch.setenv("BACKUP_ALERT_ASSIGNEE", "daniel-ospina")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tg-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "tg-chat")
+    filed: list[str] = []
+    monkeypatch.setattr(
+        gi, "create_issue",
+        lambda repo, pat, title, body, assignee=None: (
+            filed.append(title) or 4242))
+    monkeypatch.setattr(gi, "search_open_incident", lambda *a, **k: [])
+    monkeypatch.setattr(tp, "send_message", lambda *a, **k: None)
+
+    assert _ha._backup_config_safe() is None, (
+        "precondition: the sweep is disabled, which is the gate under test")
+    assert _cc.file_cohort_cost_incident(COHORT_ORG, {"spent_usd": 99.0}) is True
+    assert filed == [f"[DR] {_cc.INCIDENT_KIND} — {COHORT_ORG}"], filed
+
+
+def test_unenforceable_cap_files_its_own_kind_directly(monkeypatch):
+    """The unenforceable-cap reporter dispatches its OWN kind — asserted WITHOUT
+    the HTTP endpoint, so it does not depend on the transport wait budget (which
+    a cold embedder load breaches on a loaded box).
+
+    REDs on: dropping the ``alert_operator`` call in ``report_unenforceable_cap``
+    (no incident), or reusing ``INCIDENT_KIND`` (the kind would read as a cap
+    FIRING — the conflation that makes 'cannot say' look like 'over budget').
+    """
+    from tortoise.quota import QuotaCheckError
+
+    store, ch = _op_channels_for(monkeypatch)
+    _cc.report_unenforceable_cap(COHORT_ORG, QuotaCheckError("window"))
+    assert oa.join_operator_alerts() == 0, "the dispatch is asynchronous"
+
+    assert list(ch.issues.values()) == [
+        f"[DR] {_cc.UNENFORCEABLE_INCIDENT_KIND} — {COHORT_ORG}"], ch.issues
+    assert ch.telegram, "the incident must also push, not only file"
+    assert store.calls == [(_cc.UNENFORCEABLE_INCIDENT_KIND, COHORT_ORG,
+                             {"error_type": "QuotaCheckError"})]
 
 
 # ── 2. the paired negative control ──────────────────────────────────────────
@@ -359,6 +474,13 @@ def test_unresolvable_window_is_served_and_alerted_never_500(
 
     GREEN legitimate form: a subscription org with NULL period columns in an
     armed cohort with no spend — the unenforceable case, served and alerted.
+
+    TWO kinds are expected on the incident channel, and they are DISTINCT:
+    ``COHORT_CAP_UNENFORCEABLE`` (the cap could not be evaluated — this lane)
+    and ``UNMETERED_INCREMENT`` (the capture's own ledger write dropped for the
+    same unresolvable window). Neither is ``COHORT_COST_CAP`` — an unenforceable
+    cap is not a cap firing, and it is the KIND that says so, not the absence of
+    an incident.
     """
     reg = _ha._make_sdk(namespace="registry")._get_registry()
     reg.query(
@@ -377,9 +499,22 @@ def test_unresolvable_window_is_served_and_alerted_never_500(
     assert any("UNENFORCEABLE COHORT COST CAP" in rec.getMessage()
                for rec in caplog.records), [
         rec.getMessage() for rec in caplog.records]
-    assert not incidents.issues, (
-        "an unenforceable cap is NOT a cap firing — it must not raise a "
-        "cap incident (that would conflate 'over budget' with 'cannot say')")
+
+    assert oa.join_operator_alerts() == 0, "the dispatch is asynchronous"
+    titles = list(incidents.issues.values())
+    # MEMBERSHIP, not equality: on this path the capture's ledger write ALSO
+    # raises (the same unresolvable window), so the capture_ledger lane files a
+    # second incident. The two KINDS distinguish them now — the assertion that
+    # used to live here ("an unenforceable cap is NOT a cap firing — it must not
+    # raise a cap incident") is now the ABSENCE of COHORT_COST_CAP, not the
+    # absence of any incident.
+    assert not any(f"[DR] {_cc.INCIDENT_KIND}" in t for t in titles), titles
+    assert any(f"[DR] {_cc.UNENFORCEABLE_INCIDENT_KIND}" in t for t in titles), (
+        f"the unenforceable cap must file its OWN kind: {titles}")
+    assert any(f"[DR] {oa.UNMETERED_INCREMENT_KIND}" in t for t in titles), (
+        "the capture ledger's dropped increment must file too: "
+        f"{titles}")
+    assert incidents.telegram, "the incidents must push, not only file"
 
 
 def test_checkout_written_window_makes_the_cap_enforceable(
@@ -487,7 +622,14 @@ def test_mcp_capture_reports_err_quota_when_cohort_is_over_cap(
 
     assert result["status"] == 402, result
     assert result["code"] == ERR_QUOTA, result
-    assert "Cohort LLM spend cap reached" in result["error"], result
+    # #4614: the MCP twin must surface the refusal's MESSAGE, never the Python
+    # repr of the structured detail — stringifying the dict first bypassed
+    # `_record_capture_last_error`'s flattening and painted a repr on the
+    # dashboard sub-line and in the MCP tool result.
+    assert result["error"].startswith("Cohort LLM spend cap reached"), result
+    assert "{" not in result["error"] and "'code'" not in result["error"], (
+        f"the MCP error text is a repr of the structured detail: "
+        f"{result['error']!r}")
     assert _session_count(COHORT_ORG) == 0
 
 

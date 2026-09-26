@@ -9,6 +9,7 @@
     "overage_unit": "write_ops",
     "overage_price_per_10k": 5.0,
     "overage_tiers": [
+      "solo",
       "pro",
       "team"
     ],
@@ -49,7 +50,7 @@
       "max_graph_nodes": 25000,
       "max_api_keys": 5,
       "integrations": "unlimited",
-      "overage": false,
+      "overage": true,
       "support": "none",
       "loss_leader": true,
       "features": {

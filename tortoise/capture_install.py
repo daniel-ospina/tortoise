@@ -89,16 +89,25 @@ Relationship to ``tortoise/hook_install.py`` (PR #3866)
 -------------------------------------------------------
 #3866 adds the **drift/repair** path — ``tortoise hooks status|upgrade`` — over
 a ``HarnessLayout`` registry, and versions the contract with a
-``# tortoise-hook-version: N`` marker inside each shipped script.  This module
+``tortoise-hook-version: N`` marker inside each shipped artifact (``#`` for a
+shell hook, ``//`` for the Pi TypeScript extension, #4680).  This module
 deliberately does **not** re-declare any of that: it installs the shipped
 artifacts *verbatim* (no marker is injected, no version constant is declared)
 and emits exactly the settings shape #3866's ``_entry_command_dicts`` /
 ``_invokes_script`` classify as ours — a matcher entry whose ``hooks`` array
 holds ``{"type": "command", "command": ".claude/hooks/<name>", "timeout": 60}``.
-The artifact an install produces is therefore one ``tortoise hooks status``
-reads as current, and a stale install is repaired by ``tortoise hooks
-upgrade`` — #3808 is the mechanism #3795/#3801 operate through.  There is one
-version contract, and it lives in the shipped script.
+The artifact a **layout** install produces is therefore one
+``tortoise hooks status`` reads as current, and a stale layout install is
+repaired by ``tortoise hooks upgrade`` — #3808 is the mechanism
+#3795/#3801 operate through.  There is one version contract, and it lives in
+the shipped artifact: the shell half in ``HARNESS_LAYOUTS`` (that status/
+upgrade pair), and the Pi artifact half in
+``hook_install.ARTIFACT_CONTRACTS["pi"]`` — which those two
+commands CANNOT reach, because both resolve through ``get_layout`` and reject
+``pi`` outright (#5351).  Pi's installed seam is graded by ``tortoise doctor``
+and by ``session verify`` through the same contract, and it is repaired by
+``tortoise install pi`` (plus ``hook_install.detect_artifact_install`` for the
+read side).
 
 Because the two modules answer the same question — "is this entry ours?" —
 :func:`_is_our_script_command` here **delegates** to #3866's
@@ -231,7 +240,14 @@ CURSOR_HOOKS_SUBDIR = "hooks"
 #: belongs to cannot drift apart.
 
 #: The extension name Pi auto-discovers under ``~/.pi/agent/extensions/``.
-PI_EXTENSION_NAME = "tortoise-capture.ts"
+#: DERIVED from the install-contract registry: the seam's NAME and its version
+#: contract are one fact, and the drift detector must inspect exactly the file
+#: the installer writes.  Two independent literals could disagree, which would
+#: leave the detector checking a path the installer never produced (#4680).
+#: Evaluated at import: safe today because ``hook_install`` never imports this
+#: module at module level — if that ever changes, this line becomes an
+#: ImportError rather than a test failure, so keep the dependency one-way.
+PI_EXTENSION_NAME = hook_install.ARTIFACT_CONTRACTS["pi"].install_name
 
 #: The legacy agent-infra extension directory name (#3713).  Pi's loader does
 #: no basename dedupe, so ``tortoise-capture.ts`` and
@@ -650,6 +666,23 @@ def cursor_home(home: Path) -> Path:
         hook_install.get_layout("cursor"), home)
 
 
+def pi_home(home: Path) -> Path:
+    """Resolve Pi's extension root: ``~/.pi/agent/extensions``.
+
+    Pi has NO ``HarnessLayout`` (its seam is not a scripted hook, so
+    ``hook_install.default_root`` cannot answer for it), so the directory is
+    part of the artifact contract in ``hook_install`` — the
+    ``ARTIFACT_CONTRACTS["pi"].root_relpath`` field — which this delegates to,
+    so the contract, the installer, ``session verify`` and ``doctor`` all read
+    ONE declaration of where the seam lives (#4680).
+    """
+    root = hook_install.artifact_root("pi", Path(home))
+    if root is None:  # pragma: no cover - "pi" is a registered contract
+        raise RuntimeError(
+            "'pi' is missing from hook_install.ARTIFACT_CONTRACTS")
+    return root
+
+
 def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
                          command: str, root: str | os.PathLike[str],
                          hooks_dir: str, flat: bool) -> dict:
@@ -970,7 +1003,7 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
 
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
-    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir = pi_home(home)
     dst = ext_dir / PI_EXTENSION_NAME
     legacy = ext_dir / LEGACY_PI_DIRNAME
     legacy_disabled = ext_dir / PI_DISABLED_DIRNAME
@@ -1152,11 +1185,12 @@ def install_capture(
     # writes nothing (#4110, #4314).
     if result.ok and not dry_run:
         resolved_home = Path(home) if home is not None else Path.home()
-        # #4544: a harness with no shell-hook layout (`pi` — a TypeScript
-        # extension, not a `session-end.sh`) has no hooks_dir for the `../..`
-        # fallback to be derived from, so `get_layout` would raise and the
-        # whole install would crash.  Only a layout-bearing harness has a
-        # non-trivial `default_root`; for the others the record is skipped by
+        # A harness with no shell-hook layout (`pi` — a TypeScript extension,
+        # not a `session-end.sh`) has no hooks_dir for the `../..` fallback to
+        # be derived from, so the pre-ruling `get_layout` call raised and the
+        # whole install crashed (the no-fake-layout ruling; recorded on
+        # #4680).  Only a layout-bearing harness has a non-trivial
+        # `default_root`; for the others the record is skipped by
         # `record_hook_src_dir_for_install` itself.
         _layout = hook_install.get_layout_optional(harness)
         if _layout is None or harness == "claude":
@@ -1184,6 +1218,7 @@ __all__ = [
     "CURSOR_EVENT",
     "CURSOR_REGISTRATION_FILE",
     "CURSOR_SCRIPT_NAME",
+    "PI_EXTENSION_NAME",
     "InstallResult",
     "codex_home",
     "cursor_home",
@@ -1191,4 +1226,5 @@ __all__ = [
     "merge_capture_hooks",
     "merge_codex_capture_hooks",
     "merge_cursor_capture_hooks",
+    "pi_home",
 ]

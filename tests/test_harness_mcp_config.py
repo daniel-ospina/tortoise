@@ -340,6 +340,27 @@ class TestSelfHostedStdioShapes:
         claude_block = html.split('claude: () => JSON.stringify({', 1)[1].split('}, null, 2)', 1)[0]
         assert 'type:' not in claude_block
 
+    def test_self_hosted_page_sends_the_onboarding_instructions(self):
+        """#4365: this served page must hand the reader the onboarding INSTRUCTIONS
+        (a document the agent reads), not a skill to install — and must not
+        resurrect the retired Q&A "onboarding prompt" framing. Pinned because
+        reverting the copy left the whole suite green."""
+        html = (REPO_ROOT / "website" / "self-hosted.html").read_text()
+        low = html.lower()
+        assert "install the tortoise-onboarding skill" not in low, (
+            "self-hosted.html must not tell the reader to install onboarding")
+        assert ("https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
+                in html), ("self-hosted.html must link the served instructions")
+        assert "never an installed skill" in low, (
+            "self-hosted.html must say onboarding is not an installed skill")
+        # The retired framing must stay retired — the meta description and the
+        # step-3 note both carried it, three lines from the note above, and
+        # reverting them tripped no assertion at all (mutation-verified).
+        assert "5-question" not in low, (
+            "self-hosted.html still advertises the retired 5-question prompt")
+        assert "canonical onboarding prompt" not in low, (
+            "self-hosted.html still calls it the canonical onboarding prompt")
+
 
 class TestPrintHarnessInstructions:
     """`_print_harness_instructions` — CLI self-hosted guidance output."""
@@ -381,6 +402,143 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestDocsPageAndSkillConfig:
+    """#3145: the public docs page (`#mcp` section) and the onboarding skill
+    must agree with the tested harness shapes — no literal key, no
+    `"type": "streamable-http"`, Pi + Codex present, and the per-harness
+    `type` rule (claude = http; cursor/pi omit it).
+
+    These two surfaces were previously unasserted, which is exactly how the
+    docs shipped `streamable-http` + a literal key and the skill taught
+    `"type": "http"` for Cursor/Pi against `_harness_mcp_config`.
+    """
+
+    DOCS = REPO_ROOT / "website" / "docs.html"
+    SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
+
+    # Per-harness headings in the docs #mcp section. Rows are pinned by
+    # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
+    ROW_HEADINGS = ("<h4>Claude Code</h4>", "<h4>Cursor", "<h4>Pi",
+                    "<h4>Codex CLI</h4>", "<h4>Codex Desktop (no terminal)</h4>",
+                    "<h4>Claude Desktop</h4>", "<h4>Claude Web</h4>")
+
+    def _mcp_section(self) -> str:
+        text = self.DOCS.read_text(encoding="utf-8")
+        start = text.find('<h2 id="mcp">')
+        assert start != -1, "docs.html lost its #mcp section anchor"
+        end = text.find('<h2 id="api">', start)
+        assert end != -1, "docs.html lost its #api section anchor"
+        assert end > start, "docs.html #api now precedes #mcp — slice would be empty"
+        return text[start:end]
+
+    def _row(self, section: str, start_heading: str, end_heading: str) -> str:
+        assert start_heading in section, f"docs #mcp row missing: {start_heading}"
+        assert end_heading in section, f"docs #mcp row missing: {end_heading}"
+        return section.split(start_heading, 1)[1].split(end_heading, 1)[0]
+
+    @staticmethod
+    def _json_block(fragment: str) -> dict:
+        m = re.search(r"<pre><code>(\{.*?\})</code></pre>", fragment, re.S)
+        assert m, f"no JSON config block found in: {fragment[:80]!r}"
+        cfg = json.loads(m.group(1))["mcpServers"]["tortoise"]
+        assert "tt_" not in json.dumps(cfg), f"literal key in config block: {cfg}"
+        return cfg
+
+    # ── docs page (#mcp) ───────────────────────────────────────────────
+
+    def test_docs_mcp_section_has_no_literal_key(self):
+        section = self._mcp_section()
+        assert "tt_YOUR_KEY" not in section
+        # no config snippet ships a literal-looking tt_ key
+        assert '"Authorization": "Bearer tt_' not in section
+
+    def test_docs_mcp_section_has_no_streamable_type(self):
+        # The prose may WARN about the alias; no config value may use it.
+        assert '"type": "streamable-http"' not in self._mcp_section()
+
+    def test_docs_mcp_section_lists_all_harnesses(self):
+        section = self._mcp_section()
+        for heading in self.ROW_HEADINGS:
+            assert heading in section, f"docs #mcp must cover {heading} (#3145)"
+        # pin the Codex command, not just the word "Codex"
+        assert "codex mcp add tortoise --url" in section
+        # Codex Desktop is a separate, shell-export-free path (#2756/#2832)
+        desktop = self._row(section, "<h4>Codex Desktop (no terminal)</h4>",
+                            "<h4>Claude Desktop</h4>")
+        assert "~/.codex/config.toml" in desktop
+        assert "bearer_token_env_var" in desktop
+        assert "does <em>not</em> read shell exports" in desktop
+
+    def test_docs_hosted_json_blocks_use_env_indirection_and_canonical_type(self):
+        section = self._mcp_section()
+        # Global invariant: EVERY hosted JSON block keeps the key in an env var
+        # (a new harness row must not reintroduce a literal key).
+        hosted = self._row(section, "<h3>Setup — hosted (no install)</h3>",
+                           "<h3>Setup — self-hosted (stdio)</h3>")
+        blocks = re.findall(r"<pre><code>(\{.*?\})</code></pre>", hosted, re.S)
+        assert blocks, "no hosted MCP JSON blocks found in the docs #mcp section"
+        for raw in blocks:
+            server = json.loads(raw)["mcpServers"]["tortoise"]
+            assert "tt_" not in json.dumps(server), f"literal key in hosted block: {server}"
+            if "url" in server:
+                assert "${" in server["headers"]["Authorization"], (
+                    f"hosted block is not env-indirected: {server}")
+        # Identify each block by heading slice — Claude Code and Pi share the
+        # same plain ${VAR} header token, so a header search is ambiguous.
+        claude = self._row(section, "<h4>Claude Code</h4>", "<h4>Cursor")
+        cursor = self._row(section, "<h4>Cursor", "<h4>Pi")
+        pi = self._row(section, "<h4>Pi", "<h4>Codex CLI</h4>")
+        claude_cfg = self._json_block(claude)
+        cursor_cfg = self._json_block(cursor)
+        pi_cfg = self._json_block(pi)
+        assert claude_cfg.get("type") == "http", f"Claude Code must carry type http: {claude_cfg}"
+        assert claude_cfg["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+        assert "type" not in cursor_cfg, "Cursor remote config must omit `type`"
+        assert cursor_cfg["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
+        assert "type" not in pi_cfg, "Pi remote config must omit `type`"
+        assert pi_cfg["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+
+    def test_docs_stdio_block_carries_no_api_key(self):
+        # #702 class: TORTOISE_API_KEY disables the stdio transport, and the
+        # server needs TORTOISE_DB_URI — the docs block must not set the key.
+        section = self._mcp_section()
+        stdio = self._row(
+            section,
+            "<h3>Setup — self-hosted (stdio)</h3>",
+            "<h3>What your agent can do</h3>",
+        )
+        env = self._json_block(stdio)["env"]
+        assert "TORTOISE_API_KEY" not in env, "stdio config must not set TORTOISE_API_KEY (#702)"
+        # canonical compose sidecar URI (password + graph) — pinned so the
+        # docs cannot silently drift back to the passwordless form.
+        assert env.get("TORTOISE_DB_URI") == "docker://:falkordb@localhost:6379/tortoise", env
+
+    # ── onboarding skill (canonical) ───────────────────────────────────
+
+    def test_skill_does_not_teach_streamable_type(self):
+        skill = self.SKILL.read_text(encoding="utf-8")
+        assert '"type": "streamable-http"' not in skill
+        assert 'use `"http"`' in skill, "skill must state the canonical type value"
+
+    def test_skill_cursor_and_pi_rows_omit_type(self):
+        skill = self.SKILL.read_text(encoding="utf-8")
+        for start_h, end_h in (("### Cursor (self-install)", "### Codex CLI"),
+                               ("### Pi (self-install)", "### Claude Desktop")):
+            assert start_h in skill, f"skill row heading missing: {start_h}"
+            assert end_h in skill, f"skill row heading missing: {end_h}"
+            row = skill.split(start_h, 1)[1].split(end_h, 1)[0]
+            assert '"type"' not in row, f"{start_h}: remote config must omit `type`"
+
+    # ── cross-surface agreement (issue #3145 verification checklist) ───
+
+    def test_docs_and_skill_agree_on_canonical_type(self):
+        docs = self.DOCS.read_text(encoding="utf-8")
+        skill = self.SKILL.read_text(encoding="utf-8")
+        assert '"type": "http"' in docs
+        for name, surface in (("docs.html", docs), ("SKILL.md", skill)):
+            assert '"type": "streamable-http"' not in surface, f"{name} still teaches streamable-http"
 
 
 class TestCaptureInstallSeam:

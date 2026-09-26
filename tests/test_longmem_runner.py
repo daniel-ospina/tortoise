@@ -1,6 +1,17 @@
 """Smoke tests for the LongMemEval-S external comparability runner (#1144,
-axis 2). Runs fully offline against the committed MINI fixture with mocked
-reader + judge — no dataset download, no API keys, embedded FalkorDBLite.
+axis 2). Runs offline against the committed MINI fixture with mocked reader +
+judge — no dataset download, no API keys, embedded FalkorDBLite.
+
+Two resource contracts hold the "offline" claim:
+  * the READER/JUDGE are mocked (``--mock``) — no provider keys, no network;
+  * the DENSE (vector) leg is waived (``--skip-preflight``) on every harness
+    invocation whose subject is not the dense leg itself, so the module stays
+    green on an env without sentence-transformers or the cached model
+    (#4718, R3 #1542 D6). Tests that ASSERT dense-leg behavior opt in via
+    ``_require_embedder()`` and skip visibly when it is unavailable.
+
+--mock is NOT a dense-leg waiver (#4718): a run without the embedder fails
+closed unless ``--skip-preflight`` says so explicitly.
 
 The full 500-question run is @pytest.mark.slow and gated on the dataset +
 provider keys (never exercised in CI).
@@ -426,6 +437,12 @@ def test_outcomes_to_report_golden_shape():
         # marker — o.get-based projection, None on golden outcomes (absent
         # until the outcome carries it; pre-feature checkpoints render).
         "entity_key_expansion": None,
+        # C6 (#2520, #2513): the time-aware query expansion arm marker +
+        # the reorder stamps — o.get-based projection, None on golden
+        # outcomes (absent until the outcome carries them; pre-feature
+        # checkpoints render; the golden outcome ran OFF).
+        "time_aware_qe": None,
+        "time_aware_stats": None,
         # C3-1 (#2519, #2567): the coverage-completeness loop arm + the §8
         # per-outcome markers — o.get-based projection, None on golden
         # outcomes (absent until the outcome carries them; pre-feature
@@ -990,7 +1007,7 @@ def test_cli_smoke(tmp_path):
     out = tmp_path / "report.json"
     report = run_main([
         "--data", str(MINI), "--limit", "5", "--split", "s",
-        "--mock", "--output", str(out),
+        "--mock", "--skip-preflight", "--output", str(out),
     ])
     assert out.is_file()
     saved = json.loads(out.read_text(encoding="utf-8"))
@@ -2888,7 +2905,8 @@ def test_v2_ingest_cli_flag(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ev2, "extract_session_v2", _fake)
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--ingest-mode", "v2", "--mock"])
+                       "--ingest-mode", "v2", "--mock",
+                       "--skip-preflight"])
     assert report["methodology"]["ingest_mode"] == "v2"
     assert "v2 extractor ingestion" in report["methodology"]["extraction_approach"]
     o = report["outcomes"][0]
@@ -4491,7 +4509,8 @@ def test_knob_cli_flags(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "ingest_haystack", _capture)
     out = tmp_path / "report.json"
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock", "--chunk-turns", "4", "--context-cap", "5000",
+                       "--mock", "--skip-preflight",
+                       "--chunk-turns", "4", "--context-cap", "5000",
                        "--max-chunks-per-session", "1", "--output", str(out)])
     assert captured["chunk_turns"] == 4
     m = report["methodology"]
@@ -4507,7 +4526,7 @@ def test_knob_env_vars(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_LME_CONTEXT_CAP", "6000")
     monkeypatch.setenv("TORTOISE_LME_MAX_CHUNKS_PER_SESSION", "1")
     report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
-                       "--mock"])
+                       "--mock", "--skip-preflight"])
     m = report["methodology"]
     assert m["chunk_turns"] == 3
     assert m["context_token_cap"] == 6000
@@ -5404,33 +5423,65 @@ class _WrongDimModel:
         return np.zeros((len(texts), 512))
 
 
-def test_preflight_embedder_missing_real_run_exits(monkeypatch, capsys):
-    """D2 (R3): EmbeddingModel.get() → None on a real (non-mock) run →
-    SystemExit(1) with the exact remediation commands on stderr — the dense
-    leg can never silently degrade (#1626: numeric exit code; the message
-    goes to stderr, consistent with the PreflightError path)."""
+def test_preflight_embedder_missing_required_run_exits(monkeypatch, capsys):
+    """D2 (R3) + #4718: EmbeddingModel.get() → None on a run that REQUIRES
+    the dense leg → SystemExit(1) with the exact remediation commands on
+    stderr — the dense leg can never silently degrade (#1626: numeric exit
+    code; the message goes to stderr, consistent with the PreflightError
+    path). #4718: the failure is attributable — it names the reason, the
+    load budget used, and that no measurement was produced."""
     from tools.longmem_eval.run import _preflight_embedder
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get",
                         staticmethod(lambda load_timeout=None: None))
     with pytest.raises(SystemExit) as ei:
-        _preflight_embedder(mock=False)
+        _preflight_embedder(dense_leg_required=True)
     assert ei.value.code == 1
     err = capsys.readouterr().err
+    assert "no_embedder" in err
+    assert "load_timeout=600s" in err
+    assert "NO measurement" in err
     assert "--extra embeddings" in err
     assert "bge-small-en-v1.5" in err  # #1349 swap: the remediation names the new default
 
 
-def test_preflight_embedder_missing_mock_warns_and_continues(monkeypatch):
-    """D2 (R3): --mock + missing embedder → warn + continue (status
-    recorded, never a crash) — CI smoke stays runnable offline."""
+def test_preflight_embedder_get_raising_fails_closed(monkeypatch, capsys):
+    """#4718 (declared threat class 3): a ``get()`` that RAISES — e.g. an
+    import error inside the loader — must be treated exactly like a ``None``
+    return. The gate must not leak the exception past the fail-closed path and
+    must not let a required run proceed."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+
+    def _boom(*, load_timeout=None):
+        raise RuntimeError("import error inside the loader")
+
+    monkeypatch.setattr(EmbeddingModel, "get", staticmethod(_boom))
+    with pytest.raises(SystemExit) as ei:
+        _preflight_embedder(dense_leg_required=True)
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "no_embedder" in err
+    assert "NO measurement" in err
+    # the waiver path must swallow it too (record + continue, never raise)
+    status = _preflight_embedder(dense_leg_required=False)
+    assert status["available"] is False
+    assert status["reason"] == "no_embedder"
+
+
+def test_preflight_embedder_waived_warns_and_continues(monkeypatch, capsys):
+    """#4718: --skip-preflight is the ONE explicit dense-leg waiver. It
+    records the unavailable status and continues (the escape hatch that
+    keeps debugging/offline runs possible), and the line uses WAIVED
+    vocabulary so it can never be mistaken for a measurement's warning."""
     from tools.longmem_eval.run import _preflight_embedder
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get",
                         staticmethod(lambda load_timeout=None: None))
-    status = _preflight_embedder(mock=True)  # must not raise
+    status = _preflight_embedder(dense_leg_required=False)  # must not raise
     assert status["available"] is False
     assert status["reason"] == "no_embedder"
+    assert "WAIVED by --skip-preflight" in capsys.readouterr().err
     # the version field is well-formed — str when the extra is installed
     # (this env), null when absent — never an exception
     assert isinstance(status["sentence_transformers_version"],
@@ -5443,7 +5494,7 @@ def test_preflight_embedder_present_probe_ok():
     available=True / reason=None."""
     from tools.longmem_eval.run import _preflight_embedder
     _require_embedder()
-    status = _preflight_embedder(mock=True)
+    status = _preflight_embedder(dense_leg_required=True)
     assert status["available"] is True
     assert status["reason"] is None
     # #1349 swap: the model identity is the PINNED production default (bge),
@@ -5457,37 +5508,46 @@ def test_preflight_embedder_present_probe_ok():
 
 
 def test_preflight_embedder_encode_raises(monkeypatch, capsys):
-    """D2 (R3): a present-but-broken embedder (encode raises) →
-    reason='encode_failed'; real runs exit, --mock warns and continues.
+    """D2 (R3) + #4718: a present-but-broken embedder (encode raises) →
+    reason='encode_failed'; a required run exits, a waived run continues.
     #1626: exit code is numeric (1); the reason is on stderr."""
     from tools.longmem_eval.run import _preflight_embedder
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
         lambda load_timeout=None: _BrokenEncodeModel()))
     with pytest.raises(SystemExit) as ei:
-        _preflight_embedder(mock=False)
+        _preflight_embedder(dense_leg_required=True)
     assert ei.value.code == 1
     assert "encode_failed" in capsys.readouterr().err
-    status = _preflight_embedder(mock=True)
+    status = _preflight_embedder(dense_leg_required=False)
     assert status["available"] is False
     assert status["reason"] == "encode_failed"
 
 
-def test_preflight_embedder_wrong_dim(monkeypatch):
-    """D2 (R3): a swapped/wrong-dimension model → reason='dim_mismatch' (a
-    run can never publish vector_strategy=enabled with a broken dim)."""
+def test_preflight_embedder_wrong_dim(monkeypatch, capsys):
+    """D2 (R3) + #4718: a swapped/wrong-dimension model → reason=
+    'dim_mismatch' (a run can never publish vector_strategy=enabled with a
+    broken dim). It is fatal for a required run and recorded for a waived
+    one."""
     from tools.longmem_eval.run import _preflight_embedder
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
         lambda load_timeout=None: _WrongDimModel()))
-    status = _preflight_embedder(mock=True)
+    with pytest.raises(SystemExit) as ei:
+        _preflight_embedder(dense_leg_required=True)
+    assert ei.value.code == 1
+    assert "dim_mismatch" in capsys.readouterr().err
+    status = _preflight_embedder(dense_leg_required=False)
     assert status["available"] is False
     assert status["reason"] == "dim_mismatch"
 
 
-def test_preflight_embedder_mock_uses_short_timeout(monkeypatch):
-    """D2 (R3): --mock probes with the short (30s) load timeout — an offline
-    env without a cached model warns in ~30s, not 10 minutes."""
+def test_preflight_embedder_load_budget_follows_requirement(monkeypatch):
+    """#4718: the load budget follows the SAME predicate as the gate. A
+    required leg gets the real cold-load window (600s — #1349 raised the
+    product default off 30s for exactly this reason); an explicitly waived
+    leg gets the short 30s probe so a debugging run does not stall ten
+    minutes before continuing."""
     from tools.longmem_eval.run import _preflight_embedder
     from tortoise.embeddings import EmbeddingModel
     seen: dict[str, float | None] = {}
@@ -5497,8 +5557,131 @@ def test_preflight_embedder_mock_uses_short_timeout(monkeypatch):
         return None
 
     monkeypatch.setattr(EmbeddingModel, "get", staticmethod(_fake_get))
-    _preflight_embedder(mock=True)
+    with pytest.raises(SystemExit):
+        _preflight_embedder(dense_leg_required=True)
+    assert seen["load_timeout"] == 600.0
+    _preflight_embedder(dense_leg_required=False)
     assert seen["load_timeout"] == 30.0
+
+
+# ── #4718: the dense leg fails CLOSED for every run that requires it ────────
+#
+# The gate used to key on `--mock`, which is a reader/judge flag. That made
+# `--retrieval-only --mock` — the sealed retrieval-measurement command, real
+# retriever against a real graph with only reader/judge mocked out — inherit
+# the offline harness's warn-and-continue, so a loaded host emitted a
+# keyword-only report that read as a measurement. The receipt this bug
+# produced is self-titled "BLOCKER EVIDENCE — NOT A MEASUREMENT" because a
+# human refused to record it by hand (docs/scoping/receipts/
+# 2026-09-22-2513-embedder-preflight-blocker.json). The code must enforce
+# what that human had to notice: an unavailable dense leg is fatal unless the
+# operator EXPLICITLY waives it with --skip-preflight.
+
+
+def test_retrieval_only_mock_dense_leg_failure_fails_closed(
+        monkeypatch, tmp_path, capsys):
+    """#4718: --retrieval-only --mock is a MEASUREMENT, so an embedder that
+    cannot load must abort with a non-zero exit BEFORE any report exists.
+
+    RED before the fix: the gate keyed on ``--mock`` and warned-and-continued,
+    so no SystemExit happened at the gate — the run went on to fail only
+    incidentally, far downstream, after the keyword-only report had already
+    been WRITTEN (the retrieval-only summary crash, #4803). That is exactly
+    the indistinguishable-from-a-result receipt this gate now prevents:
+    the assertion below on the gate's own message is what makes the RED
+    attributable to the dense leg rather than to that crash."""
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+    out = tmp_path / "report.json"
+    with pytest.raises(SystemExit) as ei:
+        run_mod.run_main([
+            "--data", str(MINI), "--limit", "1", "--split", "s",
+            "--retrieval-only", "--mock", "--output", str(out)])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "no_embedder" in err          # attributable: the reason
+    assert "no measurement" in err.lower()
+    assert not out.exists()              # no receipt to mistake for a result
+
+
+def test_mock_smoke_dense_leg_failure_fails_closed(
+        monkeypatch, tmp_path, capsys):
+    """#4718: ``--mock`` selects the reader/judge, NOT an authorisation to
+    run without the dense leg — so the offline harness smoke fails closed
+    too. `--mock` is therefore structurally not a route to a degraded
+    number; the explicit escape hatch is ``--skip-preflight`` (pinned by the
+    companion test below).
+
+    RED before the fix: --mock warns-and-continues and the run completes."""
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+    out = tmp_path / "report.json"
+    with pytest.raises(SystemExit) as ei:
+        run_mod.run_main([
+            "--data", str(MINI), "--limit", "1", "--split", "s",
+            "--mock", "--output", str(out)])
+    assert ei.value.code == 1
+    assert "no measurement" in capsys.readouterr().err.lower()
+    assert not out.exists()
+
+
+def test_skip_preflight_waives_dense_leg_and_still_runs(monkeypatch, tmp_path):
+    """#4718 companion: --skip-preflight is the ONE explicit waiver of the
+    dense-leg gate (documented as debugging/offline only). With the embedder
+    pinned out the run must still reach the question loop and record the
+    dense leg as unavailable — the fail-closed change must not remove the
+    escape hatch.
+
+    Passes before AND after the fix: this is the guard against the fix
+    over-reaching into a total removal of the offline path."""
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+    out = tmp_path / "report.json"
+    report = run_mod.run_main([
+        "--data", str(MINI), "--limit", "1", "--split", "s", "--mock",
+        "--skip-preflight", "--output", str(out)])
+    assert report["methodology"]["vector_strategy"] == "unavailable"
+    assert out.is_file()
+
+
+def test_required_dense_leg_end_to_end_completes_with_leg_enabled(
+        monkeypatch, tmp_path):
+    """#4718: the REQUIRED-leg happy path, end to end through ``run_main``.
+
+    The fail-closed tests above pin the failure side; nothing else exercises
+    ``run_main`` with a dense leg that is required AND available — the
+    unit-level ``test_preflight_embedder_present_probe_ok`` skips on a host
+    without the real embedder, so the wiring from the gate through to
+    ``methodology.vector_strategy`` had no end-to-end coverage.
+
+    No ``--mock`` waiver and no ``--skip-preflight``: the gate must pass on
+    its own, the question loop must run, and the report must record the leg
+    as ENABLED (the mirror image of the two fail-closed tests, which assert
+    no report is written at all).
+    """
+    import tools.longmem_eval.run as run_mod
+    from tortoise.embeddings import EmbeddingModel
+
+    class _FakeEmbedder:
+        def encode(self, texts):
+            return [[0.0] * 384 for _ in texts]
+
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: _FakeEmbedder()))
+    out = tmp_path / "report.json"
+    report = run_mod.run_main([
+        "--data", str(MINI), "--limit", "1", "--split", "s",
+        "--mock", "--output", str(out)])
+    m = report["methodology"]
+    assert m["vector_strategy"] == "enabled"
+    assert m["embedder"]["available"] is True
+    assert out.is_file()
 
 
 def test_report_methodology_embedder_keys_always_emitted():
@@ -5858,7 +6041,10 @@ def test_encode_broken_no_contradiction(tmp_path, monkeypatch):
         assert vec["reason"] == "encode_failed"
     finally:
         sdk.close()
-    status = _preflight_embedder(mock=True)
+    # #4718: obtain the degraded status through the explicit waiver — a
+    # required pre-flight now raises instead of returning the status, and
+    # this test is about the report never contradicting itself.
+    status = _preflight_embedder(dense_leg_required=False)
     assert status["reason"] == "encode_failed"
     outcomes, report = run_evaluation(
         _mini()[:1], reader=MockReader(), judge=MockJudge(), ks=(5,),

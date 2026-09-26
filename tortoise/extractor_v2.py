@@ -62,10 +62,13 @@ import random
 import re
 import threading
 import time
+import unicodedata
 import warnings
 import weakref
 from typing import Any
 
+from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
+from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
@@ -308,7 +311,7 @@ def _s2s4_rules() -> str:
 
 
 CORE_OBJECT_KEYS = (
-    "core:Project", "core:WorkItem", "core:Problem", "core:document", "core:tag",
+    "core:Project", "core:WorkItem", "core:Problem", "core:tag",
     "core:user", "core:skill", "core:tool", "core:agent",
     "core:workflow", "core:agreement", "core:standard", "core:other",
     "core:strategy", "core:plan", "core:goal", "core:target",
@@ -523,6 +526,32 @@ def _classify_later_enabled() -> bool:
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
     review FIX B) and goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
+
+
+def _vet_enabled() -> bool:
+    """#5005: the call-time S2.2 VET toggle.
+
+    Unset/0 → the gate is entirely off-path: the VET passes do not run, the
+    list is untouched, and the only result delta is the additive ``vet``
+    evidence key — matching the ``TORTOISE_CLASSIFY_LATER`` precedent
+    (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
+    Value matching goes through the declared truthy contract (#4097)."""
+    return is_truthy(os.environ.get("TORTOISE_VET"))
+
+
+def _value_gate_enabled() -> bool:
+    """#4899: the S2.2b mechanical identifier-only predicate toggle.
+
+    ⚠️ **Subordinate to VET, and that is why it is folded into ``vet_enabled``.**
+    The predicate runs *inside* :func:`vet_gate.vet_candidates`, so this flag on
+    its own would be **inert** — it would change nothing and an operator
+    measuring the rate effect (``#4899`` safeguard 1) would read zero firings
+    and wrongly conclude the predicate never fires. With ``arbiter=None`` (the
+    production state) the VET pass's only effect *is* this predicate, so
+    switching VET on is the smallest correct subordination.
+
+    Value matching goes through the declared truthy contract (#4097)."""
+    return _value_gate.value_gate_enabled()
 
 
 def _default_kind_classifier(model):
@@ -1888,15 +1917,22 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
     rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
+        # #4511: the callee returns ``SearchResult.to_dict()`` rows, which key
+        # the kind as ``point_kind`` — never ``kind``. Reading the wrong key
+        # left every row's OUTPUT ``kind`` empty (points and the object/subject
+        # legs alike), blanking the S4 prompt's kind column. The OUTPUT key
+        # the renderer and link-before-create read stays ``kind``; only the
+        # SOURCE key is corrected.
+        row_kind = r.get("point_kind", "")
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
-                        "kind": r.get("kind", "")})
+                        "kind": row_kind})
         elif entity_type == "point" and _is_turn_echo_row(session_id, r):
             # #2552: this capture's transcript echo — never a memory prior.
             continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
-                        "kind": r.get("kind", "")})
+                        "kind": row_kind})
         if limit > 0 and len(out) >= limit:
             break
     return out
@@ -2437,6 +2473,22 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
+def _clip(value: object, limit: int = 60) -> str:
+    """Coerce a model-supplied field to bounded text for a report/warning.
+
+    The report must never be STRICTER than the write gate it reports on:
+    `execute_embed` already coerces every one of these fields with `str(...)`
+    before using them (`_norm` above carries the same correction as FIX C),
+    so a `None`/`0` name or content is WRITABLE — as `"None"`/`"0"`. Slicing
+    the raw value raised `TypeError` instead, and because
+    `extract_session_v2` wraps S5 fail-open the raise discarded the WHOLE
+    session's payload, not just the one odd item (#5060). `_parse_json_robust`
+    rung 1 returns parsed JSON without `_validate_output_shape`, so such
+    values reach these sites from real model output.
+    """
+    return str(value)[:limit]
+
+
 def _norm_kind(k: str) -> str:
     """Bare + case-folded kind form — the link-before-create lookup key.
     The model may emit 'plan' where the backend stores 'core:plan'; both
@@ -2452,6 +2504,10 @@ _MIN_OVERLAP_TOKENS = 2
 # E5 fact-value contradiction frame: stopword-stripped shared tokens on the
 # longer side must reach 0.5. A small LOCAL closed-class set (importing the
 # eval's ingest_v2._STOPWORDS into tortoise/ would invert the layering).
+# ⛔ A frame word can still be a load-bearing OPERATOR — `and` in "we ship and
+# test" asserts a different relation from `or`, while the same `and` coordinates
+# two list items.  Membership here is by commonest role; the role is read from
+# the PAIR in `_connective_swap` (#5139).
 _FRAME_STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "but", "if", "then", "else", "of",
     "to", "in", "on", "at", "for", "with", "from", "by", "about",
@@ -2910,6 +2966,14 @@ def _num_word_value(s: str) -> int | None:
 
 _NUM_WORD_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
 
+# The clock forms' single authority: "6pm" | "6:00 pm" | "six pm" |
+# "six thirty pm".  Shared by ``_value_signature`` (which normalises them) and
+# the D12/O4 guard (which strips them, so a differing number beside an equal
+# clock value is still compared).
+_CLOCK_RE = re.compile(
+    rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
+    rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
+
 
 def _value_signature(content: str) -> str | None:
     """Deterministic value-token normalization (D2, Q3) — the value-identity
@@ -2926,10 +2990,7 @@ def _value_signature(content: str) -> str | None:
     # clock forms: "6pm" | "6:00 pm" | "six pm" | "six thirty pm" — the
     # hour word is constrained to the number-word vocabulary so "at six pm"
     # cannot greedily capture "at six" as the hour (deterministic).
-    clock_re = re.compile(
-        rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
-        rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
-    for m in clock_re.finditer(c):
+    for m in _CLOCK_RE.finditer(c):
         raw, amp = m.group(1), m.group(2)[0].lower()
         if ":" in raw:
             hh, mm = raw.split(":")
@@ -2941,8 +3002,18 @@ def _value_signature(content: str) -> str | None:
             hour_v = _num_word_value(words[0])
             if hour_v is None:
                 continue
-            minute_v = (_MINUTE_WORDS.get(" ".join(words[1:]), 0)
-                        if len(words) > 1 else 0)
+            minute_v = _MINUTE_WORDS.get(" ".join(words[1:])) if len(words) > 1 else 0
+            if minute_v is None:
+                # A spelled-out minute the table does not name ("six fifty pm")
+                # is still a minute.  Defaulting it to :00 made the whole clock
+                # normalise to the hour-only value, so "6:00pm" and "six fifty
+                # pm" carried the SAME signature and one deleted the other.
+                minute_v = _num_word_value(" ".join(words[1:])) \
+                    if len(words) > 1 else 0
+            if minute_v is None or not 0 <= minute_v <= 59:
+                # Unreadable minute: leave the clock un-normalised rather than
+                # claim it agrees with every other reading of that hour.
+                continue
             sigs.append(f"{amp}{hour_v % 12 or 12:02d}:{minute_v:02d}")
     # compound numbers: "27:12", "1:02:30", "27m12s" (clock forms already
     # captured above — a following am/pm excludes the compound pass)
@@ -2950,11 +3021,21 @@ def _value_signature(content: str) -> str | None:
             r"\b\d{1,4}(?::\d{2})+(?:\.\d+)?\b(?!\s*(?:a\.?m\.?|"
             r"p\.?m\.?))|\b\d+m\d+s\b", c):
         sigs.append(re.sub(r"\s+", "", m.group(0)))
-    # quantity+unit: "5k", "10km", "2 hours"
+    # quantity+unit: "5k", "10km", "2 hours", "two hours".  The word form is
+    # matched too, and normalised to digits, or "2 hours"/"two hours" reported
+    # a value difference between two spellings of one quantity and identical
+    # claims superseded one another.
     for m in re.finditer(
-            r"\b\d+(?:\.\d+)?\s*(?:k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
+            rf"\b(\d+(?:\.\d+)?|(?:{_NUM_WORD_ALT})(?:\s*(?:{_NUM_WORD_ALT}))?)"
+            r"\s*(k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
             r"s|sec|secs|minutes|hours)\b", c):
-        sigs.append(re.sub(r"\s+", "", m.group(0)))
+        quant, unit = m.group(1), m.group(2)
+        if quant[:1].isdigit():
+            sigs.append(re.sub(r"\s+", "", quant) + unit)
+        else:
+            v = _num_word_value(quant)
+            if v is not None:
+                sigs.append(f"{v}{unit}")
     if not sigs:
         return None
     return "|".join(sorted(set(sigs)))
@@ -3009,6 +3090,1283 @@ def _date_is_later_or_undated(current_date: str | None, prior: dict) -> bool:
     except (TypeError, ValueError):
         pass
     return True
+
+
+# ── D12/O4 — the never-across boundary (#5080) ─────────────────────────────
+# The owner ruling of 2026-09-24 (recorded on #4899; EXT4 §16.4) authorises
+# merging near-duplicate claims and forbids a merge "across a difference in: a
+# number or quantity, a named entity, a language, a negation, or a condition".
+# The ruling, D12 and §16.4 state different-length lists of that boundary, so
+# the union is the floor enforced here.
+#
+# The asymmetry is also the ruling's: a false merge costs more than a kept
+# near-duplicate.  An unreadable comparison therefore reads as a DIFFERENCE
+# (both claims survive) and never as agreement.
+#
+# The dimension list alone does not cover a claim that OPPOSES its prior
+# without a marker — "failed at 3pm" vs "succeeded at 3pm" differ in no
+# number, name, negation or condition; the predicates differ — so a second,
+# more general test applies: the mechanical form of §4.2's "merged only when
+# nothing distinguishing is lost".  A fold may BROADEN a claim ("the team
+# meets weekly in main office" ← "the team meets weekly"); it may not
+# SUBSTITUTE its content.  If each side owns a content token the other lacks,
+# something distinguishing would be lost and the fold is refused.
+_NEGATION_MARKERS = frozenset({
+    "not", "no", "never", "none", "nor", "nothing", "without", "cannot",
+    "cant", "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+    "wont", "wouldnt", "shouldnt", "couldnt", "hasnt", "havent", "aint",
+    # The apostrophe-omitted spellings `_CLITIC_RE` cannot see: with the
+    # separator gone the token is an ordinary word, so it has to be named.
+    "mustnt", "neednt", "shant", "mightnt", "oughtnt", "darent", "hadnt",
+})
+_CONDITION_MARKERS = frozenset({
+    "if", "unless", "until", "when", "whenever", "provided", "assuming",
+    "whether", "iff", "pending", "once", "while", "given",
+})
+# Connectives that carry a condition in more than one word.  A single-word
+# marker list misses them entirely, and the pair then reads as one claim with a
+# detail added rather than two claims with and without a condition.
+_CONDITION_PHRASES = (
+    "as long as", "so long as", "in case", "in the event", "on condition that",
+    "provided that", "assuming that", "in the case that", "conditional on",
+)
+# A connective is FRAME (syntax) or an OPERATOR (meaning), and one spelling does
+# both jobs.  `and` COORDINATES two list items in "we ship the server and the
+# client", which must fold against the comma paraphrase; the same `and` is the
+# conjunction OPERATOR in "we ship and test", where `or` asserts something else.
+# `_FRAME_STOPWORDS` holds the token by its commonest role and the content
+# skeleton is a set, so the role cannot be read from the token — it is read from
+# the PAIR: each entry below is one SLOT, and a pair is a rival claim when BOTH
+# sides fill the SAME slot and each side owns a member the other LACKS (#5139).
+# The slot is the family, never a position: a position-keyed comparison would
+# refuse the paraphrases below, and a set (not a sequence) is what keeps
+# `and then` / `, then` folding.
+#
+# A slot is a DECLARED grouping of RIVAL operators — not a set of synonyms and
+# not a partition into relation sub-families.  Splitting the clause-relation
+# slot by relation would make `and` against `but` a CROSS-slot difference and so
+# fold it, reopening the memory-loss class this table exists to close; the cost
+# of keeping it coarse is that a swap between two members that happen to be
+# near-synonyms (`but`/`yet`, `because`/`as`, `for`/`as`) is refused too.  That
+# over-block is deliberate and is part of the declared residual set.
+#
+# What keeps the legitimate folds folding:
+#   * ONE side only — a comma list owns no `and`, so one side fills the slot, the
+#     connective did no work, and the pair is the documented broadening.
+#   * A SHARED member with a one-sided extra — "we wait for the build and the
+#     tests" against "we wait for the build, the tests" shares `for`; only ONE
+#     side is missing a member, which is the same broadening.
+#   * A SYNONYM pair that is nowhere a slot — `with`/`by` are spelled
+#     differently and assert the SAME relation, so "we ship with the courier"
+#     folds into "we ship by the courier"; the place (`in`/`on`/`at`) and
+#     relation (`of`/`for`/`about`) prepositions are that same kind of set.  ⚠️
+#     `for` is the EXCEPTION: it is a clause-relation slot member below, so its
+#     prepositional use is over-blocked — see the ⚠️ note after the table.
+#   * DIFFERENT slots are a rewording, not a swap — `to` (transfer direction)
+#     against `and` (clause relation) is the phase-D seam's own restatement, and
+#     it folds.
+# `as` fills two slots because it is polysemous (comparative "taller as", causal
+# "as it rained"); `and` is the counterpart of `or`, `but`, `nor`, `so`, `yet`,
+# `as` and `for` in one clause-relation slot.  Membership is read from the
+# TOKENS, so a member need not be a frame word to be caught — `yet`, `because`,
+# `although` and `whereas` are not frame words.
+#
+# ⚠️ Deliberate OVER-blocks, taken because the boundary's asymmetry says a wrong
+# keep is noise while a wrong drop is memory loss, and each is pinned as a
+# declared residual rather than silently absorbed:
+#   * `for` as a clause-relation member refuses the instrumental rewording
+#     "use the tool for a hammer"/"as a hammer".  Pruning it out would reopen
+#     the memory-loss class this table exists to close.
+#   * the coarse clause-relation slot refuses the within-relation synonyms
+#     `but`/`yet` and `because`/`as`.
+#   * a one-sided EXTRA operator inside an already-shared slot still folds
+#     ("we ship and test" / "we ship and test but we wait") — the extra is read
+#     as the broadening case, and closing it needs syntax.
+# `before`/`after` are deliberately NOT slots: both are ordinary content tokens
+# (neither is a frame word), so each side keeps its own ordering word and the
+# two-sided substitution rule already refuses the swap.
+_CONNECTIVE_SLOTS = (
+    # clause relation — the logical/causal/contrastive link between two
+    # predications.
+    frozenset({"and", "or", "but", "nor", "so", "yet", "as", "for",
+               "because", "although", "though", "whereas"}),
+    frozenset({"then", "else"}),
+    frozenset({"than", "as"}),
+    frozenset({"to", "from"}),
+)
+_CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
+# Multi-word COORDINATIONS.  `as well as` IS `and`, so it is canonicalised to
+# its operator before the slots are read.  Left as written its `as` fills the
+# clause-relation slot and REFUSES the legitimate `as well as` ⇄ `and` fold;
+# deleting the phrase instead would lose the `and`/`or` contrast, because
+# `as well as` against `or` would then read as one-sided and fold.
+#
+# Matched case-insensitively on a phrase EDGE that is "not alphanumeric", so
+# "it was well as expected" and "the gas well as a fuel" are not rewritten into
+# a coordination they are not.  `\b` is NOT that edge: `_` is a word character
+# to `re`, so `\b` would leave Markdown-emphasised "_as well as_"
+# uncanonicalised — the same phrase to a reader, and a MISS, which is the lossy
+# direction.
+#
+# The flag and the caller's `_norm` are both present because either alone
+# suffices for case; keeping both means no call path can depend on which one
+# happened.
+_COORDINATION_PHRASES = (("as well as", "and"),)
+_PHRASE_EDGE_LEFT = r"(?<![^\W_])"
+_PHRASE_EDGE_RIGHT = r"(?![^\W_])"
+_PHRASE_MARK_GAP = "\x00"
+# A phrase WORD is matched mark-TOLERANT between its letters, but only for the
+# gap a DROPPED MARK leaves (``\x00*``), while the SEPARATOR between the
+# phrase's words may be any non-word run (``[\W_]+``).  Both halves are needed
+# because the phrase pass reads the text through TWO de-accentings and neither
+# is complete alone: one deletes a mark (so an accent inside a word leaves the
+# word intact but a mark standing where a separator sits fuses two words), the
+# other keeps that mark as the gap it can stand for (so the separator survives
+# but a word carrying an accent is split).  The gap is a SENTINEL rather than
+# a non-word class for a reason: ``[\W_]*`` also admits a real token inside a
+# word, so the contraction ``we'll`` would spell ``well`` and ``as we'll, as``
+# would canonicalise to ``and`` — deleting the very comparison operators this
+# guard exists to keep.  A sentinel is only ever produced by a dropped mark.
+# The ends stay anchored, so only the phrase's own skeleton is loosened.
+_COORDINATION_PHRASE_RE = tuple(
+    (re.compile(_PHRASE_EDGE_LEFT
+                + r"[\W_]+".join(
+                    (_PHRASE_MARK_GAP + "*").join(re.escape(c) for c in w)
+                    for w in phrase.split())
+                + _PHRASE_EDGE_RIGHT, re.IGNORECASE), operator)
+    for phrase, operator in _COORDINATION_PHRASES
+)
+# Relative days + month names.  Not interchangeable with the value dimension:
+# "shipped in march" vs "shipped in april" carries no number.
+_DATE_WORDS = frozenset({
+    "today", "tomorrow", "yesterday",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday",
+    "january", "february", "march", "april", "june", "july",
+    "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+})
+# "may" is NOT in the set.  It is a month AND the commonest English modal, and
+# neither reading is safe as a blanket rule: as a date word everywhere it turns
+# "we may ship" vs "we can ship" into a DATE change — a value dimension, so a
+# hedge would terminalize the claim — and as a date word nowhere it loses a real
+# month difference ("we ship in may and receive in june" vs its mirror).  It is
+# read as a month only in a date position; see `_date_tokens`.
+_DATE_PREPOSITIONS = frozenset({"in", "of", "by", "during", "since", "until"})
+_MONTH_AMBIGUOUS = frozenset({"may"})
+# Relative days spelled in more than one word.  The single-word set alone
+# cannot see the modifier, so "tomorrow morning" and "the day after tomorrow
+# morning" share the token "tomorrow" and read as one claim.
+_DATE_PHRASES = (
+    "the day after tomorrow", "the day before yesterday", "the day after next",
+    "the day before last", "next week", "last week", "next month",
+    "last month", "next year", "last year", "the other day",
+)
+# Clock units are dropped from the content skeleton: "six pm" and "6pm" are
+# one value spelled twice, and the value dimension compares them.
+_CLOCK_UNITS = frozenset({"pm", "am"})
+# Pronouns and possessives are the one stopword class that CARRIES an entity:
+# "he won the race" vs "she won the race" and "my manager approved the plan"
+# vs "your manager approved the plan" name different subjects, so dropping
+# them would leave the two claims with identical content skeletons and fold a
+# re-subjected claim.  They are therefore content tokens, not frame.
+_ENTITY_PRONOUNS = frozenset({
+    "i", "me", "my", "mine", "myself",
+    "we", "us", "our", "ours", "ourselves",
+    "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself",
+    "it", "its", "itself", "they", "them", "their", "theirs",
+    "themselves", "this", "that", "these", "those",
+})
+_CONTENT_STOPWORDS = _FRAME_STOPWORDS - _ENTITY_PRONOUNS
+# "on" is a frame stopword because of its preposition use, but it also names a
+# STATE ("the flag is on").  Leaving it frame makes a state pair lopsided —
+# only "off" is one-sided — and a lopsided pair is the broadening case the
+# boundary allows, so "the flag is on" folded into "the flag is off".  As
+# content, the two are one-sided against each other and the substitution rule
+# sees them.
+_CONTENT_STOPWORDS = _CONTENT_STOPWORDS - {"on"}
+
+# A state word is load-bearing the same way a load-bearing connective is, and
+# it fails the same way: `off` in "the flag is off" asserts a property, while
+# the very same `off` can be a particle and `on` a preposition, so
+# `_CONTENT_STOPWORDS` holds the token by its commonest role and the role
+# cannot be read from the token.  PR #5320 (issue #5139, still open) adds the
+# analogous guard for the connective and refuses a SWAP — both sides fill one
+# slot, so each side owns a member the other LACKS.  A state word inverts a
+# claim on a ONE-SIDED DROP instead: "the flag is off" folded into "the
+# flag", and the in-capture seam then `DETACH DELETE`d the rival (#5134).
+#
+# The vocabulary is a flat declared set of antonym PAIRS, and `_polarity_drop`
+# reads it over the PAIR: a member present on ONE side is refused only when it
+# is the ENTIRE distinguishing content of that side's copula predicate and the
+# other side is silent.  So the two sides of the fold are the same claim minus
+# a state rather than a claim plus a detail.  The allowance for a one-sided
+# token is load-bearing (it is what keeps "the team meets weekly in main
+# office" folding into "the team meets weekly", #4652), so the pair and the
+# predicate — never a token list — decide.
+#
+# A flat set, not a table of slots like the connective rule's (#5320),
+# because a DROP has no second side to match a slot against — the rival is the
+# member's ABSENCE, not another member — so a partition would be structure no
+# rule reads.  The members above are the vocabulary's declaration, and the
+# union is what the pair predicate consults.
+#
+# The predicate condition is what separates the state `on` from the
+# prepositional one, and it is why `on` can stay a single member: "we ship on
+# friday" is a preposition whose object is a DATE token, so "we ship on
+# friday"/"we ship friday" carries one one-sided `on` and looks exactly like a
+# state drop until the predicate is read; "the focus is on quality" carries
+# `quality` as a second content token and reads the same way.  Both stay
+# foldable (pinned in the suite).
+#
+# The vocabulary is deliberately a small declared set, not an enumeration of
+# the language: a state word outside it (`shut`, `down`, `broken`) reaches no
+# dimension and is the documented residual, and so is a state term with an
+# adverb, a non-be linking verb, a passive/particle form, an inverted or fused
+# predicate, or an ATTRIBUTIVE (pre-nominal) position beside it ("seems off",
+# "was turned off", "currently off", "is the flag off", "the invalid token").
+# Each is a residual FAIL-OPEN in this guard: the pair folds, so in one
+# capture order the state-bearing claim can still be dropped.  All are pinned
+# in `tests/test_never_across_fold_5080.py` so they cannot go silent.
+_POLARITY_MEMBERS = frozenset({
+    "on", "off",
+    "enabled", "disabled",
+    "open", "closed",
+    "active", "inactive",
+    "available", "unavailable",
+    "locked", "unlocked",
+    "muted", "unmuted",
+    "online", "offline",
+    "valid", "invalid",
+    "present", "absent",
+})
+# Frame-class tokens a state predicate's complement may carry without making
+# the complement anything but the state.  The date words that are ALSO frame
+# stopwords (`today`, `yesterday`) are removed deliberately: as frame they
+# would be ignored in the tail, so "the release is on today" would read as the
+# state `on` with an empty complement and the legitimate prepositional fold
+# would be refused.  A date word that is NOT frame (`friday`, `monday`) blocks
+# the tail on its own, so the subtraction is not what keeps it — only the
+# today/yesterday pair is load-bearing, and that is the pair pinned in the
+# suite.
+_TAIL_IGNORABLE = _CONTENT_STOPWORDS - _DATE_WORDS
+# The copulas a state term completes.  `do`/`does`/`did` are auxiliaries, not
+# copulas — they carry no predicate complement — so they are excluded; a
+# non-be linking verb (`seems`, `remains`, `stays`) is a pinned residual: it is
+# a content token, so the two sides stop being one claim minus a state.  `am`
+# is the first-person be-form and is NOT a `_FRAME_STOPWORDS` member — it is a
+# `_CLOCK_UNITS` member, so `_content_tokens` drops it as a clock suffix and
+# the copula must be declared here or "i am offline" folds into "i am".
+_COPULAS = frozenset({"am", "is", "are", "was", "were", "be", "been",
+                      "being"})
+_UNREADABLE = frozenset({"unreadable"})
+
+# Token edges stripped before comparison.  `_norm` lowercases and collapses
+# whitespace but keeps punctuation, so "team." and "team" would otherwise read
+# as different tokens and the substitution test would fire on a full stop.
+_TOKEN_EDGE_PUNCT = ".,;:!?\"'`()[]{}*_"
+# A numeric token's own edges are part of its value, and three shapes have to
+# survive the strip: a LEADING separator that begins a numeral (".5"), a
+# CURRENCY or SIGN in any script ("£50", "−50"), and a TRAILING suffix that
+# changes what is counted ("50%").  The sign and currency classes are read
+# from the character category, because the ASCII spellings are a fraction of
+# them: `$`, `+` and `-` are one word each of `Sc`/`Sm`, and a whitelist of
+# ASCII characters let `£50` fold into `50` and `£50` into `€50`.
+_NUMERIC_LEAD = frozenset(".,:+-$#")
+_NUMERIC_TRAIL = frozenset("%$#\u2030\u2031\u00b0")# Clitic apostrophes, normalised to the ASCII form before tokenising.  LLM
+# output routinely spells "don't" with U+2019, and a negator the marker list
+# cannot see is a negator the boundary fails to guard.
+_APOSTROPHES = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u02bc": "'", "\u02b9": "'", "\u2032": "'", "\u2035": "'",
+    "\uff07": "'", "\u00b4": "'", "\u02be": "'", "\u02bf": "'",
+    "\u02c8": "'", "\u055a": "'", "\u05f3": "'", "\uff02": "'",
+    "\ua78c": "'", "\u02bb": "'", "\u02bd": "'", "\u02c0": "'",
+    "\u02c1": "'", "\u02ca": "'", "\u02cb": "'", "\u02cc": "'",
+    "\u02d0": "'",
+})
+# Codepoint-agnostic fallbacks for the two things an apostrophe carries.  A
+# translate table cannot enumerate the apostrophe inventory (U+055A, U+02BE,
+# U+02BF, U+00B4, U+FF02, U+A78C …), and a negator or a possessor the table
+# misses is one the boundary fails to guard, so the RULE is written as a shape:
+# a clitic is "n", one or two separator characters, "t", and a possessive is
+# a separator then "s".  At least one separator is required — zero would make
+# "want", "went" and "count" negators.
+_CLITIC_RE = re.compile(r"n[^\w\s]{1,2}t$")
+_POSSESSIVE_RE = re.compile(r"[^\w\s]{1,2}s$")
+
+
+def _canon_token(t: str) -> str:
+    """A token with every non-word character removed, so that one word's
+    spellings agree across apostrophe codepoints."""
+    return re.sub(r"[^\w]", "", t)
+
+
+def _apostrophe_free(t: str) -> str:
+    """A token with its apostrophes removed and everything else kept.
+
+    The right canonicalisation where the token is CONTENT: removing every
+    non-word character would also collapse "re-sign" onto "resign" and
+    "co-op" onto "coop", and an internal separator that changes the word is a
+    content substitution the ownership test has to see.
+    """
+    return t.replace("'", "")
+# Non-Latin scripts, by the codepoint block that identifies them.
+_SCRIPT_BLOCKS = (
+    ("greek", 0x0370, 0x03FF),
+    ("cyrillic", 0x0400, 0x04FF),
+    ("hebrew", 0x0590, 0x05FF),
+    ("arabic", 0x0600, 0x06FF),
+    ("devanagari", 0x0900, 0x097F),
+    ("kana", 0x3040, 0x30FF),
+    ("han", 0x4E00, 0x9FFF),
+    ("hangul", 0xAC00, 0xD7AF),
+)
+
+
+# Differences that make two claims RIVALS rather than one claim in two
+# spellings.  The value dimensions (number, date) are absent by design: a
+# differing value is a new value for the same attribute, which is exactly what
+# UPDATE exists to record.  These are the differences where nothing may be
+# destroyed — neither a fold nor a supersede.
+_IDENTITY_DIMENSIONS = frozenset({
+    "negation", "condition", "scope", "language", "substituted_content",
+    "unreadable",
+})
+
+
+def _fold_unicode(s: str) -> str:
+    """NFC, with invisible format characters turned into separators.
+
+    A zero-width space inside a word is neither whitespace nor punctuation, so
+    it fused a word to its neighbour: "for\u200bAlice" was ONE token, it
+    began lower case, and the name stopped reading as a name at all — the
+    entity dimension went silent on an invisible character.  Composition runs
+    first so a decomposed accent is the same word as its precomposed form.
+    """
+    text = unicodedata.normalize("NFC", str(s or ""))
+    return "".join(" " if unicodedata.category(c) == "Cf" else c for c in text)
+
+
+def _rejoin_numeric_signs(seq: list[str]) -> list[str]:
+    """A sign or currency written apart from its numeral is part of it.
+
+    "£ 50" and "50 %" are the same values as "£50" and "50%"; left apart, the
+    symbol was a one-sided content token, the numeral read as a bare value, and
+    "we paid £ 50" folded into "we paid 50".  Only a lone symbol token is
+    merged, and only against a token that is genuinely numeric, so an "and - but"
+    is left alone.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(seq):
+        t = seq[i]
+        nxt = seq[i + 1] if i + 1 < len(seq) else ""
+        sign_only = len(t) == 1 and _keeps_numeric_edge(t, True)
+        numeric_next = (any(c.isdigit() for c in nxt)
+                        or _num_word_value(nxt) is not None)
+        if sign_only and numeric_next:
+            out.append(t + nxt)
+            i += 2
+            continue
+        if (out and len(t) == 1 and _keeps_numeric_edge(t, False)
+                and out[-1][-1:].isdigit()):
+            out[-1] = out[-1] + t
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    return out
+
+
+def _guard_token_seq(content: str) -> list[str]:
+    """Lowercased whitespace tokens with edge punctuation stripped, IN ORDER.
+
+    ``_guard_tokens`` returns a set, which is what most checks want; a scope
+    check must not use it, because set iteration order is by hash and discards
+    the positions the comparison is about.
+    """
+    text = _fold_unicode(_norm(content)).translate(_APOSTROPHES)
+    # A possessive clitic detached from its owner ("bob\u200b's", where the
+    # format character became a space) is still that owner's possessive; the
+    # edge strip would otherwise reduce the clitic to a bare "s".
+    joined: list[str] = []
+    for t in text.split():
+        if joined and t in ("'s", "'"):
+            joined[-1] = joined[-1] + t
+            continue
+        joined.append(t)
+    seq = [t for t in (_strip_edges(_s) for _s in joined) if t]
+    return _rejoin_numeric_signs(seq)
+
+
+def _is_edge_punct(ch: str) -> bool:
+    """Punctuation, symbol, mark or format character, in any script.
+
+    ``_TOKEN_EDGE_PUNCT`` alone is ASCII, and LLM output wraps words in the
+    typographic characters too.  A name or a negator fused to one of them
+    ("\u201cAlice\u201d", "not\u2026", "tomorrow\u2026") kept the quoting
+    character, so it stopped being the word it was and its whole dimension went
+    silent.
+
+    Marks and format characters belong here for the same reason and are easy to
+    miss, because neither is punctuation: a zero-width space or a combining
+    mark at a token edge is invisible and fuses a word to whatever is beside
+    it, so "for\u200bAlice" read as one lower-case token and the name vanished.
+    """
+    return (ch in _TOKEN_EDGE_PUNCT
+            or unicodedata.category(ch)[:1] in ("P", "S", "C", "M"))
+
+
+def _is_percent_like(ch: str) -> bool:
+    """A percent/permille/degree-family sign, in any script.
+
+    A whitelist of ASCII spellings let U+FF05 and U+FE6A be stripped as
+    decoration, so "50\uff05" folded into "50".  Unicode names the family, and
+    the name is what distinguishes it from the punctuation beside it.
+    """
+    try:
+        name = unicodedata.name(ch)
+    except ValueError:
+        return False
+    return ("PERCENT" in name or "PER MILLE" in name
+            or "PER TEN THOUSAND" in name or name == "DEGREE SIGN")
+
+
+def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
+    """A symbol that changes what the numeral beside it counts.
+
+    A currency sign or a mathematical sign in ANY script, plus the ASCII
+    separators and the percent-like suffixes.  Category, not a whitelist: the
+    ASCII list named ``$`` and ``+`` and missed every other currency and sign,
+    which folded "\u00a350" into "50" and "\u00a350" into "\u20ac50".
+
+    Direction matters: a leading separator may BEGIN a numeral (".5") but the
+    same character must not survive at the END, or "5." and "5" stop being one
+    value.
+    """
+    if unicodedata.category(ch) in ("Sc", "Sm") or _is_percent_like(ch):
+        return True
+    return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
+
+
+def _leading_symbol_run(t: str, start: int, end: int) -> int:
+    """Where the token starts once its leading symbols are accounted for.
+
+    A CHAIN of them is common and each one counts ("-\u00a350", "\u00a3-50",
+    "-.5").  Keeping only the symbol next to the first digit discarded the
+    sign, and a negative amount then folded into a positive one.  Zero when
+    the whole run belongs to the numeral, otherwise the index past it.
+    """
+    seen = 0
+    while seen < end and _is_edge_punct(t[seen]):
+        seen += 1
+    # Punctuation that cannot belong to a numeral (a bracket, a quote) is
+    # decoration, so it comes off before the numeric run is judged.
+    while start < seen and not _keeps_numeric_edge(t[start], True):
+        start += 1
+    if start == seen or not any(c.isdigit() for c in t[seen:end]):
+        return seen
+    if not all(_keeps_numeric_edge(c, True) for c in t[start:seen]):
+        return seen
+    return start
+
+
+def _is_numeric_sign_token(t: str) -> bool:
+    """A token that is only a currency or sign, waiting for its numeral.
+
+    Written apart ("we paid £ 50"), the sign is its own whitespace token and
+    the edge strip removed it as decoration — the numeral then read as a bare
+    value and the difference folded.
+    """
+    if not t:
+        return False
+    return all(c == "-" or unicodedata.category(c) in ("Sc", "Sm")
+               or _is_percent_like(c) or c in _NUMERIC_TRAIL for c in t)
+
+
+def _strip_edges(t: str) -> str:
+    """Edge punctuation and symbols stripped, in any script.
+
+    Two numeric shapes are preserved: a leading separator that begins a numeral
+    (".5", "$50") and a trailing suffix that changes what it counts ("50%").
+    Leading only for the first, so "5." and "5" stay one value.
+    """
+    if _is_numeric_sign_token(t):
+        return t
+    start, end = 0, len(t)
+    start = _leading_symbol_run(t, start, end)
+    while end > start and _is_edge_punct(t[end - 1]):
+        if _keeps_numeric_edge(t[end - 1], False) and t[start:end - 1][-1:].isdigit():
+            break
+        end -= 1
+    return t[start:end]
+
+
+def _guard_tokens(content: str) -> set[str]:
+    """Lowercased whitespace tokens with edge punctuation stripped."""
+    return set(_guard_token_seq(content))
+
+
+def _canonicalise_clocks(content: str) -> str:
+    """Every clock form replaced by one placeholder token.
+
+    "6pm", "six pm" and "6:00 pm" are one value, and the placeholder makes a
+    clock comparable to a number — so a clock can be BOUND to the noun beside
+    it and KEPT in a marker's scope.  Deleting it, which is what the value
+    comparison alone used to do, loses both: "we start at 6pm and end at 9pm"
+    and "we start at 9pm and end at 6pm" then carry one value signature.
+    """
+    def sub(m: re.Match) -> str:
+        sig = _value_signature(m.group(0))
+        return "clock" + (sig.replace(":", "") if sig else m.group(0))
+
+    return _CLOCK_RE.sub(sub, _norm(content))
+
+
+_UNIT_WORDS = frozenset({
+    "k", "km", "mi", "m", "kg", "lb", "min", "mins", "h", "hr", "hrs",
+    "s", "sec", "secs", "minutes", "hours",
+})
+
+
+def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
+    """Each value token paired with the content token BEFORE it, IN ORDER.
+
+    Number words map to their value ("six" → "6") and clock forms to one
+    placeholder, because ``_value_signature`` compares those in its own
+    normalised encoding, where "6pm", "six pm" and "6:00 pm" are one value.
+    The signature alone is not sufficient: it returns early once both sides
+    carry one, so it misses a differing number sitting BESIDE an equal clock
+    value ("3 crates at 9am" vs "4 crates at 9am").
+
+    The PAIRING is the point, and it is why neither a set nor a bare sequence
+    will do.  "we have 2 cats and 3 dogs" and "we have 2 dogs and 3 cats" carry
+    one number sequence and two quantities; "3 crates to 2 stores" and "2
+    crates to 3 stores" likewise.  Anchoring each value to the content token it
+    sits beside separates the pairings.  The anchor is the token already seen,
+    so no lookahead is needed and a paraphrase that reorders clauses still
+    anchors each value to the same word — which is what keeps #4652's
+    marker-free paraphrase foldable.
+
+    A compound number spelled in two words is ONE value ("twenty three" →
+    "23"), not two: read apart, "twenty three boxes" bound "20" and "3" and
+    matched the genuine pair 20 and 3.
+    """
+    seq = _guard_token_seq(_canonicalise_clocks(content))
+    out: list[tuple[str, str]] = []
+    anchor = ""
+    i = 0
+    while i < len(seq):
+        t = seq[i]
+        # The token itself, NOT `_canon_token(t)`: stripping non-word
+        # characters collapses "1.2" into "12", "50%" into "50" and "$50"
+        # into "50", turning a different quantity into the same binding.  The
+        # token is already normalised and a clock is already a placeholder.
+        value = t if any(c.isdigit() for c in t) else None
+        if value is None and t in _CLOCK_UNITS:
+            # A meridiem _CLOCK_RE could not bind to an hour ("6 in the am")
+            # is still a value: dropping it let an am/pm difference fold.
+            value = "meridiem-" + t
+        if value is None:
+            v = _num_word_value(t)
+            if v is not None and i + 1 < len(seq):
+                two = _num_word_value(t + " " + seq[i + 1])
+                if two is not None:
+                    value, i = str(two), i + 1
+            if value is None:
+                value = str(v) if v is not None else None
+        if value is not None and i + 1 < len(seq) and seq[i + 1] in _UNIT_WORDS \
+                and any(c.isdigit() for c in value):
+            # A unit word written apart belongs to the value: "ten km" and
+            # "10km" are one quantity, and "2 hours"/"two hours" must agree
+            # whichever way the unit is written.
+            value = value + seq[i + 1]
+            i += 1
+        if value is not None:
+            out.append((anchor, value))
+            i += 1
+            continue
+        if t not in _CONTENT_STOPWORDS and t not in _CLOCK_UNITS \
+                and t not in _DATE_WORDS:
+            anchor = t
+        i += 1
+    return tuple(out)
+
+
+def _sub_tokens(t: str) -> tuple[str, ...]:
+    """The word-parts of one whitespace token, when it is more than a word.
+
+    A negator can be fused on its LEFT edge too, and then the separator belongs
+    to the word BEFORE it: "is!not", "do-not", "do…not" are each one
+    whitespace token, and an edge-strip cannot reach a separator that is in the
+    middle.  Canonicalised whole, they read as "isnot"/"donot", which is no
+    negation marker, and the negated claim folded into the positive one.
+    """
+    if t.isalnum():
+        return ()
+    out: list[str] = []
+    for part in re.split(r"[^\w']+|_+", t):
+        if not part:
+            continue
+        out.append(_apostrophe_free(part))
+        # An apostrophe used as a SEPARATOR is not a clitic: "do'not" is one
+        # token whose parts are "do" and "not".  Reading it whole gave
+        # "donot", which is no marker, and the negated claim folded.
+        out.extend(p for p in re.split(r"'+", part) if p)
+    return tuple(out)
+
+
+def _negation_markers(content: str) -> frozenset[str]:
+    """Negation markers, in one canonical spelling.
+
+    The clitic rule is a SHAPE (``_CLITIC_RE``), not a word list: a fixed list
+    cannot enumerate every verb a negator attaches to, nor every codepoint an
+    apostrophe is written with — "mustn't" is a negation and appears in no
+    hand-written list.
+
+    Each token is read whole AND by its word-parts.  Reading it whole is what
+    makes a clitic a negator whatever the apostrophe; reading the parts is what
+    finds one fused to a separator on its left.  A part can only ADD a marker,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        canon = _canon_token(_deaccent(t))
+        if canon in _NEGATION_MARKERS or _CLITIC_RE.search(canon):
+            out.add(canon)
+            continue
+        for part in _sub_tokens(t):
+            part = _deaccent(part)
+            if part in _NEGATION_MARKERS or _CLITIC_RE.search(part):
+                out.add(part)
+    return frozenset(out)
+
+
+def _deaccent(t: str) -> str:
+    """The word with its diacritics removed.
+
+    A combining mark is invisible in the sense that matters here: it does not
+    separate two words, so a marker with one against it is still that marker to
+    a reader, while every lookup that matches a word exactly misses it.  NFD +
+    drop the marks + NFC makes "h\u00eds" read as "his" and "today\u0308" as
+    "today".
+    """
+    decomposed = unicodedata.normalize("NFD", str(t or ""))
+    return unicodedata.normalize(
+        "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
+
+
+def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
+    """Every member of a closed-class word list the claim carries.
+
+    ONE walk, shared by the marker tables: a token is looked up whole AND by
+    its word-parts (``_lookup_keys``), so a member fused to a separator
+    ("if!then", "and/or") is still that member and a de-accented spelling
+    agrees with the table's plain one.  A hit can only ADD a marker downstream,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
+    """
+    found: set[str] = set()
+    for t in _guard_tokens(content):
+        found.update(k for k in _lookup_keys(t) if k in words)
+    return frozenset(found)
+
+
+def _deaccent_with_map(t: str, drop: str = "") -> tuple[str, list[int]]:
+    """``_deaccent`` plus the raw index each surviving character came from.
+
+    The same filtering as ``_deaccent`` (NFD, drop the non-spacing marks),
+    without the final NFC recomposition, because the caller has to map a match
+    found in the folded text back to the span it came from in the raw one.
+
+    ``drop`` is what a dropped mark becomes.  Empty (the default) is
+    ``_deaccent``'s own read — the mark vanishes, so ``as\u0338well`` reads as
+    one token ``aswell``.  ``_PHRASE_MARK_GAP`` keeps the SEPARATOR a mark can
+    stand for, which the phrase pattern reads as a non-word run: the variant a
+    phrase whose separator IS a mark needs.  A sentinel rather than a space,
+    so the phrase pattern can tell a mark-derived gap from a real space and
+    never let a real token stand inside a word.  Both reads share one ``src``
+    map, so a match found in either splices back at the same raw span.
+    """
+    chars: list[str] = []
+    src: list[int] = []
+    for i, ch in enumerate(str(t or "")):
+        for d in unicodedata.normalize("NFD", ch):
+            if unicodedata.category(d) == "Mn":
+                if drop:
+                    chars.append(drop)
+                    src.append(i)
+                continue
+            chars.append(d)
+            src.append(i)
+    return "".join(chars), src
+
+
+def _canonicalise_coordinations(text: str) -> str:
+    """Rewrite every ``_COORDINATION_PHRASES`` phrase to its operator.
+
+    Two passes over ONE text, and the second is what stops a phrase from
+    leaking its own ``as`` into a slot and masking the operator swap it stands
+    for.  The FIRST matches the text as written, so a separator BETWEEN the
+    phrase's words is the separator it is ("as well as", "as-well-as").
+    The SECOND matches the DE-ACCENTED text, because a phrase WORD can carry a
+    diacritic ("as w\u00e9ll as") or a non-spacing mark inside it ("as
+    we\u0338ll as") that no separator-based pattern sees.
+
+    The second pass reads TWO variants of that same de-accenting, because
+    deleting a mark and KEEPING it as the separator it can stand for are both
+    right and neither alone is complete: a phrase whose mark sits between its
+    words ("as\u0338well as") is a phrase only in the separator-preserving
+    variant, and one whose mark sits inside a word is a phrase only in the
+    deleting one — so a phrase that does BOTH ("as\u0338w\u00e9ll as") is
+    found by neither alone and stays two stray ``as`` tokens.  Both variants
+    share one ``src`` map, so a match from either splices back at its own raw
+    span; coinciding spans are merged before the (reversed) splice.
+
+    The sentinel a dropped mark leaves is a character a claim could also
+    CONTAIN, so the raw text is read with it replaced first — a literal NUL
+    becomes a separator and never a word gap, which keeps the sentinel
+    unproducible from outside (one char for one char, so every splice index
+    still addresses the caller's text).
+    """
+    out = text.replace(_PHRASE_MARK_GAP, " ")
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        out = pattern.sub(f" {operator} ", out)
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        folded, src = _deaccent_with_map(out)
+        separated, sep_src = _deaccent_with_map(out, _PHRASE_MARK_GAP)
+        spans: list[tuple[int, int]] = []
+        for variant, index_map in ((folded, src), (separated, sep_src)):
+            spans.extend((index_map[m.start()], index_map[m.end() - 1] + 1)
+                         for m in pattern.finditer(variant))
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        for start, end in reversed(merged):
+            out = out[:start] + f" {operator} " + out[end:]
+    return out
+
+
+def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
+    """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
+
+    A multi-word coordination is canonicalised to its operator first
+    (``_COORDINATION_PHRASES``, case-INSENSITIVELY, including the marks a
+    phrase word may carry — see ``_canonicalise_coordinations``).  The members
+    are then read from the RAW token stream through ``_wordlist_hits`` — and
+    therefore through the word-part split and ``_deaccent``, PER TOKEN.  That
+    matters: a member carrying a non-spacing combining mark ("a\u0338nd") is
+    still that member, while a mark standing where a separator would be still
+    SEPARATES ("and\u0338the" holds `and`).  Reading the FLATTENED form
+    instead LOSES the first — ``_flat_words`` turns the mark into a separator,
+    so the member is split in two before ``_deaccent`` can drop it, the slot
+    reads empty, and the guard fails OPEN.  De-accenting the WHOLE claim loses
+    the second instead: the mark glues the member to its neighbour before
+    ``_wordlist_hits`` can split it.  Canonicalising first, per the paragraph
+    above, means neither route has to be chosen.  The phrase pass lowercases
+    only because the member pass below it is case-insensitive too — a capital
+    must not make one pass and the other disagree about one phrase.
+    """
+    text = _canonicalise_coordinations(_norm(content))
+    found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)
+    return tuple(found & slot for slot in _CONNECTIVE_SLOTS)
+
+
+def _connective_swap(a: str, b: str) -> frozenset[str]:
+    """A slot BOTH sides fill where EACH side owns a member the other lacks.
+
+    Empty when the pair does not swap operators: a slot filled on ONE side only
+    is the documented broadening (`and` against a comma list); a slot filled on
+    neither says nothing; and a shared member with a one-sided extra has a
+    member the other side lacks on ONE side only — the broadening case again,
+    not a swap ("we wait for the build and the tests" against "we wait for the
+    build, the tests" shares `for` and only one side is missing `and`).  Both
+    sides owning an extra is what a swap looks like, and it is why a SHARED
+    member cannot mask one: "we ship as planned and test" against "we ship as
+    planned or test" shares `as` and still swaps `and` for `or`.
+
+    The role of a load-bearing connective is thus decided by the pair, which is
+    what a token-level predicate cannot do — and a non-empty result is a
+    substituted-content difference, the same dimension a swapped content token
+    reaches.
+    """
+    out: set[str] = set()
+    for slot_a, slot_b in zip(_connective_slots(a), _connective_slots(b),
+                              strict=True):
+        only_a, only_b = slot_a - slot_b, slot_b - slot_a
+        if only_a and only_b:
+            out |= only_a | only_b
+    return frozenset(out)
+
+
+def _flat_words(s: str) -> str:
+    """The claim with every non-word character turned into a single space.
+
+    A multi-word table entry is written with plain spaces, so an interior
+    separator defeats a substring test: "as-long-as" and "next\u200bweek" are
+    not the entries they are.  Normalised this way, both are.
+    """
+    return re.sub(r"[^\w']+|_+", " ", _fold_unicode(_norm(s))).strip()
+
+
+def _lookup_keys(t: str) -> tuple[str, ...]:
+    """Every form of a token a word list must be matched against.
+
+    Three, because a word reaches a list through three spellings: as written
+    (``t``), with its diacritics dropped, and by its word-parts when it is
+    fused to a separator ("if!the" holds "if"; "do'not" holds "not").  A key
+    can only ADD a marker downstream, and a marker only ever refuses a fold.
+    """
+    keys = [_deaccent(t)]
+    keys.extend(_sub_tokens(t))
+    return tuple(k for k in keys if k)
+
+
+def _condition_markers(content: str) -> frozenset[str]:
+    """Condition/qualifier markers — single words and multi-word connectives.
+
+    Read whole AND by parts, as the negators are: "if!the build passes" is one
+    whitespace token whose parts are "if" and "the", and matching only the
+    whole token left the condition invisible.
+    """
+    found = set(_wordlist_hits(content, _CONDITION_MARKERS))
+    flat = _flat_words(content)
+    found.update(p for p in _CONDITION_PHRASES if p in flat)
+    return frozenset(found)
+
+
+def _date_tokens(content: str) -> tuple[str, ...]:
+    """Date/scope words IN ORDER — month names, relative days, multi-word days.
+
+    Deliberately WITHOUT digit-bearing tokens: those are the value dimension's
+    job, and it normalises them ("6pm"/"six pm" are one value).  Including
+    them here would read a value spelling change as a date change.
+
+    Ordered, not a set: a date is as bound to its verb as a number is to its
+    noun, and "we ship on monday and receive on tuesday" vs its mirror carries
+    one date set and two meanings.
+
+    Position, not category: multi-word days are merged with the single-word
+    ones by where they sit in the claim.  Appending them in the phrase list's
+    own order made the tuple permutation-invariant, which put the phrase form
+    straight back where the set had been.
+    """
+    flat = _flat_words(content)
+    seq = _guard_token_seq(flat)
+    found: list[tuple[int, str]] = []
+    for i, t in enumerate(seq):
+        # A date word fused to a separator is still a date word: "tomorrow-"
+        # and "tomorrow/the launch" are one token each, and reading only the
+        # whole token made the day invisible.
+        keys = _lookup_keys(t)
+        hit = next((k for k in keys if k in _DATE_WORDS), None)
+        if hit is not None:
+            found.append((i, hit))
+            continue
+        # A month that is also a modal counts only in a date position —
+        # immediately after a date preposition.
+        ambiguous = (any(k in _MONTH_AMBIGUOUS for k in keys) and i
+                     and seq[i - 1] in _DATE_PREPOSITIONS)
+        if ambiguous:
+            found.append((i, t))
+    for phrase in _DATE_PHRASES:
+        start = flat.find(phrase)
+        if start >= 0:
+            found.append((flat[:start].count(" "), phrase))
+    found.sort()
+    return tuple(t for _, t in found)
+
+
+def _proper_nouns(content: str) -> frozenset[str]:
+    """Tokens capitalised in the RAW content, less the sentence-initial one.
+
+    Capitalisation is the one shape signal a name has without a model, and
+    ``_norm`` discards it.  The first token is excluded because it is
+    capitalised by position rather than by being a name.
+    """
+    raw = [_strip_edges(t)
+           for t in _fold_unicode(content).translate(_APOSTROPHES).split()]
+    named: set[str] = set()
+    for i, t in enumerate(raw):
+        # The first token is excluded: it is capitalised by position rather
+        # than by being a name.
+        if i == 0 or not t:
+            continue
+        # A name fused to the word before it ("for@Alice") is ONE whitespace
+        # token beginning lower case, so a whole-token capital test never saw
+        # it.  BOTH spellings are registered: the part matches the split form,
+        # and the fused spelling matches what the content skeleton holds, which
+        # is what the one-sided test intersects against.
+        parts = [t] if t.isalnum() else [p for p in re.split(r"[^\w]|_+", t) if p]
+        # ANY uppercase letter, not only one at a part's start: a combining
+        # mark that COMPOSES leaves the capital inside the word ("fo\u0155Alice"),
+        # so a start-of-part test saw no name at all.
+        if any(any(c.isupper() for c in p) for p in parts):
+            named.update(_apostrophe_free(_deaccent(_norm(p))) for p in parts)
+            named.add(_apostrophe_free(_deaccent(_norm(t))))
+    return frozenset(named)
+
+
+def _content_tokens(content: str) -> set[str]:
+    """A claim's distinguishing skeleton — frame- and value-free tokens.
+
+    Values are removed deliberately: they are compared by their own
+    dimension, and "six pm"/"6pm" must not read as a content substitution.
+    Date words go with them — "shipped in march" vs "shipped in april" is a
+    DATE difference, and counting the month as substituted content as well
+    would refuse the value update the date dimension exists to permit.  The
+    cost is that a month used as a proper name ("june is our contact" vs
+    "april is our contact") reaches no dimension that could veto the update;
+    telling a month from a name there needs a model, so it is left to one.
+
+    Entity-bearing pronouns and possessives are KEPT (``_CONTENT_STOPWORDS``
+    is the frame set minus them): a change of subject is a change of entity.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        t = _apostrophe_free(_deaccent(t))
+        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
+            continue
+        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            continue
+        out.add(t)
+    return out
+
+
+def _state_predicate(content: str, targets: frozenset[str] | set[str]) -> bool:
+    """True when a copula's complement is ONLY polarity members AND a target.
+
+    Read from the ORDERED token stream, because the reading is about the
+    predicate's shape and not a token's membership: the state term must be the
+    whole complement of some copula on its side ("the flag is off", "the
+    feature is disabled").  That is the pair-level signal a token lookup does
+    not have — it is what tells the state `on` from the prepositional `on`
+    whose object is a second token ("the focus is on quality"), and it is what
+    keeps a DATE object from reading as an absent one: ``_TAIL_IGNORABLE``
+    deliberately does not drop date words, so "the release is on friday" keeps
+    `friday` as a blocker and the pair stays foldable.  (`_content_tokens`
+    drops dates and numbers — correct for the skeleton, wrong here.)
+
+    ``targets`` is what the pair actually DROPS (``_polarity_drop``'s
+    distinguishing set), and the complement must INTERSECT it.  Without that,
+    a copula anywhere in the claim whose polarity complement is a member the
+    two sides SHARE would license a refusal: appending the same trailing
+    clause to both sides ("we ship on friday and the flag is off" against
+    "we ship friday and the flag is off") would then refuse a legitimate fold
+    on the strength of the shared trailing `off`, not the dropped
+    prepositional `on`.
+
+    A tail of frame words only does not qualify: a copula with no predicate
+    complement asserts nothing, and a marker-only tail (`not`, a condition) is
+    owned by those dimensions.  A second content token — an adverb, a value, a
+    modifier — disqualifies the complement, because the state is then not the
+    whole of what is being dropped.  That is a declared residual and it is a
+    FAIL-OPEN in this guard: the pair folds, so in one capture order the
+    state-bearing claim can still be dropped (the wrong-drop direction the
+    boundary exists to prevent).  It cannot be closed from the ordered token
+    stream without over-blocking the prepositional `on` whose object is a
+    second content token.
+    """
+    seq = _guard_token_seq(content)
+    for i, token in enumerate(seq):
+        if _apostrophe_free(_deaccent(token)) not in _COPULAS:
+            continue
+        tail = {key for t in seq[i + 1:]
+                if (key := _apostrophe_free(_deaccent(t)))
+                and key not in _TAIL_IGNORABLE}
+        if tail and tail <= _POLARITY_MEMBERS and tail & targets:
+            return True
+    return False
+
+
+def _polarity_drop(a: str, b: str,
+                   content_a: set[str] | None = None,
+                   content_b: set[str] | None = None) -> frozenset[str]:
+    """The state members on ONE side that are the pair's ONLY difference.
+
+    Empty unless exactly one side's DISTINGUISHING content is a set of
+    polarity members (the other side is silent), and a dropped member is the
+    whole complement of some copula there.  Reading the DISTINGUISHING
+    members rather than every member is what catches a one-sided state beside
+    a member the two sides SHARE ("the flag is off and the gate is on"
+    against "\u2026 the gate is off"): subtracting every member from one side
+    would fail the equality and miss it.  A one-sided token that is NOT a state
+    predicate is the documented broadening case ("the team meets weekly in
+    main office").
+
+    A pair that differs by a PERMUTATION of the same polarity members ("the
+    flag is on and the gate is off" against "the flag is off and the gate is
+    on") is not refused here: the skeleton is a SET, so both sides compare
+    equal and this predicate sees no difference at all.  That is the
+    set-level / attachment blind spot of the whole boundary (#5139 / #5131),
+    pre-existing and not specific to polarity.
+
+    A non-empty result is a substituted-content difference — dropping a state
+    substitutes the claim, it does not broaden it — so `fold_allowed`,
+    `supersede_allowed`, `classify_consolidation` and
+    `dedup_classify.rephrase_hit` all refuse from the one boundary.
+
+    ``content_a``/``content_b`` are the caller's already-computed skeletons
+    (``_identity_differences`` holds them); they are recomputed only when this
+    is called standalone.
+    """
+    if content_a is None or content_b is None:
+        content_a, content_b = _content_tokens(a), _content_tokens(b)
+    if not content_a or not content_b:
+        return frozenset()
+    # The DISTINGUISHING members, not every member: a member shared with the
+    # other side must not be subtracted from this side's skeleton, or a
+    # one-sided state beside a shared state is missed.  `only_a` all-polarity
+    # with `only_b` empty is exactly "a is b plus a state".
+    only_a, only_b = content_a - content_b, content_b - content_a
+    if only_a and not only_b and only_a <= _POLARITY_MEMBERS \
+            and _state_predicate(a, only_a):
+        return frozenset(only_a)
+    if only_b and not only_a and only_b <= _POLARITY_MEMBERS \
+            and _state_predicate(b, only_b):
+        return frozenset(only_b)
+    return frozenset()
+
+
+def _possessives(content: str) -> frozenset[str]:
+    """Possessive owners ("bob's", "the team's"), in canonical spelling.
+
+    Read from the token stream, which keeps the separator, because
+    ``_content_tokens`` strips it to make one word's two spellings agree and
+    the possessive signal is exactly what that loses.
+
+    Both the whole token and its parts are searched, so a NON-composing
+    combining mark standing where the clitic separator belongs is not erased
+    before the shape rule can see it.
+    """
+    out: set[str] = set()
+    for t in _guard_tokens(content):
+        for cand in (t, *_sub_tokens(t)):
+            if _POSSESSIVE_RE.search(cand):
+                out.add(_canon_token(_deaccent(cand)))
+    return frozenset(out)
+
+
+def _marker_scope(content: str) -> tuple[str, ...]:
+    """The ordered marker-and-content sequence of a marker-bearing claim.
+
+    Negation and condition are SCOPE-bearing, and a bag of tokens cannot
+    express that.  "the cache is not the problem, the lock is" and "the cache
+    is the problem, the lock is not" carry the same marker and the same
+    content tokens, as do "we ship if the build passes and rollback if the
+    tests fail" and its clause-swapped mirror — each pair differs only in
+    what the marker attaches to.  An ordered comparison sees that; a set
+    comparison does not, and the pair would fold (at the in-capture seam,
+    that is a DELETE).
+
+    Values and clock units are kept as placeholders and date words in
+    position: their own dimensions compare them, but a marker attached to a
+    different one of them is a different claim, and dropping them hid that.
+    """
+    out: list[str] = []
+    for t in _guard_token_seq(_canonicalise_clocks(content)):
+        if t in _NEGATION_MARKERS or _CLITIC_RE.search(t) \
+                or t in _CONDITION_MARKERS:
+            out.append(_canon_token(t))
+            continue
+        if t in _DATE_WORDS:
+            # Kept in position, and checked BEFORE the frame stop set: several
+            # relative days are frame words, so a marker on one of two dates
+            # would otherwise vanish ("we ship today, not tomorrow" vs its
+            # mirror) — the difference a date-word set cannot see.
+            out.append(t)
+            continue
+        if t in _CONTENT_STOPWORDS:
+            continue
+        if t in _CLOCK_UNITS:
+            # Kept, as the value it is: a meridiem no clock form absorbed.
+            out.append("#meridiem-" + t)
+            continue
+        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
+            # A placeholder, so a marker attached to a different value is
+            # visible ("we ship at 6pm, not at 5pm" vs its mirror).  The token
+            # itself, not its word characters: `_canon_token` would collapse
+            # "1.2", "50%" and "$50" onto "12" and "50".
+            out.append("#" + t)
+            continue
+        out.append(t)
+    return tuple(out)
+
+
+def _scripts(content: str) -> frozenset[str]:
+    """Scripts the claim's letters are drawn from — a language difference in
+    the one form decidable without a model."""
+    found: set[str] = set()
+    for ch in str(content or "").translate(_APOSTROPHES):
+        if ch.isascii() and ch.isalpha():
+            found.add("latin")
+            continue
+        cp = ord(ch)
+        for name, lo, hi in _SCRIPT_BLOCKS:
+            if lo <= cp <= hi:
+                found.add(name)
+                break
+    return frozenset(found)
+
+
+def _identity_differences(a: str, b: str) -> frozenset[str]:
+    """Every identity dimension in which ``a`` and ``b`` differ.
+
+    Deliberately independent of the value dimensions.  Asking only for the
+    FIRST differing dimension lets a value difference MASK an identity one:
+    "the deploy succeeded at 3pm" and "the deploy failed at 5pm" differ in a
+    number and in the predicate, and returning the number would license
+    superseding the predicate — the harm this boundary exists to prevent.
+    """
+    out: set[str] = set()
+    neg_a, neg_b = _negation_markers(a), _negation_markers(b)
+    con_a, con_b = _condition_markers(a), _condition_markers(b)
+    if neg_a != neg_b:
+        out.add("negation")
+    if con_a != con_b:
+        out.add("condition")
+    script_a, script_b = _scripts(a), _scripts(b)
+    if script_a and script_b and script_a != script_b:
+        out.add("language")
+    content_a, content_b = _content_tokens(a), _content_tokens(b)
+    only_a, only_b = content_a - content_b, content_b - content_a
+    one_sided = only_a | only_b
+    named = _proper_nouns(a) | _proper_nouns(b)
+    if only_a and only_b:
+        out.add("substituted_content")
+    elif (one_sided & _ENTITY_PRONOUNS) or (one_sided & named):
+        # A pronoun on ONE side re-subjects the claim, and so does a name: "the
+        # manager approved the plan" and "his manager approved the plan" are
+        # not one claim in two spellings, and neither are "the deploy failed"
+        # and "the deploy failed for alice".  A possessive is caught by the
+        # set comparison below.  Every other one-sided token is the documented
+        # broadening case ("the team meets weekly in main office" ← "the team
+        # meets weekly"), which must stay foldable.
+        out.add("substituted_content")
+    poss_a, poss_b = _possessives(a), _possessives(b)
+    if (poss_a or poss_b) and poss_a != poss_b:
+        out.add("substituted_content")
+    # A load-bearing CONNECTIVE, read from the pair (#5139).  `and`/`or` are
+    # frame words by their commonest role — the role that keeps
+    # "we ship the server and the client" folding into the comma paraphrase —
+    # and they are also operators, so a swap between two members of one slot is
+    # a substituted content token even though neither side's skeleton holds it.
+    # See `_CONNECTIVE_SLOTS` for the one-sided, synonym and cross-slot cases
+    # that must keep folding.
+    if _connective_swap(a, b):
+        out.add("substituted_content")
+    # A one-sided STATE word (#5134).  Read from the PAIR, not the token: the
+    # state word is refused only when it is the whole distinguishing content of
+    # a copula predicate, which is the same pair-read shape the connective guard
+    # above uses (#5139).  A one-sided token that is not that remains the
+    # documented broadening case.  See `_POLARITY_MEMBERS` for why a token list
+    # cannot decide and which residuals are pinned.
+    if _polarity_drop(a, b, content_a, content_b):
+        out.add("substituted_content")
+    # Negation and condition are SCOPE-bearing, and a set cannot express that:
+    # "the cache is not the problem, the lock is" and "the cache is the
+    # problem, the lock is not" carry one marker and one multiset in two
+    # attachments.  Restricted to marker-bearing pairs, because a legitimate
+    # paraphrase may reorder freely — "backpressure control is missing from
+    # the ingest queue" and "the ingest queue is missing backpressure
+    # control" are one claim, and #4652 pins that they fold.
+    if (neg_a or neg_b or con_a or con_b) \
+            and _marker_scope(a) != _marker_scope(b):
+        out.add("scope")
+    return frozenset(out)
+
+
+def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
+    """``(first distinguishing dimension or None, every identity difference)``.
+
+    The first element is the audit label — the dimension a caller reports.  The
+    second is the decision: a pair whose identity set is non-empty may be
+    neither folded nor superseded, however its value dimensions compare.
+
+    Total and fail-closed — every input is coerced by ``_norm`` and every
+    operation is a string, regex or set operation, so LLM-shaped input cannot
+    raise here; if anything does, the sentinel reads as a difference.
+    """
+    try:
+        ta, tb = _guard_tokens(a), _guard_tokens(b)
+        if not ta or not tb:
+            # Nothing to compare: refuse the fold rather than assume agreement.
+            return "unreadable", _UNREADABLE
+        identity = _identity_differences(a, b)
+        dimension: str | None = None
+        # The identity dimensions come first, because they are the ones that
+        # constrain BOTH decisions; a value dimension is reported only when no
+        # identity dimension differs.  Reporting a value dimension for a pair
+        # that also substitutes content would tell a reader the pair is a value
+        # change when the case for refusing it is the substitution.
+        if identity:
+            # Sorted so the reported label is deterministic across runs.
+            dimension = sorted(identity)[0]
+        else:
+            sig_a, sig_b = _value_signature(a), _value_signature(b)
+            # Both halves are needed.  The signature normalises the clock and
+            # quantity forms ("6pm"/"six pm" are one value); the binding pairs
+            # each value with the content token beside it, which catches a
+            # differing number ANYWHERE in the claim — including one beside an
+            # equal signature, and two numbers permuted.
+            if sig_a != sig_b or _value_bindings(a) != _value_bindings(b):
+                dimension = "number"
+            elif _date_tokens(a) != _date_tokens(b):
+                dimension = "date"
+        return dimension, identity
+    except Exception:  # noqa: BLE001, RUF100
+        return "unreadable", _UNREADABLE
+
+
+def distinguishing_difference(a: str, b: str) -> str | None:
+    """The never-across dimension in which ``a`` and ``b`` differ, else None.
+
+    Returns one of ``number``, ``negation``, ``condition``, ``scope``,
+    ``date``, ``language``, ``substituted_content`` or ``unreadable``.  Any of
+    them means the pair may not be folded into one claim: two claims differing
+    in a distinguishing dimension are rival claims, not duplicates.
+
+    When a pair differs in more than one dimension this reports the identity
+    one first, because that is what constrains the decision; the DECISION itself
+    belongs to ``fold_allowed`` / ``supersede_allowed``, which consult the full
+    identity set rather than this label.
+    """
+    return _boundary(a, b)[0]
+
+
+def _difference(a: str, b: str) -> str | None:
+    """``distinguishing_difference``, already fail-closed."""
+    return _boundary(a, b)[0]
+
+
+def fold_allowed(a: str, b: str) -> bool:
+    """True when ``a`` and ``b`` may be treated as the same claim.
+
+    Fail-closed toward KEEP: any failure to read either side refuses the fold,
+    so an unreadable comparison preserves both claims instead of dropping one
+    (D12/O4's asymmetry — a wrong keep is noise, a wrong drop is memory loss).
+    """
+    return _boundary(a, b)[0] is None
+
+
+def supersede_allowed(a: str, b: str) -> bool:
+    """True when ``a`` may supersede ``b`` (an UPDATE of the same attribute).
+
+    A differing NUMBER or DATE is a new value for one attribute, which is what
+    UPDATE is for — the boundary does not block it.  A differing NEGATION,
+    CONDITION, marker SCOPE, LANGUAGE or substituted content means the two are
+    RIVAL claims: a rival may be neither folded nor superseded, so both
+    survive.  This asks the full identity set, so a value difference elsewhere
+    in the claim cannot mask it.
+    """
+    return not _boundary(a, b)[1]
 
 
 def classify_consolidation(point: dict, priors: list[dict], *,
@@ -3078,15 +4436,24 @@ def classify_consolidation(point: dict, priors: list[dict], *,
             value_differs = bool(_frame_tokens(content)
                                  - _frame_tokens(old_content))
         later = _date_is_later_or_undated(current_date, p)
+        # D12/O4 (#5080): the boundary guards every decision that would
+        # destroy the prior, not only the fold.  ``identity`` is the full set
+        # of identity differences, so a value difference elsewhere in the
+        # claim cannot mask one of them.
+        difference, identity = _boundary(old_content, content)
         # 2) UPDATE — priority over NOOP
-        if gate and later and value_differs:
+        if gate and later and value_differs and not identity:
             band_ok = ov >= REVISES_MIN_OVERLAP
             contradiction = _fact_value_contradiction(
                 content, mentions, p, when=current_date)
             if (band_ok or contradiction) \
                     and (best_update is None or ov > best_update[0]):
                 best_update = (ov, p)
-        # 3) NOOP — paraphrase
+        # 3) NOOP — paraphrase.  A fold may never cross a distinguishing
+        # difference (D12/O4, #5080).  The boundary is checked per prior, so a
+        # refused fold falls through to ADD — both claims survive.
+        if difference is not None:
+            continue
         if sig_equal and (tier_a or bool(mentions)) and gate:
             # value identity — short-circuits both bands
             if best_noop is None or ov > best_noop[0]:
@@ -3112,6 +4479,31 @@ def classify_consolidation(point: dict, priors: list[dict], *,
             reason="paraphrase",
             evidence=f"{mode} (overlap {ov:.2f})")
     return DecisionRecord("ADD", evidence="no prior match")
+
+
+def _prior_row_content(priors: list[dict], prior_id: str, fallback: str) -> str:
+    """#4716: the canonical prior point's content for a folded endpoint.
+
+    A NOOP fold maps a ref to the PRIOR's graph id and emits no payload point.
+    The commit layer resolves a MITIGATES reason from a ref, so a folded
+    record must carry the content the ref now names — otherwise the dampener's
+    reason degrades to the bare id (a fabricated '[MITIGATION] <graph-id>'
+    claim). ``fallback`` is the candidate ref text itself (correct for the
+    ``identical`` arm, where the two are equal under normalization).
+
+    Fail-closed on an empty ``prior_id``: ``classify_consolidation`` returns
+    ``prior_id=""`` when the matched prior row carries no id, so without this
+    guard an absent id would match the FIRST id-less row and return another
+    point's content. (Unreachable from the production path — ``search_graph``
+    drops id-less rows — but the contract must be total for direct
+    ``execute_embed`` callers.)
+    """
+    if not prior_id:
+        return fallback
+    for row in priors or []:
+        if str(row.get("id") or "") == prior_id:
+            return str(row.get("content") or "") or fallback
+    return fallback
 
 
 def _find_point_match(points: list[dict], content: str, *,
@@ -3329,7 +4721,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # object kind is writable at execute_embed, so it is NOT minted;
         # the report must agree with the write gate).
         if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
-            minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
+            minted.append(f"{k} (entity '{_clip(e.get('name', ''))}')")
     for ev in embed_list.get("events", []) or []:
         if not isinstance(ev, dict):
             continue
@@ -3340,7 +4732,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # write gate).
         if k and k.lower() != UNCLASSIFIED and \
                 k.lower() not in _event_kind_forms(master):
-            minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
+            minted.append(f"{k} (event '{_clip(ev.get('content', ''))}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             continue
@@ -3352,7 +4744,7 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # otherwise accept (FIX P — the report agrees with the gate).
         if k and k.lower() != UNCLASSIFIED and \
                 k.lower() not in point_full and k.lower() not in point_bare:
-            minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
+            minted.append(f"{k} (point '{_clip(p.get('content', ''))}')")
     return minted
 
 
@@ -3740,7 +5132,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         ``target_edge`` IMPL is materialized when the model did not separately
         emit it. So the drop now fires only on a genuinely unresolvable ref
         (empty, a ref naming an emitted ENTITY — the prompt forbids entity
-        endpoints, so no claim Point is fabricated for one — or the
+        endpoints, so no claim Point is fabricated for one — whether the
+        entity was EMITTED this session or only present in the S3 index's
+        entity rows, #4716 — or the
         degenerate self-edge), not on the prompt's "CREATE the point first"
         instruction being skipped by the model. A minted endpoint no
         surviving operator references is pruned again.
@@ -3860,6 +5254,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
     # must never be materialized as a claim Point (see `_mint_endpoint`).
     emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
+    # #4716 Part 2 (Defect A / #4656 gap 1) — the mint's entity guard also
+    # consults the S3 index's entity rows, not just this session's payload
+    # entities: an Object that already exists in the graph but was NOT
+    # re-emitted this session is still an entity reference, and materializing
+    # a claim Point out of a participant name is the exact fabrication the
+    # OPERATOR REFERENCING rule forbids. `idx["entities"]` was in scope and
+    # unread by the mint before #4716 — every prior `idx[…]` use was
+    # `_index_search`'s own construction, the event loop's `idx["events"]`
+    # dedup, or `classify_consolidation`'s `idx["points"]` prior set. (Named
+    # by symbol, never by line: a numeric citation into this file re-stales on
+    # every edit — the #4648/#4954 drift class.)
+    #
+    # ⚠️ The surface is the S3 candidate window (`search_graph` defaults
+    # top-3/query, ≤15 queries), NOT an authority on the graph's contents — a
+    # bounded heuristic, empty on a degraded/non-real backend. An Object
+    # outside it is still mintable; closing that needs an authoritative
+    # query-independent entity lookup, which is deliberately out of #4716's
+    # scope (see the issue's "the candidate set cannot carry correctness").
+    graph_entity_names = {_norm(str(e.get("name") or ""))
+                          for e in idx["entities"] if e.get("name")}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -4001,6 +5415,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "point_id": pid, "session_ref": session_id,
                 "overlap": decision.overlap,
                 "evidence": decision.evidence,
+                "content": _prior_row_content(idx["points"], pid, content),
                 "reason": decision.reason})   # "identical" | "paraphrase"
             point_ids[n] = pid
             link_before_create.append({
@@ -4101,14 +5516,6 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "found": True,
             "note": f"superseded by new point {pid} — CORRECTS fold"})
 
-    # source-turn map over the emitted payload points — the NAND-direction
-    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
-    turn_by_point: dict[str, int] = {}
-    for _pt in payload_points:
-        t = _pt.get("source_turn_id")
-        if type(t) is int:
-            turn_by_point[_pt["id"]] = t
-
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
     # MITIGATES against the COMPLETE edge set so order-independence holds
@@ -4159,7 +5566,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         n = _norm(content)
         if n in point_ids:
             return point_ids[n]
-        if n in emitted_entity_names:
+        if n in emitted_entity_names or n in graph_entity_names:
             # The hard rule is explicit — "NEVER use an entity name as an
             # operator endpoint — entities are wired through
             # about_entities". Minting one would fabricate a degenerate claim
@@ -4169,20 +5576,125 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # warning, while a MITIGATES ``target_edge`` endpoint drops in pass
             # 2 with "MITIGATES target edge not emitted" (that operator's own
             # src/dst still resolve). Either way it is the pre-#2552
-            # behaviour, which is correct HERE.
+            # behaviour, which is correct HERE. #4716: the guard reads BOTH the
+            # emitted payload entities and the graph index's entity rows.
             warnings.append(
                 f"operator endpoint NOT minted (#2552 mint-before-wire): "
-                f"{where} named the emitted ENTITY {content[:60]!r} — the "
+                f"{where} named the ENTITY {content[:60]!r} — the "
                 "OPERATOR REFERENCING rule forbids entity endpoints, so no "
                 "claim Point is fabricated for it")
             return ""
+        # ── #4716 Part 2 (Defect A): the mint is not a side door around the
+        # consolidation rule the ordinary point path already implements ~100
+        # lines above. Apply the E7 classifier against the S3 priors before
+        # creating anything: a minted endpoint whose content already exists
+        # in-graph folds to the canonical id (NOOP — no second Point, no
+        # ORPHAN), which is what lets a PARAPHRASE endpoint reach the belief
+        # instead of a content-hash copy (a commit-time content-hash lookup
+        # cannot see a paraphrase — #4652).
+        #
+        # ⚠️ Inputs are DEGRADED relative to the ordinary path, so the decision
+        # surface is not identical (code-review P2): a minted ref carries no
+        # about_entities/tier, so `entity_mentions=None` leaves the entity gate
+        # UNDETERMINED-True (the documented never-block-on-absent-data posture)
+        # and the `sig_equal and (tier_a or mentions)` arm is UNREACHABLE — a
+        # paraphrase can fold only via the raw token-overlap band
+        # (`ov >= NOOP_MIN_OVERLAP`) or the ambiguous-high-overlap band. The
+        # exact/normalized-content arm (step 1) is unaffected, and that is the
+        # #4652 fold. Two refs that paraphrase each other INSIDE one payload
+        # cannot fold either: priors are `idx["points"]` (S3 priors), not the
+        # just-minted `payload_points`.
+        #
+        # The mint cannot express UPDATE: it hardcodes `reason="NEW"` and emits
+        # no supersession record (an E5 REVISES needs the ordinary path's
+        # supersessions entry, not merely a quote/turn — Part 3 below gives the
+        # mint both), so an UPDATE-classified ref is created as a new statement
+        # Point with a warning naming the decision. DELETE cannot occur at all:
+        # `classify_consolidation` documents and implements "DELETE is NEVER
+        # produced from content alone" (D5 — only explicit retractions), so
+        # only UPDATE is checked.
+        _decision = classify_consolidation(
+            {"content": content, "about_entities": [], "search_keys": [],
+             "when": None, "tier": ""},
+            idx["points"], entity_mentions=None, current_date=session_date)
+        if _decision.decision == "NOOP":
+            pid = _decision.prior_id or _content_id("pt", content)
+            noops.append({
+                "point_id": pid, "session_ref": session_id,
+                "overlap": _decision.overlap,
+                "evidence": _decision.evidence,
+                "content": _prior_row_content(idx["points"], pid, content),
+                "reason": _decision.reason})
+            point_ids[n] = pid
+            _full = _norm(ref)
+            if _full != n:
+                point_ids.setdefault(_full, pid)
+            link_before_create.append({
+                "searched_for": f"point '{content[:60]}'", "found": True,
+                "note": f"duplicate of existing {pid} "
+                        f"({_decision.reason}) — folded (no new point)"})
+            warnings.append(
+                f"operator endpoint folded (#4716 mint-vs-E7): {where} named "
+                f"{content[:60]!r}, whose content already exists in-graph as "
+                f"{pid} ({_decision.reason}) — no second Point; the operator "
+                "wires to the canonical id")
+            return pid
+        if _decision.decision == "UPDATE":
+            warnings.append(
+                f"operator endpoint minted as ADD (#4716 mint-vs-E7): {where} "
+                f"matched an existing point with consolidation decision "
+                f"{_decision.decision} ({_decision.evidence}), but a minted "
+                "endpoint hardcodes reason=NEW and emits no supersession "
+                "record, so an E5 REVISES fold is not expressible — it is "
+                "created as a new statement Point (the commit layer re-"
+                "resolves its id)")
         pid = _content_id("pt", content)
-        payload_points.append({
+        pt_entry: dict = {
             "id": pid, "content": content, "pointKind": "statement",
             "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
             "about_entities": [], "source_ref": "session.md", "quote": "",
             "search_keys": [], "status": "draft",
-        })
+        }
+        # ── #4716 Part 3 (Defect C / #4656 gap 2): give the minted endpoint a
+        # REAL source turn so a NAND whose endpoints were minted can be
+        # direction-canonicalized (#909) — `turn_by_point` is built AFTER this
+        # pre-pass (it was built before the mint, so a minted endpoint could
+        # never be in the map). The model's own reference text is the quote
+        # candidate; `_resolve_source_turn` anchors it against the transcript
+        # (verbatim first, then the >=0.6 token-overlap band).
+        #
+        # ⛔ The quote is kept ONLY on a VERBATIM anchor (code-review P2, three
+        # reviewers): the overlap band is not proof the text is in the turn,
+        # and `quote` is trusted as a verbatim excerpt downstream
+        # (`retrieval._is_own_source` keys on `source_turn_id` equality alone;
+        # `_same_fact` collapses on `source_turn_id` + quote overlap). On the
+        # band route the turn is still recorded (that is what the NAND
+        # canonicalizer needs) and the quote is left EMPTY — the pre-#4716
+        # shape for the quote, never a fabricated excerpt. With no anchor at
+        # all, neither field is set and the mint says so in its own words: the
+        # probe is run against a SCRATCH warnings list so the generic
+        # "has no resolvable source turn" text (which describes an EMITTED
+        # point losing its E3 anchor — not what happened) never reaches the
+        # payload's warnings.
+        if edus:
+            _probe = {"content": content, "quote": content[:200]}
+            _scratch: list[str] = []
+            _turn = _resolve_source_turn(_probe, edus, warnings=_scratch)
+            if _turn is None:
+                warnings.append(
+                    f"minted endpoint ({where}) has no transcript anchor — "
+                    "left unquoted (no source_turn_id)")
+            else:
+                _turn_text = next(
+                    (str(e.get("text") or "") for e in edus
+                     if e.get("index") == _turn), "")
+                _anchor = re.sub(r"\s+", " ", content[:200].strip().lower())
+                _verbatim = bool(_anchor) and re.sub(
+                    r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
+                pt_entry["source_turn_id"] = _turn
+                if _verbatim:
+                    pt_entry["quote"] = content[:200]
+        payload_points.append(pt_entry)
         point_ids[n] = pid
         # `_resolve` probes the UNTRUNCATED ref, so register that key too when
         # truncation changed it — otherwise a >1000-char ref mints a Point the
@@ -4215,6 +5727,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     _ref = str(_target.get(_side, "") or "")
                     if _ref and not _resolve(_ref):
                         _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+
+    # source-turn map over the emitted payload points — the NAND-direction
+    # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
+    # #4716 Part 3: built AFTER the mint pre-pass above, so a minted endpoint
+    # that Part 3 anchored to a real turn participates in canonicalization
+    # (building it before the mint meant a minted endpoint could never be in
+    # the map).
+    turn_by_point: dict[str, int] = {}
+    for _pt in payload_points:
+        t = _pt.get("source_turn_id")
+        if type(t) is int:
+            turn_by_point[_pt["id"]] = t
 
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
@@ -4268,12 +5792,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             strength = float(o.get("strength") or 0.3)
         except (TypeError, ValueError):
             warnings.append(f"MITIGATES strength {o.get('strength')!r} not numeric "
-                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            f"('{_clip(o.get('src', ''), 40)}'→"
+                            f"'{_clip(o.get('dst', ''), 40)}') "
                             "→ defaulted to 0.3")
             strength = 0.3
         if not (0.10 <= strength <= 0.50):
             warnings.append(f"MITIGATES strength {strength} outside [0.10, 0.50] "
-                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            f"('{_clip(o.get('src', ''), 40)}'→"
+                            f"'{_clip(o.get('dst', ''), 40)}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
         declared_target_missing = (
@@ -4637,13 +6163,60 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
             for i, t in enumerate(conversation) if t.get("content")]
 
 
+def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
+                  prior: dict | None = None
+                  ) -> tuple[dict, dict, list[str], dict]:
+    """One S2.2 VET pass (#5005) — never raises.
+
+    Returns ``(new_embed_list, stats, warnings, pool)``. On ANY failure the
+    input list is returned UNCHANGED with a warning: fail-open is the step's
+    stated failure policy (§4.2) — a wrong keep is noise, a wrong drop is
+    memory loss. `apply_vet` removes only explicit ``DISCARD`` outcomes, so the
+    no-arbiter path is a no-op on the list.
+
+    ``prior`` is the earlier pass's ``removal_pool`` (S2 → union). It is
+    **required for correctness, not cosmetic**: S4 runs between the two passes
+    and can reference an item the S2 pass removed, which a per-pass guard
+    cannot see. The returned ``pool`` is this pass's removals, to hand to the
+    next one.
+    """
+    if not embed_list:
+        return embed_list, {}, [], {}
+    try:
+        out = _vet_gate.vet_candidates(embed_list, narrative=narrative,
+                                       arbiter=arbiter)
+        new_list, apply_warnings = _vet_gate.apply_vet(
+            embed_list, out["decisions"], prior=prior)
+        stats = {
+            "stats": out["stats"],
+            "batch": out["batch"],
+            # the raw decisions ride the result so a discard is auditable and
+            # its counterfactual is recoverable (no silent discard).
+            "decisions": out["decisions"],
+        }
+        pool = _vet_gate.removal_pool(embed_list, new_list)
+        return (new_list, stats, list(out["warnings"]) + list(apply_warnings),
+                pool)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        return embed_list, {}, [
+            f"vet failed ({type(e).__name__}: {e}) — candidates kept "
+            "(fail-open)"], {}
+
+
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
                        session_date: str | None = None,
-                       kind_classifier=None) -> dict:
+                       kind_classifier=None,
+                       vet_arbiter=None) -> dict:
     """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
+    decision-only model that answers *"should this candidate exist at all?"*.
+    None + ``TORTOISE_VET`` unset → VET is entirely off-path. When the flag is
+    on and no arbiter is injected, VET runs its mechanical Level-2 batch checks
+    and keeps every candidate (fail-open). See ``tortoise/vet_gate.py``.
 
     ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
     None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
@@ -4713,6 +6286,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             classify_later = False
             errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_later_init_failed")
+    # #5005: S2.2 VET — off unless TORTOISE_VET (or an injected arbiter).
+    # #4899: the mechanical predicate lives inside that pass, so its flag must
+    # switch the pass on too or it would be inert (see `_value_gate_enabled`).
+    vet_enabled = (vet_arbiter is not None or _vet_enabled()
+                   or _value_gate_enabled())
+    vet_warnings: list[str] = []
     edus = _edus_from_conversation(conversation)
     if not edus:
         return {"session_id": session_id, "story_arc": "", "embed_list": {},
@@ -4730,6 +6309,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                                    "s2": {}, "union": {},
                                    "restamp_overrides": 0,
                                    "slot_rekeys": 0},
+                "vet": {"enabled": vet_enabled, "s2": {}, "union": {}},
                 "chain_enforcer": {"notes": [], "stats": {
                     "items_checked": 0, "violations": 0,
                     "rewired": 0, "warned": 0}}}
@@ -4785,6 +6365,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats, "s2")
         _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── S2.2 VET (#5005): the adversarial selection gate. Runs BEFORE the
+    # resolve/embed tail on every arm, and before the classify pass only under
+    # TORTOISE_CLASSIFY_LATER (with the flag off, S2.1 emits kinds inline — so
+    # the never-classified guarantee holds only on the classify-later arm).
+    # Fail-open: _run_vet_pass returns the list unchanged on any failure.
+    # Note the rebinding: with the flag on, ``result["s2_embed"]`` (set at the
+    # end of this function, commented "S2 raw (pre-S4)") is this pass's OUTPUT —
+    # the S2 embedding after VET, still pre-S4. With the flag off it is
+    # unchanged, which is the pre-existing behaviour.
+    vet_s2_stats: dict = {}
+    vet_s2_pool: dict = {}
+    if vet_enabled and embed_list:
+        embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
+            embed_list, story, arbiter=vet_arbiter)
+        vet_warnings.extend(_w)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their
@@ -4858,6 +6454,22 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats, "s4")
         _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── S2.2 VET — post-S4 union pass (#5005), the authoritative one. S4 is a
+    # second extraction pass (the live ``run_s4`` gap-filler — distinct from
+    # the design's REMOVED "S4 — granularity review"; see the G5 record in the
+    # module docstring), so VET runs again on the union to gate what S4 added.
+    # ``vet_s2_pool`` carries the S2 pass's removals forward: without it, an
+    # operator S4 re-added against an S2-discarded item would be re-minted by
+    # execute_embed, and an entity S4 started referencing would 422 the
+    # session. The union list is re-vetted wholesale rather
+    # than as a delta because merge_embed_lists rewrites/reorders it — the S2
+    # verdict ids (which are positional) do not describe the union's items.
+    vet_union_stats: dict = {}
+    if vet_enabled and complete_list:
+        complete_list, vet_union_stats, _w, _ = _run_vet_pass(
+            complete_list, story, arbiter=vet_arbiter, prior=vet_s2_pool)
+        vet_warnings.extend(_w)
 
     # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
     # re-stamp → classify(union, kind-missing only) → slot re-key. The S2
@@ -5017,6 +6629,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         "restamp_overrides": restamp_overrides,
         "slot_rekeys": slot_rekeys,
     }
+    # #5005: the S2.2 VET evidence surface (additive — an empty block when the
+    # flag is off). The off-path delta is exactly this key: the embed list and
+    # every downstream payload byte are unchanged when the flag is off.
+    result["vet"] = {
+        "enabled": vet_enabled,
+        "s2": vet_s2_stats,
+        "union": vet_union_stats,
+    }
+    if vet_warnings:
+        result["warnings"] = vet_warnings + (result.get("warnings") or [])
     if classify_later:
         # the unclassified terminal is resolved at write (execute_embed's
         # sentinel repair) — count it in the census. The UNION pass

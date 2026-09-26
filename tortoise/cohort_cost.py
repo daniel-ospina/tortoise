@@ -117,6 +117,14 @@ SINCE_ENV = "TORTOISE_COHORT_COST_SINCE"
 # a cohort that keeps tripping opens ONE incident, not one per capture.
 INCIDENT_KIND = "COHORT_COST_CAP"
 
+# The SEPARATE kind for a cap that could not be evaluated at all (#3981).
+# Deliberately NOT a superstring of ``INCIDENT_KIND``: the R2-unreachable
+# adoption path resolves an existing incident by GitHub search on the org
+# suffix, so a name that contains the other would let the two be confused for
+# one another. Pinned to its runbook row by
+# ``tests/test_operator_alert.py::test_kind_constants_match_the_runbook``.
+UNENFORCEABLE_INCIDENT_KIND = "COHORT_CAP_UNENFORCEABLE"
+
 # Bounds on the cohort we are willing to PRICE. Both control-plane reads are
 # server-side aggregates that return a SINGLE row — ``cohort_org_ids_since``
 # (``array_agg``) and ``metering_cohort_spend`` (``sum``) — so PostgREST's
@@ -130,6 +138,12 @@ INCIDENT_KIND = "COHORT_COST_CAP"
 # population this cap is written for.
 _MAX_COHORT_ORGS = 500
 
+# #4614: the machine-readable CATEGORY of a cohort-spend refusal. Distinct from
+# `quota.QUOTA_REFUSAL_CODE` on purpose — the cap is a SPEND ceiling, not a
+# plan node cap, and a client that branches on `detail.code` must not send the
+# user to buy a bigger plan that cannot lift it.
+COHORT_COST_REFUSAL_CODE = "cohort_cost_cap"
+
 
 class CohortCostCapExceeded(QuotaExceededError):
     """The cohort's measured spend is at/over the cap (#3665).
@@ -139,10 +153,16 @@ class CohortCostCapExceeded(QuotaExceededError):
     then covers the cohort cap with **no new mechanism** — which is the whole
     point of reusing ``quota.enforce_org_limit``'s error pair. ``detail``
     carries the cohort-scoped incident payload for the AlertStore sink.
+
+    #4614: it overrides the refusal CATEGORY. A spent cohort budget and a
+    hit plan cap are both 402s, and a caller that branches on
+    ``detail.code`` must be able to tell them apart — reading a spend cap as
+    "you are out of plan allowance" would send the user to buy a bigger plan
+    that does not lift it.
     """
 
     def __init__(self, message: str, *, detail: dict | None = None) -> None:
-        super().__init__(message)
+        super().__init__(message, code=COHORT_COST_REFUSAL_CODE)
         self.incident_detail = dict(detail or {})
 
 
@@ -292,14 +312,18 @@ def cohort_org_ids(since: str) -> list[str]:
 
 
 def _alert_store():
-    """The AlertStore, or ``None`` when the backup/alert plane is unconfigured
-    (a local dev box, the embedded test lane). Indirection kept callable so
-    tests can substitute a REAL AlertStore over fake transport."""
-    from tortoise import hosted_api as _ha
-    cfg = _ha._backup_config_safe()
-    if cfg is None:
-        return None
-    return _ha._alert_store_from(cfg)
+    """The AlertStore, or ``None`` when no alert channel is configured.
+
+    Delegates through ``operator_alert.alert_store`` — the shared
+    ALERT-only, sweep-independent seam (#3981; #3820 D5a class). The
+    pre-existing gating on ``_backup_config_safe()`` left the money-capping
+    alert invisible by default, because that helper is ``None`` whenever
+    ``BACKUP_SWEEP_ENABLED`` is off. Indirection kept callable so tests can
+    substitute a real AlertStore over fake transport.
+    """
+    from tortoise.operator_alert import alert_store
+
+    return alert_store()
 
 
 def file_cohort_cost_incident(org_id: str, detail: dict | None = None) -> bool:
@@ -346,7 +370,12 @@ def report_unenforceable_cap(org_id: str, error: BaseException) -> None:
     window DOES resolve is still gated exactly as before.
 
     Never raises: the alert itself must not become a new failure path (a signal
-    that can raise is a refusal by another name).
+    that can raise is a refusal by another name). The incident — a GitHub issue
+    plus Telegram, deduped per (kind, org) — is the durable operator signal; the
+    ERROR record below is the local one. The kind is
+    :data:`UNENFORCEABLE_INCIDENT_KIND`, distinct from :data:`INCIDENT_KIND` (a
+    cap that FIRED), so an unenforceable cap can never read as a cap firing in
+    the incident channel.
     """
     with contextlib.suppress(Exception):  # the alert must never raise
         _logger.error(
@@ -357,6 +386,10 @@ def report_unenforceable_cap(org_id: str, error: BaseException) -> None:
             "A late cap beats refusing a paying org; this alert is the trade.",
             org_id, type(error).__name__, error, exc_info=error,
         )
+        from tortoise.operator_alert import alert_operator
+
+        alert_operator(UNENFORCEABLE_INCIDENT_KIND, org_id,
+                       {"error_type": type(error).__name__})
 
 
 def enforce_cohort_cost_cap(org: dict | None, *,
