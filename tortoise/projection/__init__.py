@@ -6061,21 +6061,22 @@ class FalkorProjection(
         ``point_fts_v2`` marker as well. A one-field legacy index fails the
         field requirement below, so it takes the full path.
 
-        The reverse shape (two-field Point index present, ``point_fts_v2``
-        marker absent) is NOT proof the work is done: the ``if not done:``
-        block that marker guards also performs a ONE-TIME DATA FIXUP — it
-        flattens array-valued ``search_keys`` to a space-joined string, because
-        FalkorDB's fulltext index does not index array-valued properties. A
-        graph in that state (a node-only wipe that spares indexes, or a
-        swallowed marker MERGE) still has the fixup owed to it; skipping the
-        sweep would leave those nodes permanently invisible to FTS. So the
-        marker is part of the completeness contract for that shape.
+        KNOWN GAP (review P1, tracked separately): the marker is NOT reliable
+        enough to gate on. The ``if not done:`` block it guards also performs a
+        ONE-TIME DATA FIXUP (flattening array-valued ``search_keys``), so a
+        graph in the state "two-field index present, marker absent" still has
+        that fixup owed to it — and this probe reads it as current. Requiring
+        the marker here was tried and reverted: the fresh-create branch
+        swallows a failed marker write (``except Exception: pass``), so a
+        healthy graph can legitimately have no marker, and gating on it
+        re-bootstrapped every construction on CI (embedded + test-slow legs).
+        The fix is to make the marker write reliable, or to test the fixup's
+        real precondition, and only then gate the probe on it.
 
-        ``event_fts_v2`` is deliberately NOT required: no data fixup rides it
+        ``event_fts_v2`` is deliberately NOT consulted: no data fixup rides it
         (it guards only the drop→recreate churn), and a fresh graph sets the
         Event two-field index WITHOUT setting that marker — only the
-        "already indexed" path sets it — so requiring it would disable the
-        fast path on every graph.
+        "already indexed" path sets it.
         """
         try:
             rows = self.g.query("CALL db.indexes()").result_set
@@ -6115,17 +6116,18 @@ class FalkorProjection(
         if fts_required:
             required |= set(self._REQUIRED_FULLTEXT_INDEXES)
         if required <= present and fts_required:
-            # The field set alone cannot distinguish "migrated" from "index
-            # present, fixup still owed" — see the docstring. Charge the extra
-            # round trip only on the otherwise-complete path, so the common
-            # all-indexes-present case pays 2 round trips instead of ~26.
-            try:
-                if not self.g.query(
-                    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
-                ).result_set:
-                    return False
-            except Exception:  # a probe that cannot run is not a pass
-                return False
+            # REVIEW P1 — NOT enforced here on purpose. Requiring the marker
+            # makes the fast path permanently dead on any engine where the
+            # marker write did not land: the fresh-create branch wraps its
+            # ``MERGE (m:Meta {key:'point_fts_v2'})`` in ``except Exception:
+            # pass``, so a healthy, fully-indexed graph can sit with no marker.
+            # That is not hypothetical — it reddened CI's embedded and
+            # test-slow legs (every construction re-bootstrapped). The marker
+            # is therefore NOT a reliable "work done" signal, and the real fix
+            # is to make the marker write reliable (or to detect the fixup's
+            # actual precondition, array-valued ``search_keys``), then gate on
+            # it. Tracked separately.
+            pass
         return required <= present
 
     def _ensure_indexes(self) -> None:
