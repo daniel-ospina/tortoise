@@ -605,17 +605,32 @@ def test_org_label_injection_cannot_forge_an_exposition_line():
 # ── Indicator 1 · the PRODUCTION call site ─────────────────────────────────
 
 
-def test_production_path_publishes_a_nonzero_value_for_a_real_org(monkeypatch):
+def test_production_path_publishes_a_nonzero_value_for_a_real_org(
+    monkeypatch, caplog
+):
     """Drives the REAL production coroutine — not the metric object, not the
     allocation helper in isolation. This is the assertion indicator 1 asks for
-    ('a test asserts the production call site, not just the counter object')."""
+    ('a test asserts the production call site, not just the counter object').
+
+    It also pins the PRODUCTION COMPOSITION inside
+    ``cost_allocation.refresh_and_publish``: ``publish`` must run BEFORE
+    ``_reconcile_and_log``. Swapping those two statements leaves the
+    helper-level window tests green (they call ``_reconcile_and_log``
+    directly) while a first-ever refresh then logs
+    ``published_window=unknown..unknown`` and warns ``does NOT reconcile``
+    about a set that is in fact correct — the stale-figure misstatement the
+    ``published_window`` field exists to prevent. This is a first-ever refresh
+    (the autouse ``_clean_metric`` fixture leaves the tracker at None), so the
+    swapped order cannot hide behind a prior publish.
+    """
     monkeypatch.setattr(
         ha, "_iter_registered_orgs",
         lambda **_kw: [{"org_id": "org_real_1"}, {"org_id": "org_real_2"}])
     monkeypatch.setattr(
         ha, "_measured_write_ops_basis", lambda orgs: {o: 1 for o in orgs})
 
-    asyncio.run(ha._refresh_cost_allocation())
+    with caplog.at_level("INFO", logger="tortoise.cost_allocation"):
+        asyncio.run(ha._refresh_cost_allocation())
 
     published = ca.allocation_by_org()
     assert published, "the production path published nothing"
@@ -623,6 +638,18 @@ def test_production_path_publishes_a_nonzero_value_for_a_real_org(monkeypatch):
     snap = ca.current_snapshot()
     assert snap is not None and snap.state == "measured"
     assert snap.to_dict()["kind"] == "allocation"
+    # The INFO line for THIS refresh must name the window its published values
+    # belong to — the snapshot's own window, since this refresh published.
+    msg = next(r.getMessage() for r in caplog.records
+               if "kind=allocation" in r.getMessage())
+    assert (
+        f"attempted_window={snap.window_start}..{snap.window_end}" in msg
+    ), msg
+    assert (
+        f"published_window={snap.window_start}..{snap.window_end}" in msg
+    ), msg
+    assert not any("does NOT reconcile" in r.getMessage()
+                   for r in caplog.records), caplog.text
 
 
 def test_event_retention_loop_awaits_the_cost_refresh():
@@ -876,16 +903,19 @@ def test_publish_is_the_only_writer_of_the_team_cost_metric():
     SCOPE (exactly what this guard enforces, and no more): it matches syntactic
     ``Name``/``Attribute`` occurrences of ``TEAM_COST`` and its mutators
     ANYWHERE inside a ``def``/``async def`` subtree in ``tortoise/**/*.py``
-    outside every file named ``monitoring.py`` — INCLUDING a ``lambda`` or a
+    outside ``tortoise/monitoring.py`` — INCLUDING a ``lambda`` or a
     class nested inside a function body, which ``ast.walk`` inspects and
     attributes to that function. Every such reference must sit inside
     ``publish`` (the one production writer) or ``_reset_for_tests`` (the
     explicit test seam). What it does NOT match is module-level and top-level
-    class-body references, aliased imports, and ``getattr`` string lookups;
-    every file named ``monitoring.py`` is skipped wholesale (it holds the
-    definitions) — a NEW mutator defined there would not be caught. The claim is
-    stated at this strength, not a broader one, in
-    ``docs/ops/cost-allocation.md``."""
+    class-body references, aliased imports, and ``getattr`` string lookups.
+    The skip is implemented by file NAME, not by path: ``tortoise/monitoring.py``
+    holds the definitions and must be skipped, and any OTHER file named
+    ``monitoring.py`` is exempt for that same name-based reason — e.g.
+    ``tortoise/shared_state/monitoring.py``, which holds no team-cost
+    definitions at all. That is a disclosed hole: a NEW mutator added to any
+    other ``monitoring.py`` would not be caught. The claim is stated at this
+    strength, not a broader one, in ``docs/ops/cost-allocation.md``."""
     offenders: dict[str, set[str]] = {}
     for path in (REPO / "tortoise").rglob("*.py"):
         if path.name == "monitoring.py":
