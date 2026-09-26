@@ -5894,9 +5894,43 @@ async def _check_recovery_rate_limit(request: Request,
 # is a ONE-TIME human act, so a 2/24h budget never trips a real user while
 # capping an automated farm. Mirrors the register/sensitive-op limiter
 # posture (#1081's per-IP pattern; RATE_LIMIT_DISABLED=1 opts out in tests).
-_CLAIM_MAX_PER_24H = 2
-_CLAIM_WINDOW = 24 * 3600
-_CLAIM_BUCKETS: dict[str, list[float]] = defaultdict(list)
+#
+# #3125: the bucket key is the REAL client IP — the #1559 rule (see the
+# `#1559:` block in RateLimitMiddleware.dispatch): `request.state.client_ip`,
+# set by ClientIPMiddleware from Fly-Client-IP when
+# TORTOISE_TRUST_FLY_CLIENT_IP=1, falling back to `request.client.host`.
+# Keying on `request.client.host` behind Fly is the PROXY's IP — a constant —
+# so every user shared ONE bucket and the 2/24h budget was a GLOBAL 2/24h cap
+# on the whole claim surface (both `/v1/claim` OAuth and the email/password
+# claim path call this limiter).
+#
+# #3125: the store is BOUNDED, not merely pruned. The pre-fix branch pruned
+# only *stale* buckets, AFTER the charge (the #2866 non-bounding shape — and
+# dead code while every request shared one key): under a fresh-key flood
+# every bucket is in-window, so nothing was reclaimed and the store grew
+# without bound. Resolved with the #2866 D3/D4 policy — reclaim inactive
+# LRU-head buckets before admitting a new key, and while the store is still
+# at cap the new key gets NO bucket of its own: it is charged to one shared
+# overflow bucket, so the distinct-new-IP ceiling is `STORE_CAP + LIMIT`.
+# Fail closed: an un-tractable client is denied, never handed an unbounded
+# budget. Evicting an *active* bucket is explicitly rejected (#2866 approach
+# C) — under churn that is a limiter bypass.
+#
+# All three knobs are read AT CALL TIME via `_int_env` (the #3125 third
+# finding; the signup/recover/DCR convention, D8 of the #2866 policy) so a
+# per-environment budget is tunable without a code change.
+_CLAIM_MAX_PER_24H_DEFAULT = 2
+_CLAIM_WINDOW_DEFAULT = 24 * 3600
+_CLAIM_STORE_CAP_DEFAULT = 10_000
+# Singleton key for the at-cap overflow charge — never a client IP, so it can
+# never be confused with (or collide with) a per-IP bucket.
+_CLAIM_OVERFLOW_KEY = "\x00overflow"
+# Ordered by LAST CHARGE (`move_to_end` on a CHARGED request only) — the
+# ordering invariant `_claim_reclaim` depends on: an active LRU head implies
+# every later key is active too, so reclaim can stop at the first active
+# bucket and can never evict a live budget.
+_CLAIM_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_CLAIM_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
 # #1511: session-exchange per-IP bucket (5/hr) — real per-IP via
 # ClientIPMiddleware (PATH_LIMITS would bucket on the Fly proxy IP = global).
 _SESSION_BUCKETS: dict[str, list[float]] = defaultdict(list)
@@ -5906,31 +5940,125 @@ _SESSION_LOGIN_WINDOW_S = 3600
 _CLAIM_LOCK = asyncio.Lock()
 
 
+def _claim_reclaim(store: OrderedDict, now: float, window_s: int,
+                   cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (#3125 — the #2866 D3/D4 policy, mirroring
+    ``_oauth_dcr_reclaim``).
+
+    By the last-charge ordering invariant an active head implies every later
+    key is active too, so this stops at the first live bucket and can never
+    evict an active key (which under churn would be a limiter bypass).
+    O(1) at the hot cap, replacing the pre-fix O(n) full-store scan.
+    """
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
 async def _check_claim_rate_limit(request: Request) -> None:
-    """IP-based rate limit: 2 claim attempts per rolling 24h per IP."""
+    """IP-based rate limit: 2 claim attempts per rolling window (default 24h)
+    per REAL client IP (#1559/#3125 — `request.state.client_ip`, fallback
+    `request.client.host`; behind Fly the latter is the PROXY's IP).
+
+    Env knobs, read at call time so tests/operators tune without a reload:
+    TORTOISE_CLAIM_MAX_PER_24H (default 2),
+    TORTOISE_CLAIM_WINDOW_S (default 86400 — a non-positive value falls back
+    to the default, never to a disabled limiter),
+    TORTOISE_CLAIM_STORE_CAP (default 10000 — the per-process distinct-IP
+    ceiling; distinct new IPs per window are bounded by
+    `STORE_CAP + MAX_PER_24H`).
+
+    Accepted limitations (stated, not implied): while the store is FULL the
+    overflow bucket is ONE SHARED budget for every untracked IP — so at
+    `STORE_CAP` simultaneous live buckets the limiter degrades to the #3125
+    symptom (untracked clients share `MAX_PER_24H`); it is reachable only at
+    that cardinality and it only ever DENIES, never grants (fail closed), and
+    reclaiming inactive buckets clears it. An IP charged to the overflow
+    bucket can later obtain its own bucket, so one IP is bounded by
+    `2 * MAX_PER_24H` in the worst case — the same property the #2866 DCR
+    policy accepts, and the bound is what keeps the store finite. No IPv6
+    prefix keying: a client holding a whole IPv6 /64 gets one bucket per
+    address — the /64 gap is filed on #5490 (the shared-primitive issue);
+    this limiter does not use that primitive, so a fix there must cover this
+    site too (the claim budget is per-IP, and collapsing a shared /64 would
+    make unrelated users share one 2/24h budget).
+    """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
+    # #1559: the REAL client IP, NEVER the Fly proxy IP behind
+    # request.client.host (a constant behind the proxy ⇒ one global bucket).
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    if not ip:
         return
-    ip = request.client.host
+    # Normalize IPv4-mapped IPv6 so one dual-stack client cannot present two
+    # keys for one address (#1081 review P4). The other per-IP limiters get
+    # this inside `_check_ip_bucket_rate_limit`; this limiter does not use
+    # that helper, so it must apply it here.
+    ip = _normalize_mapped_ipv6(ip)
+    limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
+    window_s = _int_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
+    if window_s <= 0:
+        # An invalid window must never fail OPEN: with window_s <= 0 the
+        # in-window test `now - t < window_s` is never true, the bucket is
+        # emptied on every request and the limiter is silently disabled.
+        # Fall back to the default (the D6 convention for an out-of-range
+        # value) — the intended off-switch is RATE_LIMIT_DISABLED.
+        window_s = _CLAIM_WINDOW_DEFAULT
+    store_cap = _int_env("TORTOISE_CLAIM_STORE_CAP", _CLAIM_STORE_CAP_DEFAULT)
+    # User-facing period, derived so a tuned window cannot make the 429
+    # message lie (identical to "24h" at the default window).
+    period = (f"{window_s // 3600}h"
+              if window_s >= 3600 and window_s % 3600 == 0
+              else f"{window_s}s")
     now = time.time()
     async with _CLAIM_LOCK:
-        bucket = _CLAIM_BUCKETS[ip]
-        bucket[:] = [t for t in bucket if now - t < _CLAIM_WINDOW]
-        if len(bucket) >= _CLAIM_MAX_PER_24H:
+        # Phase 1: evaluate (and, only on a NEW key, evict INACTIVE buckets).
+        # A 429 leaves the stores UNCHARGED and UNGROWN — it may prune
+        # in place, but it never appends and never inserts.
+        bucket = _CLAIM_BUCKETS.get(ip)
+        on_overflow = False
+        if bucket is None:
+            _claim_reclaim(_CLAIM_BUCKETS, now, window_s, store_cap)
+            if len(_CLAIM_BUCKETS) >= store_cap:
+                on_overflow = True  # store full of LIVE buckets — no room
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = [t for t in bucket if now - t < window_s]
+
+        if on_overflow:
+            charged = _CLAIM_OVERFLOW.get(_CLAIM_OVERFLOW_KEY)
+            if charged is None:
+                charged = []
+            else:
+                charged[:] = [t for t in charged if now - t < window_s]
+        else:
+            charged = bucket
+
+        if len(charged) >= limit:
             raise HTTPException(
                 status_code=429,
-                detail=("Too many claim attempts (max 2 per 24h). "
+                detail=(f"Too many claim attempts (max {limit} per {period}). "
                         "Please try again later."),
-                headers={"Retry-After": "86400"},
+                # The advertised wait is the window itself (the pre-fix
+                # constant, here derived) — a tuned window can never
+                # advertise a wait longer than the budget it enforces.
+                headers={"Retry-After": str(window_s)},
             )
-        bucket.append(now)
-        # Bound memory growth: drop dead buckets beyond 10k entries.
-        if len(_CLAIM_BUCKETS) > 10_000:
-            stale = [ip for ip, b in _CLAIM_BUCKETS.items()
-                     if not any(now - t < _CLAIM_WINDOW for t in b)]
-            for ip in stale:
-                del _CLAIM_BUCKETS[ip]
+
+        # Phase 2: every dimension passed — charge (and only now reorder).
+        charged.append(now)
+        if on_overflow:
+            _CLAIM_OVERFLOW[_CLAIM_OVERFLOW_KEY] = charged
+            _CLAIM_OVERFLOW.move_to_end(_CLAIM_OVERFLOW_KEY)
+        else:
+            _CLAIM_BUCKETS[ip] = charged
+            _CLAIM_BUCKETS.move_to_end(ip)
 
 
 # ── Invite-accept limiter (#1134, OWASP per-token/IP/global caps) ────────────
