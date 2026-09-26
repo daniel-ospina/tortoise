@@ -4555,9 +4555,34 @@ _POINT_FALLBACK = {"kind": "statement"}
 #: ones: the classifier can assign them via the kind index's "events"
 #: section (FIX L synthesis), so the write gate must accept them (FIX A
 #: candidate/write-gate alignment). Full + bare forms, case-folded.
-#: Derived once per process from the default packs (packs are static per
-#: process — mirrors the other vocab caches).
-_PACK_EVENT_FORMS: set[str] | None = None
+#: Derived from the default packs, but CACHED PER INSTALLED NAMESPACE SET —
+#: not once per process. #5163 review (P1): this used to be one unkeyed
+#: process global justified by "packs are static per process", which is
+#: exactly the premise #2714/#5163 invalidated — the S5 write gate admitted
+#: EVERY pack's declared kinds on EVERY graph, so a graph with only `dev:`
+#: installed could still mint `marketing:*`.
+_PACK_EVENT_FORMS: dict[frozenset[str], set[str]] = {}
+
+
+def _installed_pack_ns(master: dict) -> frozenset[str]:
+    """The pack namespaces this master was built for, in ``"ns:"`` form.
+
+    Read off the master's OWN ``pack_kinds`` section: ``_build_master_from_brief``
+    filters that section by the same prefix allowlist the gate must respect, so
+    it is the authoritative signal already in hand — no signature change, and
+    no way for the two to disagree.
+
+    A namespace that declares NO kindDefs at all leaves no ``pack_kinds`` key
+    and is therefore invisible here. That direction is deliberately fail-open
+    (it reproduces pre-#5163 behaviour for that shape) — it can never
+    over-gate a kind the graph legitimately installs.
+    """
+    ns: set[str] = set()
+    for key in master.get("pack_kinds", {}):
+        head, _, _kind = key.rpartition(":")
+        if head:
+            ns.add(f"{head.lower()}:")
+    return frozenset(ns)
 
 
 def _event_kind_forms(master: dict) -> set[str]:
@@ -4565,13 +4590,14 @@ def _event_kind_forms(master: dict) -> set[str]:
     alignment): the master's event forms (core EVENTS + pack kindDefs —
     the entity-gate mirror, ``master_kind_forms``) PLUS the namespaced
     pack DECLARED event kinds (eventKinds — including kindDefs-less ones
-    the classifier can assign). Full + bare forms, case-folded. The gate
-    must never raise: a pack-registry failure degrades to the
-    master-forms-only set."""
-    global _PACK_EVENT_FORMS
+    the classifier can assign) **for the namespaces this graph installs**.
+    Full + bare forms, case-folded. The gate must never raise: a
+    pack-registry failure degrades to the master-forms-only set."""
     forms = master_kind_forms(master)
-    if _PACK_EVENT_FORMS is None:
-        _PACK_EVENT_FORMS = set()
+    gate = _installed_pack_ns(master)
+    pack_forms = _PACK_EVENT_FORMS.get(gate)
+    if pack_forms is None:
+        pack_forms = set()
         try:
             from tortoise.pack_registry import (
                 PackRegistry,
@@ -4581,23 +4607,26 @@ def _event_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
+                if f"{ns.lower()}:" not in gate:
+                    continue
                 for k in (pack.event_kinds or []):
-                    _PACK_EVENT_FORMS.add(f"{ns}:{k}".lower())
-                    _PACK_EVENT_FORMS.add(k.lower())
+                    pack_forms.add(f"{ns}:{k}".lower())
+                    pack_forms.add(k.lower())
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
-            _PACK_EVENT_FORMS = set()
-    return forms | _PACK_EVENT_FORMS
+            pack_forms = set()
+        _PACK_EVENT_FORMS[gate] = pack_forms
+    return forms | pack_forms
 
 
 #: The pack-DECLARED object/document kinds (objectKinds + documentKinds) —
 #: including the kindDefs-less ones: the classifier can assign them via the
 #: kind index's "objects" section (FIX L synthesis), so the entity write
 #: gate must accept them (FIX M candidate/write-gate alignment — the events
-#: lane's FIX A mirror). Full + bare forms, case-folded. Derived once per
-#: process from the default packs (packs are static per process — mirrors
-#: _PACK_EVENT_FORMS).
-_PACK_OBJECT_FORMS: set[str] | None = None
+#: lane's FIX A mirror). Full + bare forms, case-folded. Cached per INSTALLED
+#: namespace set, never once per process (see ``_PACK_EVENT_FORMS`` — the
+#: same #5163 review P1: an unkeyed global admitted every pack on every graph).
+_PACK_OBJECT_FORMS: dict[frozenset[str], set[str]] = {}
 
 
 def _object_kind_forms(master: dict) -> set[str]:
@@ -4606,13 +4635,15 @@ def _object_kind_forms(master: dict) -> set[str]:
     (``master_kind_forms``) PLUS the namespaced pack DECLARED object and
     document kinds (objectKinds + documentKinds — including kindDefs-less
     ones the classifier can assign, e.g. dev:apiSpec, pm:milestone,
-    marketing:keyword). Full + bare forms, case-folded. The gate must never
-    raise: a pack-registry failure degrades to the master-forms-only set
-    (mirrors _event_kind_forms)."""
-    global _PACK_OBJECT_FORMS
+    marketing:keyword) **for the namespaces this graph installs**. Full +
+    bare forms, case-folded. The gate must never raise: a pack-registry
+    failure degrades to the master-forms-only set (mirrors
+    _event_kind_forms)."""
     forms = master_kind_forms(master)
-    if _PACK_OBJECT_FORMS is None:
-        _PACK_OBJECT_FORMS = set()
+    gate = _installed_pack_ns(master)
+    pack_forms = _PACK_OBJECT_FORMS.get(gate)
+    if pack_forms is None:
+        pack_forms = set()
         try:
             from tortoise.pack_registry import (
                 PackRegistry,
@@ -4622,14 +4653,17 @@ def _object_kind_forms(master: dict) -> set[str]:
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
+                if f"{ns.lower()}:" not in gate:
+                    continue
                 for k in (pack.object_kinds or []) + \
                         (pack.document_kinds or []):
-                    _PACK_OBJECT_FORMS.add(f"{ns}:{k}".lower())
-                    _PACK_OBJECT_FORMS.add(k.lower())
+                    pack_forms.add(f"{ns}:{k}".lower())
+                    pack_forms.add(k.lower())
         except Exception:  # noqa: BLE001, RUF100 — never let the write
             # gate raise (fail-open to the master-forms-only gate)
-            _PACK_OBJECT_FORMS = set()
-    return forms | _PACK_OBJECT_FORMS
+            pack_forms = set()
+        _PACK_OBJECT_FORMS[gate] = pack_forms
+    return forms | pack_forms
 
 
 def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \

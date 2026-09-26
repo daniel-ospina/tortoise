@@ -359,3 +359,105 @@ class TestCaller3HostedCommitDoor:
             params={"k": MARKETING_OBJECT})
         r = _post(client, _commit_payload(MARKETING_POINT))
         assert r.status_code == 200, r.text
+
+
+class TestS5WritePathGateIsGraphScoped:
+    """#5163 review (P1) — the S5 WRITE-PATH gate must be gated per graph.
+
+    ``_object_kind_forms`` / ``_event_kind_forms`` are the gate the
+    DIRECT-WRITE capture path uses (``execute_embed``), which never passes
+    Layer-1 or the commit door. They OR the master's forms into a
+    process-global set computed once from the DEFAULT packs with no
+    ``installed_namespaces`` filter — so a graph with only ``dev:`` installed
+    accepted ``marketing:*``, and the S5 repair gate left those kinds
+    un-repaired. Same defect class as callers 1-3 (an unkeyed process-global
+    memo whose premise is "packs are static per process"), reached through the
+    fourth caller on the write path.
+
+    FAIL-ON: the write gate unions every pack's declared kinds into the
+    accepted set, so a dev-only graph accepts ``marketing:campaign``.
+    REACHABLE: the direct-write capture path calls these helpers with the
+    graph's own master — the master built from that graph's gated brief.
+    """
+
+    @staticmethod
+    def _master(installed):
+        from tortoise.extractor_v2 import PACK_NS, _build_master_from_brief
+        from tortoise.value_extractor import compile_value_brief
+        return _build_master_from_brief(
+            compile_value_brief(installed_namespaces=installed), PACK_NS)
+
+    def test_dev_only_graph_excludes_another_packs_declared_kinds(self):
+        from tortoise.extractor_v2 import _event_kind_forms, _object_kind_forms
+
+        dev = self._master({DEV})
+
+        obj = _object_kind_forms(dev)
+        leaked = sorted(f for f in obj if f.startswith("marketing:"))
+        assert not leaked, (
+            "a dev-only graph must not accept another pack's declared object "
+            f"kinds on the write path: {leaked[:6]}")
+
+        ev = _event_kind_forms(dev)
+        leaked_ev = sorted(f for f in ev if f.startswith("marketing:"))
+        assert not leaked_ev, (
+            f"...nor its declared event kinds: {leaked_ev[:6]}")
+
+    def test_the_gate_still_admits_the_installed_pack(self):
+        """The gate must not over-correct — the installed pack survives."""
+        from tortoise.extractor_v2 import _object_kind_forms
+
+        obj = _object_kind_forms(self._master({DEV}))
+        assert [f for f in obj if f.startswith("dev:")], (
+            "the INSTALLED pack's own kinds must survive the gate")
+
+    def test_ungated_master_keeps_the_full_union(self):
+        """``installed_namespaces=None`` means NO GATE, not an empty gate
+        (the seam doctrine in tests/test_vocab_gating_by_graph.py) — so the
+        ungated path stays byte-identical to pre-#5163 behaviour."""
+        from tortoise.extractor_v2 import _object_kind_forms
+
+        obj = _object_kind_forms(self._master(None))
+        assert [f for f in obj if f.startswith("marketing:")], (
+            "the ungated master must still carry every pack's kinds")
+
+    def test_gate_cache_is_keyed_by_namespace_set_not_by_process(self):
+        """Two graphs in ONE process must not share one gate.
+
+        The discriminator has to come from the CACHE, not from the master:
+        an earlier version of this test asserted on ``marketing:`` forms of a
+        real ungated master, which carries them in its own ``pack_kinds``
+        anyway — so it passed even against the unkeyed global (and, once
+        ``_PACK_OBJECT_FORMS.clear()`` ran first at pre-fix code, it never
+        recomputed at all). Both failures of that draft were the same mistake:
+        no evidence the cache was consulted.
+
+        So: synthetic masters whose ``pack_kinds`` declare exactly one
+        namespace each, and a form that ONLY the pack-forms cache can supply
+        (``dev:apispec`` / ``marketing:keyword`` are DECLARED kinds with no
+        kindDef, so they never appear in ``pack_kinds``). Each call must then
+        reflect its OWN gate; a process-global memo makes whichever call runs
+        second inherit the first's union and fail on an assertion here — not
+        on the container's type. The cache is deliberately NOT cleared.
+        """
+        from tortoise.extractor_v2 import _object_kind_forms
+
+        sections = {"objects": {}, "subjects": {}, "points": {}, "events": {}}
+        dev_master = dict(sections, pack_kinds={"dev:api": {}})
+        mkt_master = dict(sections, pack_kinds={"marketing:campaign": {}})
+
+        dev_forms = {f.lower() for f in _object_kind_forms(dev_master)}
+        mkt_forms = {f.lower() for f in _object_kind_forms(mkt_master)}
+
+        # Each gate's cache-only form must be present for itself...
+        assert "dev:apispec" in dev_forms, (
+            "the dev gate's declared-kind form must come from the pack cache")
+        assert "marketing:keyword" in mkt_forms, (
+            "the marketing gate's declared-kind form must come from the pack cache")
+
+        # ...and absent for the other. A process-global memo fails both.
+        assert "dev:apispec" not in mkt_forms, (
+            "a marketing-only graph must not inherit the dev graph's cached "
+            "kinds — the cache is not keyed by the graph's namespace set")
+        assert "marketing:keyword" not in dev_forms, (
+            "a dev-only graph must not inherit the marketing graph's cached kinds")
