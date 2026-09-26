@@ -322,6 +322,13 @@ class _Meted:
             with contextlib.suppress(Exception):
                 _ACTIVE.reset(self._token)
         tally, org = self._tally, self._org
+        # An empty tally has nothing to write (``flush_tally`` returns
+        # immediately), so skip the whole flush: no lock, no dict, no thread.
+        # A decorated runner that encoded NOTHING — the common case for the
+        # seed runners, and every OPTIONS preflight at the middleware — must
+        # not pay for a measurement it does not have.
+        if tally.is_empty():
+            return
         # ⛔ NEVER BLOCK THE EVENT LOOP. The sync arm is reached from "sync"
         # runners that an ``async def`` handler invokes DIRECTLY
         # (``_run_onboarding_seed`` / ``_run_starter_seed``) and from FastMCP's
@@ -360,6 +367,8 @@ class _Meted:
         if token is not None:
             with contextlib.suppress(Exception):
                 _ACTIVE.reset(token)
+        if tally.is_empty():
+            return False                      # nothing to write — see _finish
         try:
             # Offload: the ledger write is blocking (FalkorDB/HTTP) and must not
             # stall the loop — the same discipline as the write paths.
@@ -408,6 +417,16 @@ class EmbedMeteringMiddleware:
             if not org:
                 state = scope.get("state")
                 org = state.get("org_id") if isinstance(state, dict) else None
-            await asyncio.to_thread(
-                flush_tally, take_and_reset() or tally, org
-            )
+            # ``take_and_reset`` runs synchronously on the loop, so an UNARMED
+            # request (or a handler that replaced the tally) is settled here.
+            pending = take_and_reset() or tally
+            # Skip the offload when there is nothing to write. ``flush_tally``
+            # would return immediately anyway, but the ``to_thread`` hop is
+            # ALREADY SPENT by then — and it lands on the same small default
+            # executor the real ledger writes use, so under saturation the
+            # request's ``finally`` queues behind them for a call that does
+            # nothing. Measured: that no-op hop IS essentially the whole
+            # per-request cost of this middleware, and it is paid by every
+            # non-GET request, OPTIONS preflight included.
+            if not pending.is_empty():
+                await asyncio.to_thread(flush_tally, pending, org)
