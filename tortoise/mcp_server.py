@@ -4224,7 +4224,10 @@ def _preview_delete_entity(sdk, id: str) -> dict:
     # — and drift makes this preview UNDER-report the blast radius (a label
     # whose id property moved would match nothing and silently drop out of the
     # count), which is the dangerous direction.
-    from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+    from tortoise.projection import (
+        _CANONICAL_ENTITY_ID_PROPS,
+        secondary_entity_id_props,
+    )
     proj = sdk._get_proj()
     seen: set = set()
     nodes: list[str] = []
@@ -4235,14 +4238,32 @@ def _preview_delete_entity(sdk, id: str) -> dict:
         # an id value are both deleted, and their internal ids differ, so
         # this neither over- nor under-counts. (Matches the writer, which
         # never dedups by logical id.)
-        for (internal,) in proj.g.query(
-            f"MATCH (n:{label} {{{prop}:$id}}) RETURN ID(n)",
-            params={"id": id},
-        ).result_set:
-            if internal in seen:
-                continue
-            seen.add(internal)
-            nodes.append(id)
+        # #4649: the SAME OR-SET the writer and the replay fold use — primary
+        # key first, the label's secondary key if the primary matched nothing.
+        # A url-keyed :Source has no `id`, so without this the preview
+        # UNDER-reports the blast radius (the dangerous direction).
+        for match_prop in (prop, *secondary_entity_id_props(label)):
+            # The fall-through condition must be the WRITER's, not "did this
+            # key match anything": `_delete_entity` breaks on the DETACH
+            # DELETE's count, so a primary key whose only match was ALREADY
+            # deleted by an earlier label returns 0 and falls through to the
+            # secondary key. Gating on a raw `hit` (any matched row, `seen` or
+            # not) stops one label early and UNDER-reports the blast radius —
+            # the dangerous direction on an irreversible op. Graph:
+            # `(:Object:Source {id:X})` + `(:Source {url:X})` — the writer
+            # deletes BOTH, a `hit`-gated preview claimed one.
+            added = False
+            for (internal,) in proj.g.query(
+                f"MATCH (n:{label} {{{match_prop}:$id}}) RETURN ID(n)",
+                params={"id": id},
+            ).result_set:
+                if internal in seen:
+                    continue
+                seen.add(internal)
+                nodes.append(id)
+                added = True
+            if added:
+                break
     # `_delete_entity` does NOT run the Tag GC (only `delete_point` does).
     edges = _preview_delete_edges(sdk, sorted(seen))
     return _preview_result(
@@ -4258,8 +4279,18 @@ def _preview_delete_entity(sdk, id: str) -> dict:
 
 def _preview_delete(sdk, id: str) -> dict:
     """Preview `tortoise_delete` — resolve the label first, exactly as
-    `TortoiseSDK.delete` does, then preview the branch it would take."""
-    resolved = sdk._get_proj()._resolve_entity(id, by_id=True, by_eventId=True)
+    `TortoiseSDK.delete` does, then preview the branch it would take.
+
+    #4649: the resolution is the SAME OR-set as the writer's — `by_url=True`
+    included. Without it a url-keyed `:Source` (no `id`, minted by
+    `_link_source`) previewed as `found=False, nodes_removed=0` while
+    `tortoise_delete(url)` DELETED the node and all its edges, so the
+    destructive tool's only blast-radius surface under-reported (the leaf
+    preview `_preview_delete_entity` was already OR-set-aware; this dispatcher
+    is what routes to it).
+    """
+    resolved = sdk._get_proj()._resolve_entity(
+        id, by_id=True, by_eventId=True, by_url=True)
     if not resolved:
         return _preview_result(
             "tortoise_delete", "delete",

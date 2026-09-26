@@ -1113,6 +1113,11 @@ surfaces:
   - test_tripwire.py
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
+  # #4649: the write OR-set (Source by id OR url) — producer, both replay
+  # folds and the MCP delete preview, with the rebuild residual pinned to #5048.
+  # Same surface as its siblings test_entity_delete_rebuild.py /
+  # test_unjournaled_mutation_class.py (the projection/journal seam).
+  - test_url_keyed_source_write_4649.py
   - test_validity_windows.py
   # #5358: fail-closed refusal for an INVERTED predecessor window in
   # invalidate_point (a future-dated validFrom would be stamped validTo=now).

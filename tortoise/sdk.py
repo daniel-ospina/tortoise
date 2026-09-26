@@ -5959,9 +5959,13 @@ class TortoiseSDK:
           - Entity (Subject/Object/Event/Document/Source) → plain property
             update (delegates to update_entity).
           - Unknown id → returns {} (no write) — legacy-compatible.
+
+        #4649: resolution includes ``by_url`` so a url-keyed ``:Source`` (the
+        shape ``get_entity`` has always addressed, and ``_link_source`` mints)
+        routes to ``update_entity`` instead of silently returning ``{}``.
         """
         resolved = self._get_proj()._resolve_entity(
-            id, by_id=True, by_eventId=True)
+            id, by_id=True, by_eventId=True, by_url=True)
         if not resolved:
             return {}
         if resolved[0]["label"] == "Point":
@@ -5980,9 +5984,13 @@ class TortoiseSDK:
         :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
         JSONL `EntityMutated op="delete"` record, because the `PointRetracted`
         fold tombstones and a hard delete must replay as a hard delete.
+
+        #4649: resolution includes ``by_url``, matching ``get_entity`` — a
+        url-keyed ``:Source`` used to return ``False`` here (the node was never
+        found) while the read path resolved it.
         """
         resolved = self._get_proj()._resolve_entity(
-            id, by_id=True, by_eventId=True)
+            id, by_id=True, by_eventId=True, by_url=True)
         if not resolved:
             return False
         if resolved[0]["label"] == "Point":
@@ -18705,7 +18713,11 @@ class TortoiseSDK:
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
         # matched them via id/eventId but no caller relies on it.
-        # Per-label indexed writes (id OR eventId — original predicate; no url).
+        # Per-label indexed writes — the label's PRIMARY key (id | eventId)
+        # first, then its SECONDARY key on a miss (`Source` only, by `url`;
+        # #4649). The original #327 predicate was id OR eventId with no url;
+        # the read path always resolved a url-only `:Source`, so the write
+        # path must too or the write silently no-ops.
         # UNION cannot carry SET, so run each branch sequentially (#327).
         #
         # #3689 P1 (#4094): the generic Point branch applied caller props with
@@ -18736,9 +18748,34 @@ class TortoiseSDK:
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
             classify_entity_mutation_op,
+            secondary_entity_id_props,
         )
 
+        # #4649: a write can MOVE the node it addressed. The only identity key a
+        # caller may rewrite is `url` (a :Source's identity): `id` is refused by
+        # `_sanitize_props` above, and `eventId` is refused for every EVENT
+        # target by the #2104 guard above — whose `MATCH (e:Event) WHERE
+        # e.eventId = $id OR e.id = $id` is a SUPERSET of the Event branch's
+        # own MATCH below, so an Event can never be the node this loop matches
+        # while `eventId` is in props (`eventId` stays writable on a Point, but
+        # a Point is matched by `id`, which is never in props). The OR-set below
+        # matches by exactly those keys. The tail would then re-resolve by
+        # `id_val` and MISS the node this very call re-keyed, returning `{}` —
+        # the value `update()` / `get_entity` document as "nothing was
+        # written" — which is the success/no-op ambiguity #4649 removes, merely
+        # inverted. Track the address the write LEAVES BEHIND and resolve the
+        # return through it (the re-key guard is kept general and defensively
+        # covers `eventId` should that ban ever be lifted).
+        post_write_id = id_val
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+            # #4649: a canonical label's identity is an OR-SET, not one key.
+            # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
+            # carry a secondary one (`Source` by `url` — url-only stubs minted
+            # by `_link_source` have no `id`, so the primary MATCH below used to
+            # miss and this surface returned the UNCHANGED node as success).
+            # The primary key is ALWAYS tried first (byte-identical MATCH text
+            # and #327 index plan), the secondary only on a miss.
+            id_keys = (prop, *secondary_entity_id_props(label))
             if label == "Point":
                 # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
                 # discipline on this generic surface too. `_sanitize_props`
@@ -18801,11 +18838,14 @@ class TortoiseSDK:
                         else None)
                 else:
                     point_props = props
-                res = proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
-                    "RETURN count(n)",
-                    params={"id": id_val, "p": point_props},
-                )
+                for match_prop in id_keys:
+                    res = proj.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
+                        "RETURN count(n)",
+                        params={"id": id_val, "p": point_props},
+                    )
+                    if res.result_set and res.result_set[0][0]:
+                        break
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
                 # leaves a phantom record).
@@ -18858,17 +18898,45 @@ class TortoiseSDK:
                     # The graph write still happens — only the journal record is
                     # withheld — and the withhold is LOUD, so this is a declared
                     # deferral, never the silent loss this lane exists to fix.
-                    applied = proj.g.query(
-                        f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
-                        "RETURN count(n)",
-                        params={"id": id_val, "props": props},
-                    )
-                    # A miss mutates nothing, so there is nothing to warn about
-                    # (an `update_entity("no-such-id", name=...)` must not cry
-                    # wolf). `count(n)` is safe HERE because there is no
-                    # `properties(n)` in this RETURN to become a grouping key —
-                    # the hazard the reading query below documents.
-                    matched = bool(applied.result_set and applied.result_set[0][0])
+                    rest = {k: v for k, v in props.items() if k != "name"}
+                    keys = list(rest)
+                    # #4649: the OR-SET, and the write and its read-back are ONE
+                    # statement — the form the generic branch below already uses.
+                    # They MUST NOT be split into a write followed by a separate
+                    # MATCH: a url-keyed :Source is addressed BY `url`, and `url`
+                    # is a writable prop, so a second query matching the ORIGINAL
+                    # url runs AFTER the SET and misses the re-keyed node — the
+                    # write lands, NO `EntityMutated` record is emitted, and
+                    # `rebuild_all` silently reverts the `url` (a live≠replay
+                    # divergence with no fold-miss warning, because there is no
+                    # record to miss). MATCHing first and reading
+                    # `properties(n)` after the SET binds the node by its
+                    # PRE-write key while the returned values are post-write.
+                    applied = None
+                    matched_prop = None
+                    for match_prop in id_keys:
+                        applied = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                            "SET n += $props "
+                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                            params={"id": id_val, "props": props, "keys": keys},
+                        )
+                        # A miss mutates nothing, so there is nothing to warn
+                        # about (an `update_entity("no-such-id", name=...)` must
+                        # not cry wolf). A result row means the write landed on
+                        # THIS branch's node. Do NOT add `count(n)`: beside
+                        # `properties(n)` it becomes a grouping key, so a miss
+                        # would yield no row and a duplicate-id match one row PER
+                        # GROUP.
+                        if applied.result_set:
+                            matched_prop = match_prop
+                            break
+                    matched = matched_prop is not None
+                    if isinstance(props.get(matched_prop), str):
+                        # The matched key is one this write rewrote, so the node
+                        # no longer lives at `id_val` (a non-str value means the
+                        # key was cleared, leaving nothing to resolve).
+                        post_write_id = props[matched_prop]
 
                     # Journal everything the write changed EXCEPT `name`. The
                     # reason `name` is withheld — it moves the node before the
@@ -18877,30 +18945,22 @@ class TortoiseSDK:
                     # would leave #3312 open for the ordinary call
                     # `update_entity(id, name=..., status=...)`, silently
                     # reverting the status on rebuild.
-                    rest = {k: v for k, v in props.items() if k != "name"}
                     if matched and rest:
-                        keys = list(rest)
-                        res = proj.g.query(
-                            f"MATCH (n:{label} {{{prop}:$id}}) "
-                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                            params={"id": id_val, "keys": keys},
+                        vals = list(applied.result_set[0][0])
+                        if len(vals) != len(keys):
+                            _logger.error(
+                                "state arity mismatch for %s %r: %d keys "
+                                "vs %d values — journalling the shorter "
+                                "of the two",
+                                label, id_val, len(keys), len(vals))
+                        # `rest` carries no `name`, so the classifier can
+                        # never return `rename` here — it is `restatus` or
+                        # `revise`, both implemented.
+                        self._journal_entity_mutation(
+                            label, id_val,
+                            classify_entity_mutation_op(rest),
+                            state=dict(zip(keys, vals, strict=False)),
                         )
-                        if res.result_set:
-                            vals = list(res.result_set[0][0])
-                            if len(vals) != len(keys):
-                                _logger.error(
-                                    "state arity mismatch for %s %r: %d keys "
-                                    "vs %d values — journalling the shorter "
-                                    "of the two",
-                                    label, id_val, len(keys), len(vals))
-                            # `rest` carries no `name`, so the classifier can
-                            # never return `rename` here — it is `restatus` or
-                            # `revise`, both implemented.
-                            self._journal_entity_mutation(
-                                label, id_val,
-                                classify_entity_mutation_op(rest),
-                                state=dict(zip(keys, vals, strict=False)),
-                            )
 
                     if matched:
                         # #2296 residual, deliberately NOT promised away here: if
@@ -18925,16 +18985,28 @@ class TortoiseSDK:
                         )
                     continue
                 keys = list(props)
-                res = proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
-                    "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                    params={"id": id_val, "props": props, "keys": keys},
-                )
-                # No match => [] for THIS form. Do NOT add `count(n)`: beside
-                # `properties(n)` it becomes a grouping key, so a miss yields no
-                # row and a duplicate-id match yields one row PER GROUP.
+                res = None
+                # #4649: OR-SET — primary identity key first, then the label's
+                # secondary key(s) only if the primary matched nothing.
+                for match_prop in id_keys:
+                    res = proj.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
+                        "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                        params={"id": id_val, "props": props, "keys": keys},
+                    )
+                    # No match => [] for THIS form. Do NOT add `count(n)`: beside
+                    # `properties(n)` it becomes a grouping key, so a miss yields
+                    # no row and a duplicate-id match yields one row PER GROUP.
+                    # A non-empty `keys` with a result row means the write
+                    # landed on THIS branch's node.
+                    if res.result_set:
+                        break
                 if not keys or not res.result_set:
                     continue
+                if isinstance(props.get(match_prop), str):
+                    # Same re-key case as the `name` branch above: the matched
+                    # key is one this write rewrote.
+                    post_write_id = props[match_prop]
                 vals = list(res.result_set[0][0])
                 if len(vals) != len(keys):
                     # Impossible by construction — `[k IN $keys | ...]` is
@@ -18949,7 +19021,7 @@ class TortoiseSDK:
                     label, id_val, classify_entity_mutation_op(props),
                     state=dict(zip(keys, vals, strict=False)),
                 )
-        return self._get_entity(id_val)
+        return self._get_entity(post_write_id)
 
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
@@ -18958,16 +19030,28 @@ class TortoiseSDK:
         # matched them by id/eventId; no caller relies on it).
         # #3860: the ONE label→id-property table, shared with the replay fold
         # (``projection._delete_entity_by_id``) so the producer and the fold
-        # cannot drift.
-        from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+        # cannot drift. #4649: the identity is an OR-SET — the primary key
+        # first, the label's ``secondary_entity_id_props`` only on a miss, so a
+        # url-keyed :Source (no `id`) is FOUND instead of `delete()` returning
+        # False for a node `get_entity` can address.
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            secondary_entity_id_props,
+        )
         total = 0
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
-            r = proj.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
-                params={"id": id_val},
-            )
-            if r.result_set and r.result_set[0][0]:
-                total += r.result_set[0][0]
+            deleted = 0
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = proj.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) DETACH DELETE n "
+                    "RETURN count(n)",
+                    params={"id": id_val},
+                )
+                deleted = (r.result_set[0][0] or 0) if r.result_set else 0
+                if deleted:
+                    break
+            if deleted:
+                total += deleted
                 # #3299: journal the destruction at the write surface that
                 # performs it. Post-hoc (after the live write succeeds,
                 # matching every other emitter) so a failed/no-op delete
