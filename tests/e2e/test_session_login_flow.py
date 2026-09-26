@@ -31,10 +31,13 @@ Flows (the user's #1511 acceptance):
 """
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
 import re
+import secrets
+import sqlite3
 import time
 import urllib.parse
 import urllib.request
@@ -54,6 +57,143 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8790/")
 AUTH_HOST = "https://tortoise.premiselabs.co"
 APP_HOST = "https://app.premiselabs.co"
 API_HOST = "https://api.premiselabs.co"
+
+# ── #3501/#4054 BFF session seam ────────────────────────────────────────────
+# The dashboard's session is an OPAQUE handle in the HttpOnly `__Host-session`
+# cookie, validated SERVER-SIDE by `/api/session` against the D1 `sessions`
+# table. The legacy JS-readable `sb-tortoise-auth-token` is ignored by the gate
+# (the dashboard gate no longer reads any client-held token), so seeding it alone made the
+# app answer 401 and bounce every suite to /auth. These specs therefore seed the
+# row the gate actually reads, in the D1 the `:8790` preview serves.
+SESSION_COOKIE = "__Host-session"
+DASHBOARD_DIR = ROOT / "website" / "apps" / "dashboard"
+AUTH_MIGRATION = ROOT / "website" / "migrations" / "0001_auth_sessions.sql"
+# The dashboard calls its OWN origin (main.jsx: `const API_BASE = '/api'`), so
+# the app's API namespace is the `/api/` PATH — matched on any origin, because
+# the mutation probe serves a copy of the bundle from an ephemeral port. The
+# absolute upstream host is still accepted: intercepted prod-origin
+# subresources use it, and matching neither is why the suites' fixture rows
+# stopped arriving after the BFF move.
+GATE_PATH = "/api/session"
+
+
+def _is_bff_api(url: str) -> bool:
+    """True when ``url`` belongs to the API surface the harness answers.
+
+    The harness mocks the app's API namespace, not the proxy's routing table: a
+    render suite stubs whatever the CLIENT requests, so it stays correct when
+    the client's path shape changes. The SESSION GATE is deliberately excluded
+    (``/api/session``) — it must stay REAL, because the D1-seeded
+    `__Host-session` handle is exactly what these fixtures prove works.
+    """
+    if url.startswith(API_HOST):
+        return True
+    path = urllib.parse.urlsplit(url).path
+    return path.startswith("/api/") and path != GATE_PATH
+
+
+def _bff_path(url: str) -> str:
+    """The API path in the shape the mock branches match (``/v1/...``, ``/backups``).
+
+    The migrated dashboard requests the SAME-ORIGIN namespace
+    (``/api/v1/organizations``); the branches were written against the
+    pre-#4054 absolute shape (``https://api.premiselabs.co/v1/organizations``),
+    where the client's ``/api`` prefix did not exist. Stripping that one prefix
+    makes both shapes match the SAME branches — instead of rewriting every
+    anchored ``^/v1/...`` regex, which is how a missed anchor silently falls
+    through to the deterministic 401.
+    """
+    path = urllib.parse.urlsplit(url).path
+    if path.startswith("/api/"):
+        return path[len("/api"):]
+    return path
+
+
+def _local_d1_files() -> list[Path]:
+    """Local D1 database files (never `metadata.sqlite` — Miniflare's own index)."""
+    return [
+        p for p in DASHBOARD_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite")
+        if p.name != "metadata.sqlite"
+    ]
+
+
+def _warm_local_d1(timeout: float = 30.0) -> None:
+    """Force Miniflare to MATERIALISE the bound D1 database file.
+
+    `--d1 SESSIONS` only declares the binding: the SQLite file appears on the
+    first D1 ACCESS, not at boot. Globbing for it first (the obvious order)
+    therefore works only on a machine where an earlier run already created it,
+    and times out on a clean CI runner. One `/api/session` read with an unknown
+    handle IS a D1 access — it creates the file on the way. Its status is not
+    the point and depends on the starting state: 503 while the `sessions` table
+    does not exist yet (the clean-runner case this warm-up exists for), 401 once
+    it does.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        req = urllib.request.Request(
+            DASHBOARD_URL.rstrip("/") + "/api/session",
+            headers={"Cookie": f"{SESSION_COOKIE}={'0' * 64}"},
+        )
+        with contextlib.suppress(Exception):
+            urllib.request.urlopen(req, timeout=10).read()
+        if _local_d1_files():
+            return
+        time.sleep(0.3)
+    raise RuntimeError(
+        f"no D1 database sqlite appeared under {DASHBOARD_DIR} — is the "
+        "dashboard preview running with `--d1 SESSIONS`?"
+    )
+
+
+def _local_d1_sqlite() -> Path:
+    """The D1 database file the `:8790` preview's Functions actually read.
+
+    The workflow boots `wrangler pages dev dist --d1 SESSIONS` from
+    `website/apps/dashboard`, so Miniflare's local state lives under that
+    project's `.wrangler/state/v3/d1/`. The tree ALSO holds `metadata.sqlite`
+    (D1's index plus the cache/observability stores) — seeding one of those
+    writes a database the Worker never opens, and the route then 503s
+    (`ALTER TABLE sessions` on a DB with no such table) rather than reporting a
+    bad seed.
+    """
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        files = _local_d1_files()
+        if files:
+            return max(files, key=lambda p: p.stat().st_mtime)
+        time.sleep(0.3)
+    raise RuntimeError(
+        f"no D1 database sqlite appeared under {DASHBOARD_DIR} — is the "
+        "dashboard preview running with `--d1 SESSIONS`?"
+    )
+
+
+def _seed_bff_session(user_id: str) -> str:
+    """Create the schema + a LIVE cached-token session row; return the handle.
+
+    A cached `access_token` keeps `getAccessTokenForSession` off the network (it
+    only refreshes when the cached value is inside the skew window), so the gate
+    resolves without any Supabase binding — which is exactly the contract the
+    seed is here to satisfy: a handle that the store positively recognises.
+    """
+    handle = secrets.token_hex(32)
+    now = int(time.time() * 1000)
+    _warm_local_d1()
+    con = sqlite3.connect(_local_d1_sqlite(), timeout=15)
+    try:
+        con.executescript(AUTH_MIGRATION.read_text(encoding="utf-8"))
+        con.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(handle,user_id,refresh_token,revoked,created_at,expires_at,"
+            " access_token,access_token_expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            (handle, user_id, "seed-refresh-token", 0, now, now + 86_400_000,
+             "seed-access-token", now + 3_600_000),
+        )
+        con.commit()
+    finally:
+        con.close()
+    return handle
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -94,7 +234,7 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
     route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
 
 
-# ── #2731/#2744: drive the LOCAL committed-dist preview, never prod ──
+# ── #2731/#2744: drive the LOCAL built-dist preview, never prod ──
 # The dashboard specs used to navigate the DOCUMENT to the prod origins and
 # rely on the ``page.route`` proxy to serve local content under them. When the
 # proxy path failed, the request fell through to production and every
@@ -174,7 +314,9 @@ def _preflight_local_servers() -> None:
         pytest.exit(
             "dashboard e2e: local preview server(s) unreachable — this suite "
             "drives the LOCAL wrangler previews, never production (#2731). "
-            "Start BOTH before running:\n"
+            "Start BOTH before running (dist/ is a build artifact since "
+            "#3775 — build it first or :8790 serves a missing/stale bundle):\n"
+            "  cd website/apps/dashboard && npm ci && npm run build\n"
             "  cd website/apps/dashboard && npx wrangler@4 pages dev dist --port 8790\n"
             "  cd website && npx wrangler@4 pages dev . --port 8788\n"
             "Unreachable:\n"
@@ -186,30 +328,60 @@ def _preflight_local_servers() -> None:
 def _seed_local_session_cookie(page: Page, user_id: str,
                               session: dict | None = None,
                               parent_domain: bool = True) -> None:
-    """Seed ``sb-tortoise-auth-token`` for the LOCAL preview origin (#2731).
+    """Seed a LIVE BFF session for the LOCAL preview origin (#2731, #4054).
 
-    The browser never sends a ``.premiselabs.co``-domain cookie to
-    ``127.0.0.1``, so the host-only loopback cookie is what the local app's
-    mount gate actually reads (host-conditional ``domainAttr()``/``secureAttr()``
-    in main.jsx make the loopback cookie domain-less and Secure-less by design).
+    What the gate actually requires (read off the real code): an HttpOnly
+    `__Host-session=<64-hex handle>` cookie whose handle has a row in the D1
+    `sessions` table with `revoked = 0` and a future `expires_at`
+    (`functions/api/session.ts` -> `getSession`). This helper writes that row
+    into the preview's local D1 and adds the cookie, so `/api/session` answers
+    200 and the shell renders.
+
+    The legacy JS-readable `sb-tortoise-auth-token` is STILL seeded on purpose:
+    the app must ignore it, and several specs assert the legacy residue has no
+    effect. Seeding it is what keeps those assertions meaningful.
+
     Seeding by ``url`` (not ``domain``) keeps IPv6 loopback (``[::1]``) usable —
     Playwright needs the bracketed form, which ``urlparse().hostname`` strips
-    (#2731 review P2). The prod parent-domain cookie is seeded as well so any
-    intercepted prod-origin subresource/redirect stays session-coherent — the
-    DOCUMENT is always loaded from the local preview, never prod.
+    (#2731 review P2). `__Host-` forbids a ``Domain`` attribute, so the BFF
+    cookie is host-only by construction; the prod parent-domain legacy cookie is
+    still seeded (unless ``parent_domain=False``) so intercepted prod-origin
+    subresources stay coherent. Plain-HTTP loopback is fine: Chromium treats
+    ``http://127.0.0.1`` as a trustworthy origin and SENDS ``Secure`` cookies
+    there. The BFF cookie itself cannot go through ``add_cookies`` (see the
+    CDP call below); only the legacy cookie uses it.
 
     #2744: ``session`` lets a caller seed a CUSTOM session shape (the sibling
     specs carried bespoke dicts — user_metadata/display_name/tier variants).
     When ``session`` is given, ``user_id`` is IGNORED (the dict's own
     ``user.id`` is what the cookie carries); otherwise the standard
-    ``_session_json(user_id)`` is used. ``parent_domain`` (default True) seeds
-    the ``.premiselabs.co`` cookie as well; pass False when the spec asserts a
-    landing on the /auth page immediately after a session clear (a still-valid
-    parent-domain session would make the intercepted ``/auth`` page's
-    valid-session gate bounce straight back to the dashboard).
+    ``_session_json(user_id)`` is used.
     """
-    value = urllib.parse.quote(json.dumps(session if session is not None else _session_json(user_id)))
-    cookies = [{"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL}]
+    payload = session if session is not None else _session_json(user_id)
+    value = urllib.parse.quote(json.dumps(payload))
+    bff_user_id = (payload.get("user") or {}).get("id") or user_id
+    handle = _seed_bff_session(bff_user_id)
+    # `__Host-` rules: Secure, Path=/, NO Domain — enforced by Chromium's cookie
+    # store. Playwright's `context.add_cookies` CANNOT set it here: for a plain
+    # http URL it force-clears `secure` (verified: a `secure: True` cookie comes
+    # back `secure: False`), and a `__Host-` cookie without Secure is rejected
+    # outright — so `add_cookies` fails with "Invalid cookie fields" on the
+    # loopback preview. CDP's Network.setCookie honours the flag, and Chromium
+    # treats `http://127.0.0.1` as a trustworthy origin, so the cookie is stored
+    # (Secure, HttpOnly) and sent — no TLS needed.
+    cdp = page.context.new_cdp_session(page)
+    cdp.send("Network.setCookie", {
+        "name": SESSION_COOKIE,
+        "value": handle,
+        "url": DASHBOARD_URL,
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Lax",
+    })
+    cookies = [
+        {"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL},
+    ]
     if parent_domain:
         cookies.append({"name": "sb-tortoise-auth-token", "value": value,
                         "domain": ".premiselabs.co", "path": "/"})
@@ -217,7 +389,7 @@ def _seed_local_session_cookie(page: Page, user_id: str,
 
 
 def _goto_local_dashboard(page: Page) -> None:
-    """Load the app DOCUMENT from the local committed-dist preview (#2731)."""
+    """Load the app DOCUMENT from the local built-dist preview (#2731)."""
     page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
     # #2744: positive evidence in the run log that the DOCUMENT came from the
     # local preview. Print the TARGET (not page.url — a gate redirect can land
@@ -271,10 +443,10 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
+        if _is_bff_api(url):
             # #1828: loadAll pins ?org_id= on overview reads — match on the
             # query-stripped path so /v1/team/keys?org_id=… still resolves.
-            path = url.split("?", 1)[0]
+            path = _bff_path(url)
             if url.endswith("/v1/session/login") and route.request.method == "POST":
                 route.fulfill(status=exchange_status,
                               content_type=exchange_ctype,
@@ -335,7 +507,6 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
 
 
 def _open_auth(page: Page) -> None:
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     # #2744: the /auth DOCUMENT is loaded from the local site preview, never
     # the prod auth origin.
     _goto_local_auth(page)

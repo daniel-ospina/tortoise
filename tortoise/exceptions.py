@@ -133,15 +133,21 @@ class Phase2Error(ValueError):
         super().__init__(message)
 
 
-# ── Ask-lane typed SDK exceptions (#1987 Task 5) ───────────────────────────
-# The SDK hosted-mode ``_post_ask`` maps server statuses/body codes to these;
+# ── Ask-lane typed exceptions (#1987 Task 5) ──────────────────────────────
+# The eval-only ask lane (tortoise/ask_lane.py) maps validation/reader/
+# retrieval failures to AskValidationError / AskReaderUnavailable /
+# AskRetrievalUnavailable;
 # each carries a ``code`` class attribute referencing the canonical vocabulary
-# constants BELOW (single home — ``tortoise/schemas.py`` re-exports them, so
-# the wire body and the SDK exception attributes share one source of truth;
-# a drift between the two surfaces is impossible by construction).
+# constants BELOW (single home — ``tortoise/schemas.py`` re-exports them).
+# The wire-body half of that contract is gone: the hosted /v1/ask route and
+# its path-scoped translation were removed in #3849.
 
-# Canonical error-code vocabulary (10 codes — one vocabulary, two surfaces:
-# the wire body + the SDK exception ``code`` attributes).
+# Canonical error-code vocabulary (10 codes; SIX are still carried by the
+# eval-only lane — reader_unavailable, retrieval_unavailable, and the four
+# validation codes invalid_question / invalid_question_type /
+# invalid_question_date / question_too_long — and FOUR are the retired wire
+# vocabulary with no raiser — unauthorized, quota_exceeded, in_flight_limit,
+# timeout).
 CODE_UNAUTHORIZED = "unauthorized"
 CODE_QUOTA_EXCEEDED = "quota_exceeded"
 CODE_IN_FLIGHT_LIMIT = "in_flight_limit"
@@ -155,11 +161,10 @@ CODE_QUESTION_TOO_LONG = "question_too_long"
 
 
 class AskValidationError(ValueError):
-    """Client-input validation failure (local lane) OR a 400/401/403/422
-    response with a canonical/code-less body (hosted lane). Carries the
+    """Client-input validation failure on the eval-only ask lane. Carries the
     canonical ``code`` (``invalid_question``/``question_too_long``/
-    ``invalid_question_type``/``invalid_question_date``/``unauthorized``)
-    and, for hosted mappings, the HTTP status."""
+    ``invalid_question_type``/``invalid_question_date``). The hosted-lane
+    400/401/403/422 mappings were removed with the REST surface (#3849)."""
 
     code = CODE_INVALID_QUESTION
 
@@ -173,7 +178,13 @@ class AskValidationError(ValueError):
 
 class AskQuotaExceeded(RuntimeError):
     """429 ``quota_exceeded`` — the org's per-minute ask budget is spent.
-    Carries ``retry_after`` (seconds) when the server provided one."""
+    Carries ``retry_after`` (seconds) when the server provided one.
+
+    RETIRED (#3849): no raiser. Its only producer was the removed SDK
+    ``_post_ask`` status map; the ask budget itself is retained-but-uncalled
+    by any product path (tests/test_quota.py still pins `run_ask_bounded`'s
+    exec floor) pending the #3849 §7 D5 purge. Kept as vocabulary, not as
+    live surface."""
 
     code = CODE_QUOTA_EXCEEDED
 
@@ -185,7 +196,13 @@ class AskQuotaExceeded(RuntimeError):
 
 
 class AskInFlightLimit(RuntimeError):
-    """429 ``in_flight_limit`` — the per-org in-flight ask cap is full."""
+    """429 ``in_flight_limit`` — the per-org in-flight ask cap is full.
+
+    RETIRED (#3849): no raiser. Its only producer was the removed SDK
+    ``_post_ask`` status map; the cap machinery is retained-but-uncalled by
+    any product path (tests/test_quota.py still pins `run_ask_bounded`'s exec
+    floor) pending the #3849 §7 D5 purge. Kept as vocabulary, not as live
+    surface."""
 
     code = CODE_IN_FLIGHT_LIMIT
 
@@ -197,12 +214,14 @@ class AskInFlightLimit(RuntimeError):
 
 class AskReaderUnavailable(RuntimeError):
     """502 ``reader_unavailable`` — the LLM reader failed with no surviving
-    lane. Also used for the code-less variants that must never be
-    mislabeled ``invalid_question``: a code-less 402 (SERVER-side
-    provider-billing condition, P2-3), a code-less 404 (hosted ask
-    exposure gated off — ``TORTOISE_ENABLE_ASK`` unset, #2013), and the
-    pre-existing connection-refused ``status_code=None`` case (hosted ask
-    server unreachable)."""
+    lane (the ask lane raises it on reader build failure, empty output after
+    the bounded retry, or a reader exception).
+
+    The code-less variants the removed SDK ``_post_ask`` client used to map
+    here (a code-less 402 provider-billing condition, a code-less 404 for the
+    gone hosted ask surface, and the connection-refused ``status_code=None``
+    case) have NO raiser since #3849; ``status_code`` is kept for the
+    vocabulary."""
 
     code = CODE_READER_UNAVAILABLE
 
@@ -213,7 +232,10 @@ class AskReaderUnavailable(RuntimeError):
 
 class AskRetrievalUnavailable(RuntimeError):
     """502 ``retrieval_unavailable`` — retrieval/annotation/context
-    assembly failed wholesale (never an untyped 500 on the ask surface)."""
+    assembly failed wholesale, or (also raised by the lane) the eval-only
+    entry point was handed a hosted client (``TORTOISE_API_URL`` set) and
+    refuses it. No HTTP status ships it any more (#3849): the ``status_code``
+    default is retained vocabulary."""
 
     code = CODE_RETRIEVAL_UNAVAILABLE
 
@@ -225,7 +247,12 @@ class AskRetrievalUnavailable(RuntimeError):
 class AskTimeout(RuntimeError):
     """504 ``timeout`` — the bounded ask section exceeded the server's
     ``_ASK_TIMEOUT_S`` (server-504-fired) OR the SDK client-side timeout
-    fired (wire connect/read timeout — ``source`` marks which)."""
+    fired (wire connect/read timeout — ``source`` marks which).
+
+    RETIRED (#3849): no raiser. The server-504 half went with the hosted
+    /v1/ask route and the client-side half with ``_post_ask`` /
+    ``ASK_SDK_TIMEOUT_S`` (both deleted in #3849). Kept as vocabulary, not as
+    live surface."""
 
     code = CODE_TIMEOUT
 
@@ -263,4 +290,51 @@ class HybridReadUnavailableError(RuntimeError):
             f"single-leg (keyword-only) read is NOT the product's hybrid "
             f"retrieval and must not be labelled hybrid (#2952). "
             f"marker={self.marker!r}"
+        )
+
+
+class EmbedderUnavailableError(RuntimeError):
+    """(C) #4861 — a process that REQUIRED the embedder must not be handed
+    ``None``.
+
+    Raised by ``tortoise.embeddings.EmbeddingModel.get`` when
+    ``TORTOISE_EMBEDDING_MODEL_REQUIRED`` is truthy and the model cannot be
+    loaded, instead of returning ``None``. This is the **third surface of one
+    invariant**: a lane that cannot run hybrid must not run (#2985,
+    ``retrieval_preflight.require_hybrid_retrieval``), a read that could not
+    run its vector leg must not be labelled hybrid (#2952,
+    :class:`HybridReadUnavailableError`) — and this one, at the ``None``
+    itself, where neither of the other two can see it. Without it a
+    keyword-only (FTS-only) run is indistinguishable from a healthy one: the
+    degrade is invisible, which is the defect #2898 describes.
+
+    Unlike :class:`HybridReadUnavailableError` this carries no leg *trace* — a
+    load failure has no legs to report, and synthesizing a marker would make
+    that class mean two different things. It carries the **cause** instead:
+    ``failure_kind`` is ``not_installed`` (the environment never had it — a
+    runner-down or missing-extra run) or ``load_failed`` / ``load_timeout``
+    (the environment had it and the load broke — a different thing to fix).
+    ``model_unavailable`` is the fallback when no kind was recorded.
+    """
+
+    def __init__(self, *, failure_kind: str, model: str,
+                 revision: str | None = None,
+                 last_error: str | None = None,
+                 context: str | None = None):
+        self.failure_kind = failure_kind
+        self.model = model
+        self.revision = revision
+        self.last_error = last_error
+        self.context = context
+        where = f" ({context})" if context else ""
+        rev = f" @ {revision}" if revision else ""
+        err = f"; last error: {last_error}" if last_error else ""
+        super().__init__(
+            f"embedding model REQUIRED but unavailable{where}: {model}{rev} "
+            f"could not be loaded (failure_kind={failure_kind!r}){err} — this "
+            f"process set TORTOISE_EMBEDDING_MODEL_REQUIRED, so any retrieval "
+            f"result it produced would be keyword-only (FTS) while claiming to "
+            f"be the product's hybrid retrieval. Install the embedder "
+            f"(uv sync --extra embeddings) or unset the variable to allow the "
+            f"documented keyword-only degrade (#4861)."
         )

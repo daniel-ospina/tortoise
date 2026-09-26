@@ -255,8 +255,21 @@ def test_gate_reports_no_evidence_at_all(tmp_path: Path) -> None:
 
 
 # ── Static anti-drift guard ────────────────────────────────────────────────
+def _workflow() -> dict:
+    """The gate workflow, PARSED as YAML.
+
+    PyYAML reads a bare ``on:`` key as the boolean ``True`` (YAML 1.1), so
+    normalise it back to ``"on"``. Parsing — rather than grepping the text —
+    is the point: see the skip-footgun test below.
+    """
+    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    if True in doc and "on" not in doc:
+        doc["on"] = doc.pop(True)
+    return doc
+
+
 def _gate_step() -> dict:
-    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    workflow = _workflow()
     for step in workflow["jobs"]["ai-review-gate"]["steps"]:
         if step.get("name") == _GATE_STEP_NAME:
             return step
@@ -278,9 +291,53 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     assert env["PR_NUMBER"] == "${{ github.event.pull_request.number }}", env
     assert env["REPO_NAME"] == "${{ github.event.repository.full_name }}", env
     assert env["PR_BODY"] == "${{ github.event.pull_request.body }}", env
-    job = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["ai-review-gate"]
+    job = _workflow()["jobs"]["ai-review-gate"]
     assert "if" not in _gate_step() and "if" not in job, (
         "a conditional/skipped gate reports Success — never gate this job"
+    )
+
+
+def test_trigger_and_job_shape_are_pinned_from_parsed_yaml() -> None:
+    """The skip-footgun, asserted against the PARSED document (cycle-3 review).
+
+    The shell harness asserts these structural invariants with line-anchored
+    greps, so a valid-but-unusual spelling slips past the text matcher. YAML
+    explicit keys are the sharp case::
+
+        ? if
+        : false
+
+    parse to ``{"if": False}`` with zero errors — GitHub's own workflow parser
+    reads ``pair.key.value`` regardless of style — and a flow mapping on the
+    trigger line hides a ``paths:`` filter the same way. A text tripwire can
+    never enumerate the spellings the platform accepts; the parsed structure
+    below holds for every one of them.
+    """
+    doc = _workflow()
+    on = doc.get("on")
+    assert isinstance(on, dict) and set(on) == {"pull_request_target"}, (
+        "the gate must trigger on pull_request_target ONLY: under `pull_request` a "
+        f"same-repo PR runs its own copy of the workflow and can self-certify the "
+        f"required check. Parsed trigger: {on!r}"
+    )
+    trigger = on["pull_request_target"] or {}
+    assert "paths" not in trigger and "paths-ignore" not in trigger, (
+        f"a path-filtered required check never runs, so it can never pass: {trigger!r}"
+    )
+    job = doc["jobs"]["ai-review-gate"]
+    for banned in ("if", "needs", "continue-on-error"):
+        assert banned not in job, (
+            f"a {banned!r}-gated required job reports Success without evaluating any "
+            f"evidence — never make this job conditional or non-blocking: {job.get(banned)!r}"
+        )
+    assert "permissions" not in job, (
+        "a job-level permissions: override supersedes the workflow grant for this "
+        "job; one that drops pull-requests: read leaves the workflow-level grant "
+        "looking fine while making the diff-match path dead in production"
+    )
+    perms = doc.get("permissions") or {}
+    assert perms.get("contents") == "read" and perms.get("pull-requests") == "read", (
+        f"the gate needs contents: read + pull-requests: read to read the live diff: {perms!r}"
     )
 
 

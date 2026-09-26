@@ -9,8 +9,9 @@
 // Contract (scope pin 16):
 // - N-of-M counts ONLY the fork-aware counted rows — never capture-disclosed
 //   ("capture-disclosed before decide must NOT render '4 of 4'").
-// - decide-completed (self) and catalog-presented (build) are fork-exclusive
-//   display rows; compact orgs show the reduced checklist.
+// - decide-completed is the self-fork display row. The build fork renders NO
+//   extra row (#3913 — its gate is the two observed acts, not a catalog
+//   render), so build/compact show the reduced checklist.
 // - #2407: an org that deferred the fork card (fork_unsure_at set, fork
 //   still None) shows the FORK QUESTION as its open counted row instead of
 //   the self checklist — the card never collapses on the self path while
@@ -24,7 +25,6 @@ export const SETUP_GUIDE_COUNTED = Object.freeze([
   'harness-connected',
   'first-points-filed',
   'decide-completed',
-  'catalog-presented',
 ])
 
 const ROW_META = Object.freeze({
@@ -34,7 +34,6 @@ const ROW_META = Object.freeze({
   // unexplained names across count-of-record surfaces).
   'first-points-filed': { label: 'Seed your first memory' },
   'decide-completed': { label: 'Make your first decision' },
-  'catalog-presented': { label: 'Review the catalog' },
   'capture-disclosed': { label: 'Capture disclosure', counted: false },
   // #2407: the fork-question row — only rendered (counted) while the org
   // deferred the fork card (fork_unsure_at set, fork still None); it is
@@ -74,8 +73,10 @@ export function setupGuide(state) {
   ids.push('harness-connected', 'first-points-filed')
   if (!compact && unsureDeferred) {
     ids.push('fork')
-  } else if (!compact) {
-    ids.push(fork === 'build' ? 'catalog-presented' : 'decide-completed')
+  } else if (!compact && fork !== 'build') {
+    // #3913: the build fork renders NO extra row (its gate is the two
+    // observed acts); only the self fork adds the decide row.
+    ids.push('decide-completed')
   }
   ids.push('capture-disclosed')  // renders, NEVER counted
 

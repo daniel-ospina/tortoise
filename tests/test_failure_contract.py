@@ -5,6 +5,7 @@ the MCP boundary), the dedicated-branch ordering pin, Phase2Error batch_id,
 and ERR_BUNDLE_INVALID wire shape.
 """
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -20,6 +21,7 @@ def sdk():
     s = TortoiseSDK(db)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db), ignore_errors=True)
 
 
 def _transport(fn):

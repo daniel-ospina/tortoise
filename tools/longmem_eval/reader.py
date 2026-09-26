@@ -25,8 +25,13 @@ hedging (the reval3 class).
 # (tortoise/): the eval calls the product's OWN engine and measures it.
 # Quality improvements belong IN tortoise/ (that is what ships to
 # customers). The READER (this module) re-exports the PRODUCT reader
-# (tortoise/reader.py — shipped in #1987 as the /v1/ask + SDK ask() +
-# MCP tortoise_ask answer surface); the eval measures the exact shipped
+# (tortoise/reader.py — shipped in #1987; per #3849 it is no longer a
+# product surface: no /v1/ask route, no SDK ask() method, no MCP tool).
+# Its direct importers are the EVAL-ONLY ask lane (tortoise/ask_lane.py),
+# this thin re-export, and the eval tooling that measures the reader
+# directly (tools/longmem_eval/run.py, context_assembly_arms.py,
+# measure_temporal.py, preflight.py, detector_parity.py, and
+# tools/gen_ask_transcripts.py); the eval measures the exact shipped
 # prompts and reader class.
 # See docs/audit/2026-08-29-product-cohesion.md for the full audit.
 # ═════════════════════════════════════════════════════════════════════════
@@ -160,7 +165,9 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
     """Build the reader from env/config. ``mock=True`` returns MockReader.
 
     Raises RuntimeError when no provider key is configured and mock is off —
-    fail-closed, mirroring ``capture_session``'s no-key posture.
+    fail-closed for the READER, which cannot do anything without a model.
+    (Not a mirror of ``capture_session``, which since #3892 STORES the
+    session's turns and skips only the extraction keylessly.)
     """
     if mock:
         return MockReader()

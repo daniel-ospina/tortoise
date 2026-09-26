@@ -635,6 +635,328 @@ def test_falkor_rebuild_then_apply():
         pass  # shared session projection — module helper owns close
 
 
+# --------------------------- #2795 open-set Point writer (live + replay)
+
+def test_falkor_rebuild_preserves_unknown_point_prop():
+    """#2795: an unrecognised primitive Point prop is not dropped by
+    rebuild_all — the replay half of the shared writer's closed-set drop."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("keeps extras", provenance("d.txt", [0, 5], "q"),
+                        custom_keep="yes")
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_keep", id=pid
+        ).result_set
+        assert row and row[0][0] == "yes", row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_dict_prop_not_persisted_no_crash():
+    """#2894/#2795: a dict-valued unknown prop must not crash the writer and
+    must not be persisted as a node property (FalkorDB rejects maps)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("dict prop", provenance("d.txt", [0, 5], "q"),
+                        custom_map={"nested": 1})
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_map", id=pid
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_recomputes_content_hash():
+    """#2795: content_hash is recomputed on rebuild (previously every replayed
+    node had content_hash=NULL, degrading the indexed dedup MATCH)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import hashlib
+    api, log = _api()
+    pid = api.add_point("hash me", provenance("d.txt", [0, 5], "q"))
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
+            id=pid,
+        ).result_set
+        assert row and row[0][1] is False, row
+        assert row[0][0] is not None, "content_hash must be non-NULL after rebuild"
+        assert row[0][0] == hashlib.sha256(b"hash me").hexdigest(), row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_operator_has_no_content_hash():
+    """#2795: operators store no content (#548) — the synthesized fallback
+    content hash is skipped so it cannot match anything."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    a = api.add_point("a", provenance("d.txt", [0, 5], "q"))
+    b = api.add_point("b", provenance("d.txt", [5, 10], "q"))
+    op = api.add_operator("IMPL", [a, b], provenance("d.txt", [0, 10], "q"))
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
+            id=op,
+        ).result_set
+        assert row and row[0][1] is True, row
+        assert row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_live_point_write_preserves_unknown_prop():
+    """#2795: a door-3 live write through _upsert_point_props preserves an
+    unrecognised primitive prop (the live-drop half of the same writer)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-live-extra", "content": "x",
+                              "custom_live": "kept"}})
+        row = proj.query(
+            "MATCH (n:Point {id:'p-live-extra'}) RETURN n.custom_live"
+        ).result_set
+        assert row and row[0][0] == "kept", row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
+    """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
+    including `tags`, whose raw list would half-restore a node without its
+    TAGGED edges (#2897) — and the drop is REPORTED (indicator 4)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
+                        custom_list=["a", "b"], tags=["alpha"])
+    proj = _shared_proj()
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
+        ).result_set
+        assert row and row[0][0] is None, row
+        assert row[0][1] is None, row
+        assert any("undeclared list props" in r.getMessage()
+                   and "tags" in r.getMessage()
+                   for r in caplog.records), caplog.text
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_point_deny_list_drop_is_reported(caplog):
+    """#2795 indicator 4 / D4: a deny-listed prop that arrives in the payload
+    is dropped AND reported, not silently discarded."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    api, log = _api()
+    api.add_point("denied prop", provenance("d.txt", [0, 5], "q"),
+                  reason="because")
+    proj = _shared_proj()
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(str(log.path.parent))
+        assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
+                   for r in caplog.records), caplog.text
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
+    """#2795 / #2894 (code-review): FalkorDB stores arbitrarily NESTED arrays
+    of scalars, so the shared `_persist_extra_props` value-type filter must
+    NOT drop them. The earlier flat-list-only rule silently lost a nested-list
+    prop on every one of the six non-Point layers (Subject/Object/Document/
+    Event/Source), which previously filtered only `v is not None`. Exercised on
+    the Object layer, where no list policy applies (`list_props` is None).
+    Verified against the docker lane: the engine stores `[[1, 2], [3, 4]]`."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    api.add_object("Nested Co", "organization",
+                   custom_nested=[[1, 2], [3, 4]])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))
+        row = proj.query(
+            "MATCH (o:Object {name:'Nested Co'}) RETURN o.custom_nested"
+        ).result_set
+        assert row and row[0][0] == [[1, 2], [3, 4]], row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_nested_dict_in_list_not_persisted_no_crash():
+    """#2894 (code-review): the engine REJECTS an array containing a dict at
+    any depth — that is the crash this filter exists to prevent, and the
+    nested-array relaxation must not re-open it."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    api.add_object("Mixed Co", "organization", custom_mixed=[1, {"a": 1}])
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))  # must not raise
+        row = proj.query(
+            "MATCH (o:Object {name:'Mixed Co'}) RETURN o.custom_mixed"
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_is_persistable_prop_value_matches_engine_type_model():
+    """#2894 / #2795 (code-review): pin the predicate to the ENGINE's actual
+    type model, verified empirically against the docker FalkorDB lane —
+    scalars and arbitrarily nested arrays of scalars (lists AND tuples, which
+    the driver encodes as an array) are stored; maps/dicts (including an array
+    that contains one at any depth), bytes and sets are rejected."""
+    from tortoise.projection.entities import _is_persistable_prop_value as ok
+    assert ok("x") and ok(1) and ok(1.5) and ok(True)
+    assert ok([]) and ok(["a", 1, True])
+    assert ok([[1, 2], [3, 4]])          # engine stores this
+    assert ok([[['deep']]])              # arbitrary nesting is stored
+    assert ok((1, 2))                    # tuple -> array on the wire
+    assert not ok({"k": 1})             # engine rejects maps
+    assert not ok([1, {"a": 1}])        # dict at any depth is rejected
+    assert not ok([{"a": 1}])
+    assert not ok([[{"a": 1}]])
+    assert not ok(b"x") and not ok({1, 2}) and not ok(None)
+
+
+def test_falkor_rebuild_malformed_revised_content_does_not_crash():
+    """#2958 review / #2795: a PointRevised carrying a non-string
+    `new_content` (a hand-edited or corrupt JSONL line — rebuild is the
+    RECOVERY path) must not crash the rebuild pass: the content_hash
+    recompute degrades to NULL instead of raising inside sha256()."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    api, log = _api()
+    pid = api.add_point("malformed revise", provenance("d.txt", [0, 5], "q"))
+    log.append({"type": "PointRevised", "id": pid, "new_content": 12345,
+                "projection_version": 2, "initiated_by": "test",
+                "agent_id": "test"})
+    proj = _shared_proj()
+    try:
+        proj.rebuild_all(str(log.path.parent))  # must not raise
+        row = proj.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash", id=pid
+        ).result_set
+        assert row, "malformed revise lost the point"
+        assert row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_live_point_tuple_prop_denied_by_list_policy():
+    """#2958 review: the engine persists a TUPLE as an array exactly like a
+    list, so the Point list policy (empty `_POINT_LIST_PROPS` = deny
+    undeclared arrays) must cover tuples too — otherwise a tuple-valued key
+    bypasses the denial that refuses the equivalent list."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-live-tuple", "content": "x",
+                              "custom_tup": ("a", "b")}})
+        row = proj.query(
+            "MATCH (n:Point {id:'p-live-tuple'}) RETURN n.custom_tup"
+        ).result_set
+        assert row and row[0][0] is None, row
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_rebuild_deny_warning_emitted_once_per_key(caplog):
+    """#2958 review: the deny-drop report is emitted once per key per rebuild
+    pass. The #548 synthetic snapshot carries EP-owned state for EVERY dreamed
+    graph-only point, so a per-row warning emitted O(N) lines on a supported
+    path and buried genuine violations."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = FalkorProjection(_tmp("deny_once.db"), graph_name="test")
+    try:
+        for pid in ("dream-a", "dream-b", "dream-c"):
+            proj.g.query(
+                "CREATE (n:Point {id:$id, content:'x', pointKind:'statement', "
+                "is_operator:false, status:'live', posterior_alpha:2.0})",
+                params={"id": pid})
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"))
+        hits = [r.getMessage() for r in caplog.records
+                if "deny-listed" in r.getMessage()
+                and "posterior_alpha" in r.getMessage()]
+        assert len(hits) == 1, (len(hits), caplog.text)
+    finally:
+        proj.close()
+
+
+def test_falkor_rebuild_resets_deny_warning_between_passes(caplog):
+    """#2958 review: the deny-drop report is reset per rebuild pass — a live
+    write earlier in the SAME process populates `_deny_drop_warned`, and that
+    must not suppress the report for a later `rebuild_all` pass on the same
+    projection instance (`rebuild_all`'s reset). Black-box: only `rebuild_all`
+    is exercised, so removing `self._deny_drop_warned = set()` from
+    `rebuild_all` leaves this RED (the live-write suppression swallows the
+    pass's report) while the single-pass test above stays green."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = FalkorProjection(_tmp("deny_reset.db"), graph_name="test")
+    try:
+        # A live (door-3) write carrying a deny-listed prop: warns once and
+        # leaves the key in `_deny_drop_warned`.
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "live-1", "content": "x",
+                              "reason": "r"}})
+        assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
+                   for r in caplog.records), "live-write precondition failed"
+        # Clear so only the REBUILD pass's records are inspected — otherwise the
+        # live warning above satisfies the assertion and the test is vacuous.
+        caplog.clear()
+        # A graph-only point carrying the SAME deny-listed key survives the
+        # #548 pre-wipe snapshot and is replayed through the Point writer.
+        proj.g.query(
+            "CREATE (n:Point {id:'go-1', content:'y', pointKind:'statement', "
+            "is_operator:false, status:'live', reason:'r'})")
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"))
+        hits = [r.getMessage() for r in caplog.records
+                if "deny-listed" in r.getMessage()
+                and "reason" in r.getMessage()]
+        assert hits, ("per-pass deny report was suppressed by the earlier live "
+                      "write — rebuild_all must reset the warned set"
+                      + caplog.text)
+    finally:
+        proj.close()
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():
@@ -1516,34 +1838,39 @@ def live_proj():
 
 def test_upsert_document_capture_fields(live_proj):
     """#125: _upsert_document persists topics/summary/sessionId/eventId/
-    doc_status/_searchText + aboutSubject edges."""
+    needs_extraction/_searchText + aboutSubject edges. D10 (ONTOLOGY v3.15
+    §4.4): the document node is a :Source keyed ``url``; ``doc_status`` is
+    retired and ``needs_extraction`` is the extraction signal."""
     proj = live_proj
     proj.apply({"type": "SubjectAdded", "id": "agent-pi", "name": "agent-pi",
                 "subject_kind": "other"})
     proj.apply({"type": "DocumentCreated", "id": "test-doc-1",
                 "title": "Conv", "topics": ["licensing", "AGPL"],
                 "summary": "Compared licenses", "session_id": "sess-1",
-                "event_id": "evt-1", "doc_status": "captured",
+                "event_id": "evt-1", "needs_extraction": True,
+                "source_url": "corpus://test-doc-1",
                 "about_entities": ["agent-pi"]})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'test-doc-1'}) "
-        "RETURN d.topics, d.summary, d.sessionId, d.eventId, d.doc_status, d._searchText"
+        "MATCH (s:Source {url:'test-doc-1'}) "
+        "RETURN s.topics, s.summary, s.sessionId, s.eventId, s.needs_extraction, s._searchText"
     ).result_set
-    assert rows, "Document not created"
+    assert rows, "document Source not created"
     assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
     assert rows[0][1] == "Compared licenses"
     assert rows[0][2] == "sess-1"
     assert rows[0][3] == "evt-1"
-    assert rows[0][4] == "captured"
+    assert rows[0][4] is True
     assert "AGPL" in rows[0][5] and "Compared" in rows[0][5], rows[0][5]
     rows2 = proj.g.query(
-        "MATCH (d:Document {id:'test-doc-1'})-[:aboutSubject]->(s) RETURN s.name"
+        "MATCH (s:Source {url:'test-doc-1'})-[:aboutSubject]->(s2) RETURN s2.name"
     ).result_set
     assert len(rows2) == 1 and rows2[0][0] == "agent-pi", rows2
-    # #205: _upsert_document now creates references edge (Source → Document)
+    # #205: _upsert_document creates the references edge from the distinct
+    # corpus Source to the document Source (D10: two Source nodes, never a
+    # degenerate self-loop).
     rows3 = proj.g.query(
-        "MATCH (s:Source {url:'test-doc-1'})-[:references]->"
-        "(d:Document {id:'test-doc-1'}) RETURN count(*) > 0"
+        "MATCH (s:Source {url:'corpus://test-doc-1'})-[:references]->"
+        "(d:Source {url:'test-doc-1'}) RETURN count(*) > 0"
     ).result_set
     assert rows3[0][0] is True, "references edge not created by _upsert_document (#205)"
 
@@ -1553,14 +1880,14 @@ def test_upsert_document_partial_update_preserves_search_text(live_proj):
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-p",
                 "title": "Full Title", "topics": ["alpha"], "summary": "Sum"})
-    rows = proj.g.query("MATCH (d:Document {id:'doc-p'}) RETURN d._searchText").result_set
+    rows = proj.g.query("MATCH (s:Source {url:'doc-p'}) RETURN s._searchText").result_set
     assert rows[0][0] and "alpha" in rows[0][0], rows
-    proj.apply({"type": "DocumentCreated", "id": "doc-p", "doc_status": "captured"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-p", "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-p'}) RETURN d._searchText, d.doc_status"
+        "MATCH (s:Source {url:'doc-p'}) RETURN s._searchText, s.needs_extraction"
     ).result_set
     assert "alpha" in rows[0][0], f"_searchText wiped on partial update: {rows[0][0]}"
-    assert rows[0][1] == "captured"
+    assert rows[0][1] is True
 
 
 def test_upsert_event_uses_dict_kind(live_proj):
@@ -1586,7 +1913,7 @@ def test_upsert_event_produces_document(live_proj):
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
         "uses": [{"name": "tortoise-capture", "kind": "skill"}]}})
     rows = proj.g.query(
-        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Document) RETURN d.id"
+        "MATCH (e:Event {eventId:'evt-2'})-[:produces]->(d:Source) RETURN d.id"
     ).result_set
     assert rows and rows[0][0] == "doc-1", rows
     # No Object clone
@@ -1673,42 +2000,300 @@ def test_upsert_document_includes_source_path(live_proj):
     proj.apply({"type": "DocumentCreated", "id": "doc-sp",
                 "title": "With Source", "source_path": "/tmp/test.md"})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath"
+        "MATCH (s:Source {url:'doc-sp'}) RETURN s.sourcePath"
     ).result_set
     assert rows and rows[0][0] == "/tmp/test.md", rows
 
     # Partial update without source_path must preserve existing value
     proj.apply({"type": "DocumentCreated", "id": "doc-sp",
-                "doc_status": "archived"})
+                "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-sp'}) RETURN d.sourcePath, d.doc_status"
+        "MATCH (s:Source {url:'doc-sp'}) RETURN s.sourcePath, s.needs_extraction"
     ).result_set
     assert rows[0][0] == "/tmp/test.md", f"sourcePath wiped: {rows[0][0]}"
-    assert rows[0][1] == "archived"
+    assert rows[0][1] is True
 
 
-def test_upsert_document_preserves_doc_status_and_needs_extraction(live_proj):
-    """#133 P0: partial update via _upsert_document must NOT wipe
-    doc_status='captured' or needs_extraction=true (coalesce-null sentinel —
-    the add_document non-null-default bug class from #167)."""
+def test_upsert_document_preserves_needs_extraction_and_retires_doc_status(live_proj):
+    """#133 P0 + D10: a partial update via _upsert_document must NOT wipe
+    needs_extraction=true (coalesce-null sentinel — the add_document
+    non-null-default bug class from #167), and the retired ``doc_status`` must
+    never be written to the node (ONTOLOGY v3.15 §4.4 / adversarial B6)."""
     proj = live_proj
     proj.apply({"type": "DocumentCreated", "id": "doc-133",
                 "title": "Captured", "doc_status": "captured",
                 "needs_extraction": True})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction"
+        "MATCH (s:Source {url:'doc-133'}) RETURN s.doc_status, s.needs_extraction"
     ).result_set
-    assert rows[0][0] == "captured", rows[0][0]
+    assert rows[0][0] is None, f"retired doc_status was written: {rows[0][0]}"
     assert rows[0][1] is True, rows[0][1]
 
-    # Partial update with neither field — must preserve both
+    # Partial update with neither field — must preserve needs_extraction and
+    # must never resurrect the retired doc_status
     proj.apply({"type": "DocumentCreated", "id": "doc-133", "title": "Renamed"})
     rows = proj.g.query(
-        "MATCH (d:Document {id:'doc-133'}) RETURN d.doc_status, d.needs_extraction, d.title"
+        "MATCH (s:Source {url:'doc-133'}) RETURN s.doc_status, s.needs_extraction, s.title"
     ).result_set
-    assert rows[0][0] == "captured", f"doc_status wiped: {rows[0][0]}"
+    assert rows[0][0] is None, f"retired doc_status was written: {rows[0][0]}"
     assert rows[0][1] is True, f"needs_extraction wiped: {rows[0][1]}"
     assert rows[0][2] == "Renamed"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #5026 (D10) adversarial coverage — retiring the :Document graph label.
+# Declared threat surface (plan §threat): B1 label/key divergence ·
+# B2 derivable-set regression · B3 quota escape · B4 quota over-count ·
+# B5 resurrection residue · B6 retired-field re-write. B3/B4 live in
+# tests/test_quota.py; B5 in tests/test_pointsuperseded_rebuild.py
+# (test_about_document_title_keyed_resolution: the superseded old point
+# keeps zero aboutDocument incidence after rebuild).
+# ══════════════════════════════════════════════════════════════════════
+
+def test_5026_b1_aboutdocument_replay_key_is_url_never_title(live_proj):
+    """B1 (#5026): the label and the replay key move TOGETHER. A
+    title-keyed aboutDocument descriptor is un-replayable and must never be
+    emitted; a url-keyed one resolves to the document :Source. The replay
+    resolver is RESOLVE-ONLY — a miss must never mint a phantom Source."""
+    from tortoise.projection.edges import resolve_structural_target, stub_key
+
+    # emission guard: a target with no `url` yields no descriptor (skip)
+    assert stub_key("aboutDocument", {"title": "Spec"}) is None
+    assert stub_key("aboutDocument", {"url": "u", "title": "Spec"}) \
+        == ("Source", "u")
+
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/spec', title:'Spec', "
+        "documentKind:'report'})")
+    before = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+    # a TITLE-keyed descriptor (the old :Document convention) does NOT resolve
+    assert resolve_structural_target(
+        proj.g, "Source", "Spec", "aboutDocument") is None
+    after = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+    assert after == before, \
+        "title-keyed aboutDocument descriptor minted a phantom Source"
+    # the SAME node resolves by its identity key (url)
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/spec", "aboutDocument") is not None
+
+
+def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
+    """B1 (#5026): a session/connector/provenance :Source (no documentKind)
+    is NEVER an aboutDocument target — the `documentKind IS NOT NULL` guard.
+    The fallback is a Subject stub, not a mis-pointed Source."""
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/prov', title:'ProvOnly', "
+        "sourceKind:'github'})")
+    proj.apply({"type": "DocumentCreated", "id": "doc-b1",
+                "title": "DocB1", "document_kind": "report",
+                "about_entities": ["ProvOnly"]})
+    bad = proj.g.query(
+        "MATCH (s:Source {url:'doc-b1'})-[:aboutDocument]->"
+        "(t:Source {url:'https://x/prov'}) RETURN count(*)").result_set[0][0]
+    assert bad == 0, "a provenance Source became an aboutDocument target"
+    good = proj.g.query(
+        "MATCH (s:Source {url:'doc-b1'})-[:aboutSubject]->"
+        "(sub:Subject {name:'ProvOnly'}) RETURN count(*)").result_set[0][0]
+    assert good == 1, "auto-detect fallback did not mint the Subject stub"
+
+
+def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
+    """B1 (#5026): the REPLAY resolver must carry the LIVE path's
+    `documentKind IS NOT NULL` guard. Without it a producer-created
+    aboutDocument edge (reachable through the public `sdk.create_edge`) to a
+    provenance Source is re-attached to that non-document Source on rebuild —
+    live and replay disagree. A genuine document Source at the same shape
+    still resolves."""
+    from tortoise.projection.edges import resolve_structural_target
+
+    proj = live_proj
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/prov-b1', title:'ProvB1', "
+        "sourceKind:'github'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/prov-b1", "aboutDocument") is None, \
+        "replay resolved a provenance Source as an aboutDocument target"
+    proj.g.query(
+        "MERGE (s:Source {url:'https://x/doc-b1', title:'DocB1R', "
+        "documentKind:'report'})")
+    assert resolve_structural_target(
+        proj.g, "Source", "https://x/doc-b1", "aboutDocument") is not None, \
+        "replay refused a genuine document Source"
+
+
+def test_5026_b2_derivable_set_unchanged():
+    """B2 (#5026): aboutDocument stays in DERIVABLE_STRUCTURAL_RELS and
+    aboutSource stays out (it is not a real rel) — the target label moved to
+    Source, the REL name did not."""
+    from tortoise.projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS
+    assert "aboutDocument" in DERIVABLE_STRUCTURAL_RELS
+    assert "aboutSource" not in DERIVABLE_STRUCTURAL_RELS
+    assert STRUCTURAL_REL_LABELS["aboutDocument"] == "Source"
+    assert STRUCTURAL_REL_LABELS["extractedFrom"] == "Source"
+
+
+def test_5026_b6_retired_fields_cannot_reenter(live_proj):
+    """B6 (#5026): `content`/`doc_status`/`objectKind`/`status` cannot
+    reappear — neither via the fixed clause NOR the open passthrough. A
+    NON-retired key (`domain`) still rides the passthrough, so the deny-set
+    did not over-reach. The snake/camel synonym spellings are denied too."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-b6", "title": "B6",
+                "document_kind": "report", "format": "markdown",
+                "content": "SECRET BODY", "doc_status": "captured",
+                "docStatus": "captured",
+                "objectKind": "document", "object_kind": "document",
+                "status": "draft",
+                "domain": "legal"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6'}) RETURN s.content, s.doc_status, "
+        "s.objectKind, s.status, s.object_kind, s.docStatus").result_set[0]
+    assert rows[0] is None, f"retired `content` written: {rows[0]!r}"
+    assert rows[1] is None, f"retired `doc_status` written: {rows[1]!r}"
+    assert rows[2] is None, f"retired `objectKind` written: {rows[2]!r}"
+    assert rows[3] is None, f"retired `status` written: {rows[3]!r}"
+    assert rows[4] is None, f"retired `object_kind` written: {rows[4]!r}"
+    assert rows[5] is None, f"retired `docStatus` written: {rows[5]!r}"
+    ok = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6'}) RETURN s.domain, s.format").result_set[0]
+    assert ok[0] == "legal", f"non-retired passthrough key dropped: {ok[0]!r}"
+    assert ok[1] == "markdown", f"fixed-clause `format` dropped: {ok[1]!r}"
+
+
+def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
+    """B6, the THIRD DOOR (#5135, #5026): `update_entity` is a generic
+    `SET n += $props` surface, and its non-Point branch JOURNALS the write as
+    `state` — which the fold re-applies through `SET n += $s`. So retiring a
+    field on the document path is not enough on its own: while the generic
+    surface still accepted these keys, the field was written, journaled, and
+    SURVIVED `rebuild_all`. The two declared B6 tests cover
+    `_upsert_document` and `_upsert_source`, and neither can see this route.
+
+    The denial has to be TARGET-AWARE: `objectKind` is the canonical Object
+    kind (ONTOLOGY §5) and `content` is a legitimate Point key, so a blanket
+    `_sanitize_props` reject would break unrelated labels. It fires only on a
+    document `:Source` — the same predicate the `documents` meter uses.
+    """
+    sdk = sdk_factory()
+    doc = sdk.create_document("B6ThirdDoor", "report")
+    did = doc["id"]
+    assert doc["url"] == did, "a document Source is keyed by the doc id"
+    for key, val in (("content", "SECRET BODY"),
+                     ("doc_status", "captured"),
+                     ("docStatus", "captured"),
+                     ("objectKind", "document"),
+                     ("object_kind", "document")):
+        with pytest.raises(ValueError, match="retired document field"):
+            sdk.update_entity(did, **{key: val})
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.content, s.doc_status, s.objectKind",
+        params={"u": did}).result_set[0]
+    assert list(rows) == [None, None, None], \
+        f"retired field written through update_entity: {rows!r}"
+    # ⛔ A TRANSCRIPT document is still a document for the RETIREMENT. The
+    # `documents` meter excludes transcripts from the CAP, but
+    # `_upsert_document` denies the retired fields on EVERY document — so this
+    # guard must too. An earlier revision copied the meter's `<> 'transcript'`
+    # clause, which left exactly this node as an open third door: the same
+    # field denied by the document path and writable by the generic one, on
+    # the same node.
+    tdoc = sdk.create_document("B6ThirdDoorTranscript", "transcript")
+    tid = tdoc["id"]
+    assert tdoc["documentKind"] == "transcript"
+    with pytest.raises(ValueError, match="retired document field"):
+        sdk.update_entity(tid, content="SECRET BODY")
+    trows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.content, s.doc_status, s.objectKind",
+        params={"u": tid}).result_set[0]
+    assert list(trows) == [None, None, None], \
+        f"retired field written on a transcript document: {trows!r}"
+    # Non-over-reach: a NON-retired key still rides the same surface, so the
+    # refusal did not turn `update_entity` into a no-op for a document.
+    sdk.update_entity(did, domain="legal")
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.domain",
+        params={"u": did}).result_set[0][0] == "legal"
+
+
+def test_5026_b6_promotion_scrubs_inherited_retired_fields(sdk_factory):
+    """B6, the FOURTH DOOR (review round 3): the retired fields must be
+    SCRUBBED when a node is PROMOTED to a document, not merely refused on
+    write. A non-document `:Source` may legitimately carry `content` or
+    `objectKind` — the target-aware `update_entity` guard above allows exactly
+    that — and a later document creator MERGEs onto that SAME node by `url`.
+    Without the scrub at the document MERGE, the inherited value survived both
+    live and on replay.
+
+    This is the complement of the third-door test: that one proves the write
+    is refused on a document, this one proves a value written while the node
+    was NOT a document does not become a retired field when it becomes one.
+    """
+    sdk = sdk_factory()
+    sdk.create_source("doc/promo.md", "document")
+    sdk.update_entity("doc/promo.md", content="SECRET", objectKind="X")
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) RETURN s.content"
+    ).result_set[0][0] == "SECRET", \
+        "precondition: writable while the node is not a document"
+    proj.apply({"type": "DocumentCreated", "id": "doc/promo.md",
+                "title": "Promo", "document_kind": "report"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc/promo.md'}) "
+        "RETURN s.documentKind, s.content, s.objectKind").result_set[0]
+    assert rows[0] == "report", f"promotion did not land: {rows!r}"
+    assert list(rows[1:]) == [None, None], \
+        f"promotion inherited the retired fields: {rows!r}"
+
+
+def test_5026_b6_sourcecreated_cannot_rewrite_retired_fields(live_proj):
+    """B6 (#5026): a document IS a :Source, so a SourceCreated whose url
+    equals a document id MERGEs onto the SAME node the document path owns.
+    Its open passthrough must carry the RETIRED-KEYS deny-set, or the retired
+    fields re-enter and survive a rebuild.
+
+    ⛔ Non-over-reach pin (cycle 2): the deny-set must be the literal retired
+    keys, NOT the historical `_DOCUMENT_HANDLED` union. `_upsert_source`'s
+    fixed clause writes neither `summary` nor `topics`, so a Source that
+    legitimately carries them depends on the passthrough — widening the set to
+    all of `_DOCUMENT_HANDLED` would silently drop them (and an `embedding`,
+    which the vector retrieval leg reads)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-b6s", "title": "B6S",
+                "document_kind": "report", "format": "markdown",
+                "domain": "legal"})
+    proj.apply({"type": "SourceCreated", "url": "doc-b6s",
+                "sourceKind": "document",
+                "content": "SECRET BODY", "doc_status": "captured",
+                "docStatus": "captured", "objectKind": "document",
+                "object_kind": "document", "domain": "contracts",
+                "summary": "a legit Source summary",
+                "topics": ["legit", "source"],
+                "status": "active"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-b6s'}) RETURN s.content, s.doc_status, "
+        "s.objectKind, s.object_kind, s.docStatus, s.documentKind, "
+        "s.domain, s.format, s.summary, s.topics, s.status").result_set[0]
+    assert rows[0] is None, f"retired `content` via SourceCreated: {rows[0]!r}"
+    assert rows[1] is None, f"retired `doc_status` via SourceCreated: {rows[1]!r}"
+    assert rows[2] is None, f"retired `objectKind` via SourceCreated: {rows[2]!r}"
+    assert rows[3] is None, f"retired `object_kind` via SourceCreated: {rows[3]!r}"
+    assert rows[4] is None, f"retired `docStatus` via SourceCreated: {rows[4]!r}"
+    assert rows[5] == "report", f"document kind lost: {rows[5]!r}"
+    assert rows[6] == "contracts", f"non-retired key dropped: {rows[6]!r}"
+    assert rows[7] == "markdown", f"fixed-clause `format` dropped: {rows[7]!r}"
+    # Non-over-reach: these are NOT retired and `_upsert_source`'s fixed clause
+    # does not write them, so they MUST survive the widened deny-set.
+    assert rows[8] == "a legit Source summary", \
+        f"non-retired `summary` dropped by the deny-set (over-reach): {rows[8]!r}"
+    assert sorted(rows[9] or []) == ["legit", "source"], \
+        f"non-retired `topics` dropped by the deny-set (over-reach): {rows[9]!r}"
+    assert rows[10] == "active", \
+        f"non-retired `status` dropped by the deny-set (over-reach): {rows[10]!r}"
 
 
 # ── #214: Vocabulary edge cleanup ──────────────────────────────────────
@@ -2912,6 +3497,957 @@ def test_rebuild_all_tolerates_malformed_events():
 
 
 
+# ── #2943: the pre-wipe snapshot must survive a failed replay ───────────────
+#
+# #548 snapshots graph-only Points (and #990 :Batch markers / Point.batch_id
+# links) before `MATCH (n) DETACH DELETE n`, but that snapshot was a plain
+# in-memory list. A failure between the wipe and the end of replay killed the
+# list with the process, and a retry re-read the JSONL — which by definition
+# has no event for those nodes — so they were permanently lost. The snapshot
+# is now persisted to a sidecar next to the event log before the wipe.
+
+
+def _interrupted_rebuild(prefix: str, *, fail_on: int = 1,
+                        batch: bool = False) -> dict:
+    """Fail a rebuild AFTER the wipe landed, with graph-only Points present.
+
+    The graph-only Points come from an SDK built WITHOUT ``event_log_path`` —
+    the JSONL has no record of them, which is exactly why the #548 snapshot
+    has to carry them. ``fail_on`` selects which pass-1a upsert raises: 1 (the
+    default) is the worst case — the wipe has landed and replay has restored
+    nothing; 2 leaves the first snapshot node re-created, so the retry's fresh
+    snapshot COLLIDES with the leftover entries (the union dedup path).
+    ``batch`` also seeds a quarantined :Batch marker + a Point.batch_id link
+    (the #990 half of the snapshot). Returns a dict with the temp dir, the
+    open projection (caller closes it) and the expected points.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix=prefix)
+    db_path = os.path.join(d, "tortoise.db")
+    events_path = os.path.join(d, "events.jsonl")
+
+    sdk = TortoiseSDK(db_path=db_path, event_log_path=None)
+    try:
+        p1 = sdk.create_point("statement", "graph-only claim ONE",
+                              authoredBy="alice")
+        p2 = sdk.create_point("statement", "graph-only claim TWO",
+                              authoredBy="bob")
+        op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+    finally:
+        sdk.close()
+
+    # One genuinely journaled event — the JSONL half of the rebuild.
+    EventLog(events_path).append({
+        "type": "PointAdded",
+        "point": {"id": "evt-001", "content": "journaled claim",
+                  "pointKind": "statement", "status": "live",
+                  "createdAt": "2026-08-01T00:00:00Z"},
+        "projection_version": 2,
+        "initiated_by": "extractor",
+    })
+
+    proj = FalkorProjection(db_path, graph_name="tortoise")
+    if batch:
+        # Quarantine state + the Point.batch_id enforcement link are raw graph
+        # writes with no JSONL event (#990) — the sidecar is their only record.
+        proj.g.query("MERGE (b:Batch {id:'batch-1'}) "
+                     "SET b.status='quarantined', b.team_id='t1'")
+        proj.g.query("MATCH (p:Point {id:$pid}) SET p.batch_id='batch-1'",
+                     params={"pid": p1["id"]})
+
+    calls = {"n": 0}
+    real_upsert = FalkorProjection._upsert_point_props
+
+    def _boom(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] >= fail_on:
+            raise RuntimeError("injected mid-replay failure (#2943)")
+        # Calls before the injected one must do the REAL work, or the partial
+        # replay this helper exists to create would never happen.
+        return real_upsert(self, *args, **kwargs)
+
+    try:
+        with mock.patch.object(FalkorProjection, "_upsert_point_props", _boom), \
+                pytest.raises(RuntimeError, match="injected mid-replay"):
+            proj.rebuild_all(d)
+    except BaseException:
+        proj.close()
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    return {"dir": d, "db": db_path, "proj": proj,
+            "points": [(p1["id"], "graph-only claim ONE"),
+                       (p2["id"], "graph-only claim TWO")],
+            "op_id": op["id"], "batch_id": "batch-1" if batch else None}
+
+
+def test_falkor_rebuild_all_survives_mid_replay_failure():
+    """#2943: an interrupted rebuild must not destroy graph-only Points.
+
+    FAILS before the fix: with an in-memory-only snapshot there is no sidecar
+    and the retry re-snapshots an empty graph.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    ctx = _interrupted_rebuild("tortoise_2943_retry_")
+    try:
+        proj, d = ctx["proj"], ctx["dir"]
+        sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+
+        # 1. The wipe landed — the graph is empty ...
+        assert proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0, (
+            "the injected failure must fire after DETACH DELETE")
+        # 2. ... but every graph-only node is durably recorded on disk.
+        assert os.path.exists(sidecar), (
+            "an interrupted rebuild must leave a durable pre-wipe snapshot "
+            "(#2943) — graph-only Points have no JSONL event to fall back on")
+        with open(sidecar, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        recorded = {e["point"]["id"] for e in payload["synthetic_events"]}
+        assert {pid for pid, _ in ctx["points"]} <= recorded
+        assert ctx["op_id"] in recorded, "operator snapshot lost"
+
+        # 3. Re-running the rebuild restores everything.
+        result = proj.rebuild_all(d)
+        for pid, content in ctx["points"]:
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content",
+                params={"id": pid}).result_set
+            assert len(rows) == 1, (
+                f"graph-only Point {pid} lost across the interrupted "
+                f"rebuild")
+            assert rows[0][0] == content
+        edge_rows = proj.g.query(
+            "MATCH (n:Point {id:$o})-[r]->(m:Point {id:$p}) RETURN count(r)",
+            params={"o": ctx["op_id"], "p": ctx["points"][0][0]}).result_set
+        assert edge_rows[0][0] >= 1, "operator edge lost"
+
+        # 4. The sidecar is cleared once replay completed ...
+        assert not os.path.exists(sidecar), (
+            "a completed rebuild must drop the sidecar, or it would later "
+            "resurrect Points deleted after this rebuild")
+
+        # 5. ... and rebuilding again duplicates nothing: the count is the
+        # same 4 the snapshot+journal union replays (not `again["nodes"]`,
+        # which would make this assertion compare a value to itself).
+        again = proj.rebuild_all(d)
+        assert again["events"] == 4, again
+        assert again["nodes"] == 4, again
+        assert proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 4
+
+        # 6. The retry's event list is exactly the snapshot + the journal —
+        # the leftover/fresh union deduped instead of double-prepending (a
+        # duplicate would also shift the positional seq space the
+        # supersede/invalidate fold sweeps index on).
+        assert result["events"] == 4, result
+    finally:
+        ctx["proj"].close()
+        shutil.rmtree(ctx["dir"], ignore_errors=True)
+
+
+def test_prewipe_snapshot_routes_auto_recovery_through_rebuild_all():
+    """#2943: auto-recovery must not replay the JSONL alone while a durable
+    pre-wipe snapshot is pending.
+
+    ``recover_from_log`` is the choke point for embedded auto-recovery and is
+    apply()-only — it cannot restore graph-only Points. FAILS before the fix:
+    it reports recovered=True (the JSONL event replays) while the graph-only
+    Points stay gone forever.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+
+    ctx = _interrupted_rebuild("tortoise_2943_auto_")
+    try:
+        proj, d = ctx["proj"], ctx["dir"]
+        result = recover_from_log(d, proj)
+        assert result["recovered"] is True, result
+        for pid, _ in ctx["points"]:
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)",
+                params={"id": pid}).result_set
+            assert rows[0][0] == 1, (
+                f"graph-only Point {pid} not restored by auto-recovery")
+        assert not os.path.exists(os.path.join(
+            d, ".tortoise-prewipe-snapshot.json"))
+    finally:
+        ctx["proj"].close()
+        shutil.rmtree(ctx["dir"], ignore_errors=True)
+
+
+def test_prewipe_snapshot_corrupt_aborts_before_wipe():
+    """#2943: a sidecar that EXISTS but cannot be trusted must abort before the
+    wipe — it may be the only surviving record of graph-only Points, so
+    silently ignoring it would make a repairable state unrecoverable.
+
+    Covers unparseable JSON, a non-object payload, an unsupported version and
+    a malformed section (each reachable only by hand-editing or a partially
+    repaired file, but each fatal if silently ignored).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    bad_payloads = [
+        ("unparseable", "{not json"),
+        ("non-object", '"just a string"'),
+        ("unsupported version",
+         json.dumps({"version": 99, "synthetic_events": []})),
+        ("malformed section",
+         json.dumps({"version": 1, "synthetic_events": "not-a-list"})),
+    ]
+    for label, payload in bad_payloads:
+        d = tempfile.mkdtemp(prefix="tortoise_2943_corrupt_")
+        try:
+            db_path = os.path.join(d, "tortoise.db")
+            EventLog(os.path.join(d, "events.jsonl")).append({
+                "type": "PointAdded",
+                "point": {"id": "p1", "content": "journaled",
+                          "status": "live", "pointKind": "statement",
+                          "createdAt": "2026-08-01T00:00:00Z"},
+                "projection_version": 2, "initiated_by": "extractor"})
+
+            proj = FalkorProjection(db_path, graph_name="test")
+            try:
+                proj.g.query(
+                    "CREATE (n:Point {id:'keep-me', content:'graph-only',"
+                    " status:'live'})")
+                sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+                with open(sidecar, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+
+                with pytest.raises(RuntimeError,
+                                   match="wipe the graph"):
+                    proj.rebuild_all(d)
+
+                # The wipe never ran — the graph is untouched.
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:'keep-me'}) RETURN count(n)"
+                ).result_set
+                assert rows[0][0] == 1, (
+                    f"aborted rebuild must not wipe the graph ({label})")
+                assert os.path.exists(sidecar), (
+                    f"the sidecar is kept for repair ({label})")
+            finally:
+                proj.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_helpers_validate_union_and_write_atomically():
+    """#2943 (no DB): the sidecar writer / loader / union contracts.
+
+    Covers the shapes a hand-repaired file can take (every one must abort
+    BEFORE the wipe rather than crash the restore loop after it), the
+    symlink and non-regular-file refusals, the retirement artifact, and the
+    field-granular deduped union.
+    """
+    from tortoise.projection import (  # noqa: I001
+        _clear_prewipe_snapshot, _load_prewipe_snapshot,
+        _union_prewipe_snapshot, _write_prewipe_snapshot,
+        prewipe_snapshot_path)
+    d = tempfile.mkdtemp(prefix="tortoise_2943_unit_")
+    try:
+        path = prewipe_snapshot_path(d)
+        assert _load_prewipe_snapshot(path) is None  # absent → no sidecar
+
+        good = {
+            "version": 1,
+            "synthetic_events": [
+                {"type": "PointAdded",
+                 "point": {"id": "p1", "content": "c"},
+                 "projection_version": 2},
+                # the one nested shape the capture writes (operator inputs)
+                {"type": "OperatorAdded",
+                 "point": {"id": "op1", "content": "IMPL(p1)",
+                           "pointKind": "",
+                           "operator": {"op_type": "IMPL",
+                                        "inputs": ["p1"]}}},
+            ],
+            "batch_snapshot": [{"id": "b1", "status": "quarantined",
+                                "n": 3, "tags": ["a", "b"]}],
+            "batch_point_links": [["p1", "b1"]],
+        }
+        _write_prewipe_snapshot(path, good)
+        assert _load_prewipe_snapshot(path) == good
+        # atomic + tidy: mkstemp's temp file is consumed by os.replace
+        assert sorted(os.listdir(d)) == [".tortoise-prewipe-snapshot.json"]
+
+        # a version-less payload (hand-repaired, or an older producer) is OK
+        noversion = {k: v for k, v in good.items() if k != "version"}
+        _write_prewipe_snapshot(path, noversion)
+        assert _load_prewipe_snapshot(path) == noversion
+
+        bad_payloads = [
+            ("unparseable", None),
+            ("non-object", '"just a string"'),
+            ("unsupported version", {"version": 99}),
+            ("bad synthetic_events section", {"synthetic_events": "x"}),
+            ("bad batch_snapshot section", {"batch_snapshot": "x"}),
+            ("bad batch_point_links section", {"batch_point_links": "x"}),
+            ("synthetic entry not a dict", {"synthetic_events": ["x"]}),
+            ("synthetic entry without a point dict",
+             {"synthetic_events": [{"type": "PointAdded"}]}),
+            ("synthetic entry without a str id",
+             {"synthetic_events": [{"point": {"content": "c"}}]}),
+            # a type the replay does not dispatch on is skipped by EVERY pass,
+            # so the sidecar would be retired after a wipe that restored
+            # nothing — the type must be validated, not just the id.
+            ("synthetic entry with an unknown type",
+             {"synthetic_events": [{"type": "NopeAdded",
+                                    "point": {"id": "p1"}}]}),
+            ("synthetic entry with a non-str type",
+             {"synthetic_events": [{"type": 7, "point": {"id": "p1"}}]}),
+            # non-primitive values reach the driver and raise AFTER the wipe
+            ("non-primitive point property",
+             {"synthetic_events": [{"type": "PointAdded",
+                                    "point": {"id": "p1",
+                                              "content": {"n": 1}}}]}),
+            ("nested list point property",
+             {"synthetic_events": [{"type": "PointAdded",
+                                    "point": {"id": "p1",
+                                              "tags": [["a"]]}}]}),
+            ("operator inputs not a list of str",
+             {"synthetic_events": [{"type": "OperatorAdded",
+                                    "point": {"id": "op1",
+                                              "operator": {
+                                                  "op_type": "IMPL",
+                                                  "inputs": [1]}}}]}),
+            ("operator not an object",
+             {"synthetic_events": [{"type": "OperatorAdded",
+                                    "point": {"id": "op1",
+                                              "operator": "IMPL"}}]}),
+            # every operator value is written to the node, not just inputs
+            ("operator op_type is not primitive",
+             {"synthetic_events": [{"type": "OperatorAdded",
+                                    "point": {"id": "op1",
+                                              "operator": {
+                                                  "op_type": {"n": 1},
+                                                  "inputs": ["p1"]}}}]}),
+            ("batch entry not a dict", {"batch_snapshot": ["x"]}),
+            ("batch entry without a str id", {"batch_snapshot": [{"id": 7}]}),
+            ("non-primitive batch property",
+             {"batch_snapshot": [{"id": "b1", "meta": {"a": 1}}]}),
+            ("link with 3 elements", {"batch_point_links": [["p", "b", "x"]]}),
+            ("link with 1 element", {"batch_point_links": [["p"]]}),
+            ("link member not a str",
+             {"batch_point_links": [["p", 7]]}),
+        ]
+        for label, payload in bad_payloads:
+            if payload is None:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("{not json")
+            else:
+                _write_prewipe_snapshot(path, payload)
+            try:
+                _load_prewipe_snapshot(path)
+            except RuntimeError as e:
+                assert "wipe the graph" in str(e), f"{label}: {e}"
+            else:
+                raise AssertionError(
+                    f"{label}: a malformed sidecar was accepted instead of "
+                    f"aborting before the wipe")
+
+        # A symlink is never followed (the log dir is caller-supplied).
+        os.remove(path)
+        os.symlink(os.path.join(d, "nonexistent-target.json"), path)
+        with pytest.raises(RuntimeError, match="wipe the graph"):
+            _load_prewipe_snapshot(path)
+        os.remove(path)
+
+        # Neither is a non-regular file: a planted FIFO makes a plain O_RDONLY
+        # open block forever, on a path recovery visits on EVERY embedded DB
+        # open. O_NONBLOCK + the S_ISREG check must refuse it instead.
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(path)
+            try:
+                with pytest.raises(RuntimeError,
+                                   match="not a regular file"):
+                    _load_prewipe_snapshot(path)
+            finally:
+                os.remove(path)
+
+        # Retirement: after a completed replay the sidecar is first REWRITTEN
+        # entry-less and only then removed, so a crash (or a failed unlink) in
+        # between leaves an artifact that merges nothing instead of re-merging
+        # pre-wipe truth over a newer graph.
+        _write_prewipe_snapshot(path, good)
+        with mock.patch("tortoise.projection.os.remove",
+                        side_effect=OSError("busy")):
+            _clear_prewipe_snapshot(path)
+        assert os.path.exists(path), "the unlink was made to fail"
+        assert _load_prewipe_snapshot(path) is None, (
+            "a retired sidecar must merge nothing — otherwise the next "
+            "rebuild rolls back state that changed after the completed one")
+        os.remove(path)
+
+        fresh = {
+            "synthetic_events": [{"point": {"id": "p1", "content": "FRESH"}},
+                                 {"point": {"id": "p2", "content": "only-fresh"}},
+                                 {"point": {"id": "op1", "content": "op",
+                                            "operator": {"op_type": "IMPL",
+                                                         "inputs": []}}}],
+            "batch_snapshot": [{"id": "b1", "status": "committed"},
+                               {"id": "b2"}],
+            "batch_point_links": [("p1", "b1"), ("p2", "b2")],
+        }
+        leftover = {
+            "synthetic_events": [{"point": {"id": "p1", "content": "LEFT",
+                                              "outdated": True}},
+                                  {"point": {"id": "op1", "content": "op",
+                                             "operator": {
+                                                 "op_type": "IMPL",
+                                                 "inputs": ["p1"]}}}],
+            "batch_snapshot": [{"id": "b1", "status": "quarantined"}],
+            "batch_point_links": [["p1", "b1"]],
+        }
+        merged = _union_prewipe_snapshot(leftover, fresh)
+        # deduped, leftover-first (the synthetic prefix stays order-stable)
+        assert [e["point"]["id"] for e in merged["synthetic_events"]] == \
+            ["p1", "op1", "p2"]
+        # Field-granular: fresh truth wins where it HAS a value...
+        assert merged["synthetic_events"][0]["point"]["content"] == "FRESH"
+        assert merged["batch_snapshot"][0]["status"] == "committed"
+        # ...and the leftover fills the gaps the fresh capture cannot see. A
+        # partial replay recreates the node via _upsert_point_props, whose SET
+        # list omits `outdated` — so absent-here must mean leftover-wins.
+        assert merged["synthetic_events"][0]["point"]["outdated"] is True
+        # operator.inputs is the calibrated case: a partial replay rebuilt no
+        # edges, so an EMPTY fresh list is a gap and the leftover's fills it.
+        assert merged["synthetic_events"][1]["point"]["operator"] == \
+            {"op_type": "IMPL", "inputs": ["p1"]}
+        assert [b["id"] for b in merged["batch_snapshot"]] == ["b1", "b2"]
+        assert merged["batch_point_links"] == [("p1", "b1"), ("p2", "b2")]
+        # no leftover → fresh passes through untouched
+        assert _union_prewipe_snapshot(
+            None, fresh)["synthetic_events"] == fresh["synthetic_events"]
+        # a non-empty FRESH inputs list is newer and must NOT be replaced
+        newer = _union_prewipe_snapshot(
+            {"synthetic_events": [{"point": {
+                "id": "op1", "operator": {"op_type": "IMPL",
+                                           "inputs": ["p1"]}}}]},
+            {"synthetic_events": [{"point": {
+                "id": "op1", "operator": {"op_type": "IMPL",
+                                           "inputs": ["p2"]}}}],
+             "batch_snapshot": [], "batch_point_links": []})
+        assert newer["synthetic_events"][0]["point"]["operator"]["inputs"] == \
+            ["p2"]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_written_before_wipe_and_cleared_after():
+    """#2943: the sidecar must exist BEFORE `DETACH DELETE n` and be gone
+    after a completed replay — the ordering is the whole guarantee."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_2943_order_")
+    try:
+        EventLog(os.path.join(d, "events.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "journaled",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("CREATE (n:Point {id:'g1', content:'graph-only',"
+                         " status:'live', pointKind:'statement'})")
+            sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+            real_query = type(proj.g).query
+            seen = {}
+
+            def spy(gself, cypher, *args, **kwargs):
+                if "DETACH DELETE" in cypher:
+                    seen["sidecar_at_wipe"] = os.path.exists(sidecar)
+                return real_query(gself, cypher, *args, **kwargs)
+
+            with mock.patch.object(type(proj.g), "query", spy):
+                result = proj.rebuild_all(d)
+            assert seen.get("sidecar_at_wipe") is True, (
+                "the durable snapshot must exist BEFORE MATCH (n) DETACH "
+                "DELETE n — otherwise a kill in the wipe window loses every "
+                "graph-only Point")
+            assert result["nodes"] >= 1
+            assert not os.path.exists(sidecar), (
+                "a completed replay must drop the sidecar")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_write_failure_aborts_before_wipe():
+    """#2943: if the snapshot cannot be persisted, abort — never wipe."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_2943_writefail_")
+    try:
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("CREATE (n:Point {id:'g1', content:'graph-only',"
+                         " status:'live', pointKind:'statement'})")
+            with mock.patch("tortoise.projection._write_prewipe_snapshot",
+                            side_effect=OSError("disk full")), \
+                    pytest.raises(RuntimeError,
+                                   match="aborted BEFORE the graph wipe"):
+                proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
+            assert rows[0][0] == 1, (
+                "a failed sidecar write must leave the graph untouched")
+            assert not os.path.exists(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"))
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_capture_failure_aborts_before_wipe():
+    """#2943: a FAILED snapshot capture must not fall through to the wipe.
+
+    The capture blocks are best-effort by design, but proceeding after one
+    failed would wipe the graph with no durable record of its graph-only
+    nodes — the original bug, silently.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_2943_capturefail_")
+    try:
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("CREATE (n:Point {id:'g1', content:'graph-only',"
+                         " status:'live', pointKind:'statement'})")
+            real_query = type(proj.g).query
+
+            def spy(gself, cypher, *args, **kwargs):
+                if "properties(n)" in cypher:
+                    raise RuntimeError("simulated capture failure")
+                return real_query(gself, cypher, *args, **kwargs)
+
+            with mock.patch.object(type(proj.g), "query", spy), \
+                    pytest.raises(RuntimeError,
+                                   match="could not be captured"):
+                proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
+            assert rows[0][0] == 1, (
+                "a failed capture must leave the graph untouched")
+            assert not os.path.exists(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"))
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_retry_dedups_against_partial_replay():
+    """#2943: a retry whose fresh snapshot COLLIDES with the leftover must
+    dedup, and the leftover's pre-wipe truth must win.
+
+    The failure is injected on the SECOND pass-1a upsert, so the first
+    snapshot node is re-created before the crash and appears in both the
+    fresh snapshot and the leftover. A double-prepend would shift the
+    positional seq space the fold sweeps index on; a fresh-wins precedence
+    would discard the leftover's operator `inputs` (the partial replay never
+    reached pass 2, so the graph copy has no edges to reconstruct from).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    ctx = _interrupted_rebuild("tortoise_2943_dedup_", fail_on=2)
+    try:
+        proj, d = ctx["proj"], ctx["dir"]
+        partial = proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+        assert partial == 1, (
+            "the injected failure must leave exactly one re-created node")
+
+        result = proj.rebuild_all(d)
+        assert result["events"] == 4, (
+            "3 snapshot events + 1 journal event — a duplicate prepend means "
+            f"the union dedup failed (got {result['events']})")
+        assert result["nodes"] == 4, result
+        for pid, content in ctx["points"]:
+            rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN n.content",
+                                params={"id": pid}).result_set
+            assert len(rows) == 1, f"{pid} lost"
+            assert rows[0][0] == content
+        edge_rows = proj.g.query(
+            "MATCH (n:Point {id:$o})-[r]->(m:Point {id:$p}) RETURN count(r)",
+            params={"o": ctx["op_id"], "p": ctx["points"][0][0]}).result_set
+        assert edge_rows[0][0] >= 1, (
+            "the operator edge must survive — its `inputs` come only from the "
+            "leftover (the partial replay rebuilt no edges)")
+        assert not os.path.exists(
+            os.path.join(d, ".tortoise-prewipe-snapshot.json"))
+    finally:
+        ctx["proj"].close()
+        shutil.rmtree(ctx["dir"], ignore_errors=True)
+
+
+def test_prewipe_snapshot_restores_quarantined_batch():
+    """#2943: the #990 half — a quarantined :Batch marker and its Point
+    .batch_id enforcement link are only in the graph (raw writes, no JSONL
+    event), so the sidecar is their only durable record."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    ctx = _interrupted_rebuild("tortoise_2943_batch_", batch=True)
+    try:
+        proj, d = ctx["proj"], ctx["dir"]
+        sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+        with open(sidecar, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        assert payload["batch_snapshot"], "quarantine marker not snapshotted"
+        assert payload["batch_point_links"], "batch_id link not snapshotted"
+
+        proj.rebuild_all(d)
+        rows = proj.g.query(
+            "MATCH (b:Batch {id:'batch-1'}) RETURN b.status").result_set
+        assert rows and rows[0][0] == "quarantined", (
+            "a quarantined :Batch must stay quarantined across the recovery")
+        rows = proj.g.query("MATCH (p:Point {id:$pid}) RETURN p.batch_id",
+                            params={"pid": ctx["points"][0][0]}).result_set
+        assert rows and rows[0][0] == "batch-1", (
+            "the batch_id enforcement link must be restored or the "
+            "quarantine lock silently bypasses (#1025)")
+    finally:
+        ctx["proj"].close()
+        shutil.rmtree(ctx["dir"], ignore_errors=True)
+
+
+def test_recover_from_log_leaves_nonempty_graph_and_pending_snapshot():
+    """#2943: auto-recovery still never rebuilds a non-empty graph — a
+    partially replayed graph keeps its sidecar for an explicit rebuild."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+
+    ctx = _interrupted_rebuild("tortoise_2943_nonempty_")
+    try:
+        proj, d = ctx["proj"], ctx["dir"]
+        sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+        proj.g.query("CREATE (n:Point {id:'partial', content:'partial',"
+                     " status:'live', pointKind:'statement'})")
+        result = recover_from_log(d, proj)
+        assert result["recovered"] is False, result
+        assert "already has nodes" in result["reason"], result
+        rows = proj.g.query(
+            "MATCH (n:Point {id:'partial'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1, "a non-empty graph must not be wiped"
+        assert os.path.exists(sidecar), "the sidecar is kept for the retry"
+    finally:
+        ctx["proj"].close()
+        shutil.rmtree(ctx["dir"], ignore_errors=True)
+
+
+def test_recover_from_log_refuses_ambiguous_logs_with_pending_snapshot():
+    """#2943: the sidecar route is still gated by the #428 single-log
+    discriminator — an ambiguous log set is refused, never auto-replayed."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+
+    ctx = _interrupted_rebuild("tortoise_2943_ambig_")
+    try:
+        proj, d = ctx["proj"], ctx["dir"]
+        sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+        EventLog(os.path.join(d, "events-extra.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "extra-1", "content": "restore artifact",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        result = recover_from_log(d, proj)
+        assert result["recovered"] is False, result
+        assert "ambiguous" in result["reason"], result
+        rows = proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set
+        assert rows[0][0] == 0, "a refused recovery must not wipe or replay"
+        assert os.path.exists(sidecar), "the sidecar is kept for the retry"
+    finally:
+        ctx["proj"].close()
+        shutil.rmtree(ctx["dir"], ignore_errors=True)
+
+
+def test_prewipe_snapshot_non_str_id_aborts_before_wipe():
+    """#2943: a non-string Point id cannot round-trip the sidecar, so the
+    rebuild must refuse BEFORE the wipe.
+
+    The capture would otherwise emit an entry the loader rejects on the NEXT
+    run, making the directory permanently unrebuildable — and this run would
+    wipe a node that nothing can restore (`_upsert_point_props` and the
+    replay's id indexing are str-only, #331 r4).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_2943_nsid_")
+    try:
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("CREATE (n:Point {id: 7, content:'legacy numeric id',"
+                         " status:'live'})")
+            with pytest.raises(RuntimeError,
+                               match="could not be captured"):
+                proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point) RETURN count(n)").result_set
+            assert rows[0][0] == 1, (
+                "an uncapturable id must abort the rebuild, not destroy it")
+            assert not os.path.exists(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"))
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_clear_is_atomic_against_a_failed_unlink():
+    """#2943: a completed rebuild must leave nothing that can be re-merged.
+
+    Simulates the unlink failing (and, equivalently, a crash between the
+    retirement write and the unlink) and asserts the artifact left behind
+    merges NOTHING — otherwise the next rebuild rolls the graph back to
+    pre-wipe values, resurrecting nodes deleted since.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_2943_atomic_")
+    try:
+        EventLog(os.path.join(d, "events.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "journaled",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("CREATE (n:Point {id:'g1', content:'graph-only',"
+                         " status:'live', pointKind:'statement'})")
+            sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
+            proj.rebuild_all(d)          # completes → sidecar retired
+            # Re-plant the pre-wipe payload to stand in for the unlink having
+            # failed, then prove a retirement write makes it inert.
+            with open(sidecar, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "synthetic_events": [{
+                    "type": "PointAdded",
+                    "point": {"id": "g1", "content": "graph-only",
+                              "status": "live", "pointKind": "statement"},
+                    "projection_version": 2}],
+                    "batch_snapshot": [], "batch_point_links": []}, fh)
+            from tortoise.projection import _clear_prewipe_snapshot
+            with mock.patch("tortoise.projection.os.remove",
+                            side_effect=OSError("busy")):
+                _clear_prewipe_snapshot(sidecar)
+            assert os.path.exists(sidecar), "the unlink was made to fail"
+
+            # A legitimate delete AFTER the completed rebuild must not come
+            # back: the retired (entry-less) sidecar has nothing to merge.
+            proj.g.query("MATCH (n:Point {id:'g1'}) DETACH DELETE n")
+            proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
+            assert rows[0][0] == 0, (
+                "a retired sidecar must not resurrect a node deleted after "
+                "the rebuild that retired it")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_recover_from_log_recovers_from_a_sidecar_with_no_jsonl():
+    """#2943: zero adjacent logs is not an ambiguous log set.
+
+    With no JSONL at all the sidecar is the ONLY record of anything, so the
+    #428 ambiguity refusal must not fire; the <0-events clause is knowingly
+    waived while a sidecar is pending (db_count == 0 already bounds it).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import _write_prewipe_snapshot
+
+    d = tempfile.mkdtemp(prefix="tortoise_2943_nojsonl_")
+    try:
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            # A crashed rebuild leaves the graph wiped, and on reopen
+            # `_auto_health_recover` runs BEFORE `_ensure_indexes` — so at
+            # recovery time the FTS `:Meta` markers have not been re-created
+            # yet and the all-label count really is 0. Reproduce that state.
+            proj.g.query("MATCH (n) DETACH DELETE n")
+            _write_prewipe_snapshot(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"), {
+                    "version": 1,
+                    "synthetic_events": [{
+                        "type": "PointAdded",
+                        "point": {"id": "only-copy", "content": "claim ONE",
+                                  "pointKind": "statement",
+                                  "status": "live"},
+                        "projection_version": 2}],
+                    "batch_snapshot": [], "batch_point_links": []})
+            assert not os.listdir(d) or not any(
+                f.endswith(".jsonl") for f in os.listdir(d))
+            result = recover_from_log(d, proj)
+            assert result["recovered"] is True, result
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'only-copy'}) RETURN n.content"
+            ).result_set
+            assert rows and rows[0][0] == "claim ONE", (
+                "the sidecar is the only record and must be restored")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_recover_from_log_reports_a_batch_only_recovery_as_recovered():
+    """#2943: `recovered` means the rebuild COMPLETED, not `nodes > 0`.
+
+    A snapshot can legitimately carry only the #990 half (a quarantined
+    :Batch with no Points). Reporting that as recovered=False makes the
+    embedded caller refuse to open a DB whose quarantine state was just
+    restored — and which the rebuild has already retired its sidecar for.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import _write_prewipe_snapshot
+
+    d = tempfile.mkdtemp(prefix="tortoise_2943_batchonly_")
+    try:
+        EventLog(os.path.join(d, "events.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "journaled",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("MATCH (n) DETACH DELETE n")  # post-crash state
+            _write_prewipe_snapshot(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"), {
+                    "version": 1,
+                    "synthetic_events": [],
+                    "batch_snapshot": [{"id": "b1",
+                                        "status": "quarantined"}],
+                    "batch_point_links": []})
+            result = recover_from_log(d, proj)
+            assert result["recovered"] is True, (
+                "the rebuild completed — a batch-only snapshot still counts")
+            rows = proj.g.query(
+                "MATCH (b:Batch {id:'b1'}) RETURN b.status").result_set
+            assert rows and rows[0][0] == "quarantined", (
+                "the quarantine lock must be restored")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_prewipe_snapshot_restores_replay_gap_properties():
+    """#2943: a graph-only Point terminalized BEFORE the wipe must come back
+    terminal — not resurrected as an EP-live factor.
+
+    `_upsert_point_props`'s fixed SET list omits `outdated`/`expiredAt`/
+    `posterior_*`/`content_hash`, so a snapshot Point whose node survives the
+    wipe would otherwise lose the state that made it terminal (the #2488
+    ghost class: the invalidated claim re-enters the EP factor set) and come
+    back hash-less (#2971: every hash-keyed dedup/terminal guard misses it).
+    The pass-1b tail re-applies the captured values.
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_2943_gap_")
+    try:
+        EventLog(os.path.join(d, "events.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "journaled",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query(
+                "CREATE (n:Point {id:'g1', content:'graph-only', "
+                "status:'live', pointKind:'statement', outdated:true, "
+                "expiredAt:'2026-01-01T00:00:00Z', posterior_alpha:0.5, "
+                "posterior_beta:2.5, content_hash:'deadbeef'})")
+            proj.rebuild_all(d)
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'g1'}) RETURN n.outdated, n.expiredAt, "
+                "n.posterior_alpha, n.posterior_beta, n.content_hash"
+            ).result_set
+            assert rows, "the graph-only Point must survive the rebuild"
+            outdated, expired_at, alpha, beta, content_hash = rows[0]
+            assert outdated is True, (
+                "a terminalized graph-only Point came back live — the #2488 "
+                "ghost class")
+            assert expired_at == "2026-01-01T00:00:00Z"
+            assert alpha == 0.5 and beta == 2.5
+            assert content_hash == "deadbeef", (
+                "the restored Point is hash-less — every hash-keyed dedup "
+                "and terminal guard misses it (#2971)")
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_recover_from_log_ignores_a_retirement_artifact():
+    """#2943: an entry-less retirement artifact must not divert auto-recovery.
+
+    `_clear_prewipe_snapshot` leaves an entry-less sidecar on disk when its
+    unlink fails (or the process dies between the two steps). That artifact
+    holds nothing, so the pending-sidecar probe must report "absent" — the
+    loader already does — and recovery must take the faithful apply() path
+    rather than a destructive wipe+replay (or, with no log at all, claim a
+    recovery that restored nothing).
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import _write_prewipe_snapshot
+
+    d = tempfile.mkdtemp(prefix="tortoise_2943_retired_")
+    try:
+        EventLog(os.path.join(d, "events.jsonl")).append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "journaled",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2, "initiated_by": "extractor"})
+        proj = FalkorProjection(os.path.join(d, "tortoise.db"),
+                                graph_name="test")
+        try:
+            proj.g.query("MATCH (n) DETACH DELETE n")  # post-crash state
+            _write_prewipe_snapshot(
+                os.path.join(d, ".tortoise-prewipe-snapshot.json"), {
+                    "version": 1, "completed": True,
+                    "synthetic_events": [], "batch_snapshot": [],
+                    "batch_point_links": []})
+            result = recover_from_log(d, proj)
+            # The journal is replayed by the faithful apply() path, and the
+            # result must not claim a sidecar-driven rebuild.
+            assert "pre-wipe snapshot" not in result["reason"], result
+            assert result["reason"] != "", result
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'evt-001'}) RETURN count(n)").result_set
+            assert rows[0][0] == 1, result
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 # ═══════════════════════════════════════════════════════════════════════════
 # #2850 — bounded, env-configurable FalkorDB client socket timeouts
 # ═══════════════════════════════════════════════════════════════════════════

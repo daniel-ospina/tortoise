@@ -1,0 +1,72 @@
+# Cloudflare Pages routing — app.premiselabs.co (tortoise-dashboard project).
+#
+# WHY THIS FILE EXISTS (#3523)
+# ---------------------------
+# With no top-level 404.html, Cloudflare Pages assumes a single-page app and
+# serves the root document for EVERY unmatched path — /admin and
+# /nonsense-probe-xyz both returned 200 and rendered the dashboard overview,
+# silently discarding the address the visitor asked for. 404.html makes an
+# unknown path an honest 404; the rules below keep serving the app for the
+# pathnames the app actually owns, and send /admin to the console it means.
+#
+# The dashboard is hash-routed (src/main.jsx reads location.hash; the tabs are
+# #/overview, #/keys, …), so the app owns exactly three pathnames:
+#
+#   /         the app itself — served by the index.html asset
+#   /welcome  in-app onboarding / first-run wizard (#1287, #1566)
+#   /team     Stripe checkout + billing-portal return — the URLs
+#             tortoise/hosted_api.py builds as _billing_default_success_url()
+#             and _billing_default_portal_return()
+#
+# Everything else is not an app route and 404s. welcome.html (tortoise host)
+# client-redirects into /welcome, and Stripe returns to
+# /team?session_id=…&new_org=… — both must keep their URL AND query string, so
+# they are 200-rewritten to the app document rather than redirected (a
+# redirect would rewrite the URL the SPA branches on, and the ?session_id=
+# handoff is read from location.search).
+
+# Valid app pathnames → the app document. 200 = serve it at this URL.
+#
+# Destination is `/`, NOT `/index.html`: Pages normalizes a `.html` destination
+# with its own redirect, so `/index.html` turns this 200 rewrite into a 308 to
+# `/` — silently dropping the `/welcome` pathname that welcome mode keys on
+# (and for /team, replacing the 200 with a redirect).
+# `wrangler pages dev` flags that as an infinite loop and ignores the rule.
+#
+# Static rules precede any dynamic rule below (Pages applies the top-most
+# match).
+/team      /  200
+/team/     /  200
+
+# NO `/welcome` RULE — deliberately removed in the #4104 x #4006 merge.
+#
+# main added `/welcome / 200` for the in-app first-run wizard (#1287, #1566),
+# which was correct when the app project had no `welcome.ts`. #4171 MOVED
+# `functions/welcome.ts` onto this origin, and a matching FUNCTION beats
+# `_redirects` on inbound routing — so the rewrite stopped serving the wizard
+# and started actively breaking the recovery landing: `welcome.ts` serves the
+# reset panel by calling `env.ASSETS.fetch(...)`, that call re-enters the ASSET
+# router (where `_redirects` DOES apply), and `/welcome / 200` answered with the
+# SPA document instead of `welcome.html`. The panel silently disappeared — the
+# served page had no `#reset-panel` in it.
+#
+# `welcome.ts` is now the single owner of `/welcome` and decides on the server
+# (signed in → app root; `?reset=1` → the panel; no session → `/auth`).
+# Re-adding a rule here re-introduces the collision.
+
+# /admin genuinely means the console — and #4171 MOVED the console to THIS
+# origin (app.premiselabs.co).
+#
+# REMOVED here (#4104 x #4006 merge): these three rules sent
+# `app.premiselabs.co/admin` -> `tortoise.premiselabs.co/admin`, the OPPOSITE of
+# what `website/functions/_middleware.ts` does (`tortoise.*/admin` ->
+# `APP_ORIGIN/admin`).
+#
+# They were also DEAD CODE, and this is the part worth knowing before re-adding
+# anything here: Cloudflare Pages runs a matching FUNCTION before `_redirects`,
+# so `functions/admin/[[path]].ts` served /admin and these rules never fired —
+# verified on the real runtime (`wrangler pages dev dist`: `/admin` with no
+# cookie answers 302 `/auth?next=%2Fadmin&stale=1` from the gate, not 301 to
+# tortoise). They were removed for being contradictory, not because they were
+# live: leaving them in would make the file disagree with the architecture and
+# would go live the moment the gate stops matching.

@@ -9,6 +9,7 @@ a unique graph name). Tests clean up at start to avoid ordering issues.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -47,6 +48,7 @@ def sdk():
     _clean_graph(sdk)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _clean_graph(sdk: TortoiseSDK) -> None:

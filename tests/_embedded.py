@@ -16,15 +16,228 @@ RAW_EMBEDDED_ALLOWLIST in test_embedded_lifecycle.py.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
+import shutil
 import tempfile
+import threading
 
 import pytest
 
 from tortoise.config import is_db_uri
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.projection import FalkorProjection
+
+# ── #4439: no RDB snapshot storm from ephemeral harness fixtures ──────────
+#
+# redislite ships a periodic save schedule in
+# `DEFAULT_REDIS_SETTINGS['save']` (900 1 / 300 100 / 60 200 / 15 1000), so
+# EVERY server it starts is CONFIGURED to fork an `redis-rdb-bgsave` snapshot
+# on those triggers. A short-lived fixture that writes little never reaches
+# one (which is why small-graph RDB snapshots are known not to fire — see
+# `tortoise/projection/__init__.py`); the servers that DO reach the triggers
+# are the long-lived fixtures — the leaked #4299 population and the
+# session-scoped shared projection — whose data is discarded by definition.
+# On a loaded box holding hundreds of them that fork storm is the single
+# largest CPU consumer (#4439). A harness fixture never needs an automatic
+# snapshot:
+# explicit `SAVE`/`BGSAVE`, a graceful explicit `close()` (redislite's
+# `shutdown(save=True)`), and the AOF path (`TORTOISE_EMBEDDED_AOF=1`) are the
+# persistence contracts the suite actually asserts. (Interpreter-exit teardown
+# is `SHUTDOWN NOSAVE` when `TORTOISE_FAST_ATEXIT=1`, as conftest sets — see
+# `tortoise/embedded_lifecycle.py` — so it never relied on the schedule either.)
+#
+# Scope of the relief: this changes the schedule for servers constructed AFTER
+# the patch. Already-running leaked servers (#4299) keep their old schedule and
+# keep forking until reaped — this is the "leak at source" arm, not an instant
+# drop in the measured population.
+#
+# The patch is applied HERE, at module import — `tests/conftest.py` imports
+# this module before any server is constructed — so it covers every
+# in-process construction, including module-import-time ones.
+#
+# ⛔ TRAP (do not "simplify" this to `[]` or `''`):
+# `redislite.configuration.config()` renders only TRUTHY settings
+# (`if config_dict[key]: ... else: del config_dict[key]`). A falsy value
+# therefore OMITS the `save` directive entirely, and Redis then applies its
+# BUILT-IN defaults (measured on the bundled redis-server v8.6.2:
+# `3600 1 300 100 60 10000`) — the storm continues while the change LOOKS
+# correct. The value must be truthy AND equal to Redis's
+# disable form: the two-character string `""`, which `config_line` renders
+# as `save ""`. `tests/test_embedded_lifecycle.py` pins both halves.
+#
+# ⛔ SCOPE (do not "fix" this in product code): `tortoise.FalkorDB` subclasses
+# redislite's client and serves genuinely durable embedded user databases too.
+# Disabling persistence there would change PRODUCT durability semantics for
+# every user of embedded mode, not just test-fixture behaviour — a real
+# embedded graph must keep its automatic snapshot in production. This is a
+# TEST-HARNESS patch only; `tortoise/__init__.py` is deliberately untouched.
+# (The patch is process-global WITHIN a test session, so an in-process
+# `tortoise.FalkorDB(path)` built by a test also gets the fixture schedule.
+# That is deliberate: every durability assertion in the suite drives an
+# explicit `SAVE`/`BGSAVE` or a graceful `close()`, and no test depends on a
+# periodic snapshot — pinned by the embedded carve-out lane.)
+#
+# ⛔ DECISION CONTRADICTION (reconciled, not ignored): the closed #3827 plan doc
+# (docs/plans/2026-09-17-3827-embedded-lane-evidence-producer.md, D19) recorded
+# that the embedded lane RETAINS a save fork source — `CONFIG GET save`
+# non-empty (redislite default) — and `tools/embedded_evidence.py` carries a
+# `save-child-slot` fork-cause class keyed on it. #4439 (the owner-filed issue
+# this patch implements) deliberately supersedes D19's live-axis premise for
+# HARNESS FIXTURES: `CONFIG GET save` is now empty there and `save-child-slot`
+# is unreachable on the embedded lane. D19's enforcing file
+# (tests/test_embedded_save_tripwire.py) was never committed and #3827 is
+# closed, so nothing is red — but any future tripwire must assert the DISABLED
+# form, not the redislite default.
+#
+# Residual (tracked, not absorbed): servers spawned by a test's own SUBPROCESS
+# (`python -c '... FalkorDB() ...'`) do not import this module and keep the
+# default schedule — follow-up issue #4497. Such a spawn exits long before
+# `900 1`'s 900 s window and writes at most a handful of keys (the
+# reaper/lifecycle ones write nothing; the concurrency writer spawns write a
+# few), so no change-count or time trigger is reached; the fork cost is
+# produced by the long-lived in-process fixtures this patch covers. Servers
+# constructed with an explicit `serverconfig={'save': ...}` keep that explicit
+# value (`settings()` applies kwargs over the default).
+REDIS_SAVE_DISABLED = '""'
+
+
+def _disable_redislite_rdb_save() -> None:
+    """Set redislite's default save schedule to Redis's disable form (#4439).
+
+    Idempotent and non-raising: redislite absent means no embedded servers
+    exist, so there is nothing to damp.
+    """
+    try:
+        from redislite import configuration
+    except Exception:  # pragma: no cover - redislite absent
+        return
+    configuration.DEFAULT_REDIS_SETTINGS["save"] = REDIS_SAVE_DISABLED
+
+
+_disable_redislite_rdb_save()
+
+# #4096: session-scoped test trees created by fixtures in this module and in
+# tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
+# which `_redislite_hygiene` declares as a dependency so pytest's reverse-order
+# teardown runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have
+# used the socket/pid evidence inside these trees. A local `rmtree` in the shared
+# fixture's own finalizer would run first, destroy that evidence, and could orphan
+# a live redislite server (the #4068/#1005 class).
+SESSION_TMPDIRS: list[str] = []
+
+
+def register_session_tmpdir(path: str) -> None:
+    """Register a session-scoped test tree for end-of-session reclamation."""
+    SESSION_TMPDIRS.append(path)
+
+
+def reclaim_tmpdirs(dirs: list[str]) -> int:
+    """rmtree each tree in ``dirs`` (best-effort) and return the count.
+
+    Split out from the session reclaimer so the removal primitive is unit-
+    testable without draining the live ``SESSION_TMPDIRS`` registry mid-session.
+    """
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    return len(dirs)
+
+
+def drain_session_tmpdirs() -> int:
+    """Drain + reclaim ``SESSION_TMPDIRS`` (the session reclaimer's body).
+
+    Split from the fixture so the drain-and-clear behaviour is unit-testable
+    without driving a session-scoped pytest fixture.
+    """
+    dirs, SESSION_TMPDIRS[:] = list(SESSION_TMPDIRS), []
+    return reclaim_tmpdirs(dirs)
+
+
+# ── #3546: ONE process-wide embedded construction lock ────────────────────
+# Consolidated here from the two per-file copies that #3511 installed
+# (`tests/test_import_endpoint.py`, `tests/test_export_delete.py`). The
+# invariant is PROCESS-wide while each copy was a module-scoped lock OBJECT —
+# two independent RLocks cannot serialize against each other, so every other
+# file that constructs an embedded projection without a prior construction on
+# its pinned path stayed exposed. `tests/test_invites_http.py` was one of
+# them: its `client` fixture enters `TestClient(app)` (arming the lifespan's
+# `tortoise-health-probe` constructor) before the `reg` fixture constructs the
+# seeder's projection, both on the same fresh temp db_path.
+#
+# The race (redislite `RedisMixin.__init__`): a NEW redis-server daemon is
+# started whenever `<db>.settings` is absent (or its recorded pid is dead).
+# Two constructions that interleave BEFORE either calls
+# `_save_setting_registry()` both take the fresh-start branch, each spawning a
+# daemon in its own tempdir; the LATER writer silently owns the registry, and
+# the loser's writes become invisible to every later opener. It surfaces as a
+# seed that reads back empty — e.g. a seeded Membership that an owner/admin
+# gate cannot see, so POST /v1/invites 403s instead of reaching its 402/200
+# branch (test_invites_http), or an import that looks like it wiped the graph
+# (`assert [] == ['old-0']`, test_import_endpoint #3505).
+#
+# Scope of the guarantee (this is NOT a global single-writer guarantee): the
+# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls; two paths
+# stay outside it and can still add or remove a registry entry — (1) a
+# construction that raises inside `_start_redis()` (RedisLiteException /
+# RedisLiteServerStartError) after its daemon spawned but before
+# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
+# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
+# and shuts the daemon down from `__del__`/atexit on any thread. Callers that
+# need more than the lock must therefore ALSO verify visibility at seed time
+# (the named `SeedVisibilityError` guard in test_import_endpoint's
+# `_seed_live_graph` is the reference shape).
+#
+# Two further classes sit outside the lock BY CONSTRUCTION — they are limits,
+# not coverage gaps to close here: (3) a construction made at test-module
+# IMPORT time, because the fixture installs at first test SETUP, after
+# collection has already imported every module; and (4) a raw redislite
+# `FalkorDB(path)` client, which never calls `FalkorProjection.__init__` — the
+# raw-layer files that build clients directly (RAW_EMBEDDED_ALLOWLIST in
+# test_embedded_lifecycle.py) do so because the construction IS their test
+# input. Subprocess constructions are likewise outside an IN-PROCESS lock.
+# A test that monkeypatches `FalkorProjection.__init__` itself (e.g.
+# test_pipeline_cli) replaces this wrapper for that test's duration; those
+# seams are function-scoped and single-threaded.
+#
+# Blast radius of the critical section: it spans the WHOLE `__init__`,
+# including redislite's blocking `subprocess.call` server start and the
+# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
+# embedded start therefore stalls every in-process constructor, not just its
+# own thread. That wait is bounded by redislite's socket-wait `start_timeout`,
+# but NOT by any timeout on a hung `redis-server` binary — accepted
+# deliberately: a hung start is a louder failure than a silent second daemon.
+EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+
+
+def serialize_embedded_construction(monkeypatch) -> None:
+    """Install THE process-wide `FalkorProjection.__init__` wrapper (#3546).
+
+    Called exactly once, by the session-scoped autouse
+    `_serialize_embedded_construction` fixture in `tests/conftest.py` — never
+    per file. Files must NOT install their own copy: a second lock object
+    cannot serialize against this one, which is the defect #3546 names.
+
+    `monkeypatch` is a `pytest.MonkeyPatch` instance owned by the caller (the
+    session fixture cannot use the function-scoped `monkeypatch` fixture), so
+    the caller controls undo. Idempotent: re-wrapping an already-wrapped
+    `__init__` is a no-op, so a duplicate install can never stack a redundant
+    critical section.
+    """
+    prev = FalkorProjection.__init__
+    if getattr(prev, "_tortoise_construction_serialized", False):
+        return
+
+    def _serialized_proj_init(self, *args, **kwargs):
+        # `return` forwarded deliberately: `__init__` must return None, so it
+        # is inert today, but it stays correct if this wrapper is ever reused
+        # for a factory or `__new__` (where dropping the result is a bug).
+        with EMBEDDED_CONSTRUCTION_LOCK:
+            return prev(self, *args, **kwargs)
+
+    _serialized_proj_init._tortoise_construction_serialized = True
+    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
 
 
 # ── Epic #1686: worker-thread probe ───────────────────────────────────────
@@ -72,6 +285,10 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_backup_e2e",
     "test_config",
     "test_embedded_concurrency",
+    # #2879: the embedded AOF durability drift pin measures an on-disk
+    # `<db>-appendonlydir` artifact — under the docker redirect it would
+    # construct against the server and see none (the opt-in half reds).
+    "test_embedded_durability_claim",
     "test_embedded_lifecycle",
     "test_embedded_lifecycle_fast_close",
     "test_eval_ingest_retry",
@@ -89,10 +306,38 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_graph_integrity_gate",
     "test_guard",
     "test_hard_reject",
+    # #4047: the two #3845 fork-guard files carry a module-level
+    # ``pytestmark = pytest.mark.embedded_only`` — their SUBJECT is the embedded
+    # daemon (the module-fork wedge lives inside the bundled redis-server, and
+    # both the producer and the mitigation are embedded-daemon internals), so
+    # embedded-only is the honest classification and they must not be
+    # reclassified onto the server lane. They were registered on the docker
+    # api/core surfaces but ABSENT from this list and from
+    # ``config/ci-surfaces.yml`` ``carve_out``: a full selection COLLECTED them
+    # and every test SKIPPED via the embedded_only hook — a permanently green,
+    # permanently unexecuted gate on main. Registered here and in ``carve_out``
+    # so the URI-unset carve-out job runs them on every full selection.
+    "test_fork_safety_3845",
+    "test_fork_slot_wedge_3845",
+    # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
+    # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
+    # opener — which is only possible BECAUSE this stem is exempt. Without the
+    # exemption the redirect (the ``FalkorProjection.__init__`` block) would
+    # rename every path-built graph to a per-path ``test_*`` name, so under a
+    # server URI no production name would exist: the probe's ``own=True`` and
+    # the listing filter would assert FAIL, and the opener would return None.
+    # A hard RED, never a false pass. Same carve-out rationale as
+    # test_hosted_backup.
+    "test_cross_tenant_read_isolation",
     "test_hosted_backup",
     "test_migrate_db",
     "test_ops_safety",
     "test_per_session_census",
+    # #4028: the surface half asserts embedded brute-force floor semantics
+    # (the docker sig-A vector branch returns no absolute similarity, so the
+    # floor cannot be applied there) — it must construct a real embedded
+    # store, not a redirected server graph.
+    "test_precision_leak_4028",
     "test_pre_migration_safety",
     # #3350: the embedded lane's socket timeout / retry-bound assertions are
     # embedded-only (a redirected construction would run against the docker
@@ -101,9 +346,27 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_projection_lifecycle",
     "test_reaper",
     "test_reaper_orphan",
+    # #2814: authoritative-config durability across rebuild_all — the wipe is
+    # embedded-only in practice (the bulk-wipe guard refuses non-test graphs in
+    # server mode), so its survival pins must never flip to the server lane.
+    "test_rebuild_config_preservation",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
+    # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+    # silent vecf32-overwrite behaviour (the server lane lands the same write),
+    # so they must construct a real embedded store — a redirected construction
+    # would run against the server and certify nothing. Registered with the
+    # carve_out list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality).
+    "test_vecf32_overwrite_seams_4524",
+    # #5148: `test_sdk_emit_event_survives_unreachable_seam` is `embedded_only`
+    # (it constructs a real embedded store), so it is a permanently green,
+    # permanently unexecuted gate on main unless this stem is routed to the
+    # URI-unset carve-out job — the #4047/#4524 shape. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality).
+    "test_write_path_unreachable_seam_5148",
 )
 
 _HAS_FALKOR: bool | None = None
@@ -142,10 +405,16 @@ def has_falkor() -> bool:
     if _HAS_FALKOR is None:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
-            db_path = os.path.join(
-                tempfile.mkdtemp(prefix="tortoise_probe_"), "probe.db")
-            proj = FalkorProjection(db_path, graph_name="test")
-            proj.close()
+            tmpdir = tempfile.mkdtemp(prefix="tortoise_probe_")
+            try:
+                db_path = os.path.join(tmpdir, "probe.db")
+                proj = FalkorProjection(db_path, graph_name="test")
+                proj.close()
+            finally:
+                # #4096: reclaim the probe tree even if construction/close raises
+                # — one per process before _HAS_FALKOR caches, and the reaper
+                # never reaps a .db-only tree.
+                shutil.rmtree(tmpdir, ignore_errors=True)
             _HAS_FALKOR = True
         except Exception:
             _HAS_FALKOR = False
@@ -244,6 +513,17 @@ BACKEND_IDENTITY = BackendIdentity()
 # need no server) opt in via TORTOISE_TEST_CARVE_OUT=1. Lives HERE (not
 # conftest) for the same reason as _embedded_only_skip: an import via
 # `tests.conftest` re-executes conftest's top-level code mid-session.
+def _carve_out_opted_in() -> bool:
+    """The ``TORTOISE_TEST_CARVE_OUT`` opt-in, through the declared contract.
+
+    #4097: truthy spellings (1/true/yes/on) now opt in; unset/blank/falsy/garbage
+    do not. Previously only the exact string ``"1"`` did, so ``=true`` — what a
+    human or a CI author naturally writes — silently failed the URI gate. The
+    opt-in permits a URI-less embedded run; it deletes nothing.
+    """
+    return is_truthy(os.environ.get("TORTOISE_TEST_CARVE_OUT"))
+
+
 def _assert_p4_uri_required() -> None:
     """Epic #1647 Task 10 Step 1a (plan-review P1-9): fail the session when
     TORTOISE_DB_URI is unset UNLESS TORTOISE_TEST_CARVE_OUT=1 is set.
@@ -261,7 +541,7 @@ def _assert_p4_uri_required() -> None:
     (which would re-execute conftest's top-level code)."""
     if _uri_set_supported():
         return
-    if os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1":
+    if _carve_out_opted_in():
         return
     pytest.fail(
         "default pytest requires TORTOISE_DB_URI (epic #1647 P4); run the "
@@ -454,6 +734,124 @@ def _created_since_last_wipe() -> set[str]:
     return set(names[_read_wiped_cursor():])
 
 
+# Graph-name families the session sweep OWNS — the only names it may
+# DETACH + GRAPH.DELETE. Anything else found in the journal is preserved
+# (#7795): a non-owned name means a test drove product code with a shared
+# path (e.g. `doctor --db docker://…/tortoise`).
+#
+# `team_`/`org_` are OWNED here because the JOURNAL is the ownership record
+# for a product-side mint (`_journal_append_product` — the hosted org_create
+# sites, #1686/#3543): a journaled product-namespace graph is demonstrably
+# ours because every site journals only a graph that call itself MINTED —
+# `register_user` mints a fresh `_short_id()`, `_eager_provision_org_graph`
+# returns before journaling when a `TeamMeta` already exists, and
+# `provision_tenant` existence-guards the append the same way (#7795 P2-3).
+# `org_` is the CURRENT spelling (#3543 rename); `team_` is retained
+# for graphs minted before it. Omitting `org_` is worse than a leak — the
+# name takes the `preserved` branch, `failed` stays empty, so the journal is
+# STILL removed below and the ownership record that could later reclaim it
+# is destroyed (no sweep nor `wipe_server`'s filter can attribute it again).
+#
+# ⚠️ DIVERGENCE (#7795 review P2) — do NOT "dedupe" this set against the
+# journal-BLIND copies: `_SERVER_WIPE_PREFIXES` below,
+# `test_derived_names.test_from_uri_sites_resolve_test_prefixed`, and
+# `test_pre_migration_safety._docker_projection_target`.
+# CITE SYMBOLS — a line-number pointer re-stales on every rebase (#7795 P2-2).
+# Those carry ONLY the `_SERVER_WIPE_PREFIXES` value BY DESIGN: their input is
+# GRAPH.LIST (the whole server, no ownership attribution), and a shared/dev
+# docker legitimately holds real tenant `team_*`/`org_*` graphs — adding a
+# product prefix there would make the last-suite-standing global sweep wipe
+# every tenant graph on the server. This set is safe ONLY because its input
+# is the journal (an ownership record).
+#
+# ── Graph-name ownership vocabulary (#3634) ────────────────────────────────
+# ONE declaration. Each set states its INPUT, because that is what makes it
+# safe: a prefix is not ownership; a journal record is.
+#   input: the JOURNAL (an ownership record). May include product families.
+_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
+#   input: GRAPH.LIST (no attribution). Deliberately a SUBSET (#7795).
+_SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
+#   input: opt-in via `_sweep_team_strays`; these are REAL tenant graphs (the
+#   product's own mint namespace — `org_` current since the #3543 rename,
+#   `team_` retained for graphs minted before it).
+_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+#   input: GRAPH.LIST, OPT-IN ONLY. THE #3634 CENSUS COHORT, as recorded on
+#   issue #3634: each entry below is a name verified present in that census,
+#   except `registry_test_` — the ONE deliberate stem (723 census names, so a
+#   stem is required there — the epic CI-3 cohort). Reach is therefore bounded
+#   to the cohort PLUS any future name that extends one of its prefixes
+#   (`startswith`, so `v10fix_c1` also approves `v10fix_c10`), and several
+#   entries are themselves prefixes of longer census names (`ttm_a1` of
+#   `ttm_a1_fresh1/2`, `review_rw_probe` of `review_rw_probe2`). ADDING A STEM
+#   HERE IS A SAFETY DECISION, not a convenience: every entry authorises an
+#   irreversible DETACH DELETE + GRAPH.DELETE, so widen only with a census
+#   name in hand.
+_LEGACY_RESIDUE_PREFIXES = (
+    "registry_test_",                # the epic CI-3 cohort — 723 census names
+    "v10fix_c0", "v10fix_c1", "v10fix_c2", "v10fix_c3", "v10fix_c4",
+    "v10fix_c5", "v10fix_c6", "v10fix_c7", "v10fix_c8", "v10fix_c9",
+    "v10_smoke",
+    "ttm_a1", "ttm_a1_fresh1", "ttm_a1_fresh2", "ttm_a3",
+    "ttm_batch1", "ttm_batch2", "ttm_batch3", "ttm_batch4", "ttm_wave2",
+    "review_rw_probe",               # covers review_rw_probe2 too
+    "askshape_b6_live_1_33760_21",
+    "legbudget_25979_txrx",
+    "tt4524_probe",
+    "probe_d10_doc_fts",
+)
+#
+# `_DIVERGENCE_REGISTER` ties every NAMED prefix constant on the declared
+# surface (`tests/_embedded.py`, `tortoise/sdk.py`,
+# `tortoise/projection/__init__.py`) to its rationale BY OBJECT IDENTITY —
+# tests/test_graph_name_ownership.py asserts the ties and fails on an
+# unregistered named constant. Anonymous prefix LITERALS are out of the
+# scanner's scope; they are governed by the DIVERGENCE comment above.
+_DIVERGENCE_REGISTER = {
+    "_SWEEP_OWNED_PREFIXES": {"set": _SWEEP_OWNED_PREFIXES,
+                              "reason": "the canonical journal-ownership declaration (#7795)."},
+    "_SERVER_WIPE_PREFIXES": {"set": _SERVER_WIPE_PREFIXES,
+                              "reason": "#7795 fail-closed: GRAPH.LIST has no attribution."},
+    "_PRODUCT_GRAPH_PREFIXES": {"set": _PRODUCT_GRAPH_PREFIXES,
+                                "reason": "real tenant graphs; opt-in via _sweep_team_strays."},
+    "_LEGACY_RESIDUE_PREFIXES": {"set": _LEGACY_RESIDUE_PREFIXES,
+                                 "reason": "#3634 journal-blind residue; opt-in only via _sweep_legacy_strays."},
+}
+
+
+def owns_by_ownership_record(name: object) -> bool:
+    """The JOURNAL path's predicate — the only one that may authorise a delete
+    from an ownership record (#7795). Mirrors the gate `_sweep_drop` applies:
+    a non-``str`` name is never owned."""
+    return isinstance(name, str) and name.startswith(_SWEEP_OWNED_PREFIXES)
+
+
+def is_legacy_residue(name: object, *, default_graph: str | None) -> bool:
+    """The GRAPH.LIST residue predicate (#3634). Opt-in only.
+
+    Deny-safe: a non-``str``, the literal production graph name ``tortoise``,
+    the URI default graph, anything the ownership record covers, and any
+    ``tortoise_restored*`` snapshot are all refused.
+
+    The ``tortoise`` and ``tortoise_restored*`` refusals mirror the production
+    guard ``TortoiseSDK.test_guard`` (``tortoise/sdk.py``), which blocks
+    destructive teardowns on BOTH spellings. This predicate must refuse at
+    least that set: its caller performs an irreversible DETACH DELETE +
+    GRAPH.DELETE on the names it approves. The ``name: object`` annotation is
+    deliberate — ``isinstance(name, str)`` is part of the tested contract, so a
+    non-``str`` is refused rather than coerced."""
+    if not isinstance(name, str):
+        return False
+    if name == "tortoise":
+        return False
+    if name.startswith("tortoise_restored"):
+        return False
+    if default_graph is not None and name == default_graph:
+        return False
+    if owns_by_ownership_record(name):
+        return False
+    return name.startswith(_LEGACY_RESIDUE_PREFIXES)
+
+
 def _uri_default_graph_name() -> str | None:
     """The URI-path default graph name, or None when no URI is set
     (cycle-6 P2-12). `from_uri(uri)` without an explicit graph_name resolves
@@ -606,7 +1004,16 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # sweep (scope=None → global) still owns it.
         if scope is not None and g == default_graph:
             continue
-        if not g.startswith(("test_", "tortoise_test")):
+        # ⚠️ DIVERGENCE (#7795 review P2): `_SERVER_WIPE_PREFIXES` is
+        # deliberately NARROWER than `_SWEEP_OWNED_PREFIXES` — it omits the
+        # product namespaces. This loop's input is GRAPH.LIST (the whole
+        # server, no ownership attribution), so on a shared/dev docker
+        # `team_*`/`org_*` may be a real tenant's (or a live peer's) graph;
+        # the journal-based `_sweep_drop` may include them because there the
+        # journal IS the ownership record. Do NOT dedupe the two sets
+        # (#7795 review P2). NAMING the symbol (rather than re-inlining the
+        # tuple) is load-bearing: the register tie cannot detect a literal.
+        if not g.startswith(_SERVER_WIPE_PREFIXES):
             continue  # fail-closed: never wipe a non-test graph
         # #3074/#3214: re-read the live peers' journals IMMEDIATELY before
         # this graph's DETACH. The up-front snapshot's window was
@@ -713,12 +1120,17 @@ def _proj_for_uri(uri: str):
     """A host-mode projection for a URI, constructed WITHOUT from_uri so the
     frame-gated journal append never fires from sweep code."""
     from urllib.parse import urlparse
+
+    from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
+    # #3039: decode userinfo through the single shared rule (urlparse does
+    # NOT percent-decode; the client constructor does not either).
+    username, password = parse_uri_userinfo(uri)
     return FalkorProjection(
         host=parsed.hostname or "localhost",
         port=parsed.port or 16379,
-        username=parsed.username or None,
-        password=parsed.password or None,
+        username=username,
+        password=password,
         graph_name=f"test_sweep_{os.urandom(4).hex()}",
         ssl=(parsed.scheme == "rediss"),
         skip_health_check=True,
@@ -775,6 +1187,23 @@ def _remove_journal_file(journal_file: str) -> None:
             pass
 
 
+def _owned_names(names, default_graph) -> set[str]:
+    """The shared ownership filter: owned ∧ journalled ∧ ¬default.
+
+    This is exactly the set `_sweep_drop` may DETACH+DELETE, and the only set
+    `_owned_survivors` may count as an E2E-7 leak (#3634 Task 5 review P2).
+    Factored so the delete path and the leak predicate cannot drift apart: a
+    name the sweep refuses to own must never be reported as a leak the sweep
+    failed to drop, and a name the sweep owns must never be silently exempt.
+
+    The URI-path default graph is excluded here because a per-session sweep
+    must not race other concurrent sessions' writes on the shared default
+    (cycle-4 P2-2 / cycle-8 P1-1); the last-suite-standing full sweep owns it.
+    """
+    return {n for n in names
+            if owns_by_ownership_record(n) and n != default_graph}
+
+
 def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
                 skip_on_non_loopback: bool = True) -> dict:
     """Drop the FILE journal's graph set on proj's server (cycle-8 P1-2:
@@ -784,7 +1213,17 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     the journal file is removed ONLY when every graph dropped (cycle-8 P2-4
     keep-on-partial — a crashed/partial sweep cannot lose its own drop-set
     bookkeeping; the next session's stale sweep retries). Returns a summary
-    dict {"dropped", "failed", "journal_removed"} or {"skipped": ...}.
+    dict {"dropped", "failed", "preserved", "journal_removed"} or
+    {"skipped": ...}.
+
+    FAIL-CLOSED name gate (#7795): only the families in
+    ``_SWEEP_OWNED_PREFIXES`` are ever DETACH+DELETEd. A name outside them
+    reached the journal because a test drove PRODUCT code with a shared path
+    (e.g. ``doctor --db docker://…/tortoise`` — the doctor CLI runs
+    in-process, so its ``from_uri`` journals from the test frame). Those are
+    PRESERVED and reported in ``preserved``: a test run must never wipe the
+    dev/compose/Cloud graph, and retrying would not make the name ours, so
+    the journal is still removed.
 
     #1686: team_* graphs reach the drop set ONLY via the journal — they are
     never test-prefixed (hosted parity: team_create + the hosted mint sites
@@ -801,28 +1240,50 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
         return {"skipped": f"non-loopback {host!r}", "journal_removed": False}
     names = _read_journal_file(journal_file)
     default_graph = _uri_default_graph_name()
+    # Duplicate entries (per-test seam re-appends) are idempotent — dedupe once,
+    # preserving order, so `preserved` reports each name exactly once.
+    unique = list(dict.fromkeys(names))
+    # The SAME ownership filter `_owned_survivors` (the E2E-7 gate) counts on —
+    # the delete set and the leak predicate are one predicate by construction.
+    owned = _owned_names(unique, default_graph)
+    # #7795 fail-closed: a name the sweep does not own is PRESERVED — never
+    # DETACH+DELETE a dev/compose/Cloud graph. See the docstring. `unique`
+    # minus `owned` minus the default is exactly that preserved set.
+    preserved = [g for g in unique if g != default_graph and g not in owned]
     dropped: list[str] = []
     failed: list[str] = []
-    seen: set[str] = set()
-    for g in names:
-        if g in seen:
-            continue  # duplicate entries (per-test seam re-appends) — idempotent
-        seen.add(g)
-        if g == default_graph:
-            # Cycle-4 P2-2 / cycle-8 P1-1: the shared URI-default graph is
-            # swept ONLY by the last-suite-standing full sweep (scope=None) —
-            # a per-session own/stale drop would race other concurrent
-            # sessions' live writes on the shared default.
+    for g in unique:
+        if g not in owned:
             continue
         if _drop_one_graph(proj, g, drop=drop):
             dropped.append(g)
         else:
             failed.append(g)
+    if preserved:
+        # #7795 review P2: `preserved` is the gate's ONE product, and no
+        # caller reads it (conftest discards the return dict; `_stale_sweep`
+        # only counts journals). Surface it through the logging channel every
+        # caller already honours — a preserved name means a test drove
+        # PRODUCT code onto a shared path. What happens to the journal is
+        # decided by the `failed` gate just below, so the message must state
+        # the branch THIS run took: with no owned failure the file IS removed
+        # (this warning is then the only record), but an owned failure KEEPS
+        # it — and claiming otherwise sends the operator away from the file
+        # that still holds the drop-set bookkeeping (P2-1).
+        journal_clause = (
+            "still consumed below, so retrying cannot reclaim them"
+            if not failed else
+            "KEPT (an owned drop failed) — a retry will re-preserve them")
+        logging.getLogger(__name__).warning(
+            "session sweep PRESERVED %d non-owned journaled graph(s): %s — "
+            "NOT dropped (#7795 fail-closed); the journal is %s",
+            len(preserved), ", ".join(sorted(preserved)), journal_clause)
     removed = False
     if not failed:
         _remove_journal_file(journal_file)
         removed = True
-    return {"dropped": dropped, "failed": failed, "journal_removed": removed}
+    return {"dropped": dropped, "failed": failed, "preserved": preserved,
+            "journal_removed": removed}
 
 
 def _session_end_own_sweep(uri: str, journal_file: str, *,
@@ -833,11 +1294,19 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback=skip_on_non_loopback)
 
 
-# The product's own mint namespace, for the journal-blind stray pass below.
-# `org_` is current (tenancy rename, #3543); `team_` is retained so an
-# opted-in run still reclaims graphs minted before the rename. Both identify
-# REAL tenant graphs — which is why the pass is opt-in only.
-_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
+def _live_graph_names(uri: str) -> set[str]:
+    """The live server's graph names. Mirrors the existing probe idiom
+    (conftest.py's `with _sweep_proj(uri) as probe: probe.db.list_graphs()`)."""
+    with _sweep_proj(uri) as probe:
+        return set(probe.db.list_graphs() or [])
+
+
+def _owned_survivors(journal_names, live_names, default_graph) -> set[str]:
+    """Owned ∧ journalled ∧ ¬default ∧ still live.
+
+    Uses the SAME ownership filter `_sweep_drop` drops on (`_owned_names`) —
+    only a name the OWNERSHIP RECORD (the journal) authorises is ever a leak."""
+    return _owned_names(journal_names, default_graph) & set(live_names)
 
 
 def _team_sweep_allowed(uri: str) -> bool:
@@ -850,8 +1319,14 @@ def _team_sweep_allowed(uri: str) -> bool:
     pre-#1686 design deliberately kept wipes fail-closed to
     test_/tortoise_test_ prefixes. Allowed ONLY via an explicit operator
     opt-in (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled product-namespace
-    graphs are always dropped via _sweep_drop (the journal is the ownership
-    record) — this gate protects only the journal-blind residual pass.
+    graphs — `org_*` (current) and `team_*` (pre-rename) — ARE dropped by
+    `_sweep_drop` (both spellings are in `_SWEEP_OWNED_PREFIXES`; the journal
+    IS the ownership record), with two exceptions, NEITHER ownership-based: a
+    non-loopback host skips the whole sweep (`skip_on_non_loopback`), and the
+    URI-path DEFAULT graph takes the `default_graph` `continue` (a
+    per-session sweep must not race the shared default; the
+    last-suite-standing full sweep owns it). This gate protects only the
+    journal-blind residual pass.
 
     #1884: the URI-path inference ("test" substring in the graph name) is
     RETRACTED. The longmem_eval re-validation runs against the SAME
@@ -865,6 +1340,14 @@ def _team_sweep_allowed(uri: str) -> bool:
     server is NOT an ownership record; the explicit opt-in is (CI's
     dedicated docker containers are fresh per job, so nothing accumulates
     there without the pass)."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant
+    # org_*/team_* namespace (the `uri` parameter is dead — the #1884 URI inference
+    # was retracted — so no containment check compensates), and widening a
+    # destructive opt-in surface is not a vocabulary-coherence win. The refusal is
+    # logged with the exact required spelling, so the narrowing is discoverable.
+    # Pinned by tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
     return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 
@@ -895,6 +1378,101 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "leftover product-namespace drop failed for %r: %r", g, e)
+    return dropped
+
+
+def _legacy_sweep_allowed() -> bool:
+    """#3634: may the journal-blind LEGACY RESIDUE pass run?
+
+    The residue cohort (``_LEGACY_RESIDUE_PREFIXES``) is names whose journals
+    are GONE, so neither the journal sweep (``_sweep_drop``) nor
+    ``wipe_server``'s test-prefix filter can attribute them — the only handle
+    left is the name SHAPE. That makes this pass journal-blind, and it
+    authorises an irreversible DETACH DELETE + GRAPH.DELETE on shape alone,
+    so it is fail-closed: allowed ONLY via an explicit operator opt-in
+    (``TORTOISE_TEST_SWEEP_LEGACY=1``). The residue set is disjoint from every
+    owned family by construction
+    (``tests/test_graph_name_ownership.py::test_residue_is_disjoint_from_every_owned_family``),
+    so this pass can never become a third copy of ``wipe_server``. The
+    refusal is logged by ``_sweep_legacy_strays``, so the narrowing is
+    discoverable."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the residue
+    # cohort, and widening a destructive opt-in surface is not a
+    # vocabulary-coherence win. Pinned by
+    # tests/test_wipe_server.py::test_legacy_sweep_gate_is_narrow_by_design, and
+    # its deliberate `OVERRIDES` against the ledger's shrink-by-default rule is
+    # recorded as a `_KNOWN_NARROW_READS` entry in tests/test_env_truthy.py and
+    # an OVERRIDES comment on issue #3634.
+    return os.environ.get("TORTOISE_TEST_SWEEP_LEGACY") == "1"
+
+
+def _sweep_legacy_strays(proj, *, default_graph: str | None) -> list[str]:
+    """Drop the journal-blind LEGACY RESIDUE cohort (#3634).
+
+    ⛔ MUST NEVER BE CALLED FROM A DEFAULT TEARDOWN PATH. This pass is
+    journal-blind: its input is ``GRAPH.LIST`` and its only authorization is
+    the name shape plus the explicit ``TORTOISE_TEST_SWEEP_LEGACY=1`` opt-in.
+    Wiring it into a session-end/atexit/stale path would turn a manual
+    reclamation into an automatic delete of unowned names. The AST pin in
+    ``tests/test_graph_name_ownership.py::test_legacy_sweep_has_no_default_call_site``
+    fails if this symbol is called from any of the default-path files it
+    scans.
+
+    Predicate: ``is_legacy_residue(name, default_graph=default_graph)`` — the
+    prefix list lives ONLY in ``_LEGACY_RESIDUE_PREFIXES`` (do not re-list it
+    here). ``default_graph`` is the URI-path default (or None) so the shared
+    default graph is refused exactly as in the journal path. LOOPBACK ONLY: a
+    non-loopback host refuses before any DETACH/DELETE and returns ``[]`` (this
+    pass has no caller to inherit the guard from, unlike ``_sweep_drop`` /
+    ``_sweep_team_strays``). DETACH+DELETE per graph, log-and-continue; returns
+    the dropped names.
+
+    OPERATOR INVOCATION — the AST pin guarantees no default call site, so this
+    is the only path; it is opt-in, loopback-only, and prints what it
+    reclaimed (names the predicate refuses are skipped, not printed)::
+
+        import os
+        from tests._embedded import (
+            _sweep_legacy_strays, _sweep_proj, _uri_default_graph_name,
+        )
+
+        os.environ["TORTOISE_TEST_SWEEP_LEGACY"] = "1"   # the explicit opt-in
+        uri = os.environ["TORTOISE_DB_URI"]              # loopback only
+        with _sweep_proj(uri) as proj:
+            dropped = _sweep_legacy_strays(
+                proj, default_graph=_uri_default_graph_name())
+        print("reclaimed:", dropped)
+
+    Pass ``default_graph=_uri_default_graph_name()`` (the URI-path default, or
+    None when no URI is set) — any other value un-protects the shared default
+    graph. On a loopback host the opt-in logger line names the required env
+    var when it is unset."""
+    from tortoise.projection import _is_loopback_host
+    host = _projection_host(proj)
+    if not _is_loopback_host(host):
+        logging.getLogger(__name__).info(
+            "legacy residue pass SKIPPED non-loopback host %r — refusing to "
+            "delete on a remote server", host)
+        return []
+    if not _legacy_sweep_allowed():
+        logging.getLogger(__name__).info(
+            "legacy residue pass SKIPPED — set TORTOISE_TEST_SWEEP_LEGACY=1 "
+            "to opt in (residue prefixes: %s)",
+            "/".join(_LEGACY_RESIDUE_PREFIXES))
+        return []
+    dropped: list[str] = []
+    for g in proj.db.list_graphs() or []:
+        if not is_legacy_residue(g, default_graph=default_graph):
+            continue
+        try:
+            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+            proj.db.select_graph(g).delete()
+            dropped.append(g)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "legacy residue drop failed for %r: %r", g, e)
     return dropped
 
 
@@ -985,8 +1563,64 @@ def shared_proj():
     if not has_falkor():
         yield None
         return
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     proj = FalkorProjection(db_path, graph_name="test")
     yield proj
     proj.close()
+
+
+@contextlib.contextmanager
+def fresh_embedded_proj(db_dir, *, graph_name: str | None = None, **kwargs):
+    """Function-scoped sanctioned embedded construction (#3769).
+
+    The per-test counterpart to ``shared_proj``. ``shared_proj`` is
+    ``scope="session"``, so its single server is built **once** and anything
+    read at construction time — including ``TORTOISE_EMBEDDED_AOF`` — is frozen
+    at the first case's value. A parametrised test would then observe the first
+    case's server, and its assertion would be vacuous **in exactly the way it
+    exists to prevent** (#3624 review: the default-off and opt-in-on cases must
+    not be able to see one another).
+
+    Constructs a FRESH server per call, on an explicit path inside the caller's
+    own directory, so construction-time flags are honoured per call and the
+    caller can inspect that directory for on-disk artifacts.
+
+    The raw construction lives HERE, at the seam — which is precisely the
+    rationale ``RAW_EMBEDDED_ALLOWLIST`` records for allowlisting
+    ``_embedded.py`` ("seam/helper — raw constructions ARE the
+    embedded-under-test input"). A consumer test therefore needs no
+    ``RAW_EMBEDDED_ALLOWLIST`` entry of its own.
+
+    It DOES, however, need a SECOND carve-out: the caller's test module stem
+    must be listed in ``TEST_NO_REDIRECT_STEMS``. Under a URI lane
+    (``TORTOISE_DB_URI`` + ``TORTOISE_TEST_MODE=1``) a stem that is not exempt
+    gets redirected — ``path`` is discarded and the construction connects to a
+    server — so there is no fresh embedded server and no on-disk artifact to
+    inspect. This seam therefore FAILS CLOSED on that case rather than yielding
+    a projection that would make an ``expect_aof=False`` assertion vacuous.
+
+    Teardown never masks the caller's assertion.
+    """
+    db_path = os.path.join(str(db_dir), "graph.db")
+    kwargs.setdefault("allow_nonstandard_path", True)
+    kwargs.setdefault("skip_health_check", True)
+    if graph_name is not None:
+        kwargs["graph_name"] = graph_name
+    proj = FalkorProjection(path=db_path, **kwargs)
+    if not getattr(proj, "_is_embedded", False):
+        with contextlib.suppress(Exception):
+            proj.close()
+        raise RuntimeError(
+            "fresh_embedded_proj is embedded-only: the caller's test module "
+            "must be listed in TEST_NO_REDIRECT_STEMS (tests/_embedded.py). "
+            "Otherwise the URI redirect flips this construction to a server, "
+            "`path` is discarded, and no on-disk artifact exists — which would "
+            "make an expect_absent assertion vacuous (#3769)"
+        )
+    try:
+        yield proj
+    finally:
+        with contextlib.suppress(Exception):
+            proj.close()

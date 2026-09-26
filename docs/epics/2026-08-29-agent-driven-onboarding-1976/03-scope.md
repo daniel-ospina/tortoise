@@ -14,6 +14,8 @@ aboutObjects: tortoise
 > **Inputs:** align decision (`01-align.md`, PROCEED + Rails 1/2) + research brief (`02-research-brief.md`).
 > **This doc is the pressure-tested formalization of the issue's embedded workstream list** — the W1-W12 decomposition is retained, but boundaries, customer value, complexity, and E2E tests are now explicit and reviewable before planning.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork card writes only the fork (or its unsure marker), never a `step`, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ---
 
 ## 0. Axis Research Notes

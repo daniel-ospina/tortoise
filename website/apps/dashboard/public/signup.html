@@ -1,0 +1,1828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log in or sign up — Tortoise</title>
+  <meta name="description" content="Log in to Tortoise or create your account — one page for everything.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/auth">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <!-- #2744: dashboard-origin seam. Production leaves it unset → the same
+       hardcoded app origin as before (no behavior change). The local-preview
+       e2e sets window.__DASHBOARD_BASE_URL = http://127.0.0.1:8790 before the
+       gate runs, so the post-login redirect stays on loopback and the
+       loopback session cookie the local dashboard reads is sent. -->
+  <script>
+    window.__DASHBOARD_BASE_URL = window.__DASHBOARD_BASE_URL || "https://app.premiselabs.co";
+  </script>
+  <!-- #3080: admin return-to. The /admin gate bounces to /auth?next=%2Fadmin;
+       without this the post-login redirect always went to the app ROOT, so the
+       blog admin console was unreachable by navigation. Runs BEFORE the hard
+       gate below (which uses __DASHBOARD_BASE_URL as its destination), so
+       overriding the base URL here covers every post-login path at once.
+       Allowlist-only: we never echo an arbitrary `next` — anything that is not
+       a same-origin PATH under /admin is ignored (open-redirect guard).
+       The query is the ONLY carrier: oauthNextPath() hands the return-to to
+       /auth/start (the BFF stores it in the flow row), so no round-trip marker
+       cookie is needed. -->
+  <script>
+    (function () {
+      try {
+        var raw = new URLSearchParams(window.location.search).get("next");
+        if (!raw) return;
+        // Same-origin PATH only: reject backslashes, then resolve and re-derive
+        // the path so dot-segments cannot escape the allowlist
+        // (/admin/../blog resolves to /blog) and an absolute or
+        // protocol-relative value cannot change the origin.
+        // NOTE: ':' is deliberately NOT rejected — a colon is legal in a path
+        // and the server gate emits it (returnToPath accepts /admin/a:b), so
+        // rejecting it here would silently drop the return-to and reproduce
+        // #3080 for colon paths. Schemes are already excluded by the leading
+        // '/' requirement plus the same-origin check below.
+        if (/\\/.test(raw) || raw.charAt(0) !== "/") return;
+        var u;
+        try { u = new URL(raw, window.location.origin); } catch (e) { return; }
+        if (u.origin !== window.location.origin) return;
+        var path = u.pathname;
+        if (path !== "/admin" && path !== "/admin/" && path.indexOf("/admin/") !== 0) return;
+        window.__ADMIN_RETURN_TO = path;
+        window.__DASHBOARD_BASE_URL = window.location.origin + path;
+      } catch (e) { /* best-effort — fall back to the app root */ }
+    })();
+  </script>
+  <!-- #1494/#3501: session probe. Under the BFF the session lives in an
+       HttpOnly `__Host-session` cookie, so the browser CANNOT read it and
+       there is no synchronous check left — the only way to know is to ask the
+       server. The probe STARTS here so the request is in flight before the
+       card paints; the main script consumes it once `showError` and the
+       redirect targets exist. Skipped when ?error/?error_code present (search
+       or #1909 fragment) — the #1224 OAuth state-expiry banner must render.
+       A 503 is "we could not tell" and must NEVER be treated as signed-out
+       (#3485): the probe's status is passed through, and only a 200 forwards.
+       location.replace keeps Back from returning here. -->
+  <script>
+    (function () {
+      try {
+        var p = new URLSearchParams(window.location.search);
+        // #1909: OAuth errors can land in the URL FRAGMENT (#error=…) — read
+        // both surfaces or a denied round-trip is forwarded past the banner.
+        var h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        window.__OAUTH_ERROR = !!(p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code"));
+        // #3080: the gate bounced us because the SERVER refused the session.
+        // Do NOT forward (this probe or the main script), or we re-enter the
+        // /admin <-> /auth loop the bounce came from. This URL is
+        // attacker-forgeable (?next=/admin&stale=1), so it must not clear a
+        // cookie either — the visitor signs in again, which overwrites it.
+        if (p.get("stale") === "1" && window.__ADMIN_RETURN_TO) window.__ADMIN_STALE = true;
+        window.__SESSION_PROBE = null;
+        if (window.__OAUTH_ERROR || window.__ADMIN_STALE) return;
+        // status only: 200 = signed in, 401 = signed out, 503/0 = unknown.
+        window.__SESSION_PROBE = fetch("/api/session", {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        }).then(function (r) { return r.status; }).catch(function () { return 0; });
+      } catch (e) { /* best-effort — the card still renders */ }
+    })();
+  </script>
+  <style>
+    .hidden {
+      display: none;
+    }
+
+    .checkmark {
+      width: 48px; height: 48px;
+      margin: 0 auto 1rem;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--green, #4ade80);
+    }
+    .checkmark svg { width: 100%; height: 100%; }
+    .dim { color: var(--text-dim); }
+    .small { font-size: 0.82rem; }
+
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --accent-hover: #0891b2;
+      --green: #4ade80;
+      --red: #ef4444;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; gap: 20px;
+      padding: 14px 24px; background: rgba(6, 11, 20, 0.92);
+      border-bottom: 1px solid var(--border, #1e293b);
+      backdrop-filter: blur(8px);
+    }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
+    .topbar .logo img { height: 40px; width: auto; display: block; }
+    .topbar nav { flex: 1; display: flex; gap: 16px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
+    .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
+    .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
+    .topbar .login:hover { background: var(--accent-hover, #0891b2); }
+    /* #3950: the Blog link makes this a 3-item nav plus Login, and the row no longer
+       fit a phone. This topbar is `position: fixed`, so its overflow never extends
+       `documentElement.scrollWidth` — the mobile no-horizontal-scroll guard is blind
+       to it. Measured in Chromium: with the Blog link the Login button sat 41.6px
+       off-screen at 320px (topbar scrollWidth 362 vs 320 client) while origin/main
+       fitted. Wrap below 560px so the bar reflows instead of clipping the button. */
+    @media (max-width: 560px) {
+      .topbar { flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
+      .topbar nav { flex-wrap: wrap; gap: 12px; }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding-top: 80px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 400px;
+      padding: 1.5rem;
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 1.25rem;
+    }
+
+    .logo a {
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .logo span {
+      color: var(--accent);
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-size: 1.5rem;
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .providers {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      margin-bottom: 0.75rem;
+    }
+
+    /* #1287: combined login/signup card — Log in / Sign up toggle */
+    .auth-mode-toggle {
+      display: flex; gap: 4px; margin-bottom: 16px;
+      background: var(--surface, #0d1a2d); border: 1px solid var(--border, #1e293b);
+      border-radius: 8px; padding: 3px;
+    }
+    .auth-mode-toggle button {
+      flex: 1; padding: 7px 0; border: none; background: none;
+      color: var(--text-dim, #94a3b8); font-size: 13px; font-weight: 600;
+      border-radius: 6px; cursor: pointer;
+    }
+    .auth-mode-toggle button.active { background: var(--accent, #06b6d4); color: #04121a; }
+
+    /* #1287: API-key login — button first, input revealed on click */
+    .btn-provider.hidden { display: none; }
+
+    /* Email+password login popup (login mode) — the inline form is
+       signup-only; login opens this focused dialog from a provider-style
+       button (#1287 follow-up). */
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(6, 11, 20, 0.82);
+      backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+      padding: 1rem;
+    }
+    .modal-overlay.hidden { display: none; }
+    .modal {
+      width: 100%; max-width: 360px;
+      background: var(--surface, #0d1a2d);
+      border: 1px solid var(--border, #1e293b);
+      border-radius: 12px;
+      padding: 1.5rem;
+      position: relative;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+    .modal h2 {
+      font-family: var(--serif);
+      font-size: 1.25rem; font-weight: 400;
+      color: var(--text, #cbd5e1);
+      margin-bottom: 1rem;
+    }
+    .modal-close {
+      position: absolute; top: 0.6rem; right: 0.75rem;
+      background: none !important; border: none !important;
+      color: var(--text-dim, #94a3b8) !important;
+      font-size: 1.4rem; line-height: 1; cursor: pointer;
+      padding: 0 !important; width: auto !important;
+    }
+    .modal-close:hover { color: var(--accent, #06b6d4) !important; }
+    .last-used {
+      font-size: 11px; font-weight: 400; color: var(--accent, #06b6d4);
+      margin-left: 0.5rem; opacity: 0.9;
+    }
+    .modal .form-group { margin-bottom: 0.75rem; }
+    .modal .error { margin-bottom: 0.75rem; }
+    .modal .modal-recovery { margin-top: 0.6rem; font-size: 12px; text-align: center; }
+    .modal .modal-recovery a { color: var(--accent, #06b6d4); text-decoration: none; }
+    .modal .modal-recovery a:hover { text-decoration: underline; }
+    .modal #modal-note { margin-top: 0.5rem; text-align: center; }
+    .modal .modal-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.6rem; }
+    .modal .btn-secondary {
+      background: transparent;
+      border: 1px solid var(--border, #1e293b);
+      color: var(--text-dim, #94a3b8);
+      flex: 1;
+    }
+    .modal .btn-secondary:hover { border-color: var(--accent, #06b6d4); color: var(--text, #cbd5e1); }
+
+    .btn-provider {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .btn-provider:hover {
+      border-color: var(--accent);
+      background: rgba(6, 182, 212, 0.08);
+    }
+
+    .btn-provider svg {
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin: 0.5rem 0;
+      color: var(--text-dim);
+      font-size: 12px;
+    }
+
+    .divider::before,
+    .divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    /* `.hidden` alone loses to `.divider { display: flex }` (equal
+       specificity, later source order) — kept for the legacy inline form's
+       divider, no longer rendered on the modal-only auth card. */
+    .divider.hidden { display: none; }
+
+    .form-group {
+      margin-bottom: 0.5rem;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 0.375rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .btn-submit {
+      width: 100%;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: var(--bg);
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-submit:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn-submit:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      color: var(--red);
+      font-size: 13px;
+      margin-bottom: 1rem;
+      display: none;
+    }
+
+    .error.visible {
+      display: block;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 1.5rem;
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    .footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .footer a:hover {
+      text-decoration: underline;
+    }
+
+    .footer p { margin: 0.15rem 0; }
+    .footer .footer-legal { margin-top: 0.45rem; font-size: 12px; }
+
+    .loading-spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Legal acceptance (clickthrough for Terms/Privacy per T5) */
+    .legal-accept {
+      margin: -0.5rem 0 0.5rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      color: var(--text-dim);
+      text-align: center;
+    }
+    .legal-accept a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .legal-accept a:hover {
+      text-decoration: underline;
+    }
+
+    /* #1287: short-viewport compaction — keep the legal-accept line,
+       OAuth buttons, and submit co-visible (legal-e2e test contract). */
+    @media (max-height: 700px) {
+      .container { padding-top: 0.5rem; padding-bottom: 1rem; }
+      .logo { margin-bottom: 0.5rem; }
+      .logo a { font-size: 1.25rem; }
+      h1 { font-size: 1.15rem; margin-bottom: 0.75rem; }
+      .providers { gap: 0.4rem; margin-bottom: 0.5rem; }
+      .form-group { margin-bottom: 0.35rem; }
+      .btn-submit { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
+    <nav>
+      <a href="https://tortoise.premiselabs.co/">Product</a>
+      <a href="/docs">Docs</a>
+      <a href="/blog">Blog</a>
+    </nav>
+    <a class="login" id="topbar-login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
+    <script>try { if (window.location.pathname === '/auth') document.getElementById('topbar-login').style.display = 'none'; } catch (e) {}</script>
+  </div>
+
+  <div class="container">
+    <div class="logo">
+      <a href="/">Premise <span>Labs</span></a>
+    </div>
+    <h1 id="page-title">Create your account</h1>
+
+    <div id="error" class="error" role="alert"></div>
+
+    <!-- #1287: combined login/signup card — Log in / Sign up toggle -->
+    <div class="auth-mode-toggle" role="tablist" aria-label="Log in or sign up">
+      <button role="tab" aria-selected="false" id="toggle-signin" onclick="setAuthMode(false)">Log in</button>
+      <button role="tab" aria-selected="true" class="active" id="toggle-signup" onclick="setAuthMode(true)">Sign up</button>
+    </div>
+
+    <!-- Legal acceptance (T5) sits directly under the mode toggle, ABOVE all
+         sign-in options — it is a statement, not an option in the list. -->
+    <p class="legal-accept" id="legal-accept">
+      By creating an account, you agree to the
+      <a href="/tos" target="_blank" rel="noopener">Terms of Service</a> and
+      <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
+    </p>
+
+    <div class="providers">
+      <button class="btn-provider" onclick="signInWithProvider('github')" id="btn-github">
+        <!-- GitHub icon -->
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.01 12.01 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+        </svg>
+        <span id="label-github">Sign up with GitHub</span>
+      </button>
+      <button class="btn-provider" onclick="signInWithProvider('google')" id="btn-google">
+        <!-- Google icon -->
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/>
+          <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+          <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+          <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+        </svg>
+        <span id="label-google">Sign up with Google</span>
+      </button>
+      <!-- #1494: FOUR first-class options — GitHub / Google open the OAuth
+           page; API key and email+password open focused modals (confirm +
+           cancel). Labels follow the Log in / Sign up toggle. -->
+      <button class="btn-provider" type="button" onclick="showApiKeyModal()" id="btn-apikey">
+        <span aria-hidden="true">🔑</span>
+        <span id="label-apikey">Log in with API key</span>
+      </button>
+      <button class="btn-provider" type="button" onclick="showEmailModal()" id="btn-email">
+        <!-- Email icon -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/>
+          <path d="M22 6l-10 7L2 6"/>
+        </svg>
+        <span id="label-email">Sign up with email</span>
+      </button>
+    </div>
+
+    <noscript>
+      <div class="error visible" role="alert">Please enable JavaScript to create an account.</div>
+    </noscript>
+
+    <!-- Check-your-inbox state (email confirmation ON, E2E-8) -->
+    <div id="confirmation-required" class="hidden" role="status" aria-live="polite">
+      <div class="checkmark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+          <polyline points="22,6 12,13 2,6"/>
+        </svg>
+      </div>
+      <h2>Check your inbox</h2>
+      <p class="dim">We sent a confirmation link to <strong id="confirm-email"></strong>. Click it to finish creating your account.</p>
+      <button type="button" class="btn-submit" id="btn-resend" onclick="resendConfirmation()">Resend email</button>
+      <p class="dim small" id="resend-note"></p>
+    </div>
+
+    <!-- Email+password modal — the ONE email surface (signup OR login per
+         the toggle). Opened by the "… with email" button. Form is method=post
+         + explicit action per the #527 form-safety contract (no GET
+         credential echo if JS fails); #email/#password/#btn-submit keep the
+         ids of the retired inline form so the #527 pins + lockout countdown
+         follow the live surface. -->
+    <div class="modal-overlay hidden" id="email-modal" role="dialog" aria-modal="true" aria-labelledby="email-modal-title">
+      <div class="modal">
+        <button type="button" class="modal-close" id="btn-modal-close" aria-label="Close" onclick="hideEmailModal()">×</button>
+        <h2 id="email-modal-title">Sign up with email</h2>
+        <form id="email-form" method="post" action="/auth" onsubmit="modalEmailSubmit(event)">
+          <div class="form-group">
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+          </div>
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" placeholder="••••••••" required minlength="6" autocomplete="new-password">
+          </div>
+          <div id="modal-error" class="error" role="alert"></div>
+          <button type="submit" class="btn-submit" id="btn-submit">Create account</button>
+          <div class="modal-actions">
+            <button type="button" class="btn-submit btn-secondary" id="btn-email-cancel" onclick="hideEmailModal()">Cancel</button>
+            <p class="modal-recovery"><a href="#" id="modal-forgot-link" style="display:none" onclick="modalForgotPassword(event)">Forgot password?</a></p>
+          </div>
+          <p id="modal-note" class="dim small" role="status"></p>
+        </form>
+      </div>
+    </div>
+
+    <!-- API-key modal — paste an existing key (agents / anon bootstrap).
+         Opened by the "… with API key" button. -->
+    <div class="modal-overlay hidden" id="apikey-modal" role="dialog" aria-modal="true" aria-labelledby="apikey-modal-title">
+      <div class="modal">
+        <button type="button" class="modal-close" aria-label="Close" onclick="hideApiKeyModal()">×</button>
+        <h2 id="apikey-modal-title">Log in with API key</h2>
+        <form id="apikey-form" method="post" action="/auth" onsubmit="loginWithApiKey(event)">
+          <div class="form-group">
+            <label for="apikey-input">API key</label>
+            <input type="password" id="apikey-input" placeholder="tt_…" autocomplete="off" aria-label="API key">
+          </div>
+          <div id="apikey-modal-error" class="error" role="alert"></div>
+          <button type="submit" class="btn-submit" id="btn-apikey-confirm">Log in</button>
+          <div class="modal-actions">
+            <button type="button" class="btn-submit btn-secondary" id="btn-apikey-cancel" onclick="hideApiKeyModal()">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>Already have an account? <a href="/auth" onclick="setAuthMode(false); return false;">Sign in</a></p>
+      <p class="footer-legal"><a href="/faq">FAQ</a> · <a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> · <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a></p>
+    </div>
+  </div>
+
+  <!-- #3501: NO supabase-js, NO cross-subdomain bridge. The BFF holds the
+       session server-side; the browser holds only the HttpOnly `__Host-session`
+       cookie it cannot read. Every auth call below is a same-origin request to
+       /auth/* or /api/*, and no raw token ever reaches this page. -->
+  <script>
+    // ── Configuration ──────────────────────────────────────────────────────
+    const WELCOME_URL = window.__DASHBOARD_BASE_URL;  // #1566: post-login target — first-timers get provisioned (welcome mode), returning users get the dashboard home
+    // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
+    // (non-secret tt_claim_pending marker set by the dashboard claim card
+    // on app.premiselabs.co — the raw tt_ key never leaves app-origin
+    // sessionStorage, P1-2), OAuth must land on the dashboard CLAIM ROUTE
+    // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
+    // claimable anon team).
+    const DASHBOARD_URL = window.__DASHBOARD_BASE_URL;
+    // #3080: where to NAVIGATE once a session exists (head gate + async bounce).
+    function claimRedirectTarget() {
+      // The admin return-to wins over claim routing — the console is the
+      // requested destination, and /admin has no claim card.
+      if (window.__ADMIN_RETURN_TO) return DASHBOARD_URL;  // absolute: origin + /admin path
+      try {
+        const m = document.cookie.match(/(?:^|; )tt_claim_pending=([^;]*)/);
+        if (m) {
+          return DASHBOARD_URL + "/?claim=1";
+        }
+      } catch (e) { /* fall through to welcome */ }
+      return WELCOME_URL;
+    }
+
+    // #3501: where the BFF should land the visitor after an OAuth round-trip.
+    // A same-origin PATH — `/auth/start` stores it in the flow row and
+    // `/auth/callback` re-validates it with `safeNext` before redirecting. The
+    // server sets `__Host-session` BEFORE navigating, so landing on the
+    // return-to is safe (unlike the old fragment flow, where a /admin landing
+    // could never see the token and bounced into a self-revoking stale loop).
+    // The admin return-to wins over claim routing — /admin has no claim card.
+    function oauthNextPath() {
+      if (window.__ADMIN_RETURN_TO) return window.__ADMIN_RETURN_TO;
+      try {
+        if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) return "/?claim=1";
+      } catch (e) { /* fall through to the app root */ }
+      return "/";
+    }
+
+    // #308 (R6): Turnstile CAPTCHA — mirrors the waitlist widget pattern in
+    // index.html. Empty until a site key is provisioned (human step); when
+    // set, the widget is injected into the signup form and a single-use
+    // token rides each /auth/signup submit as cf-turnstile-response.
+    // NOTE (#3501): server-side siteverify does NOT yet live on the BFF
+    // /auth/signup route, so while a site key is provisioned this widget is
+    // advisory until it does (dormant today — the key is unset).
+    const TURNSTILE_SITE_KEY = '';
+    let turnstileToken = null;
+
+    (function initTurnstile() {
+      if (!TURNSTILE_SITE_KEY) return;
+      const form = document.getElementById('email-form');
+      if (!form) return;
+      const widget = document.createElement('div');
+      widget.className = 'cf-turnstile';
+      widget.setAttribute('data-sitekey', TURNSTILE_SITE_KEY);
+      widget.setAttribute('data-callback', 'onSignupTurnstileToken');
+      widget.setAttribute('data-expired-callback', 'onSignupTurnstileExpired');
+      widget.setAttribute('data-error-callback', 'onSignupTurnstileError');
+      // Insert the challenge just above the submit button.
+      const button = form.querySelector('button[type="submit"]');
+      form.insertBefore(widget, button);
+      window.onSignupTurnstileToken = function (token) { turnstileToken = token; };
+      window.onSignupTurnstileExpired = function () { turnstileToken = null; };
+      window.onSignupTurnstileError = function () { turnstileToken = null; };
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    })();
+
+    function resetTurnstile() {
+      // Tokens are single-use — clear + re-render after any submit attempt.
+      turnstileToken = null;
+      if (TURNSTILE_SITE_KEY && window.turnstile) {
+        try { window.turnstile.reset(); } catch (e) { /* widget not ready */ }
+      }
+    }
+
+    // #1909/#1224: OAuth errors land in the URL FRAGMENT, not just search.
+    const landingHash = window.location.hash;
+    function oauthErrorParams() {
+      var p = new URLSearchParams(window.location.search);
+      var h = new URLSearchParams(landingHash.replace(/^#/, ""));
+      var get = function (k) { return p.get(k) || h.get(k) || ""; };
+      return { error: get("error"), code: get("error_code"), desc: get("error_description") };
+    }
+
+    // ── OAuth state-expiry recovery (#1224) ───────────────────────────────
+    // A slow login can expire the Supabase OAuth state; the provider callback
+    // redirects with ?error=...&error_code=bad_oauth_state (to the landing or
+    // back here). Surface it on this retry surface with a clear message.
+    (function () {
+      try {
+        var e = oauthErrorParams();
+        if (!e.error && !e.code) return;
+        var code = e.code;
+        var desc = e.desc;
+        var msg;
+        if (code === "bad_oauth_state" || /state/.test(desc)) {
+          msg = "Your sign-in session expired while you were on the login page. Please try again.";
+        } else {
+          msg = "Sign-in failed" + (desc ? ": " + desc : ". Please try again.");
+        }
+        var errorEl = document.getElementById("error");
+        if (errorEl) { errorEl.textContent = msg; errorEl.classList.add("visible"); }
+      } catch (e) { /* banner is best-effort */ }
+    })();
+
+    // ── Session probe consumer (#1494/#3501) ───────────────────────────────
+    // The BFF holds the session in an HttpOnly cookie, so the ONLY way to know
+    // whether a visitor is already signed in is `GET /api/session` (started in
+    // <head>). The status is load-bearing:
+    //   200 → signed in: forward to the destination (claim / return-to aware)
+    //   401 → genuinely signed out: stay on the card
+    //   503 or a network fault (0) → "we could not tell". NEVER treat this as
+    //        signed-out: that conflation is the #3485 login loop. Show the
+    //        honest retryable notice and leave the card usable.
+    // Suppressed on an OAuth-error landing (the #1224 banner) or a corroborated
+    // stale bounce (#3080) — the same suppression the head probe applies.
+    if (window.__SESSION_PROBE) {
+      window.__SESSION_PROBE.then(function (status) {
+        if (window.__ADMIN_STALE || window.__OAUTH_ERROR) return;
+        if (status === 200) {
+          window.location.replace(claimRedirectTarget());
+          return;
+        }
+        if (status === 503 || status === 0) {
+          showError("We couldn't check whether you're already signed in — please try again in a moment.");
+        }
+        // 401: genuinely signed out — stay on the card.
+      });
+    }
+
+    // ── Error display ──────────────────────────────────────────────────────
+    function showError(message) {
+      const el = document.getElementById("error");
+      el.textContent = message;
+      el.classList.add("visible");
+    }
+
+    function clearError() {
+      const el = document.getElementById("error");
+      el.classList.remove("visible");
+    }
+
+    // ── Error humanization (#527) ────────────────────────────────────────
+    // Supabase surfaces raw engine messages ("Email rate limit exceeded",
+    // "Provider is not enabled") that mean nothing to end users. Map by
+    // error_code first (stable), then by message substring (legacy), with a
+    // friendly catch-all. Known codes:
+    // https://supabase.com/docs/guides/auth/error-codes
+    //
+    // #863 mechanism-accurate 429 copy: the email-send limit is PROJECT-WIDE
+    // (custom SMTP 30/hr for ALL users) — over_email_send_rate_limit is NOT a
+    // per-network problem. These constants must stay ABOVE the AUTH_ERROR_MAP
+    // literal (TDZ: the map evaluates at script load; a `const` referenced
+    // before its declaration kills the whole inline script — the #527 class).
+    const EMAIL_BUCKET_RATE_LIMIT_COPY = "Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour.";
+    const NETWORK_RATE_LIMIT_COPY = "Too many attempts from this network. Please wait about an hour and try again.";
+    const AUTH_ERROR_MAP = [
+      {
+        // Email-bucket entry FIRST with the "email_rate_limit" pseudo-code so
+        // the substring pass matches an "email rate limit exceeded" message
+        // BEFORE the network entry's bare "rate limit" (dead-code trap, #863).
+        codes: ["over_email_send_rate_limit", "email_rate_limit"],
+        message: EMAIL_BUCKET_RATE_LIMIT_COPY,
+      },
+      {
+        codes: ["over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"],
+        message: NETWORK_RATE_LIMIT_COPY,
+      },
+      {
+        codes: ["email_address_invalid"],
+        message: "That email address doesn't look valid. Check it and try again.",
+      },
+      {
+        codes: ["invalid_credentials"],
+        message: "Invalid email or password. Please try again.",
+      },
+      {
+        codes: ["email_not_confirmed"],
+        message: "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.",
+      },
+      {
+        codes: ["weak_password"],
+        message: "Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.",
+      },
+      {
+        codes: ["user_already_exists", "email_exists", "user_exists"],
+        message: "An account with this email already exists. Please sign in instead.",
+      },
+      {
+        codes: ["provider_disabled"],
+        message: "This sign-in option is temporarily unavailable. Try email instead.",
+      },
+    ];
+
+    function humanizeAuthError(error) {
+      if (!error) return "Something went wrong. Please try again.";
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      for (const entry of AUTH_ERROR_MAP) {
+        if (entry.codes.includes(code)) return entry.message;
+        for (const c of entry.codes) {
+          if (msg.includes(c.replace(/_/g, " "))) return entry.message;
+        }
+      }
+      if (msg.includes("already registered") || msg.includes("already exists") || msg.includes("already been registered")) {
+        return "An account with this email already exists. Please sign in instead.";
+      }
+      if (msg.includes("email rate limit")) {
+        return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      }
+      if (msg.includes("rate limit")) {
+        return NETWORK_RATE_LIMIT_COPY;
+      }
+      if (msg.includes("provider is not enabled") || msg.includes("provider disabled") || msg.includes("unsupported provider")) {
+        return "This sign-in option is temporarily unavailable. Try email instead.";
+      }
+      if (msg.includes("invalid login credentials") || msg.includes("invalid email or password")) {
+        return "Invalid email or password. Please try again.";
+      }
+      if (msg.includes("email not confirmed")) {
+        return "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.";
+      }
+      if (msg.includes("network") || msg.includes("failed to fetch")) {
+        return "Couldn't reach the signup service. Check your connection and try again.";
+      }
+      return "Something went wrong. Please try again in a moment.";
+    }
+
+    // ── Rate-limit lockout (#801) ──────────────────────────────────────────
+    // The GoTrue email-send bucket is PROJECT-WIDE (custom SMTP: 30 sends/hr
+    // for ALL users) — a client that re-submits after a 429 burns the shared
+    // bucket for every other visitor. On an EMAIL-bucket rate-limit error,
+    // lock THIS browser out of email signup for 1h (sessionStorage-persisted),
+    // disable submit/resend, and show a live countdown. Per-IP auth-attempt
+    // limits (over_request_rate_limit*) self-reset in seconds/minutes — they
+    // get a short 60s lockout only (two-tier; do NOT flatten them into the
+    // 1h email-bucket lockout).
+    const RATE_LIMIT_CODES = ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"];
+    const RATE_LIMIT_LOCKOUT_MS = 60 * 60 * 1000;   // email bucket — 1h (matches the hourly window)
+    const SHORT_RATE_LIMIT_LOCKOUT_MS = 60 * 1000;  // per-IP auth-attempt limits — 60s
+    const RATE_LIMIT_KEY = "tortoise_signup_rate_limited_until";
+    const RATE_LIMIT_TIER_KEY = "tortoise_signup_rate_limit_tier";  // "email" | "short" — copy must not decay with remaining time
+    let rateLimitTimer = null;
+    let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
+    let rateLimitTier = "short"; // in-memory tier mirror — copy stays correct when storage is cleared mid-lockout (P4)
+    let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
+
+    // ── LOGIN-surface lockout bucket (#863 separation, #1493) ──────────────
+    // The login surface (email modal + forgot-password) keeps its OWN bucket
+    // (tortoise_signin_* — migrated from the retired signin.html) so a login
+    // throttle can never disable the signup form, and a signup 429 (project-
+    // wide email bucket, 1h) can't block login. #863 deliberately separated
+    // the two surfaces; the #1490-era modal shared the signup keys.
+    const LOGIN_RATE_LIMIT_KEY = "tortoise_signin_rate_limited_until";
+    const LOGIN_RATE_LIMIT_TIER_KEY = "tortoise_signin_rate_limit_tier";
+    let loginRateLimitUntil = 0;
+    let loginRateLimitTier = "short";
+    let loginRateLimitTimer = null;
+
+    function loginRateLimitRemainingMs() {
+      try {
+        const stored = parseInt(sessionStorage.getItem(LOGIN_RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, loginRateLimitUntil) : loginRateLimitUntil;
+        return Math.max(0, until - Date.now());
+      } catch (e) { return Math.max(0, loginRateLimitUntil - Date.now()); }
+    }
+
+    function setLoginRateLimitLockout(error) {
+      const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
+      loginRateLimitUntil = Math.max(loginRateLimitUntil, Date.now() + ms);
+      loginRateLimitTier = (loginRateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+      try {
+        const existing = parseInt(sessionStorage.getItem(LOGIN_RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, loginRateLimitUntil);
+        sessionStorage.setItem(LOGIN_RATE_LIMIT_KEY, String(until));
+        sessionStorage.setItem(LOGIN_RATE_LIMIT_TIER_KEY, loginRateLimitTier);
+      } catch (e) {}
+      applyLoginRateLimitLockout();
+    }
+
+    function loginRateLimitMessage() {
+      if (loginRateLimitRemainingMs() <= 0) return "";
+      let tier = loginRateLimitTier;
+      try { tier = sessionStorage.getItem(LOGIN_RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      return "Too many attempts from this network. Please try again in a minute.";
+    }
+
+    function applyLoginRateLimitLockout() {
+      if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
+      // #1494: the email surface is a single modal now. #863 separation is
+      // preserved at the BUTTON level: the login bucket only disables
+      // #btn-submit while the user is in LOGIN mode (the signup bucket owns
+      // it in signup mode); #btn-apikey-confirm is always a login surface.
+      const btn = document.getElementById("btn-submit");
+      const apikeyBtn = document.getElementById("btn-apikey-confirm");
+      const update = function () {
+        const ms = loginRateLimitRemainingMs();
+        if (ms <= 0) {
+          // #1494 review: the login bucket OWNS #btn-apikey-confirm — it
+          // must be re-enabled on expiry regardless of the mode-aware defer
+          // (which only defers #btn-submit to the signup bucket).
+          if (apikeyBtn) apikeyBtn.disabled = false;
+          loginRateLimitTier = "short";
+          try { sessionStorage.removeItem(LOGIN_RATE_LIMIT_TIER_KEY); } catch (e) {}
+          if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
+          // BOTH buckets share #btn-submit — the cross-bucket defer is
+          // MODE-AWARE: only leave the button to the other bucket when that
+          // bucket owns it (a signup lockout must NOT disable the Log in
+          // submit, and vice versa — #863).
+          if (rateLimitRemainingMs() > 0 && authIsSignup) return;
+          if (btn && btn.dataset.originalLabel) {
+            btn.textContent = btn.dataset.originalLabel;
+            delete btn.dataset.originalLabel;
+          }
+          if (btn) btn.disabled = false;
+          return;
+        }
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const label = "Try again in "
+          + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
+          + String(totalSec % 60).padStart(2, "0");
+        if (!authIsSignup && btn) {
+          if (!btn.dataset.originalLabel && btn.textContent.trim()) {
+            btn.dataset.originalLabel = btn.textContent;
+          }
+          btn.textContent = label;
+          btn.disabled = true;
+        }
+        if (apikeyBtn) apikeyBtn.disabled = true;
+      };
+      update();
+      if (loginRateLimitRemainingMs() > 0) loginRateLimitTimer = setInterval(update, 1000);
+    }
+
+    function isEmailBucketError(error) {
+      if (!error) return false;
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      return code === "over_email_send_rate_limit"
+        || msg.includes("email rate limit")
+        || (code === "rate_limit" && msg.includes("email"));
+    }
+
+    function isRateLimitError(error) {
+      if (!error) return false;
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      if (RATE_LIMIT_CODES.includes(code)) return true;
+      for (const c of RATE_LIMIT_CODES) {
+        if (msg.includes(c.replace(/_/g, " "))) return true;
+      }
+      return msg.includes("email rate limit") || msg.includes("rate limit");
+    }
+
+    function rateLimitRemainingMs() {
+      try {
+        const stored = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, rateLimitUntil) : rateLimitUntil;
+        return Math.max(0, until - Date.now());
+      } catch (e) { return Math.max(0, rateLimitUntil - Date.now()); }
+    }
+
+    function setRateLimitLockout(error) {
+      // Two-tier: email-bucket exhaustion → 1h; per-IP auth-attempt limits → 60s.
+      const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
+      // Never-shrink invariant: a later 60s (or shorter) lockout must never
+      // truncate an active longer lockout (both tiers share one key).
+      rateLimitUntil = Math.max(rateLimitUntil, Date.now() + ms);
+      // Monotonic tier: the copy is pinned at set-time (a 1h lockout must
+      // keep its "about an hour" copy for its whole life, never decaying
+      // into the minute copy as time passes — code-review P2).
+      rateLimitTier = (rateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+      try {
+        const existing = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, rateLimitUntil);
+        sessionStorage.setItem(RATE_LIMIT_KEY, String(until));
+        sessionStorage.setItem(RATE_LIMIT_TIER_KEY, rateLimitTier);
+      } catch (e) {}
+      applyRateLimitLockout();
+    }
+
+    // Tier-aware lockout copy: the email bucket maps to the #863
+    // mechanism-accurate "temporarily exhausted" literal; the short per-IP
+    // tier must not contradict the live countdown it shows. Tier is read
+    // from storage (set at lockout time) — deriving it from remaining time
+    // would decay the copy mid-lockout.
+    function rateLimitMessage() {
+      if (rateLimitRemainingMs() <= 0) return "";
+      let tier = rateLimitTier;
+      try { tier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") {
+        return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      }
+      return "Too many attempts from this network. Please try again in a minute.";
+    }
+
+    function applyRateLimitLockout() {
+      if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+      const btn = document.getElementById("btn-submit");
+      const resend = document.getElementById("btn-resend");
+      // #1494 review: clearError() only on the locked→unlocked TRANSITION —
+      // the no-lockout call path (signUpWithEmail's finally, every submit)
+      // must not wipe a just-shown non-rate-limit error before the modal
+      // mirrors it into view. Signal = remaining time OR a live tier key —
+      // the key is removed on every expiry transition (defer branch + this
+      // branch) and at on-load, so a genuinely stale key can't re-trigger
+      // the clear (the forced-expiry e2e re-apply relies on the key).
+      var lockoutWasActive = false;
+      try { lockoutWasActive = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) !== null; } catch (e) {}
+      lockoutWasActive = lockoutWasActive || rateLimitRemainingMs() > 0;
+      const update = function () {
+        const ms = rateLimitRemainingMs();
+        if (ms <= 0) {
+          // Cleanup on the expiry transition happens BEFORE the mode-aware
+          // defer — the tier key + interval + #btn-resend must not linger
+          // while the other bucket owns #btn-submit.
+          if (lockoutWasActive) {
+            clearError();
+            rateLimitTier = "short";
+            try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+          }
+          if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+          if (resend) resend.disabled = (Date.now() < resendCooldownUntil);
+          // BOTH buckets share #btn-submit — the cross-bucket defer is
+          // MODE-AWARE: only leave the button to the other bucket when that
+          // bucket owns it (a login lockout must NOT disable the Sign up
+          // submit, and vice versa — #863).
+          if (loginRateLimitRemainingMs() > 0 && !authIsSignup) return;
+          if (btn && btn.dataset.originalLabel) {
+            btn.textContent = btn.dataset.originalLabel;
+            delete btn.dataset.originalLabel;
+          }
+          if (btn) btn.disabled = false;
+          return;
+        }
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const label = "Try again in "
+          + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
+          + String(totalSec % 60).padStart(2, "0");
+        // #863 separation at the BUTTON level: the signup bucket owns
+        // #btn-submit in signup mode only (the login bucket owns it in login
+        // mode) — a signup rate limit must never disable the Log in submit.
+        if (authIsSignup && btn) {
+          // P2 hardening: never capture an empty label (setLoading's spinner
+          // swaps innerHTML → textContent "" mid-request). Guard on trimmed
+          // truthiness so the label restore can never blank the button.
+          if (!btn.dataset.originalLabel && btn.textContent.trim()) {
+            btn.dataset.originalLabel = btn.textContent;
+          }
+          btn.textContent = label;
+          btn.disabled = true;
+        }
+        if (resend) resend.disabled = true;
+      };
+      update();
+      // Only run the ticking interval while a lockout is actually pending — an
+      // idle interval's first tick could re-enable #btn-submit mid-request
+      // (double-submit → duplicate confirmation email → bucket burn, #801).
+      if (rateLimitRemainingMs() > 0) rateLimitTimer = setInterval(update, 1000);
+    }
+
+    // ── Loading state ──────────────────────────────────────────────────────
+    // Saves the full innerHTML (provider SVG icons included) and restores it,
+    // so OAuth button icons survive an error cycle (#751).
+    function setLoading(loading) {
+      document.querySelectorAll("button").forEach((btn) => {
+        btn.disabled = loading;
+        if (loading) {
+          if (!btn.dataset.originalHTML) btn.dataset.originalHTML = btn.innerHTML;
+          btn.innerHTML = '<span class="loading-spinner"></span>';
+        } else {
+          if (btn.dataset.originalHTML) {
+            btn.innerHTML = btn.dataset.originalHTML;
+            delete btn.dataset.originalHTML;
+          }
+        }
+      });
+    }
+
+    // ── #1287: combined login/signup card — mode toggle + API-key login ──
+    // signup (default) = the page's native flow (server signup, confirmation).
+    // login = email+password sign-in + API-key login (existing key holders).
+    let authIsSignup = true;
+
+    // On load: honor a persisted lockout — the lockout updates are
+    // MODE-AWARE (they read authIsSignup above), so these MUST run after the
+    // declaration (a TDZ ReferenceError here would kill the whole script,
+    // the #527 failure class). A stale tier key with no remaining time is
+    // dropped (it must never re-trigger the error-clear path).
+    if (rateLimitRemainingMs() <= 0) {
+      try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+    }
+    if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
+    if (rateLimitRemainingMs() > 0) {
+      showError(rateLimitMessage());
+      applyRateLimitLockout();
+    }
+
+    // Modal bindings hoisted ABOVE the ?mode=login init below — setAuthMode
+    // → hideEmailModal/hideApiKeyModal read the flags, and a TDZ
+    // ReferenceError here would kill this whole script (the #527 failure
+    // class; node --check does NOT catch TDZ — only a runtime ?mode=login
+    // landing does).
+    const MODAL_FOCUS_SELECTOR = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+    let modalWasOpened = false;  // focus restore only after a real open (a11y)
+    let apiKeyModalWasOpened = false;  // same, for the API-key modal
+
+    applyLastUsedPills();  // #1511/D3: "Last used" on the used-last option
+
+    // #1493: ?mode=login lands on the Log in tab — the topbar "Login"
+    // buttons on docs/signin/invite-accept and the signInAndGo recovery
+    // path point here. MUST run after `let authIsSignup` above — setAuthMode
+    // reads it, and a TDZ ReferenceError here would kill this whole script
+    // (the #527 failure class: one bad line disables everything below it).
+    // Skips when ?error/?error_code present — setAuthMode's clearError()
+    // must not wipe the #1224 OAuth state-expiry banner.
+    if (new URLSearchParams(window.location.search).get("mode") === "login") {
+      var modeParams = new URLSearchParams(window.location.search);
+      // #1224: never wipe the OAuth state-expiry banner (setAuthMode clears
+      // the error box) on a crafted ?mode=login&error=… landing.
+      if (!modeParams.get("error") && !modeParams.get("error_code")) {
+        setAuthMode(false);
+      }
+    }
+
+    function setAuthMode(isSignup) {
+      authIsSignup = isSignup;
+      document.getElementById("toggle-signin").classList.toggle("active", !isSignup);
+      document.getElementById("toggle-signin").setAttribute("aria-selected", String(!isSignup));
+      document.getElementById("toggle-signup").classList.toggle("active", isSignup);
+      document.getElementById("toggle-signup").setAttribute("aria-selected", String(isSignup));
+      document.getElementById("page-title").textContent = isSignup ? "Create your account" : "Log in to your account";
+      document.getElementById("legal-accept").style.display = isSignup ? "" : "none";
+      // #1494: FOUR always-visible options — the labels follow the mode so
+      // each button states its workflow (GitHub/Google → OAuth page; API key
+      // / email → modal with confirm + cancel). API-key is login-only (paste
+      // an EXISTING key — #1287), so its labels are mode-independent.
+      var modeWord = isSignup ? "Sign up" : "Log in";
+      document.getElementById("label-github").textContent = modeWord + " with GitHub";
+      document.getElementById("label-google").textContent = modeWord + " with Google";
+      document.getElementById("label-apikey").textContent = "Log in with API key";
+      document.getElementById("label-email").textContent = modeWord + " with email";
+      document.getElementById("email-modal-title").textContent = modeWord + " with email";
+      document.getElementById("apikey-modal-title").textContent = "Log in with API key";
+      applyLastUsedPills();  // #1511/D3: labels were rewritten — re-pin the pill
+      // Forgot-password is a login-mode affordance (new accounts have no
+      // password to reset).
+      document.getElementById("modal-forgot-link").style.display = isSignup ? "none" : "";
+      const submit = document.getElementById("btn-submit");
+      submit.textContent = isSignup ? "Create account" : "Log in";
+      // #1494 review P2-3: a mode toggle mid-lockout must not restore the
+      // OTHER mode's label on expiry — re-capture so the countdown restore
+      // matches the visible mode. Also drop a stale spinner-restore payload
+      // (a signInAndGo failure mid-request flipped the mode; setLoading(false)
+      // must not resurrect the old mode's label).
+      delete submit.dataset.originalLabel;
+      delete submit.dataset.originalHTML;
+      const pw = document.getElementById("password");
+      pw.autocomplete = isSignup ? "new-password" : "current-password";
+      hideEmailModal();
+      hideApiKeyModal();
+      clearError();
+      // #1494 review: re-show the option buttons — the check-your-inbox
+      // state hides them and a mode toggle must never leave the card empty.
+      document.querySelectorAll(".btn-provider").forEach(function (b) {
+        b.classList.remove("hidden");
+      });
+      // #1494 review: re-assert BOTH lockouts so the visible surface matches
+      // the mode just toggled — each apply is mode-aware (owns #btn-submit
+      // only in its own mode; the expiry branches defer to the other bucket
+      // only when it owns the button), so a signup lockout never disables the
+      // Log in submit (#863) and a cold bucket re-enables the button.
+      applyRateLimitLockout();
+      applyLoginRateLimitLockout();
+      // #1494 review: re-show the pending lockout's EXPLANATION — the
+      // re-assert only mutates the button; the copy was cleared above and
+      // must return so a disabled countdown button is never unexplained.
+      const errBox = document.getElementById("error");
+      if (!errBox.classList.contains("visible")) {
+        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
+        else if (loginRateLimitRemainingMs() > 0) showError(loginRateLimitMessage());
+      }
+    }
+
+    function showApiKeyModal() {
+      apiKeyModalWasOpened = true;
+      document.getElementById("apikey-modal").classList.remove("hidden");
+      document.body.style.overflow = "hidden";
+      document.getElementById("apikey-modal-error").classList.remove("visible");
+      document.getElementById("apikey-input").focus();
+    }
+
+    function hideApiKeyModal() {
+      document.getElementById("apikey-modal").classList.add("hidden");
+      document.body.style.overflow = "";
+      if (!apiKeyModalWasOpened) return;
+      const launcher = document.getElementById("btn-apikey");
+      if (launcher && launcher.offsetParent !== null) launcher.focus();
+    }
+
+    function showApiKeyModalError(message) {
+      const el = document.getElementById("apikey-modal-error");
+      el.textContent = message;
+      el.classList.add("visible");
+    }
+
+    // #1494/#1511/#3501: API-key login — paste an existing key (agents / anon
+    // bootstrap) in a focused modal. The key is exchanged for a REAL session
+    // SERVER-SIDE (POST /auth/api-key): the BFF calls the hosted API, stores the
+    // refresh token in D1 and sets the HttpOnly `__Host-session` cookie, so the
+    // dashboard is authenticated WITHOUT the raw key OR the token it returns
+    // ever reaching the browser. Login-bucket discipline (#863).
+    async function loginWithApiKey(event) {
+      if (event) event.preventDefault();
+      const key = document.getElementById("apikey-input").value.trim();
+      if (!key) { showApiKeyModalError("Enter your API key to log in."); return; }
+      if (loginRateLimitRemainingMs() > 0) {
+        showApiKeyModalError(loginRateLimitMessage());
+        applyLoginRateLimitLockout();
+        return;
+      }
+      document.getElementById("apikey-modal-error").classList.remove("visible");
+      setLoading(true);
+      // #1511 (code-review P2): the buttons STAY disabled + spun across the
+      // exchange await (a double-click/Enter would otherwise fire duplicate
+      // exchanges → duplicate GoTrue mints + 503s and double rate-bucket
+      // consumption). Re-enabled on every non-navigation terminal path.
+      var reenable = function () { setLoading(false); };
+      try {
+        const resp = await fetch("/auth/api-key", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ api_key: key }),
+        });
+        if (resp.status === 429) {
+          // The exchange bucket is 5/hr/IP server-side (Retry-After ~1h) —
+          // surface the hour-scale copy, NOT the 60s email-bucket lockout
+          // (which would send the user into a retry-429 loop). The bucket
+          // separation (#863) is kept: this 429 is never fed into the
+          // email-bucket lockout.
+          var retryAfter = 3600;
+          try { retryAfter = parseInt(resp.headers.get("Retry-After") || "", 10) || 3600; } catch (e) {}
+          var mins = Math.max(1, Math.ceil(retryAfter / 60));
+          showApiKeyModalError("Too many sign-in attempts from this network — try again in about " + mins + " minutes.");
+          reenable();
+          return;
+        }
+        if (resp.status >= 500) {
+          // #1719 (Task 6): ANY server-side failure (500 unmapped faults,
+          // 501, 502, 503, 504, Cloudflare 52x origin errors) renders the
+          // honest unavailable copy — never "Invalid API key." (which
+          // misdirected users into rotating keys during a control-plane
+          // outage). One unified string contract with hosted_api's
+          // _control_plane_unavailable().
+          showApiKeyModalError("Sign-in is temporarily unavailable — try again in a moment.");
+          reenable();
+          return;
+        }
+        if (!resp.ok) {
+          let payload = {};
+          try { payload = await resp.json(); } catch (e) {}
+          const code = payload.error || "";
+          if (code === "ANON_TEAM_NO_OWNER") {
+            // #1511/D2: this key belongs to an unclaimed team — funnel to the
+            // dashboard claim card (the raw key never crosses origins; the
+            // user re-pastes it there).
+            setClaimPendingMarker();
+            // #3080: an admin return-to wins — /admin has no claim card, so
+            // appending ?claim=1 would land the user on a dead route.
+            window.location.href = window.__ADMIN_RETURN_TO || (window.__DASHBOARD_BASE_URL + "/?claim=1");
+            return;
+          }
+          if (code === "KEY_NOT_USER_MINTED") {
+            showApiKeyModalError("This key can't be used to sign in — mint a new key in the dashboard or use GitHub/Google.");
+            reenable();
+            return;
+          }
+          if (code === "ACCOUNT_MISSING") {
+            showApiKeyModalError("Your account couldn't be found — contact support.");
+            reenable();
+            return;
+          }
+          if (code === "dashboard_login_disabled") {
+            showApiKeyModalError("API-key login is disabled for this organization — sign in with GitHub or Google.");
+            reenable();
+            return;
+          }
+          showApiKeyModalError("Invalid API key.");
+          reenable();
+          return;
+        }
+        // 200: the BFF already set the HttpOnly `__Host-session` cookie and
+        // stored the refresh token in D1. There is no client session to store —
+        // `window.storeSession` is gone with the JS-readable token it wrote.
+        try { window.setLastAuthMethod("apikey"); } catch (e) {}
+        window.location.href = claimRedirectTarget();
+      } catch (e) {
+        setLoading(false);
+        showApiKeyModalError("Sign-in failed — check your connection and try again.");
+      }
+    }
+
+    // #1511/D2: set the non-secret tt_claim_pending marker (parent-domain
+    // cookie) so the dashboard claim card renders after the anon funnel.
+    function setClaimPendingMarker() {
+      try {
+        var expires = new Date(Date.now() + 3600 * 1000).toUTCString();
+        var domain = (window.location.hostname === "premiselabs.co"
+                      || window.location.hostname.endsWith(".premiselabs.co"))
+          ? "; Domain=.premiselabs.co" : "";
+        document.cookie = "tt_claim_pending=1" + domain +
+          "; Path=/; SameSite=Lax" + (window.location.protocol === "https:" ? "; Secure" : "") +
+          "; Expires=" + expires;
+      } catch (e) { /* best-effort */ }
+    }
+
+    // #1511/D3: the "last used" preference. It used to be provided by the
+    // deleted session bridge (supabase-session.js) alongside the token
+    // machinery. It is a UI preference, NOT a credential, so it is kept — here
+    // in the page — under the same `tt_last_auth_method` cookie the bridge wrote
+    // (host-only on the app origin), with the bridge's legacy localStorage key
+    // as a read-only fallback.
+    var LAST_AUTH_COOKIE = "tt_last_auth_method";
+    var LEGACY_LAST_AUTH = "tortoise_last_auth_method";
+    function getLastAuthMethod() {
+      try {
+        var m = document.cookie.match(/(?:^|; )tt_last_auth_method=([^;]*)/);
+        if (m) return decodeURIComponent(m[1] || "");
+        var legacy = window.localStorage.getItem(LEGACY_LAST_AUTH);
+        return legacy || "";
+      } catch (e) { return ""; }
+    }
+    function setLastAuthMethod(method) {
+      if (!method) return;
+      try {
+        var expires = new Date(Date.now() + 90 * 24 * 3600 * 1000).toUTCString();
+        document.cookie = LAST_AUTH_COOKIE + "=" + encodeURIComponent(method) +
+          "; Path=/; SameSite=Lax" + (window.location.protocol === "https:" ? "; Secure" : "") +
+          "; Expires=" + expires;
+      } catch (e) { /* best-effort */ }
+    }
+    window.getLastAuthMethod = getLastAuthMethod;
+    window.setLastAuthMethod = setLastAuthMethod;
+
+    // #1511/D3: "Last used" pills on the four option buttons.
+    function applyLastUsedPills() {
+      try {
+        var m = (typeof window.getLastAuthMethod === "function") ? window.getLastAuthMethod() : "";
+        var ids = { github: "label-github", google: "label-google",
+                    apikey: "label-apikey", email: "label-email" };
+        for (var k in ids) {
+          var label = document.getElementById(ids[k]);
+          if (!label) continue;
+          var old = label.querySelector(".last-used");
+          if (old) old.remove();
+          if (m === k) {
+            var span = document.createElement("span");
+            span.className = "last-used";
+            span.setAttribute("aria-label", "Last used");
+            span.textContent = "Last used";
+            label.appendChild(span);
+          }
+        }
+      } catch (e) { /* best-effort */ }
+    }
+
+    // ── OAuth sign in (#3501) ────────────────────────────────────────────
+    // The OAuth flow MUST go through the BFF: `/auth/start` generates the PKCE
+    // `code_verifier` SERVER-SIDE and stores it in a flow row, so `/auth/callback`
+    // can exchange the code. A client-side `signInWithOAuth` would generate a
+    // verifier the server can never see. This is a plain same-origin navigation;
+    // no GoTrue URL is built here.
+    function signInWithProvider(provider) {
+      clearError();
+      setLoading(true);
+      // X conversion (#736 Path A) is intentionally SKIPPED on OAuth signup: the
+      // provider redirect navigates the page away before any conversion event
+      // could be pushed/reliably attributed to the user id.
+      try { window.setLastAuthMethod(provider); } catch (e) {}
+      window.location.assign("/auth/start?provider=" + encodeURIComponent(provider)
+        + "&next=" + encodeURIComponent(oauthNextPath()));
+    }
+
+    // ── BFF auth helper (#3501) ───────────────────────────────────────────
+    // Every auth call is a same-origin POST returning JSON. The helper does not
+    // throw on an HTTP error — the caller branches on `status`, so a 503 can be
+    // answered "try again" rather than "signed out" (#3485).
+    async function bffPost(path, payload) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload),
+      });
+      let data = {};
+      try { data = (await res.json()) || {}; } catch (e) { data = {}; }
+      return { status: res.status, ok: res.ok, data: data };
+    }
+
+    // Map a BFF error payload onto the {code, message} shape the lockout and
+    // humanizer helpers read. The signup route forwards the provider's own code
+    // in `providerError`; every other route uses `error`.
+    function bffError(data) {
+      data = data || {};
+      return { code: data.providerError || data.error || "", message: data.message || "" };
+    }
+
+    // Analytics (#528) + X conversion (#736 Path A): client-side tracking —
+    // only when the consent banner granted it (consent.js defines
+    // window.consentState; window.posthog is a no-op stub until consent).
+    // Server-side account telemetry (tenant_provisioned etc.) is not gated
+    // by the banner. Wrapped in try/catch (#527): a stub/analytics throw
+    // must never abort the signup success path. Shared by the #801
+    // server-first path and the legacy client-side fallback.
+    function pushSignupEvents(user) {
+      try {
+        if (user && user.identities && user.identities.length > 0) {
+          if (window.posthog && window.consentState && window.consentState() === "granted") {
+            window.posthog.identify(user.id);
+            window.posthog.capture("user_signed_up", { provider: "email" });
+          }
+        }
+      } catch (analyticsErr) {
+        console.warn("analytics skipped:", analyticsErr);
+      }
+      try {
+        window.dataLayer = window.dataLayer || [];
+        window.dataLayer.push({
+          event: "x_signup",
+          email: user?.email || "",
+          conversion_id: user?.id || "",
+        });
+      } catch (dlErr) {
+        console.warn("dataLayer push skipped:", dlErr);
+      }
+    }
+
+    let signupInFlight = false;  // #801 review P1: double-submit guard
+
+    async function signUpWithEmail(event) {
+      event.preventDefault();
+      // #1287: combined card — login mode routes to email+password sign-in.
+      if (!authIsSignup) {
+        await signInWithEmailPassword();
+        return;
+      }
+      if (signupInFlight) return;
+      signupInFlight = true;
+      if (rateLimitRemainingMs() > 0) {
+        showError(rateLimitMessage());
+        applyRateLimitLockout();
+        signupInFlight = false;  // #1494 review: never leak the guard on the early return
+        return;
+      }
+      clearError();
+      setLoading(true);
+      try {
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
+
+        if (password.length < 6) {
+          showError("Password must be at least 6 characters.");
+          return;
+        }
+
+        // #308 (R6): require the Turnstile challenge before submitting
+        // (only when a site key is provisioned).
+        if (TURNSTILE_SITE_KEY && !turnstileToken) {
+          showError("Please complete the verification check first.");
+          return;
+        }
+
+        // #3501/#801: signup is server-side. `/auth/signup` proxies the hosted
+        // API's `POST {API_ORIGIN}/v1/signup/email` (the #801 admin path), which
+        // creates the auth user with `email_confirm=true` and sends NO email —
+        // the route then signs the user in server-side and sets
+        // `__Host-session`. The confirmation-email funnel is the API's opt-in
+        // `TORTOISE_SIGNUP_EMAIL_CONFIRM=false` mode: it returns
+        // `confirmationRequired:true` (no session) and the page shows the
+        // check-your-inbox state. GoTrue's own email-sending `/auth/v1/signup`
+        // is NEVER called from here — it burns Supabase's project-wide SMTP
+        // bucket and 429s every signup once exhausted.
+        const body = { email: email, password: password };
+        if (TURNSTILE_SITE_KEY) body["cf-turnstile-response"] = turnstileToken || "";
+        const resp = await bffPost("/auth/signup", body);
+        const payload = resp.data || {};
+
+        if (resp.status === 429) {
+          // Tier-aware, if the BFF ever surfaces the provider bucket directly:
+          // email bucket → 1h lockout + exhausted copy; per-IP → 60s + network
+          // copy. Never leave the shared bucket exposed to a retry loop.
+          const err = bffError(payload);
+          setRateLimitLockout(err);
+          showError(isEmailBucketError(err) ? EMAIL_BUCKET_RATE_LIMIT_COPY : rateLimitMessage());
+          return;
+        }
+        if (resp.status === 400) {
+          // A provider REFUSAL (email_exists, validation_failed, weak_password,
+          // …). The route forwards the provider's code + a message.
+          const err = bffError(payload);
+          if (err.code === "user_already_exists" || err.code === "email_exists" || err.code === "user_exists") {
+            showError("An account with this email already exists. Please sign in instead.");
+            return;
+          }
+          showError(err.message || humanizeAuthError(err));
+          return;
+        }
+        if (resp.status === 503) {
+          // The provider or the session store is unavailable. If the route
+          // reports `accountCreated`, the account EXISTS and only the session
+          // could not be established — a plain "try again" there would send the
+          // user to retry and hit "already exists". Say what happened instead.
+          if (payload.accountCreated) {
+            showError(payload.message || "Your account was created, but we couldn't sign you in automatically. Please sign in with your email and password.");
+            return;
+          }
+          // Store/provider fault: "try again", never "your signup was refused".
+          showError("Signup is temporarily unavailable — please try again in a moment.");
+          return;
+        }
+        if (!resp.ok) {
+          showError("Signup failed. Please try again in a moment.");
+          return;
+        }
+
+        // 200: either the API's opt-in confirmation funnel is active (no
+        // session; `confirmationRequired`) or the account was created
+        // pre-confirmed and the route signed the user in.
+        if (payload.confirmationRequired) {
+          // Analytics + conversion tracking (see pushSignupEvents). GoTrue's
+          // confirmation-required body carries no user object, so the event is
+          // keyed on the address; attribution moves server-side on confirm.
+          pushSignupEvents({ email: email });
+          showConfirmationRequired(email);
+          return;
+        }
+
+        if (payload.user) pushSignupEvents(payload.user);
+        try { window.setLastAuthMethod("email"); } catch (e) {}
+        window.location.href = claimRedirectTarget();
+      } catch (err) {
+        console.error("signUpWithEmail:", err);
+        showError(humanizeAuthError(err));
+      } finally {
+        signupInFlight = false;
+        setLoading(false);
+        applyRateLimitLockout();
+        resetTurnstile();  // #308: single-use token — re-arm the challenge
+      }
+    }
+
+    // ── Check-your-inbox state (email confirmation ON) ──
+    function showConfirmationRequired(email) {
+      const form = document.getElementById("email-form");
+      const oauthBtns = document.querySelectorAll(".btn-provider");
+      const confirm = document.getElementById("confirmation-required");
+      if (form) form.classList.add("hidden");
+      oauthBtns.forEach((b) => b.classList.add("hidden"));
+      if (confirm) {
+        confirm.classList.remove("hidden");
+        const el = document.getElementById("confirm-email");
+        if (el) el.textContent = email;
+      }
+    }
+
+    // ── Email+password login popup (login mode) ────────────────────────────
+    // ── Email+password modal (signup OR login per the toggle) ─────────────
+    // Opened by the "… with email" button. Errors surface INSIDE the modal
+    // (the page-level banner sits behind the overlay).
+
+    function showEmailModal() {
+      modalWasOpened = true;
+      // #1494 review: the check-your-inbox state hides #email-form (the
+      // modal form) — re-show it on every open so the form can't stay
+      // hidden for the rest of the page's life.
+      document.getElementById("email-form").classList.remove("hidden");
+      document.getElementById("email-modal").classList.remove("hidden");
+      document.body.style.overflow = "hidden";
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      document.getElementById("email").focus();
+    }
+
+    function hideEmailModal() {
+      document.getElementById("email-modal").classList.add("hidden");
+      document.body.style.overflow = "";
+      // Restore focus to the launching button (a11y APG dialog pattern) —
+      // only when the modal was actually opened by the user (setAuthMode
+      // also closes it on load; a load-time focus grab would be hostile).
+      if (!modalWasOpened) return;
+      const launcher = document.getElementById("btn-email");
+      if (launcher && launcher.offsetParent !== null) launcher.focus();
+    }
+
+    function showModalError(message) {
+      const el = document.getElementById("modal-error");
+      el.textContent = message;
+      el.classList.add("visible");
+    }
+
+    // Escape closes whichever modal is open (guarded — a global unguarded
+    // handler would close it under an in-flight submit).
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      if (!document.getElementById("email-modal").classList.contains("hidden")) hideEmailModal();
+      if (!document.getElementById("apikey-modal").classList.contains("hidden")) hideApiKeyModal();
+    });
+
+    // Tab cycles within the OPEN modal (focus trap — the overlay must not
+    // let keyboard focus reach background controls). Focusables are computed
+    // in DOM order (close button is FIRST in the markup), and the wrap
+    // happens at the natural tab-order boundaries.
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Tab") return;
+      const open = ["email-modal", "apikey-modal"]
+        .map(function (id) { return document.getElementById(id); })
+        .filter(function (m) { return m && !m.classList.contains("hidden"); })[0];
+      if (!open) return;
+      const focusables = Array.prototype.slice.call(open.querySelectorAll(MODAL_FOCUS_SELECTOR))
+        .filter(function (el) { return el.offsetParent !== null; });
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
+
+    // Shared login error copy (modal + legacy inline path).
+    function loginErrorMessage(error) {
+      const m = (error && error.message) || "";
+      if (m.includes("Invalid login")) return "Invalid email or password.";
+      if (m.includes("Email not confirmed")) return "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.";
+      return m || "Something went wrong — try again.";
+    }
+
+    // #1494: ONE email surface, mode-aware. The submit routes through the
+    // shared signUpWithEmail flow (which dispatches signup vs login by the
+    // toggle) and mirrors any page-level error into the modal. Success paths
+    // navigate away (modal disappears with the page).
+    async function modalEmailSubmit(event) {
+      if (event) event.preventDefault();
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      await signUpWithEmail(event);
+      // If the flow transitioned to the check-your-inbox state, close the
+      // modal — it renders behind the overlay and its actions (Resend) would
+      // be unreachable.
+      const inbox = document.getElementById("confirmation-required");
+      if (inbox && !inbox.classList.contains("hidden")) hideEmailModal();
+      const banner = document.getElementById("error");
+      // #1494 review: mirror the banner text whenever it is non-empty —
+      // applyRateLimitLockout's no-lockout path may have removed the .visible
+      // class (it now only clearError()s on the locked→unlocked transition,
+      // but a non-rate-limit error must never be dropped from the modal).
+      if (banner.textContent && banner.textContent.trim()) {
+        showModalError(banner.textContent);
+        banner.classList.remove("visible");
+      }
+    }
+
+    // Forgot-password from the login modal — POST /auth/reset (the BFF owns the
+    // GoTrue call) with the same two-tier login-bucket discipline (#863). The
+    // route is deliberately non-enumerating: a valid address always answers 200.
+    // The reset link lands on /welcome?reset=1 — the route's OWN redirect target
+    // (welcome.ts serves the reset panel), never a client-supplied one.
+    let modalForgotInFlight = false;  // double-submit guard (shared email bucket, #801)
+    async function modalForgotPassword(event) {
+      if (event) event.preventDefault();
+      if (modalForgotInFlight) return;
+      modalForgotInFlight = true;
+      const email = document.getElementById("email").value.trim();
+      if (!email) { showModalError("Enter your email address first — we'll send the reset link there."); modalForgotInFlight = false; return; }
+      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); modalForgotInFlight = false; return; }
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      try {
+        const resp = await bffPost("/auth/reset", { email: email });
+        if (resp.status === 429) {
+          const err = bffError(resp.data);
+          setLoginRateLimitLockout(err);
+          showModalError(isEmailBucketError(err) ? humanizeAuthError(err) : loginRateLimitMessage());
+          return;
+        }
+        if (resp.status === 400) {
+          showModalError((resp.data && resp.data.message) || "That doesn't look like an email address.");
+          return;
+        }
+        if (resp.status === 503) {
+          // Provider/config fault: "try again", never a verdict about the address.
+          showModalError("We couldn't send the reset email right now — please try again in a moment.");
+          return;
+        }
+        if (!resp.ok) {
+          showModalError("Something went wrong — try again.");
+          return;
+        }
+        const note = document.getElementById("modal-note");
+        note.textContent = "Reset link sent — check your inbox (and spam).";
+      } catch (e) {
+        showModalError((e && e.message) || "Something went wrong — try again.");
+      } finally {
+        modalForgotInFlight = false;
+      }
+    }
+
+    // #1287/#3501: email+password LOGIN (combined-card login mode) — POST
+    // /auth/password. The BFF verifies the credential server-side and sets the
+    // HttpOnly `__Host-session` cookie; the browser never receives a token.
+    async function signInWithEmailPassword() {
+      if (signupInFlight) return;
+      signupInFlight = true;
+      // #1493: LOGIN surface → login bucket (tortoise_signin_*) — a legacy
+      // safety net for the inline form; must never touch the signup bucket.
+      if (loginRateLimitRemainingMs() > 0) {
+        showError(loginRateLimitMessage());
+        applyLoginRateLimitLockout();
+        signupInFlight = false;
+        return;
+      }
+      clearError();
+      setLoading(true);
+      try {
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
+        if (!email || !password) {
+          showError("Enter your email and password.");
+          return;
+        }
+        const resp = await bffPost("/auth/password", { email: email, password: password });
+        if (resp.status === 429) {
+          // #1494 review P1-2: a rate limit sets the LOGIN lockout + tier copy
+          // instead of leaking the raw engine message (the #527 raw-leak class).
+          const err = bffError(resp.data);
+          setLoginRateLimitLockout(err);
+          showError(isEmailBucketError(err) ? humanizeAuthError(err) : loginRateLimitMessage());
+          return;
+        }
+        if (resp.status === 401) {
+          // The only 401 this route emits is a positive credential rejection.
+          showError(loginErrorMessage({ message: (resp.data && resp.data.message) || "Invalid email or password." }));
+          return;
+        }
+        if (resp.status === 503) {
+          // Store/provider fault: "try again", never "you are signed out".
+          showError("Sign-in is temporarily unavailable — please try again in a moment.");
+          return;
+        }
+        if (!resp.ok) {
+          showError((resp.data && resp.data.message) || "Something went wrong — try again.");
+          return;
+        }
+        if (resp.data && resp.data.user) pushSignupEvents(resp.data.user);
+        try { window.setLastAuthMethod("email"); } catch (e) {}
+        window.location.href = claimRedirectTarget();
+      } catch (e) {
+        showError((e && e.message) || "Something went wrong — try again.");
+      } finally {
+        signupInFlight = false;
+        setLoading(false);
+        // #1493/#1494 review: setLoading(false) re-enabled every button —
+        // re-assert the login lockout (countdown + disabled) if a 429 set it.
+        if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
+      }
+    }
+
+    async function resendConfirmation() {
+      const email = document.getElementById("confirm-email").textContent;
+      const btn = document.getElementById("btn-resend");
+      if (!email || !btn) return;
+      if (rateLimitRemainingMs() > 0) { applyRateLimitLockout(); return; }
+      btn.disabled = true;
+      try {
+        // POST /auth/resend. A non-2xx is an HTTP STATUS here (not a silent
+        // {data, error} tuple), so a rate-limited resend cannot be mistaken for
+        // success — which burned the shared bucket while claiming "Resent".
+        const resp = await bffPost("/auth/resend", { email: email });
+        if (resp.status === 429) {
+          const err = bffError(resp.data);
+          setRateLimitLockout(err);
+          document.getElementById("resend-note").textContent = isEmailBucketError(err)
+            ? "Email limit reached — try again in about an hour."
+            : "Email limit reached — try again in a minute.";
+          return;
+        }
+        if (resp.status === 400) {
+          document.getElementById("resend-note").textContent =
+            (resp.data && resp.data.message) || "Could not resend — try again shortly.";
+          return;
+        }
+        if (!resp.ok) {
+          // 503 (provider/store) and anything else: retryable, NOT a success.
+          document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+          return;
+        }
+        document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
+      } catch (e) {
+        document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
+      } finally {
+        // ⛔ SET THE COOLDOWN FIRST so applyRateLimitLockout()'s update()
+        // sees it when deciding whether to re-enable #btn-resend — setting it
+        // after would let the first click's cooldown go unenforced (#527/#801).
+        resendCooldownUntil = Date.now() + 60000;
+        applyRateLimitLockout();
+        // Guarded re-enable: never re-enable during an active lockout
+        // (the interval would re-disable on the next tick, but avoid the
+        // flicker); never re-enable before the 60s cooldown is over.
+        setTimeout(() => {
+          if (rateLimitRemainingMs() <= 0 && Date.now() >= resendCooldownUntil) {
+            btn.disabled = false;
+          }
+        }, 60000); // rate-limit resend
+      }
+    }
+  </script>
+<script src="/consent.js" defer></script>
+
+  <!-- #3501: the Supabase-CDN watchdog is gone with the CDN script. There is
+       no client library to arrive late, so there is no "script blocked"
+       dead-form state left to guard — a BFF fault surfaces as an honest 503
+       message from the call that hit it. -->
+</body>
+</html>

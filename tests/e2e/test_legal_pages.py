@@ -6,22 +6,29 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #2  /tos 200 + negation-safe block + eligibility + carve-outs + dollar guard
       (== 1, the "$5M" AUG) + fees keywords + Pricing Page hyperlink
   #3  /license + /dpa 200 (both REQUIRED — G-gate ③/⑨ LOCKED)
-  #4  footer legal links on auth/signup/signin/self-hosted/faq
-      (the FOOTER_PAGES tuple; BASE_URL half unconditional, TORTISE_HOST half
-      gated on TORTISE_HOST_CHECK; product.html's footer is covered by the
-      tortoise-host half only)
-  #5  company-host copies of the 14 tortoise-only pages 301 → the exact
-      tortoise host URL (canonical consolidation, 2026-08-17); tortoise-host
-      copies 200 (gated)
+  #4  footer legal links on self-hosted/faq (marketing) and auth/signup (app
+      origin, #4054) — the FOOTER_PAGES / APP_FOOTER_PAGES tuples; the BASE_URL
+      half is unconditional, the TORTISE_HOST half is gated on
+      TORTISE_HOST_CHECK; product.html's footer is covered by the tortoise-host
+      half only. /signin and /welcome are NOT in either set: both redirect to
+      /auth, which is already covered.
+  #5  company-host redirects, split by ORIGIN (#4054): the tortoise-only pages
+      (docs, FAQ, security, self-hosted, the 5 legal pages, aviso-privacidad,
+      signin) 301 → the exact tortoise host URL (canonical consolidation,
+      2026-08-17); the app-only pages (auth, signup, welcome, invite-accept)
+      301 → app.premiselabs.co on EVERY host, because this project no longer
+      holds their assets. Dev/preview keep the tortoise-only pass-through
+      (200), and the tortoise-host copies 200 (gated).
   #6  middleware root rewrites — tortoise.* → product marker,
       premiselabs.co → index marker (gated)
   #7  same-viewport acceptance (.legal-accept vs .providers + #btn-submit at
       1280x720 AND 375x667) + DOM parentage + mocked email signup + mocked
-      GitHub OAuth click (mocked email signup asserts the #801 server-first
-      deployed contract: /v1/signup/email 200 → direct sign-in → /welcome
-      redirect; the check-your-inbox state is not part of the hosted happy
-      path — the legacy fallback that reaches it is covered in
-      test_signup_form_safety_e2e via the 503-degradation resend test)
+      GitHub OAuth click. Run on the APP origin, which serves the page and the
+      BFF it calls: the signup POSTs to the same-origin /auth/signup (the page
+      no longer calls api.premiselabs.co/v1/signup/email directly — the BFF
+      route performs that upstream call server-side) and the OAuth
+      button navigates to the BFF's /auth/start. The confirmation-email funnel
+      (200 with confirmationRequired) is covered in test_signup_form_safety_e2e.
   #8  link crawl — enumerated page set final-200 + tortoise root (gated) +
       third-party external links
   #9  mobile render @375px — no horizontal scroll + minimum content + headings
@@ -37,23 +44,35 @@ Harness contract (cycle-4 P1-1, pinned):
     module skip; bare collection of this module NEVER errors (skip is the
     guaranteed outcome on every surface that collects tests/e2e/ without it).
     NEVER pytest.exit() — it aborts the whole pytest session.
-  - ALLOW_PROD=1 required to point BASE_URL/TORTISE_HOST at https:// URLs
-    (no production assertions pre-merge; local runs pass http://127.0.0.1).
+  - ALLOW_PROD=1 required to point BASE_URL/APP_BASE_URL/TORTISE_HOST at
+    https:// URLs (no production assertions pre-merge; local runs pass
+    http://127.0.0.1).
   - TORTISE_HOST_CHECK == "1" gates the tortoise.* tests (#4 tortoise-host
     half, #5, #6, #8) — the post-deploy CI job (follow-up #677) sets it only
     when its DNS preflight is green; a skipped tortoise.* test is
     GREEN-WITH-ANNOTATION by design.
 
-Run locally against a wrangler pages dev preview:
+Run locally against a wrangler pages dev preview (TWO servers — #4054 split
+the auth surface onto the app origin; the marketing origin only 301s to it):
   cd website && npx wrangler@4 pages dev . --port 8788 --ip 127.0.0.1
+  cd website/apps/dashboard && npm ci && npm run build
+    && npx wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 --d1 SESSIONS
   RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788 \
+    APP_BASE_URL=http://127.0.0.1:8790 \
     TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1 \
     python -m pytest tests/e2e/test_legal_pages.py -v
 
-Run against production (manual post-deploy verification — the repo's
-pages deploy workflow deploy-pages.yml has NO post-deploy job; the CI
-post-deploy job is tracked as follow-up #677):
+APP_BASE_URL is REQUIRED for local runs: /auth, /signup, /welcome and
+/invite-accept are rendered by the app origin, and following the marketing
+origin's 301 would assert against DEPLOYED PRODUCTION.
+
+Run against production (manual post-deploy verification — the pages deploy
+workflow `deploy-pages.yml` has two post-deploy steps in the `deploy` job
+(`Post-deploy — sign-in is actually reachable`, and since #3620
+`Post-deploy — internal paths are not publicly served`) plus the separate
+`verify-legal` job, which is this suite; #677 shipped `verify-legal`):
   RUN_LEGAL_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
+    APP_BASE_URL=https://app.premiselabs.co \
     TORTISE_HOST=https://tortoise.premiselabs.co \
     python -m pytest tests/e2e/test_legal_pages.py -v
 """
@@ -80,34 +99,49 @@ if not os.environ.get("RUN_LEGAL_E2E"):
 # ── Harness guard (cycle-4 P1-1) — refuse production URLs pre-merge. ───────
 BASE_URL = os.environ.get("BASE_URL", "https://premiselabs.co")
 TORTISE_HOST = os.environ.get("TORTISE_HOST", "https://tortoise.premiselabs.co")
-if (BASE_URL.startswith("https://") or TORTISE_HOST.startswith("https://")) and os.environ.get("ALLOW_PROD") != "1":
+if (
+    BASE_URL.startswith("https://")
+    or TORTISE_HOST.startswith("https://")
+    # #4054: the auth surface lives on the app origin, so an https APP_BASE_URL
+    # is a production assertion too. Checking only the two origins above would
+    # let `BASE_URL=http://127.0.0.1:8788 APP_BASE_URL=https://app.premiselabs.co`
+    # run the auth-surface tests against production pre-merge.
+    or os.environ.get("APP_BASE_URL", "").startswith("https://")
+) and os.environ.get("ALLOW_PROD") != "1":
     pytest.skip(
         "no production assertions pre-merge — set ALLOW_PROD=1 to test production",
         allow_module_level=True,
     )
 
-# ── Signup-flow mode discrimination (#1190) ────────────────────────────────
-# The deployed form is SERVER-FIRST on the hosted site (#801) but runs the
-# LEGACY client-side auth/signUp flow on local/dev previews (isLocal in
-# signup.html). The mocked email-signup test drives BOTH: the server
-# endpoint on prod, the legacy endpoint on local preview.
-IS_LOCAL = "127.0.0.1" in BASE_URL or "localhost" in BASE_URL
-# CORS preflight headers for the mocked cross-origin endpoints (the browser
-# preflights the api.premiselabs.co fetch and the supabase auth calls before
-# the real POST — the OPTIONS must be fulfilled locally or the request is
-# blocked before the mock can answer).
-_CORS_PREFLIGHT = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST,OPTIONS",
-    "Access-Control-Allow-Headers": "*",
-}
+# Imported here rather than with the stdlib block above ON PURPOSE: the two opt-in
+# skips immediately above are this module's pinned harness contract ("FIRST
+# executable statement"), so bare collection must reach them before anything that
+# could fail to import. The helper is pure stdlib today, but the contract is what
+# keeps collection error-free in every lane, so it does not depend on that.
+from tests._html_links import blog_entry_hrefs  # noqa: E402
+
+# ── App origin (#4054) ────────────────────────────────────────────────────
+# The auth surface — /auth, /signup, /welcome, /invite-accept — moved to the
+# `tortoise-dashboard` Pages project at app.premiselabs.co. The marketing
+# origin only 301s those paths there (functions/_middleware.ts + _redirects),
+# so a PAGE-level assertion on them must run against the APP origin. Following
+# the 301 from BASE_URL lands on DEPLOYED PRODUCTION — which is what this suite
+# did before the split: it "passed" against premiselabs.co's live auth page
+# while the branch's own page was never exercised, exactly the pre-merge
+# production assertion the ALLOW_PROD guard above exists to forbid.
+#
+# Production runs (ALLOW_PROD=1) default to the real app origin. Local runs MUST
+# set APP_BASE_URL (the dashboard `wrangler pages dev dist` origin); `_app_url()`
+# fails loudly rather than silently asserting against production.
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "")
+if not APP_BASE_URL and BASE_URL.startswith("https://"):
+    APP_BASE_URL = "https://app.premiselabs.co"
 
 # Browser-level network log noise from deliberately-failed requests (real
-# 401s from the /welcome bridge boot after the mocked sign-in redirect in
-# prod mode — rest/v1/org_memberships, /v1/onboarding/state fire ~100-500ms
-# after commit; review P1 c60) — NOT page JS errors; the zero-console-errors
-# assertion in the mocked-signup test filters it (same filter the signup
-# safety suite uses).
+# 401s from the app root's boot after the mocked sign-in redirect —
+# rest/v1/org_memberships, /v1/onboarding/state fire ~100-500ms after commit;
+# review P1 c60) — NOT page JS errors; the zero-console-errors assertion in the
+# mocked-signup test filters it (same filter the signup safety suite uses).
 _RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
 
 # ── Lazy playwright import — bare collection must never error. ─────────────
@@ -192,10 +226,15 @@ FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # with NO pricing content — the id="pricing-section" anchor exists only in
 # product.html (served at '/' on the tortoise host via the middleware rewrite).
 PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
-FOOTER_PAGES = ("/auth", "/signup", "/signin", "/self-hosted.html", "/faq")
+FOOTER_PAGES = ("/self-hosted.html", "/faq")
+APP_FOOTER_PAGES = ("/auth", "/signup")
+# The crawl only walks pages the MARKETING origin serves with a final 200. The
+# auth surface (/welcome, /signup, /auth, /invite-accept — the middleware's
+# APP_ONLY set, plus /signin, which 301s same-origin to /auth first) leaves for
+# the app origin, so crawling it would leave the local server for production.
 CRAWL_PAGES = (
-    "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq",
+    "/self-hosted.html", "/docs.html",
+    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq", "/contact",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
@@ -409,10 +448,38 @@ def _scan_instrumentation_markers() -> list[str]:
 
 
 def _goto(page: Page, url: str, status: int = 200) -> str:
+    """Fetch ``url`` and assert its status, retrying once on a mismatch.
+
+    This suite runs against LIVE production post-deploy, where a transient 5xx or a
+    stale edge response is not a defect — the external-crawl check below retries for
+    the same reason. Without this, the two unconditional production assertions added
+    for #3950 could redden the post-deploy job on a blip (review finding, #3962).
+    """
     resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    if resp is None or resp.status != status:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     assert resp is not None, f"{url} produced no response"
     assert resp.status == status, f"{url} returned {resp.status} (expected {status})"
     return page.content()
+
+
+def _app_url(path: str) -> str:
+    """Absolute URL on the APP origin for an #4054 auth-surface path.
+
+    Fails (never silently falls back to BASE_URL): the marketing origin only
+    301s these paths to the app origin, so a missing APP_BASE_URL would send the
+    assertion to deployed production.
+    """
+    if not APP_BASE_URL:
+        pytest.fail(
+            "APP_BASE_URL is not set — /auth, /signup, /welcome and "
+            "/invite-accept are served by the app origin since #4054 and the "
+            "marketing origin only 301s to it. Set APP_BASE_URL to the app "
+            "origin (local: the dashboard `wrangler pages dev dist` server, "
+            "e.g. http://127.0.0.1:8790); without it these assertions would "
+            "follow the 301 into deployed production."
+        )
+    return APP_BASE_URL + path
 
 
 def _body_text_clean(page: Page) -> str:
@@ -424,6 +491,29 @@ def _footer_links_present(content: str) -> None:
     legal/security hrefs appear in the served document."""
     for href in FOOTER_LINK_HREFS:
         assert href in content, f"footer link {href} missing"
+
+
+def _has_blog_entry(content: str) -> bool:
+    """True when the served HTML carries an ANCHOR into the blog (#3950).
+
+    Uses the SAME rule the static guard uses — `blog_entry_hrefs`, which is
+    `extract_anchor_hrefs` plus `is_blog_entry`, both in `tests/_html_links.py`.
+    That is not a stylistic preference: an earlier revision of this helper
+    scanned the raw document, so a commented-out or `<script>`-only anchor
+    satisfied the production check while the static guard correctly reported the
+    link as lost — and no test could catch the divergence, because importing this
+    module runs its module-level `pytest.skip`. The PREDICATE is shared for the
+    same reason: while each layer owned a copy, the two could disagree about
+    which hrefs count, with the same undetectability.
+
+    `href="/blog"` (the index) and `/blog/<slug>` (a post — its own nav links
+    back) both count. A root-relative href is accepted as written; an absolute
+    one must name a host the site owns, so `premiselabs.co/blog` (which 301s to
+    the tortoise host) counts while a typo'd or third-party host does not. And
+    because the extractor reads anchors, a `<link rel="prefetch">` is not a way
+    in.
+    """
+    return bool(blog_entry_hrefs(content))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -572,22 +662,31 @@ def test_license_and_dpa_serve_200(page: Page) -> None:
 
 def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
     """UNCONDITIONAL half: the five legal/security links are present in the
-    FOOTER element on every page in FOOTER_PAGES (auth, signup, signin,
-    self-hosted, faq) (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
+    FOOTER element on every page in FOOTER_PAGES (self-hosted, faq) AND
+    APP_FOOTER_PAGES (/auth, /signup — the app origin's pages, #4054)
+    (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
     Security — all five ship, no conditional). Scoped to the footer element
     via a real locator (footer, .legal-footer, .footer) — not page-wide
     (#3501 dropped /welcome from this set: it redirects to /auth, which is
-    already here, so including it only re-tested /auth's footer).
-    substring checks (reviewer P3-5a)."""
-    for path in FOOTER_PAGES:
-        _goto(page, BASE_URL + path)
+    already here, so including it only re-tested /auth's footer; /signin left
+    for the same reason).
+    substring checks (reviewer P3-5a).
+
+    #4054 split: the auth pages are rendered by the APP origin and reached on
+    the marketing origin only by a 301, so they are asserted there (this test
+    used to follow that 301 into deployed production).
+    """
+    for url in [BASE_URL + p for p in FOOTER_PAGES] + [
+        _app_url(p) for p in APP_FOOTER_PAGES
+    ]:
+        _goto(page, url)
         footer = page.locator(FOOTER_SELECTOR).first
         expect(footer).to_be_visible()
         hrefs = footer.evaluate(
             "el => [...el.querySelectorAll('a[href]')].map(a => a.getAttribute('href'))"
         )
         for href in FOOTER_LINK_HREFS:
-            assert href in hrefs, f"footer link {href} missing on {path} (footer hrefs: {hrefs})"
+            assert href in hrefs, f"footer link {href} missing on {url} (footer hrefs: {hrefs})"
 
 
 @TORTOISE_HOST_SKIP
@@ -604,73 +703,107 @@ def test_tortoise_host_footer_half(page: Page) -> None:
     _footer_links_present(body)
 
 
+# ── #3950: the blog is live but was unreachable — pin the SERVED entry points ──
+# These belong here (not only in the static guard) because the tortoise root is
+# served by `functions/_middleware.ts`, which fetches `/product.html`: the served
+# markup is Function-produced, so a repo-side assertion cannot prove what a
+# visitor receives. This suite runs against production post-deploy.
+
+
+def test_company_root_links_to_the_blog(page: Page) -> None:
+    """UNCONDITIONAL half (#3950): the company root must offer the blog.
+
+    `premiselabs.co/` serves `index.html`, which had no blog link at all. Asserted
+    on the SERVED page — "the link exists in the repo" is not the property; the
+    property is that a visitor can reach it.
+    """
+    body = _goto(page, BASE_URL + "/")
+    assert _has_blog_entry(body), (
+        "premiselabs.co/ carries no /blog entry point (#3950): the blog is live but "
+        "unreachable when nothing links it. Add the absolute "
+        "https://tortoise.premiselabs.co/blog to index.html's footer bar."
+    )
+
+
+@TORTOISE_HOST_SKIP
+def test_tortoise_root_links_to_the_blog(page: Page) -> None:
+    """TORTISE-HOST half (#3950): the page the owner actually complained about.
+
+    The middleware rewrites `/` to `product.html`, so this is the served landing
+    page. Gated by TORTISE_HOST_CHECK exactly like the footer half — a stale-DNS
+    run skips (green-with-annotation), never reddens.
+    """
+    host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
+    spoof = host if host.startswith("tortoise.") else "tortoise.premiselabs.co"
+    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
+    assert resp.status == 200, f"tortoise host root returned {resp.status}"
+    body = resp.text()
+    assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
+    assert _has_blog_entry(body), (
+        "tortoise.premiselabs.co/ carries no /blog entry point (#3950) — this is the "
+        "exact page the owner reported as unreachable. It must offer the blog in the "
+        "hero's secondary-link row (above the fold) and in the footer."
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # #5 cross-host
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
-    """UNCONDITIONAL consolidation half (#5, 2026-08-17): all 14 tortoise-only
-    pages (docs, FAQ, security, self-hosted, the 5 legal pages, auth,
-    signup/signin, welcome, invite-accept) are canonical on
-    tortoise.premiselabs.co; the
-    middleware 301s their copies on the exact premiselabs.co hostname
-    (redirect target is a constant, so this is safe on stale-DNS runs).
-    Local dev / *.pages.dev previews pass through with 200 — not indexed,
-    and the E2E suite runs against a dev server — so the 301 half is
-    asserted only against the production company host. Two exceptions are
-    redirect-by-design on every host: /signin (consolidation → /auth) and
-    /welcome (#3501: a pure server redirect, so it never serves a 200 body)."""
+    """UNCONDITIONAL consolidation half (#5, 2026-08-17), split by ORIGIN in
+    #4054.
+
+    TORTOISE_ONLY (docs, FAQ, security, self-hosted, the 5 legal pages,
+    aviso-privacidad, signin) is canonical on tortoise.premiselabs.co.
+    APP_ONLY (auth, signup, welcome, invite-accept) moved to the APP origin —
+    the BFF and the three pages it serves live in the `tortoise-dashboard`
+    project — so those 301 to app.premiselabs.co, NOT to the tortoise host.
+
+    On the exact premiselabs.co hostname the middleware 301s the tortoise-only
+    set; redirect targets are constants, so this is safe on stale-DNS runs.
+    Local dev / *.pages.dev previews keep the pass-through for that set (not
+    indexed; the suite runs against a dev server). The APP_ONLY 301s apply on
+    EVERY host, though: this project can no longer render those pages (the
+    assets moved with the BFF), so a dev request for one must not fall through
+    to a deleted asset. /signin is the marketing-side redirect — it 301s to
+    /auth, which then lands on the app origin.
+    """
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
-    # The full company-host consolidation surface of the middleware
-    # TORTOISE_ONLY set (extensionless forms; .html/trailing-slash variants
-    # normalize onto these canonicals).
-    for path in ("/docs", "/faq", "/security", "/self-hosted", "/privacy", "/tos",
-                 "/license", "/dpa", "/aviso-privacidad", "/auth", "/signup", "/signin",
-                 "/welcome", "/invite-accept"):
+    tortoise_only = ("/docs", "/faq", "/security", "/self-hosted", "/privacy",
+                     "/tos", "/license", "/dpa", "/aviso-privacidad", "/signin")
+    app_only = ("/auth", "/signup", "/welcome", "/invite-accept")
+
+    for path in tortoise_only + app_only:
         r = page.request.get(BASE_URL + path, timeout=15_000, max_redirects=0)
-        if prod_company:
-            assert r.status == 301, f"{path} on premiselabs.co → {r.status} (expected 301)"
-            # Pin the raw Location verbatim — the middleware deterministically
-            # strips trailing slashes, so a trailing-slash regression would
-            # emit a non-canonical URL (a second 301 hop via _redirects on
-            # the tortoise host) instead of the exact canonical and MUST
-            # fail this assertion.
-            expected = "https://tortoise.premiselabs.co" + path
-            location = r.headers.get("location")
+        location = r.headers.get("location")
+        if path in app_only:
+            # 301 on EVERY host (#4054) — the asset is not in this project.
+            assert r.status == 301, f"{path} on {BASE_URL} → {r.status} (expected 301)"
+            expected = "https://app.premiselabs.co" + path
             assert location == expected, (
                 f"{path} redirects to {location!r} (expected {expected})"
             )
-        else:
-            # Dev/preview pass-through: most tortoise-only pages serve
-            # 200; the auth consolidation 301s apply on EVERY host, so
-            # /signin → /auth here too (single auth page).
-            #
-            # /welcome is 302 by design since #3501: `functions/welcome.ts` is a
-            # pure server redirect (signed-in → the app origin, anonymous →
-            # /auth). It has no HTML to serve, so a 200 here would mean the
-            # redirect was REMOVED and the page has silently become a rendered
-            # page again — the exact regression this asserts against.
-            expected_dev = {
-                "/signin": 301,
-                "/welcome": 302,
-            }.get(path, 200)
-            assert r.status == expected_dev, (
-                f"{path} on {BASE_URL} → {r.status} (expected {expected_dev} dev pass-through)"
+        elif prod_company:
+            assert r.status == 301, f"{path} on premiselabs.co → {r.status} (expected 301)"
+            # Pin the raw Location verbatim — the middleware deterministically
+            # strips trailing slashes, so a trailing-slash regression would
+            # emit a non-canonical URL (a second 301 hop via _redirects on the
+            # tortoise host) instead of the exact canonical and MUST fail this.
+            expected = "https://tortoise.premiselabs.co" + path
+            assert location == expected, (
+                f"{path} redirects to {location!r} (expected {expected})"
             )
-            if path == "/welcome":
-                # urlsplit rather than startswith("/"): a protocol-relative
-                # `//evil.example/auth` satisfies BOTH startswith("/") and a
-                # naive "/auth" substring test, so the weaker form did not
-                # actually pin the same-origin property it claimed to.
-                location = r.headers.get("location") or ""
-                parsed_loc = urlsplit(location)
-                assert parsed_loc.netloc == "", (
-                    f"/welcome must stay same-origin in dev, got {location!r}"
-                )
-                assert parsed_loc.path == "/auth", (
-                    f"anonymous /welcome must redirect to /auth, got {location!r}"
-                )
+        elif path == "/signin":
+            # The legacy alias consolidates onto the single auth screen; the
+            # hop is same-origin here and the NEXT hop leaves for the app.
+            assert r.status == 301, f"/signin on {BASE_URL} → {r.status} (expected 301)"
+            assert location == "/auth", f"/signin redirects to {location!r} (expected '/auth')"
+        else:
+            assert r.status == 200, (
+                f"{path} on {BASE_URL} → {r.status} (expected 200 dev pass-through)"
+            )
 
 
 @TORTOISE_HOST_SKIP
@@ -749,7 +882,7 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
     buttons."""
     width, height = viewport
     page.set_viewport_size({"width": width, "height": height})
-    _goto(page, BASE_URL + "/signup")
+    _goto(page, _app_url("/signup"))
 
     accept = page.locator(".legal-accept")
     expect(accept).to_be_visible()
@@ -791,7 +924,7 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers,
     PRECEDES <form id="email-form"> in document order, and is NOT a
     descendant of the form. Links resolve to /tos and /privacy."""
-    _goto(page, BASE_URL + "/signup")
+    _goto(page, _app_url("/signup"))
 
     struct = page.evaluate(
         """() => {
@@ -817,17 +950,22 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
 
 
 def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
-    """Mocked email-path signup — the DEPLOYED #801 server-first contract
-    (stale client-side auth/v1/signup assertions fixed in #1190): the submit
-    calls api.premiselabs.co/v1/signup/email, a 200 "created" signs the user
-    in directly (auth/v1/token) and redirects to the app root (in-app
-    provisioning, #1566) — the
-    check-your-inbox state is NOT part of the hosted happy path
-    (email_confirm=true server-side, #801; that legacy UI is only reached
-    via the server-unavailable fallback, covered in the safety suite's
-    resend test). Asserts the signup request fired with the typed payload,
-    the x_signup conversion event (#736), the acceptance block stayed
-    visible, the redirect happened, and zero console errors."""
+    """Mocked email-path signup — the #3501/#4054 BFF contract.
+
+    The submit POSTs to the SAME-ORIGIN `/auth/signup` route (supabase-js is
+    gone from the page, and the page no longer calls
+    api.premiselabs.co/v1/signup/email directly — the route performs that
+    upstream call server-side), which creates the account server-side; the page
+    then
+    navigates to its post-login target. Asserts the request fired with the
+    typed payload, the navigation landed off the signup URL on the app origin,
+    the x_signup conversion event (#736), and zero console errors.
+
+    Runs on the APP origin (`_app_url`): the page belongs to the
+    `tortoise-dashboard` project. `window.__DASHBOARD_BASE_URL` is pinned to
+    that origin so the post-login navigation stays on the local server — at its
+    production default it would carry the test to app.premiselabs.co.
+    """
     email = f"e2e-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     console_errors: list[str] = []
     # _RESOURCE_LOG_RE filter (review P1 c60): in prod mode the /welcome
@@ -842,6 +980,11 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
 
     fired: dict = {}
     captured: dict = {}
+    # Keep the post-login navigation on the app origin UNDER TEST — the page
+    # defaults __DASHBOARD_BASE_URL to production.
+    page.add_init_script(
+        f"window.__DASHBOARD_BASE_URL = {json.dumps(APP_BASE_URL)};"
+    )
     # Capture the x_signup push SYNCHRONOUSLY in the page (pushSignupEvents
     # runs in the same task as the /welcome redirect — the JS context is
     # destroyed on commit, so post-navigation reads always miss it).
@@ -860,64 +1003,22 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     """)
 
     def handle(route):
-        url = route.request.url
-        if "v1/signup/email" in url:
-            if route.request.method == "OPTIONS":  # CORS preflight
-                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
-                return
-            if route.request.method == "POST":
-                fired["signup"] = route.request
-                # #801 server-first: account created confirmed server-side.
-                route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    headers={"Access-Control-Allow-Origin": "*"},
-                    body=json.dumps({"user_id": "mock-user", "email": email,
-                                     "email_confirm": True, "message": "user_created"}),
-                )
+        # Same-origin BFF route (#3501/#4054) — no CORS: the page and the
+        # Functions that serve it share the app origin.
+        if "/auth/signup" not in route.request.url or route.request.method != "POST":
+            route.continue_()
             return
-        if "auth/v1/signup" in url:
-            # local-preview (isLocal) legacy path — session-less success →
-            # the check-your-inbox state (no sign-in / redirect).
-            if route.request.method == "OPTIONS":  # CORS preflight
-                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
-                return
-            if route.request.method == "POST":
-                fired["signup"] = route.request
-                route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    headers={"Access-Control-Allow-Origin": "*"},
-                    body=json.dumps({"user": {"id": "mock-user", "email": email,
-                                               "identities": [{"id": "mock-id"}]}}),
-                )
-            return
-        if "auth/v1/token" in url:
-            if route.request.method == "OPTIONS":  # CORS preflight
-                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
-                return
-            if route.request.method == "POST":
-                # signInAndGo: the created account signs in directly (session
-                # response — user carries identities).
-                route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    headers={"Access-Control-Allow-Origin": "*"},
-                    body=json.dumps({
-                        "access_token": "mock-at", "token_type": "bearer",
-                        "expires_in": 3600, "refresh_token": "mock-rt",
-                        "user": {"id": "mock-user", "email": email,
-                                  "identities": [{"id": "mock-id"}]},
-                    }),
-                )
-            return
-        route.continue_()
+        fired["signup"] = route.request
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            # The BFF's shape: the created user, signed in server-side.
+            body=json.dumps({"user": {"id": "mock-user", "email": email,
+                                      "identities": [{"id": "mock-id"}]}}),
+        )
 
-    page.route("**/v1/signup/email*", handle)
-    page.route("**/auth/v1/signup*", handle)
-    page.route("**/auth/v1/token*", handle)
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
-    _goto(page, BASE_URL + "/signup")
+    page.route("**/auth/signup*", handle)
+    _goto(page, _app_url("/signup"))
     expect(page.locator(".legal-accept")).to_be_visible()
 
     page.locator("#btn-email").click()
@@ -925,18 +1026,22 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     page.locator("#password").fill("E2ePass-12345!")
     page.locator("#btn-submit").click()
 
-    if IS_LOCAL:
-        # local-preview (isLocal) legacy path: session-less success → the
-        # check-your-inbox state (no sign-in / redirect on the legacy flow).
-        expect(page.locator("#confirmation-required")).to_be_visible(timeout=15_000)
-        expect(page.locator("#confirm-email")).to_have_text(email)
-    else:
-        # #801 deployed happy path: created server-side → direct sign-in →
-        # redirect to the app root (no check-your-inbox step, #801/#1566).
-        # #1566: the signup now lands on the app ROOT (in-app provisioning).
-        # ** (double-star): the browser commits the trailing slash
-        # (https://app.premiselabs.co/) which a single * glob excludes.
-        page.wait_for_url("**://app.premiselabs.co**", timeout=15_000)
+    # Created server-side → the page navigates to its post-login target, which
+    # __DASHBOARD_BASE_URL pins to the app origin under test (above). The guard
+    # must EXCLUDE the signup path: the page was loaded at APP_BASE_URL +
+    # "/signup", so an origin-only predicate is satisfied before the navigation
+    # and the assertion could never fail.
+    signup_url = _app_url("/signup")
+    page.wait_for_url(
+        lambda url: url.startswith(APP_BASE_URL) and url.rstrip("/") != signup_url,
+        timeout=15_000,
+    )
+    # The expose_function binding is a round-trip: the page pushes x_signup and
+    # navigates in the SAME task, so the callback can still be in flight when
+    # wait_for_url returns. Poll rather than read immediately.
+    deadline = time.time() + 5
+    while "x_signup" not in captured and time.time() < deadline:
+        page.wait_for_timeout(50)
 
     # X conversion event (#736 Path A): the dataLayer push fired on success
     # with event=x_signup, the typed email, and a non-empty conversion_id
@@ -947,7 +1052,7 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
         f"x_signup entry malformed: {entry}"
 
     # The signup request fired with the typed payload.
-    assert "signup" in fired, "v1/signup/email request never fired"
+    assert "signup" in fired, "/auth/signup request never fired"
     payload = json.loads(fired["signup"].post_data or "{}")
     assert payload.get("email") == email, f"signup payload email mismatch: {payload.get('email')!r}"
     assert payload.get("password") == "E2ePass-12345!"
@@ -957,15 +1062,14 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
 
 
 def test_mock_github_oauth_fires(page: Page) -> None:
-    """Mocked OAuth click: 'Continue with GitHub' fires the auth/v1/authorize
-    request with provider=github (supabase-js navigates the browser to the
-    authorize URL directly — the mock fulfills that navigation with a stub),
-    with no acceptance-block interference."""
+    """Mocked OAuth click: 'Continue with GitHub' navigates to the BFF's
+    `/auth/start?provider=github` route (#3501/#4054). The PKCE verifier must be
+    minted SERVER-side, so the page cannot build a GoTrue authorize URL itself —
+    the route (fulfilled here with a stub document) owns that hop."""
     fired: dict = {}
 
     def handle(route):
-        url = route.request.url
-        if "auth/v1/authorize" in url:
+        if "/auth/start" in route.request.url:
             fired["authorize"] = route.request
             route.fulfill(
                 status=200,
@@ -975,9 +1079,8 @@ def test_mock_github_oauth_fires(page: Page) -> None:
             return
         route.continue_()
 
-    page.route("**/auth/v1/authorize*", handle)
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
-    _goto(page, BASE_URL + "/signup")
+    page.route("**/auth/start*", handle)
+    _goto(page, _app_url("/signup"))
     expect(page.locator(".legal-accept")).to_be_visible()
 
     page.locator("#btn-github").click()
@@ -985,9 +1088,9 @@ def test_mock_github_oauth_fires(page: Page) -> None:
     deadline = time.time() + 15
     while "authorize" not in fired and time.time() < deadline:
         page.wait_for_timeout(100)
-    assert "authorize" in fired, "auth/v1/authorize request never fired"
+    assert "authorize" in fired, "/auth/start request never fired"
     assert "provider=github" in fired["authorize"].url, \
-        f"OAuth request missing provider=github: {fired['authorize'].url}"
+        f"OAuth start missing provider=github: {fired['authorize'].url}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1019,7 +1122,7 @@ def test_crawl_tortoise_root_serves_product(page: Page) -> None:
 # Project-owned domains are excluded from the third-party crawl: they are the
 # crawl's own enumerated set (already asserted against BASE_URL/TORTISE_HOST),
 # a separately-deployed project (app.premiselabs.co — the dashboard, S4), or
-# covered by the welcome suite (the tortoise-onboarding skill mirror,
+# covered by the welcome suite (the tortoise-onboarding instructions mirror,
 # app.premiselabs.co/skills/... — #1998; the old onboarding-prompt.md URL is
 # archived/retired). Fetching
 # them in a local pre-merge run would hit PRODUCTION URLs (P1-3 violation).
@@ -1085,9 +1188,19 @@ def test_docs_html_contact_is_mailto(page: Page) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/privacy", "/tos", "/signup", "/docs.html", "/security", "/faq"]
+    "origin,path",
+    [
+        ("marketing", "/privacy"),
+        ("marketing", "/tos"),
+        ("marketing", "/docs.html"),
+        ("marketing", "/security"),
+        ("marketing", "/faq"),
+        # #4054: the auth screen is rendered by the APP origin — measured there
+        # rather than by following the marketing origin's 301 into production.
+        ("app", "/signup"),
+    ],
 )
-def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
+def test_mobile_render_no_horizontal_scroll(page: Page, origin: str, path: str) -> None:
     """At 375px the page must render without horizontal scroll (S8).
     NOTE: product.html was removed from this set (PR #840) — the product
     page now lives only on the tortoise host and raw page.request fetches
@@ -1100,7 +1213,7 @@ def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
     establish — so it is uncovered here rather than mislabelled, and the reset
     panel's own behaviour is pinned by tests/e2e/auth/test_welcome_and_password.py."""
     page.set_viewport_size({"width": 375, "height": 667})
-    _goto(page, BASE_URL + path)
+    _goto(page, _app_url(path) if origin == "app" else BASE_URL + path)
     dims = page.evaluate(
         "({sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth})"
     )
@@ -1219,11 +1332,15 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
 
     # /welcome is excluded: since #3501 it is a pure server redirect, so this
     # request would follow it to /auth (already in this tuple) and re-assert
-    # /auth's consent tag under a /welcome label.
-    for path in ("/auth", "/signup", "/signin"):
-        raw = page.request.get(BASE_URL + path, timeout=15_000).text()
+    # /auth's consent tag under a /welcome label. /auth and /signup moved to the
+    # APP origin in #4054 — the marketing origin only 301s them, so they are
+    # fetched there (following the 301 would assert against deployed
+    # production). /signin is dropped for the same reason /welcome is: it 301s
+    # to /auth, which is already in this set.
+    for url in [_app_url(p) for p in ("/auth", "/signup")]:
+        raw = page.request.get(url, timeout=15_000).text()
         assert re.search(r'<script[^>]+src="/consent\.js"[^>]*>', raw, re.I), \
-            f"{path}: missing consent.js script tag"
+            f"{url}: missing consent.js script tag"
 
     raw_index = page.request.get(BASE_URL + "/index.html", timeout=15_000).text()
     assert "consent.js" not in raw_index, \

@@ -83,7 +83,7 @@
 
 **Intent:** ONE shared source of truth for the onboarding state machine — canonical step list, card subset, per-key-type semantics, step validation, the fork-aware completion gate, and the graph write/read primitives the endpoints, agents (W2/W3), and card all consume.
 
-**Acceptance:** The module exports `ONBOARDING_STEPS` (6), `CARD_STEPS` (4, ⊆ canonical), `PER_KEY_SEMANTICS`, `completion_gate_satisfied`, `validate_step_id`, graph writers (`ensure_onboarding_state_node`, `write_completed_step`, `write_fork`, `write_compact`, `write_last_decide_attempt`, `write_member_progress`, `write_status`), `read_onboarding_node`. Unit tests: unknown step rejected; card-subset ⊆ canonical; gate logic per fork (self/build/compact, compact-first, fork=None→'self'); set-once/LWW semantics table complete.
+**Acceptance:** The module exports `ONBOARDING_STEPS` (6), `CARD_STEPS` (3, ⊆ canonical — was 4 before #3913 dropped the build fork's `catalog-presented` row), `PER_KEY_SEMANTICS`, `completion_gate_satisfied`, `validate_step_id`, graph writers (`ensure_onboarding_state_node`, `write_completed_step`, `write_fork`, `write_compact`, `write_last_decide_attempt`, `write_member_progress`, `write_status`), `read_onboarding_node`. Unit tests: unknown step rejected; card-subset ⊆ canonical; gate logic per fork (self/build/compact, compact-first, fork=None→'self'); set-once/LWW semantics table complete.
 
 **Files:**
 - Create: `tortoise/onboarding/state.py`

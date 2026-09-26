@@ -8,7 +8,7 @@ aboutObjects: tortoise-oauth-mcp
 domain: platform
 doc_status: live
 created: 2026-08-15
-updated: 2026-09-11
+updated: 2026-09-20
 ---
 
 # OAuth 2.1 for Remote MCP Auth (hosted)
@@ -44,6 +44,18 @@ needs no client_id paste.
 2. Client opens `/oauth/authorize` with `response_type=code`,
    `code_challenge` (PKCE, S256 only), `redirect_uri`, and an optional
    RFC 8707 `resource`.
+
+   **`redirect_uri` acceptance at registration (#3579).** An entry is accepted
+   when it is `https`, an `http` loopback URI, or a **private-use URI scheme**
+   listed in `_NATIVE_REDIRECT_SCHEMES` — currently `cursor` alone, per
+   RFC 8252 §7.1, because Cursor IDE's MCP OAuth DCR still sends
+   `cursor://anysphere.cursor-mcp/oauth/callback` on its exthost path. It is a
+   deliberate **allowlist**: registration is all-or-nothing (one rejected entry
+   costs the client its `client_id`, and with it every sign-in path), and the
+   consent page hands the code over by navigating to the raw value, so a scheme
+   a browser executes (`javascript:`, `data:`) must never be registrable. A
+   fragment is refused for every scheme (RFC 6749 §3.1.2) — tested as the raw
+   `#` delimiter, so a bare trailing `#` (an empty fragment) is refused too.
 
    **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
    is ignored when matching the registered value (RFC 8252 §7.3 — a native
@@ -105,6 +117,102 @@ still rejected (RFC 8707 §2).
 - A lapsed membership revokes the presented refresh token.
 - Clients may revoke explicitly: `POST /oauth/revoke` (RFC 7009).
 
+## Authorization-code redemption state (#3027)
+
+`oauth_codes.used_at` records that a request **claimed** a code; on its own it
+cannot say what the claim *did*, so a failed or lost redemption was
+indistinguishable from a replay. Migration
+`20260925000002_oauth_redemption_state.sql` adds the durable outcome:
+
+| `redemption_state` | Meaning | Redeemable? |
+|---|---|---|
+| `unclaimed` | not claimed (mirrors `used_at IS NULL`) | yes, while unexpired |
+| `claimed` | an attempt owns the code; **outcome not yet recorded** | no — a second request is terminal, and the residue is settled by the reconciler |
+| `minted` | the pair was handed to the response | no — replay-safe terminal |
+| `burned` | terminal failure; never mints again | no |
+
+A schema CHECK pins the state to the legacy flag **in one direction** —
+`used_at IS NULL ⇒ redemption_state = 'unclaimed'`, i.e.
+`used_at IS NOT NULL OR redemption_state = 'unclaimed'`. It is deliberately NOT
+the biconditional: the pre-#3027 writer PATCHes `used_at` alone and leaves the
+`'unclaimed'` default, and because this migration must be applied **before** the
+new image ships (the fail-closed migration-drift gate), the old writer is live
+against this schema during the rollout — a biconditional rejects it and every
+authorization-code exchange then fails with `23514`. (A `NOT VALID` check does not
+help: Postgres still enforces it on new writes.) The enforced direction is the one
+the state machine relies on — a settled row always has a claim timestamp — and the
+relaxed one is the shape `_observe_code` already treats as `claimed`. The claim
+statement writes `used_at`, the state and a fresh `redemption_id` atomically,
+alongside the existing `used_at IS NULL` CAS, so every write this code makes
+satisfies the biconditional anyway.
+
+**Rollout ordering.** Apply this migration before the new app image (the drift
+gate enforces it), and apply it in a quiet window: the migration runs in one
+transaction and takes `ACCESS EXCLUSIVE` on `oauth_codes`, `oauth_access_tokens`
+and `oauth_refresh_tokens` until commit, so reads of the token tables block too.
+
+**Terminal and recovery rules.** `minted` is written just before the pair is
+returned — and **delivery is gated on winning that write**. Every **settle** is a
+CAS on the claim identity (`redemption_state='claimed'` plus `id`, and
+`redemption_id` when the settling view carries it), so only one of *{the owning
+request, a reconciler that took the claim over}* can settle a claim. (The
+`claimed → unclaimed` re-arm is a separate CAS on `code_hash`+`used_at`, made
+in-process by the request that still owns its claim.) `burned` is
+written where the residue is terminal: a pre-mint signal (bad PKCE,
+client/redirect/resource mismatch, suspended org, or an expired code), or a
+reconcile past the grace that ATTEMPTED to revoke a live orphan family (the
+revoke is best-effort — a failure is captured and the row survives inert under a
+now-`burned` code until the TTL sweep) or found none
+**at probe time**.
+
+An outcome the process could not settle stays **`claimed`**, and another
+redemption of that code is answered **terminally** (`invalid_grant`) — never
+retryably: the retry can terminate, because the sibling may still settle
+`minted`, and #2863 records an outcome-unknown write state as never retryable.
+The terminal answer also runs the lazy reconciler, which settles the residue once
+it ages past the grace window (`TORTOISE_OAUTH_REDEMPTION_GRACE_S`, default 60s):
+
+- within the grace window the claim may still be live, so **nothing is touched**
+  (`inflight`) — least of all re-armed;
+- past the grace, the reconciler first **takes the claim over with the same CAS**,
+  then acts. If it loses that CAS the owner settled `minted` first, so the family
+  is delivered and nothing is touched. If it wins and a LIVE family is linked to
+  the code, the mint committed and was never delivered, so the family is
+  soft-revoked (best-effort, and captured if the revoke fails) and the code is
+  burned; if it wins and no family is linked, the claim
+  left no live credential **at probe time** (the probe and the settle are not one
+  transaction, so a family minted between them escapes) and the code is **burned**
+  (`unresolved`) — fail safe; the client re-runs authorization;
+- if the reconciler's own read fails, nothing is written.
+
+The grace window does **not** prove the claim's owner is dead — the mutating
+grant is awaited with no wall-clock bound, so a live sibling can outlive any
+window; it bounds when a later request starts taking over. A live sibling that
+outlives it loses the CAS and its pair is compensated (an aborted grant, not a
+double grant). Resolution is **lazy**: it happens only when the code is presented
+again, so a claim that is never retried stays `claimed`, and any orphan family
+linked to it stays live until the retention sweep reaches its TTL.
+
+**There is no cross-request re-arm.** An earlier revision re-armed a stale
+no-family claim; that mints **two live families for one single-use code** when the
+stalled owner is not in fact dead (the mutating grant is awaited with no
+wall-clock bound, so no grace window proves otherwise). The verified-clean failure
+re-arms **in process only**, via `_restore_code`, where the observation and the
+write are the same request.
+
+Minted rows carry `code_id` (the authorizing `oauth_codes.id`) on both the
+access and refresh tables, and **rotation inherits it**, so "did this code
+mint a family?" is answerable across a rotation chain. `code_id` is
+`ON DELETE SET NULL` — the #3036 policy for OAuth provenance FKs (a bearer
+credential is independent of the code that minted it).
+
+**A retry never re-serves the same credential pair.** Tokens are stored hashed
+only (below), so the plaintext cannot be re-issued. A response lost after the
+`minted` write is therefore answered terminally and the client re-runs
+`/oauth/authorize`; the family left behind is inert (nobody holds its
+plaintext) and is reaped by the #3036 retention sweep. The invariant the state
+machine guarantees is that a retry **never creates a second live family**.
+
 ## Implementation notes
 
 - `tortoise/oauth.py` — protocol logic, control-plane seam (functions take
@@ -122,7 +230,188 @@ still rejected (RFC 8707 §2).
 - OAuth is hosted-only: in registry/selfhost mode the functional endpoints
   fail closed with 503; metadata endpoints still serve static JSON.
 - Env knobs: `TORTOISE_OAUTH_ACCESS_TTL` (3600s), `TORTOISE_OAUTH_REFRESH_TTL`
-  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s).
+  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s); retention grace
+  `TORTOISE_OAUTH_ACCESS_RETENTION_S` / `TORTOISE_OAUTH_REFRESH_RETENTION_S` /
+  `TORTOISE_OAUTH_CODE_RETENTION_S` (each 86400s, positive-int validated — a
+  malformed or non-positive override falls back to the default); redemption
+  reconciler grace `TORTOISE_OAUTH_REDEMPTION_GRACE_S` (60s, same validation).
+- Referential integrity + retention (#3036): `supabase/migrations/20260925000001_oauth_referential_integrity.sql`
+  adds the two FKs 0016 omitted (`refresh_token_id`, `rotated_from`, both
+  `ON DELETE SET NULL`) and `expires_at` indexes. A scheduled sweep
+  (`tortoise/oauth.py::sweep_oauth_retention`, wired into `hosted_api` boot +
+  `TORTOISE_EVENT_RETENTION_INTERVAL`) removes a row once its own `expires_at`
+  is past by the grace. These windows are credential hygiene — a different axis
+  from the user-content deletion promise; see `docs/retention-and-deletion.md`.
+- Redemption state (#3027): `supabase/migrations/20260925000002_oauth_redemption_state.sql`
+  adds `oauth_codes.redemption_state` / `redemption_id` / `redemption_settled_at`
+  / `redemption_note`, the `code_id` provenance FKs (`ON DELETE SET NULL`),
+  and the backfill that marks every already-consumed code `burned`. The
+  state machine and the reconciler live in `tortoise/oauth.py`
+  (`_settle_redemption`, `_observe_code`, `_reconcile_claimed_redemption`); the
+  design record is `docs/scoping/2026-09-25-3027-oauth-redemption-state.md`.
+
+## Client identity: CIMD (#2847)
+
+Before this change the only client-identity path was Dynamic Client
+Registration, which Anthropic calls *per fresh connection* on hosted Claude
+surfaces — so the `oauth_clients` table grew with connections, not with
+clients. The authorization-server metadata now also advertises **Client ID
+Metadata Documents** (`draft-ietf-oauth-client-id-metadata-document-00`):
+
+```json
+"client_id_metadata_document_supported": true,
+"token_endpoint_auth_methods_supported": ["none", "client_secret_post"]
+```
+
+Both values are required, not just the flag: Claude selects CIMD **only** when
+the flag and `"none"` are both present (its CIMD client authenticates as a
+public client at the token endpoint). If either is missing it falls back to
+DCR. The flag is read at request time, so `TORTOISE_OAUTH_CIMD=0` reverts the
+metadata and the fetch path in one env change — no deployment.
+
+With CIMD the `client_id` **is** an HTTPS URL that the authorization server
+fetches. It is fetched from `/oauth/authorize` *before* the user is
+authenticated, and — because `resolve_client` is the one resolver shared with
+the token path — also from `/oauth/consent` and from `/oauth/token` (both
+grants) when the presented `client_id` does not resolve in the registry. That
+is a server-side request forgery surface, so the fetch lives in
+`tortoise/cimd.py` behind seven controls, each with a test in
+`tests/test_cimd_ssrf.py`:
+
+| # | Control | Implementation |
+|---|---|---|
+| 1 | URL validation | https, absolute, path present, no userinfo, no fragment, no literal *or* percent-encoded `.`/`..` segments, length + control-char caps |
+| 2 | Host validation | every resolved address must be globally routable (no private / loopback / link-local / CGNAT / multicast / reserved / unspecified / NAT64) **and the socket connects to the vetted address** — see below |
+| 3 | Redirects | never followed; a 3xx is a hard failure |
+| 4 | Size + timeout | 64 KiB body cap, 3 s connect/read |
+| 5 | Cache | successes only, 300 s TTL, LRU cap 128; errors and malformed documents are **never** cached (§4.3) |
+| 6 | Rate limit | per-host 60/hr + aggregate 600/hr + live-store cap 256 |
+| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4), a per-fetch deadline bounding every socket phase (6 s: connect attempts, TLS, status/header and body reads — the 3 s read timeout is per-socket-read, not total; the OS resolver's `getaddrinfo` tail is the documented exception, see Limitations), and a per-window wall-clock budget (120 s / 3600 s) whose worst case is RESERVED at admission |
+
+Control 2 is closed against **DNS rebinding** rather than narrowed: a custom
+`httpcore` `NetworkBackend` resolves the host, refuses the whole resolution if
+*any* address is non-public, and then connects the TCP socket to the vetted
+address while TLS SNI and the `Host` header stay on the hostname (`httpcore`
+passes `server_hostname=origin.host` to `start_tls`). A design that resolves,
+validates, and then hands the *name* to the HTTP client leaves a TOCTOU window
+in which the name re-resolves to an internal address between the two; pinning
+removes the window. A proxy is deliberately not honoured (it would move egress
+off the pinned socket), and unix sockets are refused.
+
+Anthropic's rules beyond SSRF are applied too: the document must be
+**self-referential** (its `client_id` must equal the URL it was served from),
+`token_endpoint_auth_method` must be `none` (no shared secret can be
+established), non-loopback `redirect_uris` must be same-origin with the
+`client_id` URL, and the consent screen shows the client_id **host** — never
+the document's self-asserted `client_name`, which would be a phishing surface.
+The host must also be **ASCII (punycode)**: a non-ASCII host would render as a
+homograph on the consent screen (`сlaude.ai` with a Cyrillic с), so the A-label
+form is required. Loopback `redirect_uris` are exempt from the same-origin rule
+(native clients declare an ephemeral port listener against a hosted client_id
+URL; the port-agnostic match is #2846's `_redirect_uri_matches`).
+
+### `oauth_clients` growth bound
+
+| Identity path | Rows created | Bound |
+|---|---|---|
+| DCR (`POST /register`) | one per fresh connection | **O(connections)** — unbounded; gated by the #2866 limiter |
+| CIMD | one per distinct `client_id` URL, deduplicated | **O(distinct URLs)** — a handful for a real client population |
+| Operator-issued / `oauth_anthropic_creds` | one per issued credential | O(1) |
+
+The CIMD row exists only because `oauth_codes` / `oauth_access_tokens` /
+`oauth_refresh_tokens` carry a `REFERENCES oauth_clients(id)` foreign key, and
+it is written **once per distinct URL**: three connections from the same
+`client_id` URL produce exactly one row, however many times they connect —
+which is the whole point of the change, and the property DCR lacks.
+
+⚠️ **The "handful" bound is a property of honest clients, not a hard cap.** CIMD
+changes the growth *driver* from connections to distinct `client_id` URLs; it
+does not itself cap row growth, because anyone can mint a URL. The reachable
+rate is bounded by the **CIMD fetch** limiter above (600/hr aggregate,
+in-process) — **not** by the DCR limiter, which CIMD never touches — and, since
+#3669, also by a process-wide in-flight cap and a per-window wall-clock budget
+(see "Limitations"). Pruning for
+the pre-existing DCR-generated rows remains owned by **#2853 / #1677 (owner
+@daniel-ospina, dated 2026-10-15)**; CIMD adds one row per client
+implementation in normal operation but does add to that backlog under abuse.
+
+Idempotency under concurrency rests on the schema's `id text PRIMARY KEY`
+(`supabase/migrations/0016_oauth.sql`): two simultaneous first authorizations of
+the same URL race, and the loser's insert raises while the row is present, which
+is not an error. Note the in-memory `FakeControlPlane` used by the tests does
+**not** enforce the PK (its `POST` appends), so that claim is verified by
+inspection against the migration rather than by a test.
+
+### Knobs
+
+| Knob | Default | Notes |
+|---|---|---|
+| `TORTOISE_OAUTH_CIMD` | `1` | `0`/`false`/`no`/`off` disables both the metadata flag and the fetch path |
+| `TORTOISE_OAUTH_CIMD_SAME_ORIGIN` | `1` | `0` relaxes "non-loopback `redirect_uris` must be same-origin with the client_id URL" — the single lever if a future client's document legitimately spans hosts |
+
+Both knobs resolve through the shared env-truthiness contract (`tortoise/env_truthy.py`, #4097),
+so any truthy spelling (`1`/`true`/`yes`/`on`, any case) enables and any falsy spelling
+(`0`/`false`/`no`/`off`) disables. **An EMPTY value (`TORTOISE_OAUTH_CIMD=`) or a
+whitespace-only one means *unset*, i.e. the default — it does NOT disable the knob.**
+Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse, silently
+*relaxed* `TORTOISE_OAUTH_CIMD_SAME_ORIGIN`); set either to `0` to actually turn it off.
+
+### Limitations (deliberate)
+
+- The rate-limit, fetch-cache and #3669 occupancy stores are in-process, so the
+  real bound is `limit × running machines` and resets on restart — the same
+  accepted limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive is
+  #3124). The in-flight cap is per process (N machines ⇒ N×4), and the window
+  budget is per process (N machines ⇒ N×120 s/window).
+- The fetch is **synchronous** by construction, matching this path's existing
+  control-plane style (`cp.query` is a blocking PostgREST call made from the
+  same async handler). **#3669 moved the whole OAuth client resolution off the
+  event loop** through the bounded `monitoring` offload seam on a dedicated
+  `oauth` pool, so a fetch no longer occupies the loop (`Dockerfile.hosted` runs
+  a single `uvicorn` process with no `--workers`). Total occupancy is bounded
+  three ways, all charged in `resolve_client_metadata` — the one function all
+  four unauthenticated front doors reach through `resolve_client`: a
+  process-wide **in-flight cap** (`cimd.MAX_IN_FLIGHT_FETCHES`), a **per-fetch
+  deadline** (`cimd.FETCH_MAX_S`; the per-read `READ_TIMEOUT_S` does not bound a
+  trickled response, so `_DeadlineStream` caps every read/write/TLS timeout by
+  the remaining deadline and the pinning backend caps each connect attempt — the
+  OS resolver's own `getaddrinfo` timeout is the one unbounded tail), and a
+  **wall-clock budget per window** (`cimd.FETCH_BUDGET_S`) whose worst case is
+  reserved at admission and settled to the actual duration on return. Fetch
+  COUNT alone never bounded the product (distinct `client_id` URLs share one
+  aggregate budget; 600 fetches at the 6 s ceiling is ~the whole window).
+  Ordering: `FETCH_MAX_S < CONTROL_PLANE_OFFLOAD_TIMEOUT_S`, so a fetch returns
+  before its caller's offload bound.
+- **The window budget is an admitted cost, and it is the reason a sustained
+  attack can still starve a legitimate CIMD client.** It is a single
+  process-wide 120 s / 3600 s allowance, so a hostile host that keeps ~20
+  fetches alive near the `FETCH_MAX_S` ceiling exhausts it, after which every
+  later cache-miss CIMD client is refused as an unknown client for the rest of
+  the window (`invalid_client` at `/oauth/token`; `invalid_request` at
+  `/oauth/authorize` and `/oauth/consent`). A cache hit, and any non-CIMD/DCR
+  client, is unaffected. The fix removes the *unbounded* occupancy and keeps the
+  AS responsive; it does not make CIMD fetch capacity attack-proof, and the
+  600/hr aggregate limiter is the other ceiling on the same path. This is the
+  residual the single-worker deployment carries until the limiter/budget moves
+  to shared state (#3124).
+- The `authorize` error path uses the client **stamped on the raised
+  `OAuthError`** by `validate_authorize_params`, so an in-document
+  `redirect_uri` is still honoured on error responses without a second
+  resolution. Before #3669 it re-resolved, paying a second CIMD fetch and
+  rate-limit charge on every *failed* request (the success path's cache
+  absorbed it); a refused fetch there degrades to a JSON error rather than a
+  redirect, which is the conservative direction.
+- **Revocation:** the CIMD resolver re-reads through the revoked-filtered
+  accessor, so a revoked `client_id` URL is refused at `/oauth/authorize` and
+  `/oauth/consent` exactly as a revoked DCR client is (found in review; the
+  provisioning insert's duplicate re-read used the raw row and would otherwise
+  have resurrected it). Re-adding a revoked CIMD client requires clearing
+  `revoked_at`, same as any other client.
+- `oauth_anthropic_creds` (Anthropic-held credentials) remains the ops-side
+  alternative and is **not** implemented here: it needs no Tortoise code, only
+  an email to `mcp-review@anthropic.com` with a `client_id`/`client_secret`.
+  CIMD is preferred because it is self-serve, works against any authorization
+  server, and needs no vendor round-trip.
 
 ## DCR capacity policy (#2866)
 

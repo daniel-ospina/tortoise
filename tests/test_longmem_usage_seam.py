@@ -406,9 +406,12 @@ def test_call_once_runs_model_in_caller_context():
             return "ok"
 
     cv.set("caller-value")
-    resp, finish, ptok, ctok = _call_once(
+    # #3359: _call_once returns the 7-tuple (the trailing three are the
+    # per-call cost driver: cost_usd, serving provider, wire model id).
+    resp, finish, ptok, ctok, cost_usd, _prov, _model = _call_once(
         StubModel(), "s", "u", deadline_s=30, max_tokens=None, stats=None)
     assert ptok == 0 and ctok == 0  # #2134 Task 0: no token attrs -> 0
+    assert cost_usd is None         # no last_cost_usd attr -> disclosed as None
     assert resp == "ok"
     assert finish == "stop"
     assert seen["ctx_value"] == "caller-value", (

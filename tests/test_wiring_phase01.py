@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ def sdk():
     s.test_guard = lambda: None  # destructive teardown safety for tests
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _proj(sdk):
@@ -326,6 +328,17 @@ class TestRdbSnapshotRestore:
             "docker://:pw@localhost:6379/tortoise")
         assert cfg["host"] == "localhost"
         assert cfg["port"] == 6379
+        assert cfg["graph"] == "tortoise"
+
+    def test_parse_uri_percent_decodes_credentials(self):
+        """#3039: ``parse_uri`` must percent-decode userinfo (urlparse does
+        not). ``parse_uri`` exposes only the password (anonymous-user docker
+        form) and this module's callers currently discard the dict, so the
+        assertion pins the shared rule rather than a live client feed (#3089)."""
+        cfg = rdb_snapshot_restore.parse_uri(
+            "docker://:p%40ss@localhost:6379/tortoise")
+        assert cfg["password"] == "p@ss"
+        assert cfg["host"] == "localhost"
         assert cfg["graph"] == "tortoise"
 
     def test_restore_refuses_without_yes(self):

@@ -288,6 +288,10 @@ def search_snapshot(
             # A5 (#2070): stored evidence mark rides the snapshot hits
             # (snapshot points carry has_answer when the graph wrote it).
             has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
+            # ⛔ No ``source_ref``/``captured_at`` here — the lean snapshot
+            # projection excludes them by design, so
+            # TORTOISE_SEARCH_PROVENANCE is a no-op on this tier; see the KNOWN
+            # LIMITATION note on ``search_engine.search_provenance_enabled``.
         ).to_dict()
         for r in scored
     ]

@@ -6,7 +6,7 @@ the shared resolution logic (resolve_api_key, user_memberships, ...) runs
 verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 (plan Task 5 / P1-3): an adapter exposing query() over in-memory rows.
 
-Filter ops: eq | neq | is (None → IS NULL) | gt | lt | lte (all ordered
+Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
 ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
 rows; POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
@@ -65,6 +65,43 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
 _FAULT_CPS: list = []
 
 
+def _metering_period_label(period_start) -> str | None:
+    """The DERIVED ``'YYYY-MM'`` label the SQL RPC writes for a window start
+    (``to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM')``). #3825: a
+    derived label, a pure function of the key — never the row key itself."""
+    dt = _as_dt(period_start)
+    if dt is None:
+        return None
+    return f"{dt.year}-{dt.month:02d}"
+
+
+def _as_dt(value):
+    """Parse a stored metering instant for the fake's SQL-semantics
+    comparisons. ``None`` in → ``None`` out (a row with no window cannot match
+    a windowed read). An epoch int is accepted because the registry lane stores
+    whatever the Stripe webhook wrote, and a naive string is read as UTC — the
+    fake emulates a ``timestamptz`` column and every caller in this repo writes
+    UTC."""
+    from datetime import datetime
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
                  *, missing_columns: dict[str, set[str]] | None = None,
@@ -91,12 +128,32 @@ class FakeControlPlane:
         # partial unique index is the READ-COMMITTED backstop; the fake must
         # be atomic under the two-tab threading test).
         self._identity_lock = threading.Lock()
+        # #4355: a conditional PATCH (the rotate CAS
+        # ``UPDATE ... WHERE id = :id AND revoked_at IS NULL``) is ONE atomic
+        # statement in Postgres — two concurrent statements serialize on the
+        # row. The in-memory check-then-write below is NOT atomic under
+        # threads (the `if _matches(...)` and the `r.update(...)` are separate
+        # bytecodes a switch can land between), so two racing claims could
+        # BOTH observe the row live and both report success — making a genuine
+        # two-thread CAS test nondeterministic instead of red. Serialize the
+        # write to model the statement the fake stands in for.
+        self._patch_lock = threading.Lock()
         # #2863: fault injectors, consumed in order (see fail_query/_take_fault).
         self._faults: list[dict] = []
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
         return self
+
+    def rpc_value(self, fn: str, body: dict | None = None):
+        """Scalar-returning RPC — the read counterpart of :meth:`rpc`
+        (``SupabaseControlPlane.rpc_value``). #3825: ``metering_cohort_spend``
+        is reached through this method, so a test that asserts the aggregate
+        over a WINDOW needs it on the double; the RPC emulation in :meth:`rpc`
+        already RETURNS the scalar, so this delegates and records the call
+        exactly once in ``rpc_calls``.
+        """
+        return self.rpc(fn, body)
 
     def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
@@ -106,7 +163,8 @@ class FakeControlPlane:
             if k.get("org_id") == org_id and (cb.startswith("anon-") or cb.startswith("reg-")):
                 k["created_by"] = str(user_id)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Simulate provision_team (migration 0010) over the in-memory rows.
 
         Mirrors the real SECURITY DEFINER function's observable effects:
@@ -156,15 +214,106 @@ class FakeControlPlane:
             p = body or {}
             rows = self.tables.setdefault("metering_records", [])
             row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
-                        and r["period"] == p.get("p_period")), None)
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
             n = int(p.get("p_n") or 1)
             if row:
                 row["write_ops"] = row.get("write_ops", 0) + n
             else:
                 rows.append({"org_id": p.get("p_org_id"),
-                             "period": p.get("p_period"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
                              "write_ops": n})
             return None  # PostgREST minimal — no echo
+        if fn == "metering_increment_ask":
+            # #1987 Task 6 / #3825: the ask lane's additive upsert on the SAME
+            # ``(org_id, period_start)`` row — the fake must model the shared
+            # row, otherwise a test cannot tell a single-window ask+capture
+            # pair from two month buckets (the defect #3825 removes).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 1)
+            tin = int(p.get("p_tokens_in") or 0)
+            tout = int(p.get("p_tokens_out") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["ask_calls"] = row.get("ask_calls", 0) + calls
+                row["ask_tokens_in"] = row.get("ask_tokens_in", 0) + tin
+                row["ask_tokens_out"] = row.get("ask_tokens_out", 0) + tout
+                row["ask_cost_usd"] = (float(row.get("ask_cost_usd") or 0.0)
+                                       + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "ask_calls": calls, "ask_tokens_in": tin,
+                             "ask_tokens_out": tout, "ask_cost_usd": cost})
+            return None
+        if fn == "metering_increment_capture_cost":
+            # #3665: migration 20260917000001 — additive upsert mirroring
+            # metering_increment_capture_cost (the capture lane's twin),
+            # re-keyed onto the window start by 20260918000001 (#3825).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            calls = int(p.get("p_calls") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["capture_calls"] = row.get("capture_calls", 0) + calls
+                row["capture_cost_usd"] = (
+                    float(row.get("capture_cost_usd") or 0.0) + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             "capture_calls": calls,
+                             "capture_cost_usd": cost})
+            return None
+        if fn == "metering_cohort_spend":
+            # #3665/#3825: the SQL aggregate — one scalar, so no row cap can
+            # truncate it (the reason it is an RPC and not a filtered read).
+            # Mirrors the SQL's HALF-OPEN OVERLAP test
+            # (``period_start < p_period_end AND period_end > p_period_start``),
+            # not a ``period = p_period`` month equality.
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            start = _as_dt(p.get("p_period_start"))
+            end = _as_dt(p.get("p_period_end"))
+            total = 0.0
+            for r in self.tables.get("metering_records", []):
+                if str(r.get("org_id")) not in wanted:
+                    continue
+                r_start = _as_dt(r.get("period_start"))
+                r_end = _as_dt(r.get("period_end"))
+                if r_start is None or r_end is None:
+                    continue  # no window → not addressable by a window read
+                if r_start < end and r_end > start:
+                    total += float(r.get("ask_cost_usd") or 0.0)
+                    total += float(r.get("capture_cost_usd") or 0.0)
+            return total
+        if fn == "cohort_org_ids_since":
+            # #3665: array_agg over a bounded subquery — one row/one array,
+            # so a row cap cannot truncate the org set. Mirror the SQL's
+            # ``ORDER BY created_at, id LIMIT p_limit + 1``.
+            p = body or {}
+            since = str(p.get("p_since") or "")
+            limit = int(p.get("p_limit") or 0)
+            rows = [t for t in self.tables.get("organizations", [])
+                    if t.get("id") and str(t.get("created_at") or "") > since]
+            rows.sort(key=lambda t: (str(t.get("created_at") or ""),
+                                     str(t["id"])))
+            return [str(t["id"]) for t in rows[:limit + 1]]
         if fn == "claim_membership":
             # Emulate migration 20260813000004's SQL semantics over the
             # in-memory rows (mirrors the real SECURITY DEFINER function):
@@ -660,13 +809,17 @@ class FakeControlPlane:
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
             # rows ([] when nothing matched), the atomic-claim path used by
-            # OAuth single-use codes / rotation (PR #1264 review P2).
+            # OAuth single-use codes / rotation (PR #1264 review P2, and the
+            # #4355 rotate claim). `_patch_lock` makes the check-then-write
+            # atomic the way the real single UPDATE statement is (see
+            # __init__) — required for the #4355 two-thread CAS test.
             updated: list[dict] = []
-            for r in self.tables.get(table, []):
-                if _matches(r, filters or []):
-                    r.update(json_body or {})
-                    if select is not None:
-                        updated.append({k: r.get(k) for k in select})
+            with self._patch_lock:
+                for r in self.tables.get(table, []):
+                    if _matches(r, filters or []):
+                        r.update(json_body or {})
+                        if select is not None:
+                            updated.append({k: r.get(k) for k in select})
             return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
@@ -674,6 +827,16 @@ class FakeControlPlane:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone
                 row["created_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            if table == "oauth_codes" and row.get("id") is None:
+                # mirror `id bigint GENERATED ALWAYS AS IDENTITY` (0016). #3027
+                # records a redemption outcome BY id and links minted tokens
+                # with `code_id`, so a fake row with no id would make the
+                # durable path silently unwritable in tests. Derived from the
+                # stored rows (not a counter) so it also cannot collide with a
+                # row a test seeded by hand.
+                numeric = [r.get("id") for r in self.tables.get(table, [])
+                           if isinstance(r.get("id"), int)]
+                row["id"] = (max(numeric) + 1) if numeric else 1
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)
@@ -692,13 +855,24 @@ class FakeControlPlane:
             if op == "eq":
                 rows = [r for r in rows if r.get(col) == value]
             elif op == "neq":
-                rows = [r for r in rows if r.get(col) != value]
+                # SQL semantics: `col <> value` is NULL (not TRUE) when either
+                # side is NULL, so a NULL column (or a NULL comparison value)
+                # never matches. Python's bare `r.get(col) != value` would
+                # KEEP the NULL row — a dialect divergence that would hide an
+                # over-exemption regression (e.g. a `created_via=neq.bootstrap`
+                # filter silently exempting legacy NULL rows — #4140 T4).
+                rows = ([] if value is None else
+                        [r for r in rows
+                         if r.get(col) is not None and r.get(col) != value])
             elif op == "is":
                 rows = [r for r in rows if (r.get(col) is None) == (value is None)]
             elif op == "gt":
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) > value]
+            elif op == "gte":
+                rows = [r for r in rows
+                        if r.get(col) is not None and r.get(col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) < value]
@@ -738,17 +912,28 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
         if op == "eq" and row.get(col) != value:
             return False
-        if op == "neq" and row.get(col) == value:
+        if op == "neq" and (value is None or row.get(col) is None
+                            or row.get(col) == value):
             return False
         if op == "is" and (row.get(col) is None) != (value is None):
             return False
         if op == "gt" and (row.get(col) is None or row.get(col) <= value):
+            return False
+        if op == "gte" and (row.get(col) is None or row.get(col) < value):
             return False
         if op == "lt" and (row.get(col) is None or row.get(col) >= value):
             return False
         if op == "lte" and (row.get(col) is None or row.get(col) > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
+        if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
+            # #3665 review: an op this helper does not implement must RAISE,
+            # not silently no-op. Silently ignoring an op makes PATCH/DELETE
+            # match on the remaining filters — i.e. the fake mutates MORE rows
+            # than the real client would, and a test can pass against
+            # behaviour production does not have. The GET path above already
+            # raises for an unsupported op; this mirrors it.
+            raise ValueError(f"unsupported filter op {op!r}")
     return True
 
 
@@ -767,5 +952,6 @@ class ErrorControlPlane(FakeControlPlane):
     def query(self, table: str, *args: Any, **kwargs: Any) -> list[dict]:
         raise self._exc
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         raise self._exc

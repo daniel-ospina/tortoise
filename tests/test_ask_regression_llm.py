@@ -1,5 +1,5 @@
-"""Product-lane ask LLM regression (#1987 Task 12) — the repeatable
-counterpart to the (b) product-lane known-answer smoke.
+"""Eval-only ask-lane LLM regression (#1987 Task 12) — the repeatable
+counterpart to the (b) eval-only ask-lane known-answer smoke.
 
 GATING (P2-9): SKIPPED unless ``TORTOISE_ASK_LLM_REGRESSION=1`` is set OR a
 live provider key env is present (DEEPSEEK_API_KEY / OPENROUTER_API_KEY /
@@ -42,6 +42,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# The ONE capture-shaped seeder for this fixture family (#3914) — the
+# generator's own, imported rather than mirrored.
+from tools.gen_ask_transcripts import _seed as _generate_transcripts_seed
+from tortoise.ask_lane import run_ask_lane
 from tortoise.reader import reader_prompt_constants
 from tortoise.sdk import TortoiseSDK
 
@@ -77,31 +81,24 @@ def _load_transcripts() -> list[dict]:
 
 
 def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
-    """Seed the fixture's points + Event nodes (startedAt from session_date)
-    so annotate_ask_hits reproduces the annotated hits; ``supersedes_into``
-    creates a real CORRECTS supersession so the D8 markers render."""
-    proj = sdk._get_proj()
-    ids: dict[str, str] = {}
-    for i, seed in enumerate(seeds):
-        point = sdk.create_point(seed.get("kind", "statement"),
-                                 seed["content"], tags=seed.get("tags", []))
-        pid = point["id"]
-        ids[seed.get("label", f"s{i}")] = pid
-        event_id = seed.get("eventId") or f"ev-{i}"
-        sdate = seed.get("session_date") or "2026-08-20"
-        proj.g.query(
-            "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
-            params={"eid": event_id, "st": f"{sdate}T10:00:00Z"},
-        )
-        proj.g.query(
-            "MATCH (p:Point {id: $pid}) SET p.eventId = $eid, p.sessionId = $sid",
-            params={"pid": pid, "eid": event_id,
-                    "sid": seed.get("sessionId") or f"sess-{i}"},
-        )
-    for seed in seeds:
-        succ = seed.get("supersedes_into")
-        if succ and succ in ids and seed.get("label") in ids:
-            sdk.supersede_point(ids[seed["label"]], ids[succ])
+    """Seed the fixture's memory exactly as the GENERATOR does.
+
+    Imported, not mirrored (#3914): this file used to carry its own copy of
+    ``tools/gen_ask_transcripts.py::_seed``, and both copies wrote plain
+    ``statement`` Points with ``p.sessionId`` / ``p.eventId`` PROPS and NO
+    ``(:Session)-[:CONTAINS]`` edge — a graph capture cannot produce. Because
+    the shipping point fetch PREFERS a renderable ``p.sessionId`` prop, the
+    committed transcripts stayed byte-green even with the CONTAINS-edge
+    identity read removed entirely (the #3888 mutation): a false PASS on the
+    very read the goldens quote (``[session sess-N]``).
+
+    There is now exactly ONE seeder for this lane, so the replay test and the
+    generator cannot drift into disagreeing about the shape — a change to it
+    is exercised by ``test_fixture_replay_user_message_byte_equal`` on the
+    next run, and a reversion is caught by ``tests/test_ask_seed_shape.py``,
+    which reads the resolved graph back.
+    """
+    _generate_transcripts_seed(sdk, seeds)
 
 
 class _ReplayReader:
@@ -126,7 +123,7 @@ class _ReplayReader:
 @pytest.fixture(autouse=True)
 def _clean_ask_state(monkeypatch):
     """Isolated per-test DB + a reset ask-reader cache (fresh namespace)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     sdk_mod._reset_ask_reader_cache_for_tests()
     yield
     sdk_mod._reset_ask_reader_cache_for_tests()
@@ -136,7 +133,7 @@ def _run_fixture(tx: dict, monkeypatch) -> dict:
     """Seed + run the ask pipeline for one transcript. FIXTURE mode (the env
     var set — the CI shape, deterministic) uses the replay reader; LIVE-KEY
     mode (env var unset, provider keys present) uses the real factory."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     sdk_mod._reset_ask_reader_cache_for_tests()
     db = os.path.join(tempfile.mkdtemp(prefix="ask_reg_"), "t.db")
     sdk = TortoiseSDK(db)
@@ -147,7 +144,7 @@ def _run_fixture(tx: dict, monkeypatch) -> dict:
         monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                             lambda: replay)
     try:
-        return sdk.ask(tx["question"], question_date=tx["question_date"])
+        return run_ask_lane(sdk, tx["question"], question_date=tx["question_date"])
     finally:
         sdk.close()
         if replay is not None:
@@ -210,7 +207,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
     """P2-19: the replayed user message BYTE-EQUALS the pipeline's current
     rendered output for the same hits — render_context formatting changes
     (markers, headers, ordering) force fixture regeneration."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     for tx in _load_transcripts():
         sdk_mod._reset_ask_reader_cache_for_tests()
         db = os.path.join(tempfile.mkdtemp(prefix="ask_reg_"), "t.db")
@@ -220,7 +217,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
             replay = _ReplayReader(tx["completion"])
             monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                                 lambda replay=replay: replay)
-            sdk.ask(tx["question"], question_date=tx["question_date"])
+            run_ask_lane(sdk, tx["question"], question_date=tx["question_date"])
             assert replay.user_message == tx["user_message"], (
                 f"rendered context drifted for {tx['fixture']} — regenerate")
         finally:
@@ -230,7 +227,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
 
 def test_live_key_mode_real_lane(monkeypatch) -> None:
     """LIVE-KEY mode: the REAL ``build_reader_model`` lane answers the
-    known-answer fixture (the (b) product-lane smoke — the RoutingModel
+    known-answer fixture (the (b) eval-only ask-lane smoke — the RoutingModel
     transport delta vs the eval's OpenAICompatModel)."""
     if _fixture_mode():
         pytest.skip("fixture mode set — live-key lane not exercised")

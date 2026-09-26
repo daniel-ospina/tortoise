@@ -13,10 +13,25 @@ ownedBy: epistemic-team
 > BLOCKED until all four sub-gates (a)–(d) pass with NON-SKIPPED verdicts on
 > file (verified by `scripts/check-ask-premerge.cjs` in the commit-workflow
 > pre-merge step).
+>
+> **⛔ Naming (#3849).** The dated measurement records below call the ask lane
+> the **"product lane"** — that was its name when those runs were performed
+> and they are left verbatim as the record they are. The lane is now the
+> **EVAL-ONLY** lane (`tortoise/ask_lane.py`, entry point `run_ask_lane`): no
+> MCP tool, no SDK method, no REST route (the surface table below carries the
+> per-row current state). Where a record names a removed SYMBOL
+> (`sdk.ask`, `TortoiseSDK.ask()`, `tortoise_ask`, `/v1/ask`), that symbol no
+> longer resolves — the lane's entry point is `ask_lane.run_ask_lane`.
 
 ---
 
-## PRODUCT DECISION (2026-08-30, PR #2013) — ask exposure gated, reader shipped
+## PRODUCT DECISION (2026-08-30, PR #2013) — ask exposure was gated, reader shipped
+
+> **Superseded by #3849:** the gate no longer exists. Ask was REMOVED from the
+> product surfaces (MCP / SDK / REST) and survives as the EVAL-ONLY lane
+> `tortoise/ask_lane.py`. This section is the 2026-08-30 record of the decision
+> as it stood then; the surface table below already carries the current
+> REMOVED / EVAL-ONLY state per row.
 
 > **The (d) gate is MOOT by product decision.** The reader over-abstention
 > class is FIXED (#2027, below) — that was the gate-d blocker. The remaining
@@ -35,11 +50,12 @@ ownedBy: epistemic-team
 | Surface | Status | Where |
 |---|---|---|
 | `tortoise/reader.py` (the reader itself) | **SHIPPED, unchanged** — the eval's reader | `tortoise/reader.py` (re-exported by `tools/longmem_eval/reader.py`) |
-| `TortoiseSDK.ask()` | **Stays** — the eval's reader path; docstring marks it GATED/EXPERIMENTAL (not for production use until the reader-model decision) | `tortoise/sdk.py` |
-| `POST /v1/ask` (hosted) | **GATED OFF by default** — route not registered (404) unless `TORTOISE_ENABLE_ASK=1` (tests/dev); handler + error translation stay, tested, ready | `tortoise/hosted_api.py` |
-| MCP `tortoise_ask` | **GATED OFF by default** — own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; explicit `tool_group="ask"` (dev/eval) serves it | `tortoise/mcp_server.py`, `tortoise/tool_registry.py` |
-| MCP `tortoise_ask` (selfhost) | **GATED identically** — the selfhost /mcp DEFAULT surface hides the tool + ERR_EXCLUDEDs the call; selfhost MCP opt-in is `tool_group="ask"` (`TORTOISE_TOOL_GROUP=ask` env), while selfhost REST /v1/ask stays unmetered | `tortoise/mcp_server.py` |
-| `POST /v1/ask` (self-host REST) | **Stays** — the local-lane REST parity surface (mirrors the SDK local lane; no team budget, unmetered) | `tortoise/selfhost_api.py` |
+| `tortoise/ask_lane.py` (`run_ask_lane`) | **Stays — EVAL-ONLY (#3849)**; the only home of the ask pipeline | `tortoise/ask_lane.py` |
+| `POST /v1/ask` (hosted) | **REMOVED (#3849)** — no route, no handler, no error translation, no gating flag | — |
+| `TortoiseSDK.ask()` / `.ask_assembled()` | **REMOVED (#3849)** — the SDK holds no ask code; the names do not resolve | — |
+| MCP ask tool | **REMOVED (#3849)** — no registry entry; absent from `tools/list` and `tools/call`; the `"ask"` group is gone | — |
+| MCP ask tool (selfhost) | **REMOVED (#3849)** — same registry removal; nothing to hide or ERR_EXCLUDE | — |
+| `POST /v1/ask` (self-host REST) | **REMOVED (#3849)** — the route and its path-scoped handlers are gone | — |
 
 **Follow-up (tracked, not blocking):** (1) the ask reader-model upgrade —
 provider routing for the ask lane (deepseek-direct primary 400s on non-
@@ -64,8 +80,9 @@ Shipped as an optimisation loop (baseline → lever → measure → keep/revert)
   product graphs currently carry none — zero marks = no-op),
 - **A3** ask-lane fusion weights/k knobs (default = shared global),
 - **A6** measurement-gated cap review (retrieval-window `limit` threaded in
-  tandem with `context_item_cap`; default OFF = 40/40/8000),
-- **A7** product cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
+  tandem with `context_item_cap`; #4105 defaults 200/200/16000 with the
+  byte ceiling derived; raising one half alone changes nothing),
+- **A7** eval-lane cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
   OFF, gated phase 2, degrade-to-untouched contract).
 
 **Measured baseline (embedded lane, `tools/ask_recall_bench.py`, seed 4):**
@@ -105,7 +122,7 @@ stays `openrouter:deepseek/deepseek-v4-flash` — #1525). Requires an
 `OPENROUTER_API_KEY` (and `OPENAI_API_KEY` for the official GPT-4o judge);
 no keys were present at record time, so this config is verified up to spec
 parse + mock-run only, not executed. Cost re-measure + provider routing for
-the PRODUCT ask lane (deepseek-direct 400s on non-deepseek specs) remain the
+the ask lane (eval-only; deepseek-direct 400s on non-deepseek specs) remain the
 tracked follow-up (1) above.
 
 ---
@@ -202,7 +219,7 @@ three non-abstention failure classes:
 | class | failures | cause (verified) |
 |---|---|---|
 | reader-MODEL content error | gpt4_8279ba02 (commits purchase date, no day count), gpt4_7a0daae1 (hedge), gpt4_6ed717ea (wrong order), 830ce83f (recency noise: commits the older Chicago mention; gold = the suburbs), 0100672e ($60 total vs $12 each), e831120c (hedge), b0479f84 (commits wrong recs) | deepseek-v4-flash answers wrong content — arithmetic, ordering, recency, per-unit reasoning |
-| retrieval gap (FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; the gold turns rank below the 8k/40 caps on these long haystacks |
+| retrieval gap (pre-#4105 FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; at the HISTORICAL 8k/40 caps the gold turns ranked below the window (fused ranks 67-153) on these long haystacks. The #4105 resolved defaults (200/200/16000) admit the answer-bearing turn for 1de5cff2 (rank 67), 1d4e3b97 (84), e9327a54 (89), ceb54acb (93) and 0a995998 (147). 0a995998's THIRD gold turn (rank 153) is inside the 200-wide window and stays out because the resolved 16k TOKEN budget fills first (~97 hits) — a budget bound, not pool depth; only that turn needs a wider budget. |
 | containment-judge bar | d6233ab6 (long synthesis gold: needs ~45-word overlap), 1d4e3b97 (same) | the judge's `max(2, len(gold_words)//2)` word-overlap bar on ~70-90-word synthesis golds is structurally unreachable |
 
 qwen3.8-max diagnostic (same evidence, `qwen/qwen3.8-max` via the
@@ -356,7 +373,7 @@ only, no graph writes).
 
 FULL `_abs` set (30 questions) through the **unified product reader**
 (`LLMReader(build_reader_model())` — the RoutingModel transport, the same
-`build_reader_model` `sdk.ask` uses) with the **strict MockJudge** (the
+`build_reader_model` `ask_lane.run_ask_lane` uses) with the **strict MockJudge** (the
 judge-marker path — `_ABSTRACTION_MARKERS`, the deterministic judge; the
 preliminary sample used the same).
 
@@ -407,7 +424,7 @@ preliminary sample used the same).
 ### (b) Product-lane known-answer smoke — **PASS** (re-run this session)
 
 Gold-verbatim fixture (`what is the office hours policy?`) through the REAL
-`build_reader_model()` lane (`sdk.ask` — deepseek-direct primary):
+`build_reader_model()` lane (`ask_lane.run_ask_lane` — deepseek-direct primary):
 
 ```
 answer: The office hours policy is 9am to 5pm.
@@ -446,7 +463,7 @@ failure below is consistent with this under-engagement: `detected=None`
 ### (d) QA spot-check — **FAIL: aggregate 0.43 (9/21) < 0.8 (REQUIRED gate)**
 
 FULL spot-check via `TORTOISE_TEST_CARVE_OUT=1 uv run python
-tools/ask_spotcheck.py` — the REAL product lane (`sdk.ask` →
+tools/ask_spotcheck.py` — the REAL eval-only ask lane (`ask_lane.run_ask_lane` →
 `build_reader_model`), containment judge, 21-question composition (the
 plan's mix: 4 temporal / 3 preference / 4 KU / 4 MSR / 3 SSA / 3 `_abs`,
 deterministic seed 1987):
@@ -655,7 +672,7 @@ PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
    `ASK_METER_RATES_STRONG = {3.00, 9.00}` (qwen $2/$6 × 1.5, the same
    over-cover convention); `select_ask_meter_rates(model.model)` picks by
    the SERVING wire id's family; BOTH `estimate_ask_cost_usd` call sites in
-   `sdk.ask` (the metering record + the response `cost_estimate_usd`) are
+   `ask_lane.run_ask_lane` (the metering record + the response `cost_estimate_usd`) are
    pinned to it — a strong-lane query never under-counts at 0.21/0.42
    (~10× under-count pre-fix).
 
@@ -713,7 +730,7 @@ target for the strong lane. Dollar blast radius at 60/min grows from
 > promise. Root-cause probe evidence: same evidence with headroom answers
 > correctly ($185 bike total; reunion synthesis; "10 days ago").
 
-### Fix (product lane, `tortoise/sdk.py` + `tortoise/reader.py`)
+### Fix (ask lane, `tortoise/ask_lane.py` + `tortoise/reader.py`)
 
 - `_ask_reader_complete` (bounded escalation, at most 2 calls): empty output
   + `finish_reason="length"` → ONE retry at an escalated budget
@@ -759,3 +776,33 @@ clause for the generic baseline (or the KU fragment firing — #2009
 detector), and enumeration guidance for multi-session counts. Both are
 prompt-calibration work with regression risk — tracked separately, not
 silently closed.
+
+### Comparability note — the fixture's input graph changed (#3910, 2026-09-17)
+
+**The 19/21 (0.90) and 21/21 (1.00) numbers above are NOT directly comparable
+to any spot-check run on the post-#3910 fixture.** `tools/ask_spotcheck.py::
+_seed_memory` used to seed plain `statement` Points carrying `p.sessionId` /
+`p.eventId` **props** with no edge — a graph the real capture path cannot
+produce. It now seeds the capture shape: a `(:Session {id})` node (id = the
+question's own `haystack_session_ids[i]`), one episodic `pointKind='event'`
+turn Point per turn with the deterministic `f"{sid}_t{i}"` id and **no**
+`sessionId`/`eventId` prop, plus the real
+`(:Session)-[:CONTAINS]->(:Point)` edge. The pre-#3910 number above was
+produced on a fixture that reported provenance the capture path never writes
+and omitted the edge the shipping read derives identity from.
+
+Two deterministic consequences, measured on the committed composition with
+the same read calls and no reader/LLM (old → new): turn hits carrying the
+`:Event` **`session_date`** marker 40 → **0** (capture's turn Points carry no
+`eventId`, so the annotation join never reached them in production either),
+and hits carrying the **`session_id`** key from `annotate_ask_hits`
+40 → **0** — that key is the FIRST source `retrieval.hit_session_id` reads,
+so the pre-#3910 fixture reported an identity the capture-shaped graph
+instead derives from the edge. (It is also the ask lane's `dedup_pool` bucket
+key, but that cap applies only to raw `session-transcript` chunks, of which
+this fixture seeds none — hence the unchanged 40 → 40 hit count; D3 #1540
+forbids *widening the `annotate_ask_hits` Event join*, which this change does
+not do.) Both move the fixture TOWARD production shape; the live judge-graded aggregate on the
+new graph is **UNMEASURED** (the tool fails fast without a judge provider
+key), so a future re-run must be recorded as a NEW baseline, not compared to
+0.90/1.00.

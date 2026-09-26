@@ -2,6 +2,21 @@
 
 One ToolDefinition per SDK operation. Both MCP and REST surfaces derive their
 registrations from this registry. HTTP_ALLOWED is derived — zero manual sync.
+
+⛔ SURFACE APPROVAL MANDATE (#4282, owner ruling)
+    This registry IS the MCP tool surface. You may NOT add, remove, or rename an
+    entry without human approval. The surface is the contract every agent and
+    customer integration is built on, so changing it materially affects customer
+    outcomes. GET APPROVAL FROM DANIEL FIRST — repo `AGENTS.md` → "USER QUESTIONS"
+    / "DECISION RELAY" — and record it on the row's `approval` in
+    `config/surface-manifest.yml` before the PR. The full procedure is in
+    `CONTRIBUTING.md` ("The MCP tool surface and public SDK methods cannot grow by
+    accident").
+
+    `tools/surface-guard.py` is a DRIFT control, NOT an approval gate: an expansion
+    that updates this registry and `config/surface-manifest.yml` consistently
+    PASSES it. It cannot tell an approved addition from an unapproved one —
+    Daniel's review is what carries the approval.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -25,6 +40,8 @@ class RestSpec:
 class ToolDefinition:
     """One entry per SDK-exposed operation."""
     name: str                    # e.g. "tortoise_create_point"
+    id: str                      # immutable stable identity — `name` may change; a
+                                 # retired id is reserved once a ledger exists (#3883)
     description: str             # Docstring for MCP + OpenAPI
     annotations: ToolAnnotations  # readOnlyHint, destructiveHint, idempotentHint
     http_policy: bool            # True = exposed on HTTP surfaces
@@ -35,6 +52,9 @@ class ToolDefinition:
     hosted_only: bool = False    # #1935: register ONLY on the hosted surface
                                  # (deployment-gated — e.g. tortoise_pack_install;
                                  # self-host uses filesystem packs dir + CLI)
+    writes: bool = False         # declared write permission — a caller needs graphs:write
+    retired_use_instead: Optional[str] = None  # noqa: UP045  # #3883: non-None ONLY
+                                 # on a retired entry — the call that replaces this name.
 
 
 # ── Shorthand constructors ────────────────────────────────────────
@@ -54,11 +74,33 @@ def _idem() -> ToolAnnotations:
 # ── Registry Entries ────────────────────────────────────────────
 # Maintained in the same order as mcp_server.py for diffability.
 # New tools: add one entry here → both surfaces pick it up.
+#
+# ⛔ AN ENTRY HERE EXPANDS THE AGENT-FACING SURFACE, AND THAT NEEDS EXPLICIT
+#    HUMAN APPROVAL (#3863). `tools/surface-guard.py` — CI job `surface-guard`,
+#    part of `python-ci-gate` — compares this registry against the approved
+#    baseline in `config/surface-manifest.yml` and fails closed on ANY added
+#    tool, removed tool, changed SDK binding, or an exemption that has become
+#    reachable.
+#
+#    To propose an addition: change the registry, run
+#    `uv run python tools/surface_manifest.py cut` to fold it into the baseline,
+#    run `... render` to regenerate `docs/product/mcp-sdk-surface.md`, then get
+#    the owner's approval recorded per-row in `approval:`. A baseline that no
+#    longer matches this registry, or an approval that is absent, is a red build
+#    by design — that red IS the gate. Do not "fix" it by editing the baseline
+#    to match; see docs/product/mcp-sdk-surface.md for the curated list.
 
-TOOL_REGISTRY: list[ToolDefinition] = [
+# The FULL declaration, live and retired together. `TOOL_REGISTRY` (the live,
+# advertised surface) and `RETIRED_TOOL_REGISTRY` (the #3883 warning shims) are
+# both derived from this at the module bottom — which entries land where is
+# decided by `RETIRED_USE_INSTEAD` there, so an entry's retirement is legible in
+# one place rather than implied by which list literal it sits in.
+_ENTRY_DECLARATIONS: list[ToolDefinition] = [
     # ── Core CRUD ─────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_create_point",
+        id="surface.create_point",
+        writes=True,
         description="Create a Point node (statement, decision, vision, hypothesis, etc.). "
                     "dedup=True (default): idempotent — returns existing Point if content matches.",
         annotations=_idem(),
@@ -70,6 +112,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_query",
+        id="surface.query",
         description="Query points by pointKind and/or property filters — structural exact-match "
                     "retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag "
                     "merged in). Pagination via offset=/limit= (or 1-based page=); tag= filters "
@@ -82,6 +125,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_paginated_query",
+        id="surface.paginated_query",
         description="DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=). "
                     "Kept for one release; will be removed in the next release — migrate now.",
         annotations=_ro(),
@@ -90,6 +134,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_check_structure",
+        id="surface.check_structure",
         description="Check Gate 0→4 chain integrity (orphans, dangling refs).",
         annotations=_ro(),
         http_policy=True,
@@ -97,6 +142,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_validate_domain",
+        id="surface.validate_domain",
         description="Validate a domain's ontology integrity (issue #405) — advisory, read-only. "
                     "Runs the domain's graph-surface rules (orphan useCase, dangling refs, "
                     "draft hygiene) and returns enriched, actionable violations "
@@ -108,6 +154,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_summarize_structure",
+        id="surface.summarize_structure",
         description="Structure summary — points on the graph across ALL point "
                     "kinds (#2205). Returns {total, operators, gate0_jtbds.."
                     "gate4_requirements, gate_total}: total counts non-operator "
@@ -120,6 +167,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_audit",
+        id="surface.audit",
         description="Audit graph wiring quality — 8 checks: missing sourceKind "
                     "(point-level legacy + Source-level canonical), missing sourceDate, "
                     "superseded points without a CORRECTS edge, live IMPL/NAND edges "
@@ -134,6 +182,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_pointkinds",
+        id="surface.list_pointkinds",
         description="List all pointKinds present in the graph with counts. What EXISTS.",
         annotations=_ro(),
         http_policy=True,
@@ -141,6 +190,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_sources",
+        id="surface.list_sources",
         description="List all Sources with point counts. Where data came FROM.",
         annotations=_ro(),
         http_policy=True,
@@ -148,6 +198,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_namespaces",
+        id="surface.list_namespaces",
         description="List installed pack namespaces.",
         annotations=_ro(),
         http_policy=True,
@@ -156,6 +207,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # epic #902 A13 (#1051) — batch audit surface
     ToolDefinition(
         name="tortoise_list_batch",
+        id="surface.list_batch",
         description="Audit one ingest bundle: the stamped artifacts (Points "
                     "created or adopted via dedup + direct edges) carrying the "
                     "given batch_id. Entities/sources are out of stamp scope; "
@@ -167,6 +219,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_batches",
+        id="surface.list_batches",
         description="Batch discovery — the most recent distinct ingest batch_ids "
                     "with their point/direct-edge counts (ordered by newest "
                     "stamp, capped at limit, default 20).",
@@ -176,16 +229,19 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_packs_list",
+        id="surface.packs_list",
         description="List this team's active packs (#318): the shared pack catalog "
                     "joined with the tenant graph's PackInstall activation records. "
                     "Read-only; empty result when nothing is installed (existence "
                     "masking — another tenant's packs are never observable).",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="get_tenant_packs",  # pack_state helper, not an SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)
     ),
     ToolDefinition(
         name="tortoise_pack_install",
+        id="surface.pack_install",
+        writes=True,
         description="Install a custom expansion pack on the HOSTED surface (#1935): "
                     "validates against the shared registry + tenant policy "
                     "(reserved starter namespace, ontology-only v1), stores the "
@@ -194,13 +250,14 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "filesystem packs dir + tortoise pack CLI).",
         annotations=_rw(),  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
         http_policy=True,
-        sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_manifest_store.upsert_tenant_manifest)
         group="admin",
         hosted_only=True,
     ),
     # ── Tags (#215) ───────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_list_tags",
+        id="surface.list_tags",
         description="List all Tag names with count of tagged Points. Where tags are USED.",
         annotations=_ro(),
         http_policy=True,
@@ -208,6 +265,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_query_points_by_tag",
+        id="surface.query_points_by_tag",
         description="DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). "
                     "Kept for one release; will be removed in the next release — migrate now.",
         annotations=_ro(),
@@ -217,6 +275,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Point accessors ───────────────────────────────────────────
     ToolDefinition(
         name="tortoise_get_point",
+        id="surface.get_point",
         description="Get a single Point by ID. Returns all properties, or empty dict.",
         annotations=_ro(),
         http_policy=True,
@@ -224,6 +283,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_suggest_entry_points",
+        id="surface.suggest_entry_points",
         description="Entity resolution — NL query → matching entities from the graph.",
         annotations=_ro(),
         http_policy=True,
@@ -232,6 +292,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Semantic Search (#6990) ───────────────────────────────────
     ToolDefinition(
         name="tortoise_search",
+        id="surface.search",
         description="Hybrid semantic search — FTS + vector + structural RRF fusion with EP "
                     "confidence annotation. Use when matching by MEANING (natural-language "
                     "query); for exact structural/filter queries use tortoise_query. "
@@ -241,31 +302,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="tortoise_fts_query",
         rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
-    # ── Ask answer surface (#1987 Task 8/9) ───────────────────────
-    # #2013 PRODUCT-GATING: group="ask" (OWN group, OFF by default — see
-    # GROUP_BY_NAME below) — an ask consumes LLM tokens + the per-minute
-    # ask budget (search is LLM-free) —
-    # documented in the tool description. Read-classified: NOT in
-    # _QUOTA_GATED / WRITE_TOOL_NAMES (introspection green). ``AskRequest``
-    # is referenced by STRING (the registry convention — no class import,
-    # avoiding the tool_registry → hosted_api → mcp_server → tool_registry
-    # cycle); the model lives in tortoise/schemas.py (P2-3).
-    ToolDefinition(
-        name="tortoise_ask",
-        description="Answer a question about captured memory — one bounded retrieve-then-"
-                    "read pass (an ANSWER, not ranked hits) with the full ask response "
-                    "shape (answer, abstained, evidence, cost_estimate_usd, ...). COST "
-                    "PROFILE: unlike tortoise_search (LLM-free), tortoise_ask consumes "
-                    "LLM tokens against the team's per-minute ask budget (60/min) — "
-                    "budget-exhausted calls return the structured quota_exceeded error.",
-        annotations=_ro(),
-        http_policy=True,
-        sdk_method="ask",
-        rest_spec=RestSpec(method="POST", path="/v1/ask",
-                           request_model="AskRequest"),
-    ),
     ToolDefinition(
         name="tortoise_expand_relationships",
+        id="surface.expand_relationships",
         description="Full relationship payload for ONE Point, incl. each related point's "
                     "content (the expand side of the #1353 list/expand split — search "
                     "returns bounded state entries; use this to read a neighbor's full "
@@ -276,6 +315,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_recall",
+        id="surface.recall",
         description="Epistemic recall — four intents via mode (preset + override). "
                     "mode='state' (UC1): current high-confidence state — "
                     "multiplicative confidence gate "
@@ -303,6 +343,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Phase-4 mining/promotion/dedup/timeline (#787) ────────────
     ToolDefinition(
         name="tortoise_mine_conversations",
+        id="surface.mine_conversations",
+        writes=True,
         description="Mine agent conversations (single transcript or corpus "
                     "batch) into the graph — extraction, entity reification, "
                     "content dedup, temporal wiring, W-3 batch gate. Batch "
@@ -315,6 +357,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_dedup_candidates",
+        id="surface.list_dedup_candidates",
         description="Review queue for dedup/temporal candidates "
                     "(candidate_type=content|temporal|entity).",
         annotations=_ro(),
@@ -323,6 +366,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_approve_merge",
+        id="surface.approve_merge",
+        writes=True,
         description="Review a dedup/temporal candidate — action=merge|reject. "
                     "Wiring deferred to promotion for live priors. WRITES "
                     "review flags + wires edges (idempotent for repeats).",
@@ -332,6 +377,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_promote_point",
+        id="surface.promote_point",
+        writes=True,
         description="Reviewer-gated draft→live promotion — the only path a "
                     "draft extraction Point may go live (quarantine lock, "
                     "R16 operator promotion, deferred dedup/temporal wiring). "
@@ -342,6 +389,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_belief_timeline",
+        id="surface.belief_timeline",
         description="Dated, ordered belief chain for a topic — decision "
                     "Points with validFrom, NAND/CORRECTS links, superseded "
                     "priors visible.",
@@ -352,6 +400,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── EP Belief Propagation (#6908) ─────────────────────────────
     ToolDefinition(
         name="tortoise_compute_confidence",
+        id="surface.compute_confidence",
         description="Compute confidence via EP belief propagation. "
                     "Returns {iterations, converged, confidences}. "
                     "#395: no-arg (no factors/anchors) runs LOCAL EP over "
@@ -371,6 +420,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_set_point_baseline",
+        id="surface.set_point_baseline",
+        writes=True,
         description="Set Beta prior evidence for a claim.",
         annotations=_rw(),
         http_policy=True,
@@ -378,6 +429,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_confidence",
+        id="surface.get_confidence",
         description="Get EP confidence for a claim: {mean, variance, alpha, beta}.",
         annotations=_ro(),
         http_policy=True,
@@ -385,6 +437,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_calibrate_summary",
+        id="surface.calibrate_summary",
         description="Audit graph calibration state. Returns per-point guidance.",
         annotations=_ro(),
         http_policy=True,
@@ -392,6 +445,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_dream",
+        id="surface.dream",
         description="Run EP stabilization (dreaming, #85). "
                     "Default: incremental dirty subgraph. Set full=True for whole-graph. "
                     "mode (epic 903): explicit strategy override "
@@ -407,6 +461,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_dream_health",
+        id="surface.dream_health",
         description="Dream observability (epic 903-C7): zero-output "
                     "silent-death alarm verdict + health record (last pass, "
                     "coverage, failure rate, region_attempts, warm-start "
@@ -419,6 +474,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Updates ───────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_update_point",
+        id="surface.update_point",
+        writes=True,
         description="Update properties on a Point. Safe — modifies one Point only.",
         annotations=_rw(),
         http_policy=True,
@@ -427,6 +484,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Operators ─────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_create_operator",
+        id="surface.create_operator",
+        writes=True,
         description="Create an operator connecting Points. "
                     "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.",
         annotations=_idem(),
@@ -435,6 +494,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_annotate_operator",
+        id="surface.annotate_operator",
+        writes=True,
         description="Annotate an operator Point with structured epistemic dimensions "
                     "(bias, precision, consistency, directness).",
         annotations=_rw(),
@@ -443,6 +504,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_operator",
+        id="surface.get_operator",
         description="Get an operator Point by ID. Returns all properties including "
                     "annotation dimensions.",
         annotations=_ro(),
@@ -451,6 +513,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_mitigate_operator",
+        id="surface.mitigate_operator",
+        writes=True,
         description="Create a mitigation Point that modulates an operator's edge strength. "
                     "Idempotent — second call updates existing mitigation.",
         annotations=_idem(),
@@ -460,6 +524,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Decisions ─────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_file_decision",
+        id="surface.file_decision",
+        writes=True,
         description="File a simple decision directly to the graph. "
                     "Creates decision + options + evidence + IMPL edges atomically.",
         annotations=_rw(),
@@ -468,6 +534,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_file_human_approval",
+        id="surface.file_human_approval",
+        writes=True,
         description="File a human approval of a planning artifact to the graph. "
                     "Creates Event (eventKind: humanApproval) + decision Point "
                     "(pointKind: humanApproval) + unidirectional IMPL fan-out "
@@ -479,24 +547,34 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Deletion / Invalidation ───────────────────────────────────
     ToolDefinition(
         name="tortoise_delete_point",
-        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+        id="surface.delete_point",
+        writes=True,
+        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. "
+                    "dry_run=True previews the blast radius (the point and every edge that "
+                    "would be removed) and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_point_wrapped",
     ),
     ToolDefinition(
         name="tortoise_invalidate",
-        description="Mark a Point outdated with a CORRECTS edge from the correcting Point.",
+        id="surface.invalidate",
+        writes=True,
+        description="Mark a Point outdated with a CORRECTS edge from the correcting Point. "
+                    "dry_run=True previews the one-point transition + one edge and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="invalidate_point",
     ),
     ToolDefinition(
         name="tortoise_supersede",
+        id="surface.supersede",
+        writes=True,
         description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
                     "transfer_edges=True (default): full supersede — all edges move from "
                     "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer.",
+                    "+ CORRECTS edge only, no edge transfer. "
+                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="supersede",
@@ -504,6 +582,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Subscriptions / claim lifecycle (#432) ─────────────────────
     ToolDefinition(
         name="tortoise_events_poll",
+        id="surface.events_poll",
         description="Poll graph/claim events after an opaque cursor (at-least-once). "
                     "Returns {events, next_cursor}. Event types: 11 registered claim "
                     "types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, "
@@ -515,9 +594,12 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_retract_point",
+        id="surface.retract_point",
+        writes=True,
         description="Tombstone-retract a Point — status='retracted' (point stays "
                     "in graph, excluded from default surfaces). Terminal; cannot "
-                    "retract operators or already-terminal points.",
+                    "retract operators or already-terminal points. "
+                    "dry_run=True previews the status transition and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="retract_point",
@@ -525,15 +607,17 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Navigation (#6962, #6963, #6964) ──────────────────────────
     ToolDefinition(
         name="tortoise_entity_profile",
+        id="surface.entity_profile",
         description="Multi-hop BFS from an entity with optional filters (pointKind, "
                     "confidenceMin) — full neighborhood categorized by node type. Use for deep "
                     "entity analysis; for a fast neighbor list use tortoise_list_topics.",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="entity_profile",  # navigation.entityProfile — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls navigation.entityProfile)
     ),
     ToolDefinition(
         name="tortoise_traverse",
+        id="surface.traverse",
         description="Multi-hop graph traversal from entity following ALL relationship types. "
                     "Returns {entity, nodes: [{node, relationship, depth}]}.",
         annotations=_ro(),
@@ -543,6 +627,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ─────────────
     ToolDefinition(
         name="tortoise_checkpoint",
+        id="surface.checkpoint",
+        writes=True,
         description="Session batch save — two-tier dedup (content hash + embedding similarity). "
                     "Returns {filed: N, duplicates: M}.",
         annotations=_idem(),
@@ -551,6 +637,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_diary_write",
+        id="surface.diary_write",
+        writes=True,
         description="Write an agent diary entry (AAAK format suggested). "
                     "Creates a Point with pointKind=diary, authoredBy=agent.",
         annotations=_rw(),
@@ -559,6 +647,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_diary_read",
+        id="surface.diary_read",
         description="Read recent diary entries for an agent, newest first.",
         annotations=_ro(),
         http_policy=True,
@@ -566,6 +655,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_graphs",
+        id="surface.list_graphs",
         description="List all graph names in the database. Useful for namespace discovery.",
         annotations=_ro(),
         http_policy=True,
@@ -573,6 +663,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_status",
+        id="surface.status",
         description="Graph health + entity counts + FalkorDB connectivity. "
                     "Returns {connected, counts, total_entities}.",
         annotations=_ro(),
@@ -581,6 +672,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_health",
+        id="surface.health",
         description="Health check + basic metrics: graph_size, last_ingest, error_count, uptime.",
         annotations=_ro(),
         http_policy=True,
@@ -588,6 +680,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_session_context",
+        id="surface.session_context",
         description="Return 'what happened last session' — diary entries, recent Points, "
                     "Events, confidence changes.",
         annotations=_ro(),
@@ -597,12 +690,16 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_session_capture",
+        id="surface.session_capture",
+        writes=True,
         description="File an agent session into the graph (epic #909 capture path): "
                     "turns become episodic Points, the conversation is LLM-extracted into "
                     "epistemic Points, and the Session links to subject/project entities. "
                     "#1927: session_recording is default-ON (ToS-covered) with an "
                     "optional off-switch — returns 409 when the team disabled capture; "
-                    "402 at quota; 503 without an LLM provider; "
+                    "402 at quota; a missing LLM provider key is NOT a refusal — the "
+                    "capture is STORED and only extraction is skipped "
+                    '(extraction_mode "no-provider"); '
                     "422 for an invalid harness. session_id is the idempotency key (re-filing "
                     "the same id mints zero new nodes). Only call this when the team has "
                     "session recording enabled (the dashboard 'Memory sources > Agent sessions' "
@@ -619,6 +716,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_graph_set_recording",
+        id="surface.graph_set_recording",
+        writes=True,
         description="Set or clear a graph's session-recording override (#2302) — the MCP "
                     "twin of PATCH /v1/graphs/{graph_id} (recording), sharing the same "
                     "hosted_api core so the surfaces never drift. recording: true/false "
@@ -636,6 +735,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_issue_insight",
+        id="surface.issue_insight",
         description="Return a compact 'there's more in the graph' insight for a would-be "
                     "issue — call BEFORE filing. Surfaces cross-session decisions / EP-tagged "
                     "claims matching the title (semantic stage) plus prior indexed issues for "
@@ -649,6 +749,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Excluded from HTTP ────────────────────────────────────────
     ToolDefinition(
         name="tortoise_ingest_corpus",
+        id="surface.ingest_corpus",
         description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update Document nodes. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -658,6 +759,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_ingest",
+        id="surface.ingest",
+        writes=True,
         description="Heterogeneous bulk write (epic #888 W4) — one call writes points + "
                     "entities + sources + connections coherently (nodes first, then "
                     "connections). Connections carrying 'operator' (IMPL/NAND) create "
@@ -687,6 +790,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Taxonomy ──────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_taxonomy",
+        id="surface.taxonomy",
         description="Count entities by node label. "
                     "Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.",
         annotations=_ro(),
@@ -695,6 +799,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_list_topics",
+        id="surface.list_topics",
         description="Fast one-hop neighbor enumeration for an entity — quick discovery and "
                     "navigation. Use for shallow context; for multi-hop filtered BFS use "
                     "tortoise_entity_profile.",
@@ -705,15 +810,17 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Graph Analysis ────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_analyze",
+        id="surface.analyze",
         description="Answer natural language questions about the Tortoise epistemic graph. "
                     "Ask things like: 'where is the disagreement?' 'what supports claim X?'",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="analyze",  # analyze.analyze — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls analyze.analyze)
     ),
     # ── P1-3: Staleness Detection ─────────────────────────────────
     ToolDefinition(
         name="tortoise_stale",
+        id="surface.stale",
         description="Find Points not updated in N days. Returns {stale, count, cutoff, limit}.",
         annotations=_ro(),
         http_policy=True,
@@ -721,6 +828,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_review_connections",
+        id="surface.review_connections",
         description="Review graph connections (READ-ONLY — never mutates the graph). "
                     "Hygiene counterpart to connect: mode=add surfaces related-but-missing "
                     "connections as suggestions {from, to, suggested_relation, reason, "
@@ -738,6 +846,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_find_cross_lens_candidates",
+        id="surface.find_cross_lens_candidates",
         description="Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent): "
                     "surface unverified candidate pairs between Points from DIFFERENT "
                     "sources (cross-stream discovery over the vector index) with lens "
@@ -755,6 +864,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_provenance",
+        id="surface.provenance",
         description="Provenance chain — 'Who decided this?' "
                     "Follows authoredBy → Subject → delegation.",
         annotations=_ro(),
@@ -764,6 +874,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Multi-tenancy (#7001) ─────────────────────────────────────
     ToolDefinition(
         name="tortoise_org_create",
+        id="surface.org_create",
         description="Create isolated team graph via FalkorDB select_graph. "
                     "EXCLUDED from tenant HTTP — provisioning belongs to "
                     "/internal/provision behind FASTAPI_INTERNAL_KEY.",
@@ -774,6 +885,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
     ToolDefinition(
         name="tortoise_create_subject",
+        id="surface.create_subject",
+        writes=True,
         description="Create a Subject node (team, role, organization, person).",
         annotations=_rw(),
         http_policy=True,
@@ -781,6 +894,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_create_object",
+        id="surface.create_object",
+        writes=True,
         description="Create an Object node (product, customer, skill, etc.).",
         annotations=_rw(),
         http_policy=True,
@@ -788,6 +903,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_create_event",
+        id="surface.create_event",
+        writes=True,
         description="Create an Event node (meeting, decision, deployment, etc.).",
         annotations=_rw(),
         http_policy=True,
@@ -795,6 +912,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_events",
+        id="surface.get_events",
         description="Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').",
         annotations=_ro(),
         http_policy=True,
@@ -802,6 +920,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_session",
+        id="surface.get_session",
         description="Get a single agent session Event by session_id.",
         annotations=_ro(),
         http_policy=True,
@@ -809,6 +928,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_index_sessions",
+        id="surface.index_sessions",
         description="DEPRECATED — use tortoise_index_files. Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -818,6 +938,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_index_files",
+        id="surface.index_files",
+        writes=True,
         description="Index a corpus directory of .md files as Sources + Events/"
                     "Documents (the unified index path — replaces "
                     "tortoise_index_sessions + tortoise_ingest_corpus file semantics "
@@ -833,6 +955,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_search_sessions",
+        id="surface.search_sessions",
         description="Search indexed agent sessions. Returns Events with narrative_arc snippets.",
         annotations=_ro(),
         http_policy=True,
@@ -840,6 +963,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_create_document",
+        id="surface.create_document",
+        writes=True,
         description="Create a Document node (research, planDoc, meetingNotes, etc.).",
         annotations=_idem(),
         http_policy=True,
@@ -847,6 +972,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_create_source",
+        id="surface.create_source",
+        writes=True,
         description="Create a Source node for provenance (document, web, db, etc.). "
                     "Sources track content origin — url is the permalink key. "
                     "tier (T0-T4 / legacy alias) stores the credibility tier; "
@@ -857,6 +984,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_source_reliability",
+        id="surface.get_source_reliability",
+        writes=True,
         description="Derive a Source's reliability (0-1) — query-time, "
                     "cache-consistency-checked. NOTE: refreshes the reliability "
                     "cache on the Source node (write-through projection), so not read-only.",
@@ -866,6 +995,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_assess_source",
+        id="surface.assess_source",
+        writes=True,
         description="Record an agent's assessment of a Source (0-1 score + rationale). "
                     "Creates a pointKind='assessment' Statement Point; latest per "
                     "(url, assessor) wins; weighted by assessor reputation.",
@@ -875,6 +1006,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_set_source_tier",
+        id="surface.set_source_tier",
+        writes=True,
         description="Set (or change) a Source's credibility tier (T0-T4). "
                     "Non-destructive — never overwrites sourceKind type strings.",
         annotations=_rw(),
@@ -883,13 +1016,19 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_entity",
-        description="Get any entity by ID, eventId, or url.",
+        id="surface.get_entity",
+        description="Get any entity by ID, eventId, or url. `type` selects the node kind "
+                    "(point | entity | operator | events | governance), dispatching exactly as "
+                    "the retired per-type getters did; omit it to look the entity up by id. "
+                    "The canonical fetch-by-id tool.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="get_entity",
     ),
     ToolDefinition(
         name="tortoise_update_entity",
+        id="surface.update_entity",
+        writes=True,
         description="Update any entity's properties.",
         annotations=_rw(),
         http_policy=True,
@@ -897,13 +1036,19 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_delete_entity",
-        description="Delete any entity by ID.",
+        id="surface.delete_entity",
+        writes=True,
+        description="Delete any entity by ID. DESTRUCTIVE — cannot be undone. "
+                    "dry_run=True previews the node(s) and every edge that would be "
+                    "removed and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_entity",
     ),
     ToolDefinition(
         name="tortoise_create_entity",
+        id="surface.create_entity",
+        writes=True,
         description="Create an entity — type: subject|object|event|document. "
                     "Event entities wire about* edges from aboutSubject/aboutObject/"
                     "aboutPoint/aboutDocument props. Returns {node, nudges} — nudges "
@@ -914,6 +1059,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_update",
+        id="surface.update",
+        writes=True,
         description="Update a Point OR entity by id. Points get point-lifecycle semantics "
                     "(draft→live promote via status, version increment for Point:Object, "
                     "status validation); entities get a plain property update.",
@@ -923,14 +1070,20 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_delete",
+        id="surface.delete",
+        writes=True,
         description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
-                    "confirmation. Cannot be undone.",
+                    "confirmation. Cannot be undone. dry_run=True previews the blast "
+                    "radius (which node resolves, and every edge that would go) and "
+                    "changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete",
     ),
     ToolDefinition(
         name="tortoise_operator_action",
+        id="surface.operator_action",
+        writes=True,
         description="Consolidated operator write action — action=mitigate|annotate. "
                     "mitigate: reason + strength (0-1) — creates/updates the mitigation "
                     "Point (idempotent). annotate: bias/precision/consistency/directness "
@@ -941,6 +1094,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_create_edge",
+        id="surface.create_edge",
+        writes=True,
         description="Create a typed structural edge between two entities. "
                     "Relation: performs, produces, uses, memberOf, ownedBy, managedBy, "
                     "about*, related, dependsOn, etc. Operator-less per the reification "
@@ -952,6 +1107,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get_governance",
+        id="surface.get_governance",
         description="Get all entities owned by a Subject.",
         annotations=_ro(),
         http_policy=True,
@@ -960,6 +1116,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Orient / Direct consolidation (epic #888 W3) ────────────────
     ToolDefinition(
         name="tortoise_overview",
+        id="surface.overview",
         description="Graph orientation in one call — consolidates the list_*/status/health/"
                     "taxonomy/structure zoo. section: taxonomy|structure|structure_check|"
                     "pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale. "
@@ -970,6 +1127,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_get",
+        id="surface.get",
         description="Fetch a node by id — consolidates get_point/get_entity/get_operator/"
                     "get_events/get_session/get_governance. type: point|operator|entity|"
                     "event|session|events|governance. Omitted type → auto-detect by id "
@@ -980,6 +1138,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_backfill_v25",
+        id="surface.backfill_v25",
         description="Backfill database to ONTOLOGY v2.5 schema. "
                     "EXCLUDED from tenant HTTP — schema-level migration (operator-only).",
         annotations=_rw(),
@@ -989,6 +1148,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Onboarding tools (#498/#499/#500) ─────────────────────────
     ToolDefinition(
         name="tortoise_onboarding_demo_create",
+        id="surface.onboarding_demo_create",
+        writes=True,
         description="Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).",
         annotations=_idem(),
         http_policy=True,
@@ -997,6 +1158,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_onboarding_state",
+        id="surface.onboarding_state",
         description="Return this team's onboarding progress (Q6 verification).",
         annotations=_ro(),
         http_policy=True,
@@ -1005,6 +1167,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_onboarding_seed",
+        id="surface.onboarding_seed",
+        writes=True,
         description=("File the two onboarding anchor Subjects (Organization/"
                      "organization + User/naturalPerson linked memberOf) — "
                      "interactive, ontology-precise (#1999 W3): call without "
@@ -1017,6 +1181,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_onboarding_session_recording",
+        id="surface.onboarding_session_recording",
+        writes=True,
         description="Toggle automatic session recording for this team (Q3).",
         annotations=_rw(),
         http_policy=True,
@@ -1025,6 +1191,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_onboarding_github_connect",
+        id="surface.onboarding_github_connect",
+        writes=True,
         description="Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).",
         annotations=_rw(),
         http_policy=True,
@@ -1033,6 +1201,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_onboarding_github_index",
+        id="surface.onboarding_github_index",
+        writes=True,
         description="Start background GitHub indexing of an org's issues/PRs (Q2).",
         annotations=_rw(),
         http_policy=True,
@@ -1041,6 +1211,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_onboarding_github_status",
+        id="surface.onboarding_github_status",
         description="Return GitHub connection status for this team (Q1 verify).",
         annotations=_ro(),
         http_policy=True,
@@ -1056,6 +1227,41 @@ TOOL_REGISTRY: list[ToolDefinition] = [
 def get_http_allowed() -> frozenset[str]:
     """Derive HTTP_ALLOWED from registry — zero manual sync."""
     return frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
+
+
+def get_write_tool_names() -> frozenset[str]:
+    """Derive the write-tool name set from each entry's declared `writes`.
+
+    Replaces the hand-maintained parallel list: the permission lives on the
+    tool entry, so a rename or a merge cannot leave it behind (#4170).
+
+    Covers the SERVED set (#3883): a retired name still answers through the
+    warning shim, so a write served under a retired name must not be recorded as
+    a read. No retired entry is a writer today, so the census is unchanged — the
+    derivation is stated over the served set so it cannot silently shrink when
+    one is."""
+    return frozenset(
+        t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
+    )
+
+
+_TOOL_BY_NAME: dict[str, ToolDefinition] | None = None
+
+
+def get_tool_by_name() -> dict[str, ToolDefinition]:
+    """Registry indexed by tool name — the scope gate's single lookup.
+
+    Retired entries are INCLUDED (#3883): a retired name still resolves and is
+    still served (through the warning shim), so it must carry a permission the
+    gate can read. Omitting them made the gate answer a scoped caller with
+    "Unknown tool — denied" instead of the retirement warning.
+
+    Cached: the registry is immutable after import, and this is on the
+    per-tool-call hot path."""
+    global _TOOL_BY_NAME
+    if _TOOL_BY_NAME is None:
+        _TOOL_BY_NAME = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
+    return _TOOL_BY_NAME
 
 
 # ── Adapters ────────────────────────────────────────────────────
@@ -1212,10 +1418,6 @@ class FastAPIRouterAdapter:
 #   journal   — checkpoints, diary, decisions, approvals
 #   admin     — status, health, orgs, governance, migrations
 #   onboarding — hosted onboarding flows
-#   ask       — the answer surface (#2013 PRODUCT-GATING): OFF by default —
-#               excluded from the ungrouped hosted surface unless
-#               TORTOISE_ENABLE_ASK=1; served only via an explicit
-#               tool_group="ask" server
 
 GROUP_BY_NAME: dict[str, str] = {
     # memory
@@ -1228,11 +1430,6 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_invalidate": "memory", "tortoise_retract_point": "memory",
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
-    # #2013 PRODUCT-GATING: the ask tool has its OWN group (no longer the
-    # "memory" default) so the hosted surface can exclude it by default —
-    # the READER ships (the eval's reader), the ask EXPOSURE is gated off
-    # until the reader-model decision is made.
-    "tortoise_ask": "ask",
     "tortoise_expand_relationships": "memory",
     "tortoise_recall": "memory",
     "tortoise_issue_insight": "memory",
@@ -1299,15 +1496,73 @@ GROUP_BY_NAME: dict[str, str] = {
 }
 
 
-def _apply_groups() -> list[ToolDefinition]:
-    """Return the registry with curation groups assigned (frozen dataclass)."""
-    out = []
-    for t in TOOL_REGISTRY:
-        out.append(replace(t, group=GROUP_BY_NAME.get(t.name, "memory")))
-    return out
+# ── Retired names (#3883 / #3863) ─────────────────────────────────────────
+# A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not
+# registered as an MCP tool and never appears in `tools/list`. It is NOT gone —
+# `_RetiredToolTransform` in mcp_server.py resolves it on `get_tool` and serves
+# a shim that answers exactly as the live tool did AND warns the caller, naming
+# the replacement. That is the #3836 (b) decision: a retired name keeps working
+# and tells us who still calls it.
+#
+# The handler FUNCTION (mcp_server.py) and the SDK METHOD (sdk.py) both stay: the
+# consolidating tool calls the function internally, so retiring the NAME loses no
+# capability.
+#
+# Retiring a name SHRINKS the agent-facing surface, so it is a surface change:
+# `tools/surface-guard.py` requires every name here to be recorded in the
+# approved baseline's `retired:` block, and re-cut by a human, exactly as an
+# addition requires approval.
+RETIRED_USE_INSTEAD: dict[str, str] = {
+    # Tier 1 — `tortoise_get_entity` is the canonical fetch-by-id tool; the
+    # per-type getters and `tortoise_get` are redundant names for it.
+    #
+    # ⚠ This direction is an OWNER DECISION, not an implementation preference:
+    # `docs/product/canonical-mcp-tools.md` (approved, approval_pr 4120) rules
+    # that `tortoise_get_entity` must NOT be retired and that the map must
+    # retire `tortoise_get` in its place. Retiring the pair the other way sends
+    # every caller of `get_entity` to a name that is itself retired — a churn
+    # loop — which is why the pointers below name `tortoise_get_entity`.
+    "tortoise_get_point": 'tortoise_get_entity(id, type="point")',
+    "tortoise_get": 'tortoise_get_entity(id, type=...)',
+    "tortoise_get_events": 'tortoise_get_entity(None, type="events")',
+    "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
+    "tortoise_get_governance": 'tortoise_get_entity(id, type="governance")',
+    # Tier 1 — tortoise_overview() already calls the handler; the name is redundant.
+    "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
+    "tortoise_list_tags": 'tortoise_overview(section="tags")',
+    "tortoise_list_sources": 'tortoise_overview(section="sources")',
+    "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',
+    "tortoise_health": 'tortoise_overview(section="health")',
+    "tortoise_status": 'tortoise_overview(section="status")',
+    "tortoise_stale": 'tortoise_overview(section="stale")',
+    # Tier 2 — the entry's own description already named its replacement.
+    "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
+    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    "tortoise_index_sessions": "tortoise_index_files(directory)",
+    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+}
 
 
-TOOL_REGISTRY = _apply_groups()
+def _apply_groups(entries: list[ToolDefinition]) -> list[ToolDefinition]:
+    """Assign curation groups + the retirement pointer to a list of entries."""
+    return [
+        replace(
+            t,
+            group=GROUP_BY_NAME.get(t.name, "memory"),
+            retired_use_instead=RETIRED_USE_INSTEAD.get(t.name),
+        )
+        for t in entries
+    ]
+
+
+# The LIVE, advertised surface. Every entry here is registered on both surfaces.
+TOOL_REGISTRY = _apply_groups(
+    [t for t in _ENTRY_DECLARATIONS if t.name not in RETIRED_USE_INSTEAD]
+)
+# The RETIRED names: served ONLY through the warning shim, never advertised.
+RETIRED_TOOL_REGISTRY = _apply_groups(
+    [t for t in _ENTRY_DECLARATIONS if t.name in RETIRED_USE_INSTEAD]
+)
 
 
 def tools_by_group(group: str) -> list[ToolDefinition]:

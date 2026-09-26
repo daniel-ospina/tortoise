@@ -88,9 +88,9 @@ primary_region = "iad"
   #
   # NOTE: [[services.*_checks]] has NO `port` key — a service check always rides
   # the service's internal_port (8000 here). It cannot be pointed at 9090. The
-  # 9090/healthz signal is a top-level [checks] entry, which is NOT in this PR:
-  # it is deferred to a follow-up PR (see the DEFERRED block below and
-  # docs/infra-runbook.md §6.0 for the merge-order precondition). A top-level
+  # 9090/healthz signal is a top-level [checks] entry, which IS present in this
+  # file ([checks.loop_liveness], reinstated 2026-09-17 below; the DEFERRED
+  # placeholder it replaced is gone). A top-level
   # check never affects routing, but it DOES gate flyctl's deploy health wait.
   #
   # timeout=5s against a 15s interval (was 15s/15s — a 1:1 ratio with zero
@@ -107,49 +107,53 @@ primary_region = "iad"
     timeout = "5s"
     grace_period = "180s"
 
-# ── DEFERRED to a follow-up: non-routing loop-liveness check (#2850) ─────────
-# The top-level [checks.loop_liveness] entry is NOT in this PR. It is deferred
-# to a follow-up PR that MUST merge and deploy only AFTER #3062
-# (fix/2850-health-liveness-decouple) is deployed and the 9090 listener is
-# verified bound on 0.0.0.0 inside the machine:
+# ── REINSTATED 2026-09-17: non-routing loop-liveness check (#3447, #2850) ────
+# DECIDED here — this is a deployment-configuration judgement, NOT an owner
+# decision (it is not ontology / EP model / product scope / price / promise).
+# REINSTATE. The precondition this file deferred on is now VERIFIED on the live
+# machine, and the standard converges: an application-level liveness probe
+# alongside a transport check is how K8s / Cloud Run / Azure document catching
+# a STALLED-BUT-RUNNING process, which a kernel-served TCP handshake cannot see.
 #
-#     fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"
-#     # expect a line whose LOCAL address is 00000000:2382 (= 0.0.0.0:9090).
-#     # 0100007F:2382 would mean loopback-only, and a Fly check would never pass.
-#     # Then expect a token-less 200 from /healthz.
+# Precondition, executed 2026-09-17 against tortoise-y4mjjq:
+#   fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"
+#     → LOCAL address 00000000:2382 = 0.0.0.0:9090  ✅ (not 0100007F)
+#   fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:9090/healthz"
+#     → http=200 {"status":"ok","loop_age_ms":67.7,"loop_stale":false}  ✅
+# #3062 merged 2026-09-13T02:45:10Z and the machine has been redeployed since
+# (last update 2026-09-16T18:49:30Z), so the listener is deployed, not merely
+# present. Decision record and sources: issue #3447.
 #
-# Why it is split out: flyctl's deploy health wait counts top-level checks
-# (WaitForHealthchecksToPass counts len(cfg.Checks) plus service checks and
-# requires every reported check to pass — no informational/readiness filter),
-# and .github/workflows/deploy-hosted.yml auto-deploys whenever fly.toml
-# changes. Shipping this check before its 9090 listener exists would fail every
-# deploy after --wait-timeout and repeatedly roll the sole production machine.
-# The TCP routing check and the lifecycle keys above are the actual #2850 fix
-# and carry zero deploy-gate risk, so they merge independently. See
-# docs/infra-runbook.md §6.0 (merge order) and §6.4 (deferred check).
+# This check does NOT affect request routing — the proxy ignores top-level
+# checks when choosing where to send traffic. It exists so a stalled event loop
+# can be surfaced to an operator even though a stall can no longer take the app
+# offline (#3062). It points at the app's dedicated 9090 /healthz listener.
 #
-# Restore the block below VERBATIM in the follow-up PR, once the precondition
-# above holds:
+# ⚠️ The listener's predicate is `503 if (stale AND idle) else 200`
+# (tortoise/monitoring.py) — a stale loop WITH a request in flight still
+# reports 200, so this check does NOT reliably surface a true wedge; it errs
+# toward 200, which is the safe direction for the deploy gate it feeds.
 #
-# [checks]
-#   [checks.loop_liveness]
-#     type = "http"
-#     method = "get"
-#     path = "/healthz"
-#     port = 9090
-#     interval = "15s"
-#     timeout = "5s"
-#     grace_period = "180s"
-#
-# (Original rationale, for the follow-up: this check does not affect request
-# routing — the proxy ignores top-level checks when choosing where to send
-# traffic. It exists so a STALLED EVENT LOOP is visible to an operator even
-# though a stall can no longer take the app offline. It points at
-# the app's dedicated 9090 /healthz listener (200 progressing / 503 stalled).
-# Top-level checks REQUIRE `port`, and Fly requires that port be bound on
-# 0.0.0.0 — a loopback-only 127.0.0.1 listener makes the check fail
-# permanently. grace_period matches the routing check because the 9090 listener
-# shares the ~85s app boot.)
+# ⚠️ DEPLOY-BLOCKING BY DESIGN: flyctl's deploy health wait counts top-level
+# checks (WaitForHealthchecksToPass requires every reported check to pass — no
+# informational/readiness filter) and .github/workflows/deploy-hosted.yml
+# auto-deploys whenever fly.toml changes. If the 9090 listener ever fails to
+# bind, EVERY deploy fails and the sole production machine is rolled repeatedly
+# until it is fixed. grace_period = 180s is the documented mitigation (Fly:
+# "give your app enough time to start up") and covers the ~85s boot with
+# headroom — the same value the routing check above uses. Do not shorten it
+# below the boot time. Top-level checks REQUIRE `port`, and the port must be
+# bound on 0.0.0.0 — a loopback-only listener makes the check fail permanently.
+# See docs/infra-runbook.md §6.0 (merge order) and §6.4 (this check).
+[checks]
+  [checks.loop_liveness]
+    type = "http"
+    method = "get"
+    path = "/healthz"
+    port = 9090
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "180s"
 
 [[vm]]
   cpu_kind = "shared"
@@ -188,6 +192,25 @@ primary_region = "iad"
   R2_ACCESS_KEY_ID = ""
   R2_SECRET_ACCESS_KEY = ""
   R2_BUCKET = ""
+  # ── #4126 secret-provenance: non-secret CONFIG, version-controlled here ────
+  # These three were Fly SECRETS with no managing source — the recorded debt in
+  # `.github/scripts/fly-managed-secrets.txt`. A non-secret config value belongs
+  # in version control, so it lives here and is declared `fly-toml-env` there.
+  # The deploy then no longer needs a secret for any of them, and the provenance
+  # gate fails a `fly-toml-env` declaration whose name is still a Fly secret
+  # (a Fly secret SHADOWS `[env]`) — so the two states cannot come apart.
+  #
+  # ⛔ THE VALUES ARE CARRIED OVER FROM THE LIVE FLY SECRETS, NOT FROM
+  # `.env.example`. TORTOISE_MANUAL_LINKING_ENABLED is `1` in production while
+  # `.env.example` documents the `0` dev default — moving it is
+  # behaviour-preserving, so the live value is what the app reads today and is
+  # what is recorded here. The flag's VALUE is the owner's call (the 2026-08-26
+  # ops runbook gates a flip on a Supabase `double_confirm_changes` check); this
+  # entry only carries the current value across. Do NOT "fix" it to match
+  # `.env.example`.
+  TORTOISE_CONTROL_PLANE = "supabase"
+  TORTOISE_REAUTH_WINDOW_SECONDS = "900"
+  TORTOISE_MANUAL_LINKING_ENABLED = "1"
 
 [deploy]
   wait_timeout = "5m"

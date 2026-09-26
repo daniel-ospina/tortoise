@@ -13,6 +13,6 @@
       "session_date": "2026-08-25"
     }
   ],
-  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-25) I bought a new bicycle yesterday.\n\nQuestion: what color is the new bicycle?\n\nAnswer:",
-  "user_message_hash": "cd460cf4834a55c7d0885ddf5fb7eb788910722ea954db99587ad6d2dc02fe55"
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session sess-0] (session date 2026-08-25) [user] I bought a new bicycle yesterday.\n\nQuestion: what color is the new bicycle?\n\nAnswer:",
+  "user_message_hash": "5969441018e7305ce43f515585a808e07a019985c0074ce784ae4a3cc364a872"
 }

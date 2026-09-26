@@ -16,6 +16,19 @@ v2 eval lane faithfully (docs/plans/2026-09-08-2165-connected-assembly.md):
 
 This module is a TEST HELPER (underscore prefix) — excluded from
 ci-surfaces.yml selection and from any production import path.
+
+⛔ NOT a capture-shaped session graph, deliberately (#3914). Every Point here
+carries only the snake ``session_id`` prop that ``create_point(session_id=…``
+writes — there is NO ``(:Session {id})`` node and NO
+``(:Session)-[:CONTAINS]->(:Point)`` edge, and the shipping point fetch
+deliberately does NOT read the snake prop (#3804). The assembly goldens in
+``tests/test_assembly_sdk.py`` therefore pin ``[session ?]`` — they assert the
+identity is ABSENT, so this fixture cannot green-light a broken CONTAINS read
+the way the ask fixtures in #3910/#3914 did. Wiring a Session here WOULD
+change those goldens (``[session sess-2026-08-10]``), which is the
+policy-governed change tracked by #3804 — not something a fixture edit may do
+incidentally. Read as: "session identity is not the subject of the
+connected-assembly goldens", NOT as "capture writes a ``session_id`` prop".
 """
 from __future__ import annotations
 

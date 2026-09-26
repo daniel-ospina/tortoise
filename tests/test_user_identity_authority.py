@@ -514,6 +514,10 @@ def test_oauth_quota_fields_no_nameerror():
     row = {"id": "t-1", "tier": "free", "email": "owner@x.com"}
     out = oa._quota_fields(cp, row)
     assert out["email"] == "owner@x.com"  # or None via fallback — never NameError
+    # #4010: the OAuth MCP auth lane uses this dict verbatim as the limits
+    # dict, so a finite max_sessions here re-caps every OAuth-authenticated
+    # MCP capture. Pin the value, not just the absence of a NameError.
+    assert out["max_sessions"] is None
 
 
 def test_unlink_token_never_in_logs(client, monkeypatch, fake, caplog):

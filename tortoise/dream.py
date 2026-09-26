@@ -268,21 +268,53 @@ class Dreamer:
         self._last_belief_write_count = len(params_list)
         if params_list:
             if stamp_now:
-                proj.g.query(
+                written = proj.g.query(
                     "UNWIND $params AS p "
                     "MATCH (n:Point {id: p.id}) "
                     "SET n.confidence = p.c, n.lastDreamedAt = $now, "
-                    "    n.updatedAt = $now",
+                    "    n.updatedAt = $now "
+                    "RETURN n.id",
                     params={"params": params_list, "now": now},
-                )
+                ).result_set
             else:
-                proj.g.query(
+                written = proj.g.query(
                     "UNWIND $params AS p "
                     "MATCH (n:Point {id: p.id}) "
-                    "SET n.confidence = p.c, n.updatedAt = $now",
+                    "SET n.confidence = p.c, n.updatedAt = $now "
+                    "RETURN n.id",
                     params={"params": params_list, "now": now},
-                )
+                ).result_set
+            # #2884 D3: journal the write-back — one ConfidenceChanged per
+            # committed row, with ``lastDreamedAt`` ONLY when the run
+            # converged AND stamping is on (``stamp_now`` — the exact
+            # condition the live SET above uses; a record claiming a stamp
+            # that did not happen is a worse bug than the pre-fix loss).
+            self._journal_belief_writeback(written, params_list, now, stamp_now)
         return iterations, converged, affected
+
+    def _journal_belief_writeback(self, written, params_list: list[dict],
+                                  now: str, stamp_now: bool) -> None:
+        """#2884 D3: journal a committed dream confidence write-back.
+
+        ``written`` is the ``RETURN n.id`` result of the write statement, so
+        the journal set == the committed set by construction. ``lastDreamedAt``
+        rides ONLY when ``stamp_now`` (converged + stamping on). Best-effort:
+        the emitter is the SDK's ``_emit_event``, which no-ops without an
+        event log and swallows log-write failures.
+        """
+        emit = getattr(self._sdk, "_emit_event", None)
+        if emit is None:
+            return
+        by_id = {p["id"]: p["c"] for p in params_list}
+        for row in written:
+            cid = row[0]
+            if cid not in by_id:
+                continue
+            if stamp_now:
+                emit("ConfidenceChanged", id=cid, confidence=by_id[cid],
+                     lastDreamedAt=now)
+            else:
+                emit("ConfidenceChanged", id=cid, confidence=by_id[cid])
 
     # ── Stale-first window scheduler (epic 903-C3, #1241) ────────────
 
@@ -497,7 +529,16 @@ class Dreamer:
                 "RETURN n.id",
                 params={"ids": list(claim_ids), "now": now},
             ).result_set
-        return {r[0] for r in rows}
+        stamped = {r[0] for r in rows}
+        # #2884 D3: journal the stamp for exactly the rows the statement
+        # updated (the RETURN already names them) — a trivial stamp is a
+        # committed lastDreamedAt write. The caller gates this method on the
+        # pass converging, so the journal mirrors the live write condition.
+        emit = getattr(self._sdk, "_emit_event", None)
+        if emit is not None:
+            for cid in stamped:
+                emit("ConfidenceChanged", id=cid, lastDreamedAt=now)
+        return stamped
 
     # ── Whole-graph ────────────────────────────────────────────────
 

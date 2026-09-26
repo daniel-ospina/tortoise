@@ -340,8 +340,13 @@ class KindClassifier:
         any exception → kNN top-1 fallback + ``classify_error`` census.
 
         Returns ``(calls, usage)`` — ``usage`` is the accumulated LLM spend
-        across batches (``{"calls", "attempts", "retries", "truncated"}``,
-        rollable into the session llm_stats via ``_rollup_llm``), so the
+        across batches (``{"calls", "attempts", "retries", "truncated",
+        "deadline_aborts"}`` plus ``"cost"`` — the ``#3359`` per-route
+        cost accumulator merged in by ``_merge_cost_accumulator``, carrying
+        ``by_route`` lanes with prompt/completion tokens, the provider's own
+        reported charge, and the ``calls_without_cost`` /
+        ``calls_without_usage`` disclosures). The whole dict is rollable
+        into the session llm_stats via ``_rollup_llm``, so the
         adjudication tail's cost is never invisible to the A/B gate.
         ``usage["calls"]`` is the BATCH count (one per adjudication call),
         ``usage["attempts"]`` the total adapter-call attempts across
@@ -354,11 +359,13 @@ class KindClassifier:
             for iid, _item, top in tail:
                 stats["assigned_knn"] += 1
                 assignments[iid] = {"kind": top[0][0], "margin": top[0][1], "mode": "knn"}
-            return 0, {"calls": 0, "attempts": 0, "retries": 0, "truncated": False}
-        from tortoise.extractor_v2 import _complete_parsed
+            return 0, {"calls": 0, "attempts": 0, "retries": 0,
+                       "truncated": False}
+        from tortoise.extractor_v2 import _complete_parsed, _merge_cost_accumulator
 
         calls = 0
-        usage = {"calls": 0, "attempts": 0, "retries": 0, "truncated": False}
+        usage = {"calls": 0, "attempts": 0, "retries": 0,
+                 "truncated": False}
         try:
             batch_size = max(1, min(int(self.batch_size), 50))  # plan: 25-50/call
         except (TypeError, ValueError):  # caller passed junk — bounded default
@@ -443,6 +450,14 @@ class KindClassifier:
                 # here would silently undercount deadline-killed spend.
                 usage["deadline_aborts"] = usage.get("deadline_aborts", 0) + \
                     batch_stats.get("deadline_aborts", 0)
+                # #3359: merge the batch's cost accumulator (tokens + the
+                # provider's own reported charge, per-route) into the
+                # adjudication accumulator. Merging rather than snapshotting
+                # keeps every call of a multi-call batch, and the per-route
+                # buckets keep a mid-batch failover attributed to the lane
+                # that actually served it. The failed-batch case is included
+                # deliberately — the calls were made, so the spend is real.
+                _merge_cost_accumulator(usage, batch_stats)
             if not isinstance(parsed, dict):
                 warnings.append("adjudication returned a non-object — kNN top-1 fallback")
                 stats["classify_errors"] += 1

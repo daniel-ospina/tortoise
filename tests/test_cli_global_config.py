@@ -34,6 +34,9 @@ def _home_isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    # #3615: capture needs explicit consent — a stray ambient opt-in must not
+    # leak into (or out of) these tests.
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
     monkeypatch.chdir(tmp_path)
 
 
@@ -80,6 +83,8 @@ class TestGlobalConfigCommands:
 
     def test_session_capture_from_global(self, tmp_path, monkeypatch):
         _seed_global(tmp_path)
+        # #3615: the credential alone is not consent — ask for capture.
+        monkeypatch.setenv("TORTOISE_CAPTURE", "1")
         transcript = tmp_path / "conv.txt"
         transcript.write_text("User: hello\nAssistant: hi there\n")
         with mock.patch("urllib.request.urlopen", return_value=_ok(

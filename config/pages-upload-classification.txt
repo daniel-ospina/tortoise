@@ -1,0 +1,62 @@
+# Every top-level entry under `website/` and whether the Cloudflare Pages upload
+# STAGES it. This is the REVIEWED classification from issue #3620, kept OUT of
+# the workflow so the deploy's denylist and the test's expectations cannot drift:
+#
+#   public    copied into the staged upload root ($RUNNER_TEMP/pages-upload) and
+#             served from premiselabs.co
+#   excluded  never leaves the runner
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# `wrangler pages deploy .` uploaded EVERY file under `website/`, and
+# `.wranglerignore` is not honoured by the Pages upload path at all (hardcoded
+# IGNORE_LIST, no ignore-file read — verified four ways in #3620). The deploy
+# step now stages a DENYLIST copy, which means a NEW top-level entry is uploaded
+# unless it is excluded. `tools/check_pages_upload_root.py` runs BEFORE the
+# upload in the deploy job and fails if any tracked top-level entry is missing
+# from this table — so an unclassified entry cannot reach the public internet on
+# a green deploy. (The nested rules — `node_modules/` and `*.md` at any depth,
+# plus the excluded directories' contents — remain in the deploy step; this table
+# decides the top level, which is where the denylist's residual risk lives.)
+#
+# `admin/` is deliberately ABSENT: it used to be generated into `website/` by the
+# blog-admin build step immediately before the deploy. #4171 moved the console to
+# the app origin (`tortoise-dashboard`), which stages it into
+# `website/apps/dashboard/dist/admin/` instead — so no `admin/` tree is produced
+# under `website/` at all now.
+#
+# Format: <public|excluded> <name>
+public _headers
+public _redirects
+public 404.html
+public assets
+public aviso-privacidad.html
+public blog
+public consent.js
+public contact.html
+public docs.html
+public dpa.html
+public faq.html
+public functions
+public index.html
+public license.html
+public logo.png
+public privacy.html
+public product.html
+public robots.txt
+public security.html
+public self-hosted.html
+# signin.html was DELETED in #4054: /signin, /signin/ and /signin.html are 301'd
+# to /auth by _redirects (and the company host by _middleware.ts), so the asset
+# was unreachable and kept the last legacy-bridge page alive.
+public sitemap-company.xml
+public sitemap-product.xml
+public tos.html
+# The auth pages (signup.html = /auth, welcome.html, invite-accept.html) moved
+# to the tortoise-dashboard project (website/apps/dashboard/public/) in #4054.
+# They are staged by the dashboard's vite build, not by this upload.
+excluded 2479-re-auth-implementation-plan.md
+excluded README.md
+excluded apps
+excluded migrations
+excluded website_architecture.md

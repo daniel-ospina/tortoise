@@ -10,7 +10,9 @@
 # routing IS a total outage.
 #
 # This workflow is the missing OUT-OF-PROCESS observer: it runs on GitHub
-# Actions (a different failure domain than Fly), every 5 minutes, and asserts
+# Actions (a different failure domain than Fly) on a */5 cron intent — measured
+# delivery is ~15 min (33% of intent), so any threshold stated in RUNS must be
+# justified against the measured rate, never the nominal one — and asserts
 # the REAL USER PATH — `GET /v1/organizations` with no auth, which must answer 401
 # (source-verified: tortoise/session_auth.py `verify_session_jwt` raises 401
 # "Missing session token" with zero network I/O when the Authorization header
@@ -38,6 +40,15 @@
 # Operator runbook: docs/infra-runbook.md → "Out-of-band availability watchdog".
 # Harness: .github/scripts/availability-watchdog.test.sh (CI job
 # availability-watchdog; stubs curl/gh/flyctl, no network).
+#
+# TWO PRODUCTION TARGETS (#3628): the Fly API probe above, plus a SECOND,
+# DEDICATED step for the Cloudflare Pages auth surface (`GET /auth/start`).
+# During the #3616 sign-in outage only /auth/start revealed it — /welcome
+# answered 302 and /api/session answered 401 the whole time, so a bare liveness
+# probe of either was GREEN while nobody could sign in for ~35 minutes. The
+# auth step asserts 302 AND that the response carries the PKCE challenge; it is
+# production for alerting/identity but has no Fly machine, so it is
+# hard-disarmed from the restart leg (see RESTARTABLE_PROBE_URLS).
 #
 # Manual run / drill (disarms self-healing automatically): dispatch this
 # workflow with probe_url set to a non-production URL.
@@ -81,8 +92,10 @@ jobs:
       # (availability-watchdog.sh DEFAULT_PROBE_URL). Duplicating the production
       # URL here would mean that changing one copy silently turns every
       # production run into a drill — no restarts, [DRILL]-titled incidents —
-      # and the string comparison against DEFAULT_PROBE_URL is the ONLY thing
-      # distinguishing a drill from production.
+      # and SET MEMBERSHIP in the script's PROD_PROBE_URLS set is the ONLY thing
+      # distinguishing a drill from production. (This replaced the old
+      # single-literal `PROBE_URL == DEFAULT_PROBE_URL` comparison; an
+      # unrecognised URL stays a DRILL, fail closed.)
       PROBE_URL: ${{ inputs.probe_url }}
       # Fly app. FLY_API_TOKEN is the established name (deploy-hosted.yml) and
       # is passed at STEP level (see the probe step) — NOT here: a job-level
@@ -156,4 +169,66 @@ jobs:
           # Absent → the page is skipped with a log line.
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # #3887: the SUSTAINED-incident escalation recipient. OPTIONAL — left
+          # empty, the script falls back to TELEGRAM_CHAT_ID, so this knob can
+          # point a sustained page at an on-call group without moving transition
+          # paging. STEP-level for the same credential containment as the other
+          # Telegram secrets (never job-level: that would also hand a durable
+          # bot token to actions/checkout and to the third-party flyctl setup).
+          ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
+          # #3887 (round 5): the operator KILL SWITCH, wired so the runbook's
+          # documented control is actually usable. Without this line an operator
+          # sets the repo variable and NOTHING happens — the script's default of
+          # 1 wins silently, which is the "documented but unreachable control"
+          # defect review caught. Unset `vars.ESCALATE_ENABLED` expands to EMPTY,
+          # which is the script's documented default (paging ENABLED), so the
+          # unset state is safe. STEP-level, like ESCALATION_CHAT_ID above: this
+          # steers the watchdog, so it belongs to the step that RUNS the
+          # watchdog, and env precedence is step > job > workflow — a job-level
+          # copy could never shadow the step's value and would only widen where
+          # the switch is visible. Only a byte-exact 0 disables escalation; any
+          # other value warns and keeps paging.
+          ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
+        run: bash .github/scripts/availability-watchdog.sh
+      # SECOND TARGET (#3628): the Pages auth surface. `!cancelled()` rather
+      # than the default `success()` — the two surfaces fail INDEPENDENTLY, so
+      # an API outage must not suppress the auth alert (and vice versa: a
+      # failing auth probe still fails the job).
+      # NO FLY_API_TOKEN here: there is no Fly machine behind this surface, and
+      # the script hard-disarms the restart leg for it (an unknown URL stays a
+      # drill, and this URL is production-but-not-restartable). A 503 here
+      # means a missing/renamed binding — a restart of the API app cannot fix
+      # it and would restart an unrelated service.
+      # The host label is REQUIRED: the incident TITLE is the dedupe key, so
+      # without its own label the two production targets would share ONE issue.
+      - name: Probe the Pages auth surface (PKCE flow; never restartable)
+        if: ${{ !cancelled() }}
+        env:
+          # Same step-level credential containment as the API step above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # #3887: the SUSTAINED-incident escalation recipient. OPTIONAL — left
+          # empty, the script falls back to TELEGRAM_CHAT_ID, so this knob can
+          # point a sustained page at an on-call group without moving transition
+          # paging. STEP-level for the same credential containment as the other
+          # Telegram secrets (never job-level: that would also hand a durable
+          # bot token to actions/checkout and to the third-party flyctl setup).
+          ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
+          # #3887 (round 5): the operator KILL SWITCH, in the SAME repository
+          # variable as the API step above (unset → EMPTY → paging ENABLED, the
+          # script default). Both probe steps must carry it: they fail
+          # INDEPENDENTLY, so wiring only one would leave the auth surface
+          # unkillable. STEP-level, never job-level (same discipline as
+          # ESCALATION_CHAT_ID).
+          ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
+          PROBE_URL: https://app.premiselabs.co/auth/start
+          PROBE_HOST_LABEL: app.premiselabs.co
+          # Healthy = 302 with the PKCE challenge in the response headers. The
+          # old hardcoded UP arms classified 3xx as UNEXPECTED, so a naive
+          # probe of this route would page on a HEALTHY site; the allow-list
+          # replaces ONLY the UP arms (000/5xx stay DOWN, other stays
+          # UNEXPECTED).
+          PROBE_EXPECT_STATUS: '302'
+          PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'
         run: bash .github/scripts/availability-watchdog.sh

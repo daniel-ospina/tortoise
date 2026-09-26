@@ -14,8 +14,7 @@ Task 2 — deterministic type detection + the best-effort abstained label:
   * _looks_abstained phrase list + blank/whitespace → True,
   * LLMReader.answer + _looks_abstained over empty/whitespace/refusal
     outputs → blank → abstained=True (the canonical NO_EVIDENCE_TEXT
-    substitution happens at the SDK surface — pinned in
-    tests/test_ask_api.py, not inside the reader).
+    substitution happens at the ask-lane surface, not inside the reader).
 
 Fully offline: stub models only, no API keys, no DB.
 """
@@ -201,7 +200,7 @@ def test_llmreader_answer_guards_none_completion() -> None:
     """answer() must NOT crash when the model returns None (a provider
     response with empty content — refusal/empty generation observed live
     2026-09-02 on qwen via OpenRouter, question 830ce83f): the None-guard
-    mirrors the product ask()'s ``(raw or "").strip()`` so the eval's
+    mirrors the ask lane's ``(raw or "").strip()`` so the eval's
     direct LLMReader path surfaces "" instead of AttributeError on
     None.strip()."""
     class _NoneModel:
@@ -244,7 +243,8 @@ def test_llmreader_answer_strips_raw_completion() -> None:
 
 def test_build_reader_user_message_direct() -> None:
     """Direct unit pin of the single-sourced user-message template — the
-    SDK local lane and LLMReader.answer share ONE copy (no parallel
+    eval-only ask lane (``ask_lane.run_ask_lane``) and ``LLMReader.answer``
+    share ONE copy (no parallel
     template drift); the render path is cross-pinned above."""
     assert build_reader_user_message("[user] hi", "what changed?") == \
         "Memory context:\n[user] hi\n\nQuestion: what changed?\n\nAnswer:"
@@ -418,8 +418,8 @@ class TestLooksAbstained:
         clause to match — NOT abstained (pre-cycle-2 behavior; the
         cycle-2 clause filter must not crash on an empty clause list —
         this label gates NO_EVIDENCE_TEXT substitution upstream, so an
-        uncaught IndexError would escape sdk.ask()'s documented Raises
-        contract)."""
+        uncaught IndexError would escape ``ask_lane.run_ask_lane``'s
+        documented Raises contract)."""
         assert _looks_abstained("...") is False
         assert _looks_abstained(".") is False
         assert _looks_abstained("!?") is False
@@ -436,8 +436,8 @@ class TestLooksAbstained:
         ordinary text ("not enough chairs", "does not contain the
         document") IS labeled abstained — the label is a clause-scoped
         substring heuristic, NEVER a gate (the two-phase prompt is
-        authoritative; the SDK substitutes NO_EVIDENCE_TEXT on this
-        label, per tests/test_ask_api.py). Since the clause-scoped
+        authoritative; the ask lane substitutes NO_EVIDENCE_TEXT on this
+        label). Since the clause-scoped
         tightening (P2), the FIRST-clause occurrence labels abstained; a
         TRAILING qualifier does not (pinned in
         ``test_trailing_qualifier_not_abstained`` below) — except a
@@ -490,8 +490,8 @@ class TestLooksAbstained:
     def test_blank_output_labels_abstained(self) -> None:
         """Blank model output → the reader returns the raw blank and
         ``_looks_abstained`` labels it abstained (the deterministic case).
-        The canonical ``NO_EVIDENCE_TEXT`` substitution happens at the SDK
-        surface (pinned in tests/test_ask_api.py), not inside the reader —
+        The canonical ``NO_EVIDENCE_TEXT`` substitution happens at the
+        ask-lane surface, not inside the reader —
         this test pins the reader-side label only."""
         model = _StubModel(reply="")
         reader = LLMReader(model, model_id="stub")

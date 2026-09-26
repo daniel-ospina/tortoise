@@ -114,12 +114,21 @@ class EncodeCache:
     # ── ingest interception ───────────────────────────────────────────────
     @contextmanager
     def active(self):
-        """Wrap ``tortoise.embeddings.compute_embedding`` so every ingest-time
-        encode consults this cache first; restores + flushes on exit."""
+        """Wrap ``tortoise.embeddings`` encode entry points so every ingest-time
+        encode consults this cache first; restores + flushes on exit.
+
+        #4194: BOTH the single-text ``compute_embedding`` and its batched form
+        ``compute_embeddings`` are wrapped. ``compute_embedding`` now delegates
+        to ``compute_embeddings``, and the capture turn write calls the batched
+        form directly — wrapping only the single form would have made the
+        established interception seam stop governing the turn write path
+        silently.
+        """
         global _ACTIVE_CACHE
         import tortoise.embeddings as emb
 
         original = emb.compute_embedding
+        original_batch = emb.compute_embeddings
         cache = self
 
         def _cached(content: str, max_tokens: int = 512) -> list[float] | None:
@@ -131,13 +140,38 @@ class EncodeCache:
                 cache.put(content, vec)
             return vec
 
+        def _cached_batch(texts: list[str],
+                          max_tokens: int = 512) -> list[list[float] | None]:
+            # Cache HITS are served per text; only the MISSES share one
+            # batched encode, so the batch's one-model-call property survives.
+            out: list[list[float] | None] = [None] * len(texts)
+            miss_idx: list[int] = []
+            miss_texts: list[str] = []
+            for i, text in enumerate(texts):
+                hit = cache.get(text)
+                if hit is not None:
+                    out[i] = hit
+                else:
+                    miss_idx.append(i)
+                    miss_texts.append(text)
+            if miss_texts:
+                vecs = original_batch(miss_texts, max_tokens=max_tokens)
+                for i, text, vec in zip(miss_idx, miss_texts, vecs,
+                                        strict=True):
+                    out[i] = vec
+                    if vec is not None:
+                        cache.put(text, vec)
+            return out
+
         prev = _ACTIVE_CACHE
         _ACTIVE_CACHE = cache
         emb.compute_embedding = _cached
+        emb.compute_embeddings = _cached_batch
         try:
             yield cache
         finally:
             emb.compute_embedding = original
+            emb.compute_embeddings = original_batch
             _ACTIVE_CACHE = prev
             cache.save()
 

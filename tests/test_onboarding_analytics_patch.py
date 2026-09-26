@@ -38,6 +38,11 @@ def client(tmp_path, monkeypatch):
                         str(tmp_path / "analytics_fallback.jsonl"))
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    # #3820 (cycle-2 P1): the CANONICAL name too. With an ambient production
+    # `SUPABASE_SERVICE_ROLE_KEY` and no URL, `_service_key()` finds it and the
+    # emit is classified `fallback`/`supabase_env_incomplete` — this fixture's
+    # "Supabase env removed" premise would be false.
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     # DB-free: capture what reaches the state writer (the pop contract).
     captured_kwargs = {}
 

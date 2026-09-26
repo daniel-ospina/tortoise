@@ -33,11 +33,15 @@ from datetime import datetime, timezone
 
 import httpx
 
-from tortoise.notify import redact_safe
+from tortoise.notify import file_incident, redact_safe
 
 logger = logging.getLogger(__name__)
 
 RESEND_URL = "https://api.resend.com/emails"
+
+# Ops incident kind (the alert_store sink) for a failed invite DELIVERY — not
+# an invite event; see notify.file_incident for the dedup contract.
+_INVITE_SEND_FAILED_KIND = "INVITE_SEND_FAILED"
 
 # Shared concurrency cap for all sends (volume is tiny; this bounds blast radius
 # if a send storms during a replay — not a rate limiter).
@@ -280,6 +284,16 @@ async def _send_invite_attempt(invitee_email: str, org_name: str, role: str,
     logger.warning("email notify: invite email failed for %s (%s)",
                    invitation_id, redact_safe(last_err))
     _refund_send()  # #1138 P1: provider rejected/failed the POST — free the slot
+    # Ops incident (GH issue + Telegram) — the invite is the ONLY automated
+    # token-delivery path (the dashboard discards the token), so a provider
+    # failure means the invitee never receives a way in, and before this it was
+    # visible only in a log line. Platform subject ("") on purpose: the Resend
+    # account is shared across teams, so keying by team would file one issue per
+    # affected team for a single outage. Dedup keeps repeats to one issue.
+    file_incident(_INVITE_SEND_FAILED_KIND, "", {
+        "invitation_id": invitation_id,
+        "error": redact_safe(last_err),
+    })
 
 
 def send_invite_email(org_name: str, invitee_email: str, role: str,

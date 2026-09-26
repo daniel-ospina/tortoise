@@ -291,22 +291,20 @@ class TestStubAdoption:
             sdk.close()
 
 
-# ── Tests 14-15 (green-pins, post-review): delete non-durability ──────────
+# ── Tests 14-15 (closed by #3299): delete durability ──────────────────────
 
 
-class TestDeleteNonDurability:
-    """Green-pins for the plan-accepted delete asymmetry (#2194 code review).
+class TestDeleteDurability:
+    """Delete durability (#2194 code review; #2296 scope hook; closed by #3299).
 
-    _delete_entity is a bare DETACH DELETE — the journal vocabulary has no
-    Object-delete event, so a deleted canonical Object's ObjectRegistered line
-    still replays. Consequences (documented-by-test, accepted; #2296 scope
-    hook — the durability write-surface invariant must cover deletion):
-    - test 14: a deleted Object RESURRECTS on the next rebuild_all.
-    - test 15: delete→recreate journals TWO first-registrations; replay
-      first-wins the earlier line's createdAt (≠ the live node's second).
+    #3299 journals ``_delete_entity`` as an ``EntityMutated op=delete`` JSONL
+    record and replays it as a hard delete, so:
+    - test 14: a deleted Object is ABSENT after rebuild_all;
+    - test 15: delete→recreate journals TWO first-registrations and replay
+      reproduces the SECOND (live) incarnation, not the first.
     """
 
-    def test_deleted_object_resurrects_on_rebuild(self, tmp_path):
+    def test_deleted_object_absent_after_rebuild(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t14.db"),
@@ -321,19 +319,17 @@ class TestDeleteNonDurability:
             assert sdk._delete_entity(oid) is True, "node must be deleted"
             rows = _object_row(proj, "delete-me-A")
             assert not rows, "live node must be gone after delete"
-            # delete mints no journal line — rebuild replays the OR line and
-            # resurrects the deleted Object (accepted divergence, #2296 hook).
+            # #3299: the delete is now journaled (EntityMutated op=delete),
+            # so replay hard-deletes instead of resurrecting the OR line.
             proj.rebuild_all(str(events))
             rows = _object_row(proj, "delete-me-A", "status", "createdAt")
-            assert rows and rows[0][0] == "live", (
-                "deleted Object resurrects live on rebuild "
-                "(no delete tombstone in the journal vocabulary)")
-            assert rows[0][1] == journal[0]["createdAt"], (
-                "resurrected node carries the journaled createdAt")
+            assert not rows, (
+                "deleted Object resurrects live on rebuild — the #3299 "
+                "defect (no longer: the delete is journaled)")
         finally:
             sdk.close()
 
-    def test_delete_recreate_replays_first_incarnation(self, tmp_path):
+    def test_delete_recreate_replays_second_incarnation(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t15.db"),
@@ -356,9 +352,9 @@ class TestDeleteNonDurability:
                 "live node carries the SECOND registration's createdAt")
             proj.rebuild_all(str(events))
             rows = _object_row(proj, "delete-me-B", "createdAt")
-            assert rows and rows[0][0] == ors[0]["createdAt"], (
-                "replay first-wins the FIRST registration's createdAt — "
-                "accepted delete→recreate divergence (#2296 hook)")
+            assert rows and rows[0][0] == ors[1]["createdAt"], (
+                "replay must reproduce the SECOND incarnation — the "
+                "journaled delete must not swallow the later recreate")
         finally:
             sdk.close()
 
@@ -686,10 +682,11 @@ class TestCasReplayParity:
     def test_fold_reg_fold_recreate_last_wins_unchanged(self, tmp_path,
                                                         caplog):
         """delete→recreate→re-supersede: [Reg(fr-B), OS(fr-B→B), <delete,
-        no tombstone>, Reg(fr-B), OS(fr-B→C)] replays with the SAME last-wins
-        outcome as pre-CAS on both surfaces → supersededBy == fr-succ-C
-        (live truth — the CURRENT incarnation was superseded by C). A cas
-        leak into replay would CAS-miss the second line → B (first-wins)."""
+        journaled as EntityMutated op=delete>, Reg(fr-B), OS(fr-B→C)] replays
+        with the SAME last-wins outcome as pre-CAS on both surfaces →
+        supersededBy == fr-succ-C (live truth — the CURRENT incarnation was
+        superseded by C). A cas leak into replay would CAS-miss the second
+        line → B (first-wins)."""
         import logging
         events = tmp_path / "events"
         events.mkdir()
@@ -704,7 +701,7 @@ class TestCasReplayParity:
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,
                             supersedes_by="fr-succ-B",
                             evidence="first fold")
-            assert sdk._delete_entity(oid) is True               # no tombstone
+            assert sdk._delete_entity(oid) is True               # journaled
             sdk.create_entity("object", name, objectKind="core:other",
                               is_episodic=False)                 # Reg 2
             sdk._emit_event("ObjectSuperseded", id=oid, name=name,

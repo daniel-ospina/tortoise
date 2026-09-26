@@ -1,5 +1,7 @@
 # Scoping — #2304: custom-graph delete leaves data at rest + overstates permanence
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 > Double-diamond scoping (issue-scoping skill). Human approval gate: present options +
 > recommendation to the owner before implementation planning.
 

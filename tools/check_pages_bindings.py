@@ -20,17 +20,26 @@ verified that four ways: wrangler's `pages/validate.ts` uses a hardcoded
 IGNORE_LIST with no ignore-file read; the string `wranglerignore` appears in 0
 files across all locally installed wrangler versions; `wrangler pages deploy
 --help` exposes no include/exclude; and live,
-`https://tortoise.premiselabs.co/.wranglerignore` returns 200 while `apps/` is
-served despite being listed. Anything left under `website/` WILL be published.
+`https://tortoise.premiselabs.co/.wranglerignore` returns 200 while `apps/` was
+served despite being listed. #3620 replaced that wholesale upload with a staged
+DENYLIST copy, so excluded paths are no longer published — but a NEW top-level
+entry under `website/` is still staged unless it is excluded (the deploy job's
+classification preflight and `tests/test_pages_bindings.py` pin that). Keeping
+the manifest in `config/` is what makes it immune to that residual risk.
 
 Usage:
     check_pages_bindings.py --manifest config/required-bindings.yml \\
-        [--account-id <id>] [--api-token <token>] [--json]
+        [--project <name>] [--account-id <id>] [--api-token <token>] [--json]
+
+`--project` narrows the check to ONE project in the manifest. Omit it to check
+EVERY project (the default): a project the manifest declares is never silently
+skipped, because a skipped project is a gate that asserts nothing.
 
 Exit codes:
-    0  every `required` binding present (warnings allowed)
+    0  every `required` binding present for every checked project (warnings allowed)
     1  a `required` binding is missing
-    2  could not determine the state (API error, bad manifest) — fail closed
+    2  could not determine the state (API error, bad manifest, unknown --project)
+       — fail closed
 
 The pure comparison logic is `evaluate()`, unit-tested in
 `tests/test_pages_bindings.py` with no network access.
@@ -56,8 +65,8 @@ except ImportError:  # pragma: no cover - the workflow installs pyyaml
 KIND_ENUM = frozenset({"required", "recommended"})
 
 
-def load_manifest(path: Path) -> dict:
-    """Load and validate a binding manifest.
+def _validate_bindings(path: Path, where: str, bindings) -> list[dict]:
+    """Validate ONE project's `bindings` list and return it unchanged.
 
     Validation is deliberately strict: a manifest that declares nothing, or
     declares an entry with an unvalidated field, makes the gate vacuous — and a
@@ -65,23 +74,19 @@ def load_manifest(path: Path) -> dict:
     here, because a field the loader ignores is a field an attacker (or a typo)
     can use to turn `required` into a warning.
     """
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: expected a mapping, got {type(data).__name__}")
-
-    bindings = data.get("bindings")
+    prefix = f"{path}: {where}" if where else f"{path}:"
     if not isinstance(bindings, list) or not bindings:
         raise ValueError(
-            f"{path}: `bindings` must be a non-empty list — an empty manifest "
+            f"{prefix} `bindings` must be a non-empty list — an empty manifest "
             "would assert nothing"
         )
 
     for i, spec in enumerate(bindings):
         if not isinstance(spec, dict):
-            raise ValueError(f"{path}: bindings[{i}] must be a mapping")
+            raise ValueError(f"{prefix} bindings[{i}] must be a mapping")
         for key in ("name", "type"):
             if not spec.get(key):
-                raise ValueError(f"{path}: bindings[{i}] is missing `{key}`")
+                raise ValueError(f"{prefix} bindings[{i}] is missing `{key}`")
 
         # `kind` MUST be validated against an enum. Without this, a one-character
         # typo (`kind: Required`, `kind: rquired`) silently downgrades a binding
@@ -95,7 +100,7 @@ def load_manifest(path: Path) -> dict:
         kind = spec.get("kind", "required")
         if not isinstance(kind, str) or kind not in KIND_ENUM:
             raise ValueError(
-                f"{path}: bindings[{i}] ({spec.get('name')}) has invalid kind "
+                f"{prefix} bindings[{i}] ({spec.get('name')}) has invalid kind "
                 f"{kind!r}; expected one of {sorted(KIND_ENUM)}"
             )
 
@@ -107,31 +112,106 @@ def load_manifest(path: Path) -> dict:
         envs = spec.get("envs", ["production"])
         if not isinstance(envs, list) or not envs:
             raise ValueError(
-                f"{path}: bindings[{i}] ({spec.get('name')}) `envs` must be a "
+                f"{prefix} bindings[{i}] ({spec.get('name')}) `envs` must be a "
                 "non-empty list of environment names"
             )
 
     if not any(s.get("kind", "required") == "required" for s in bindings):
         raise ValueError(
-            f"{path}: no binding is marked `required` — the gate would only warn"
+            f"{prefix} no binding is marked `required` — the gate would only warn"
         )
 
-    return data
+    return bindings
 
 
-def evaluate(manifest: dict, configs: dict[str, dict]) -> tuple[list[str], list[str]]:
-    """Return (missing_required, missing_recommended) as human-readable strings.
+def load_manifest(path: Path) -> dict:
+    """Load and validate a binding manifest, normalized to `{"projects": [...]}`.
 
+    TWO SHAPES ARE ACCEPTED:
+
+      * multi-project (current)::
+
+            projects:
+              - project: premise-labs
+                bindings: [...]
+              - project: tortoise-dashboard
+                bindings: [...]
+
+      * single-project (legacy, still loads)::
+
+            project: premise-labs
+            bindings: [...]
+
+    Both normalize to a list of ``{"project": <name>, "bindings": [...]}`` so
+    `main()` and `evaluate()` never branch on the on-disk shape. The legacy shape
+    is kept so a manifest outside this repo does not break on upgrade.
+    """
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping, got {type(data).__name__}")
+
+    if "projects" in data:
+        raw = data["projects"]
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(
+                f"{path}: `projects` must be a non-empty list of projects"
+            )
+        projects: list[dict] = []
+        seen: set[str] = set()
+        for i, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                raise ValueError(f"{path}: projects[{i}] must be a mapping")
+            name = entry.get("project")
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{path}: projects[{i}] is missing a `project` name")
+            if name in seen:
+                raise ValueError(
+                    f"{path}: duplicate project {name!r} — two entries would "
+                    "check the same Cloudflare project twice"
+                )
+            seen.add(name)
+            projects.append(
+                {
+                    "project": name,
+                    "bindings": _validate_bindings(
+                        path, f"projects[{i}] ({name})", entry.get("bindings")
+                    ),
+                }
+            )
+        return {"projects": projects}
+
+    # Legacy single-project shape. Kept working so an existing manifest loads.
+    bindings = _validate_bindings(path, "", data.get("bindings"))
+    project = data.get("project")
+    if not isinstance(project, str) or not project:
+        raise ValueError(f"{path}: missing a `project` name")
+    return {"projects": [{"project": project, "bindings": bindings}]}
+
+
+def iter_projects(manifest: dict) -> list[dict]:
+    """Every project in a loaded manifest, in declaration order."""
+    return manifest["projects"]
+
+
+def evaluate(project: dict, configs: dict[str, dict]) -> tuple[list[str], list[str]]:
+    """Return (missing_required, missing_recommended) for ONE project.
+
+    ``project`` is a manifest entry (``{"project": name, "bindings": [...]}``).
     ``configs`` maps env name -> that env's deployment config dict (the shape the
     Pages API returns under ``deployment_configs``).
+
+    Labels are project-qualified — ``<project>:<env>:<type>:<name>``. The two
+    projects share binding names, so a bare ``production:env_vars:SUPABASE_URL``
+    would not say WHICH project is missing it.
 
     Pure function: no network, no I/O. This is what the tests exercise.
     """
     missing_required: list[str] = []
     missing_recommended: list[str] = []
+    pname = project["project"]
 
-    for spec in manifest["bindings"]:
-        name = spec["name"]
+    for spec in project["bindings"]:
+        bname = spec["name"]
         kind = spec.get("kind", "required")
         btype = spec["type"]
         for envname in spec.get("envs", ["production"]):
@@ -139,9 +219,9 @@ def evaluate(manifest: dict, configs: dict[str, dict]) -> tuple[list[str], list[
             bucket = env.get(btype) or {}
             # Truthiness, not key membership: a null-valued binding
             # (`{"SESSIONS": None}`) is not a usable binding.
-            if bucket.get(name):
+            if bucket.get(bname):
                 continue
-            label = f"{envname}:{btype}:{name}"
+            label = f"{pname}:{envname}:{btype}:{bname}"
             if kind == "required":
                 missing_required.append(label)
             else:
@@ -196,6 +276,11 @@ def fetch_configs(account_id: str, project: str, api_token: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", default="config/required-bindings.yml")
+    ap.add_argument(
+        "--project",
+        default=None,
+        help="check only this project (default: every project in the manifest)",
+    )
     ap.add_argument("--account-id", default=os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
     ap.add_argument("--api-token", default=os.environ.get("CLOUDFLARE_API_TOKEN"))
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -217,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     {
                         "project": None,
+                        "projects": [],
                         "missing_required": [],
                         "missing_recommended": [],
                         "error": reason,
@@ -231,20 +317,44 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         return _fail(f"cannot read {args.manifest}: {e}")
 
-    project = manifest.get("project")
-    if not project or not args.account_id or not args.api_token:
+    projects = iter_projects(manifest)
+
+    if args.project is not None:
+        projects = [p for p in projects if p["project"] == args.project]
+        if not projects:
+            # A typo'd --project must NOT report success for a project that was
+            # never checked — that is the #3616 vacuous-gate failure with one
+            # flag removed. Exit 2 (could-not-determine), never 0.
+            return _fail(
+                f"project {args.project!r} is not declared in {args.manifest} — "
+                "refusing to report success for a project that was never checked"
+            )
+
+    if not args.account_id or not args.api_token:
         return _fail(
-            "project, --account-id and --api-token (or CLOUDFLARE_ACCOUNT_ID / "
+            "--account-id and --api-token (or CLOUDFLARE_ACCOUNT_ID / "
             "CLOUDFLARE_API_TOKEN) are required"
         )
 
-    try:
-        configs = fetch_configs(args.account_id, project, args.api_token)
-    except RuntimeError as e:
-        # Fail CLOSED: not knowing is not the same as knowing it is fine.
-        return _fail(str(e))
-
-    missing_required, missing_recommended = evaluate(manifest, configs)
+    results: list[dict] = []
+    missing_required: list[str] = []
+    missing_recommended: list[str] = []
+    for project in projects:
+        try:
+            configs = fetch_configs(args.account_id, project["project"], args.api_token)
+        except RuntimeError as e:
+            # Fail CLOSED: not knowing is not the same as knowing it is fine.
+            return _fail(str(e))
+        req, rec = evaluate(project, configs)
+        missing_required += req
+        missing_recommended += rec
+        results.append(
+            {
+                "project": project["project"],
+                "missing_required": req,
+                "missing_recommended": rec,
+            }
+        )
 
     if args.json:
         # Diagnostics go to STDERR. Emitting them after the document made
@@ -254,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "project": project,
+                    "projects": results,
                     "missing_required": missing_required,
                     "missing_recommended": missing_recommended,
                 },
@@ -270,7 +380,11 @@ def main(argv: list[str] | None = None) -> int:
             for item in missing_required:
                 print(f"::error::REQUIRED binding missing: {item}", file=sys.stderr)
             return 1
-        print(f"\u2705 {project}: all required bindings present", file=sys.stderr)
+        print(
+            f"\u2705 {', '.join(p['project'] for p in projects)}: "
+            "all required bindings present",
+            file=sys.stderr,
+        )
         return 0
 
     for item in missing_recommended:
@@ -280,16 +394,17 @@ def main(argv: list[str] | None = None) -> int:
         for item in missing_required:
             print(f"::error::REQUIRED binding missing: {item}", file=sys.stderr)
         print(
-            "\nThe code cannot serve its purpose without these. Bind them on the "
-            f"`{project}` Pages project before deploying — see "
-            "config/required-bindings.yml and issue #3616.",
+            "\nThe code cannot serve its purpose without these. Each line above is "
+            "`<project>:<env>:<type>:<name>` — bind the missing entry on the named "
+            "Pages project before deploying. See config/required-bindings.yml and "
+            "issue #3616.",
             file=sys.stderr,
         )
         return 1
 
     print(
-        f"✅ {project}: all required bindings present "
-        f"({len(missing_recommended)} recommended absent)"
+        f"✅ {', '.join(p['project'] for p in projects)}: all required bindings "
+        f"present ({len(missing_recommended)} recommended absent)"
     )
     return 0
 

@@ -56,6 +56,7 @@ from __future__ import annotations
 import logging
 import re
 
+from .live import TERMINAL_EXCLUDED_STATUSES
 from .why import assemble_why_blocks
 
 logger = logging.getLogger(__name__)
@@ -80,9 +81,12 @@ DEGRADED_ASSEMBLY = "assembly_error"
 DEGRADED_BREAKER = "breaker_open"
 DEGRADED_REASONS = (DEGRADED_TIMEOUT, DEGRADED_ASSEMBLY, DEGRADED_BREAKER)
 
-# Terminal statuses that never surface as CURRENT belief (superseded /
-# deprecated / retracted — E2E-6 "never reads as the current belief").
-CURRENT_VIEW_EXCLUDED_STATUS = ("superseded", "deprecated", "retracted")
+# Statuses that never surface as CURRENT belief. #2901: the ONE canonical
+# terminal set (tortoise/live.py) — this was a hand-written subset
+# ``(superseded, deprecated, retracted)`` omitting ``outdated`` / ``archived``,
+# so an outdated predecessor could resolve as the current belief and be
+# labelled not-superseded (E2E-6 "never reads as the current belief").
+CURRENT_VIEW_EXCLUDED_STATUS = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
 
 # Structural kinds never surfaced as POINTERS (they are recall *support*
 # material, not beliefs the reflex pushes): evidence/option records ride the
@@ -574,9 +578,10 @@ def run_volunteer_pipeline(
     search = _search_fn if _search_fn is not None else _default_search
     try:
         # ── Stage 3: resolve (bounded pool; two arms) ──────────────────────
-        # Current-view arm excludes terminal statuses (superseded /
-        # deprecated / retracted) so a superseded predecessor NEVER resolves
-        # as the current belief.  The supersession arm (include_terminal,
+        # Current-view arm excludes the canonical terminal set (see
+        # CURRENT_VIEW_EXCLUDED_STATUS — ``outdated`` / ``archived`` included
+        # since #2901) so a superseded predecessor NEVER resolves as the
+        # current belief.  The supersession arm (include_terminal,
         # retracted still excluded) lets a window that touches a SUPERSEDED
         # point's OWN content surface it flagged ``superseded`` + "see what
         # changed" (E2E-9 1a / E2E-6) — live candidates always outrank it.

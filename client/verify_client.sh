@@ -42,7 +42,11 @@ python3.12 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet "$WHEEL"
 
 echo "== Gate 0: wheel content — whitelist (thin driver only) =="
-ALLOWED_TORTOISE="__init__.py mcp_client.py config.py exceptions.py"
+# The shared-module set is DERIVED from client/build_client.sh via
+# shared_modules.sh (#3805) — one source of truth, so this allowlist
+# can never miss a module the build stages into the wheel.
+SHARED_MODULES="$(bash "$SCRIPT_DIR/shared_modules.sh")"
+ALLOWED_TORTOISE="__init__.py $(printf '%s' "$SHARED_MODULES" | tr '\n' ' ')"
 ALLOWED_TORTOISE_CLIENT="__init__.py __main__.py cli.py"
 BAD_ENTRIES=()
 while IFS= read -r entry; do
@@ -66,7 +70,7 @@ if [[ ${#BAD_ENTRIES[@]} -gt 0 ]]; then
     printf '  - %s\n' "${BAD_ENTRIES[@]}" >&2
     exit 1
 fi
-echo "OK  wheel whitelist — tortoise/{__init__,mcp_client,config,exceptions}.py + tortoise_client shim only"
+echo "OK  wheel whitelist — tortoise/{__init__.py,$(printf '%s' "$SHARED_MODULES" | tr '\n' ',')} + tortoise_client shim only"
 
 echo "== Gate 1: driver import (neutral cwd, isolated mode, venv wheel) =="
 cd "$NEUTRAL"

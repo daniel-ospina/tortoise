@@ -1,0 +1,214 @@
+exit_reason: 'HUMAN-AUTHORIZED STOP (2026-09-15, operator: "no cycle 17, just go") — the loop was stopped by the operator, NOT by a clean verdict. This is an ESCALATION exit, not a completion: cycle 16 returned 3 verdicts ISSUES FOUND with 1 P0 (#239), which was fixed and claim-checked (25/25) but NEVER RE-REVIEWED, because the re-review was cycle 17 and cycle 17 did not run. Recorded so the artifact cannot be read as clean.'
+                                  # Prior: the cycle-5 bound exit was acknowledged by the operator on 2026-09-15
+                                  # ("keep looping until clean"), which was an authorized human bound extension.
+                                  # That extension is now itself superseded by the operator's stop instruction.
+                                  # ⚠️ The plan-review skill's clean-exit conditions are NOT met. The plan is
+                                  # final-but-unverified, and ships with #3467's implementation rather than
+                                  # as a standalone PR.
+also_reached: cycle-cap           # HISTORICAL (cycle 5). Superseded by the operator's stop instruction.
+clean: false                      # NOT clean — stopped early by the operator with 1 fixed-but-unre-reviewed P0 + recorded P2 #238 open
+cycles: 16
+tier: medium-high
+reviewers: 3                      # #1 Structural & Efficiency, #2 Integration, #4 Failure Mode Auditor; + #5 advisory
+max_cycles: 5                     # HISTORICAL tier bound; extended by human authorization, not auto-renewed
+
+issues_per_cycle: [24, 20, 13, 22, 22, 12, 13, 12, 27, 26, 25, 24, 28, 18, 23, 11]  # DISTINCT-after-dedup basis, NOT raw. The per-cycle headings report both bases (c7 "13 raw / 9 distinct" but 13 here; c9 "27 raw / ~20 distinct"), so the array must be read as one basis: distinct. On that basis cycles 3-5 are 13 -> 22 -> 22 and the honest-stuck predicate is met; on a RAW basis cycle 4 is 23 and 13 -> 23 -> 22 is NOT non-decreasing, so the predicate would not fire. The distinct basis is deliberate — do not mix.
+plan_modified_per_cycle: [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]
+detector_fired: none              # since the extension; 'honest-stuck' fired at 13→22→22 (cycles 3-5) and is the
+                                  # reason the extension was sought. 12→13→12 is oscillation, not a stall.
+fingerprint_recurrence_last_cycle: 0.3   # hand-computed on (location, severity) hashes; < stall_threshold 0.8
+
+# Detector inputs, in full (cycles 6-8):
+#   honest-stuck      : did NOT re-fire since the extension (13→22→22 was the trigger). 12→13→12 oscillates.
+#   fingerprint-stall : did NOT fire (recurrence ~0.3 < 0.8; surviving P1s are NEW LOCATIONS)
+#   zero-progress     : did NOT fire (doc rewritten every cycle)
+#   convergence       : not convergence, and importantly NOT convergence-by-exhaustion either — cycle 8's four
+#                       convergent P1s (the population carrier) were a REAL defect introduced by cycle 6's fix.
+#
+# CONFOUNDS (must be stated, not smoothed):
+#   1. Reviewer count changed 2 → 3 at cycle 4 (the cycle-3 mis-tier as Low-Medium). 13 → 22 was partly a
+#      measurement change, not a regression — per-reviewer rate was roughly flat (~4.3 → ~5.5).
+#   2. Reviewers have 2x-ed over the loop: 24→12 in raw count is not a 2x quality gain, because most of the
+#      late findings are single-site statement defects (8 of cycle 8's 12) rather than design defects.
+#   3. Cycle 7 had #4 WEDGED (no verdict) — that cycle was dimension-degraded, so its 9 is an undercount.
+#   4. Cycle 8 recovered #4 and the raw count still held at 12 — i.e. the count is NOT falling. The honest
+#      read: the loop is not converging by issue count, but the surviving issues are narrower and the one
+#      convergent P1 was a genuine design defect in a fix. Reported as such; the loop continues.
+
+severity_trend: "3 P0s (c1) → 0 P0s (c3..c8) → P0s RETURN (c9, c14=2, c15=1, c16=1); the mid-run P0-free stretch ended at c8 — each later P0 was found inside the previous cycle's own fix, and the surviving findings are progressively narrower"
+residual:
+  unreviewed: true
+  carried_forward: "17 cycle-12 fixes applied after the cycle-12 review AND unreviewed; plus cycle 16's P0 (fix pass applied and claim-checked 25/25 but NEVER re-reviewed) — see exit_reason"
+  requires_human_acknowledgement: false   # the standing authorization covers the next cycle
+  note: "the cycle-6 CHANGELOG claimed a fix (#110) that was never applied; caught by two reviewers in cycle 8.
+         A CHANGELOG row is a claim about the artifact, not a receipt for an intention."
+
+plan: docs/plans/2026-09-14-3467-trunk-green-honest-gate.md
+issue: daniel-ospina/tortoise#3467
+skill: plan-review v2.3.0
+
+verdicts_cycle_13:
+  structural_efficiency: "ISSUES FOUND: 9 (P0=0 P1=5 P2=4)"
+  integration: "ISSUES FOUND: 6 (P0=0 P1=3 P2=3) — recovered on a 3-interface brief"
+  failure_mode_auditor: "ISSUES FOUND: 7 (P0=0 P1=5 P2=2)"
+  duplication_architecture_advisory: "ISSUES FOUND: 6 (P0=0 P1=3 P2=3)"
+
+verdicts_cycle_14:
+  structural_efficiency: "ISSUES FOUND: 7 (P0=1 P1=2 P2=4)"
+  integration: "ISSUES FOUND: 7 (P0=0 P1=4 P2=3) — recovered a 3rd time on the 3-interface brief"
+  failure_mode_auditor: "ISSUES FOUND: 4 (P0=2 P1=1 P2=1)"
+  duplication_architecture_advisory: "advisory — repair-chain audit + size measurement"
+
+verdicts_cycle_15:
+  structural_efficiency: "ISSUES FOUND: 9 (P0=0 P1=3 P2=6)"
+  integration: "ISSUES FOUND: 6 (P0=0 P1=2 P2=4)"
+  failure_mode_auditor: "ISSUES FOUND: 8 (P0=1 P1=4 P2=3)"
+  duplication_architecture_advisory: "ISSUES FOUND: 5 (P0=0 P1=3 P2=2), all unify-contract-keep-drivers"
+
+verdicts_cycle_16:
+  structural_efficiency: "ISSUES FOUND: 7 (P0=0 P1=2 P2=5)"
+  integration: "ISSUES FOUND: 4 (P0=0 P1=2 P2=2)"
+  failure_mode_auditor: "ISSUES FOUND: 3 (P0=1 P1=1 P2=1) — class NOT exhausted: 2 uncovered families"
+  duplication_architecture_advisory: "DEGRADED — WEDGED (1188s no output); treated as a LOST reviewer, not a clean one"
+
+# CYCLE 16 — the recorded stop condition was applied as a FALSIFIABLE TEST and FAILED it.
+#   The plan stated (cycle 15): "if cycle 16 returns no new P0 in this class, the class is exhausted".
+#   It returned one, in the SAME class, on a surface neither cycle 14 nor 15 gated:
+#   P0 (#239) the refusal covered ONE of the TWO observation fetches. admin-merge.sh fetches the
+#     observation AGAIN for the flake re-run (:535, --runs-report "$TMP/pr-report2.txt" > pr-fails2.txt),
+#     and it is pr-fails2.txt that produces the final residual (unique2, :544) and AUTHORIZES the merge
+#     (cp pr-fails2.txt pr-fails.txt, :549). pr-report2.txt is read only for the evidence string (:576-578)
+#     — no gate reads it. A re-run that truncates -> smaller unique2 -> rerun_residual == 0 -> merge on an
+#     observation that never collected the PR's regression, every guard green. Independently re-verified
+#     at :535/:537-544/:549/:576-578 before the fix was applied.
+#   Families #4 TESTED AND CLEARED (8 total; do not re-hunt): marker-dropped-by-tail; SIGKILL on the three
+#     bannerless lanes (fail-closed via grammar-invalid tokens -> extracted < examined); SIGINT on
+#     bannerless lanes; parser-invocation-without-report (report written only on extraction success);
+#     plus the three cycle-15 clearances re-verified unchanged.
+#   Families NOT covered -> now fixed: job-level timeout-minutes kill (#240), the counters' absent/
+#     unreadable polarity (#241, precedent admin-merge.sh:352), the pmv consumer (#242), the 2nd fetch (#239).
+#   CYCLE 17 is judged against the same stop condition. #4's stated most-likely remaining vector is the
+#     counters' POLARITY -- now pinned by #241 -- so cycle 17 should test the NEW pin, not re-hunt the family.
+
+# CYCLE 15 — 1 P0, and it is the CYCLE-14 FIX, INCOMPLETE. Same class, second vector.
+#   P0 (a) cycle 14's guard keyed on the `--maxfail` marker (`stopping after`); but EVERY lane is also
+#     wrapped in `timeout -s INT -k 10 <N>m`, and on expiry SIGINT makes pytest abort with
+#     `KeyboardInterrupt` -- printing FAILED lines for only the failures already collected and
+#     emitting NO `stopping after` line (verified locally: rc=2, partial FAILED, grep -> no match).
+#     `python-ci.yml:1721` (D14, a python-ci-gate member) carries NO --maxfail at all, so a
+#     marker-only guard can never fire there. FALSE-PASS ONLY, same as #207.
+#   (b) the refusal named "the parser" -- which is SIDE-BLIND (one extraction path serves the
+#     observation at admin-merge.sh:330 AND the baseline at :431), so a parser-level exit inverts
+#     the polarity and blocks EVERY merge. Found independently by #1, #2 AND #4.
+#     MECHANISM CHANGED to counters: parser emits `truncated=` / `unparsed_jobs=`; the refusal is a
+#     CONSUMER rule on the observation side only (mirrors pr_extracted/pr_examined).
+#   (c) `extracted < examined` was itself toothless: the phantom `FAILED may` token increments
+#     `extracted` even when zero nodeid-shaped lines were produced -> grammar-valid counting.
+#   (d) observation completeness unit is the RUN, not the JOB -> `unparsed_jobs=`.
+#   CONVERGENT LATENT RISKS (3 reviewers, independent angles):
+#     - `.github/settings.yml` left at the WINDOW set after closure -> the single home disagrees with
+#       live protection, re-creating the exact defect the plan exists to fix (#225)
+#     - the closure script was created in Task 9 while Task 6 (which runs FIRST) consumed it, so
+#       cycle 14's own pre-window dry run could not run (#224)
+#     - the quarantine hook de-selects in EVERY lane incl. pmv's post-merge lane, so "leaves the
+#       required path" was not the enforced behaviour (#226)
+#   ONE ROW REVERTED A CORRECT FIX: row 174 claims the cycle-10 "correction" introduced two wrong
+#     citations and reverted them; at the pinned 090fa004c the REVERTED-TO numbers are the wrong
+#     ones. Sixth instance of the class that row describes (#233).
+#   ONE ITEM RECORDED OPEN, NOT FIXED: #238 (three lanes define the orphan threshold independently;
+#     fix = one declared derivation) -- flagged for cycle 16 rather than claimed.
+#   THE LOOP'S FAILURE MODE IS NOW PRECISE: three consecutive cycles, the substantive P0 has been
+#     IN THE PREVIOUS CYCLE'S FIX. The reviewer step finds real defects whenever given a real
+#     surface; the FIX-AND-CLAIM step is where the loss happens. Mitigated mechanically -- the
+#     corrected claim-vs-artifact check ran 16/16 (cycle-14 fixes) and 17/17 (cycle-15 fixes).
+#   REVIEWER #5 (4th consecutive): body 480 lines, FLAT for a 4th cycle; CHANGELOG 370 -> 403
+#     (45.6%); annotations FLAT at 72 (the cycle-14 forward policy held -- #5's histogram found
+#     ZERO body cycle-mentions for cycles 14+, so the annotation layer stopped growing WITHOUT
+#     stripping provenance). Verdict: "converging on the body, churning on the record".
+#     #5's condition for a STOP verdict: a cycle with no P0 and only bookkeeping/citation P2s.
+#   CLASS EXHAUSTION SIGNAL (recorded so it is not discovered by exhaustion): #4 tested and
+#     CLEARED the other families in this class -- selection divergence (fails closed), partial log
+#     fetch (extraction fails -> BLOCK), run cancelled before the aggregate (tested==0 -> refuse).
+#     IF CYCLE 16 RETURNS NO NEW P0 IN THIS CLASS, IT IS EXHAUSTED AND THE PLAN SHOULD BE DECLARED
+#     EXECUTABLE (remaining: recorded P2 #238 + deferred follow-ups).
+
+
+# CYCLE 14 — 2 P0, the first since cycle 3, and the cycle that JUSTIFIES the loop's continuation.
+#   P0 #207 `--maxfail` truncation: all six lane invocations cap failures (`--maxfail=20` x4,
+#     `--maxfail=10` x1) while the extractor greps ONLY `FAILED <nodeid>` with no marker awareness.
+#     A truncated run still yields >=1 nodeid -> `extracted == examined` never fires ->
+#     `unique = O - B` SHRINKS -> `unique to this PR: 0` on a PR whose regression was never
+#     collected. FALSE-PASS ONLY. Independently re-verified by the controller (pytest probe:
+#     5 of 30 failures extracted, marker emitted on stdout). This is the "P0 in gate BEHAVIOUR"
+#     that reviewer #5 itself named as the thing that would change its "executable now" verdict --
+#     so the recommendation is recorded, NOT adopted, and the loop continues.
+#   P0 #208 28-line splice: two `## Task 7` headings (:284, :312), Task 6's Deliverable/
+#     Verification/Rollback re-inserted under Task 7. Deleted with a two-way losslessness proof;
+#     the one genuinely unique fragment was RELOCATED into Task 6 Step 5b first.
+#   FIVE RECURRENCES at previously-claimed-fixed locations: #209 (row 193), #210 (row 196),
+#     #211 (row 198), #214 (row 202), #215 (row 206) -- plus #212 (row 200, incomplete).
+#   SEVEN false-as-written CHANGELOG rows: 193, 196, 198, 200, 202, 205, 206. Seventh occurrence
+#     of that class, and the first time the mechanical check found them the same cycle they were
+#     written. The check itself produced 3 FALSE FAILURES on first run (rigid pattern; an --absent
+#     grep matching the CHANGELOG's own historical quotes; grep eating `--present "--dry-run ..."`
+#     as an option) -- corrected: --absent is now BODY-scoped and all patterns use `grep -e`.
+#     Final: 16/16 PASS.
+#   SIZE, first move in the right direction: body 507 -> 480 (-27, exactly the splice:
+#     507 - 28 + 1 refusal bullet). CHANGELOG 370 (43.5%). in-body cycle-N annotations 79 -> 72.
+#     Machinery: +1 refusal, +1 fixture, +1 named sub-step, -28 duplicate lines. NO new workflow,
+#     NO new secret, NO new state file.
+#   THE LOOP'S WEAK LINK IS NOW NAMED: reviewers still find (2 P0 in one cycle after 4 clean-P0
+#     cycles), but the fix-and-claim step produced 5 recurrences + 7 false rows. Mitigated
+#     mechanically (the corrected claim-vs-artifact check), not by resolve.
+
+# CYCLE 9 — the decisive cycle. Two reviewers independently found a P0: the population-RESTRICTION
+# rule (cycles 6-8) was directionally wrong. unique = observation - baseline
+# (ci-failure-set.sh:272 = comm -23), so RESTRICTING the baseline can only ADD uniques; restricting is
+# a no-op for entries the observation ran; and the "FAIL-CLOSED" label sat on the fewer-uniques branch.
+# An empty restricted baseline does not certify unique:0 -- comm -23(A, {}) = A, it blocks EVERYTHING.
+# The response was to DELETE the rule, not to repair it a fourth time. The same cycle deleted the docs
+# scanner, the window-roll control, the six-site marker patching and the log-retrieval mechanism.
+# MACHINERY WENT DOWN for the first time in the loop.
+
+
+# CYCLE 12 — 0 P0 for the third consecutive cycle. Two substantive faults converged:
+#   (a) the cycle-11 `skipped` rule was TAUTOLOGICAL (every conditional leg's `if:` IS its own
+#       selector output) and had no runtime locus -> replaced by `diff => surface`, enforced
+#       inside python-ci-gate;
+#   (b) the protection-window mechanism was an 8-cycle NON-CONVERGING repair chain -> REMOVED
+#       entirely (no scheduled check, no standing admin PAT, no committed state record).
+# The mechanical claim-vs-artifact check was RUN FOR THE FIRST TIME before writing rows, and it
+# caught TWO FURTHER FALSE CLAIMS about the agent's own work. Fifth occurrence of that class.
+#
+# ESCALATION (process, not plan): reviewer #5 measured 315/793 lines (~40%) as CHANGELOG +
+# loop narrative, 106 inline cycle annotations in the body, ~40 dispatches over 12 cycles, and
+# concluded the plan is EXECUTABLE NOW and further review is diminishing returns. The standing
+# instruction is to loop until clean, so the loop continues — but the tension is recorded in the
+# artifact and surfaced to the operator, because "keep looping" vs "declare executable" is a
+# process decision that belongs to a human, not to the loop.
+#
+# REVIEWER RELIABILITY: #2 (Integration) has WEDGED twice in a row (~1190s, no output). Its
+# dimension is UNREVIEWED for cycles 11 and 12. Cycle 13 re-dispatches it with a 3-interface brief.
+
+
+# CYCLE 13 — 0 P0 for the FOURTH consecutive cycle. Substantive findings nonetheless:
+#   - cycle-12's removal was INCOMPLETE (5 live orphans referencing the deleted scheduled check)
+#   - `diff => surface`'s PREMISE IS IMPOSSIBLE (`python` is a workflow literal, not a classifier
+#     output) and its locus (python-ci-gate) has no checkout -> rule corrected to the changes job
+#   - the marker caveat clause would UN-CERTIFY the existing gh-shim cert_body fixtures, and the
+#     verifier holds TWO jq copies; the plan had listed the fixture it would break as "preserve"
+#   - the closure script had no path/owner/deliverable; the dated issue had no creator; the date
+#     had no input; the before-state had no home
+#
+# REVIEWER #5, SECOND CONSECUTIVE ARCHITECTURAL FINDING (measurements, cycle 12 -> 13):
+#   body 478 -> 478 (FLAT); CHANGELOG 315 -> 340 lines (41.6%); issue rows 157 -> 167;
+#   in-body `cycle-N fix` annotations 106 -> 114; 45/478 body lines carry a tombstone word.
+#   Machinery went DOWN (-1 workflow, -1 secret, -2 state files, -1 discriminator) while the
+#   DOCUMENT went UP. Conclusion (recorded, escalated): the design has been stable since cycle 9's
+#   deletion; cycles 10-13 recorded 0 P0; remaining findings are bookkeeping/citation defects or
+#   incomplete sweeps from deletions -- not mechanism defects. #5 says the plan is EXECUTABLE NOW.
+#
+# FORWARD POLICY adopted (zero-risk half of #5's recommendation): no NEW inline annotations in the
+# body; corrections recorded in the CHANGELOG only. Existing annotations frozen, not stripped.
+# What would change #5's mind: a P0 in gate BEHAVIOUR, or an orphaned reference that corresponds to
+# a MISSING deliverable rather than a stale one. Cycle 13 found the latter (5 orphans) and no P0.

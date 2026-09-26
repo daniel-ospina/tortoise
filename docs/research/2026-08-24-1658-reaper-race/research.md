@@ -238,6 +238,10 @@ _LOCK_PATH = os.path.join(
   walk (`find -maxdepth 2 -name redis.socket -o -name redis.pid`),
   `_sweep_quarantine_dirs` (`*reaper-stale-*`), and
   `sweep_stale_index_pid_files` (`index-*.pid`) → **self-reap safe**.
+  (#4068 update: the walk is no longer a `find` subprocess — it is a depth-1
+  `os.scandir` scoped to `EPHEMERAL_PREFIXES`. The self-reap-safety argument
+  is unchanged and now holds *a fortiori*: `.tortoise` cannot match an
+  ephemeral prefix.)
 - Edge case to document: an OS temp-cleaner (`tmpreaper`) deleting the lock file
   mid-sweep would split the flock across inodes (holder keeps old fd, new
   acquirer creates a new file). Same exposure already accepted for

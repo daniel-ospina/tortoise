@@ -28,6 +28,50 @@
       "statement": "Routine note about a long design review."
     }
   ],
+  "planted_operators": [
+    {
+      "expected_kind": "SUPPORTS",
+      "from": {
+        "planted_turn": 3,
+        "verbatim_anchor": "The spike correlates with the October 5 release, the one that added the related-memory sidebar"
+      },
+      "id": "wp04_aurora_perf_op_01",
+      "reason": "the release-correlation observation (t3) supports the prime-suspect claim (t4) \u2014 ONTOLOGY \u00a73.1 IMPL + \u00a78 supports|IMPL; the assistant turn states the relation ('So the sidebar feature is the prime suspect.'). from = observation/evidence, to = claim.",
+      "relation_turn": 4,
+      "to": {
+        "planted_turn": 4,
+        "verbatim_anchor": "the sidebar feature is the prime suspect"
+      }
+    },
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 12,
+        "verbatim_anchor": "A ten-minute TTL cache will absorb nearly all of the repeat traffic"
+      },
+      "id": "wp04_aurora_perf_op_02",
+      "reason": "the batch lookup plus ten-minute TTL cache (t12) reduces the N+1 latency cause claim (t5) \u2014 ONTOLOGY \u00a73.9 mitigated_by; t12 states the dampening ('the batch call only runs on a cache miss'). from = the measure's claim, to = the problem claim. FLAGGED (scoping finding F1) as on wp01 op_02.",
+      "relation_turn": 12,
+      "to": {
+        "planted_turn": 5,
+        "verbatim_anchor": "The N+1 embedding calls are what blew up the p95"
+      }
+    },
+    {
+      "expected_kind": "MITIGATES",
+      "from": {
+        "planted_turn": 17,
+        "verbatim_anchor": "Invalidate the cache entry for a team whenever a write lands in that team's graph"
+      },
+      "id": "wp04_aurora_perf_op_03",
+      "reason": "write-triggered invalidation (t17) closes the cache-staleness risk the assistant names in t16 ('One risk with the cache: stale related items') \u2014 ONTOLOGY \u00a73.9 mitigated_by; t17 keeps the TTL as a backstop rather than the primary consistency mechanism. FLAGGED (scoping finding F1) as on wp01 op_02.",
+      "relation_turn": 17,
+      "to": {
+        "planted_turn": 16,
+        "verbatim_anchor": "stale related items if the underlying memory changes between refreshes"
+      }
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

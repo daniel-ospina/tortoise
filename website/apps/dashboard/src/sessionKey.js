@@ -112,3 +112,71 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   if (row.expires_at) return { key: '', durable: false, source: 'expiring' }
   return { key: apiKey, durable: true, source: 'durable' }
 }
+
+// #3783: the connect step's KEY-SOURCE GATE. `durableConnectKey` answers
+// "which plaintext, if any, may we EMBED" — it returns an empty key for BOTH
+// `'none'` (the org holds no key at all) and `'rows-durable'` (a usable
+// durable row exists, but its plaintext was displayed once and is not in this
+// browser). The wizard rendered ONE affordance for both: the mint CTA. So an
+// owner/admin whose organization was provisioned with a key at org creation
+// (`created_via: 'provisioned'`, revealed in the org-create→connect window and
+// lost by any reload before the connect step) minted a SECOND key at connect —
+// spending the free tier's entire 2-key allowance on a key the user never got
+// to use — while the Overview banner read the SAME `'rows-durable'` source and
+// said an existing key was usable. This gate separates the two so the connect
+// step can offer the existing key (rotate reuses its slot) instead of minting.
+// Returns { mode, key, existing }:
+//   - front-channel plaintext held → { mode: 'embed',  key, existing: null }
+//   - usable durable row, no held plaintext → { mode: 'existing', existing: row }
+//   - no usable key anywhere → { mode: 'mint', existing: null }
+//   - rows not loaded yet → { mode: 'loading', existing: null }
+//   - the rows GET FAILED → { mode: 'error', existing: null }
+// Consumers may mint ONLY on `'mint'`; `'existing'` must route to a reuse path,
+// and `'loading'`/`'error'` must offer NEITHER — neither is a resolved answer.
+//
+// #3783 (review P2): `keysLoaded` marks whether the rows payload has actually
+// ARRIVED. Without it, `keys` initialises to `[]`, so a slow or failed `GET
+// /v1/team/keys` made the gate resolve `'mint'` for an organization that may
+// already hold a usable row — the UI offered a mint CTA that can burn the free
+// tier's last slot in exactly the window it must not. The default is `true` so
+// existing callers (and the unit tests) that pass a real rows array keep the
+// loaded meaning; `main.jsx` passes the live load state explicitly.
+//
+// #3783 (review P2, second pass): `keysLoaded` flips on SUCCESS only, so it
+// cannot tell "still in flight" from "the GET failed". Collapsing both into
+// `'loading'` gave that arm no failure exit — a failed read rendered the wait
+// state forever, its only recovery a full page reload. `keysError` (main.jsx's
+// recorded failure) therefore resolves `'error'`: still NO mint (an unresolved
+// read is not "no key", the slot-burn this gate exists to prevent), but a
+// state the caller can act on with a retry. Default `false` keeps the callers
+// that never observe a fetch (and the unit tests) unchanged.
+export function connectKeyGate(welcomeKey, keyRows, keysLoaded = true, keysError = false) {
+  const dc = durableConnectKey(welcomeKey, '', keyRows)
+  if (dc.key) return { mode: 'embed', key: dc.key, existing: null }
+  if (!keysLoaded) return { mode: keysError ? 'error' : 'loading', key: '', existing: null }
+  if (dc.source === 'rows-durable') {
+    return { mode: 'existing', key: '', existing: usableDurableRows(keyRows)[0] || null }
+  }
+  return { mode: 'mint', key: '', existing: null }
+}
+
+// #3783: a display identity for a key row the user never named. The org-create
+// provisioning mints the organization's first key with `name: null`, so the
+// API Keys table rendered it as "—" — the user could see it (the issue's own
+// walk did) but could not ACCOUNT for it, and could not tell it apart from any
+// other unnamed row. A `'provisioned'` row with no name IS the organization's
+// setup key; name it. Review P2: `'recovery'` (the owner-level keyless-mint
+// lane) and legacy rows minted before `created_via` existed are ALSO unnamed
+// real, slot-consuming keys — leaving them as an unaccountable "—" is the same
+// defect one row over, so they get a source-specific label too. The terminal
+// fallback covers any future unnamed mint source: every row the API Keys table
+// lists is a durable product key (bootstrap rows are excluded by
+// `isManagedKey`), so none should render as nothing. Returns null only when
+// there is no row at all; a user-named row always wins.
+export function keyDisplayName(k) {
+  if (!k) return null
+  if (k.name) return k.name
+  if (k.created_via === 'provisioned') return 'Organization key'
+  if (k.created_via === 'recovery') return 'Recovery key'
+  return 'API key'
+}

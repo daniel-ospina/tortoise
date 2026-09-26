@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 
@@ -370,10 +371,12 @@ def _set_status(sdk, pid, status):
 
 @pytest.fixture
 def mining_sdk():
-    sdk = TortoiseSDK(os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_mining_test_"), "test.db"))
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_mining_test_")
+    sdk = TortoiseSDK(os.path.join(tmpdir, "test.db"))
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestQuarantineBatch:

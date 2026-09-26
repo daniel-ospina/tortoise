@@ -109,6 +109,91 @@ def test_resend_failure_swallowed(monkeypatch, caplog):
     assert any("resend failed" in r.message for r in caplog.records)
 
 
+def _install_alert_store(monkeypatch):
+    """Point the notify sink at a REAL AlertStore over MemoryStorage.
+
+    A real store (not a fake) so the dedup contract under test is the store's
+    own create-once behavior — same approach as tests/test_alert_store.py.
+    Returns (filed_titles, telegram_texts).
+    """
+    from tortoise import hosted_api as ha
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    filed: list[str] = []
+    pushed: list[str] = []
+
+    def file_issue(title, body):
+        filed.append(title)
+        return len(filed)
+
+    store = AlertStore(
+        MemoryStorage(),
+        file_issue=file_issue,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org_id="": [],
+        push_telegram=pushed.append,
+        repo="daniel-ospina/tortoise",
+    )
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", lambda cfg: store)
+    return filed, pushed
+
+
+def test_billing_send_failure_files_exactly_one_deduped_incident(monkeypatch, caplog):
+    """A swallowed Resend failure reaches the ops sink — ONCE.
+
+    Before this, a billing notification that never left the building existed
+    only as a log line. Repeated failures of the same channel must NOT file
+    repeatedly: that is AlertStore's per-(kind, org_id) create-once dedup.
+    """
+    filed, pushed = _install_alert_store(monkeypatch)
+
+    def boom(url, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(notify.httpx, "post", boom)
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_cancel", TEAM)  # must not raise
+        notify.notify_billing_event("billing_cancel", TEAM)  # same outage again
+
+    assert len(filed) == 1, f"expected one incident, got {filed}"
+    assert notify._BILLING_SEND_FAILED_KIND in filed[0]
+    assert len(pushed) == 1, pushed
+    # The original warning is preserved on BOTH failures.
+    assert sum("resend failed" in r.message for r in caplog.records) == 2
+
+
+def test_billing_send_failure_alert_never_raises(monkeypatch, caplog):
+    """A dead alert channel must not break the send path.
+
+    The sink is downstream of a best-effort notification; an R2/GitHub outage
+    while FILING must degrade to a log line, never propagate into the caller.
+    """
+    from tortoise import hosted_api as ha
+
+    def boom(cfg):
+        raise RuntimeError("r2 down")
+
+    def boom_post(url, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: object())
+    monkeypatch.setattr(ha, "_alert_store_from", boom)
+    monkeypatch.setattr(notify.httpx, "post", boom_post)
+    with caplog.at_level(logging.WARNING):
+        notify.notify_billing_event("billing_cancel", TEAM)  # must not raise
+    assert any("incident filing failed" in r.message for r in caplog.records)
+
+
+def test_file_incident_returns_false_when_sink_disabled(monkeypatch):
+    """No backup config -> the sink is off; filing is a no-op, not an error."""
+    from tortoise import hosted_api as ha
+
+    monkeypatch.setattr(ha, "_backup_config_safe", lambda: None)
+    assert notify.file_incident("ANY_KIND") is False
+
+
 def test_telegram_failure_swallowed(monkeypatch, caplog):
     def boom(bot_token, chat_id, text, timeout=15.0):
         raise RuntimeError("tg down")

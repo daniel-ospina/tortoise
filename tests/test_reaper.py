@@ -142,8 +142,14 @@ def _make_no_path_server():
     concurrent test sessions spawning servers in the same tempdir cannot
     confuse the lookup). Returns the REALPATH'd socket (matching
     discover() output — macOS /var -> /private/var symlink).
+
+    #3767: constructed through the GUARDED `tortoise.FalkorDB` (not raw
+    redislite) so the fixture is faithful to production — a real embedded
+    server carries tortoise's `.tortoise-owners` instrument, which is the
+    positive ownership claim reap() now requires before a fast (unconfirmed)
+    kill.
     """
-    from redislite.falkordb_client import FalkorDB
+    from tortoise import FalkorDB
     db = FalkorDB()  # no path -> fresh tempdir server
     time.sleep(1)
     sock = os.path.realpath(db.client.socket_file)
@@ -257,7 +263,8 @@ def test_discover_protects_path_based_server_with_old_settings(tmp_path):
         assert matches[0]["classification"] == "protected"
 
 
-def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, caplog):
+def test_discover_unknown_old_settings_pattern_scoped_absent_full_scan_protected(
+        tmp_path, caplog):
     """Pre-#90 .settings, no db_filename, no .db file, non-matching dirname
     -> protected (boot cooldown: no live pid) — never crash, never killable.
 
@@ -265,8 +272,14 @@ def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, capl
     so it is no longer flagged as an 'unrecognized pattern' (the tree itself
     is known-ephemeral); protection now comes from the boot cooldown. The
     unrecognized-pattern warning only applies outside ephemeral trees.
+
+    #4068 re-argument: discovery is now scoped to the ephemeral namespace,
+    and `my-custom-name` is OUTSIDE it — so the scoped sweep does not
+    enumerate the dir at all, which is strictly STRONGER than classifying
+    it `protected`. The classification claim is preserved (and the escape
+    hatch's purpose is pinned) by asserting both halves.
     """
-    dbdir = tmp_path / "my-custom-name"  # non-matching dirname
+    dbdir = tmp_path / "my-custom-name"  # non-matching (out-of-namespace) name
     dbdir.mkdir()
     socket_path = dbdir / "redis.socket"
     socket_path.write_text("")
@@ -276,10 +289,156 @@ def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, capl
         "dbdir": str(dbdir),
     }))
     with monkeypatch_tempdir(tmp_path):
-        found = discover()
+        # (a) scoped discovery: out-of-namespace name -> not enumerated
+        assert [s for s in discover()
+                if str(dbdir) in s.get("dbdir", "")] == []
+        # (b) detect-only hatch: discovered AND classified protected
+        found = discover(full_scan=True)
         matches = [s for s in found if str(dbdir) in s.get("dbdir", "")]
-        assert matches, "unknown-pattern server not discovered"
+        assert matches, "unknown-pattern server not discovered under --full-scan"
         assert matches[0]["classification"] == "protected"
+
+
+def test_full_scan_does_not_add_actions_beyond_scoped(monkeypatch):
+    """Adversarial class 4: `--full-scan` restores the pre-#4068 UN-SCOPED
+    enumeration, but it cannot add an ACTION. The fixture is aged past the
+    boot-cooldown guard and carries a REAL dead socket, so the removal chain
+    actually runs — and is refused by CONTAINMENT (the dir's name is outside
+    the ephemeral namespace). Removing Guard 1 reddens this test."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        outdir = base / "my-custom-name"
+        outdir.mkdir()
+        sp = outdir / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket -> the probe guard would NOT refuse
+        (outdir / "redis.pid").write_text("99999999\n")
+        (outdir / "x.settings").write_text(json.dumps({
+            "pidfile": str(outdir / "redis.pid"), "unixsocket": str(sp),
+            "dbdir": str(outdir), "dbfilename": "redis.db"}))
+        old = _t.time() - 120
+        os.utime(str(outdir), (old, old))  # past the boot-cooldown guard
+        # `outdir` realpaths under the tempdir but its NAME is out of the
+        # discovery namespace, so containment (not probe/age) must refuse.
+        monkeypatch.setattr(_R, "_real_gettempdir", lambda: str(base))
+        for full_scan in (False, True):
+            acted = _R._run_sweep(dry_run=False, batch_size=None,
+                                  full_scan=full_scan, sweep_pid_files=False)
+            assert not [r for r in acted
+                        if str(outdir) in str(r.get("dbdir", ""))], (
+                            full_scan, acted)
+        assert outdir.is_dir() and sp.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_live_candidate_is_found_by_pass1_regardless_of_dir_name(
+        tmp_path, monkeypatch):
+    """The PASS-1 LEMMA the scoped discovery's kill-losslessness rests on:
+    a LIVE server is enumerated by pgrep + cmdline regardless of its socket
+    dir's name, so the scoped pass 2 losing an out-of-namespace name costs
+    no kill. Pinned so a pass-1 regression reddens here."""
+    import tortoise.embedded_reaper as _R
+    for name in ("my-custom-name", "another-custom-name"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "redis.socket").write_text("")
+    # pass 1 resolves the dir from the live pid's cmdline (name-independent)
+    monkeypatch.setattr(_R, "_pgrep_redis_servers", lambda: [424242])
+    monkeypatch.setattr(_R, "_socket_dir_from_cmdline",
+                        lambda pid: str(tmp_path / "my-custom-name"))
+    monkeypatch.setattr(_R, "_classify_dir",
+                        lambda d, s, known_pid=None: {
+                            "pid": known_pid, "socket_path": s, "dbdir": d,
+                            "classification": "protected", "settings": None})
+    with monkeypatch_tempdir(tmp_path):
+        recs = list(_R.discover())
+    assert [r["dbdir"] for r in recs] == [str(tmp_path / "my-custom-name")], recs
+
+
+def test_symlinked_decoy_dir_never_reaped(monkeypatch):
+    """Adversarial class 1: an ephemeral-named SYMLINK pointing OUTSIDE the
+    reaper's tempdir. Discovery cannot enumerate it (symlinked entries are
+    skipped), and a crafted record is refused by CONTAINMENT on the realpath
+    — the target is not under the tempdir. The fixture is aged past the
+    boot-cooldown guard and carries a REAL dead socket, so the refusal is
+    provably containment's and not a probe/age abort; the link and its target
+    survive. Removing Guard 1 lets the target be renamed/rmtree'd and this
+    test reddens."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        target = base / "decoy-target"
+        target.mkdir()
+        sp = target / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket file (persists)
+        (target / "redis.pid").write_text("99999999\n")  # > pid_max
+        (target / "x.settings").write_text(json.dumps({
+            "pidfile": str(target / "redis.pid"), "unixsocket": str(sp),
+            "dbdir": str(target), "dbfilename": "redis.db"}))
+        old = _t.time() - 120
+        os.utime(str(target), (old, old))  # past the boot-cooldown guard
+        link = base / "tmpDECOYXX"
+        link.symlink_to(target, target_is_directory=True)
+        # the reaper's tempdir is redirected elsewhere, so the link's realpath
+        # (the target) is OUT of tree -> containment must refuse
+        monkeypatch.setattr(_R, "_real_gettempdir",
+                            lambda: "/nonexistent-4068-other-root")
+        assert _R._is_ephemeral_dir(os.path.realpath(str(link)),
+                                    _R._real_gettempdir()) is False
+        rec = {
+            "pid": None, "socket_path": str(link / "redis.socket"),
+            "dbdir": str(link), "path_based": True, "dir_missing": False,
+            "client_count": None, "uptime": None,
+            "classification": "stale_socket", "settings": None,
+        }
+        acted = _R.reap([rec], dry_run=False)
+        assert not [r for r in acted
+                    if str(link) in str(r.get("dbdir", ""))], acted
+        assert link.is_symlink() and target.is_dir()
+        assert (target / "redis.socket").exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_namespace_match_with_escaping_realpath_refused(monkeypatch):
+    """Adversarial class 2: a record whose `dbdir` realpaths OUTSIDE the
+    reaper's tempdir is refused by the destruction CONTAINMENT guard. The
+    fixture is aged past the boot-cooldown guard and carries a REAL dead
+    socket, so neither the probe nor the age guard can be the reason —
+    removing Guard 1 reddens this test."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        sp = base / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket -> the probe guard would NOT refuse
+        old = _t.time() - 120
+        os.utime(str(base), (old, old))  # past the boot-cooldown guard
+        # redirect the reaper's notion of the tempdir so `base` is out of tree
+        monkeypatch.setattr(_R, "_real_gettempdir",
+                            lambda: "/nonexistent-4068-other-root")
+        assert _R._is_ephemeral_dir(os.path.realpath(str(base)),
+                                    _R._real_gettempdir()) is False
+        rec = {"dbdir": str(base), "socket_path": str(sp)}
+        assert _R._remove_stale_socket_dir(rec, dry_run=False) is None
+        assert base.is_dir() and sp.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 # ── Error isolation ─────────────────────────────────────────────────
@@ -351,6 +510,214 @@ def test_discover_handles_symlinked_tempdir(tmp_path, monkeypatch):
         assert isinstance(found, list)
     finally:
         db.close()
+
+
+# ── #4068: scoped, in-process discovery ─────────────────────────────
+
+def test_scoped_discovery_predicate_equivalence_at_depth_1(tmp_path):
+    """For depth-1 dirs the DISCOVERY predicate `_ephemeral_name` and the
+    destruction predicate `_is_ephemeral_dir` are the SAME set. The scoped
+    walk's removal-losslessness rests on this — it must redden if either
+    side changes, so it asserts on the function actually used by
+    `_scan_socket_dirs`, not on an inlined copy of its body."""
+    from tortoise.embedded_reaper import (
+        _ephemeral_name,
+        _is_ephemeral_dir,
+    )
+    tmp_real = os.path.realpath(str(tmp_path))
+    for name in ["tmp", "tmpx", "redislite_x", "tortoise_a", "tt_", "lme-x",
+                 "my-custom-name", "d", "ask_sdk_x"]:
+        d = tmp_path / name
+        d.mkdir()
+        assert _ephemeral_name(name) == _is_ephemeral_dir(
+            os.path.realpath(str(d)), tmp_real), name
+
+
+def test_discovery_tests_the_name_before_is_symlink(
+        tmp_path, monkeypatch):
+    """The perf win IS the ordering: a foreign entry costs a dirent read and
+    is never even symlink-tested. `DirEntry.is_symlink()` is C-level and
+    invisible to an `os.stat` counter, so the ORDER is pinned directly: the
+    predicate is called for every entry, `is_symlink` only for matches."""
+    calls = {"predicate": 0, "is_symlink": 0}
+    real_scandir = os.scandir
+    real_is_symlink = os.DirEntry.is_symlink
+
+    class _CountingEntry:
+        def __init__(self, e):
+            self._e = e
+            self.name = e.name
+            self.path = e.path
+
+        def is_symlink(self):
+            calls["is_symlink"] += 1
+            return real_is_symlink(self._e)
+
+    class _CountingScan:
+        def __init__(self, path):
+            self._it = real_scandir(path)
+
+        def __iter__(self):
+            for e in self._it:
+                yield _CountingEntry(e)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._it.close()
+            return False
+
+    for i in range(500):
+        (tmp_path / f"foreign_{i}").mkdir()
+    (tmp_path / "tmpAAAAAAAA").mkdir()
+    (tmp_path / "tmpAAAAAAAA" / "redis.socket").write_text("")
+    from tortoise.embedded_reaper import _ephemeral_name as _real_pred
+    from tortoise.embedded_reaper import _iter_candidate_dirs
+
+    monkeypatch.setattr(os, "scandir", _CountingScan)
+
+    def _counting_pred(name):
+        calls["predicate"] += 1
+        return _real_pred(name)
+
+    res = _iter_candidate_dirs(str(tmp_path), predicate=_counting_pred)
+    assert res.dirs == [str(tmp_path / "tmpAAAAAAAA")]
+    assert calls["predicate"] == 501, calls
+    assert calls["is_symlink"] == 1, calls
+
+
+def test_find_socket_dirs_scoped_skips_custom_full_scan_finds(tmp_path):
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    for name in ("my-custom-name", "redislite_ok"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "redis.socket").write_text("")
+    assert _scan_socket_dirs(str(tmp_path)).dirs == [
+        str(tmp_path / "redislite_ok")]
+    assert set(_scan_socket_dirs(str(tmp_path), full_scan=True).dirs) == {
+        str(tmp_path / "my-custom-name"), str(tmp_path / "redislite_ok")}
+
+
+def test_find_socket_dirs_finds_either_marker_name(tmp_path):
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    (tmp_path / "tmpAAAAAAA1").mkdir()
+    (tmp_path / "tmpAAAAAAA2").mkdir()
+    (tmp_path / "tmpAAAAAAA1" / "redis.socket").write_text("")
+    (tmp_path / "tmpAAAAAAA2" / "redis.pid").write_text("")
+    assert len(_scan_socket_dirs(str(tmp_path)).dirs) == 2
+
+
+def test_find_socket_dirs_symlinked_marker_file_still_discovered(tmp_path):
+    """A symlink NAMED redis.socket inside a real ephemeral dir is found —
+    `find -name` matches it too."""
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    d = tmp_path / "tmpZZZZZZZZ"
+    d.mkdir()
+    (tmp_path / "elsewhere.socket").write_text("")
+    os.symlink(tmp_path / "elsewhere.socket", d / "redis.socket")
+    assert _scan_socket_dirs(str(tmp_path)).dirs == [str(d)]
+
+
+def test_symlinked_dir_not_enumerated(tmp_path, tmp_path_factory):
+    """Parity with `find` without -L: a symlinked depth-1 dir is not descended."""
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    root = tmp_path / "root"
+    root.mkdir()
+    target = tmp_path_factory.mktemp("outside")  # OUTSIDE the scanned root
+    (target / "redis.socket").write_text("")
+    (root / "tmpLINKLINK").symlink_to(target, target_is_directory=True)
+    (root / "tmpREALONE1").mkdir()
+    (root / "tmpREALONE1" / "redis.socket").write_text("")
+    res = _scan_socket_dirs(str(root), full_scan=True)
+    assert res.dirs == [str(root / "tmpREALONE1")] and res.complete
+
+
+def test_find_socket_dirs_budget_expiry_partial_and_warns(tmp_path, caplog):
+    import time as _t
+
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    for i in range(50):
+        d = tmp_path / f"tmp{i:08d}"
+        d.mkdir()
+        (d / "redis.socket").write_text("")
+    with caplog.at_level("WARNING"):
+        res = _scan_socket_dirs(str(tmp_path), deadline=_t.monotonic() - 1.0)
+    assert res.complete is False and res.dirs == []
+    assert "budget" in caplog.text.lower()
+
+
+def test_iter_candidate_dirs_oserror_mid_iteration_is_partial(
+        tmp_path, monkeypatch, caplog):
+    """A mid-iteration OSError keeps the entries already yielded."""
+    from tortoise.embedded_reaper import _iter_candidate_dirs
+    (tmp_path / "tmphit").mkdir()
+    (tmp_path / "tmpboom").mkdir()
+    real = os.scandir
+
+    class _It:
+        def __init__(self):
+            self._it = real(str(tmp_path))
+            self._n = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self._n += 1
+            if self._n > 1:
+                raise OSError("nope")
+            return next(self._it)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(os, "scandir", lambda p: _It())
+    with caplog.at_level("WARNING"):
+        res = _iter_candidate_dirs(str(tmp_path), predicate=lambda n: True)
+    assert res.complete is False and len(res.dirs) == 1
+    assert "failed" in caplog.text.lower()
+
+
+def test_iter_candidate_dirs_empty_root_is_complete(tmp_path):
+    from tortoise.embedded_reaper import _iter_candidate_dirs
+    res = _iter_candidate_dirs(str(tmp_path), predicate=lambda n: True)
+    assert res.dirs == [] and res.complete is True
+
+
+def test_discover_full_scan_keyword_reaches_walk(tmp_path):
+    from tortoise.embedded_reaper import discover
+    d = tmp_path / "my-custom-name"
+    d.mkdir()
+    (d / "redis.socket").write_text("")
+    with monkeypatch_tempdir(tmp_path):
+        assert [r for r in discover()
+                if r["dbdir"].endswith("my-custom-name")] == []
+        found = [r for r in discover(full_scan=True)
+                 if r["dbdir"].endswith("my-custom-name")]
+    assert found and found[0]["classification"] == "protected"
+
+
+def test_scan_set_equality_against_independent_predicate(tmp_path):
+    """Acceptance #3: the scoped set equals the set computed independently
+    from the invariant (ephemeral name AND a marker present)."""
+    from tortoise.embedded_reaper import _ephemeral_name, _scan_socket_dirs
+    expected = set()
+    for name, marker in [("tmpAAAAAAA1", "redis.socket"),
+                         ("redislite_ok", "redis.pid"),
+                         ("tortoise_x", "redis.socket"),
+                         ("my-custom-name", "redis.socket"),
+                         ("d", "redis.socket"),
+                         ("ask_sdk_x", "redis.pid")]:
+        d = tmp_path / name
+        d.mkdir()
+        (d / marker).write_text("")
+        if _ephemeral_name(name):
+            expected.add(str(d))
+    assert set(_scan_socket_dirs(str(tmp_path)).dirs) == expected
 
 
 # ── CLIENT LIST / SKIPME ────────────────────────────────────────────
@@ -532,7 +899,7 @@ def _spawn_orphan(monkeypatch=None):
     import sys as _sys
     code = (
         "import os,subprocess,sys,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "from tortoise import FalkorDB; db=FalkorDB();\n"
         "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
     )
     proc = sp.Popen([_sys.executable, "-c", code],
@@ -1204,6 +1571,69 @@ def test_active_suite_markers_recycled_pid_is_stale(monkeypatch, tmp_path):
     assert tokens == ["legacy-no-start", "right-identity"], tokens
 
 
+def test_dead_suite_marker_does_not_hold_the_only_safe_gate(
+        monkeypatch, tmp_path):
+    """#4487 directive (verified ALREADY satisfied): the only-safe gate must be
+    honest about corpse markers.
+
+    A suite that dies abnormally leaves its marker behind and nothing on this
+    host unlinks it (measured 2026-09-21 12:4x: 100 marker files, 95 with a
+    dead pid). The gate must treat a marker whose PID is dead as ABSENT — by
+    the guard itself, not a separate janitor — so a pile of corpses can never
+    keep ``suites_active`` True forever. A LIVE marker must still hold the
+    gate shut (#1005/#1557).
+
+    This is a REGRESSION test, not a mutation test: the filter already exists
+    (``active_suite_markers`` skips ``not _pid_identity_matches``), so it
+    passes pre-fix. It pins the property against future edits.
+    """
+    from tortoise.embedded_reaper import (
+        ZERO_CLIENT_CONFIRM_MINUTES,  # noqa: F401
+        _mark_orphan_confirmation,
+        _process_start_time,
+        active_suite_tokens,
+    )
+    marker_dir = tmp_path / "active_suites"
+    marker_dir.mkdir()
+    # A SIGKILLed suite's corpse: pid provably dead on both platforms, and a
+    # recorded start so the identity read is the one under test.
+    (marker_dir / "99999999-dead").write_text("pid=99999999\nstart=1.0\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)  # confirm on the SECOND sweep
+    assert active_suite_tokens() == [], (
+        "a dead-pid corpse must not count as a live suite (the gate must "
+        "not be pinned shut by SIGKILLed suites)")
+
+    # A server dir that exists (not the socketless path) with 0 clients.
+    sockdir = tmp_path / "sockdir"
+    sockdir.mkdir()
+    sock = str(sockdir / "redis.socket")
+    for _ in range(2):
+        rec = _zero_client_candidate(sock, os.getpid())
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "with an empty LIVE suite set (corpses ignored) the window path must "
+        "confirm — otherwise a corpse pile re-shuts the #4487 gate")
+
+    # A LIVE suite marker re-shuts the gate for a fresh 0-client server.
+    start = _process_start_time(os.getpid())
+    assert start is not None
+    (marker_dir / f"{os.getpid()}-live").write_text(
+        f"pid={os.getpid()}\nstart={start}\n")
+    assert active_suite_tokens(), "the live marker must be seen"
+    sock2 = str(tmp_path / "sockdir2" / "redis.socket")
+    (tmp_path / "sockdir2").mkdir()
+    for _ in range(2):
+        rec2 = _zero_client_candidate(sock2, os.getpid())
+        rec2["path_based"] = False
+        _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is not True, (
+        "a LIVE suite's marker must still hold the gate shut (#1557)")
+
+
 def test_parse_lstart_both_platform_formats():
     """#1642 FIX 5: ps -o lstart= formats differ between macOS (day before
     month) and Linux (month before day); both must parse, plus a
@@ -1312,7 +1742,7 @@ def test_run_sweep_includes_stale_pid_files(tmp_path, monkeypatch):
     # No redis servers involved — discover() finds nothing; the pid sweep is
     # the only actor. _run_sweep takes the reaper lock; it must be free.
     monkeypatch.setattr("tortoise.embedded_reaper.discover",
-                        lambda jobs=1: [])
+                        lambda jobs=1, **kw: [])
     acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True)
     pid_actions = [a for a in acted if a.get("classification") == "stale_pid_file"]
     assert len(pid_actions) == 1
@@ -1891,6 +2321,370 @@ def test_stale_dir_reuse_pidfile_rewrite_does_not_refresh_dir_mtime(monkeypatch)
         assert os.path.exists(dbdir)
 
 
+# ── #4098: shared-tempdir marker-write hardening (CWE-377) ──────────
+
+def test_stale_marker_write_never_follows_symlink(monkeypatch):
+    """#4098 / CWE-377 / SEI CERT FIO21-C: the pre-rename marker write must
+    never follow a symlink planted at the marker path.
+
+    The candidate dir is discovered in a SHARED, world-writable tempdir
+    (Linux `/tmp`, mode 1777), so its owner may be a different local uid than
+    the reaper's. A plain `open(path, "w")` at `REAPER_OWNED_MARKER` FOLLOWS a
+    symlink there, converting "write a marker" into "truncate any file the
+    reaper's uid can write".
+
+    The fixture is a decoy aged past the boot-cooldown guard, carrying a REAL
+    dead socket AND a planted symlink at the marker path, with the tempdir
+    redirected onto a scratch base — so the truncation is provably the marker
+    write's and no abort at an earlier guard can explain it.
+
+    Removed the `O_NOFOLLOW`/dir-fd guard (the pre-#4098 body: plain
+    `open(..., "w")`) -> the symlink target is truncated to "reaper-owned\\n",
+    i.e. this test reddens (verified by mutation).
+    """
+    from tortoise.embedded_reaper import (
+        REAPER_OWNED_MARKER,
+        STALE_QUARANTINE_SUFFIX,
+        _is_ephemeral_dir,
+        _run_sweep,
+    )
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        target = base / "victim-writable-file.txt"
+        target.write_text("ORIGINAL CONTENT\n")
+        dbdir, _sock = _make_dead_pid_dir(base, name="tmpEVILXX")
+        # THE ATTACK: the marker path is a symlink out of the candidate dir.
+        (dbdir / REAPER_OWNED_MARKER).symlink_to(target)
+        _backdate_dir(dbdir)  # past STALE_SOCKET_MIN_AGE_DEFAULT
+        assert _is_ephemeral_dir(os.path.realpath(str(dbdir)),
+                                 os.path.realpath(str(base))), \
+            "fixture must be inside the ephemeral namespace — else the " \
+            "refusal would be containment's, not the marker guard's"
+        # No pgrep in the fixture: pass 2 is what must discover the decoy.
+        monkeypatch.setattr("tortoise.embedded_reaper._pgrep_redis_servers",
+                            lambda: [])
+        with monkeypatch_tempdir(base):
+            acted = _run_sweep(dry_run=False, batch_size=None,
+                               sweep_pid_files=False)
+        assert target.read_text() == "ORIGINAL CONTENT\n", \
+            "reaper followed a planted marker symlink and truncated a file " \
+            "outside the candidate dir (CWE-377)"
+        # The hardened write must not leak the candidate either: the planted
+        # entry is removed (never followed) and the dir is REAPED (not merely
+        # renamed and left quarantined by a guard-7/8 abort).
+        dbdir_real = os.path.realpath(str(dbdir))
+        assert any(a.get("dbdir") == dbdir_real for a in acted), \
+            "hardened marker write must still let the sweep reap the dir"
+        assert not [p for p in base.iterdir()
+                    if STALE_QUARANTINE_SUFFIX in p.name], \
+            "the dir must be fully reaped, not left as a quarantine"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_marker_write_non_regular_occupant_fails_closed(monkeypatch):
+    """#4098 adversarial class 2/3: an occupant that cannot be removed makes
+    `_open_marker_no_follow` fail CLOSED — it must never return a non-regular
+    fd, and the caller must abort the record rather than rename/rmtree.
+
+    `os.unlink` is neutered so the planted symlink survives every attempt and
+    the retry is exhausted; a DIRECTORY occupant is the other unremovable
+    case. (The retry-exhaustion *outcome* is pinned end-to-end by
+    `test_stale_marker_write_never_follows_symlink`; this test pins that the
+    helper never follows and never hands back a non-regular fd.)
+    """
+    from tortoise.embedded_reaper import (
+        REAPER_OWNED_MARKER,
+        _open_marker_no_follow,
+    )
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        victim = base / "victim.txt"
+        victim.write_text("ORIGINAL\n")
+        decoy = base / "tmpDECOY"
+        decoy.mkdir()
+        marker = decoy / REAPER_OWNED_MARKER
+        dir_fd = os.open(str(decoy), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            # case 1: symlink that is re-planted through the neutered unlink
+            marker.symlink_to(victim)
+            monkeypatch.setattr(os, "unlink", lambda *a, **k: None)
+            assert _open_marker_no_follow(dir_fd) is None
+            assert victim.read_text() == "ORIGINAL\n"
+            monkeypatch.undo()
+            # case 2: a DIRECTORY occupant cannot be unlinked at all
+            marker.unlink()
+            marker.mkdir()
+            assert _open_marker_no_follow(dir_fd) is None
+            assert marker.is_dir()
+        finally:
+            os.close(dir_fd)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_marker_write_error_skips_one_record_not_the_sweep(monkeypatch):
+    """#4098 review-cycle-1 P1 regression pin: a transient marker-write
+    failure (ENOSPC) must skip THIS record and let the sweep continue — it
+    must never propagate out of `reap()` (the remaining records include live
+    orphans), and a later record in the same call must still be acted on.
+    The pre-#4098 `with open(...)` had this isolation; the first cut of the
+    dir_fd rewrite lost it.
+    """
+    from tortoise.embedded_reaper import reap
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        d1, s1 = _make_dead_pid_dir(base, name="tmpONE")
+        d2, s2 = _make_dead_pid_dir(base, name="tmpTWO")
+        _backdate_dir(d1)
+        _backdate_dir(d2)
+        real_write = os.write
+        state = {"n": 0}
+
+        def _poisoned_write(fd, data):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise OSError(28, "ENOSPC")
+            return real_write(fd, data)
+
+        monkeypatch.setattr(os, "write", _poisoned_write)
+        monkeypatch.setattr("tortoise.embedded_reaper._real_gettempdir",
+                            lambda: os.path.realpath(str(base)))
+        acted = reap([_stale_record(d1, s1), _stale_record(d2, s2)],
+                     dry_run=False)
+        assert os.path.exists(str(d1)), \
+            "the failed record must be left intact (retried next sweep)"
+        assert not os.path.exists(str(d2)), \
+            "a later record must still be reaped — the failure is per-record"
+        assert [a.get("dbdir") for a in acted] == [str(d2)], acted
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_reaper_lock_never_follows_symlink(tmp_path):
+    """#4098 / CWE-377: the singleton lock lives in the SHARED tempdir
+    (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`), so a symlink
+    planted at the lock path must be REFUSED (ELOOP from O_NOFOLLOW) — the pre-#4098
+    `open(path, "a")` truncated the symlink target."""
+    from tortoise.embedded_reaper import _ReaperLock
+    lock_dir = tmp_path / ".tortoise"
+    lock_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("IMPORTANT\n")
+    lock_path = lock_dir / ".reaper.lock"
+    os.symlink(str(victim), str(lock_path))
+    lock = _ReaperLock(str(lock_path))
+    assert lock.acquire() is False, "a planted symlink must never be followed"
+    assert victim.read_text() == "IMPORTANT\n", \
+        "the lock open truncated the symlink target (CWE-377)"
+
+
+def test_marker_write_never_truncates_a_planted_hardlink(tmp_path):
+    """#4098 review: a HARDLINK planted at the marker name is a REGULAR file,
+    so an `O_TRUNC` open would truncate a file outside the candidate dir. The
+    `st_nlink == 1` gate refuses it; the attacker's LINK is removed (which
+    never touches the victim's content) and a fresh marker is created — so
+    the write succeeds against a NEW file and the victim is untouched."""
+    from tortoise.embedded_reaper import _open_marker_no_follow
+    victim = tmp_path / "victim.txt"
+    victim.write_text("IMPORTANT\n")
+    cand = tmp_path / "tmpCANDIDATE"
+    cand.mkdir()
+    planted = cand / ".reaper-owned"
+    os.link(str(victim), str(planted))
+    assert os.stat(str(victim)).st_nlink == 2
+    dir_fd = os.open(str(cand), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _open_marker_no_follow(dir_fd)
+        assert fd is not None, "a fresh marker after unlinking the link"
+        os.write(fd, b"reaper-owned\n")
+        os.close(fd)
+    finally:
+        os.close(dir_fd)
+    assert victim.read_text() == "IMPORTANT\n", \
+        "the marker open truncated the hardlink target"
+    assert os.stat(str(victim)).st_nlink == 1, "the attacker's link must be gone"
+    assert planted.read_text() == "reaper-owned\n"
+
+
+def test_reaper_lock_refuses_a_foreign_owned_lock_dir(tmp_path, monkeypatch):
+    """#4098 review: the lock dir lives in the shared tempdir, so it may have
+    been created by ANOTHER local uid. `exist_ok=True` + `fchmod` do not make
+    that safe (the owner can chmod back and unlink/recreate the lock file,
+    splitting the singleton flock across two inodes) — the dir must be OURS
+    or `acquire()` fails closed."""
+    from tortoise.embedded_reaper import _ReaperLock
+    lock_dir = tmp_path / ".tortoise"
+    lock_dir.mkdir()
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)
+    lock = _ReaperLock(str(lock_dir / ".reaper.lock"))
+    assert lock.acquire() is False, "a foreign-owned lock dir must be refused"
+
+
+def test_lock_holder_pid_never_follows_a_symlinked_lock_dir(
+        tmp_path, monkeypatch):
+    """#4098 review: `O_NOFOLLOW` alone protects the BASENAME, so a symlink
+    planted at the lock DIR would still redirect the holder read
+    (log spoofing) and could serve an unbounded file before `signal.alarm` is
+    armed. The read is anchored on the dir fd and must return 'unknown'."""
+    import tortoise.embedded_reaper as _R
+    real_dir = tmp_path / "real-dot-tortoise"
+    real_dir.mkdir()
+    (real_dir / ".reaper.lock").write_text("4242")
+    link = tmp_path / ".tortoise"
+    link.symlink_to(real_dir, target_is_directory=True)
+    monkeypatch.setattr(_R, "_LOCK_PATH", str(link / ".reaper.lock"))
+    assert _R._lock_holder_pid() == "unknown"
+
+
+def test_lock_holder_pid_ignores_a_foreign_owned_lock_dir(tmp_path, monkeypatch):
+    """#4098 review: the holder read gated the lock FILE but not its DIR, so
+    an attacker-owned dir holding a world-readable regular `.reaper.lock`
+    still fed attacker-chosen text into the reaper log. Apply the same
+    ownership gate `acquire()` uses."""
+    import tortoise.embedded_reaper as _R
+    lock_dir = tmp_path / f".tortoise-reaper-{os.geteuid()}"
+    lock_dir.mkdir()
+    (lock_dir / ".reaper.lock").write_text("4242")
+    monkeypatch.setattr(_R, "_LOCK_PATH", str(lock_dir / ".reaper.lock"))
+    # Sanity: with our real euid the holder IS read.
+    assert _R._lock_holder_pid() == "4242"
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    assert _R._lock_holder_pid() == "unknown", \
+        "a foreign-owned lock dir's contents are attacker-authored"
+
+
+def test_lock_contention_is_silent(tmp_path, caplog, monkeypatch):
+    """#4098 cycle-4 P2: the single `except OSError` around flock + seek +
+    truncate + write + flush conflated CONTENTION with FAILURE. Contention is
+    the ordinary case and must stay silent — a warning there fires on every
+    concurrent run — while a real fault must be loud."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    path = str(tmp_path / ".tortoise-reaper-x" / ".reaper.lock")
+    holder, waiter = er._ReaperLock(path), er._ReaperLock(path)
+    assert holder.acquire()
+    try:
+        with caplog.at_level(logging.WARNING, logger=er.logger.name):
+            assert waiter.acquire() is False, "the second sweeper must not acquire"
+        assert not [r for r in caplog.records if "reaper lock unavailable" in r.message], \
+            "ordinary lock contention must NOT warn (it fires on every run)"
+    finally:
+        holder.release()
+
+
+def test_lock_write_failure_is_loud_not_silent(tmp_path, caplog, monkeypatch):
+    """#4098 cycle-4 P2: a full/read-only tempfs (ENOSPC/EDQUOT/EIO) fails in
+    seek/truncate/write/flush, which the old single `except OSError` swallowed
+    as if it were contention — a silent, permanent-looking disable."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    path = str(tmp_path / ".tortoise-reaper-y" / ".reaper.lock")
+    lock = er._ReaperLock(path)
+
+    class _BadIO:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+        def truncate(self, *a, **kw):
+            raise OSError(28, "No space left on device")
+
+    real_fdopen = os.fdopen
+    monkeypatch.setattr(os, "fdopen", lambda fd, mode: _BadIO(real_fdopen(fd, mode)))
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert lock.acquire() is False, "a write failure must fail closed"
+    assert any("cannot write the lock file" in r.message for r in caplog.records), \
+        "a non-contention fault must be loud, not mistaken for contention"
+    assert lock._fh is None
+
+
+def test_lock_flock_failure_is_loud_not_silent(tmp_path, caplog, monkeypatch):
+    """#4098 cycle-5: covers the `cannot take the lock` branch — a flock
+    failure that is NOT contention (EINTR/EIO) must be loud. Previously the
+    single handler reported it as if another sweeper held the lock."""
+    import fcntl
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    lock = er._ReaperLock(str(tmp_path / ".tortoise-reaper-z" / ".reaper.lock"))
+
+    def _boom(*_a, **_kw):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(fcntl, "flock", _boom)
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert lock.acquire() is False, "a flock fault must fail closed"
+    assert any("cannot take the lock" in r.message for r in caplog.records), \
+        "a non-contention flock failure must be loud"
+    assert lock._fh is None
+
+
+def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
+    """#4098 cycle-2 P1: `_lock_holder_pid()` is evaluated in `main()` BEFORE
+    `signal.alarm(timeout)` is armed, so a FIFO planted at the lock path must
+    not block it — `open(FIFO, O_RDONLY)` without `O_NONBLOCK` hung reaper
+    startup forever with the watchdog disabled. A non-regular path is not the
+    lock this module wrote -> "unknown"."""
+    import tortoise.embedded_reaper as er
+    fifo = tmp_path / ".reaper.lock"
+    os.mkfifo(str(fifo))
+    monkeypatch.setattr(er, "_LOCK_PATH", str(fifo))
+    assert er._lock_holder_pid() == "unknown"
+
+
+@pytest.mark.timeout(30)
+def test_reaper_lock_symlinked_dir_is_not_chmodded(tmp_path):
+    """#4098 cycle-2 P2: `os.chmod` FOLLOWS a symlink (Linux has no lchmod),
+    so tightening a pre-existing lock DIR must not run on the
+    path — a planted symlink reached the mode change before the O_NOFOLLOW
+    gate. The dir is opened O_NOFOLLOW first and tightened through the fd."""
+    from tortoise.embedded_reaper import _ReaperLock
+    victim = tmp_path / "victimdir"
+    victim.mkdir()
+    os.chmod(str(victim), 0o755)
+    lock_dir = tmp_path / ".tortoise"
+    os.symlink(str(victim), str(lock_dir))
+    lock = _ReaperLock(str(lock_dir / ".reaper.lock"))
+    assert lock.acquire() is False, "a symlinked lock dir must be refused"
+    assert (os.stat(str(victim)).st_mode & 0o777) == 0o755, \
+        "the planted symlink redirected a chmod onto an unrelated dir"
+
+
+def test_open_marker_no_follow_replaces_fifo_without_blocking(tmp_path):
+    """#4098 in-scope class 3: a FIFO at the marker path must not block the
+    write (`O_NONBLOCK`) — it is removed and replaced by a regular file."""
+    import stat as _stat
+
+    from tortoise.embedded_reaper import (
+        REAPER_OWNED_MARKER,
+        _open_marker_no_follow,
+    )
+    decoy = tmp_path / "tmpFIFO"
+    decoy.mkdir()
+    marker = decoy / REAPER_OWNED_MARKER
+    os.mkfifo(str(marker))
+    dir_fd = os.open(str(decoy), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _open_marker_no_follow(dir_fd)
+        assert fd is not None, "a FIFO occupant must be replaced, not block"
+        assert _stat.S_ISREG(os.fstat(fd).st_mode)
+        os.write(fd, b"reaper-owned\n")
+        os.close(fd)
+    finally:
+        os.close(dir_fd)
+    assert not os.path.islink(str(marker))
+    assert marker.read_text() == "reaper-owned\n"
+
+
 # ── #1383: pipeline integration — quarantine sweep (plan Task 4) ─────
 
 def test_discover_skips_quarantine_dirs():
@@ -1948,7 +2742,7 @@ def test_run_sweep_removes_stale_socket_record(monkeypatch):
         monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(dbdir.parent / "locks"))
         monkeypatch.setattr(
             "tortoise.embedded_reaper.discover",
-            lambda jobs=1: [_stale_record(dbdir, sock)])
+            lambda jobs=1, **kw: [_stale_record(dbdir, sock)])
         acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True,
                            sweep_pid_files=False)
         assert any(a.get("dbdir") == str(dbdir) for a in acted)
@@ -2010,7 +2804,15 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
         monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
                             lambda pid: pid == live_pid)
         monkeypatch.setattr("tortoise.embedded_reaper._socket_dir_from_cmdline",
-                            lambda pid: str(dbdir))  # original (gone) path
+                            # #3767: REALPATH'd — production returns a
+                            # canonical path and `_has_ownership_claim`'s
+                            # absent-dir arm compares it against the
+                            # already-canonical `dbdir_real`. A raw
+                            # `/var/...` here never matches `/private/var/...`
+                            # on macOS, so the ownership claim refused and
+                            # the record classified 'protected' instead of
+                            # the 'candidate' shape this test pins.
+                            lambda pid: os.path.realpath(str(dbdir)))
         monkeypatch.setattr(
             "tortoise.embedded_reaper._pgrep_redis_servers", lambda: [live_pid])
         try:
@@ -2042,7 +2844,7 @@ def test_run_sweep_combined_quarantine_and_pid_files(monkeypatch):
         old = time.time() - 120
         os.utime(stale_pid, (old, old))
         monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(locks))
-        monkeypatch.setattr("tortoise.embedded_reaper.discover", lambda jobs=1: [])
+        monkeypatch.setattr("tortoise.embedded_reaper.discover", lambda jobs=1, **kw: [])
         acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True)
         classes = {a.get("classification") for a in acted}
         assert "stale_quarantine" in classes
@@ -2065,7 +2867,7 @@ def test_cli_json_emits_stale_socket_shape(monkeypatch):
                             lambda self: None)
         monkeypatch.setattr(
             "tortoise.embedded_reaper.discover",
-            lambda jobs=1: [_stale_record(dbdir, sock)])
+            lambda jobs=1, **kw: [_stale_record(dbdir, sock)])
         import io
         import json as _json
         out = io.StringIO()
@@ -2103,6 +2905,22 @@ def test_sweep_quarantine_dirs_removes_dead_leftover():
         removed = _sweep_quarantine_dirs(dry_run=False)
         assert q in removed
         assert not os.path.exists(q)
+
+
+def test_quarantine_sweep_budget_expiry_partial(monkeypatch, caplog):
+    """#4068: the quarantine scan shares the bounded primitive — expiry is a
+    WARNING + partial result, never an exception or a silent empty sweep."""
+    import tortoise.embedded_reaper as _R
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        q = os.path.realpath(str(dbdir)) + ".reaper-stale-123"
+        os.rename(dbdir, q)
+        _mark_quarantine(q)
+        monkeypatch.setattr(_R, "SOCKET_WALK_TIMEOUT", -1.0)
+        with caplog.at_level("WARNING"):
+            removed = _R._sweep_quarantine_dirs(dry_run=True)
+        assert removed == []
+        assert "budget" in caplog.text.lower()
+        assert os.path.exists(q), "partial scan must not mutate"
 
 
 def test_sweep_quarantine_dirs_keeps_live_leftover():
@@ -2473,7 +3291,7 @@ def test_mark_orphan_confirmation_no_confirmation_while_suite_active(
     assert rec.get("_orphan_confirmed") is not True
 
 
-def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
+def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch, tmp_path):
     """#1642 FIX 3: only_safe kills a live-pid candidate ONLY when it is
     orphan-confirmed (persisted 0-client + no live suite markers) — the
     cron mode's discriminator that #1557's blanket live-pid protection
@@ -2489,14 +3307,19 @@ def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
                         lambda _s: 0)
     # redislite servers daemonize to ppid=1 — every candidate is detached.
     monkeypatch.setattr("tortoise.embedded_reaper._is_detached", lambda p: True)
+    # #4136: a kill is only authorized by a candidate dir owned by our euid.
+    owned = tmp_path / "redislite_owned"
+    owned.mkdir()
     confirmed = {"classification": "candidate", "dir_missing": False,
                  "socket_path": "/tmp/s-confirmed", "pid": os.getpid(),
+                 "dbdir": str(owned),
                  "path_based": False, "_orphan_confirmed": True}
     acted = reap([confirmed], dry_run=False, only_safe=True)
     assert killed == [os.getpid()]
     assert acted  # killed
     unconfirmed = {"classification": "candidate", "dir_missing": False,
                    "socket_path": "/tmp/s-unconfirmed", "pid": os.getpid(),
+                   "dbdir": str(owned),
                    "path_based": False}
     killed.clear()
     acted = reap([unconfirmed], dry_run=False, only_safe=True)
@@ -2504,7 +3327,7 @@ def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
     assert acted == []
 
 
-def test_reap_path_based_requires_confirmation(monkeypatch):
+def test_reap_path_based_requires_confirmation(monkeypatch, tmp_path):
     """#1642 FIX 3: a path_based (user-data) candidate is killed in the
     FULL sweep only when orphan-confirmed; without confirmation it is
     protected even at 0 clients (its data outlives the test tree)."""
@@ -2517,20 +3340,24 @@ def test_reap_path_based_requires_confirmation(monkeypatch):
     monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
     monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
                         lambda _s: 0)
+    owned = tmp_path / "redislite_owned"
+    owned.mkdir()
     unconfirmed = {"classification": "candidate", "dir_missing": False,
                    "socket_path": "/tmp/pb-unconfirmed", "pid": os.getpid(),
+                   "dbdir": str(owned),
                    "path_based": True}
     acted = reap([unconfirmed], dry_run=False, only_safe=False)
     assert killed == [], "unconfirmed path-based server killed in full sweep"
     assert acted == []
     confirmed = {"classification": "candidate", "dir_missing": False,
                  "socket_path": "/tmp/pb-confirmed", "pid": os.getpid(),
+                 "dbdir": str(owned),
                  "path_based": True, "_orphan_confirmed": True}
     acted = reap([confirmed], dry_run=False, only_safe=False)
     assert killed == [os.getpid()]
 
 
-def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch):
+def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch, tmp_path):
     """#1642 FIX 3: ephemeral test-tree candidates keep the existing FULL
     sweep contract — 0-client (double-checked) candidates are killed on
     first pass (the 445-kill wave behavior); only_safe still requires
@@ -2544,8 +3371,11 @@ def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch):
     monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
     monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
                         lambda _s: 0)
+    owned = tmp_path / "redislite_owned"
+    owned.mkdir()
     rec = {"classification": "candidate", "dir_missing": False,
            "socket_path": "/tmp/eph", "pid": os.getpid(),
+           "dbdir": str(owned),
            "path_based": False}
     acted = reap([rec], dry_run=False, only_safe=False)  # noqa: F841
     assert killed == [os.getpid()]
@@ -2623,8 +3453,13 @@ def test_reap_kills_confirmed_socketless_orphan(monkeypatch):
     monkeypatch.setattr("tortoise.embedded_reaper._kill",
                         lambda pid, timeout: killed.append(pid))
     monkeypatch.setattr("tortoise.embedded_reaper._is_detached", lambda p: True)
+    # #4136: the socket-less kill is authorized by the pid's OWN argv naming
+    # the dir (the unforgeable pass-1 binding) — simulated here.
+    monkeypatch.setattr("tortoise.embedded_reaper._socket_dir_from_cmdline",
+                        lambda p: "/nonexistent/1642")
     confirmed = {"classification": "candidate", "dir_missing": False,
                  "socket_path": "/nonexistent/1642/redis.socket",
+                 "dbdir": "/nonexistent/1642",
                  "pid": os.getpid(), "path_based": False,
                  "_orphan_confirmed": True}
     acted = reap([confirmed], dry_run=False, only_safe=True)
@@ -2632,6 +3467,7 @@ def test_reap_kills_confirmed_socketless_orphan(monkeypatch):
     assert acted
     unconfirmed = {"classification": "candidate", "dir_missing": False,
                    "socket_path": "/nonexistent/1642b/redis.socket",
+                   "dbdir": "/nonexistent/1642b",
                    "pid": os.getpid(), "path_based": False}
     killed.clear()
     acted = reap([unconfirmed], dry_run=False, only_safe=True)
@@ -2687,9 +3523,59 @@ def test_lock_is_tempdir_scoped_not_home_scoped():
         f"_LOCK_PATH {lock_path!r} must be tempdir-scoped (was ~/.tortoise)"
     assert os.path.expanduser("~") not in lock_path, \
         f"_LOCK_PATH {lock_path!r} must not be HOME-scoped"
-    # It lives in the same <tempdir>/.tortoise/ dir as ACTIVE_SUITES_DIR.
-    assert os.path.dirname(lock_path) == os.path.dirname(er.ACTIVE_SUITES_DIR), \
-        "lock and active-suites dir must share the tempdir/.tortoise root"
+    # #4098: the lock DIR is uid-scoped. A fixed name under a shared /tmp is
+    # pre-creatable by any local uid, and the ownership gate in acquire()
+    # then fails closed FOREVER — a zero-privilege denial of the reaper.
+    assert f"-{os.geteuid()}" in os.path.basename(os.path.dirname(lock_path)), \
+        f"lock dir {os.path.dirname(lock_path)!r} must be uid-scoped (#4098)"
+
+
+def test_foreign_owned_lock_dir_fails_closed_and_warns(tmp_path, caplog, monkeypatch):
+    """#4098 review: a lock dir created by ANOTHER local uid must not be used
+    (its owner can chmod back and unlink/recreate the lock, splitting the
+    singleton flock across two inodes). Refuse — and say so, rather than
+    silently skipping every sweep for the rest of the machine's uptime."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    lock_dir = tmp_path / f".tortoise-reaper-{os.geteuid()}"
+    lock_dir.mkdir()
+    fake = er._ReaperLock(str(lock_dir / ".reaper.lock"))
+    real = os.geteuid()
+    # Simulate a dir owned by someone else by making the CALLER's euid look
+    # foreign — no root needed.
+    monkeypatch.setattr(os, "geteuid", lambda: real + 1)
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert fake.acquire() is False, "a foreign-owned lock dir must fail closed"
+    assert any("not owned by this uid" in r.message for r in caplog.records), \
+        "the refusal must be loud, not silent"
+    assert fake._fh is None, "no fd may be left open on the refusal path"
+
+
+def test_symlink_at_lock_dir_refuses_loudly(tmp_path, caplog):
+    """#4098 review: `os.makedirs(exist_ok=True)` accepts a SYMLINK to a
+    directory, so a planted link at the uid-scoped lock-dir name fails later
+    at `O_NOFOLLOW|O_DIRECTORY` with ELOOP. That refusal used to be silent,
+    which is indistinguishable from ordinary lock contention — and under a
+    sticky `/tmp` the victim cannot remove it, so the reaper would stop
+    sweeping for good without a word. Every refusal must be logged."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    real_dir = tmp_path / "elsewhere"
+    real_dir.mkdir()
+    planted = tmp_path / f".tortoise-reaper-{os.geteuid()}"
+    os.symlink(str(real_dir), str(planted))
+    lock = er._ReaperLock(str(planted / ".reaper.lock"))
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert lock.acquire() is False, "a symlinked lock dir must fail closed"
+    assert any("reaper lock unavailable" in r.message for r in caplog.records), \
+        "the ELOOP refusal must be loud, not silent"
+    assert lock._fh is None
+    assert not os.path.exists(str(real_dir / ".reaper.lock")), \
+        "no lock file may be created through the planted symlink"
 
 
 def test_cross_home_sweepers_share_one_lock():
@@ -2980,6 +3866,255 @@ def test_owner_records_connected_client_is_never_confirmed(
         "a server with connected clients must never be confirmed")
 
 
+# ── #4577: the held-flock liveness signal (kernel fact, not inference) ──────
+# The writer (`embedded_lifecycle.record_owner`) holds a SHARED flock on
+# `<socket_dir>/.tortoise-owners/.lock` for the process's lifetime; the
+# kernel releases it on death. The reader probe below is the PRIMARY
+# liveness signal; `_owner_records` stays as the fallback for pre-change
+# owners (no `.lock` file) for which the probe reads UNKNOWN.
+
+def _hold_owner_lock(sock_dir):
+    """Hold a SHARED flock on `<sock_dir>/.tortoise-owners/.lock`, exactly
+    as a live owner process does. Caller releases via `_release_owner_lock`."""
+    import fcntl
+
+    from tortoise.embedded_reaper import OWNER_LOCK_NAME
+    d = _owner_dir(sock_dir)
+    fd = os.open(str(Path(d) / OWNER_LOCK_NAME),
+                 os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    return fd
+
+
+def _release_owner_lock(fd):
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
+def test_owner_lock_held_blocks_orphan_confirmation(monkeypatch, tmp_path):
+    """#4577: a live owner's SHARED flock on `.tortoise-owners/.lock` is a
+    KERNEL-FACT liveness signal — the server must never be orphan-confirmed
+    while it is held, even though every owner RECORD is provably dead (the
+    record-based signal alone WOULD confirm it).
+
+    Mutation: delete the `if _owner_lock_held(...) is True:` branch from
+    `_mark_orphan_confirmation`; the dead-pid record then reads `(0, 1)`,
+    `no_live_owner` fires, the record IS confirmed, and the held-lock
+    assertion fails."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _owner_records
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    # Every owner RECORD is dead -> the record chain confirms on its own.
+    _write_owner(_owner_dir(sock), 99999999, 1234567890)
+    assert _owner_records(sp) == (0, 1), "test precondition: all records dead"
+
+    fd = _hold_owner_lock(sock)
+    try:
+        rec = _zero_client_candidate(sp, os.getpid())
+        _mark_orphan_confirmation([rec])
+        assert rec.get("_orphan_confirmed") is not True, (
+            "a held owner lock must veto orphan confirmation")
+    finally:
+        _release_owner_lock(fd)
+
+    # With the lock released the SAME dead-owner record confirms: the lock
+    # was the veto, and a free lock is not itself an authorization.
+    rec2 = _zero_client_candidate(sp, os.getpid())
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is True, (
+        "without the lock the dead-owner record must still confirm")
+
+
+def test_owner_lock_released_by_the_kernel_on_holder_death(
+        monkeypatch, tmp_path):
+    """#4577: a SIGKILLed owner holds nothing — the kernel releases the flock
+    with the process, so the probe reads False and the dead-pid record then
+    confirms exactly as before.
+
+    Mutation: make `_owner_lock_held` test the lock file's EXISTENCE
+    (`os.path.exists`) instead of attempting `flock(LOCK_EX|LOCK_NB)`; the
+    dead holder's `.lock` file survives, the probe wrongly returns True, the
+    confirmation never happens, and the `_orphan_confirmed` assertion fails."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _owner_lock_held
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    proc = None
+    try:
+        sp = str(base / "redis.socket")
+        child = (
+            "import os, sys, fcntl\n"
+            "d = os.path.join(sys.argv[1], '.tortoise-owners')\n"
+            "os.makedirs(d, exist_ok=True)\n"
+            "fd = os.open(os.path.join(d, '.lock'),\n"
+            "             os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_SH)\n"
+            "open(os.path.join(d, '%d-0' % os.getpid()), 'w').close()\n"
+            "print('READY', flush=True)\n"
+            "sys.stdin.readline()\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child, str(base)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        assert proc.stdout.readline().strip() == "READY", "child never ready"
+        assert _owner_lock_held(sp) is True, "child must hold the lock"
+        proc.kill()  # SIGKILL: no teardown runs in the child
+        proc.wait(timeout=30)
+        proc = None
+
+        assert _owner_lock_held(sp) is False, (
+            "the kernel must release a SIGKILLed holder's flock")
+        _markerless_suite(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+        rec = _zero_client_candidate(sp, os.getpid())
+        _mark_orphan_confirmation([rec])
+        assert rec.get("_orphan_confirmed") is True, (
+            "a dead holder's record must confirm as before")
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_owner_lock_missing_falls_back_to_records(monkeypatch, tmp_path):
+    """#4577 backward compatibility: an owner created BEFORE this change has
+    no `.lock` file. The probe must read UNKNOWN (None) — never "orphan" —
+    and the existing record chain must decide exactly as before.
+
+    Mutation: change the reader's missing-file `return None` to
+    `return False`; the `is None` assertion fails. (Returning True would be
+    worse still: a genuine dead-owner orphan would be protected forever.)"""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _owner_lock_held
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES", 0.0)
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+
+    # Live record, no lock: the record chain protects it (fallback path).
+    _write_owner(_owner_dir(sock), os.getpid(), _own_start())
+    assert _owner_lock_held(sp) is None, (
+        "a pre-change owner has no lock -> UNKNOWN, never a verdict")
+    rec = _zero_client_candidate(sp, os.getpid())
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True, (
+        "no lock -> fall back to records, which show a live owner")
+
+    # Dead record, no lock: the record chain still confirms (unchanged flow).
+    shutil.rmtree(_owner_dir(sock))
+    _write_owner(_owner_dir(sock), 99999999, 1234567890)
+    rec2 = _zero_client_candidate(sp, os.getpid())
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is True, (
+        "no lock -> the existing dead-owner record still confirms")
+
+
+def test_owner_lock_symlink_is_not_followed(tmp_path):
+    """#4577 / #4098: a symlink planted at `.lock` must not be followed. If
+    the reader followed it, it would probe — and see a SHARED lock on — the
+    link TARGET (an attacker-chosen file), reporting a live owner that does
+    not exist. `O_NOFOLLOW` makes the open fail, which reads UNKNOWN.
+
+    Mutation: drop `O_NOFOLLOW` from the reader's `os.open`; the symlink is
+    followed, the target's shared lock is observed, the probe returns True
+    instead of None, and the assertion fails."""
+    import fcntl
+
+    from tortoise.embedded_reaper import _owner_lock_held
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    target = tmp_path / "victim.lock"
+    target.write_text("")
+    (Path(_owner_dir(sock)) / ".lock").symlink_to(target)
+    fd = os.open(str(target), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        assert _owner_lock_held(sp) is None, (
+            "the probe must not follow a symlink planted at `.lock`")
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_owner_lock_probe_never_blocks_on_a_planted_fifo(tmp_path):
+    """#4577 review P1: `_owner_lock_held` must never BLOCK on a planted
+    non-regular `.lock`. `open(FIFO, O_RDONLY)` with no writer parks FOREVER,
+    and the probe runs for every candidate in `_mark_orphan_confirmation` —
+    including the conftest end-sweep, which arms NO SIGALRM watchdog — so a
+    single planted FIFO would hang the sweep and pin every orphan on the
+    host. The module already guards its own lock path this way (#4098).
+
+    Mutation: drop `O_NONBLOCK` or the `S_ISREG` check from
+    `_owner_lock_held`; this test then hangs (pytest-timeout reds it)."""
+    from tortoise.embedded_reaper import (
+        OWNER_LOCK_NAME,
+        OWNERS_DIRNAME,
+        _owner_lock_held,
+    )
+    decoy = tmp_path / "decoy"
+    (decoy / OWNERS_DIRNAME).mkdir(parents=True)
+    lock = decoy / OWNERS_DIRNAME / OWNER_LOCK_NAME
+    os.mkfifo(lock)
+    sp = str(decoy / "redis.socket")
+    assert _owner_lock_held(sp) is None, (
+        "a non-regular `.lock` must read UNKNOWN, never block the probe")
+    # A REAL regular lock file still probes normally (the guard is not
+    # over-broad): free -> False.
+    os.unlink(lock)
+    lock.write_text("")
+    assert _owner_lock_held(sp) is False
+
+
+def test_owner_lock_probe_none_path_never_raises():
+    """#4577 review P2: the probe's contract is "never raises"; a falsy
+    `socket_path` must return UNKNOWN rather than raise TypeError from
+    `os.path.dirname(None)`.
+
+    Mutation: remove the `if not socket_path: return None` guard."""
+    from tortoise.embedded_reaper import _owner_lock_held
+    assert _owner_lock_held(None) is None  # type: ignore[arg-type]
+    assert _owner_lock_held("") is None
+
+
+def test_reap_skips_server_whose_owner_lock_is_held(monkeypatch, tmp_path):
+    """#4577: reap() must never kill — nor even report as a would-kill — a
+    server whose owner holds the shared lock, even when the dead-owner
+    records and the 0-client probe would otherwise authorize it.
+
+    Mutation: delete the `if _owner_lock_held(...) is True:` branch from
+    `reap()`; with the lock held the dry run below appends the record to
+    `acted`, so the `acted == []` assertion fails."""
+    from tortoise.embedded_reaper import reap
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: None)
+    sock_dir = tmp_path / "redislite_lockreap"
+    sock_dir.mkdir()
+    sp = str(sock_dir / "redis.socket")
+    _write_owner(_owner_dir(sock_dir), 99999999, 1234567890)  # all records dead
+    rec = {
+        "classification": "candidate", "socket_path": sp,
+        "pid": os.getpid(), "dbdir": str(sock_dir), "path_based": False,
+        "client_count": 0, "_orphan_confirmed": True, "settings": None,
+    }
+    fd = _hold_owner_lock(sock_dir)
+    try:
+        acted = reap([rec], dry_run=True, only_safe=False)
+        assert acted == [], "a held owner lock must block the kill"
+    finally:
+        _release_owner_lock(fd)
+    # Released: the confirmed dead-owner orphan is a would-kill again.
+    acted2 = reap([rec], dry_run=True, only_safe=False)
+    assert acted2 and acted2[0] is rec, (
+        "with the lock released the confirmed orphan is a would-kill")
+
+
 def _load_embedded_orphans():
     """Import tools/embedded_orphans.py by path (it is a CLI, not a module)."""
     import importlib.util
@@ -3032,6 +4167,94 @@ def test_embedded_orphans_census_fails_closed_when_enumeration_fails(
     assert mod.main([]) == 2
 
 
+def test_run_sweep_plain_list_discover_seam(monkeypatch):
+    """A monkeypatched `discover` returning a plain list must not break
+    `_run_sweep` and must read as INCOMPLETE (fail-closed) — an unknown
+    result is never a finished scan (#4068)."""
+    from tortoise.embedded_reaper import _run_sweep
+    monkeypatch.setattr("tortoise.embedded_reaper.discover",
+                        lambda jobs=1, **kw: [])
+    res = _run_sweep(dry_run=True, batch_size=None, sweep_pid_files=False)
+    assert list(res) == [] and res.complete is False
+
+
+def test_parse_full_scan_env_truthiness():
+    from tortoise.embedded_reaper import _env_truthy
+    for raw in ("1", "true", "TRUE", "yes", "On"):
+        assert _env_truthy(raw) is True, raw
+    for raw in (None, "", "0", "false", "no", "off", "garbage"):
+        assert _env_truthy(raw) is False, raw
+
+
+def test_cli_full_scan_resolves_from_flag_and_env(monkeypatch, capsys):
+    """CLI flag > env > default, and the resolved value reaches `_run_sweep`."""
+    import tortoise.embedded_reaper as _R
+    seen = {}
+
+    def _fake_run_sweep(**kw):
+        seen.update(kw)
+        return _R._ScanAwareList()
+
+    monkeypatch.setattr(_R, "_run_sweep", _fake_run_sweep)
+    monkeypatch.setattr(_R._ReaperLock, "acquire", lambda self: True)
+    monkeypatch.setattr(_R._ReaperLock, "release", lambda self: None)
+    monkeypatch.delenv("TORTOISE_REAPER_FULL_SCAN", raising=False)
+
+    assert _R.main([]) == 0 and seen["full_scan"] is False
+    assert _R.main(["--full-scan"]) == 0 and seen["full_scan"] is True
+    monkeypatch.setenv("TORTOISE_REAPER_FULL_SCAN", "1")
+    assert _R.main([]) == 0 and seen["full_scan"] is True
+    monkeypatch.setenv("TORTOISE_REAPER_FULL_SCAN", "0")
+    assert _R.main([]) == 0 and seen["full_scan"] is False
+    capsys.readouterr()
+
+
+def test_main_surfaces_truncation(monkeypatch, capsys):
+    """#4068: a truncated discovery must never read as a finished sweep."""
+    import tortoise.embedded_reaper as _R
+
+    def _truncated(**kw):
+        out = _R._ScanAwareList()
+        out.complete = False
+        return out
+
+    monkeypatch.setattr(_R, "_run_sweep", _truncated)
+    monkeypatch.setattr(_R._ReaperLock, "acquire", lambda self: True)
+    monkeypatch.setattr(_R._ReaperLock, "release", lambda self: None)
+    assert _R.main(["--no-dry-run"]) == 0
+    assert "SCAN TRUNCATED" in capsys.readouterr().out
+
+
+def test_census_reports_truncation(monkeypatch, capsys):
+    """#4068: --deep is detect-only and bounded; a truncated scan must be
+    reported (dict key + stderr warning), and must NOT change the exit code."""
+    mod = _load_embedded_orphans()
+    monkeypatch.setattr(mod, "census", lambda **kw: {
+        "live_servers": 0, "orphans": 0, "orphan_details": [],
+        "protected": 0, "unclassified": 0, "stale_socket_dirs": 0,
+        "stale_socket_dir_sample": [], "census_truncated": True})
+    assert mod.main(["--deep"]) == 0
+    assert "PARTIAL" in capsys.readouterr().err
+
+
+def test_deep_census_uses_the_unscoped_scan(monkeypatch):
+    """`--deep` must request full_scan (detect-only) and surface the
+    scan's completeness without raising on an incomplete scan."""
+    mod = _load_embedded_orphans()
+    import tortoise.embedded_reaper as _R
+    seen = {}
+
+    def _fake_scan(tmpdir, **kw):
+        seen.update(kw)
+        return _R._ScanResult([], complete=False)
+
+    monkeypatch.setattr(_R, "_scan_socket_dirs", _fake_scan)
+    monkeypatch.setattr(mod, "_enumerate_servers_strict", lambda: [])
+    res = mod.census(deep=True)
+    assert seen.get("full_scan") is True
+    assert res["census_truncated"] is True
+
+
 def test_embedded_orphans_inconclusive_is_not_clean(monkeypatch, capsys):
     """#3599: a census whose EVERY server failed classification learned
     nothing about the invariant — it must not report it satisfied."""
@@ -3070,6 +4293,53 @@ def test_embedded_orphans_never_uses_the_swallowing_enumerator(monkeypatch):
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Ok())
     res = mod.census()  # must not reach _pgrep_redis_servers at all
     assert res["live_servers"] == 0
+
+
+def test_pgrep_redis_servers_or_none_distinguishes_failure_from_zero(
+        monkeypatch):
+    """#4740: `_pgrep_redis_servers` collapses a probe FAILURE into `[]`, which
+    reads identically to a measured zero. The gate binds its bound to the
+    sweep's `left`, so an unmeasured residue must be `None`, not a plausible
+    0 — while the swallowing function's contract for its many other callers
+    is unchanged."""
+    import tortoise.embedded_reaper as _R
+
+    class _Ok:
+        returncode = 0
+        stdout = "111\n222\n"
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Ok())
+    assert _R._pgrep_redis_servers_or_none() == [111, 222]
+
+    def _timeout(*_a, **_k):
+        raise _R.subprocess.TimeoutExpired("pgrep", 5)
+
+    monkeypatch.setattr(_R.subprocess, "run", _timeout)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    def _missing(*_a, **_k):
+        raise OSError("pgrep not found")
+
+    monkeypatch.setattr(_R.subprocess, "run", _missing)
+    assert _R._pgrep_redis_servers_or_none() is None
+    assert _R._pgrep_redis_servers() == []
+
+    # pgrep exits 1 on NO MATCHES — a successful probe reporting zero, never a
+    # failure. An unexpected status (2/3) is a failure, not an answer.
+    class _NoMatch:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _NoMatch())
+    assert _R._pgrep_redis_servers_or_none() == []
+
+    class _Bad:
+        returncode = 2
+        stdout = ""
+
+    monkeypatch.setattr(_R.subprocess, "run", lambda *a, **k: _Bad())
+    assert _R._pgrep_redis_servers_or_none() is None
 
 
 def test_reap_refuses_when_an_owner_attached_after_confirmation(
@@ -3393,3 +4663,883 @@ def test_reap_only_safe_refuses_unconfirmed_live_candidate(monkeypatch):
     acted = reap([rec], dry_run=False, only_safe=True)
     assert killed == [], "an unconfirmed live candidate must not be killed"
     assert not acted
+
+
+# ── #4136: PROVENANCE GUARD (T2/T3/T4) ──────────────────────────────────────
+# Declared adversarial surface (the escalated set of #4098; implementation
+# issue #4136):
+#   IN SCOPE — T2 (an attacker-authored candidate dir, owned by a DIFFERENT
+#   local uid, authorizes a SIGTERM), T3 (the kill path rmtrees a
+#   registry-supplied `dir=` pointing at a bystander), T4 (discovery↔action
+#   TOCTOU: the ownership verdict is re-read at the action), and the added
+#   class T3b (the quarantine sweep rmtrees a foreign-owned
+#   `*.reaper-stale-*` dir).
+#   OUT OF SCOPE — same-uid co-tenants (already inside the trust boundary),
+#   and an INTERMEDIATE path-component swap (`O_NOFOLLOW` protects the final
+#   component; final-component refusal + the action-time ownership read are
+#   what is covered here). No override/allowlist for cross-uid reaping exists
+#   BY DECISION (#4136).
+# A second local uid cannot be created from a test process without root, so
+# the foreign-uid precondition is simulated the way the guard READS it: the
+# invoking `os.geteuid()` is made to differ from the directory's real
+# `st_uid`. That is the exact inequality the guard tests, asserted against a
+# real st_uid — the guard itself is never mocked (except where a per-path
+# ownership split is required to isolate T3 while the kill is admitted).
+
+def _owned_dir(base: Path, name: str) -> str:
+    d = base / name
+    d.mkdir()
+    return str(d)
+
+
+def _foreign_euid_of(path: str):
+    """A geteuid value that differs from `path`'s real owner (the cross-uid
+    inequality the provenance guard reads)."""
+    return os.stat(path).st_uid + 1
+
+
+def test_provenance_guard_reads_real_ownership(monkeypatch, tmp_path):
+    """`_dir_owned_by_euid` is the boundary: same-uid dir -> True; a foreign
+    owner, a missing path, a non-directory, a symlink, and None all fail
+    closed."""
+    from tortoise import embedded_reaper as R
+    owned = _owned_dir(tmp_path, "tmp_owned")
+    assert R._dir_owned_by_euid(owned) is True
+    monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(owned))
+    assert R._dir_owned_by_euid(owned) is False
+    monkeypatch.undo()
+    assert R._dir_owned_by_euid(str(tmp_path / "does-not-exist")) is False
+    plain = tmp_path / "plain-file"
+    plain.write_text("x")
+    assert R._dir_owned_by_euid(str(plain)) is False
+    link = tmp_path / "link-to-owned"
+    link.symlink_to(owned, target_is_directory=True)
+    assert R._dir_owned_by_euid(str(link)) is False
+    assert R._dir_owned_by_euid(None) is False
+
+
+def test_reap_refuses_to_kill_from_a_foreign_owned_candidate_dir(
+        monkeypatch, tmp_path):
+    """T2 (#4136): a candidate dir owned by a DIFFERENT local uid cannot
+    authorize a SIGTERM, however complete the evidence inside it (the
+    decoy's fake RESP server, pidfile and owner records are all the
+    attacker's)."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    decoy = _owned_dir(tmp_path, "tmpEVIL")  # this process owns it...
+    monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(decoy))
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": os.path.join(decoy, "redis.socket"),
+           "dbdir": decoy, "pid": os.getpid(), "path_based": False,
+           "settings": {"dir": decoy, "dbfilename": "redis.db"},
+           "_orphan_confirmed": True}
+    acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], "a foreign-owned candidate dir authorized a SIGTERM"
+    assert acted == []
+    assert os.path.isdir(decoy), "kill-path cleanup ran on a foreign dir"
+
+
+def test_reap_kills_from_a_same_uid_candidate_dir(monkeypatch, tmp_path):
+    """Control for T2: the legitimate same-uid population is unaffected."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    owned = _owned_dir(tmp_path, "redislite_owned")
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": os.path.join(owned, "redis.socket"),
+           "dbdir": owned, "pid": os.getpid(), "path_based": False,
+           "settings": {"dir": owned, "dbfilename": "redis.db"},
+           "_orphan_confirmed": True}
+    acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()]
+    assert acted
+
+
+def test_reap_refuses_socketless_kill_without_a_pid_binding(
+        monkeypatch, tmp_path):
+    """T2/T4 socket-less arm (#4136): when the candidate dir is gone, the
+    kill is authorized ONLY by the pid's own argv naming that dir — an
+    attacker's decoy whose dir vanished mid-sweep is refused (fail closed)."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: None)
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": "/nonexistent/4136/redis.socket",
+           "dbdir": "/nonexistent/4136", "pid": os.getpid(),
+           "path_based": False, "_orphan_confirmed": True}
+    acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], "an unbound socket-less record authorized a kill"
+    assert acted == []
+
+
+def test_reap_kill_path_refuses_to_rmtree_a_foreign_owned_reg_dir(
+        monkeypatch, tmp_path):
+    """T3 (#4136): `reap()`'s post-kill cleanup must not rmtree a
+    registry-supplied `dir=` that is foreign-owned. The kill IS admitted
+    (the candidate dir is ours), so this isolates the CLEANUP guard from the
+    kill-admission guard — the per-path ownership split is how a second uid
+    is simulated without root."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    sock_dir = _owned_dir(tmp_path, "redislite_owned")
+    bystander = _owned_dir(tmp_path, "tortoise_bystander")
+    (Path(bystander) / "important.txt").write_text("keep\n")
+    real_guard = R._dir_owned_by_euid
+    monkeypatch.setattr(
+        R, "_dir_owned_by_euid",
+        lambda p: (False if os.path.realpath(p) == os.path.realpath(bystander)
+                   else real_guard(p)))
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": os.path.join(sock_dir, "redis.socket"),
+           "dbdir": sock_dir, "pid": os.getpid(), "path_based": False,
+           "settings": {"dir": bystander, "dbfilename": "redis.db"}}
+    R.reap([rec], dry_run=False, only_safe=False)
+    assert killed == [os.getpid()], "test setup: the kill must be admitted"
+    assert not os.path.exists(sock_dir), \
+        "the candidate's OWN dir must still be cleaned after a kill"
+    assert os.path.exists(bystander), \
+        "kill-path cleanup rmtree'd a foreign-owned reg_dir (T3)"
+    assert (Path(bystander) / "important.txt").exists()
+
+
+def test_cleanup_tempdir_refuses_a_foreign_owned_dir(monkeypatch, tmp_path):
+    """T3 choke point (#4136): EVERY rmtree goes through `_cleanup_tempdir`,
+    which refuses a foreign-owned target."""
+    from tortoise import embedded_reaper as R
+    victim = _owned_dir(tmp_path, "tortoise_bystander")
+    (Path(victim) / "data.txt").write_text("keep\n")
+    monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(victim))
+    assert R._cleanup_tempdir(victim) is False
+    assert os.path.isdir(victim), "a foreign-owned dir was rmtree'd"
+    assert (Path(victim) / "data.txt").read_text() == "keep\n"
+
+
+def test_cleanup_tempdir_still_removes_a_same_uid_dir(monkeypatch, tmp_path):
+    """Control for the choke point: same-uid removal is unchanged."""
+    from tortoise import embedded_reaper as R
+    owned = _owned_dir(tmp_path, "tortoise_owned")
+    result = R._cleanup_tempdir(owned)
+    assert result is not False, "same-uid removal must never be refused"
+    assert not os.path.exists(owned)
+
+
+def test_stale_action_refuses_a_foreign_owned_dir(monkeypatch):
+    """T4/T3 stale path (#4136): the rename-aside + rmtree action refuses a
+    directory not owned by the invoking euid."""
+    from tortoise import embedded_reaper as R
+    with _stale_dir_env() as (dbdir, sock):
+        _backdate_dir(dbdir)
+        monkeypatch.setattr(os, "geteuid",
+                            lambda: _foreign_euid_of(str(dbdir)))
+        acted = R._remove_stale_socket_dir(_stale_record(dbdir, sock),
+                                           dry_run=False)
+        assert acted is None, "stale action acted on a foreign-owned dir"
+        assert os.path.exists(dbdir)
+
+
+def test_stale_action_rechecks_ownership_at_action_time(monkeypatch):
+    """T4 (#4136): the ownership verdict is re-read at the ACTION, not
+    trusted from discovery or the guard chain — the world changes mid-chain
+    and the action must still refuse."""
+    from tortoise import embedded_reaper as R
+    with _stale_dir_env() as (dbdir, sock):
+        _backdate_dir(dbdir)
+        rec = _stale_record(dbdir, sock)
+        real_probe = R._probe_socket_any
+        real_geteuid = os.geteuid
+        flipped = {"done": False}
+
+        def probe_then_flip(path, timeout=R.PROBE_SOCKET_TIMEOUT):
+            out = real_probe(path, timeout=timeout)
+            # T4: ownership state changes AFTER the guard chain has begun.
+            os.geteuid = lambda: real_geteuid() + 1
+            flipped["done"] = True
+            return out
+
+        monkeypatch.setattr(R, "_probe_socket_any", probe_then_flip)
+        try:
+            acted = R._remove_stale_socket_dir(rec, dry_run=False)
+        finally:
+            os.geteuid = real_geteuid
+        assert flipped["done"], "test setup: the guard chain must have run"
+        assert acted is None, \
+            "action trusted a stale verdict instead of re-reading ownership"
+        assert os.path.exists(dbdir), "dir removed despite the mid-chain swap"
+
+
+def test_quarantine_sweep_refuses_a_foreign_owned_dir(monkeypatch):
+    """T3b (#4136): the quarantine sweep's rmtree refuses a
+    `*.reaper-stale-*` dir not owned by our euid — the marker gate is a
+    plain `exists` on attacker-authorable content, so it is not provenance."""
+    from tortoise import embedded_reaper as R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        q = base / "tmpQ.reaper-stale-1"
+        q.mkdir()
+        _mark_quarantine(str(q))
+        sp = q / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # dead socket -> would otherwise be removed
+        monkeypatch.setattr(R, "_real_gettempdir", lambda: str(base))
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(base))
+        monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(str(q)))
+        removed = R._sweep_quarantine_dirs(dry_run=False)
+        assert str(q) not in removed
+        assert q.exists(), "quarantine sweep rmtree'd a foreign-owned dir"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_pid_cmdline_names_dir_binds_without_the_config_file(
+        monkeypatch, tmp_path):
+    """The socket-less provenance arm must not need the config file to still
+    exist: redislite's macOS argv names `<dbdir>/redis.config`, which the
+    dir's deletion removes — argv ALONE must bind, or a genuine socket-less
+    orphan is stranded (a regression on the per-user-$TMPDIR platform)."""
+    from tortoise import embedded_reaper as R
+    dbdir = os.path.realpath(_owned_dir(tmp_path, "redislite_gone"))
+    gone_cfg = os.path.join(dbdir, "redis.config")
+    # Inline form (Linux daemonized re-exec): `--unixsocket <dir>/redis.socket`.
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: dbdir)
+    monkeypatch.setattr(R, "_cmdline", lambda p: "redis-server --unixsocket x")
+    assert R._pid_cmdline_names_dir(os.getpid(), dbdir) is True
+    # Config-file argv form (macOS redislite), config file already gone.
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: None)
+    monkeypatch.setattr(
+        R, "_cmdline",
+        lambda p: f"redis-server {gone_cfg} --loadmodule /x.so")
+    assert R._pid_cmdline_names_dir(os.getpid(), dbdir) is True
+    # A DIFFERENT dir named in argv must never authorize this candidate.
+    assert R._pid_cmdline_names_dir(os.getpid(), str(tmp_path)) is False
+    assert R._pid_cmdline_names_dir(os.getpid(), dbdir + "-other") is False
+
+
+def test_socketless_binding_never_resolves_the_candidate_path(
+        monkeypatch, tmp_path):
+    """Adversarial-review Finding 1 (#4136, fail-open): the socket-less arm
+    must compare the already-canonical `dbdir` TEXTUALLY, never re-resolve it.
+    An attacker who toggles the decoy path from absent to a SYMLINK pointing
+    at a directory the victim's own argv names would otherwise forge the pid
+    binding and be authorized to SIGTERM the victim."""
+    from tortoise import embedded_reaper as R
+    victim_dir = os.path.realpath(_owned_dir(tmp_path, "redislite_victim"))
+    decoy = tmp_path / "tmpEVIL"  # attacker's path, NOT canonical
+    decoy.symlink_to(victim_dir, target_is_directory=True)
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: victim_dir)
+    monkeypatch.setattr(R, "_cmdline", lambda p: "redis-server --unixsocket x")
+    # Resolving the decoy would land on victim_dir and forge the binding.
+    assert R._pid_cmdline_names_dir(os.getpid(), str(decoy)) is False
+    # And the refusal path must refuse the whole record (never authorize).
+    refusal = R._kill_provenance_refusal(
+        {"dbdir": str(decoy), "socket_path": str(decoy / "redis.socket"),
+         "pid": os.getpid()})
+    assert refusal is not None, "planted symlink forged the socket-less binding"
+
+
+def test_run_sweep_forwards_jobs_to_reap(monkeypatch):
+    """`--jobs N` must reach reap()'s parallel CLIENT LIST pre-probe.
+
+    #4299: `_run_sweep` forwards `jobs` to discover() but called reap()
+    WITHOUT it, so reap fell back to its own default (jobs=8) and the flag
+    that exists to parallelize the probe pool silently did half its job.
+
+    Mutation: delete `jobs=jobs` from the reap() call in `_run_sweep` and
+    this test fails.
+    """
+    import tortoise.embedded_reaper as R
+
+    captured: dict = {}
+
+    monkeypatch.setattr(R, "discover", lambda jobs=1, **kw: [])
+    monkeypatch.setattr(R, "_mark_orphan_confirmation", lambda records: None)
+    monkeypatch.setattr(R, "_sweep_quarantine_dirs", lambda dry_run=False: [])
+
+    def _fake_reap(records, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(R, "reap", _fake_reap)
+
+    R._run_sweep(dry_run=True, batch_size=None, only_safe=True, jobs=16,
+                 sweep_pid_files=False)
+
+    assert captured.get("jobs") == 16, (
+        f"jobs not forwarded to reap(): {captured.get('jobs')!r} "
+        "(the flag would silently no-op)")
+    # The other kwargs the caller owns must still be forwarded unchanged.
+    assert captured.get("only_safe") is True
+    assert captured.get("dry_run") is True
+
+
+def test_reap_nonpositive_jobs_does_not_crash(monkeypatch):
+    """#4438 review P2: `--jobs 0` / `--jobs -1` must not crash reap().
+
+    `reap()` builds `ThreadPoolExecutor(max_workers=min(jobs, len(cands)))`
+    for its parallel CLIENT LIST pre-probe; a non-positive `jobs` makes that
+    `max_workers=0` -> `ValueError: max_workers must be greater than 0`.
+
+    Mutation: delete the `if jobs < 1: jobs = 1` clamp in reap() and this
+    raises.
+    """
+    import tortoise.embedded_reaper as R
+
+    records = [
+        {"classification": "candidate", "socket_path": "/nonexistent/a.sock"},
+        {"classification": "candidate", "socket_path": "/nonexistent/b.sock"},
+    ]
+    monkeypatch.setattr(R, "_active_client_count", lambda path: None)
+    for jobs in (0, -1):
+        acted = R.reap(records, dry_run=True, jobs=jobs)
+        assert isinstance(acted, list)
+
+
+def test_run_sweep_clamps_nonpositive_jobs_to_one(monkeypatch):
+    """`_run_sweep` clamps a non-positive `jobs` before reap() sees it.
+
+    Pins the CLI `--jobs 0` / `--jobs -1` path (`_run_sweep` is the only
+    caller of `reap` from main()). Mutation: delete the clamp in
+    `_run_sweep` and `captured["jobs"]` is 0/-1.
+    """
+    import tortoise.embedded_reaper as R
+
+    captured: dict = {}
+
+    def _fake_reap(records, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(R, "discover", lambda jobs=1, **kw: [])
+    monkeypatch.setattr(R, "_mark_orphan_confirmation", lambda records: None)
+    monkeypatch.setattr(R, "_sweep_quarantine_dirs", lambda dry_run=False: [])
+    monkeypatch.setattr(R, "reap", _fake_reap)
+
+    for jobs in (0, -1):
+        captured.clear()
+        R._run_sweep(dry_run=True, batch_size=None, only_safe=True, jobs=jobs,
+                     sweep_pid_files=False)
+        assert captured.get("jobs") == 1, (
+            f"non-positive jobs reached reap(): {captured.get('jobs')!r}")
+
+
+# ── #4740 review 4: the end-sweep's `cleared` derivation ───────────────────
+# `sweep_until_cleared` is the loop conftest's session-end sweep runs. Its
+# `cleared` field is the sweep's own budget/stop-condition claim, carried for
+# diagnosis — not a field the CI orphan gate decides its verdict on; review 4
+# found the previous `cleared = not acted` reported True for a deadline-aborted
+# sweep (`reap()` breaks on its first record and returns [], which is not proof
+# the backlog is clear). These cases pin all four stop shapes.
+
+
+def _scan_aware(records, complete=True):
+    """A `_run_sweep`-shaped result: a list carrying `.complete`."""
+    from tortoise.embedded_reaper import _ScanAwareList
+
+    out = _ScanAwareList(records)
+    out.complete = complete
+    return out
+
+
+def test_sweep_until_cleared_healthy_path():
+    """Acting, then an empty iteration with budget remaining → cleared."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (1, True)
+
+
+def test_sweep_until_cleared_already_expired_deadline_is_not_cleared():
+    """The abort the fix exists for: reap() hits an already-expired deadline
+    on its first record and returns []. `not acted` must not read as clear."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([]), deadline=999.0, clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_sweep_until_cleared_spent_budget_after_work_is_not_cleared():
+    """The budget runs out while servers are still being acted on: the loop
+    must STOP on the spent deadline (not keep iterating) and report not
+    cleared. `run_one` is a bounded sequence so removing the deadline break
+    shows up as a different `total`, not a hang."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    responses = iter([
+        _scan_aware([{"pid": 1}]),
+        _scan_aware([{"pid": 2}]),
+        _scan_aware([]),
+    ])
+    total, cleared = sweep_until_cleared(
+        responses.__next__, deadline=1030.0, clock=lambda: 9999.0)
+    assert (total, cleared) == (1, False)
+
+
+def test_sweep_until_cleared_truncated_scan_is_not_cleared():
+    """A partial discovery scan that acted on nothing proves nothing, even
+    with budget remaining (`.complete` is fail-closed False)."""
+    from tortoise.embedded_reaper import sweep_until_cleared
+
+    total, cleared = sweep_until_cleared(
+        lambda: _scan_aware([], complete=False), deadline=1030.0,
+        clock=lambda: 1000.0)
+    assert (total, cleared) == (0, False)
+
+
+def test_build_end_sweep_report_defaults_to_the_real_monotonic_clock():
+    """#4740 review 10: the load-bearing `clock` default is the builder's.
+
+    All four stop-shape cases above inject `clock=`, and production
+    (`tests/conftest.py`'s `_sweep`) reaches the clock only through
+    `build_end_sweep_report` with three positional args (no `clock`) — the
+    builder passes its OWN `clock` explicitly into `sweep_until_cleared`. So
+    the default production actually runs with is the builder's, not
+    `sweep_until_cleared`'s. A default of `lambda: 0.0` makes
+    `clock() < deadline` always true, so a deadline-aborted sweep reports
+    `cleared=true` — reported as finished rather than exhausted, losing the
+    exhausted-budget diagnostic. `cleared` is a diagnostic flag that does not
+    decide the gate's verdict at any measured count. No clock is injected here.
+    """
+    import inspect
+    import time
+
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    default = inspect.signature(
+        build_end_sweep_report).parameters["clock"].default
+    assert default is time.monotonic, (
+        f"build_end_sweep_report's clock default must be the real monotonic "
+        f"clock, got {default!r}"
+    )
+    # A deadline already in the past, with the REAL default: the empty
+    # iteration is an already-expired abort, never a cleared backlog.
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=time.monotonic() - 1,
+        probe=lambda: 0)
+    assert report["cleared"] is False
+
+
+def test_hygiene_report_threads_cleared_verbatim():
+    """#4740 review 6: the report builder must use the declared field set AND
+    thread `cleared` through verbatim.
+
+    `cleared` is a diagnostic flag that does not decide the gate's verdict at
+    any measured count. This is behavioural — the real module is imported and
+    called — so the AST shapes that passed the round-5 pin (a subscript store,
+    a dead branch around the literal, a tuple reorder) cannot satisfy it.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        _hygiene_report,
+    )
+
+    assert _hygiene_report(0, False, 1, 5)["cleared"] is False
+    assert _hygiene_report(1, True, 13, 22)["cleared"] is True
+    report = _hygiene_report(0, False, 1, 5)
+    assert set(report) == set(_HYGIENE_REPORT_FIELDS)
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+# ── #4740 review 9: the end-sweep COMPOSITION, pinned behaviourally ───────
+# The composition — pre-sweep probe (`before`), the sweep, post-sweep probe
+# (`left`), and the report built from them — used to be pinned by a static AST
+# check over `tests/conftest.py`'s `_sweep` source. Eight review rounds each
+# closed one syntactic bypass while the next found another (`left = max(...)`,
+# then `for left in (...)`, `if (left := ...)`, `with ... as left`) — a static
+# shape check cannot prove a runtime data-flow property, and each bypassed pin
+# fell silent in exactly the way the pin existed to prevent. The composition
+# now lives in the real `build_end_sweep_report`; these tests DRIVE it, so
+# every bypass above is a wrong VALUE or a wrong call count — caught by
+# behaviour, which syntax cannot reach.
+
+
+def test_live_embedded_server_count_wraps_the_probe(monkeypatch):
+    """`live_embedded_server_count` = len(probe), or None for a failed probe.
+
+    The three cases are deliberately different answers: a constant return for
+    either half (`return 0`, or `0` where `None` belongs) cannot satisfy 0, 3
+    and None at once.
+    """
+    import tortoise.embedded_reaper as _R
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: [])
+    assert _R.live_embedded_server_count() == 0
+    monkeypatch.setattr(
+        _R, "_pgrep_redis_servers_or_none", lambda: [111, 222, 333])
+    assert _R.live_embedded_server_count() == 3
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: None)
+    assert _R.live_embedded_server_count() is None
+
+
+def test_build_end_sweep_report_reads_probe_before_and_after_the_sweep():
+    """`before`/`left` are the FIRST and SECOND probe readings, in that order.
+
+    The probe returns 5 then 3, so a swapped arrangement, a probe replaced by
+    a constant, and a post-probe rebind (`left = max(probe() or 0, 1000000)`,
+    or the `for`/`with`/walrus rebinding forms) each produce the wrong dict or
+    the wrong call log.
+    """
+    from tortoise.embedded_reaper import (
+        _HYGIENE_REPORT_FIELDS,
+        build_end_sweep_report,
+    )
+
+    readings = iter([5, 3])
+    calls = []
+
+    def probe():
+        value = next(readings)
+        calls.append(value)
+        return value
+
+    responses = iter([_scan_aware([{"pid": 1}]), _scan_aware([])])
+    report = build_end_sweep_report(
+        responses.__next__, deadline=1030.0, probe=probe,
+        clock=lambda: 1000.0,
+    )
+    assert calls == [5, 3], (
+        "the probe must be called exactly twice — before the sweep, then after"
+    )
+    assert report == {"reaped": 1, "cleared": True, "left": 3, "before": 5}
+    assert tuple(report) == _HYGIENE_REPORT_FIELDS
+
+
+def test_build_end_sweep_report_threads_the_sweep_outcome():
+    """`cleared` is the sweep's own outcome, never hardcoded or recomputed.
+
+    An already-expired deadline makes `sweep_until_cleared` return
+    `cleared=False`; a builder that hardcoded `True` (or re-derived it from
+    the count after the call) greens the deadline-aborted backlog the CI gate
+    exists to catch.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=0.0, probe=lambda: 2,
+        clock=lambda: 1000.0,
+    )
+    assert report["reaped"] == 0
+    assert report["cleared"] is False
+
+
+def test_conftest_sweep_returns_build_end_sweep_report():
+    """Reject the enumerated unpinned-report shapes at the `_sweep` call site.
+
+    The behavioural cases above drive `embedded_reaper.build_end_sweep_report`
+    in isolation, so a `_sweep` that short-circuits it — `return {report} or
+    embedded_reaper.build_end_sweep_report(...)` — leaves them all green while
+    the gate reads a hand-written dict. This test rejects these specific
+    shapes:
+
+    * a report-shaped `Dict` literal ANYWHERE in the fixture — in a `Return`
+      or inside a lambda body (a lambda body is not a `Return`, so a local
+      `build_end_sweep_report = lambda ...: {report}` rebinding would
+      otherwise leave the pin green);
+    * a `Return` in `_sweep` other than the single live builder call and the
+      three documented early returns (`no_embedded_servers`, `skipped`,
+      `error`);
+    * a builder call reached through a BARE name rather than the
+      `embedded_reaper` module attribute (a bare name is shadowable by a
+      local rebinding, so the module attribute is the only accepted form);
+    * a builder call that is statically unreachable (`if False:`);
+    * a builder call whose arguments are not exactly the three positional
+      ones — a `lambda: _run_sweep(...)`, the `deadline` name, and
+      `embedded_reaper.live_embedded_server_count` (a fabricated probe,
+      e.g. `lambda: 999`, is a different shape and is rejected).
+
+    This test does not prove the call site correct in general; it rejects the
+    shapes listed above (#4740).
+    """
+    import ast
+
+    from tortoise.embedded_reaper import _HYGIENE_REPORT_FIELDS
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    sweep = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_sweep"
+    )
+
+    # Parent links so a Return's enclosing control flow is visible; a plain
+    # `ast.walk` cannot tell whether a Return sits under `if False:`.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(sweep):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` is statically unreachable (`if False:`)."""
+        cur = parents.get(node)
+        while cur is not None and cur is not sweep:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    # The three documented early returns, keyed by the sentinel their dict
+    # literal carries. A report-shaped dict reached through a name is an
+    # `ast.Name`, never an `ast.Dict`, so it cannot masquerade as one of these.
+    early_keys = {"no_embedded_servers", "skipped", "error"}
+
+    def is_documented_early_return(node: ast.Return) -> bool:
+        value = node.value
+        if not isinstance(value, ast.Dict):
+            return False
+        keys = {
+            k.value for k in value.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        return len(keys) == 1 and keys <= early_keys
+
+    returns = [n for n in ast.walk(sweep) if isinstance(n, ast.Return)]
+    def is_module_builder_call(value: ast.AST) -> bool:
+        """True for `embedded_reaper.build_end_sweep_report(...)`."""
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "build_end_sweep_report"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "embedded_reaper"
+        )
+
+    builder_returns = [n for n in returns if is_module_builder_call(n.value)]
+    assert len(builder_returns) == 1, (
+        "tests/conftest.py's _sweep must contain exactly one "
+        "`embedded_reaper.build_end_sweep_report(...)` call reached through "
+        "the module attribute; a bare-name call (shadowable by a local "
+        "rebinding), a hand-written report dict, or a short-circuit around "
+        "the builder is not pinned by the behavioural tests and would leave "
+        "the gate reading an unpinned report (#4740)"
+    )
+    builder_return = builder_returns[0]
+    assert not under_constant_false_guard(builder_return), (
+        "tests/conftest.py's _sweep returns "
+        "embedded_reaper.build_end_sweep_report(...) from a statically "
+        "unreachable branch (`if False:`): the count is satisfied by a DEAD "
+        "return while the live path escapes the pin (#4740); dead return at "
+        f"line {builder_return.lineno}"
+    )
+    call = builder_return.value
+    assert isinstance(call, ast.Call)  # narrows the type for the reader
+    assert len(call.args) == 3 and call.keywords == [], (
+        "the builder call must pass exactly 3 positional arguments and no "
+        "keywords — the sweep lambda, the deadline, and the live-server "
+        "probe; any other arity leaves an argument unpinned (#4740)"
+    )
+    sweep_lambda, deadline_arg, probe_arg = call.args
+    assert (
+        isinstance(sweep_lambda, ast.Lambda)
+        and isinstance(sweep_lambda.body, ast.Call)
+        and isinstance(sweep_lambda.body.func, ast.Name)
+        and sweep_lambda.body.func.id == "_run_sweep"
+    ), (
+        "argument 1 must be a `lambda: _run_sweep(...)`; a constant or a "
+        "different callee hands the builder a sweep that never ran (#4740)"
+    )
+    assert isinstance(deadline_arg, ast.Name) and deadline_arg.id == "deadline", (
+        "argument 2 must be the `deadline` name — the budget the sweep and "
+        "the builder share; any other expression decouples them (#4740)"
+    )
+    assert (
+        isinstance(probe_arg, ast.Attribute)
+        and isinstance(probe_arg.value, ast.Name)
+        and probe_arg.value.id == "embedded_reaper"
+        and probe_arg.attr == "live_embedded_server_count"
+    ), (
+        "argument 3 must be `embedded_reaper.live_embedded_server_count` — "
+        "the real probe; a fabricated probe (e.g. `lambda: 999`) hands the "
+        "gate a bound the run never measured (#4740)"
+    )
+    undocumented = [
+        n for n in returns
+        if n is not builder_return and not is_documented_early_return(n)
+    ]
+    assert undocumented == [], (
+        "tests/conftest.py's _sweep must return only the single "
+        "`embedded_reaper.build_end_sweep_report(...)` call or one of the "
+        "three documented early returns (no_embedded_servers / skipped / "
+        "error); any other return is not pinned by the behavioural tests "
+        f"and would leave the gate reading an unpinned report (#4740); found "
+        f"at line(s) {[n.lineno for n in undocumented]}"
+    )
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+    hand_written = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value in _HYGIENE_REPORT_FIELDS
+            for k in n.keys
+        )
+    ]
+    assert hand_written == [], (
+        "the _redislite_hygiene fixture must not contain a report-shaped dict "
+        "literal anywhere — not in a `Return` and not in a lambda body; such "
+        "a literal bypasses the builder and the gate would read it unpinned "
+        f"(#4740); found at line(s) {[n.lineno for n in hand_written]}"
+    )
+
+
+def test_conftest_closes_embedded_clients_before_the_end_sweep():
+    """#1005 (epic #1647 E2E-7): the end-sweep must probe a CLIENT-CLOSED seam.
+
+    The sweep's `left` is read during fixture teardown. While this process's
+    own embedded clients are still open, every server they hold reads as a
+    live-client server and `reap()` declines it — so `left` counted the
+    suite's own client population (147 in the post-#4927 CI sample) while the
+    workflow's post-exit probe measured the residue (5). `COUNT <= left` was
+    then structurally incapable of failing on the leak it exists to catch.
+
+    The fix is an ORDERING property of two statements in
+    `_redislite_hygiene`'s session-end teardown: `close_embedded_clients()`
+    (the existing idempotent seams atexit uses) must run BEFORE the
+    `end_result = _sweep(...)` assignment. Source order is execution order in
+    this straight-line teardown, so an index comparison over the fixture's own
+    top-level statements proves the property that a value-level AST pin
+    cannot: a `_sweep()` that runs first reads an inflated `left` no matter
+    what it returns.
+
+    The pin is scoped to the fixture's OWN body — a `close_embedded_clients()`
+    call nested in a helper def/lambda (e.g. `_atexit_cleanup`, which runs at
+    interpreter exit, long after the sweep) would satisfy a naive `ast.walk`
+    line comparison while not running before the sweep at all. Calls under a
+    statically-false guard are rejected too.
+
+    Reverting the conftest call (or re-ordering it after the sweep) fails
+    this test and the CI orphan gate silently loses its same-seam bound.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "tests" / "conftest.py"
+    ).read_text()
+    tree = ast.parse(source)
+    fixture = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_redislite_hygiene"
+    )
+
+    # Parent links so both the enclosing scope and the fixture's own
+    # top-level statement LIST are visible to the checks below.
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(fixture):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    nested_scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def nested_scope(node: ast.AST) -> ast.AST | None:
+        """The nearest helper scope between `node` and the fixture, if any."""
+        cur = parents.get(node)
+        while cur is not None and cur is not fixture:
+            if isinstance(cur, nested_scopes):
+                return cur
+            cur = parents.get(cur)
+        return None
+
+    def under_constant_false_guard(node: ast.AST) -> bool:
+        """True when `node` sits under a statically-false `if`."""
+        cur = parents.get(node)
+        while cur is not None and cur is not fixture:
+            if (
+                isinstance(cur, ast.If)
+                and isinstance(cur.test, ast.Constant)
+                and not cur.test.value
+            ):
+                return True
+            cur = parents.get(cur)
+        return False
+
+    def top_level_statement(node: ast.AST) -> ast.stmt:
+        """The fixture's own top-level statement containing `node`."""
+        cur: ast.AST = node
+        while parents.get(cur) is not fixture:
+            cur = parents[cur]
+        assert isinstance(cur, ast.stmt)
+        return cur
+
+    def top_level_index(node: ast.AST) -> int:
+        # List.index uses identity under `==` for objects, but ast stmt
+        # equality is identity, so this is exact.
+        return fixture.body.index(top_level_statement(node))
+
+    close_calls = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "close_embedded_clients"
+    ]
+    assert len(close_calls) == 1, (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() exactly once (the session-end, "
+        "before-the-sweep close); found "
+        f"{len(close_calls)} call(s) — the end-sweep would otherwise probe a "
+        "population that still includes this process's own clients (#1005)"
+    )
+    close_call = close_calls[0]
+    assert nested_scope(close_call) is None, (
+        "close_embedded_clients() is called inside a nested function/lambda "
+        f"at line {nested_scope(close_call).lineno} — e.g. a helper that runs "
+        "at interpreter exit, AFTER the end-sweep. The session-end close must "
+        "be in _redislite_hygiene's own teardown body so it runs before the "
+        "sweep probes `left` (#1005)"
+    )
+    assert not under_constant_false_guard(close_call), (
+        "close_embedded_clients() sits under a statically-false `if` "
+        f"(line {close_call.lineno}) — the pin would read a dead call as the "
+        "live close (#1005)"
+    )
+
+    end_assigns = [
+        n for n in ast.walk(fixture)
+        if isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "end_result"
+            for t in n.targets
+        )
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "_sweep"
+    ]
+    assert len(end_assigns) == 1, (
+        "tests/conftest.py's _redislite_hygiene must run its session-end sweep "
+        f"as `end_result = _sweep(...)` exactly once; found {len(end_assigns)} "
+        "assignment(s) — the ordering pin needs the single session-end call "
+        "(#1005)"
+    )
+    end_assign = end_assigns[0]
+    assert nested_scope(end_assign) is None, (
+        "the session-end `end_result = _sweep(...)` sits inside a nested "
+        "scope; the pin must compare the fixture's own statements (#1005)"
+    )
+
+    assert top_level_index(close_call) < top_level_index(end_assign), (
+        "tests/conftest.py's _redislite_hygiene must call "
+        "close_embedded_clients() BEFORE `end_result = _sweep(...)`: the "
+        "end-sweep's `left` is read during fixture teardown, and while this "
+        "process's own clients are open every server they hold is declined by "
+        "reap()'s live-client gate — so `left` measures the suite's own "
+        "clients, not the residue, and the gate's `COUNT <= left` comparison "
+        "is not same-seam (#1005). Reorder the close before the sweep."
+    )

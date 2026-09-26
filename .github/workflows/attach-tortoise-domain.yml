@@ -10,9 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Attach custom domain
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           curl -s -X POST \
             "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects/premise-labs/domains" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"name":"tortoise.premiselabs.co"}'

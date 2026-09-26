@@ -813,7 +813,7 @@ class TestRevokeBodySweepCap:
         app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "team-001", "tier": "free", "key_id": "k1",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
-            "max_api_keys": 2, "max_sessions": 1000,
+            "max_api_keys": 2, "max_sessions": None,
         }
         try:
             monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
@@ -835,7 +835,7 @@ class TestRevokeBodySweepCap:
         app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "team-001", "tier": "free", "key_id": "k1",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
-            "max_api_keys": 2, "max_sessions": 1000,
+            "max_api_keys": 2, "max_sessions": None,
         }
         try:
             r = sweep_client.post(

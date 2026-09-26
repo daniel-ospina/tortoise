@@ -329,7 +329,7 @@
       <h1>Memory that makes your agents <span>smarter</span></h1>
       <p class="hero-sub">Tortoise is the memory and reasoning system that enables your agents to make complex decisions without losing track of the variables or being swayed by the last message. They don&rsquo;t just recall facts. They understand why decisions were made and reason with auditable world models.</p>
       <a href="/auth" class="cta-start hero-cta">Connect your agent →</a>
-      <p style="margin-top:1.25rem;font-size:0.85rem;"><a href="/docs" style="color:var(--accent);text-decoration:none;">Browse the docs →</a> · <a href="/faq" style="color:var(--accent);text-decoration:none;">Design FAQ →</a></p>
+      <p style="margin-top:1.25rem;font-size:0.85rem;"><a href="/docs" style="color:var(--accent);text-decoration:none;">Browse the docs →</a> · <a href="/faq" style="color:var(--accent);text-decoration:none;">Design FAQ →</a> · <a href="/blog" style="color:var(--accent);text-decoration:none;">Read the blog →</a></p>
     </section>
     <section id="beat-how" class="beat">
       <h2>A <span>computational</span> memory graph</h2>
@@ -654,7 +654,7 @@
       },
       tiers: {
         free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys", "Unlimited integrations"], excluded: ["Overage"] },
-        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations"], excluded: ["Overage"] },
+        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: true, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
         pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
         team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Unlimited integrations", "Usage-based overage", "Priority support"], excluded: [] }
       }
@@ -683,9 +683,16 @@
     function renderPricing() {
       const grid = document.getElementById('pricing-grid');
       const names = ['free', 'solo', 'pro', 'team'];
+      // #4336: display names — the tier KEY stays `pro` (mirror parity,
+      // Stripe ids, pricing.json); only the rendered name changes.
+      const labels = { free: 'Free', solo: 'Solo', pro: 'Builder', team: 'Team' };
+      // One resolver for every rendered name: a tier present in `names` but
+      // missing from `labels` must never print "undefined" in customer copy
+      // (#4815). Used by both the card heading and the overage line below.
+      const displayName = (n) => labels[n] || (n.charAt(0).toUpperCase() + n.slice(1));
       grid.innerHTML = names.map((name) => {
         const t = PRICING.tiers[name];
-        const label = name.charAt(0).toUpperCase() + name.slice(1);
+        const label = displayName(name);
         const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
         const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
         const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');
@@ -699,7 +706,17 @@
           <a href="/auth" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
       }).join('');
-      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Pro and Team`;
+      // Names the tiers THIS page's mirror marks as metered. It agrees with
+      // that mirror by construction — it does not read product/pricing.json,
+      // so mirror drift propagates here faithfully. The guards against drift
+      // live in tests/test_website_static.py::test_overage_flag_mirrors
+      // (page mirror vs pricing.json) and
+      // tests/test_pricing_tiers.py::test_overage_tiers_list_agrees_with_tier_flags
+      // (overage_tiers vs per-tier flags) (#4815).
+      const overageTiers = names.filter((n) => PRICING.tiers[n].overage).map(displayName);
+      document.getElementById('pricing-usage-line').textContent = overageTiers.length
+        ? `${PRICING.display.overage_line} — applies to ${overageTiers.join(', ')}`
+        : PRICING.display.overage_line;
     }
 
     function renderSelfHost() {
@@ -734,12 +751,14 @@
       <img src="/assets/premiselabs-logo.png" alt="Premise Labs" width="160" height="98" />
     </a>
     <nav class="footer-links" aria-label="Footer">
+      <a href="/blog">Blog</a>
       <a href="/faq">FAQ</a>
       <a href="/privacy">Privacy Policy</a>
       <a href="/tos">Terms of Service</a>
       <a href="/license">License</a>
       <a href="/dpa">DPA</a>
       <a href="/security">Security</a>
+      <a href="/contact">Contact</a>
     </nav>
   </footer>
 <script src="/consent.js" defer></script>

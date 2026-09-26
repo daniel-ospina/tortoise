@@ -12,16 +12,19 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_DIR = REPO_ROOT / "client"
+CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 REEXPORTS = ("available", "call_tool", "get_client", "list_tools", "status")
 ENGINE_ONLY_SYMBOLS = ("sdk", "projection", "ep", "FalkorDB")
@@ -128,3 +131,167 @@ def _python3_build_usable() -> bool:
         return r.returncode == 0
     except (ValueError, OSError, subprocess.SubprocessError):
         return False
+
+
+# --- wheel shared-module enumeration drift pins (#3805 / PR #4044 review) ----
+#
+# The client wheel's shared-module set has ONE source of truth: the
+# `cp "$REPO_ROOT/tortoise/<mod>.py"` lines in client/build_client.sh — the
+# copies that literally ship. client/shared_modules.sh derives the set from
+# them for its consumers (the ci.yml `client` path gate, the ci.yml wheel
+# whitelist, verify_client.sh Gate 0).
+#
+# Before PR #4044 the path gate carried its own literal list of three modules.
+# Staging tortoise/status_vocabulary.py into the wheel therefore left the
+# gate computing `client=false`, SILENTLY skipping client-build for the very
+# module both client surfaces import — and client-build's acceptance gate is
+# the only thing proving the thin-client boundary holds. These tests pin the
+# derivation so a literal list cannot re-grow.
+
+_BUILD_CP = re.compile(r'^cp\s+"\$REPO_ROOT/tortoise/([A-Za-z0-9_]+\.py)"', re.M)
+_GATE_START = "cat > /tmp/ci-gates.py <<'PY'\n"
+_WHITELIST_START = "      - name: Wheel content check — whitelist (thin driver only)\n"
+_WHITELIST_END = "      - name: Acceptance gate (clean venv, client only)"
+
+
+def _staged_shared_modules() -> list[str]:
+    """The canonical modules client/build_client.sh copies into the wheel."""
+    script = (CLIENT_DIR / "build_client.sh").read_text(encoding="utf-8")
+    found = sorted(set(_BUILD_CP.findall(script)))
+    assert found, "no `cp \"$REPO_ROOT/tortoise/*.py\"` copies in client/build_client.sh"
+    return found
+
+
+def _derived_shared_modules() -> list[str]:
+    """What client/shared_modules.sh — the single extractor — derives."""
+    res = subprocess.run(
+        ["bash", str(CLIENT_DIR / "shared_modules.sh")],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
+    )
+    assert res.returncode == 0, f"client/shared_modules.sh failed: {res.stderr}"
+    return res.stdout.split()
+
+
+def _ci_gate_source() -> str:
+    """The Python per-surface path gate embedded in ci.yml's `changes` job."""
+    yml = CI_YML.read_text(encoding="utf-8")
+    start = yml.index(_GATE_START) + len(_GATE_START)
+    end = yml.index("\n          PY\n", start)
+    return textwrap.dedent(yml[start:end])
+
+
+def _run_ci_gate(changed: list[str]) -> dict[str, bool]:
+    """Execute the extracted gate over a changed-file set; return its outputs."""
+    with tempfile.TemporaryDirectory(prefix="tw-ci-gate-") as td:
+        script = Path(td) / "ci-gates.py"
+        script.write_text(_ci_gate_source(), encoding="utf-8")
+        out = Path(td) / "out.txt"
+        res = subprocess.run(
+            [sys.executable, str(script), str(out)],
+            input="\n".join(changed), capture_output=True, text=True,
+            cwd=str(REPO_ROOT), timeout=120,
+        )
+        assert res.returncode == 0, f"ci path gate failed: {res.stdout}\n{res.stderr}"
+        written = out.read_text(encoding="utf-8")
+    return {
+        k: v == "true"
+        for k, v in (ln.strip().split("=", 1) for ln in written.splitlines() if "=" in ln)
+    }
+
+
+def _ci_client_gate_entry() -> str:
+    """The `"client": any_file(...)` entry of the extracted path gate."""
+    gate = _ci_gate_source()
+    start = gate.index('"client": any_file(')
+    end = gate.index("\n    ),\n", start)
+    return gate[start:end]
+
+
+def test_client_shared_modules_extractor_matches_build_script():
+    """The extractor and the build script's copy list are the same set."""
+    assert _derived_shared_modules() == _staged_shared_modules()
+
+
+def test_shared_modules_extractor_fails_closed():
+    """An underivable set exits non-zero — it must never print nothing.
+
+    A silent empty set is how a "derived" gate could skip the client leg
+    while looking like it had simply nothing to do.
+    """
+    with tempfile.TemporaryDirectory(prefix="tw-shared-") as td:
+        tmp = Path(td)
+        shutil.copy(CLIENT_DIR / "shared_modules.sh", tmp / "shared_modules.sh")
+        cmd = ["bash", str(tmp / "shared_modules.sh")]
+
+        # (a) no build script at all
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        assert res.returncode != 0 and not res.stdout.strip()
+        assert "not found" in res.stderr
+
+        # (b) a build script whose copies are client SHIMS, not canonical modules
+        (tmp / "build_client.sh").write_text(
+            'cp "$SCRIPT_DIR/tortoise/__init__.py" "$STAGE/tortoise/__init__.py"\n',
+            encoding="utf-8",
+        )
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        assert res.returncode != 0 and not res.stdout.strip()
+        assert "no canonical shared-module copies" in res.stderr
+
+
+@pytest.mark.parametrize("module", _staged_shared_modules())
+def test_client_gate_fires_for_every_staged_module(module: str):
+    """PR #4044 review: touching ONE staged module alone must run client-build.
+
+    RED before the fix for `status_vocabulary.py`: the gate's literal list
+    named only mcp_client/config/exceptions, so the single-file diff computed
+    `client=false` and the wheel build + verify_client.sh acceptance gate were
+    skipped for a module the wheel ships.
+    """
+    assert _run_ci_gate([f"tortoise/{module}"])["client"] is True, (
+        f"tortoise/{module} is staged into the client wheel but does not trip "
+        f"the `client` path gate — client-build would be silently skipped"
+    )
+
+
+def test_client_gate_ignores_a_non_staged_module():
+    """Negative control — the gate is not trivially true for every path."""
+    assert _run_ci_gate(["tortoise/sdk.py"])["client"] is False
+
+
+def test_client_gate_and_allowlists_derive_their_module_set():
+    """No client consumer may re-grow a hand-maintained literal list (PR #4044)."""
+    gate = _ci_gate_source()
+    entry = _ci_client_gate_entry()
+    assert "client/shared_modules.sh" in gate, (
+        "the ci.yml gate must derive the wheel's shared-module set "
+        "(client/shared_modules.sh)"
+    )
+    assert "SHARED" in entry, (
+        "the ci.yml `client` gate entry must use the derived SHARED set"
+    )
+    for module in _staged_shared_modules():
+        assert f"tortoise/{module}" not in entry, (
+            f"the ci.yml `client` gate hard-codes tortoise/{module} — derive the "
+            f"set instead so a newly staged module cannot be missed"
+        )
+
+    yml = CI_YML.read_text(encoding="utf-8")
+    whitelist = yml[
+        yml.index(_WHITELIST_START):yml.index(_WHITELIST_END, yml.index(_WHITELIST_START))
+    ]
+    assert "client/shared_modules.sh" in whitelist, (
+        "the ci.yml wheel whitelist must derive its module set"
+    )
+    for module in _staged_shared_modules():
+        assert module not in whitelist, (
+            f"the ci.yml wheel whitelist hard-codes {module} — derive it instead"
+        )
+
+    verify = (CLIENT_DIR / "verify_client.sh").read_text(encoding="utf-8")
+    assert "shared_modules.sh" in verify, (
+        "verify_client.sh Gate 0 must derive its allowlist"
+    )
+    for module in _staged_shared_modules():
+        assert module not in verify, (
+            f"verify_client.sh Gate 0 hard-codes {module} — derive the allowlist instead"
+        )

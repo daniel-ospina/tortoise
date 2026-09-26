@@ -66,6 +66,13 @@ LOOP_BUDGET_S = 3.0
 # loop yields 0 (the next tick can only happen once the freeze releases); a
 # free loop yields ~STALL_S/0.05 ≈ 80.
 MIN_TICKS_IN_STALL = 10
+# Bound on the wait for the fake to report that the capture entered its stall,
+# before the /health probe is issued (the liveness test below). Generous and
+# only reached on the failure path: the endpoint's pre-stall synchronous setup
+# is legitimately slow on a loaded runner (measured ~4.75s for a max-size
+# 500-turn capture, #3086), and a capture that never starts must fail on the
+# `"entered" in state` assertion rather than hang the suite.
+STALL_START_WAIT_S = 60.0
 # NOTE: this endpoint ALSO does bounded synchronous graph work on the event
 # loop (turn upserts, session MERGE, tenant-vocab build). That is a SEPARATE,
 # tracked defect — measured at ~4.75s for a max-size 500-turn capture (#3086)
@@ -164,9 +171,9 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 
-    Both assertions are order-independent — they compare observed timestamps
-    against the stall window recorded by the fake itself, so neither can pass
-    by accident of scheduling:
+    Every signal is order-independent — each reads observed state (tick
+    timestamps, or the fake's own entry/exit events) against the stall window
+    the fake records, so none can pass by accident of scheduling:
 
     * ``ticks_in_stall`` — the PRIMARY signal: ticks the loop completed while
       the extraction was stalled. A blocked loop yields 0, because the next
@@ -177,26 +184,50 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       extraction is legitimately slow (seconds) on a loaded runner and would
       otherwise be misread as a freeze. A call that blocks for part of the
       stall still shows up here as one long interval.
-    * the ``/health`` request completes BEFORE the stall ends AND AFTER the
-      extraction entered it, i.e. the API answered DURING the freeze window
-      rather than queued behind it (or served before it began).
+    * the ``/health`` request is answered while the stall is still OPEN. The
+      probe is fired only after the fake signals ENTRY (a shared event, not a
+      fixed sleep, asserted at the point it matters — so a run whose probe
+      would precede the stall fails instead of proving nothing), and the
+      answer is read against the fake's EXIT event. This signal needs no
+      cross-thread clock ordering (#3581) — unlike the tick filters above,
+      which compare the worker's ``state`` timestamps with loop-sampled ticks
+      and are sound because ``time.perf_counter()`` is a process-wide
+      monotonic clock read only after the worker completed. The probe must
+      still complete inside the stall, whose ``STALL_S`` budget is orders of
+      magnitude above the in-memory /health path; a probe that merely queues
+      behind a blocking capture fails. The endpoint's pre-stall synchronous
+      setup can run for seconds on a loaded runner (and #4304 lengthens it),
+      so the probe is issued only after the fake reports the stall has
+      STARTED — waiting on the fake's own ENTRY event, not a fixed sleep,
+      puts it inside the freeze window by construction and keeps both signals
+      measuring what they claim to.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
-    primary assertion fail (0 ticks in the window). The narrower regression of
-    moving it back to the SHARED pool via `asyncio.to_thread` still runs
-    off-loop and passes HERE — it is pinned by the pool-name assertion in
-    `test_capture_extraction_runs_off_the_event_loop`, which fails for both
-    branches (measured).
+    primary assertion fail (0 ticks in the window); with the tick guard
+    neutralized, the health-in-stall guard fails too (measured, #3581) — no
+    single signal can be satisfied by a blocking capture. The narrower
+    regression of moving it back to the SHARED pool via `asyncio.to_thread`
+    still runs off-loop and passes HERE — it is pinned by the pool-name
+    assertion in `test_capture_extraction_runs_off_the_event_loop`, which
+    fails for both branches (measured).
     """
     from tortoise.hosted_api import app
 
     state: dict[str, float] = {}
+    # Shared entry/exit flags (#3581): observed by the event loop, set by the
+    # worker thread running the fake. Used to OPEN the window deterministically
+    # and to read whether /health was answered while it was still open — never
+    # to compare two clocks sampled in different execution contexts.
+    entered_evt = threading.Event()
+    exited_evt = threading.Event()
 
     def _stalled_extract(_self, windowed, session_id, now, **kw):
         state["entered"] = time.perf_counter()
+        entered_evt.set()
         time.sleep(STALL_S)  # stand-in for a wedged provider call
         state["exited"] = time.perf_counter()
+        exited_evt.set()
         return [], {}
 
     monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled_extract)
@@ -220,17 +251,51 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             await asyncio.sleep(0.05)
             capture = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
-            await asyncio.sleep(0.05)  # let the capture reach the extraction
+            # Issue the probe only once the capture is INSIDE its stall. The
+            # endpoint does bounded synchronous setup BEFORE the extraction
+            # starts (seconds on a loaded runner — and #4304 lengthens it — the
+            # very interval the tick-interval check above excludes). Probing
+            # concurrently races that setup: on a slow runner the probe is
+            # already answered before the stall begins, so the run proves
+            # nothing about liveness (#3060). Waiting on the fake's own ENTRY
+            # event (not a fixed sleep, and not the worker's ``state`` dict, so
+            # no cross-thread clock ordering is read — #3581) makes the probe
+            # land inside the freeze window by construction. Bounded, and it
+            # also stops as soon as the capture has SETTLED without reaching
+            # the extraction (a fast endpoint error), so a failure here stays
+            # fast instead of burning the whole bound before the guard below
+            # reports it.
+            _stall_deadline = time.perf_counter() + STALL_START_WAIT_S
+            while (not entered_evt.is_set()
+                   and not capture.done()
+                   and time.perf_counter() < _stall_deadline):
+                await asyncio.sleep(0.05)
+            # Asserted HERE, before the probe: on an exhausted wait the request
+            # below would be served BEFORE the stall opened and the run would
+            # pass vacuously on the exit-event read (#3581 review) — the
+            # unconditional run-validity guard the old ordering assert carried.
+            assert entered_evt.is_set(), (
+                "the capture never reached the extraction within "
+                f"{STALL_START_WAIT_S:.0f}s — the stall window never opened, "
+                "so this run proves nothing (#3060)"
+                + (
+                    " — the capture finished without entering the extraction: "
+                    f"{capture.exception() or capture.result()!r}"
+                    if capture.done()
+                    else f" — the capture is still pending after "
+                         f"{STALL_START_WAIT_S:.0f}s"
+                ))
             health = await ac.get("/health")
-            health_done = time.perf_counter()
+            # The invariant, read the moment the response is in hand: the stall
+            # must still be OPEN. No clocks compared.
+            health_served_in_stall = not exited_evt.is_set()
             cap = await capture
             stop["done"] = True
             await tick
-        return ticks, health, health_done, cap
+        return ticks, health, health_served_in_stall, cap
 
-    ticks, health, health_done, cap = asyncio.run(_run())
+    ticks, health, health_served_in_stall, cap = asyncio.run(_run())
 
-    assert "entered" in state, "the capture never reached the extraction"
     assert health.status_code == 200, health.text
 
     entered, exited = state["entered"], state["exited"]
@@ -260,13 +325,11 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             f"unanswered, Fly drops the machine and the proxy returns nothing "
             f"at all for EVERY request (#3060)")
 
-    assert health_done < exited, (
-        "no /health response was served while the capture was stalled — the "
-        "API was mute for the whole stall (#3060)")
-    assert health_done > entered, (
-        "/health answered BEFORE the capture entered its stall, so this run "
-        "proves nothing about liveness under load (#3060) — the answer must "
-        "be served inside the stall window")
+    assert health_served_in_stall, (
+        f"the /health request did not return inside the {STALL_S:.1f}s stall "
+        f"even though the event loop kept ticking ({len(in_stall)} ticks) — "
+        "the liveness handler's own request path is blocking or queued behind "
+        "the capture, not the event loop (#3060)")
 
     assert cap.status_code == 200, cap.text
 
@@ -835,7 +898,8 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
                     _current_legacy_full_access]
         toks = [v.set(val) for v, val in zip(
             ctx_vars,
-            [TEST_ORG_ID, {}, None, None, ["graphs:read", "graphs:write"],
+            [TEST_ORG_ID, {"max_points": 100000, "max_sessions": None},
+             None, None, ["graphs:read", "graphs:write"],
              False],
             strict=True)]
         try:
@@ -1482,3 +1546,245 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
         slot_a.release()
     assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+# ── #3086: the capture WRITE path must not block the loop either ───────────
+#
+# The tests above pin the EXTRACTION off the loop and deliberately exclude the
+# endpoint's own synchronous graph work (the module note at the top: "that is a
+# SEPARATE, tracked defect — measured at ~4.75s for a max-size 500-turn
+# capture (#3086)"). THESE tests pin that window.
+#
+# Before #3086 the per-turn store was a loop DUPLICATED between
+# `tortoise/sdk.py` and `tortoise/hosted_api.py`, and each iteration issued TWO
+# FalkorDB round-trips ON the event loop — a node `MERGE` then a `CONTAINS`
+# edge `MERGE` for `{session_id}_t{i}` — i.e. ~1000 blocking calls for a
+# 500-turn capture on a single-loop API. The fix is ONE shared writer
+# (`_write_capture_turns`) that collapses the store to a single
+# `UNWIND $turns` transaction, called from both lanes and run off the loop on
+# the capture pool by the hosted lane.
+#
+# WHY THESE ASSERTIONS AND NOT A WALL-CLOCK GAP: a full-request loop-gap
+# budget is not a valid discriminator on a shared/loaded runner. Measured on
+# this box, the whole-request worst gap is 6-15s for a 2-TURN capture — the
+# floor is dominated by per-request SDK/projection schema bootstraps (~15
+# on-loop `_get_proj()` constructions, ~430 on-loop queries — the issue's own
+# "~450 non-turn queries") plus runner scheduling, neither of which scales
+# with the turn count and neither of which is this issue's seam. A gap budget
+# therefore passes and fails the same way pre- and post-fix, which is exactly
+# the "a green test that measures a different window is not evidence" trap.
+# These tests instead measure the SAME whole-request window and assert the
+# property that actually regressed: the work the capture puts ON the event
+# loop must not scale with the number of turns.
+CAPTURE_TURNS_LARGE = 500
+CAPTURE_TURNS_SMALL = 50
+# The on-loop query count is dominated by the fixed SDK/projection bootstraps
+# (~430), identical for both sizes. The per-turn loop added ~2 queries per
+# turn, so the pre-fix delta between these two sizes was ~900; a batched store
+# adds a constant. 60 is generous for a constant and an order of magnitude
+# below the per-row shape it must catch.
+ON_LOOP_QUERY_DELTA_BUDGET = 60
+# Same reasoning as a TIME bound: 900 on-loop round-trips at the ~2.6ms/query
+# the issue measured is ~2.3s of hard blocking, versus a constant that is
+# ~0 — but the COUNT is what this test asserts (see the note at the assertion
+# on why an on-loop TIME budget is not a valid discriminator on this lane).
+
+
+def _capture_conv(turns: int) -> list[dict]:
+    return [
+        {"role": "user" if i % 2 == 0 else "assistant",
+         "content": f"turn {i} " + ("the database schema needs work " * 3)}
+        for i in range(turns)
+    ]
+
+
+def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
+    """Run one real hosted capture, returning the GRAPH work the loop did.
+
+    The graph class's ``query`` is wrapped for the duration, so every
+    round-trip is attributed to the thread that made it. Only ``MainThread``
+    (the event loop — ``TestClient``'s lifespan portal and the monitoring
+    threads have their own names) is counted: that is precisely the work a
+    stalled loop cannot interleave.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    monkeypatch.setattr(
+        TortoiseSDK, "_extract_session_v2",
+        lambda _self, windowed, session_id, now, **kw: ([], {}))
+
+    graph_cls = type(ha_mod._make_sdk(namespace="registry")._get_proj().g)
+    orig_query = graph_cls.query
+    records: list[tuple[str, float]] = []
+    cyphers: list[str] = []
+    writer_threads: list[str] = []
+    orig_writer = ha_mod._write_capture_turns
+
+    def _timed_query(self, cypher, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return orig_query(self, cypher, *args, **kwargs)
+        finally:
+            records.append((threading.current_thread().name,
+                            time.perf_counter() - started))
+            cyphers.append(" ".join(cypher.split()))
+
+    def _wrapped_writer(*args, **kwargs):
+        writer_threads.append(threading.current_thread().name)
+        return orig_writer(*args, **kwargs)
+
+    monkeypatch.setattr(graph_cls, "query", _timed_query)
+    monkeypatch.setattr(ha_mod, "_write_capture_turns", _wrapped_writer)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.post("/v1/sessions",
+                                 json={"conversation": _capture_conv(turns),
+                                       "session_id": sid})
+
+    resp = asyncio.run(_run())
+    monkeypatch.setattr(graph_cls, "query", orig_query)
+    monkeypatch.setattr(ha_mod, "_write_capture_turns", orig_writer)
+    on_loop = [d for name, d in records if name == "MainThread"]
+    return resp, len(on_loop), sum(on_loop), writer_threads, cyphers
+
+
+def test_capture_write_does_not_scale_loop_blocking_with_turns(
+        client, monkeypatch):
+    """#3086: the capture's ON-LOOP graph work is constant in turn count.
+
+    Same whole-request window (setup included) for both sizes, so the fixed
+    per-request cost — which is NOT this issue's seam — cancels in the delta
+    and the remaining signal is exactly the per-turn store.
+
+    Mutation check (must stay true): restoring the per-turn loop (node MERGE +
+    CONTAINS MERGE per turn) ON the loop puts ~900 extra on-loop queries on the
+    500-turn capture, failing the count delta; and
+    keeping a per-row walk but merely moving it into an off-loop writer still
+    fails the single-`UNWIND` assertion below (the batching win is lost even
+    though the loop stops blocking). No WALL-CLOCK gap budget is asserted: on
+    a shared/loaded runner the whole-request gap is dominated by the fixed
+    per-request SDK/bootstrap cost (measured 6-15s even for a 2-TURN capture)
+    and by runner scheduling, so a gap budget passes and fails identically
+    pre- and post-fix — the "measures a different window" trap.
+    """
+    small_resp, small_q, _, _, _ = _measure_on_loop_graph_work(
+        monkeypatch, CAPTURE_TURNS_SMALL, "loop-scale-small-3086")
+    assert small_resp.status_code == 200, small_resp.text[:300]
+    large_resp, large_q, _, writer_threads, cyphers = \
+        _measure_on_loop_graph_work(
+            monkeypatch, CAPTURE_TURNS_LARGE, "loop-scale-large-3086")
+    assert large_resp.status_code == 200, large_resp.text[:300]
+
+    assert writer_threads, (
+        "the hosted capture never called the shared turn writer — the turn "
+        "store is forked again or the write did not happen (#3086)")
+    assert all(name.startswith("capture-extract") for name in writer_threads), (
+        f"the turn writer ran on {writer_threads!r}, not the dedicated capture "
+        f"pool — the per-turn graph work is back on the event loop (#3086)")
+
+    # The store is ONE batched transaction whatever thread runs it: exactly one
+    # `UNWIND $turns` statement and none of the old per-row node writes. This
+    # is what a per-row walk moved off the loop would break (the batching win
+    # would be silently lost).
+    batched = [c for c in cyphers if "UNWIND $turns AS turn" in c]
+    per_row = [c for c in cyphers if "MERGE (t:Point {id:$id})" in c]
+    assert len(batched) == 1, (
+        f"a {CAPTURE_TURNS_LARGE}-turn capture issued {len(batched)} "
+        f"`UNWIND $turns` statement(s) — the turn store is no longer a single "
+        f"batched transaction (#3086)")
+    assert not per_row, (
+        f"the per-row turn write is back ({len(per_row)} statement(s)) — "
+        f"batching was reverted to one graph round-trip per turn (#3086)")
+
+    q_delta = large_q - small_q
+    assert q_delta < ON_LOOP_QUERY_DELTA_BUDGET, (
+        f"a {CAPTURE_TURNS_LARGE}-turn capture put {large_q} graph queries on "
+        f"the event loop vs {small_q} for {CAPTURE_TURNS_SMALL} turns "
+        f"(delta {q_delta}, budget {ON_LOOP_QUERY_DELTA_BUDGET}) — the turn "
+        f"store is per-row again: ~1000 blocking round-trips for 500 turns "
+        f"freeze the single event loop and take /health down with it (#3086)")
+
+    # The on-loop TIME delta is deliberately NOT asserted (it is measured and
+    # reported in the message above for diagnostics). On this lane the on-loop
+    # time is dominated by the fixed per-request SDK/bootstrap cost, which
+    # varies by seconds run to run — measured +1.24s between a 50- and a
+    # 500-turn capture with ZERO extra queries. A time threshold that reds on a
+    # correctly-fixed tree is a bad gate; the COUNT delta is deterministic
+    # (pre-fix +876, post-fix constant) and is what actually scales with turns.
+
+
+def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
+    """#3086: the SDK and hosted lanes share ONE turn writer, and it is
+    idempotent.
+
+    * IDENTITY — the hosted module must call the SDK's writer (the same
+      function object), not a private copy. A future re-fork fails here.
+    * IDEMPOTENCY — a re-capture of the same session_id must leave exactly one
+      turn Point per ``{session_id}_t{i}``. A single ``UNWIND $turns``
+      statement means a partial failure can only be a partial BATCH, so
+      per-row idempotency on the deterministic ids is what makes a retry
+      converge instead of duplicating (#3086).
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise import sdk as sdk_mod
+    from tortoise.hosted_api import app
+
+    writer = getattr(sdk_mod, "_write_capture_turns", None)
+    assert writer is not None, (
+        "the shared batched turn writer (_write_capture_turns) is missing "
+        "from tortoise/sdk.py (#3086)")
+    assert getattr(ha_mod, "_write_capture_turns", None) is writer, (
+        "the hosted capture lane does not call the SDK's turn writer — the "
+        "per-turn store is forked again (the drift class #3086 deletes)")
+
+    monkeypatch.setattr(
+        TortoiseSDK, "_extract_session_v2",
+        lambda _self, windowed, session_id, now, **kw: ([], {}))
+
+    sid = "batched-3086"
+
+    async def _post():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.post(
+                "/v1/sessions",
+                json={"conversation": _capture_conv(CAPTURE_TURNS_SMALL),
+                      "session_id": sid})
+
+    first = asyncio.run(_post())
+    assert first.status_code == 200, first.text[:300]
+    second = asyncio.run(_post())
+    assert second.status_code == 200, second.text[:300]
+
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+        "WHERE t.is_episodic = true RETURN count(t)",
+        params={"sid": sid}).result_set
+    turn_count = rows[0][0] if rows else 0
+    assert turn_count == CAPTURE_TURNS_SMALL, (
+        f"a re-capture of {CAPTURE_TURNS_SMALL} turns left {turn_count} turn "
+        f"Points — the batched writer's per-row MERGE must be idempotent on "
+        f"the deterministic {{sid}}_t{{i}} ids (#3086)")
+
+    # The node shape the shared writer produces (the loop it replaced wrote
+    # exactly these) — a re-capture that changed any of them would silently
+    # break the read path.
+    props = sdk._get_proj().g.query(
+        "MATCH (t:Point {id:$tid}) RETURN t.content, t.pointKind, t.speaker, "
+        "t.is_episodic, t.status, t.is_operator, t.content_hash IS NOT NULL",
+        params={"tid": f"{sid}_t0"}).result_set
+    assert props, "the shared writer created no turn node"
+    content, point_kind, speaker, is_episodic, status, is_operator, has_hash = \
+        props[0]
+    assert point_kind == "event", point_kind
+    assert speaker == "user", speaker
+    assert is_episodic is True, is_episodic
+    assert status == "draft", status
+    assert is_operator is False, is_operator
+    assert has_hash is True, "the turn carries no content_hash"
+    assert content.startswith("[user] turn 0 "), content

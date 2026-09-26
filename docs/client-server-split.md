@@ -31,7 +31,7 @@ makes it physically true — the license boundary moves to the network.
 | Component | Distribution | License | Content |
 |---|---|---|---|
 | **Server** | `tortoise-graph` (existing, 0.2.0) | BSL-1.1 | engine (sdk, projection, EP), daemon, MCP server, hosted/self-host APIs, CLIs (`tortoise`, `tortoise-serve`, `tortoise-ingest`) |
-| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), shared config + error types, minimal CLI |
+| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), shared config + error types, the recorded status vocabulary (`tortoise/status_vocabulary.py`, #3805), minimal CLI |
 
 Industry precedent (verified 2026-08-13, issue comment): **MongoDB** (server
 SSPL, all drivers Apache-2.0 — an app using the driver is "a separate
@@ -58,6 +58,8 @@ client/
   LICENSE                  # Apache-2.0 text (governs the client dist)
   build_client.sh          # staging build — copies shared modules from the canonical
                            #   repo tree, overlays client shims, builds wheel+sdist
+  shared_modules.sh        # derives the wheel's shared-module set from
+                           #   build_client.sh (the CI path gate + allowlists read it)
   verify_client.sh         # acceptance gate (clean-venv import + dep checks)
   tortoise/__init__.py     # client-only `tortoise` namespace shim (lightweight —
                            #   NOT the engine's __init__, which imports redislite)
@@ -76,15 +78,24 @@ modules are never staged. The wheel ships exactly:
 - `tortoise/mcp_client.py` — the network driver (canonical copy)
 - `tortoise/config.py` — shared config (canonical copy)
 - `tortoise/exceptions.py` — shared error types (canonical copy)
+- `tortoise/status_vocabulary.py` — the one recorded status vocabulary
+  (`available` / `empty` / `degraded` / `unconfigured`, #3805; canonical copy)
 - `tortoise/__init__.py` — client namespace shim (`__version__` only)
 - `tortoise_client/` — re-export shim + CLI
+
+The canonical-copy list is not transcribed anywhere by hand: the `cp` lines
+in `client/build_client.sh` are the source, and `client/shared_modules.sh`
+derives the set from them for the CI `client` path gate and both wheel
+allowlists (PR #4044 review).
 
 **What stays server-side (unchanged):** everything else — sdk.py,
 projection, ep, FalkorDB deps, fastapi/uvicorn, mcp_server, mcp_auth/
 session_auth, hosted/self-host APIs, billing, ingest/index CLIs,
 `tortoise/tortoise_client.py` (the S9 skill-wiring CLI — **not** a network
 driver, deliberately not the basis of the client; it remains an internal
-server-side wrapper).
+server-side wrapper. Only its machine-readable status WORDS moved, to the
+recorded vocabulary in `tortoise/status_vocabulary.py` — #3805; the split
+itself is unchanged).
 
 **No breakage:** `tortoise-graph` keeps shipping the full `tortoise.*`
 tree exactly as before — `from tortoise.mcp_client import ...` keeps working
@@ -193,5 +204,6 @@ client/verify_client.sh                         # clean-venv gate
   package.
 - **Internal consumers** (skills, graph-scripts, tests, bridge) migrate at
   leisure — the daemon is already their integration point (post-#338/#554).
-- `tortoise/tortoise_client.py` (S9 skill wiring) is untouched and stays
-  server-side.
+- `tortoise/tortoise_client.py` (S9 skill wiring) is not part of the split and
+  stays server-side; only its status words moved to the recorded vocabulary
+  (`tortoise/status_vocabulary.py`, #3805).

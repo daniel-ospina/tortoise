@@ -16,14 +16,21 @@ failed questions after every question; re-running with the same file resumes
 (skips completed/failed, continues the rest).
 
 Run modes:
-    --mock        fully offline (MockReader + MockJudge; CI smoke, no keys)
+    --mock        offline reader/judge (MockReader + MockJudge; CI smoke, no
+                  provider keys). The dense leg is still REQUIRED (#4718);
+                  --skip-preflight is the explicit waiver.
     default       real LLM reader + judge via provider keys (env-driven)
 
 Full run needs: the dataset (~tens of MB, auto-downloaded to
 ``~/.cache/tortoise-longmemeval`` or ``TORTOISE_LME_CACHE_DIR``) and provider
 keys (OPENROUTER_API_KEY / OPENAI_API_KEY / …) — never committed, never
 hardcoded. The committed MINI fixture + ``--mock`` exercises the whole
-pipeline in CI.
+pipeline offline; the pinned embedder is still REQUIRED (#4718), so a CI
+lane that runs these paths provisions it up front (the main test job's
+``tools/embedder_provision.py`` step, #2573) and the harness invocations
+whose subject is not the dense leg carry ``--skip-preflight`` — a cold or
+absent embedder therefore never downloads mid-suite and never turns an
+unrelated assertion red.
 """
 from __future__ import annotations
 
@@ -101,6 +108,7 @@ from .report import (
 from .rerank import (
     _TRUTHY,
     RERANK_MODEL_DEFAULT,
+    _clamp_int,
     _env_float,
     _env_int,
     rerank_enabled,
@@ -112,6 +120,7 @@ from .retrieve import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_REINJECTION_TOTAL_ITEMS,
     DEFAULT_RETRIEVAL_BUDGET_MS,
     DEFAULT_TR_TOP_K,
     EVAL_RETRIEVAL_BUDGET_MS,
@@ -439,6 +448,42 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
     }
 
 
+def _resolve_reinjection_total_cap(arm_on: bool,
+                                   explicit: int | None = None) -> int | None:
+    """C4 (#2513): the resolved source-session injection TOTAL budget — the
+    volume guard on the re-injection sweep, resolved ONCE before the loop.
+
+    Contract (the sibling-knob precedent, ``_resolve_rerank`` /
+    ``context_item_cap``): the run path passes the resolved value to
+    ``retrieve_for_question`` and stamps it on BOTH the checkpoint
+    fingerprint and the methodology record, so a cap-10 checkpoint can
+    never be resumed by a cap-15 run — two injection volumes must not blend
+    into one artifact that declares one config.
+
+    Off-path hygiene (the evidence_boost multiplier precedent): an arm-OFF
+    run resolves ``None`` — it never reads the env, never records a stray
+    env value, and never stamps an inert knob on the fingerprint. The cap
+    key's conditional presence only avoids recording an inert value; the
+    always-present ``session_reinjection`` / ``session_reinjection_guard``
+    bools are what refuse a fingerprint-bearing pre-C4 resume
+    (``CheckpointStaleError``, the safe direction).
+    Arm-ON
+    resolution is explicit > env > product constant, and BOTH sides go
+    through the SAME ``rerank._clamp_int`` (garbage / non-integer / <1
+    falls back to ``DEFAULT_REINJECTION_TOTAL_ITEMS``) — so the run path
+    and a direct caller can never resolve the knob differently. #2513
+    (delta-review P2): the explicit value used to bypass the clamp
+    entirely (explicit 0 resolved to 0 and served a silent zero-injection
+    arm; '15' raised a TypeError swallowed by the fail-open handler).
+    """
+    if not arm_on:
+        return None
+    if explicit is not None:
+        return _clamp_int(explicit, DEFAULT_REINJECTION_TOTAL_ITEMS)
+    return _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
+                    DEFAULT_REINJECTION_TOTAL_ITEMS)
+
+
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
 # tortoise.embeddings (the single source of truth; #1349 swapped the default
 # to bge-small). The pre-flight probe asserts this dimension (384) so a swap
@@ -472,23 +517,42 @@ def _embedder_status(*, available: bool, reason: str | None,
     }
 
 
-def _preflight_embedder(*, mock: bool) -> dict:
+# #4718: the dense-leg load budget is chosen by the same predicate as the
+# gate — what the run NEEDS, not which reader/judge it uses. A required leg
+# gets the real cold-load window (600s): #1349 already raised the product
+# default from 30s to 90s because "30s caused silent TF-IDF degrade on cold
+# caches" (tortoise/embeddings.py), and the old 30s `--mock` budget
+# re-introduced exactly that for the sealed retrieval-measurement command. A
+# leg the operator explicitly waived gets the short probe, so a debugging run
+# does not stall ten minutes before continuing.
+_DENSE_LEG_LOAD_TIMEOUT_S = 600.0
+_WAIVED_DENSE_LEG_LOAD_TIMEOUT_S = 30.0
+
+
+def _dense_leg_load_timeout(*, dense_leg_required: bool) -> float:
+    """The dense-leg probe budget — follows `dense_leg_required` (#4718)."""
+    return (_DENSE_LEG_LOAD_TIMEOUT_S if dense_leg_required
+            else _WAIVED_DENSE_LEG_LOAD_TIMEOUT_S)
+
+
+def _preflight_embedder(*, dense_leg_required: bool) -> dict:
     """R3 (#1542) D2: pre-flight the dense leg — never a silent None.
 
     Verifies USABILITY, not just loadability: after ``EmbeddingModel.get()``
-    succeeds, runs one probe encode and asserts the 384-dim output. A real
-    (non-mock) run refuses to start when the embedder is missing or broken
-    (SystemExit naming the remediation commands); ``--mock`` warns and
-    continues (the status is still recorded in the report methodology).
+    succeeds, runs one probe encode and asserts the 384-dim output.
 
-    Timeouts are mode-aware: real runs probe with ``load_timeout=600`` (the
-    cold-download window for the first-ever model fetch); ``--mock`` probes
-    with ``load_timeout=30`` so an offline env without a cached model warns
-    and continues in ~30s instead of stalling 10 minutes.
+    The gate keys on whether the run REQUIRES the dense leg, never on
+    ``--mock`` (#4718). ``--mock`` selects the reader/judge; it is not an
+    authorisation to publish a degraded number — ``--retrieval-only --mock``
+    is the sealed measurement command (real retriever, real graph, only
+    reader/judge mocked out), so a failed dense leg there is a fabricated
+    result. Every run requires the dense leg except an explicit
+    ``--skip-preflight`` waiver (the documented debugging/offline escape
+    hatch).
     """
     from tortoise.embeddings import EmbeddingModel
 
-    timeout = 30.0 if mock else 600.0
+    timeout = _dense_leg_load_timeout(dense_leg_required=dense_leg_required)
     try:
         model = EmbeddingModel.get(load_timeout=timeout)
     except Exception:  # noqa: BLE001, RUF100
@@ -497,7 +561,8 @@ def _preflight_embedder(*, mock: bool) -> dict:
     if model is None:
         status = _embedder_status(available=False, reason="no_embedder",
                                   st_version=st_version)
-        return _finalize_embedder_preflight(status, mock=mock)
+        return _finalize_embedder_preflight(
+            status, dense_leg_required=dense_leg_required)
     # #1349: the loaded model id — EmbeddingModel has no model_id attr, so
     # fall back to the probe state (the ACTUAL injected candidate for
     # --model runs) before the pinned default. Without the probe check an
@@ -519,12 +584,14 @@ def _preflight_embedder(*, mock: bool) -> dict:
             status = _embedder_status(
                 available=False, reason="dim_mismatch",
                 model=model_id, st_version=st_version)
-            return _finalize_embedder_preflight(status, mock=mock)
+            return _finalize_embedder_preflight(
+                status, dense_leg_required=dense_leg_required)
     except Exception:  # noqa: BLE001, RUF100
         status = _embedder_status(
             available=False, reason="encode_failed",
             model=model_id, st_version=st_version)
-        return _finalize_embedder_preflight(status, mock=mock)
+        return _finalize_embedder_preflight(
+            status, dense_leg_required=dense_leg_required)
     status = _embedder_status(available=True, reason=None,
                               model=model_id, st_version=st_version)
     print(f"[longmem_eval] embedder pre-flight OK: {model_id} "
@@ -532,23 +599,33 @@ def _preflight_embedder(*, mock: bool) -> dict:
     return status
 
 
-def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
-    """R3 (#1542) D2 gate: real runs refuse to start with a degraded dense
-    leg (SystemExit with the exact remediation); ``--mock`` warns and
-    continues (CI smoke stays runnable offline)."""
+def _finalize_embedder_preflight(status: dict, *,
+                                 dense_leg_required: bool) -> dict:
+    """The dense-leg gate (#4718).
+
+    Required (the default for every run that has not explicitly waived the
+    leg) → ``SystemExit(1)`` naming the reason, the load budget used, and the
+    fact that no measurement was produced.
+
+    Waived (``--skip-preflight``, documented as debugging/offline only) →
+    record the status and continue. The message uses WAIVED vocabulary so
+    the line can never be mistaken for a measurement's warning, and the
+    report records ``vector_strategy: "unavailable"``.
+    """
     reason = status.get("reason")
-    if mock:
-        # Reachable under --mock (warn + continue) AND under --skip-preflight
-        # (the gate is lifted for debugging; #1626). Distinguish the two so an
-        # operator isn't told a real run was "mock".
-        print("[longmem_eval] WARNING: embedder unavailable "
-              f"(reason={reason}) — the vector/dense leg is DISABLED for "
-              "this run; install with: uv sync --group dev "
-              "--extra embeddings", file=sys.stderr)
+    if not dense_leg_required:
+        print("[longmem_eval] WARNING: dense leg WAIVED by --skip-preflight "
+              f"(embedder unavailable: reason={reason}) — this run is NOT a "
+              "measurement and its report records "
+              "vector_strategy='unavailable'. Install with: uv sync "
+              "--group dev --extra embeddings", file=sys.stderr)
         return status
+    timeout = _dense_leg_load_timeout(dense_leg_required=True)
     print("[longmem_eval] EMBEDDER PRE-FLIGHT FAILED — the dense (vector) "
-          f"leg cannot run (reason={reason}). Refusing to start: publishing "
-          "a dense-less report is worse than no report.", file=sys.stderr)
+          f"leg cannot run (reason={reason}; load_timeout={timeout:g}s) and "
+          "this run REQUIRES it, so NO measurement was produced. Refusing "
+          "to start: publishing a dense-less report is worse than no "
+          "report.", file=sys.stderr)
     print("The eval env must install the pinned embedder (R3 #1542):",
           file=sys.stderr)
     print("  uv sync --group dev --extra embeddings", file=sys.stderr)
@@ -1240,12 +1317,36 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C6 (#2520, #2513): the time-aware query expansion
+                       # arm — conditional presence like the sibling C-arm
+                       # knobs (an armed checkpoint resumed without the arm
+                       # is refused by the fingerprint gate).
+                       time_aware_qe: bool | None = None,
                        # C3-1 (#2519, #2567): the coverage-completeness
                        # loop arm — conditional presence (a looped
                        # checkpoint resumed without the arm is refused by
                        # the fingerprint gate; the 2×2 with #2518 stays
                        # reconstructable).
                        coverage_loop: bool | None = None,
+                       # C4 (#2517/#2568, #2513): the source-session
+                       # re-injection arm + its guard ablation — ALWAYS
+                       # present as resolved bools (the sibling-arm
+                       # convention), so a fingerprint-bearing pre-feature
+                       # checkpoint refuses on resume and an arm/guard flip
+                       # can never cross.
+                       session_reinjection: bool = False,
+                       session_reinjection_guard: bool = True,
+                       # C4 (#2513, delta-review P1): the RESOLVED injection
+                       # total budget — conditional presence (None when the
+                       # arm is OFF: an inert knob never gates a checkpoint,
+                       # the evidence_boost-multiplier precedent). When the
+                       # arm is ON the cap is ALWAYS stamped, so a cap-10
+                       # checkpoint can never be resumed by a cap-15 run —
+                       # the two injection volumes must not blend into one
+                       # artifact that declares one config. The env is not
+                       # part of any fingerprint, so a lazily re-read cap
+                       # could not gate resume at all.
+                       reinjection_total_cap: int | None = None,
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm
@@ -1255,8 +1356,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
                        # question that dies at 0 write retries survives at 2 —
-                       # the same class as max_retries). A pre-feature
-                       # checkpoint therefore refuses via CheckpointStaleError
+                       # the same class as max_retries). A fingerprint-bearing
+                       # pre-feature checkpoint therefore refuses via
+                       # CheckpointStaleError
                        # (the SAFE direction — Task 8 requires a fresh
                        # checkpoint anyway).
                        ingest_write_retries: int = INGEST_WRITE_RETRIES,
@@ -1268,10 +1370,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # cross-session NOOP / DELETE / supersession
                        # consolidation records the interleaved sequential
                        # path writes. ALWAYS present (the retry-constant
-                       # precedent): a pre-#1744 checkpoint carries no key,
-                       # so ANY resume under the new defaults refuses via
-                       # CheckpointStaleError (the SAFE direction) instead of
-                       # silently crossing the toggle.
+                       # precedent): a fingerprint-bearing pre-#1744
+                       # checkpoint carries no key, so a resume under the new
+                       # defaults refuses via CheckpointStaleError (the SAFE
+                       # direction) instead of silently crossing the toggle.
                        session_workers: int = 1,
                        # #1786 (R5): the eval's HYBRID-arm retrieval deadline
                        # (ms) — conditional presence (present iff non-default:
@@ -1359,8 +1461,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
         "rerank": rerank_config,
         # #1786 (P1-1/P1-2): the three retry constants are ALWAYS present —
-        # a deliberate default-fingerprint change so a pre-feature checkpoint
-        # resumed under post-feature DEFAULTS refuses instead of silently
+        # a deliberate default-fingerprint change so a fingerprint-bearing
+        # pre-feature checkpoint resumed under post-feature DEFAULTS refuses
+        # instead of silently
         # changing retry semantics (0 retries → 2 write retries + 1 R2 + 2
         # resumes). ``--retry-failed`` is NOT fingerprinted (a recorded
         # resume-mode, methodology + checkpoint field — Task 2 Step 1).
@@ -1372,6 +1475,16 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "ingest_question_retries": ingest_question_retries,
         "resume_attempts_cap": resume_attempts_cap,
         "session_workers": session_workers,
+        # C4 (#2517/#2568, #2513): the source-session re-injection arm +
+        # its guard ablation — ALWAYS present (the retry-constant
+        # precedent): a fingerprint-bearing pre-feature checkpoint carries
+        # no key, so a resume under the new defaults refuses via
+        # CheckpointStaleError (the safe direction) instead of silently
+        # crossing the arm; an
+        # arm-ON checkpoint can never be resumed with the arm OFF, nor
+        # the guard flipped either way.
+        "session_reinjection": session_reinjection,
+        "session_reinjection_guard": session_reinjection_guard,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -1388,19 +1501,40 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
+            # C4 (#2513): the resolved injection total budget — conditional
+            # presence like the sibling knobs (absent for an arm-OFF run:
+            # the knob is inert there, so no inert value is recorded). This
+            # key is NOT what makes a pre-C4 checkpoint resumable — the
+            # always-present arm/guard bools above are what refuse a
+            # fingerprint-bearing pre-C4 resume. When the arm is ON the cap is
+            # always stamped, so a cap change (10 vs 15 vs the product
+            # default) refuses the resume in either direction via the
+            # key-union in ``_fingerprint_diffs``.
+            # #2513 (delta-review P2): the key name is IDENTICAL to the
+            # methodology record's (``session_reinjection_total_cap``) — a
+            # key-for-key cross-check of the checkpoint fingerprint against
+            # the report must find the same name, because that hand
+            # cross-check is how this class of defect gets verified (the
+            # two names diverging means the cross-check silently finds
+            # nothing).
+            ("session_reinjection_total_cap", reinjection_total_cap),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).
             ("aggregative_flag", aggregative_flag),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
-            # presence (the eval always passes 1500, so a pre-feature /
-            # 500-ms-budget checkpoint refuses via CheckpointStaleError).
+            # presence (the eval always passes 1500, so a fingerprint-bearing
+            # pre-feature / 500-ms-budget checkpoint refuses via
+            # CheckpointStaleError).
             ("retrieval_budget_ms", retrieval_budget_ms),
             # #2578 (Task 1): the TR item-cap knob — conditional presence
-            # (absent at the 12 default → pre-feature checkpoints resume
-            # byte-identically; a 16-checkpoint resumed at 12 refuses).
+            # (absent at the 12 default, so the key itself perturbs nothing;
+            # a post-C4 checkpoint resumes byte-identically, a fingerprint-
+            # bearing pre-C4 one is refused by the always-present arm/guard
+            # bools; a 16-checkpoint resumed at 12 refuses).
             ("tr_top_k", tr_top_k),
             # #2976: the temporal retrieval-leg arm — conditional presence
             # ONLY when the env resolves ON, so the default fingerprint
@@ -1850,8 +1984,11 @@ def _load_checkpoint(path: str | None,
 
     M7 (#1527, D7): the loaded checkpoint's fingerprint must match the
     effective run config — a mismatch raises ``CheckpointStaleError`` naming
-    the differing fields (refuse stale resume). A legacy v1 checkpoint
-    (no ``fingerprint`` key) is refused too. #1349: the checkpoint also
+    the differing fields (refuse stale resume). A markerless legacy
+    checkpoint (no ``format``/``run_key`` markers, hence no ``fingerprint``
+    key) is refused too; a fingerprintless checkpoint that carries the
+    ``format`` marker plus a matching ``run_key`` (the #1349 vector-arm path)
+    falls through the fingerprint gate and resumes. #1349: the checkpoint also
     carries the per-model ``run_key`` (``{surface}__{retriever}__{model}__
     {prompt}``) — a cross-surface (embedded↔hnsw) or cross-model resume is
     impossible by construction. The read happens under an exclusive flock
@@ -2339,6 +2476,22 @@ class CheckpointPersistError(RuntimeError):
     """
 
 
+class ArmConflictError(RuntimeError):
+    """Two arms that own the SAME pool order are armed together (#2517 §0.2).
+
+    C3-1's guard and C4's guard both re-order the pool, and the stage order
+    between them is arbitrary — rather than let a run be order-dependent,
+    the run REFUSES the combination. Raised at ARM RESOLUTION (before the
+    question loop, outside every fail-open region) so it can never be
+    swallowed into N per-question "non-fatal" failures, and re-raised by the
+    per-question handler and ``_run_main`` so it always aborts the run.
+    """
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
+
+
 #: Watchdog rolling-window length (questions) — the latency and gate-red
 #: windows are GLOBAL across workers (plan cycle2-P2-24).
 _WATCHDOG_WINDOW = 10
@@ -2583,26 +2736,35 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
-#: eval-side pipeline + payload writer) and tortoise/extractor_v2.py (the
-#: production 5-stage extractor). A content change to either invalidates
-#: every cached per-question graph automatically — no manual cache-bust.
+#: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
+#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: A content change to any of these invalidates every cached per-question
+#: graph automatically — no manual cache-bust.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
     / "tortoise" / "extractor_v2.py",
+    # #5005: the S2.2 VET gate is imported by the extractor and REMOVES
+    # candidates from the embed list, so an uncommitted edit to it changes
+    # extraction output — the dirty-tree half of the fingerprint must see it
+    # (``git_sha`` only covers committed HEAD).
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "vet_gate.py",
 )
 
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, and the stage token caps/truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
+#: truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_EXTRACTOR_PROMPT",       # compact ↔ default render
     "TORTOISE_LABEL_ORDER",            # S2/S4 shuffled kind-order renders
-    "TORTOISE_LABEL_SEED",             # the shuffle seed (with the above)
+    "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
+    "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )
@@ -2612,17 +2774,17 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: two small modules); the digest is
+    Reads the files at run start (cheap: three small modules); the digest is
     stable within a process and identical across processes on the same
     checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the two modules' IMPORT CLOSURE (chain_enforcer,
+    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the two
+    conservative net; ``paths`` keeps the digest sensitive to the three
     hot files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
@@ -3365,6 +3527,12 @@ def run_evaluation(
     # the methodology — an expanded checkpoint resumed without the arm is
     # refused by the fingerprint gate (same contract as evidence_boost).
     entity_key_expansion: bool | None = None,
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (explicit
+    # flag > ``TORTOISE_LME_TIME_AWARE_QE`` env > OFF, the #1745 fail-safe
+    # default). Resolved once, fingerprinted, and recorded in the
+    # methodology — an armed checkpoint resumed without the arm is refused
+    # by the fingerprint gate (same contract as entity_key_expansion).
+    time_aware_qe: bool | None = None,
     # C3-1 (#2519, #2567): the coverage-completeness loop — tri-state
     # (explicit flag > ``TORTOISE_LME_COVERAGE_LOOP`` env > OFF, the #1745
     # fail-safe default). The #2519 all-or-nothing lever (2×2 covariate
@@ -3372,6 +3540,24 @@ def run_evaluation(
     # methodology — a looped checkpoint resumed without the arm is refused
     # by the fingerprint gate (same contract as evidence_boost).
     coverage_loop: bool | None = None,
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # (explicit flag > ``TORTOISE_LME_SESSION_REINJECTION`` env > OFF, the
+    # #1745 fail-safe default), plus the guard ablation
+    # (``session_reinjection_guard``; None = ON). Resolved once,
+    # fingerprinted (always-present resolved bools), and recorded in the
+    # methodology. A both-arms-ON run (coverage_loop AND
+    # session_reinjection) is REFUSED at resolution — two owners of the
+    # same pool order are never left order-dependent.
+    session_reinjection: bool | None = None,
+    session_reinjection_guard: bool | None = None,
+    # C4 (#2513, delta-review P1): the RESOLVED injection total budget
+    # (explicit value > ``TORTOISE_LME_REINJECTION_TOTAL_CAP`` env > the
+    # product constant ``DEFAULT_REINJECTION_TOTAL_ITEMS``), resolved ONCE
+    # here — before the loop — and stamped on BOTH the checkpoint
+    # fingerprint and the methodology record (the TORTOISE_LME_CONTEXT_ITEMS
+    # / _RERANK_CAP contract). None while the arm is OFF: the knob is inert,
+    # never read, never fingerprinted, never recorded as a stray env value.
+    reinjection_total_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (explicit flag > ``TORTOISE_LME_AGGREGATIVE_FLAG``
     # env > OFF, the #1745 fail-safe default). The A/B switch that MEASURES
@@ -3513,6 +3699,15 @@ def run_evaluation(
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): resolve the time-aware query expansion tri-state
+    # ONCE, before the loop — same contract as the sibling C-arms: a None
+    # with the TORTOISE_LME_TIME_AWARE_QE env set must not record `false`
+    # in the methodology while the per-question retrieval armed
+    # (methodology records the knobs truthfully; fail-safe OFF: only
+    # 1/true/yes/on enables — the #1745 default decision).
+    if time_aware_qe is None:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): resolve the coverage-completeness loop tri-state
     # ONCE, before the loop — same contract as evidence_boost/entity_key_
     # expansion: a None with the TORTOISE_LME_COVERAGE_LOOP env set must
@@ -3522,6 +3717,33 @@ def run_evaluation(
     if coverage_loop is None:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C4 (#2517/#2568, #2513): resolve the source-session re-injection arm
+    # + its guard ablation ONCE, before the loop — same contract as the
+    # sibling arms (methodology == actual == fingerprint; fail-safe OFF:
+    # only 1/true/yes/on enables).
+    if session_reinjection is None:
+        sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        session_reinjection = sr_env.strip().lower() in _TRUTHY
+    if session_reinjection_guard is None:
+        session_reinjection_guard = True
+    # C4 (#2513, delta-review P1): the injection total budget is a
+    # results-affecting knob (it is the volume guard the re-injection sweep
+    # varies) — resolve it ONCE, before the loop, and thread the SAME value
+    # into the fingerprint, the methodology and every question's fetch. A
+    # lazily re-read cap (the pre-fix shape) is invisible to the fingerprint
+    # gate: a cap-10 checkpoint would be resumed by a cap-15 run and the two
+    # volumes would blend into one artifact declaring one config.
+    reinjection_total_cap = _resolve_reinjection_total_cap(
+        bool(session_reinjection), reinjection_total_cap)
+    # §0.2: C3-1 and C4 both own the pool order — REFUSE the both-ON
+    # combination HERE (arm resolution, before the question loop and
+    # outside every fail-open region), so the refusal aborts the run
+    # instead of degrading into per-question failures.
+    if coverage_loop and session_reinjection:
+        raise ArmConflictError(
+            "coverage_loop (C3-1) and session_reinjection (C4) both re-order "
+            "the retrieval pool — arm them separately (this run refuses the "
+            "combination at arm resolution)")
     # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
     # tri-state ONCE, before the loop — same contract as the C2 knobs: a
     # None with the TORTOISE_LME_AGGREGATIVE_FLAG env set must not record
@@ -3640,10 +3862,31 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C6 (#2520, #2513): the resolved time-aware arm rides the
+        # fingerprint — an armed checkpoint resumed without the arm is
+        # refused by the fingerprint gate (A/B arm isolation).
+        time_aware_qe=bool(time_aware_qe),
         # C3-1 (#2519, #2567): the resolved coverage-loop arm rides the
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
         coverage_loop=bool(coverage_loop),
+        # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
+        # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
+        # (the sibling-arm convention) — a fingerprint-bearing pre-feature
+        # checkpoint refuses on resume (CheckpointStaleError, the safe
+        # direction), and an arm-ON checkpoint can never be resumed with the
+        # arm OFF or the guard flipped.
+        session_reinjection=bool(session_reinjection),
+        session_reinjection_guard=bool(session_reinjection_guard),
+        # C4 (#2513): the resolved injection total budget rides the
+        # fingerprint as a CONDITIONAL member (absent while the arm is OFF
+        # — the knob is inert there, so no inert value is recorded; a
+        # fingerprint-bearing pre-C4 checkpoint is refused by the
+        # always-present arm/guard bools, not by this key). Arm-ON: always
+        # stamped, so the cap the
+        # checkpoint was produced under can never differ silently from the
+        # cap a resume serves (10 vs 15 vs the product default all refuse).
+        reinjection_total_cap=reinjection_total_cap,
         # C5 (#2521, #2513): the resolved aggregative-check arm rides the
         # fingerprint — a flagged checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
@@ -3651,23 +3894,27 @@ def run_evaluation(
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
-        # presence — the eval always passes the non-default 1500). All four
-        # stale pre-feature checkpoints via CheckpointStaleError.
+        # presence — the eval always passes the non-default 1500). Each
+        # stales a fingerprint-bearing pre-feature checkpoint via
+        # CheckpointStaleError.
         ingest_write_retries=ingest_write_retries,
         ingest_question_retries=ingest_question_retries,
         resume_attempts_cap=resume_attempts_cap,
         # #1744 (review P1): the graph-content-affecting session-parallel
-        # toggle — ALWAYS present, so a pre-#1744 checkpoint (no key)
-        # refuses on resume rather than silently crossing the mode. Recorded
+        # toggle — ALWAYS present, so a fingerprint-bearing pre-#1744
+        # checkpoint (no key) refuses on resume rather than silently crossing
+        # the mode. Recorded
         # as the EFFECTIVE ingest value: the per-session census lane forces
         # ingest to sequential, so recording the outer value would fingerprint
         # a regime that did not actually run.
         session_workers=(1 if per_session_census else session_workers),
         retrieval_budget_ms=retrieval_budget_ms,
         # #2578 (Task 1): conditional presence — the DEFAULT tr_top_k (12)
-        # fingerprints as absent so pre-feature checkpoints resume
-        # byte-identically; a non-default value fingerprints (mismatched
-        # resumes refused by the existing fingerprint gate).
+        # fingerprints as absent, so the key itself perturbs nothing; a
+        # post-C4 checkpoint resumes byte-identically (a fingerprint-bearing
+        # pre-C4 one is refused by the always-present arm/guard bools); a
+        # non-default value fingerprints (mismatched resumes refused by the
+        # existing gate).
         tr_top_k=(tr_top_k if tr_top_k != DEFAULT_TR_TOP_K else None),
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
@@ -4090,10 +4337,28 @@ def run_evaluation(
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
                             entity_key_expansion=entity_key_expansion,
+                            # C6 (#2520, #2513): the time-aware query
+                            # expansion arm (resolved above; OFF by
+                            # default — the sealed A/B decides adoption).
+                            time_aware_qe=time_aware_qe,
                             # C3-1 (#2519, #2567): the coverage-completeness
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
                             coverage_loop=coverage_loop,
+                            # C4 (#2517/#2568, #2513): the source-session
+                            # re-injection arm + guard ablation (resolved
+                            # above; OFF by default — the sealed A/B
+                            # decides adoption).
+                            session_reinjection=session_reinjection,
+                            session_reinjection_guard=session_reinjection_guard,
+                            # C4 (#2513): the SAME resolved cap the
+                            # checkpoint fingerprint and the methodology
+                            # record carry — never re-resolved per question
+                            # (a lazy re-read is invisible to the
+                            # fingerprint gate and would blend two
+                            # injection volumes into one artifact).
+                            session_reinjection_total_cap=(
+                                reinjection_total_cap),
                             # C5 (#2521, #2513): the aggregative-intent
                             # coverage-check arm (resolved above; OFF by
                             # default — records the per-outcome verdict
@@ -4313,6 +4578,12 @@ def run_evaluation(
                         # reconstructs which arm each outcome ran on).
                         "entity_key_expansion": ret.get(
                             "entity_key_expansion"),
+                        # C6 (#2520, #2513): the time-aware query expansion
+                        # arm per question (the A/B arm marker + the
+                        # reorder stamps — read via ret.get so a
+                        # pre-feature checkpoint stays readable).
+                        "time_aware_qe": ret.get("time_aware_qe"),
+                        "time_aware_stats": ret.get("time_aware_stats"),
                         # C3-1 (#2519, #2567): the coverage-completeness
                         # loop arm per question — the resolved bool + the §8
                         # per-outcome markers (loop_iterations /
@@ -4322,6 +4593,18 @@ def run_evaluation(
                         # pre-feature checkpoints).
                         "coverage_loop": ret.get("coverage_loop"),
                         "coverage_loop_stats": ret.get("coverage_loop_stats"),
+                        # C4 (#2517/#2568, #2513): the source-session
+                        # re-injection arm marker + per-outcome census
+                        # (seeded sessions, injected/merged counts per
+                        # session, dropped-by-cap, fetch health, total-cap
+                        # hit, the resolved guard bool, latency) — the
+                        # flip census and the guard ablation both read it
+                        # (read via .get — absent on pre-feature
+                        # checkpoints).
+                        "session_reinjection": ret.get(
+                            "session_reinjection"),
+                        "session_reinjection_stats": ret.get(
+                            "session_reinjection_stats"),
                         # C5 (#2521, #2513): the aggregative-check arm marker
                         # + the per-outcome verdict — the marker reconstructs
                         # which arm ran; the verdict (present under the arm
@@ -4512,7 +4795,8 @@ def run_evaluation(
                     # record a bogus failure entry and continue the run — the
                     # watchdog would never abort). Re-raise so the dispatch
                     # handler records the run-level marker and aborts.
-                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError)):
+                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError,
+                                      ArmConflictError)):
                         raise
                     # M2 (#1523, D4): a fatal-class provider error mid-run means the
                     # key died (billing cap hit, revocation) — continuing would
@@ -4756,11 +5040,31 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C6 (#2520, #2513): the time-aware query expansion arm —
+            # recorded verbatim in the methodology (published numbers carry
+            # which A/B arm produced them).
+            "time_aware_qe": bool(time_aware_qe),
             # C3-1 (#2519, #2567): the coverage-completeness loop arm —
             # recorded verbatim in the methodology (published numbers carry
             # which of the 2×2 arms produced them; the §5 gate deltas are
             # denominated on the recorded arm).
             "coverage_loop": bool(coverage_loop),
+            # C4 (#2517/#2568, #2513): the source-session re-injection arm
+            # + its guard ablation — recorded verbatim in the methodology
+            # (published numbers carry which arm produced them; the guard
+            # bool distinguishes the injection-only ablation).
+            "session_reinjection": bool(session_reinjection),
+            "session_reinjection_guard": bool(session_reinjection_guard),
+            # C4 (#2513): the resolved injection total budget — recorded so
+            # a published number carries the volume guard it was produced
+            # under (the sweep's arms differ ONLY by this value). The
+            # product default is recorded when the arm is OFF (the
+            # evidence_boost-multiplier precedent: an inert knob never lets
+            # a stray env value into the methodology).
+            "session_reinjection_total_cap": (
+                reinjection_total_cap
+                if reinjection_total_cap is not None
+                else DEFAULT_REINJECTION_TOTAL_ITEMS),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them; OFF by default — the C3-3
@@ -4942,10 +5246,18 @@ def outcomes_to_report(
                 # arm marker rides the projection (read via o.get — absent
                 # on pre-feature checkpoints).
                 "entity_key_expansion",
+                # C6 (#2520, #2513): the time-aware query expansion arm +
+                # the reorder stamps ride the projection (read via o.get —
+                # absent on pre-feature checkpoints).
+                "time_aware_qe", "time_aware_stats",
                 # C3-1 (#2519, #2567): the coverage-completeness loop arm +
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
                 "coverage_loop", "coverage_loop_stats",
+                # C4 (#2517/#2568, #2513): the source-session re-injection
+                # arm marker + per-outcome census ride the projection
+                # (read via o.get — absent on pre-feature checkpoints).
+                "session_reinjection", "session_reinjection_stats",
                 # C5 (#2521, #2513): the aggregative-check arm marker + the
                 # per-outcome verdict ride the projection (read via o.get —
                 # absent until the outcome carries them; pre-feature
@@ -5204,6 +5516,16 @@ def _print_summary(report: dict[str, Any]) -> None:
             print(f"  {cls:<28} {count}")
     else:
         print("error census: no errors")
+    # #2873: the extractor-warning readout — printed ONLY when the run
+    # emitted warnings, so a warning-bearing run's console summary is no
+    # longer byte-identical to a clean one (the issue's symptom). Readout
+    # only; never a gate limb (integrity.valid untouched).
+    ew = integ.get("extractor_warnings") or {}
+    if ew.get("count"):
+        print(f"extractor warnings: {ew.get('count')} across "
+              f"{ew.get('questions_with_warnings')} question(s)")
+        for w in (ew.get("sample") or []):
+            print(f"  - {w}")
     for c in integ.get("checks") or []:
         print(f"  check: {c}")
     # #1946: the extraction-health gate readout — printed BEFORE the score
@@ -5397,6 +5719,25 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C2 evidence-mark boost even when "
                          "TORTOISE_LME_EVIDENCE_BOOST is set "
                          "(tri-state: explicit flags beat the env)")
+    # C6 (#2520, #2513): time-aware query expansion — tri-state
+    # --time-aware-qe / --no-time-aware-qe (None default so the
+    # TORTOISE_LME_TIME_AWARE_QE env still applies; OFF by default in code
+    # — the sealed #2513 A/B decides adoption). The A/B switch: identical
+    # questions run once with the arm OFF (baseline) and once ON; the
+    # report's shared-question evidence_recall@k / recall_all@5 deltas gate
+    # the +recall claim.
+    ta = p.add_mutually_exclusive_group()
+    ta.add_argument("--time-aware-qe", dest="time_aware_qe",
+                    action="store_true", default=None,
+                    help="Time-aware query expansion: anchor the dense-leg "
+                         "query with the question date and reorder the "
+                         "final pool live-before-stale on a prefer-latest "
+                         "question (non-TR only). Default: OFF; "
+                         "TORTOISE_LME_TIME_AWARE_QE=1 also enables.")
+    ta.add_argument("--no-time-aware-qe", dest="time_aware_qe",
+                    action="store_false",
+                    help="Force time-aware query expansion OFF (overrides "
+                         "the env var).")
     # C2 (#2518, #2513): entity/fact-augmented key expansion — tri-state
     # --entity-key-expansion / --no-entity-key-expansion (None default so
     # the TORTOISE_LME_ENTITY_KEY_EXPANSION env still applies; OFF by
@@ -5443,6 +5784,46 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C3-1 coverage-completeness loop even "
                          "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
                          "explicit flags beat the env)")
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # --session-reinjection / --no-session-reinjection (None default so the
+    # TORTOISE_LME_SESSION_REINJECTION env still applies; OFF by default in
+    # code). The A/B switch for the reader-surface + pool-rank-cut lever;
+    # the guard ablation (--no-session-reinjection-guard) still re-caps
+    # through the shared contract but skips the session-diverse reorder, so
+    # a flip is attributable to the guard rather than the fetched items.
+    # A both-arms-ON run (this + --coverage-loop) is REFUSED at arm
+    # resolution (both own the pool order).
+    sr = p.add_mutually_exclusive_group()
+    sr.add_argument("--session-reinjection", dest="session_reinjection",
+                    action="store_true", default=None,
+                    help="enable the C4 source-session re-injection "
+                         "(seed the reader-reachable pool head by rank, "
+                         "fetch each seeded session's remaining verbatim "
+                         "material — the product's episodic turns by "
+                         "default — in ONE batched query, splice them "
+                         "additively after the session's last base hit; "
+                         "default: env "
+                         "TORTOISE_LME_SESSION_REINJECTION — OFF by default "
+                         "in code, #2517)")
+    sr.add_argument("--no-session-reinjection", dest="session_reinjection",
+                    action="store_false", default=None,
+                    help="disable the C4 source-session re-injection even "
+                         "when TORTOISE_LME_SESSION_REINJECTION is set "
+                         "(tri-state: explicit flags beat the env)")
+    srg = p.add_mutually_exclusive_group()
+    srg.add_argument("--session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_true",
+                     default=None,
+                     help="apply the C4 session-diverse window guard "
+                          "(default: ON — --no-session-reinjection-guard is "
+                          "the injection-only ablation)")
+    srg.add_argument("--no-session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_false",
+                     help="skip the C4 session-diverse reorder (the "
+                          "injection-only ablation; the C5 re-cap still "
+                          "applies through the same shared contract — it "
+                          "binds injected CHUNKS, not the default turn "
+                          "grain)")
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state --aggregative-flag / --no-aggregative-flag (None
     # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF
@@ -5474,7 +5855,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(env TORTOISE_LME_EVIDENCE_BOOST_SOURCE; default "
                         f"{DEFAULT_EVIDENCE_BOOST_SOURCE})")
     p.add_argument("--mock", action="store_true",
-                   help="offline mode: MockReader + MockJudge, no API keys (CI)")
+                   help="offline mode: MockReader + MockJudge, no API keys "
+                        "(CI). Does NOT waive the dense-leg gate (#4718) — "
+                        "use --skip-preflight for that")
     p.add_argument("--skip-preflight", action="store_true",
                    help="bypass the pre-flight API gate AND the dense-leg "
                         "(embedder) gate (debugging/offline only — the "
@@ -5973,6 +6356,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
         eke_env = (os.environ.get("TORTOISE_LME_ENTITY_KEY_EXPANSION")
                    or "")
         entity_key_expansion = eke_env.strip().lower() in _TRUTHY
+    # C6 (#2520, #2513): time-aware query expansion — tri-state (CLI flag
+    # > TORTOISE_LME_TIME_AWARE_QE env > OFF — fail-safe: only
+    # 1/true/yes/on enables). Resolved once and threaded into
+    # run_evaluation (methodology == actual; the #2513 retrieval A/B
+    # switch).
+    if args.time_aware_qe is not None:
+        time_aware_qe = args.time_aware_qe
+    else:
+        ta_env = (os.environ.get("TORTOISE_LME_TIME_AWARE_QE") or "")
+        time_aware_qe = ta_env.strip().lower() in _TRUTHY
     # C3-1 (#2519, #2567): coverage-completeness loop — tri-state (CLI flag
     # > TORTOISE_LME_COVERAGE_LOOP env > OFF — fail-safe: only
     # 1/true/yes/on enables, mirroring the boost gate above). Resolved once
@@ -5983,6 +6376,24 @@ def _run_main(parser: argparse.ArgumentParser, args,
     else:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C4 (#2517/#2568, #2513): source-session re-injection + guard
+    # ablation — tri-state (CLI flag > TORTOISE_LME_SESSION_REINJECTION env
+    # > OFF — fail-safe: only 1/true/yes/on enables, mirroring the sibling
+    # arms). Resolved once and threaded into run_evaluation (methodology ==
+    # actual).
+    if args.session_reinjection is not None:
+        session_reinjection = args.session_reinjection
+    else:
+        sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        session_reinjection = sr_env.strip().lower() in _TRUTHY
+    if args.session_reinjection_guard is not None:
+        session_reinjection_guard = args.session_reinjection_guard
+    else:
+        session_reinjection_guard = True
+    # §0.2: the both-arms-ON refusal is raised by ``run_evaluation`` at arm
+    # resolution (before the question loop) and caught in ``_run_main`` —
+    # kept in ONE place so the check cannot diverge from the driver's env
+    # resolution.
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (CLI flag > TORTOISE_LME_AGGREGATIVE_FLAG env >
     # OFF — fail-safe: only 1/true/yes/on enables, mirroring the C2 gates
@@ -6064,14 +6475,14 @@ def _run_main(parser: argparse.ArgumentParser, args,
                      load_timeout=args.load_timeout)
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
-    # the ~tens-of-MB download). Real runs refuse to start when the dense
-    # leg can't run; --mock warns and continues. The status flows into the
-    # report methodology (D5: embedder + vector_strategy always emitted).
-    # R3 (#1542) D2: the embedder gate. `--skip-preflight` must ALSO skip
-    # this gate — it's the "skip all gates" debugging flag; a real (non-mock)
-    # run without it still refuses to start dense-less (#1626).
+    # the ~tens-of-MB download). EVERY run refuses to start when the dense
+    # leg cannot run; the only waiver is an explicit --skip-preflight (#1626).
+    # `--mock` selects the reader/judge and is NOT a dense-leg authorisation
+    # (#4718: `--retrieval-only --mock` is a measurement, and a loaded host
+    # used to turn it keyword-only). The status flows into the report
+    # methodology (D5: embedder + vector_strategy always emitted).
     embedder_status = _preflight_embedder(
-        mock=args.mock or args.skip_preflight)
+        dense_leg_required=not args.skip_preflight)
 
     instances = ds.load_dataset(
         args.split, limit=args.limit, data_path=args.data,
@@ -6190,10 +6601,19 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm (tri-state resolved above; OFF by default — the
                 # sealed #2513 A/B decides adoption).
                 entity_key_expansion=entity_key_expansion,
+                # C6 (#2520, #2513): time-aware query expansion arm
+                # (tri-state resolved above; OFF by default — the sealed
+                # #2513 A/B decides adoption).
+                time_aware_qe=time_aware_qe,
                 # C3-1 (#2519, #2567): coverage-completeness loop arm
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
                 coverage_loop=coverage_loop,
+                # C4 (#2517/#2568, #2513): the source-session re-injection
+                # arm + guard ablation (tri-state resolved above; OFF by
+                # default — the sealed A/B decides adoption).
+                session_reinjection=session_reinjection,
+                session_reinjection_guard=session_reinjection_guard,
                 # C5 (#2521, #2513): the aggregative-intent coverage-check
                 # arm (tri-state resolved above; OFF by default — records
                 # the per-outcome verdict under the arm; the C3-3 routing
@@ -6219,9 +6639,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # --retry-failed resume mode (default off) + the eval's
                 # elevated HYBRID-arm retrieval deadline (1500 ms via the
                 # _elevated_timeout_ms seam — the vector arm keeps
-                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale
-                # pre-feature checkpoints (CheckpointStaleError — the SAFE
-                # direction; Task 8 requires a fresh checkpoint anyway).
+                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale a
+                # fingerprint-bearing pre-feature checkpoint
+                # (CheckpointStaleError — the SAFE direction; Task 8 requires
+                # a fresh checkpoint anyway).
                 retry_failed=args.retry_failed,
                 ingest_write_retries=INGEST_WRITE_RETRIES,
                 ingest_question_retries=INGEST_QUESTION_RETRIES,
@@ -6256,6 +6677,13 @@ def _run_main(parser: argparse.ArgumentParser, args,
                   f"{MODEL_ENCODE_FAILED_EXIT} (never report empty recall as a "
                   f"result)", file=sys.stderr)
             raise SystemExit(MODEL_ENCODE_FAILED_EXIT) from e
+        except ArmConflictError as e:
+            # §0.2: the arm-resolution refusal must ABORT with a clean
+            # message + non-zero exit — never a bare traceback, never N
+            # per-question "non-fatal" failure entries.
+            print("[longmem_eval] RUN ABORTED — arm conflict: "
+                  f"{e}", file=sys.stderr)
+            raise SystemExit(1) from e
 
         out = args.output or str(default_report_path(args.split))
         save_report(report, out)

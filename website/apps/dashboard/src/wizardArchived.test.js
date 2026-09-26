@@ -44,8 +44,8 @@ test('live wizard renders WIZARD_STEPS (the 4 human steps), not legacy labels', 
   // helper's `hasOrg` arm and the e2e's "never 'Create your Organization'" pin.
   const h1Open = src.indexOf('<h1 className="welcome-title">')
   const h1 = src.slice(h1Open, src.indexOf('</h1>', h1Open))
-  assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })'),
-    'the live wizard <h1> names the stage through wizardStageLabel (the org-holding and paused overrides are pinned by the unit tests)')
+  assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })'),
+    'the live wizard <h1> names the stage through wizardStageLabel (the org-holding, paused, #3428 not-connected and cycle-4 build-fork overrides are pinned by the unit tests)')
   assert.ok(!src.slice(src.indexOf('<div className="welcome-head">'), src.indexOf('LEGACY_WIZARD_ARCHIVED &&')).includes('className="wizard-title"'),
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // the archived block's title still reads wizardSteps (kept for rollback)
@@ -72,12 +72,16 @@ test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan
     'wizardComplete dropped the PATCH onboarding_complete write')
 })
 
-test('review P1: build fork marks catalog-presented in the handler (not a step-2 effect)', () => {
-  // React batches fork-chosen + advance into one render, so the render-time
-  // effect can never observe a FRESH build pick. The handler must fire the
-  // catalog-presented checkpoint on the build success path.
-  assert.ok(src.includes("if (forkId === 'build')"),
-    'handleWizardFork has a build branch')
-  assert.ok(/step: 'catalog-presented'/.test(src),
-    'catalog-presented checkpoint in the handler')
+test('review P1 / #3913: the build fork handler writes NO checkpoint step (the catalog card still renders)', () => {
+  // #1997 (review P1) pinned the handler's catalog-presented write; #3913
+  // (owner ruling 2026-09-20) removed it — the build-fork gate completes on the
+  // two acts the server OBSERVES (harness-connected + first-points-filed), so a
+  // fork pick must record no step. The build branch still exists: a build pick
+  // stays on the fork step so the catalog CARD renders, and self picks advance.
+  assert.ok(src.includes("if (forkId !== 'build')"),
+    'handleWizardFork still branches on the build pick (non-build picks advance, build stays for the card)')
+  assert.ok(src.includes('Build catalog'),
+    'the build catalog CARD still renders (only the write was removed)')
+  assert.ok(!/step: 'catalog-presented'/.test(src),
+    'no catalog-presented checkpoint anywhere in main.jsx — #3913 removed the writer')
 })

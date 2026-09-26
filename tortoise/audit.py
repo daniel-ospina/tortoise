@@ -249,7 +249,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
 
     def _superseded_w(alias: str = "n") -> str:
         """Supersession filter: superseded/outdated status OR the legacy
-        outdated=true flag (invalidate_point keeps the original status)."""
+        outdated=true flag (invalidate_point keeps the original status).
+
+        Deliberately NOT ``live.TERMINAL_EXCLUDED_STATUSES`` (#2901): this is
+        the SUPERSESSION shape, not the terminal shape. ``retracted`` /
+        ``archived`` / ``deprecated`` are terminal but are not produced by a
+        supersession write, so folding them in would make checks 3/4 flag
+        retraction/archival as "superseded with no CORRECTS edge" — a false
+        positive. The narrow set is the reason; the terminal set is the OTHER
+        question, answered once in live.py.
+        """
         return (f"({alias}.status IN ['superseded', 'outdated'] "
                 f"OR {alias}.outdated = true)")
 

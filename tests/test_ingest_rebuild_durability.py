@@ -150,10 +150,17 @@ def test_a10_content_kind_fallback_dedups_hash_less_sibling(a10):
 
 def test_a10_post_rebuild_fallback_dedups_unpatched_resubmission(a10):
     """E2E-6.4(i) post-rebuild leg (CYCLE-23 nit-fix): a hash-less partial
-    SURVIVES rebuild content-intact (the #548 snapshot synthesis) with
-    content_hash NULL — an UNPATCHED resubmission dedups via the fallback
-    (exactly-once; the hash-less sibling exists post-rebuild is asserted
-    FIRST, so a synthesis regression cannot pass the leg vacuously)."""
+    SURVIVES rebuild content-intact (the #548 snapshot synthesis); #2795 now
+    also RECOMPUTES its content_hash from the replayed content (the old
+    closed writer left it NULL), so an UNPATCHED resubmission dedups via the
+    primary hash MATCH (exactly-once preserved either way).
+
+    #2958 review: because the recompute now lets the FIRST resubmission hit
+    the primary hash MATCH, this test re-opens the CONTENT+KIND FALLBACK leg
+    explicitly below (force the partial back to its hash-less crash state and
+    resubmit) — otherwise the fallback scan would no longer be exercised on
+    the post-rebuild path at all."""
+    import hashlib
     db, events, sdk = a10  # noqa: RUF059
     g = sdk._get_proj().g
     content = "post-rebuild-partial"
@@ -162,12 +169,22 @@ def test_a10_post_rebuild_fallback_dedups_unpatched_resubmission(a10):
         "is_operator:false, status:'live'})",
         params={"c": content})
     _rebuild(sdk, events)
-    # the hash-less partial exists post-rebuild, content intact, hash NULL
+    # the partial exists post-rebuild, content intact, and #2795 derives the
+    # hash from the replayed content (was NULL under the closed writer)
     row = g.query("MATCH (n:Point {id:'pr-partial'}) RETURN n.content, "
                   "n.content_hash").result_set[0]
-    assert row[0] == content and row[1] is None
-    # unpatched resubmission → fallback dedups to the SAME id, one point total
+    assert row[0] == content
+    assert row[1] == hashlib.sha256(content.encode()).hexdigest()
+    # unpatched resubmission → dedups to the SAME id via the PRIMARY hash MATCH
     p = sdk.create_point("statement", content, dedup=True)
     assert p["id"] == "pr-partial"
+    assert _count(g, "MATCH (n:Point {content:$c}) RETURN count(n)",
+                  {"c": content}) == 1
+    # #2958 review: re-open the FALLBACK leg — force the crash-partial state
+    # (hash-less) and resubmit; the content+kind scan must still dedup to the
+    # SAME id (never a permanent duplicate).
+    g.query("MATCH (n:Point {id:'pr-partial'}) SET n.content_hash = NULL")
+    p2 = sdk.create_point("statement", content, dedup=True)
+    assert p2["id"] == "pr-partial"
     assert _count(g, "MATCH (n:Point {content:$c}) RETURN count(n)",
                   {"c": content}) == 1

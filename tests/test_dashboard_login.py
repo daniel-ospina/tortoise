@@ -970,7 +970,7 @@ class TestKeyManagementOwnerAdminGate:
 class TestBackupsSessionAuth:
     """#1831 P2-4: GET /backups rides the session dual-auth (#1828).
 
-    loadBackups calls api('/backups') with NO key when a recoverable mint
+    loadBackups calls api('/v1/backups') with NO key when a recoverable mint
     failure (#1830) left apiKey empty — a bare get_current_org dependency
     would 401 and the Backups card silently vanished for Pro users. The
     ungated dual-auth accepts session JWT OR tt_ key; only org_id is read.

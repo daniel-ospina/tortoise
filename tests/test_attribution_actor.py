@@ -457,7 +457,7 @@ class TestMcpBoundaryStripAndIgnore:
             tok_t = _current_org_id.set("team-strip-2600")
             tok_l = _current_org_limits.set(
                 {"org_id": "team-strip-2600", "tier": "free",
-                 "max_points": 100000})
+                 "max_points": 100000, "max_sessions": None})
             tok_m = _transport_mode.set("http")
             try:
                 res = tortoise_create_point(
@@ -503,7 +503,7 @@ class TestMcpToolSweepStripActor:
                 tok_t = _current_org_id.set("team-sweep-2600")
                 tok_l = _current_org_limits.set(
                     {"org_id": "team-sweep-2600", "tier": "free",
-                     "max_points": 100000})
+                     "max_points": 100000, "max_sessions": None})
                 tok_m = _transport_mode.set("http")
                 try:
                     yield

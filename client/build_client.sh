@@ -3,10 +3,14 @@
 # pattern: stage the client subset of the `tortoise` package into a temp
 # tree, overlay the client-only shim files, then build.
 #
-# Shared modules (mcp_client.py, config.py, exceptions.py) are COPIED from
-# the canonical repo tree (tortoise/) at build time — single source of
-# truth, zero drift. The engine modules (sdk.py, projection, ep, ...) are
-# never staged, so the wheel contains the thin driver only.
+# Shared modules (mcp_client.py, config.py, exceptions.py,
+# status_vocabulary.py) are COPIED from the canonical repo tree (tortoise/)
+# at build time — single source of truth, zero drift. The `cp` lines below
+# ARE that source: client/shared_modules.sh derives the module set from them
+# for the CI `client` path gate and the wheel allowlists (#3805), so a
+# new shared module is added HERE and nowhere else. The engine modules
+# (sdk.py, projection, ep, ...) are never staged, so the wheel contains the
+# thin driver only.
 #
 # Usage:
 #   client/build_client.sh [OUT_DIR]     # default OUT_DIR = <repo>/dist-client
@@ -29,6 +33,9 @@ mkdir -p "$STAGE/tortoise" "$STAGE/tortoise_client"
 cp "$REPO_ROOT/tortoise/mcp_client.py" "$STAGE/tortoise/mcp_client.py"
 cp "$REPO_ROOT/tortoise/config.py"     "$STAGE/tortoise/config.py"
 cp "$REPO_ROOT/tortoise/exceptions.py" "$STAGE/tortoise/exceptions.py"
+# #3805: the recorded status vocabulary — the ONE declaration both client
+# surfaces import (the thin probe and the S9 skill-wiring client).
+cp "$REPO_ROOT/tortoise/status_vocabulary.py" "$STAGE/tortoise/status_vocabulary.py"
 
 # Client-only shim files (checked into client/ — NOT copies of the engine's
 # __init__, which imports redislite).

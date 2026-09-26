@@ -36,6 +36,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -77,12 +78,15 @@ def _load_backfill():
 
 @pytest.fixture
 def proj():
+    tmpdir = tempfile.mkdtemp(prefix="t12_force_")
     p = FalkorProjection(
-        os.path.join(tempfile.mkdtemp(prefix="t12_force_"), "t12.db"),
+        os.path.join(tmpdir, "t12.db"),
         graph_name="tortoise",
     )
     yield p
     p.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _g(proj):

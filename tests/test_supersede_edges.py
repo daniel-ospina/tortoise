@@ -9,6 +9,7 @@ Runnable with:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -27,6 +28,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, **kw):

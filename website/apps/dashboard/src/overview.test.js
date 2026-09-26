@@ -11,8 +11,13 @@ import {
   overviewDigest,
   overviewNextAction,
 } from './overview.js'
+import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './connectionObservation.js'
+import { wizardStageLabel } from './wizardFlow.js'
 import { setupGuide } from './setupGuide.js'
 import { stripComments } from './testSupport.js'
+// #4880/#4365: the live wizard prompt bodies moved from main.jsx into this
+// JSX-free module, so this ratchet asserts them through the RENDER.
+import { wizardPromptText } from './wizardPrompts.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -48,6 +53,43 @@ test('connection: grandfathered wire-complete (no node steps) → connected', ()
 test('connection: active org without harness-connected → not connected', () => {
   const c = overviewConnection({ status: 'active', completed_steps: ['team-named'] })
   assert.equal(c.kind, 'disconnected')
+})
+
+// #3724: the disconnected card reports the OBSERVATION, never the categorical
+// absence. "Not connected" asserted what the server did not observe and was
+// false for a captured-session user (capture files only `capture-disclosed`,
+// never `harness-connected`), whose memories are visible on the same screen.
+test('#3724: the disconnected card states the observation, never a categorical absence', () => {
+  const c = overviewConnection({ status: 'active', completed_steps: ['team-named'] })
+  assert.equal(c.kind, 'disconnected', 'the arm is unchanged — kind drives the styling')
+  assert.equal(c.value, NO_CONNECTION_OBSERVED)
+  assert.equal(c.value, 'No connection observed yet', 'the shipped phrase is observational')
+})
+
+// #3724: the paused heading is the SAME observation with a wizard-only prefix.
+// It is DERIVED from NO_CONNECTION_OBSERVED (not re-typed) so a change to the
+// base cannot leave the paused arm stale. The literal below fails if the
+// derivation is replaced by a differently-worded independent literal.
+test('#3724: the paused wizard heading is derived from the shared observation phrase', () => {
+  assert.equal(SETUP_PAUSED_NO_CONNECTION_OBSERVED, 'Setup paused — no connection observed yet')
+})
+
+// #3724: one condition must not be stated two ways. The card and the wizard's
+// step-3 heading share the phrase by construction (connectionObservation.js);
+// this ratchet catches a future edit that re-divides them into two DIFFERENT
+// words. Both sides are pinned to the literal, so neither can drift silently.
+//
+// SCOPED to the NEGATIVE (not-connected) arm: the wizard's POSITIVE arms
+// legitimately take extra predicates the card does not (`connected`,
+// `buildFork`), so the two surfaces do NOT state one universal string.
+// Unifying the positive arms is a separate copy decision, not this fix —
+// asserting it here would overclaim the ratchet.
+test('#3724: the Overview card and the wizard step state the SAME observation phrase in the NEGATIVE arm', () => {
+  const c = overviewConnection({ status: 'active', completed_steps: ['team-named'] })
+  assert.equal(c.value, 'No connection observed yet',
+    'the card states the observation phrase')
+  assert.equal(wizardStageLabel(3), 'No connection observed yet',
+    'the wizard step-3 heading states the SAME phrase — pinned literally, not via the shared constant')
 })
 
 test('connection: graph-down markers → unavailable, NEVER connected', () => {
@@ -179,9 +221,11 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
 
   // Quote-aware strip, then excision of the ARCHIVED wizard block: dead code
-  // at LEGACY_WIZARD_ARCHIVED = false, but it must stay byte-identical for the
-  // A0 rollback path (main.jsx:2459-2462), so it is excluded from the scan
-  // rather than edited.
+  // at LEGACY_WIZARD_ARCHIVED = false, excluded from the vocab scan so its
+  // legacy copy cannot pollute the live-surface ratchet. #4335 intentionally
+  // edited its welcome plan-chooser fallback (marketing link → honest disabled
+  // CTA), so the slice's line-count canary below is kept in sync rather than
+  // the block being frozen.
   const strip = stripComments(src)
 
   // Scan-coverage self-test: the connector line is JSX TEXT whose tail
@@ -209,12 +253,14 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   assert.notEqual(markerAt, -1, 'excision marker not found after anchor — refusing a slice to the file edge')
   const end = markerAt + MARKER.length
   const lineStart = strip.lastIndexOf('\n', anchor) + 1
-  // raw main.jsx 6577..6854; the same slice is 279 split('\n') elements on the
-  // STRIPPED source (end is a stripped-source index — slice `strip`, not `src`)
+  // The same slice is 278 split('\n') elements on the STRIPPED source (end is a
+  // stripped-source index — slice `strip`, not `src`). Was 279 before #4335
+  // replaced the archived wizard's welcome plan-chooser fallback (a marketing
+  // "See pricing" link) with the honest disabled UpgradeCta — one line shorter.
   const E = strip.slice(lineStart, end)
   assert.match(E, /^ *\{LEGACY_WIZARD_ARCHIVED && welcomeOriented && \(/m)
   assert.ok(E.trimEnd().endsWith(')}'))
-  assert.equal(E.split('\n').length, 279)
+  assert.equal(E.split('\n').length, 278)
   assert.match(strip.slice(end), /^ *<\/>/)
 
   // Scan = the whole file, minus the archived block when the flag is off. Flip
@@ -227,7 +273,7 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   // overlap fails with a named message instead of a confusing count mismatch.
   const ALLOW = [
     [/\/v1\/graphs\/trash\/[^`]*points\$\{q\}/, 1], // main.jsx:4990
-    [/\/v1\/points/, 4],                            // main.jsx:1080, 2968, 6310, 7437 (no \b: 2968 is preceded by a quote)
+    [/\/v1\/points/, 4],                            // snippet const, overview seed call, build-fork curl, done-step endpoint (#3890: the D5 empty-state curl moved to overviewEmptyAction.js)
     [/points=\{team\.point_count \?\? 0\}/, 1],     // main.jsx:7456
     [/overviewDigest\(points\)/, 1],                // main.jsx:298
     [/\{\s*points\s*\}/, 1],                        // main.jsx:297
@@ -271,11 +317,32 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   const POSITIVES = [
     [/card-label">\s*Memories</, 'the point_count card is labelled "Memories"'],
     [/file your first memory/i, 'live connect caption carries the anchor'],
-    [/file my first memory/i, 'live prompt bodies carry the anchor (not just the caption)'],
-    [/decisions and findings it saves land here as memories/,
-      'the live first-contact empty state glosses the anchor'],
+    [/two ways to add\s+memory/,
+      'the live first-contact empty state glosses the anchor (#3832 D5 copy)'],
   ]
   for (const [re, label] of POSITIVES) assert.ok(re.test(scan), label)
+
+  // #4880/#4365: the live prompt bodies MOVED out of main.jsx into
+  // wizardPrompts.js. A ratchet that kept scanning only main.jsx would silently
+  // lose coverage of the file that now holds them, so the moved copy is
+  // ratcheted in its new home — and the anchor is asserted through the RENDER
+  // (what the agent actually receives), which is what the old
+  // `[/file my first memory/i, 'live prompt bodies…']` entry was reaching for
+  // through the source text.
+  const promptsSrc = readFileSync(join(__dirname, 'wizardPrompts.js'), 'utf8')
+  assert.deepEqual(promptsSrc.match(/\bpoints?\b/gi) ?? [], [],
+    'new "point" vocabulary in wizardPrompts.js — the live wizard copy')
+  const rendered = ['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web']
+    .flatMap((h) => [1, 2].map((s) => wizardPromptText(h, s, 'tk_test', 'included')))
+  assert.ok(rendered.some((p) => p.includes('tortoise_create_point')),
+    'precondition: a rendered prompt carries the create_point instruction')
+  for (const p of rendered) {
+    if (!p.includes('tortoise_create_point')) continue
+    assert.match(p, /file my first memory/i,
+      'rendered live prompt carries the anchor (not just the caption)')
+    assert.ok(!/\bpoints?\b/i.test(p),
+      `rendered live prompt drifted to "point" jargon: ${JSON.stringify(p)}`)
+  }
 
   // BINDING — the ratchet must read a STRIPPED view. Two things hold this in
   // place: (1) `scan`/`strip` are asserted to be provably not the raw source,
@@ -293,7 +360,7 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   assert.notEqual(scan, src, 'the vocabulary scan must read a stripped view, not raw source')
   const commentOnly = 'const x = 1 /* card-label">Memories< */\n' +
     '// file your first memory\n// file my first memory\n' +
-    '/* decisions and findings it saves land here as memories */'
+    '/* two ways to add memory */'
   const commentOnlyStripped = stripComments(commentOnly)
   for (const [re, label] of POSITIVES) {
     assert.ok(re.test(commentOnly), `control: ${label} — the anchor pattern is present in the fixture`)

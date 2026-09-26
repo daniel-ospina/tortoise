@@ -38,6 +38,14 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
+# #2901: the ONE canonical non-current predicate (tortoise/live.py) — status
+# in the canonical terminal vocabulary OR the legacy ``outdated=true`` flag.
+# Never inline a status subset here (the pre-fix three-status list
+# ``superseded/retracted/archived`` omitted ``outdated`` / ``deprecated``, so an
+# outdated keyed statement was treated as the current twin of a legacy
+# observation).
+from tortoise.live import _terminal_excluded  # noqa: E402
+
 DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
 
 
@@ -102,7 +110,7 @@ def scan_observation_duplicates(proj) -> dict:
     stmt_rows = proj.g.query(
         "MATCH (n:Point {pointKind:'statement'}) "
         "WHERE n.github_url IS NOT NULL AND n.github_url <> '' "
-        "AND (n.status IS NULL OR NOT (n.status IN ['superseded','retracted','archived'])) "
+        f"AND {_terminal_excluded('n.status')} "
         "RETURN n.id, n.github_url, n.status",
     ).result_set
     statements_by_url: dict[str, list[str]] = {}

@@ -445,7 +445,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # #1885: a returning user (onboarding complete) lands on the dashboard's
     # first-run card — the key is NEVER re-revealed (reveal_calls stays 0;
     # the welcome-card reveal only fires on the provisioning path).
-    expect(page.locator("body")).to_contain_text("Welcome to your Tortoise graph", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("No memories yet", timeout=20_000)
     assert reveal_calls["n"] == 0, f"no re-reveal on the returning dashboard path, got {reveal_calls['n']}"
     assert mint_calls == [], f"zero-mint: POST /v1/session/key on the returning visit: {mint_calls}"
     # #2356 (test-review): pin the KEYLESS outcome concretely — the welcome
@@ -454,7 +454,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # old "copy it now"/"Couldn't create an agent key" negations were
     # vacuous — those strings exist nowhere in the app sources.
     expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
-    expect(page.locator("body")).to_contain_text("Connect your agent so it remembers why, not just what.")
+    expect(page.locator("body")).to_contain_text("Your memory is connected")
 
 
 def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:

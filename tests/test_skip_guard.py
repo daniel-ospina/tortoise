@@ -753,3 +753,356 @@ def test_shared_live_uri_reason_stays_in_the_exempt_family():
         f"{LIVE_URI_SKIP_REASON!r} — tools/skip-guard.py exempts by prefix "
         f"{_skip_guard._EXEMPT_REASON_PREFIXES}; update BOTH together"
     )
+
+
+# ── #2573: the embedder-unavailable reason class ──────────────────────────
+# The dense-retrieval leg degrades silently to keyword-only when the embedding
+# model cannot be loaded, and the suite reports green while asserting a
+# different meaning (semantic recall changes under TF-IDF). These reasons
+# mention neither FalkorDB nor a manifest, so they could not trip the guard at
+# all before this class existed. The reasons below are VERBATIM from the tree
+# (file:line in each id) — if a reason string changes, the guard silently stops
+# matching it, so the assertion is written against the real text.
+
+# (nodeid, verbatim reason) — the -v progress form is built from these.
+EMBEDDER_UNAVAILABLE_REASONS = [
+    ("tests/test_cross_lens.py::test_real_embedder_smoke",
+     "bge-small-en-v1.5 not cached locally — skipping real-embedder test"),  # :455
+    ("tests/test_cross_lens.py::test_real_embedder_smoke",
+     "bge-small-en-v1.5 unavailable — model load timed out"),  # :457
+    ("tests/test_search_engine.py::test_dense_leg",
+     "sentence-transformers / all-MiniLM-L6-v2 cache not available — "
+     "dense-leg assertion skipped"),  # :198
+    ("tests/test_extractor.py::test_multi_source_embedding",
+     "sentence-transformers / bge-small cache not available — multi-source "
+     "embedding test skipped (embedder-less CI)"),  # :417
+    ("tests/test_assembly_pure.py::test_shipped_config",
+     "embedder unavailable — the shipped hybrid leg cannot be exercised in "
+     "this lane (see #3223)"),  # :694
+    ("tests/test_hosted_api.py::test_thread_safety",
+     "bge-small-en-v1.5 not cached — skipping thread-safety test"),  # :5721
+]
+
+# Reasons that must NOT trip the embedder class. Each is a REAL reason from the
+# tree or a minimal probe of a boundary: generic "cache"/"model" words, an
+# embedder-context word with no availability claim, and the deliberately
+# EXCLUDED collection-time offline-precondition family (a non-shipped alternate
+# model with `local_files_only=True`, which fires by design in CI).
+NON_EMBEDDER_REASONS = [
+    "requires network access",
+    "sklearn not installed",
+    "frozen LongMemEval-S dataset not cached (CI)",   # "not cached", no model ctx
+    "result cache not available for this run",        # availability, no model ctx
+    "model checkpoint download disabled",             # the word "model" only
+    "no embedder AND no sklearn — probe cannot run",  # context, no availability
+    "embedder present — degraded-absence path not exercised",  # context only
+    "all-MiniLM-L6-v2 not in HF cache (HF_HUB_OFFLINE in CI)",  # out of class
+]
+
+
+def _v_line(nodeid: str, reason: str) -> str:
+    """Real pytest -v progress shape: '<nodeid> SKIPPED (<reason>) [ 25%]'."""
+    return f"{nodeid} SKIPPED ({reason}) [ 25%]\n"
+
+
+class TestGuardFailsOnEmbedderUnavailableSkip:
+    def test_real_reasons_all_red_in_v_format(self):
+        for nodeid, reason in EMBEDDER_UNAVAILABLE_REASONS:
+            proc = run_guard(_v_line(nodeid, reason))
+            assert proc.returncode == 1, f"embedder skip not caught: {reason!r}"
+            assert nodeid in proc.stdout
+            assert "embedder-unavailable" in proc.stdout
+
+    def test_rs_summary_format_red(self):
+        # -r fEs summary is the authoritative never-truncated reason source.
+        proc = run_guard(
+            "SKIPPED [2] tests/test_search_engine.py:198: sentence-transformers "
+            "/ all-MiniLM-L6-v2 cache not available — dense-leg assertion "
+            "skipped\n"
+        )
+        assert proc.returncode == 1
+        assert "test_search_engine.py" in proc.stdout
+
+    def test_non_embedder_reasons_do_not_trip(self):
+        for reason in NON_EMBEDDER_REASONS:
+            proc = run_guard(_v_line("tests/test_x.py::test_y", reason))
+            assert proc.returncode == 0, (
+                f"FALSE TRIP on a non-embedder reason: {reason!r}\n"
+                f"stdout={proc.stdout!r}"
+            )
+
+    def test_legacy_line_matcher_wires_the_embedder_class(self):
+        # Half a / P1 CI uses find_violations directly (no junitxml) — the
+        # embedder class must red there too, or the two paths disagree.
+        find_violations = _skip_guard.find_violations
+        for nodeid, reason in EMBEDDER_UNAVAILABLE_REASONS:
+            assert find_violations(_v_line(nodeid, reason)) == [nodeid], (
+                f"legacy matcher missed the embedder class: {reason!r}"
+            )
+        for reason in NON_EMBEDDER_REASONS:
+            assert find_violations(_v_line("tests/test_x.py::test_y", reason)) == [], (
+                f"legacy matcher false-tripped on: {reason!r}"
+            )
+
+    def test_junitxml_matcher_wires_the_embedder_class(self, tmp_path):
+        # The junitxml path (the AUTHORITATIVE reason source) must agree with
+        # the legacy line matcher — a reason-level skip reds with no manifest.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "bge-small-en-v1.5 not cached locally — skipping real-embedder test"))
+        proc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert proc == 1
+
+    def test_junitxml_non_embedder_reason_stays_green(self, tmp_path):
+        # Same path, non-embedder reason → observed skip, no reason violation.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "result cache not available for this run"))
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert rc == 0
+
+    def test_manifest_mode_embedder_skip_reds_despite_nodeid_observed(
+            self, tmp_path):
+        # Coverage ≠ healthy: the nodeid IS observed (satisfies the manifest)
+        # but the reason is an embedder-availability regression → red, exactly
+        # like the FalkorDB availability-REGRESSION family.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "sentence-transformers / all-MiniLM-L6-v2 cache not available — "
+            "dense-leg assertion skipped"))
+        manifest = _write(
+            tmp_path, "manifest.txt",
+            "tests/test_embedded_lifecycle_fast_close.py::test_ephemeral_nosave\n")
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), manifest,
+                                     junit=junit)
+        assert rc == 1
+
+    def test_both_classes_are_independent(self):
+        # Regression guard for the two families: each predicate is blind to the
+        # other's reasons, so neither can shadow the other.
+        falkor_only = "Live FalkorDB (Docker) not available"
+        embedder_only = "bge-small-en-v1.5 not cached locally"
+        assert _skip_guard.is_falkor_reason_violation(falkor_only)
+        assert not _skip_guard.is_embedder_reason_violation(falkor_only)
+        assert _skip_guard.is_embedder_reason_violation(embedder_only)
+        assert not _skip_guard.is_falkor_reason_violation(embedder_only)
+
+    def test_existing_falkordb_exemptions_still_live(self):
+        # The embedder class must not have disturbed the FalkorDB reason-family
+        # exemptions (regression guard, mirroring
+        # test_legacy_matcher_exempts_same_families).
+        for exempt in ("requires TORTOISE_DB_URI (live FalkorDB sidecar)",
+                       "Live FalkorDB server on localhost:6399 not available",
+                       "embedded FalkorDBLite unavailable",
+                       "redislite falkordb unavailable"):
+            assert not _skip_guard.is_falkor_reason_violation(exempt), exempt
+            assert not _skip_guard.is_embedder_reason_violation(exempt), exempt
+        assert _skip_guard.find_violations(
+            "SKIPPED [1] tests/test_falkordb_compat.py:367: "
+            "Live FalkorDB server on localhost:6399 not available\n") == []
+
+    def test_embedder_reasons_are_verbatim_in_the_tree(self):
+        # Anti-drift: the reasons asserted above must still exist verbatim as
+        # skip reasons in tests/ — a reworded skip would silently stop being
+        # caught, and the guard's own tests would keep passing. Reasons are
+        # collected with `ast` so the source's implicit string concatenation is
+        # already folded (`ast.Constant` holds the joined value).
+        real = _all_skip_reasons()
+        assert real, "walker found no skip reasons — scan is broken"
+        for _nodeid, reason in EMBEDDER_UNAVAILABLE_REASONS:
+            assert reason in real, (
+                f"embedder skip reason no longer present in tests/ — the guard "
+                f"would silently stop matching it: {reason!r}"
+            )
+
+
+def _all_skip_reasons() -> set[str]:
+    """Every literal skip/xfail reason under tests/ (ast, concatenation-folded)."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    found: set[str] = set()
+    for path in sorted((root / "tests").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, SyntaxError):  # pragma: no cover
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name not in ("skipif", "skip", "xfail"):
+                continue
+            reason: object = None
+            for kw in node.keywords:
+                if kw.arg == "reason" and isinstance(kw.value, ast.Constant):
+                    reason = kw.value.value
+            if reason is None and node.args and isinstance(node.args[0], ast.Constant):
+                reason = node.args[0].value
+            if isinstance(reason, str):
+                found.add(reason)
+    return found
+
+
+# ── #4221: the module-level collection-skip class ─────────────────────────
+# The #4221 shape is a skip that aborts a WHOLE MODULE at collection time
+# (pytest.skip(..., allow_module_level=True)): tests/test_event_log.py +
+# tests/test_crash_recovery_e2e.py swallowed a ModuleNotFoundError into one
+# and hid 26 data-integrity tests (SHA-256 hash-chained event log + crash
+# recovery). The class is STRUCTURAL — pytest's constant "collection skipped"
+# junitxml message — never a reason-text match: the verbatim #4221 reason
+# below contains no import text at all, while "import text" matching
+# false-positived on every deliberate pytest.importorskip(...) probe (P0 — the
+# carve-out lane reddened on botocore).
+#
+# `git show origin/main:tests/test_event_log.py` L27 (verbatim; the branch
+# fixed the import, so this text exists only on origin/main — hence the
+# literal here rather than a tree scan):
+#     pytest.skip("shared_state package not installed — event log tests require
+#                 it", allow_module_level=True)
+COLLECTION_SKIP_REASON = (
+    "shared_state package not installed — event log tests require it")
+
+# Reasons that must NOT trip the collection-skip class. A PER-TEST
+# pytest.importorskip(...) is an optional dependency BY CONSTRUCTION. The REAL
+# message it emits is pinned here (P2 — the old "sklearn not installed" was an
+# invented string the guard never actually saw, so it asserted a property the
+# guard did not have).
+OPTIONAL_DEPENDENCY_SKIP_REASONS = [
+    "requires network access",
+    "could not import 'sklearn': No module named 'sklearn'",
+    "could not import 'botocore.exceptions': No module named 'botocore'",
+    "frozen LongMemEval-S dataset not cached (CI)",
+]
+
+
+def _collection_skip_junit(reason, *, file="tests/test_modskip.py",
+                           module="tests.test_modskip", line=5):
+    """REAL pytest 9.1.1 junitxml for a module-level collection skip: empty
+    classname, name = dotted module path, constant message="collection
+    skipped", and the real reason in the element TEXT as pytest's
+    ``(path, line, 'Skipped: <reason>')`` tuple."""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite tests="1">'
+        f'<testcase classname="" name="{module}" file="{file}" time="0.000">'
+        '<skipped message="collection skipped">'
+        f"('{file}', {line}, 'Skipped: {reason}')"
+        "</skipped></testcase></testsuite></testsuites>"
+    )
+
+
+class TestGuardFailsOnModuleLevelCollectionSkip:
+    def test_real_pytest_module_skip_fixture_is_caught(self, tmp_path):
+        # End-to-end proof with a REAL pytest run: a module that aborts at
+        # collection (the #4221 shape + its verbatim reason) writes the
+        # junitxml the guard must red on. Not a hand-written string that
+        # happens to match a regex.
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_modskip.py").write_text(
+            "import pytest\n"
+            f"pytest.skip({COLLECTION_SKIP_REASON!r}, allow_module_level=True)\n\n"
+            "def test_never_runs():\n"
+            "    assert True\n",
+            encoding="utf-8",
+        )
+        junit = tmp_path / "junit.xml"
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", str(tests_dir / "test_modskip.py"),
+             "-p", "no:cacheprovider", "-o", "junit_family=xunit1",
+             f"--junitxml={junit}"],
+            capture_output=True, text=True, cwd=str(tmp_path),
+        )
+        # pytest exits 5 ("no tests collected") when the ONLY module in the
+        # run aborts at collection — the junitxml is still written, which is
+        # the evidence the guard reads.
+        assert proc.returncode in (0, 5), proc.stdout + proc.stderr
+        assert "collection skipped" in junit.read_text(encoding="utf-8"), (
+            "the fixture did not produce a real collection-skip junitxml"
+        )
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=str(junit))
+        assert rc == 1, "a real whole-module skip did not red the guard"
+
+    def test_real_4221_reason_is_caught_and_reported(self, tmp_path):
+        junit = _write(tmp_path, "junit.xml", _collection_skip_junit(
+            COLLECTION_SKIP_REASON, file="tests/test_event_log.py",
+            module="tests.test_event_log"))
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), str(tmp_path / "pytest.log"),
+             f"--junitxml={junit}"],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 1
+        assert "tests/test_event_log.py" in proc.stdout
+        assert "collection" in proc.stdout
+
+    def test_uri_gate_module_skip_is_exempt(self, tmp_path):
+        # A WHOLE-MODULE skip is not automatically a vacancy: the docker-lane
+        # URI gates (tests/test_capabilities_endpoint.py, the onboarding W3-W8
+        # suites, test_eval_ingest_cache.py) abort their module BY DESIGN on a
+        # URI-less tier-2 leg. Those must not red.
+        junit = _write(tmp_path, "junit.xml", _collection_skip_junit(
+            "docker-lane capabilities tests require TORTOISE_DB_URI "
+            "(tier-2 embedded legs skip)",
+            file="tests/test_capabilities_endpoint.py",
+            module="tests.test_capabilities_endpoint"))
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert rc == 0
+
+    def test_legacy_line_matcher_does_not_assert_the_absent_signal(self):
+        # The -rs/-v line text carries NO module-level signal: a collection
+        # skip's summary line is byte-identical to a per-test skip's ("SKIPPED
+        # [N] file.py:line: <reason>") and the location can be a helper module.
+        # The guard therefore does not assert this class there (see
+        # find_violations) — a real whole-module skip is junitxml-only.
+        find_violations = _skip_guard.find_violations
+        assert find_violations(
+            "SKIPPED [1] tests/test_event_log.py:27: "
+            f"{COLLECTION_SKIP_REASON}\n") == []
+
+    def test_predicate_is_structural_not_reason_text(self):
+        # The trip needs the constant collection-skip message; the #4221
+        # reason alone (no structural marker) does NOT trip.
+        assert _skip_guard.is_collection_skip_violation(
+            _skip_guard._COLLECTION_SKIP_MESSAGE,
+            f"(..., 27, 'Skipped: {COLLECTION_SKIP_REASON}')")
+        assert not _skip_guard.is_collection_skip_violation(
+            COLLECTION_SKIP_REASON, "")
+        assert not _skip_guard.is_collection_skip_violation(
+            "could not import 'sklearn': No module named 'sklearn'", "")
+
+
+class TestGuardAcceptsDeliberateOptionalDependencySkips:
+    def test_real_importorskip_message_does_not_trip_line_matcher(self):
+        for reason in OPTIONAL_DEPENDENCY_SKIP_REASONS:
+            proc = run_guard(_v_line("tests/test_x.py::test_y", reason))
+            assert proc.returncode == 0, (
+                f"FALSE TRIP on an optional-dependency skip: {reason!r}\n"
+                f"stdout={proc.stdout!r}"
+            )
+
+    def test_real_importorskip_message_does_not_trip_junitxml(self, tmp_path):
+        # The botocore shape that reddened the carve-out lane: a PER-TEST
+        # importorskip inside tests/test_hosted_backup.py (non-empty classname,
+        # a normal <skipped message="could not import ...">), never a
+        # whole-module collection skip.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "could not import 'botocore.exceptions': No module named 'botocore'"))
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert rc == 0
+
+    def test_three_classes_are_independent(self):
+        # Regression guard for the three families: the collection predicate is
+        # blind to the other two classes' reasons and vice versa.
+        falkor_only = "Live FalkorDB (Docker) not available"
+        embedder_only = "bge-small-en-v1.5 not cached locally"
+        import_message = ("could not import 'shared_state': "
+                          "No module named 'shared_state'")
+        assert not _skip_guard.is_collection_skip_violation(falkor_only, "")
+        assert not _skip_guard.is_collection_skip_violation(embedder_only, "")
+        assert not _skip_guard.is_collection_skip_violation(import_message, "")
+        assert not _skip_guard.is_falkor_reason_violation(
+            _skip_guard._COLLECTION_SKIP_MESSAGE)
+        assert not _skip_guard.is_embedder_reason_violation(
+            _skip_guard._COLLECTION_SKIP_MESSAGE)

@@ -13,6 +13,14 @@
 // - copy sweep: user-facing labels say "Organization" — never "team" or
 //   "workspace".
 
+// #3724: the not-connected card reports the OBSERVATION the server can support
+// ("No connection observed yet"), the SAME phrase the wizard's step-3 heading
+// states — one vocabulary, one source (connectionObservation.js). The card
+// never asserts the categorical absence: a captured-session user has memories
+// in the graph while `harness-connected` is absent, so "Not connected" was
+// false for a reachable population.
+import { NO_CONNECTION_OBSERVED } from './connectionObservation.js'
+
 export const OVERVIEW_ELEMENTS = Object.freeze([
   'connection-status',
   'memory-digest',
@@ -49,8 +57,13 @@ export function overviewConnection(state) {
   }
   return {
     kind: 'disconnected',
-    value: 'Not connected',
-    detail: 'Run the setup command from Settings → Setup guide — your agent confirms the connection there, and you mark it connected in the wizard.',
+    value: NO_CONNECTION_OBSERVED,
+    // #3428/#2937: the trailing clause ("and you
+    // mark it connected in the wizard") described the DELETED human writer —
+    // the connect step's Continue used to checkpoint `harness-connected`. The
+    // wizard now reports only what the server observed, so there is nothing
+    // left for the user to mark.
+    detail: 'Run the setup command from Settings → Setup guide — your agent confirms the connection there.',
   }
 }
 

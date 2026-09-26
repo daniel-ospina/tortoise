@@ -1,0 +1,15 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/wt3770-a36/.venv/bin/python3
+rootdir: /private/tmp/wt3770-a36
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+timeout: 900.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 2 items
+
+tests/eval/write_path/test_write_path_operator_lane.py::test_deterministic_planted_operator_lane_grades_at_least_three PASSED [ 50%]
+tests/eval/write_path/test_write_path_operator_lane.py::test_operator_nodes_enter_retrievable_layer_and_survive_strip PASSED [100%]
+
+============================== 2 passed in 18.67s ==============================

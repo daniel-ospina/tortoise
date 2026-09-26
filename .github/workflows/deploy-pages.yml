@@ -7,6 +7,12 @@ on:
     paths:
       - 'website/**'
       - 'tortoise/onboarding/**'
+      # #3775: product/pricing.json is bundled into the DASHBOARD at build time
+      # (website/apps/dashboard/src/pricing.js imports it), so a pricing-only
+      # change changes the served app.premiselabs.co bundle. Before #3775 the
+      # committed dist carried that signal under website/**; the artifact is
+      # untracked now, so the input is named explicitly.
+      - 'product/pricing.json'
       # #1118: workflow changes must self-deploy — the #1113 merge (which
       # added the dashboard job) did NOT trigger this workflow because the
       # workflow file wasn't in its own paths filter; it required manual
@@ -28,15 +34,18 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: website/apps/blog-admin/package-lock.json
-      - name: Onboarding skill is staged for the dashboard deploy
+      - name: Onboarding instructions are staged for the dashboard deploy
         # #1998 (W2, M8): the OLD prompt-staging pipeline (the
         # archived prompt + harness variants -> deployed .md copies via the
         # retired staging script) is ARCHIVED — never two live onboarding
         # scripts. The ONE live script is the tortoise-onboarding
         # SKILL.md, mirrored byte-identically into
         # website/apps/dashboard/public/skills/tortoise-onboarding/ (parity
-        # test) and served at app.premiselabs.co/skills/tortoise-onboarding/
-        # by the deploy-dashboard job below (dist build copies public/).
+        # test) and served at
+        # app.premiselabs.co/skills/tortoise-onboarding/SKILL.md by the
+        # deploy-dashboard job below (dist build copies public/).
+        # (The trailing-slash DIRECTORY URL is not a route — since #3523 an
+        # unknown path on the app host is an honest 404, not the dashboard.)
         run: |
           test -s tortoise/onboarding/SKILL.md
           cmp tortoise/onboarding/SKILL.md \
@@ -52,44 +61,33 @@ jobs:
         # already active). Once the token gains DNS scope this repairs the
         # subdomain automatically.
         continue-on-error: true
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[0].id')
           echo "zone: $ZONE"
           REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=tortoise.premiselabs.co" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
           REC_ID=$(echo "$REC" | jq -r '.result[0].id // empty')
           CUR=$(echo "$REC" | jq -r '.result[0].content // empty')
           echo "current: id=$REC_ID content=$CUR"
           if [ "$CUR" != "premise-labs.pages.dev" ]; then
             echo "repairing CNAME $CUR → premise-labs.pages.dev"
             curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$REC_ID" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
               -H "Content-Type: application/json" \
               -d '{"type":"CNAME","name":"tortoise.premiselabs.co","content":"premise-labs.pages.dev","proxied":true}' \
               | jq -c '{success, errors: [.errors[].message]}'
           else
             echo "CNAME already correct"
           fi
-      - name: Build blog admin SPA (vite) → stage into website/admin/ (#1800)
-        # The admin gate Function serves /admin/index.html from ASSETS; the
-        # built app must land at website/admin/ before the Pages deploy. Env
-        # comes from repo secrets (VITE_* are public-safe — anon key). The
-        # app's env guard throws at RUNTIME (browser), so missing secrets
-        # would silently ship a white-screen SPA — fail fast instead.
-        run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
-            exit 1
-          fi
-          cd website/apps/blog-admin
-          npm ci
-          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
-            npm run build
-          mkdir -p ../../admin
-          cp -r dist/* ../../admin/
-          test -s ../../admin/index.html
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -99,6 +97,12 @@ jobs:
       # requirement lived in a PR body, which cannot fail — so it now lives in
       # config/required-bindings.yml and this step reads it. Fails BEFORE the
       # deploy, because the failure mode is "deploy succeeds, runtime 503s".
+      #
+      # `--project premise-labs` scopes the check to THIS deploy's project. Since
+      # #4054 the manifest also covers `tortoise-dashboard` (gated by the
+      # `deploy-dashboard` job below, `--project tortoise-dashboard`); without
+      # this scope the not-yet-configured dashboard would block the marketing
+      # deploy. Both projects are still checked — by the job that deploys them.
       - name: Preflight — required Pages bindings exist
         run: |
           python3 -m pip install --quiet 'pyyaml==6.0.3'
@@ -109,7 +113,7 @@ jobs:
           # ignore a required check).
           rc=1
           for attempt in $(seq 1 3); do
-            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml && rc=0 && break
+            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml --project premise-labs && rc=0 && break
             rc=$?
             echo "::warning::binding preflight attempt $attempt failed (exit $rc)"
             # No sleep after the FINAL attempt: it delays the failure by 10s for
@@ -124,10 +128,100 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+      # #3620: the staged-upload DENYLIST has one residual hole — a NEW top-level
+      # entry under `website/` is uploaded unless it is excluded. The pytest
+      # ratchet pins that case, but this job runs no pytest and does not depend
+      # on python-ci, so a push adding an unclassified entry would publish it and
+      # only red afterwards. This step closes it BEFORE the upload: the tracked
+      # top-level entries under `website/` are compared against the reviewed
+      # classification in config/pages-upload-classification.txt. No pytest, no
+      # network, no third-party deps (stdlib + git) — ~1s.
+      - name: Preflight — every website/ top-level entry is classified (#3620)
+        run: python3 tools/check_pages_upload_root.py
+      # #3620: `wrangler pages deploy .` uploaded EVERY file under `website/`.
+      # There is no ignore mechanism on the Pages upload path — wrangler uses a
+      # hardcoded IGNORE_LIST and the string `wranglerignore` appears in 0 files
+      # across every installed bundle — so `website/.wranglerignore` never
+      # excluded anything (the file itself answered 200 in production) and these
+      # were publicly served: README.md (deploy instructions + secret names +
+      # the Supabase project ref), website_architecture.md, the re-auth plan,
+      # migrations/0001_auth_sessions.sql (the full session DDL), and the
+      # dashboard/blog-admin sources under apps/ (including a committed
+      # node_modules tree).
+      #
+      # So the upload root is STAGED instead: copy the intended public surface
+      # into a temp directory and upload THAT.
+      #
+      # DENYLIST, NOT ALLOWLIST — deliberate. These entries MUST stay in the
+      # upload root and are exactly what an allowlist forgets:
+      #   * functions/ — Pages compiles Functions FROM the process CWD, not from
+      #     the directory being uploaded (`path.join(process.cwd(), "functions")`;
+      #     `pages deploy` has no `--functions-directory`, only the global
+      #     `--cwd`). Its IGNORE_LIST also means `functions/` is never uploaded as
+      #     an asset. So the step below `cd`s into the stage: run it from the repo
+      #     root and wrangler finds no functions/ and silently deploys a site with
+      #     NO Functions — every /auth/*, /api/*, /blog/* and /admin/* route 404s
+      #     while the deploy stays green. (The old `cd website` + `deploy .` got
+      #     this right by accident.) The survival guards below assert the staged
+      #     `functions/` — the tree wrangler will actually compile now.
+      #   * _redirects / _headers — consumed from the upload root; dropping them
+      #     silently discards the redirect + security-header contracts.
+      # #4171: `admin/` is no longer staged here. The blog admin console moved
+      # to the app origin (the `tortoise-dashboard` project) so it is
+      # same-origin with its `__Host-session` cookie; it is now built and staged
+      # into `website/apps/dashboard/dist/admin/` by the `deploy-dashboard` job.
+      # This project keeps only the single-hop `/admin` → app origin 302 in
+      # `functions/_middleware.ts`. An `admin/` tree reappearing here would be
+      # dead weight (the middleware redirects before any asset is read).
+      # A denylist fails LOUD: an over-eager exclusion 404s a page that the
+      # verify-legal job already covers. An allowlist fails SILENT: dead auth.
+      # The five survival guards below are what keep the denylist honest.
+      #
+      # RESIDUAL RISK: a NEW top-level entry under `website/` is staged unless it
+      # is excluded — but it can no longer ship on a green deploy. The preflight
+      # step above compares the tracked top-level entries against
+      # `config/pages-upload-classification.txt` BEFORE the upload, so an
+      # unclassified entry fails the deploy (the pytest ratchet in
+      # tests/test_pages_bindings.py pins the same table). What remains unpinned
+      # entirely is a new NESTED file under an already-public directory (e.g.
+      # `website/blog/internal.txt`): the classification is top-level only, so a
+      # nested internal file must be added to the exclude list AND to the 404
+      # assertion step below by hand — the 404 probe asserts a fixed
+      # enumeration, so it cannot notice a nested file on its own.
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
-          cd website
-          npx --yes wrangler@4 pages deploy . --project-name=premise-labs --branch=main
+          # `${RUNNER_TEMP:?}` and not `$RUNNER_TEMP`: the next command is
+          # `rm -rf "$STAGE"`, and an unset RUNNER_TEMP would make that a delete
+          # of `/pages-upload`. Runners always set it; fail fast if one does not.
+          STAGE="${RUNNER_TEMP:?RUNNER_TEMP is set by the runner — refusing to derive a stage path from an empty value}/pages-upload"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          rsync -a \
+            --exclude='/apps/' \
+            --exclude='/migrations/' \
+            --exclude='node_modules/' \
+            --exclude='/.wranglerignore' \
+            --exclude='*.md' \
+            website/ "$STAGE/"
+          # Fail LOUD, and before the upload, if a load-bearing entry did not
+          # survive the copy. A bare `test` would abort under `bash -e` with an
+          # empty log, so every guard carries its own operator-facing reason.
+          test -d "$STAGE/functions" \
+            || { echo '::error::functions/ did not survive staging — Pages compiles Functions from the cwd (`cd "$STAGE"` below), so every /auth/*, /api/*, /blog/* and /admin/* route would 404 (#3620)'; exit 1; }
+          test -f "$STAGE/functions/_middleware.ts" \
+            || { echo '::error::functions/_middleware.ts is missing — host routing and the /admin → app-origin redirect would be gone (#3620/#4171)'; exit 1; }
+          test -f "$STAGE/_redirects" \
+            || { echo '::error::_redirects did not survive staging — the redirect contract is gone (#3620)'; exit 1; }
+          test -f "$STAGE/_headers" \
+            || { echo '::error::_headers did not survive staging — the security-header contract is gone (#3620)'; exit 1; }
+          # wrangler resolves `functions/` against the PROCESS CWD, not against
+          # the directory argument, so the cwd must be the upload root. Without
+          # this `cd`, wrangler looks for `<repo root>/functions` (absent), omits
+          # the worker bundle entirely, and deploys a site with NO Functions —
+          # every /auth/*, /api/*, /blog/* and /admin/* route 404s on a green
+          # deploy. tests/test_pages_bindings.py pins this cwd by execution.
+          cd "$STAGE"
+          npx --yes wrangler@4 pages deploy "$STAGE" --project-name=premise-labs --branch=main
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
@@ -146,14 +240,48 @@ jobs:
       # what a still-propagating PREVIOUS deployment also returns. It therefore
       # cannot distinguish the new deployment from the old one, so a regression
       # in the new build can be masked if Pages is still serving the previous
-      # one. Detecting that needs the deployment id from the upload step, which
-      # `wrangler pages deploy` does not hand back in a form this step can read.
-      # The probe catches "the site cannot sign anyone in at all", not "this
-      # particular build broke sign-in".
+      # one. Closing that needs the deployment id, which `wrangler pages deploy`
+      # does not surface: it prints a deployment URL and alias but has NO `--json`
+      # flag (`Unknown argument: json`), so the id is only available from
+      # `wrangler pages deployment list --json` or the Pages deployments API — so
+      # today the probe catches "the site cannot sign anyone in at all", not
+      # "this particular build broke sign-in". Same shape as the leak probe's
+      # KNOWN LIMIT below.
       - name: Post-deploy — sign-in is actually reachable
         run: |
-          url=https://tortoise.premiselabs.co/auth/start
+          # TWO hops, because the moved surface is a seam across two origins:
+          #
+          #   tortoise.premiselabs.co/auth/start --302--> app.premiselabs.co/auth/start
+          #                                     --302--> <supabase>/auth/v1/authorize?…&code_challenge_method=s256
+          #
+          # Hop 1 pins THIS project's routing contract: a 302 to the app origin,
+          # at the same path. Per `SCOPE.md` §12 / F12 a NEW branch for the moved
+          # auth surface is 302 — never a 301 (a 301 is browser-persistent and
+          # cannot be reclaimed by a deploy), and never a 404 (F12 exists to
+          # answer a stale bookmark). The OVERRIDES marker for that departure
+          # lives on #3501/#3521.
+          #
+          # The PREVIOUS version of this probe asked for `302 + PKCE` from the
+          # marketing host in ONE request. Verified by execution: it FAILS on this
+          # correct architecture, because hop 1's 302 is a redirect to the app
+          # origin and carries no PKCE challenge — so it was UNSATISFIABLE, red on
+          # `main` with no correct fix available, and its message named the wrong
+          # remedy ("expected a 302 to Supabase" from the marketing host). It also
+          # could not distinguish "the marketing host routes to the app" from "the
+          # marketing host serves the BFF itself", which is the pre-cutover shape.
+          #
+          # Hop 2 is the BFF, and it is the ONLY hop that can carry the #3616
+          # evidence: start.ts performs an awaited INSERT into auth_flows (so a
+          # 302 proves that write did not throw) and `new URL()` throws on an
+          # unset SUPABASE_URL (so a 302 proves that too). A 503 here is the
+          # `session_store_unavailable` signature. Checking for 503 on hop 1
+          # would be VACUOUS — the middleware redirects before any Function runs,
+          # so hop 1 can never answer 503.
+          host=https://tortoise.premiselabs.co/auth/start
+          app=https://app.premiselabs.co/auth/start
+          url=$host
           code=000
+          loc=""
           curl_rc=0
           # Poll: Pages can briefly serve the previous deployment after upload.
           for attempt in $(seq 1 10); do
@@ -176,9 +304,49 @@ jobs:
             if [ "$curl_rc" -ne 0 ]; then
               code="curl-failed(rc=$curl_rc)"
             fi
-            [ "$code" = "302" ] && break
+            # `-i` so the Location header is greppable in the SAME file — the
+            # two hops are then asserted from one artifact each. `%{redirect_url}`
+            # is deliberately not used: it reports a curl-computed URL, and a
+            # wrong-but-well-formed Location must still fail.
+            loc=$(grep -i '^location:' /tmp/start.hdr 2>/dev/null | head -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//')
+            [ "$code" = "302" ] && [ "$loc" = "$app" ] && break
             # No sleep after the FINAL attempt — it would delay the failure by
             # 15s for nothing.
+            [ "$attempt" -lt 10 ] && sleep 15
+          done
+          echo "$url -> $code"
+          echo "$url -> Location: $loc"
+
+          if [ "$code" != "302" ]; then
+            echo "::error::hop 1: expected a 302 from the marketing host, got $code"
+            echo '::error::Per SCOPE.md §12/F12 a NEW branch for the moved auth surface'
+            echo '::error::is 302 — a 301 is browser-persistent and a 404 breaks stale links.'
+            cat /tmp/start.err 2>/dev/null || true
+            cat /tmp/start.body 2>/dev/null || true
+            exit 1
+          fi
+          # A 302 alone is not enough on hop 1: it must redirect to the app
+          # origin, at the SAME path and preserving the query. A 302 to
+          # somewhere else is a routing regression, not a healthy deploy.
+          if [ "$loc" != "$app" ]; then
+            echo "::error::hop 1 redirected to '$loc', expected '$app'"
+            cat /tmp/start.hdr
+            exit 1
+          fi
+
+          # ── Hop 2 — the BFF. This is where the #3616 evidence lives. ──
+          url=$app
+          code=000
+          curl_rc=0
+          for attempt in $(seq 1 10); do
+            curl_rc=0
+            code=$(curl -sS -o /tmp/start2.body -D /tmp/start2.hdr \
+                        -w '%{http_code}' -m 20 "$url" 2>/tmp/start2.err) \
+              || curl_rc=$?
+            if [ "$curl_rc" -ne 0 ]; then
+              code="curl-failed(rc=$curl_rc)"
+            fi
+            [ "$code" = "302" ] && break
             [ "$attempt" -lt 10 ] && sleep 15
           done
           echo "$url -> $code"
@@ -190,36 +358,156 @@ jobs:
             echo '::error::/auth/start returned 503 — the session store is unavailable.'
             echo '::error::Expected `session_store_unavailable` (session.ts). Almost always'
             echo '::error::a missing SESSIONS D1 binding — see issue #3616.'
-            cat /tmp/start.body 2>/dev/null || true
+            cat /tmp/start2.body 2>/dev/null || true
             exit 1
           fi
           if [ "$code" != "302" ]; then
-            echo "::error::expected a 302 to Supabase, got $code"
-            cat /tmp/start.err 2>/dev/null || true
-            cat /tmp/start.body 2>/dev/null || true
+            echo "::error::hop 2: expected a 302 to Supabase, got $code"
+            cat /tmp/start2.err 2>/dev/null || true
+            cat /tmp/start2.body 2>/dev/null || true
             exit 1
           fi
 
           # A 302 alone is not enough: the redirect must carry a PKCE challenge.
           # The challenge is generated in-process, so this proves the awaited
           # INSERT into auth_flows did not throw (not that the row is readable).
-          if ! grep -qi 'code_challenge_method=s256' /tmp/start.hdr; then
+          if ! grep -qi 'code_challenge_method=s256' /tmp/start2.hdr; then
             echo '::error::302 did not include a PKCE code_challenge'
-            cat /tmp/start.hdr
+            cat /tmp/start2.hdr
             exit 1
           fi
-          echo "✅ sign-in reachable, SESSIONS write succeeded, PKCE challenge issued"
+          echo "✅ sign-in reachable across both hops, SESSIONS write succeeded, PKCE challenge issued"
+
+      # #3620: the deploy step above stages an explicit upload set. This is the
+      # gate that proves it — the paths below were verified LIVE at 200 while
+      # `wrangler pages deploy .` was in use (issue #3620).
+      #
+      #   * 404 is asserted EXACTLY, not "any non-2xx": `curl -sf` (the obvious
+      #     spelling) treats a 5xx as a PASS, and a 5xx means the file could not
+      #     be read back — not that it is absent.
+      #   * a transport failure fails CLOSED, matching
+      #     tools/check_pages_bindings.py's exit-2 contract: not knowing is not
+      #     the same as knowing it is fine.
+      #   * `|| curl_rc=$?` is required — GitHub's default shell is `bash -e`, so
+      #     a bare `code=$(curl ...)` whose substitution fails ABORTS the step and
+      #     the remaining paths go unchecked. Same trap the sign-in probe above
+      #     documents; tests/test_pages_bindings.py executes both blocks.
+      #   * it POLLS, like the sign-in probe above. Pages can briefly serve the
+      #     PREVIOUS deployment after upload, and that cuts both ways: on THIS
+      #     deploy the previous deployment is the leaking one (a single-shot
+      #     probe reds the very fix that removes the leak), and on a deploy that
+      #     re-introduces a leak the previous deployment is the clean one (a
+      #     single-shot probe silently PASSES the regression — fail-open). The
+      #     final attempt's verdict is the step's verdict.
+      #     KNOWN LIMIT (unpinned): the loop stops at the first fully-404 attempt,
+      #     so a PARTIALLY propagated edge could satisfy it while another edge
+      #     still serves the old, leaking deployment. A per-deployment URL does
+      #     NOT attest that the custom-domain edges have been cut over (wrangler
+      #     prints a deployment URL/alias and the API exposes a deployment id, but
+      #     neither proves edge cutover), so the cheap close is N-consecutive-clean
+      #     attempts — deferred, as it multiplies the step's runtime on every
+      #     deploy. Same limitation the sign-in probe above documents.
+      #
+      # `if: always()` so a failing sign-in probe cannot MASK a leak: the two
+      # assertions are independent, and a served internal file cannot be
+      # un-published by retrying the other one.
+      - name: Post-deploy — internal paths are not publicly served (#3620)
+        if: always()
+        run: |
+          base=https://tortoise.premiselabs.co
+          MAX_ATTEMPTS=10
+          leaks=0
+          failing=""
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            leaks=0
+            failing=""
+            for p in \
+              /.wranglerignore \
+              /README.md \
+              /website_architecture.md \
+              /2479-re-auth-implementation-plan.md \
+              /migrations/0001_auth_sessions.sql \
+              /apps/dashboard/src/main.jsx \
+              /apps/blog-admin/src/App.tsx \
+              /apps/dashboard/package.json \
+              /apps/blog-admin/package.json; do
+              code=000
+              curl_rc=0
+              code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$base$p") \
+                || curl_rc=$?
+              if [ "$curl_rc" -ne 0 ]; then
+                echo "::warning::attempt $attempt: could not verify $p (curl rc=$curl_rc) — a leak check that cannot run must not pass (#3620)"
+                failing="$failing $p(unverifiable)"
+                leaks=$((leaks + 1))
+                continue
+              fi
+              case "$code" in
+                404)
+                  :
+                  ;;
+                2*|3*)
+                  echo "::warning::attempt $attempt: $p is publicly served (HTTP $code) (#3620)"
+                  failing="$failing $p(HTTP $code)"
+                  leaks=$((leaks + 1))
+                  ;;
+                *)
+                  echo "::warning::attempt $attempt: $p did not return 404 (HTTP $code) — refusing to pass a leak check it could not run (#3620)"
+                  failing="$failing $p(HTTP $code)"
+                  leaks=$((leaks + 1))
+                  ;;
+              esac
+            done
+            [ "$leaks" -eq 0 ] && break
+            # No sleep after the FINAL attempt — it would delay the failure by
+            # 15s for nothing.
+            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep 15
+          done
+          if [ "$leaks" -ne 0 ]; then
+            echo "::error::the Pages upload root is not controlled — still not 404 after $MAX_ATTEMPTS attempts:$failing (#3620)"
+            exit 1
+          fi
+          echo "✅ every internal path returns 404"
 
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two
-  # stale-bundle incidents caused by the manual-only deploy.sh). The
-  # dashboard's dist/ IS committed (merges carry it); this job rebuilds +
-  # redeploys it on every website/** change. Same wrangler auth pattern as
-  # the premise-labs job above (no new secrets).
+  # stale-bundle incidents caused by the manual-only deploy.sh). Since #3775
+  # dist/ is a build artifact (untracked) and this job is its only producer
+  # for the deploy — it rebuilds + redeploys on a website/** or
+  # product/pricing.json change. Same wrangler auth pattern as the
+  # premise-labs job above (no new secrets).
   deploy-dashboard:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # #4054: the BFF moved onto `tortoise-dashboard`, which when the move
+      # landed had 0 env vars and 0 D1 bindings — every /auth/* and /api/*
+      # request would have 503'd on a green deploy. The same #3616 gate that
+      # guards `premise-labs` now guards this project. `--project
+      # tortoise-dashboard` reads config/required-bindings.yml; a missing
+      # REQUIRED binding exits 1, which aborts THIS step and therefore the job
+      # BEFORE the upload — the whole point is that it gates, not warns. It runs
+      # before the build so a misconfigured project fails fast.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Preflight — required Pages bindings exist (tortoise-dashboard)
+        run: |
+          python3 -m pip install --quiet 'pyyaml==6.0.3'
+          rc=1
+          for attempt in $(seq 1 3); do
+            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml --project tortoise-dashboard && rc=0 && break
+            rc=$?
+            echo "::warning::binding preflight attempt $attempt failed (exit $rc)"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          if [ "$rc" = "1" ]; then
+            echo '::error::A REQUIRED binding is absent on the tortoise-dashboard project.'
+            echo '::error::Bind the SESSIONS D1 database + the BFF env vars before deploying. See #4054.'
+          fi
+          exit $rc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -230,17 +518,52 @@ jobs:
           cd website/apps/dashboard
           npm ci
           npm run build
+      - name: Build blog admin SPA (vite) → stage into dist/admin/ (#4171)
+        # The blog admin console moved to the session origin (#4171). Its shell
+        # and assets must land at `dist/admin/` so the gate Function
+        # (functions/admin/[[path]].ts) can serve them from ASSETS — and so the
+        # whole console ships with THIS project, same-origin with the
+        # `__Host-session` cookie. VITE_* are public-safe (anon key). The app's
+        # env guard throws at RUNTIME (browser), so missing secrets would
+        # silently ship a white-screen SPA — fail fast instead.
+        # #4361: both secrets are bound in `env:` and read as QUOTED shell
+        # variables. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
+            exit 1
+          fi
+          cd website/apps/blog-admin
+          npm ci
+          VITE_SUPABASE_URL="$SUPABASE_URL" \
+          VITE_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+            npm run build
+          mkdir -p ../dashboard/dist/admin
+          cp -r dist/* ../dashboard/dist/admin/
+          test -s ../dashboard/dist/admin/index.html
       - name: Pre-flight — token can see tortoise-dashboard project (P2-1)
         # The CLOUDFLARE_API_TOKEN may be scoped per-project; assert the
         # dashboard project is visible BEFORE deploying so a 403-scoped
         # token fails fast (loud, at the right step) instead of silently
         # skipping the deploy.
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable — never interpolated into the `run:` text (a value with `"`
+        # loses its quotes; `$(…)`/backticks would execute).
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           # No per_page param — the Pages projects endpoint REJECTS it with
           # "Invalid list options provided" (known CF issue, error 8000024;
           # the docs list it but the API doesn't accept it). Returns the
           # default page — sufficient for this account's project count.
-          LIST=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects"             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+          LIST=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects"             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
           # Diagnostic: surface the API status + a snippet so a failing
           # pre-flight is debuggable (not just 'cannot list').
           STATUS=$(echo "$LIST" | jq -r '.success // empty' 2>/dev/null || echo 'parse-error')
@@ -271,8 +594,9 @@ jobs:
       - name: Post-deploy poll (app.premiselabs.co serves the new bundle hash)
         # The failure mode of both #1086 and #1109: nothing verified the
         # dashboard deploy. Poll until the served index.html references the
-        # bundle hash we JUST BUILT (build step runs before this — the
-        # committed dist hash is stale by definition).
+        # bundle hash we JUST BUILT (the "Build dashboard (vite)" step above
+        # runs before this and is the ONLY source of dist/ — since #3775 the
+        # bundle is untracked, so there is no committed hash to go stale).
         #
         # #2688 fix: added retry + diagnostics for the local file read edge
         # case (CI filesystem timing) and better mismatch logging showing
@@ -394,6 +718,11 @@ jobs:
           # full crawl.
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL: '1'
           BASE_URL: https://premiselabs.co
+          # #4054: the auth surface is served by the app origin, and the
+          # marketing origin only 301s to it. The suite's app-surface tests must
+          # target the app origin — following that 301 would assert against
+          # whatever production last shipped instead of this deploy.
+          APP_BASE_URL: https://app.premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
 
       # Step 4: Warn-only effective-date comparison — served
@@ -423,9 +752,11 @@ jobs:
   #   CF_API_TOKEN + CF_ZONE_ID (edge-cache purge #1865)
   # (no SUPABASE_JWT_SECRET — the admin gate validates sessions via
   # Supabase /auth/v1/user; ops step documented in the epic README).
-  # The lifecycle/meta E2E tests need BLOG_E2E_AGENT_KEY (a valid agent key
-  # provisioned in blog_agent_keys as agent_name='blog-e2e') — without it
-  # those tests SKIP. Set it as a GitHub Actions secret.
+  # The lifecycle/meta E2E tests (the only tests needing BLOG_E2E_AGENT_KEY, a
+  # valid agent key provisioned in blog_agent_keys as agent_name='blog-e2e') do
+  # NOT run here: this job holds no write-capable key. Run them on demand via
+  # the `Blog write E2E (manual, #4220)` workflow
+  # (.github/workflows/blog-write-e2e.yml).
   # continue-on-error: warn-only — the deploy is already live.
   verify-blog:
     runs-on: ubuntu-latest
@@ -445,7 +776,16 @@ jobs:
         run: |
           pip install pytest requests playwright pytest-playwright
           pip install -e .
-      - name: Run blog E2E suite against production
+      - name: Run blog E2E suite against production (read-only)
+        # #4220: `-m "not blog_write"` excludes the two tests that CREATE rows
+        # (create/publish/unpublish). A deploy must not mutate production
+        # content, and a write test that fails mid-run leaves residue. Those two
+        # now run on demand — see .github/workflows/blog-write-e2e.yml.
+        #
+        # BLOG_E2E_AGENT_KEY is deliberately NOT in this job any more: the
+        # read-only assertions need no credential, so a deploy no longer holds a
+        # production write-capable key at all (defence in depth — even if the
+        # marker were dropped, the write tests skip without a key).
         env:
           RUN_BLOG_E2E: '1'
           ALLOW_PROD: '1'
@@ -454,6 +794,9 @@ jobs:
           TORTOISE_TEST_CARVE_OUT: '1'
           BASE_URL: https://premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
-          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
+          # The gate assertion runs on the session origin (#4054/#4171); without
+          # this the suite falls back to its https default, which happens to
+          # match — pass it explicitly so the two cannot drift apart silently.
+          APP_HOST: https://app.premiselabs.co
         run: |
-          python3 -m pytest tests/e2e/test_blog.py -v
+          python3 -m pytest tests/e2e/test_blog.py -v -m "not blog_write"

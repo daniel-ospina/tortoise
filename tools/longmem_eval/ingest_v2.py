@@ -52,6 +52,12 @@ from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E4
                      UNDATED_SENTINEL,
                      _existing_point_ids, _session_chunks)
 
+# #2873: how many DISTINCT extractor warnings the per-question stats keep as a
+# sample. The count stays exact; only the sample is bounded, so a session that
+# emits a long/repetitive warning list cannot bloat the stats or the
+# checkpoint replay payload.
+WARNING_SAMPLE_CAP = 20
+
 
 def _event_about_names(ev: dict) -> list[str]:
     """#2165 (R8): the event's plural ``about_entities`` as clean name
@@ -512,12 +518,23 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
     cannot double-count the caller's stats."""
     a = {"sessions": 0, "chunks": 0}
     # ── Session node (mirrors the deterministic leg) ──
+    # #4106: the session's RECORDED time is the dataset's session date, and a
+    # session the dataset does NOT date records NO time. `_now_iso()` here
+    # would assert a capture time this ingestion never had, and the ask-path
+    # date annotation (which reads `s.created_at`) would then render the RUN
+    # DATE as the session's date for the reader to compute elapsed time from.
+    # No `coalesce`: the value is deterministic per (question, session index),
+    # so a re-ingest is idempotent — and a store previously written with the
+    # old run-clock fallback CONVERGES to "no time" instead of keeping the
+    # fabricated date forever. This mirrors the rule the point write already
+    # follows (R5: `createdAt` is `session_date or UNDATED_SENTINEL`, never
+    # the server default now).
     sdk._get_proj().g.query(
         "MERGE (s:Session {id:$id}) "
-        "SET s.created_at=coalesce(s.created_at, $ts), "
+        "SET s.created_at=$ts, "
         "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
         "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
-        params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
+        params={"id": s_node, "ts": session_date or None, "tc": len(session),
                 "qid": qid, "si": si, "sid": sid},
     )
     a["sessions"] = 1
@@ -739,7 +756,16 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              # #1786 (R1, Task 1 Step 5): the per-question write-stage retry
              # count (distinct from the R2 whole-question counter — the E2E
              # asserts R2 via ``whole_question_retries``, never this).}
-             "ingest_retries": 0}
+             "ingest_retries": 0,
+             # #2873: the extractor's warning channel — the product lane
+             # forwards it (sdk.py:4503 → ``meta["warnings"]`` at :4933);
+             # this lane used to drop it, so a warning-emitting run was
+             # byte-indistinguishable from a clean one. ``count`` is every
+             # occurrence; ``distinct`` the unique count; ``sample`` the
+             # first ``WARNING_SAMPLE_CAP`` distinct strings (in first-seen
+             # order). Always present — a clean run reports zeros, never a
+             # missing key.
+             "warnings": {"count": 0, "distinct": 0, "sample": []}}
     # M6: the evidence-session id set (haystack sessions containing >=1
     # has_answer turn) + ALL answer-turn contents (question-wide — marks
     # (b)/(c) match against every answer turn, wherever it lives).
@@ -752,6 +778,10 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     # so answer-string marks are computed at eval-ingest time, never at
     # extraction.
     gold_answer = str(question.get("answer") or "")
+    # #2873: the distinct-warning set backing ``stats["warnings"]["sample"]``
+    # (accounts for duplicates across sessions/questions without keeping an
+    # unbounded list).
+    _warn_seen: set[str] = set()
 
     # ── Phase A (sequential, fast): session node + turn/chunk raw leg.
     # #1744 — this live copy had lost the parallel extraction the older copy
@@ -887,6 +917,26 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         stats["minted_kinds"] += len(out.get("minted_kinds", []) or [])
         stats["supersessions"] += len(out.get("supersessions", []) or [])
         stats["errors"].extend(out.get("errors", []) or [])
+        # #2873: fold the extractor's warning channel into the per-question
+        # stats — the eval lane used to contain ZERO occurrences of the
+        # string ``warnings``, so extraction-stage problems the extractor
+        # REPORTED were invisible to the benchmark report. Count every
+        # occurrence; dedupe for the bounded first-N sample. The producer
+        # contract is ``list[str]``; a malformed non-list value is treated
+        # as empty rather than iterated char/key-wise (which would inflate
+        # the counts) — fail closed.
+        _warn_acc = stats["warnings"]
+        _raw_warnings = out.get("warnings")
+        if not isinstance(_raw_warnings, list):
+            _raw_warnings = []
+        for _w in _raw_warnings:
+            _ws = str(_w)
+            _warn_acc["count"] += 1
+            if _ws not in _warn_seen:
+                _warn_seen.add(_ws)
+                _warn_acc["distinct"] += 1
+                if len(_warn_acc["sample"]) < WARNING_SAMPLE_CAP:
+                    _warn_acc["sample"].append(_ws)
         for _class, count in (out.get("error_census") or {}).items():
             stats["error_census"][_class] = stats["error_census"].get(_class, 0) + count
         # #1746 (D7): thread the extractor's llm telemetry + recovery counters
@@ -993,8 +1043,3 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             _write_ctx(_ctx, _extract_ctx(_ctx))
 
     return stats
-
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017

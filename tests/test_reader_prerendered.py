@@ -18,7 +18,8 @@ Contracts pinned here (all hermetic — no network, no DB, stub models only):
      ``question_type``.
   3. Empty evidence (arm D sends none) reproduces the existing empty-context
      behaviour exactly — including NOT substituting ``NO_EVIDENCE_TEXT``
-     (that substitution belongs to the SDK/ask lane, not the reader).
+     (that substitution belongs to the ask lane — ``ask_lane.run_ask_lane`` —
+     not the reader).
   4. The pre-rendered path does NOT wrap text in ``[session ?]`` /
      ``[speaker]`` decoration (proved against the hit path, which does).
   5. The base ``Reader`` Protocol is unchanged — every existing structural
@@ -176,7 +177,8 @@ def test_empty_evidence_matches_empty_context_exactly():
     """Arm D sends NO evidence. ``evidence=""`` must reproduce
     ``answer(context_hits=[])`` byte-for-byte — including the raw
     ``Memory context:\\n\\n\\nQuestion:`` shape and NO
-    ``NO_EVIDENCE_TEXT`` substitution (that is the SDK lane's job).
+    ``NO_EVIDENCE_TEXT`` substitution (that is the ask lane's job —
+    ``ask_lane.run_ask_lane``).
 
     Note the actual empty-context render: with ``question_date=None``
     ``render_context([])`` is the empty string, so the pre-rendered call is

@@ -3,7 +3,7 @@ account/team deletion (E2E-6-D), on BOTH control planes.
 
 Supabase mode (FakeControlPlane, mirroring test_auth_flip):
 - GET /v1/organizations/{id}/export — owner-only JSON export (graph + control plane)
-- DELETE /v1/organizations/{id} — owner-only soft delete → 24h grace → hard purge
+- DELETE /v1/organizations/{id} — owner-only soft delete → 7-day grace → hard purge
 
 Registry mode (temp FalkorDBLite, mirroring test_dr_endpoints): the same
 surface over registry Membership/APIKey/Team nodes.
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import threading
 import warnings
 from datetime import datetime, timedelta, timezone
 
@@ -30,7 +29,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
-from tortoise.projection import FalkorProjection
+from tortoise.retention import RESTORE_WINDOW_HOURS
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -241,47 +240,25 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # property of opening the app, not of the control-plane mode.
 # ═══════════════════════════════════════════════════════════════════════
 
-# #3505: one embedded server per db_path — serialize construction.
+# #3505/#3546: the embedded construction serialization this file needs lives
+# ONCE for the whole session — `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`,
+# installed by `tests/conftest._serialize_embedded_construction`. It was a
+# module-scoped copy here (#3511); that copy could not serialize against the
+# one in `tests/test_import_endpoint.py` or cover any other file, which is the
+# defect #3546 names. Do NOT re-add a per-file copy.
 #
-# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
-# absent (or its pid is dead). Two constructions that interleave BEFORE
-# either has written `.settings` therefore BOTH take the fresh-start branch,
-# each spawning its own daemon in its own tempdir, and the later
-# `_save_setting_registry()` silently owns the registry — the loser's writes
-# are then invisible to every later opener. Mirror of the proven Group B fix
-# in tests/test_import_endpoint.py (`_EMBEDDED_CONSTRUCTION_LOCK`) — that
-# copy carries the full "Scope of the guarantee" / "Blast radius" note; the
-# two caveats that matter to THIS file are repeated here.
-#
-# LANE SCOPE — this lock is a NO-OP on the docker lane. With a supported
-# `TORTOISE_DB_URI` set, every construction from this module REDIRECTS to
-# that server (`tortoise/projection/__init__.py`, the #1647 D-1=A test
-# redirect: `path` is nulled, so `_is_embedded` is False), no redislite
-# daemon is started, and no double-start can occur. `test_export_delete` is
-# NOT in `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects
-# that branch. What protects THIS file on the docker lane is the BOOT-SWEEP
-# quiesce (`_quiesce_testclient_background_work`), not this lock. The
-# serialization is live on the embedded tier-2 / carve-out lane only. See
-# the LANE SCOPE note in `_quiesce_testclient_background_work`.
-#
-# Serializing the construction makes the first starter the single owner, so
-# later openers (seeder, `_registry_count`, health probe, request handler)
-# normally resolve through `.settings` to that one server. This is NOT a
-# global single-writer guarantee: the lock serializes only IN-PROCESS
-# `FalkorProjection.__init__` calls, and two paths stay outside it, each able
-# to add or remove a registry entry anyway — (1) a construction that raises
-# inside redislite's `_start_redis()` after its daemon spawned but before
-# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
-# redislite's `_cleanup()` last-client branch removing `<db>.settings` from
-# `__del__`/atexit on any thread.
-#
-# The critical section also spans redislite's BLOCKING server start, so a
-# wedged embedded start stalls every other constructor in the module, where
-# it previously stalled only its own thread. That wait is bounded by
-# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
-# `redis-server` binary — accepted deliberately: a hung start is a louder
-# failure than a silent second daemon.
-_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+# LANE SCOPE — the serialization is INERT on the lane CI runs this file on.
+# Under a supported `TORTOISE_DB_URI` (the docker lane, this file's default)
+# every construction from this module REDIRECTS to that server
+# (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect: `path` is
+# nulled, so `_is_embedded` is False), no redislite daemon is started, and no
+# double-start can occur. `test_export_delete` is NOT in
+# `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that branch.
+# What protects THIS file on the docker lane is the BOOT-SWEEP quiesce
+# (`_quiesce_testclient_background_work`), not the serialization. The lock is
+# live only on the embedded tier-2 / carve-out lane (no URI), where
+# constructions stay local-file and real daemons are spawned; it is kept for
+# correctness there, not because the docker lane depends on it.
 
 
 async def _quiet_boot_sweeps() -> None:
@@ -318,8 +295,15 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
 
        The product behaviour is benign (dropping an already-dropped graph
        is idempotent) — the defect is test isolation: the assertions assume
-       exclusive ownership of a sweep production also runs. Both callers are
+       exclusive ownership of a sweep production also runs. Every caller is
        therefore quiesced here.
+
+       #3036 added a THIRD caller to both sites — `_sweep_oauth_retention`
+       (a `_run_boot_sweeps` member AND an `_event_retention_loop` call). It
+       is benign for THIS file (it touches only the fake control plane), but
+       the enumeration above is the guard that makes the next lifespan-armed
+       caller visible, so keep it complete: a new sweep reachable from either
+       entry point belongs in this list.
 
        The CALLEE is deliberately not stubbed: this file's tests call
        `ha_mod._purge_deleted_teams()` directly and resolve it off the
@@ -341,12 +325,14 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
        that constructor, so the embedded double-start race would stay live.
        Rather than quiesce a third background caller one caller at a time
        (whack-a-mole — `_lifespan` already grew the probe loop after
-       #2850), the CONSTRUCTION is serialized instead: the invariant
-       redislite actually needs is that the first construction on a given
-       db_path writes `<db>.settings` before any other opener evaluates the
-       fresh-start branch, and serializing holds it for EVERY in-process
-       construction in this file — no matter which background caller
-       `_lifespan` arms next.
+       #2850), the CONSTRUCTION is serialized: the invariant redislite
+       actually needs is that the first construction on a given db_path
+       writes `<db>.settings` before any other opener evaluates the
+       fresh-start branch. #3546 moved that serialization to ONE
+       process-wide lock for the whole session
+       (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by
+       `tests/conftest._serialize_embedded_construction`) — this file no
+       longer installs its own.
 
        LANE SCOPE — the serialization is INERT on the lane CI runs this file
        on. Under a supported `TORTOISE_DB_URI` (the docker lane, this file's
@@ -357,7 +343,7 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
        `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
        branch. On that lane the protection this file actually gets is item 1
        — the BOOT-SWEEP quiesce, which removes the second caller of
-       `_purge_deleted_teams` — and NOT this serialization. The lock is live
+       `_purge_deleted_teams` — and NOT the serialization. The lock is live
        only on the embedded tier-2 / carve-out lane (no URI), where
        constructions stay local-file and real daemons are spawned; it is
        kept for correctness there, not because the docker lane depends on
@@ -368,20 +354,6 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
     monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
     monkeypatch.setattr(ha_mod, "event_retention_interval",
                         lambda *args, **kwargs: 86400.0)
-    # (2) serialize embedded projection construction on the pinned db file.
-    # NO-OP on a URI lane (docker): every construction redirects to the
-    # server, `_is_embedded` is False, no daemon is started — see the LANE
-    # SCOPE note in this fixture's docstring. Live on the embedded lane.
-    _orig_proj_init = FalkorProjection.__init__
-
-    def _serialized_proj_init(self, *args, **kwargs):
-        # `return` forwarded deliberately: `__init__` must return None, so it
-        # is inert today, but it stays correct if this wrapper is ever reused
-        # for a factory or `__new__` (where dropping the result is a bug).
-        with _EMBEDDED_CONSTRUCTION_LOCK:
-            return _orig_proj_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
 
 
 @pytest.fixture
@@ -793,13 +765,13 @@ class TestDeleteSupabase:
         body = r.json()
         assert body["status"] == "delete_scheduled"
         assert body["org_id"] == ORG_ID
-        assert body["grace_hours"] == 24
+        assert body["grace_hours"] == RESTORE_WINDOW_HOURS
         assert body["deleted_at"]
         assert body["hard_delete_after"] > body["deleted_at"]
 
         by_id = {row["id"]: row for row in fake.tables["organizations"]}
         assert by_id[ORG_ID]["deleted_at"] == body["deleted_at"]
-        assert by_id[ORG_ID]["grace_hours"] == 24  # persisted promise
+        assert by_id[ORG_ID]["grace_hours"] == RESTORE_WINDOW_HOURS  # persisted promise
         assert fake.tables["api_keys"][0]["revoked_at"] == body["deleted_at"]
         assert fake.tables["org_memberships"][0]["status"] == "removed"
         assert fake.tables["invitations"][0]["status"] == "revoked"
@@ -890,7 +862,7 @@ class TestDashboardCreatedTeamRoundTrip:
         as_user()
         # env must be 0 BEFORE delete — soft_delete stamps the STORED
         # grace_hours and the purge honors stored grace over env
-        # (_past_grace): a 24h stamp would skip the just-deleted team.
+        # (_past_grace): a 7-day stamp would skip the just-deleted team.
         monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "0")
         r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
@@ -987,7 +959,7 @@ class TestExportDeleteRegistry:
             "MATCH (t:Team {id:'reg-team-1'}) RETURN t.deleted_at, t.grace_hours"
         ).result_set
         assert rows and rows[0][0]  # deleted_at stamped
-        assert rows[0][1] == 24  # persisted grace promise
+        assert rows[0][1] == RESTORE_WINDOW_HOURS  # persisted grace promise
         assert _registry_count(db_path, "APIKey", "reg-team-1") == 1
         rev = reg.query(
             "MATCH (k:APIKey {org_id:'reg-team-1'}) RETURN k.revoked_at"
@@ -1044,7 +1016,7 @@ class TestPurge:
     def test_purge_hard_deletes_past_grace_registry(self, reg_client,
                                                     capture_audit, monkeypatch):
         tc, db_path = reg_client  # noqa: RUF059
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
         _seed_registry(db_path, org_id="reg-old", deleted_at=past)
         _seed_registry(db_path, org_id="reg-recent",
                        deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
@@ -1086,10 +1058,36 @@ class TestPurge:
         assert _registry_count(db_path, "Team", "reg-promised") == 1  # kept
         assert _registry_count(db_path, "Team", "reg-env-old") == 0  # purged
 
+    def test_purge_does_not_defer_org_past_stored_grace(
+            self, reg_client, capture_audit, monkeypatch):
+        """#4179 P1 — grow-direction twin of ``test_purge_honors_stored_grace``.
+
+        A legacy in-flight org deleted under the old 24h default (stored
+        ``grace_hours=24``) 30h ago is past its OWN disclosed
+        ``hard_delete_after``. Raising the env default to 168h must NOT hold
+        it until 168h: the env cutoff is a fetch superset, never a pre-filter
+        of the stored promise."""
+        monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "168")
+        tc, db_path = reg_client  # noqa: RUF059
+        thirty_hours = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()  # noqa: UP017
+        _seed_registry(db_path, org_id="reg-legacy", deleted_at=thirty_hours)
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:'reg-legacy'}) SET t.grace_hours=24"
+        )
+        # control: no stored grace → the env fallback (168h) still applies.
+        _seed_registry(db_path, org_id="reg-env-recent",
+                       deleted_at=thirty_hours)
+
+        ha_mod._purge_deleted_orgs()
+
+        assert _registry_count(db_path, "Team", "reg-legacy") == 0
+        assert _registry_count(db_path, "Team", "reg-env-recent") == 1
+
     def test_purge_deletes_rows_past_grace_supabase(self, sb_client,
                                                     capture_audit):
         tc, fake, _ = sb_client  # noqa: RUF059
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
         recent = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.seed("organizations", [
             dict(FREE_TEAM, deleted_at=past),
@@ -1129,7 +1127,7 @@ class TestPurge:
         (control-plane rows untouched, no purge audit event), and the
         next sweep retries the drop to completion."""
         tc, fake, _ = sb_client  # noqa: RUF059
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
+        past = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()  # noqa: UP017
         fake.seed("organizations", [dict(FREE_TEAM, deleted_at=past),
                              dict(FREE_TEAM, id="team-other",
                                   deleted_at=past)])

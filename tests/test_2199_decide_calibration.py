@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util as _ilu
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -53,6 +54,7 @@ def sdk():
     s = TortoiseSDK(db_path)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _set_raw_baseline(sdk, pid: str, alpha: float, beta: float,

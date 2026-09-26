@@ -76,7 +76,7 @@ interface ProvisionResponse {
 const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
 
 // ── CORS / origin allowlist ─────────────────────────────────────────────
-// The welcome page (website/welcome.html) calls this function DIRECTLY from
+// The welcome page (website/apps/dashboard/public/welcome.html) calls this function DIRECTLY from
 // the browser via the JWT path (#527/#802): fetch(PROVISION_URL, { method:
 // "POST", headers: { Authorization: Bearer <jwt>, Content-Type: json } }).
 // A non-simple Content-Type forces a CORS preflight (OPTIONS), so without

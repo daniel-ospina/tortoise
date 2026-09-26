@@ -109,7 +109,7 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
   lock serializes count-then-insert (E2E-11 no oversubscription).
 - **Deletes cascade keys:** `DELETE /v1/graphs/{id}` tombstones the graph
   and revokes its keys (idempotent; a client retry converges). The default
-  graph 403s.
+  graph 403s. The restore window is `docs/retention-and-deletion.md`.
 - **Sweeps (#2313 landed):** the hosted backup sweep now enumerates EVERY
   active graph (default + custom) — graph-keyed archives
   (`backups/{org_id}/{graph}/{ts}_{rnd}/...`), per-graph state/retention, and

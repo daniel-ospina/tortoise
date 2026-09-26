@@ -17,8 +17,14 @@
 //   validation below mirrors POST /v1/onboarding/team (server regex).
 // - the fork card is once-per-org (set-once server-side); build branch
 //   renders the registry-backed capability catalog (W8 — the offline
-//   fallback lives in BUILD_CATALOG_PLACEHOLDER) whose render marks the
-//   catalog-presented step edge (surface 4).
+//   fallback lives in BUILD_CATALOG_PLACEHOLDER). #3913: rendering the
+//   catalog performs NO write — the dashboard records no `catalog-presented`
+//   step edge (the build fork completes on the two acts the server OBSERVES).
+
+// #3724: the not-connected OBSERVATION phrase is ONE source shared with the
+// Overview's connection card (connectionObservation.js) — the two surfaces
+// state the same server fact and used to drift apart as two literals.
+import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './connectionObservation.js'
 
 export const WIZARD_STEPS = Object.freeze([
   {
@@ -62,10 +68,74 @@ export const WIZARD_STEPS = Object.freeze([
 //     "You're set up, but your agent isn't connected yet" contradicted itself.
 // Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
 // by a source-text grep.
-export function wizardStageLabel(step, { hasOrg = false, paused = false } = {}) {
-  if (step === 3 && paused) return 'Setup paused — your agent is not connected yet'
+export function wizardStageLabel(step, { hasOrg = false, paused = false, connected = false, buildFork = false } = {}) {
+  if (step === 3) {
+    // A real connection OUTRANKS the local skip (#2361 r3): connect → Back →
+    // Skip must still read as connected, never as paused. Checked first so the
+    // two flags cannot compose into the false "paused" reading.
+    if (connected) return WIZARD_STEPS[3]?.label ?? ''
+    // #3428/#2937 (lane B3): step 3's own label ("You're all set") is itself a
+    // harness-connected CLAIM — the very claim the deleted human writer used to
+    // manufacture. With the writer gone, a user who finishes the connect step
+    // without a server-observed connection lands here with `paused` false, and
+    // the old code greeted them with "You're all set". `connected` is the
+    // caller's server-derived `serverHarnessConnected`.
+    //
+    // The default is deliberately `false` (fail-honest): a caller that forgets
+    // to pass `connected` understates the connection, which is the harmless
+    // direction — it can never claim a connection we did not observe.
+    //
+    // review cycle 4 (item 13) made the BUILD arm state what was OBSERVED
+    // instead of asserting the connection is absent. review cycle 6 (item 2)
+    // makes the SELF arms do the same, for the same two reasons: its body
+    // refuses to assert the absence too ("we can't tell it's connected yet"),
+    // and the categorical sentence is factually false for a user whose session
+    // was CAPTURED — capture writes Session nodes and extracted points but
+    // files only `capture-disclosed`, never `harness-connected`, so that user
+    // can be connected-and-capturing under a screen reading "Not connected
+    // yet".
+    //
+    // Both forks now print the observation phrasing, so the fork no longer
+    // SELECTS a string here. `buildFork` stays in the signature deliberately:
+    // both call sites pass it (that call shape is pinned in
+    // wizardArchived.test.js) and it records the fork input; it is simply no
+    // longer a discriminator.
+    if (paused) return SETUP_PAUSED_NO_CONNECTION_OBSERVED
+    return NO_CONNECTION_OBSERVED
+  }
   if (step === 0 && hasOrg) return 'Your Organization'
   return WIZARD_STEPS[step]?.label ?? ''
+}
+
+// #3725: the header LEDE (`.welcome-lede`, the step's own `sub`) is
+// `wizardStageLabel`'s sibling — the same pure-decision treatment, for the
+// same reason (#2912): a render condition inlined in main.jsx cannot be
+// unit-tested, so a heading-vs-body contradiction on that line survives every
+// source-text grep. Returns the `sub` string to render, or `null` when the
+// header must render no lede at all (the card body then carries the state).
+//
+// The null arms are BOTH "the body already says it" cases:
+//   - step 0 on an org-holding account is a read-only summary whose body opens
+//     "You're set up in <org>…";
+//   - step 3 without a server-observed connection: the <h1> already names the
+//     state (wizardStageLabel's not-connected / paused arms) and the body
+//     carries the recovery.
+// #3725 adds the third: step 3 on the BUILD fork WITH a connection. Its body
+// says "Connected" + "Keep calling the SDK from your app." — so the step's own
+// sub ("Your agent takes over from here.") names an agent the build-fork user
+// does not have. The contradiction is the same one #2912 fixed for the paused
+// arm: two lines in one viewport saying opposite things. Suppress the lede
+// rather than invent a third fork-specific sentence to restate the body.
+// `hasOrg`/`connected` default fail-honest (false), matching
+// `wizardStageLabel`: a caller that forgets an input understates, never
+// over-claims.
+export function wizardStepSub(step, { hasOrg = false, connected = false, buildFork = false } = {}) {
+  if (step === 0 && hasOrg) return null
+  if (step === 3) {
+    if (!connected) return null
+    if (buildFork) return null
+  }
+  return WIZARD_STEPS[step]?.sub ?? null
 }
 
 // The fork card (epic plan P4 / I-4): presentation fork, once per org,
@@ -108,9 +178,9 @@ export const WIZARD_FORK_OPTIONS = Object.freeze([
 // endpoint is unreachable. The names/kinds/descriptions are kept
 // byte-identical to the registry's 3 launch rows (the JS unit tests pin
 // this shape; a registry rename must be mirrored here + in the Python
-// test_capability_catalog.py CANONICAL_NAMES). The fallback's render marks
-// the catalog-presented step edge via POST /v1/onboarding/state/checkpoint
-// (surface 4 write contract — unchanged by W8).
+// test_capability_catalog.py CANONICAL_NAMES). The fallback's render records
+// NOTHING: #3913 removed the `catalog-presented` step edge from the dashboard
+// entirely (the only client checkpoint write is the fork pick itself).
 export const BUILD_CATALOG_PLACEHOLDER = Object.freeze([
   { name: 'Session recorder', kind: 'indexer', description: 'Files agent conversations to the graph.' },
   { name: 'Session extractor', kind: 'extractor', description: 'Pulls decisions and findings out of recorded sessions.' },

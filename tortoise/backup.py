@@ -133,7 +133,10 @@ def restore(backup_dir: str, db_path: str,
 
     # Restore into FalkorDB if requested
     if into_falkor:
-        from tortoise.projection import FalkorProjection  # noqa: I001
+        from tortoise.projection import (  # noqa: I001
+            FalkorProjection,
+            journal_hard_delete_seqs,
+        )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
         # incl. SDK-created points that never made it into events.jsonl.
@@ -150,8 +153,32 @@ def restore(backup_dir: str, db_path: str,
         # JSONL replay fallback (no RDB, or RDB was empty)
         proj = FalkorProjection(db_path)
         try:
-            for ev in EventLog(events_path).read_all():
+            # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
+            # whose endpoint is created LATER in the journal folds to nothing
+            # inline. This is the FOURTH whole-journal replay engine (besides
+            # ``rebuild`` / ``rebuild_all`` / ``recover_from_log``) — buffer
+            # the records and fold them AFTER the pass, the same trailing
+            # sweep the other three give the type. The records carry their
+            # journal seq so the sweep can suppress a link whose endpoint was
+            # HARD-DELETED afterwards (#3722 review P2). A fold failure is
+            # logged, never raised: restore must not abort on one unreplayable
+            # link.
+            records = EventLog(events_path).read_all()
+            hard_delete_seqs = journal_hard_delete_seqs(records)
+            deferred_links: list[tuple[int, dict]] = []
+            for seq, ev in enumerate(records):
+                if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                    deferred_links.append((seq, ev))
+                    continue
                 proj.apply(ev)
+            if deferred_links:
+                try:
+                    proj.fold_deferred_entity_links(
+                        deferred_links, hard_delete_seqs)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred EntityLinked fold failed; %d "
+                        "link(s) not replayed", len(deferred_links))
         finally:
             proj.close()
 

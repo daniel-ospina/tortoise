@@ -59,8 +59,10 @@ def client(tmp_path):
             "max_teams": 1,
             # #1922: the demo seed is now quota-gated — the team dict must
             # carry max_points (the fail-closed points cap) or the check
-            # 500s.
+            # 500s. #4010: the same contract now applies to max_sessions
+            # (unlimited → explicit None); a missing key is fail-closed.
             "max_points": 10000,
+            "max_sessions": None,
             # #1748: the onboarding sub-team is provisioned on the USER path
             # — the session user becomes the owner member
             # (get_current_org_session attaches session_user_id for session
@@ -142,6 +144,7 @@ class TestPublicDemo:
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 0,  # at cap — count(0) >= limit(0)
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 402, r.text
@@ -171,6 +174,7 @@ class TestPublicDemo:
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 200, r.text
@@ -623,6 +627,12 @@ class TestRegister:
 # value is PATCHed and must round-trip (bool keys take True; timestamp keys
 # take an ISO string; scope keys take a small non-empty sample).
 _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
+    # #1924: per-source ENABLE intent. Unlike every other bool in this table —
+    # which samples True — these PATCH False on purpose: the OFF direction IS
+    # the bug the key exists to fix, so the round-trip must prove a False
+    # survives the merge (True-only coverage would never exercise off).
+    "issues_enabled": ("issues_enabled", False),
+    "docs_enabled": ("docs_enabled", False),
     # #1894: last-indexed timestamps (ISO strings, server-stamped at
     # completion — registered like every other capture/state key).
     "github_indexed_at": ("github_indexed_at", "2026-08-25T00:00:00Z"),
@@ -651,12 +661,16 @@ _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
 
 
 def test_state_keys_registered_parametrized(client):
-    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key
-    round-trips through BOTH live default-state dicts, the allowlist, and the
-    PATCH model — a key added to the table without registering it anywhere
-    fails here (the allowlist filter would silently drop it in production)."""
+    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key is
+    REGISTERED — present in BOTH live default-state dicts, the allowlist, and
+    the PATCH model — so a key added to the table without registering it
+    anywhere fails here (the allowlist filter would otherwise silently drop it
+    in production). The OPERATIONAL keys then round-trip through PATCH + GET;
+    the server-owned capture/install evidence keys are REFUSED there (403, no
+    write) instead — see ``_CAPTURE_SERVER_OWNED_KEYS`` and the branch below."""
     from tortoise.hosted_api import (
         _ALLOWED_STATE_KEYS,
+        _CAPTURE_SERVER_OWNED_KEYS,
         _ONBOARDING_DEFAULT_STATE,
         DEFAULT_ONBOARDING_STATE,
         OnboardingStatePatchRequest,
@@ -683,6 +697,22 @@ def test_state_keys_registered_parametrized(client):
         # merge (bool keys take True; timestamp keys take an ISO string;
         # scope keys take a small non-empty sample) AND read back via GET
         # (the node is provisioned, so this is a real persisted round-trip).
+        #
+        # #3681: the capture/install EVIDENCE keys (receipts, per-harness
+        # last-errors, install probes) are SERVER-OWNED — registration still
+        # guarantees the key ROUND-TRIPS through the read path, but a client
+        # PATCH must be REFUSED (403) rather than accepted. Asserting the
+        # refusal here keeps the registration table honest about the key (it
+        # exists on both default dicts + the model) while pinning the
+        # server-owned write surface.
+        if state_key in _CAPTURE_SERVER_OWNED_KEYS:
+            r = client.patch("/v1/onboarding/state",
+                             json={patch_field: patch_value})
+            assert r.status_code == 403, (
+                f"server-owned key {state_key} was client-writable: {r.text}")
+            assert r.json()["detail"] == {
+                "message": "server_owned_key", "keys": [state_key]}, r.text
+            continue
         r = client.patch("/v1/onboarding/state",
                          json={patch_field: patch_value})
         assert r.status_code == 200, r.text
@@ -691,6 +721,36 @@ def test_state_keys_registered_parametrized(client):
         r = client.get("/v1/onboarding/state")
         assert r.json()["onboarding"][state_key] == patch_value, \
             f"{state_key} did not read back through GET"
+
+
+def test_issues_off_does_not_disconnect_github(client):
+    """#1924: the Issues off-toggle is an ENABLE flag, not a disconnect.
+
+    Before #1924 the dashboard's off-toggle PATCHed ``github_connected=False``
+    — a full GitHub disconnect that also killed the docs source and forced a
+    fresh OAuth round-trip just to hide issues. The dashboard now PATCHes
+    ``issues_enabled=False``; this pins the server-side invariant the fix
+    rides on: turning the Issues source off leaves the CONNECTION and the
+    sibling docs source intact (so re-enabling needs no re-authorization).
+    """
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.patch("/v1/onboarding/state", json={"github_connected": True})
+    assert r.status_code == 200, r.text
+    # the off-toggle's write: issues intent only — nothing about the connection
+    r = client.patch("/v1/onboarding/state", json={"issues_enabled": False})
+    assert r.status_code == 200, r.text
+    body = r.json()["onboarding"]
+    assert body["issues_enabled"] is False
+    assert body["github_connected"] is True, \
+        "turning the Issues source off must NOT disconnect GitHub (#1924)"
+    assert body["docs_enabled"] is True, \
+        "the sibling docs source must be untouched (#1924)"
+    st = client.get("/v1/onboarding/state").json()["onboarding"]
+    assert st["github_connected"] is True
+    assert st["issues_enabled"] is False
 
 
 def test_capture_surface_keys_shared_across_defaults():
@@ -905,10 +965,10 @@ def test_install_probe_round_trip(client):
 
 def test_install_probe_unregistered_harness_422(client):
     """Task 14: a harness with no REGISTERED install_probe_ key (codex /
-    claude-desktop / claude-web / cursor — backfill-only or pending-spike
-    harnesses) → 422 at the model boundary, never a silent drop (an
-    unregistered key would be discarded by the allowlist filter and look
-    like a recorded probe)."""
+    claude-desktop / claude-web / cursor — harnesses with no install-probe
+    beacon; cursor has a capture seam (#3819) but fires no probe) → 422 at the
+    model boundary, never a silent drop (an unregistered key would be
+    discarded by the allowlist filter and look like a recorded probe)."""
     from tortoise.hosted_api import _make_sdk
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",

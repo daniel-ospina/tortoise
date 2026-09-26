@@ -56,6 +56,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unicodedata
@@ -89,6 +90,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Graph-state helpers (raw Cypher assertions) ─────────────────────

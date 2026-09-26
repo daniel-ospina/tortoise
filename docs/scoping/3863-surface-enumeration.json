@@ -1,0 +1,2579 @@
+{
+  "commit": "4488de7d949a5ea586e2b071be528c15d2bcdb78",
+  "tool_count": 99,
+  "sdk_public_method_count": 152,
+  "tools": [
+    {
+      "name": "tortoise_create_point",
+      "description": "Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent — returns existing Point if content matches.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "create_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_create_point"
+    },
+    {
+      "name": "tortoise_query",
+      "description": "Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag merged in). Pagination via offset=/limit= (or 1-based page=); tag= filters Points by TAGGED edge; include_retracted=True surfaces tombstones. For semantic relevance use tortoise_search; for a single known ID use tortoise_get_point.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "query",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_query"
+    },
+    {
+      "name": "tortoise_paginated_query",
+      "description": "DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=). Kept for one release; will be removed in the next release — migrate now.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "paginated_query",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_paginated_query"
+    },
+    {
+      "name": "tortoise_check_structure",
+      "description": "Check Gate 0→4 chain integrity (orphans, dangling refs).",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "check_structure",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_check_structure"
+    },
+    {
+      "name": "tortoise_validate_domain",
+      "description": "Validate a domain's ontology integrity (issue #405) — advisory, read-only. Runs the domain's graph-surface rules (orphan useCase, dangling refs, draft hygiene) and returns enriched, actionable violations ({rule, kind, ref, message, fix}) + drift warnings. Never modifies the graph; violations are warnings, not blocks.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "validate_domain",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_validate_domain"
+    },
+    {
+      "name": "tortoise_summarize_structure",
+      "description": "Structure summary — points on the graph across ALL point kinds (#2205). Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}: total counts non-operator Points of every kind (not just the product-strategy gates), operators is reported separately, gate keys stay the gate-kind breakdown, gate_total is the gate subtotal.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "summarize_structure",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_summarize_structure"
+    },
+    {
+      "name": "tortoise_audit",
+      "description": "Audit graph wiring quality — 8 checks: missing sourceKind (point-level legacy + Source-level canonical), missing sourceDate, superseded points without a CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL contradiction heuristic, low-confidence operators without mitigation, and legacy 'mitigates' edges. Returns structured JSON: per-check counts (uncapped) + capped samples + summary + exit_code (0 clean, 1 issues). point_kinds: optional pointKind list to scope the audit.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "audit",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_audit"
+    },
+    {
+      "name": "tortoise_list_pointkinds",
+      "description": "List all pointKinds present in the graph with counts. What EXISTS.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "list_pointkinds",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_pointkinds"
+    },
+    {
+      "name": "tortoise_list_sources",
+      "description": "List all Sources with point counts. Where data came FROM.",
+      "group": "sources",
+      "group_source": "mapped",
+      "sdk_method": "list_sources",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_sources"
+    },
+    {
+      "name": "tortoise_list_namespaces",
+      "description": "List installed pack namespaces.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "list_namespaces",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_namespaces"
+    },
+    {
+      "name": "tortoise_list_batch",
+      "description": "Audit one ingest bundle: the stamped artifacts (Points created or adopted via dedup + direct edges) carrying the given batch_id. Entities/sources are out of stamp scope; editorial supersede artifacts are outside audit. Completeness holds across rebuild_all.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "list_batch",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_batch"
+    },
+    {
+      "name": "tortoise_list_batches",
+      "description": "Batch discovery — the most recent distinct ingest batch_ids with their point/direct-edge counts (ordered by newest stamp, capped at limit, default 20).",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "list_batches",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_batches"
+    },
+    {
+      "name": "tortoise_packs_list",
+      "description": "List this team's active packs (#318): the shared pack catalog joined with the tenant graph's PackInstall activation records. Read-only; empty result when nothing is installed (existence masking — another tenant's packs are never observable).",
+      "group": "admin",
+      "group_source": "mapped",
+      "sdk_method": "get_tenant_packs",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_packs_list"
+    },
+    {
+      "name": "tortoise_pack_install",
+      "description": "Install a custom expansion pack on the HOSTED surface (#1935): validates against the shared registry + tenant policy (reserved starter namespace, ontology-only v1), stores the manifest in the tenant graph and activates it. Deployment- gated: on self-host this is an actionable stub (use the filesystem packs dir + tortoise pack CLI).",
+      "group": "admin",
+      "group_source": "explicit",
+      "sdk_method": "upsert_tenant_manifest",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": true,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_pack_install"
+    },
+    {
+      "name": "tortoise_list_tags",
+      "description": "List all Tag names with count of tagged Points. Where tags are USED.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "list_tags",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_tags"
+    },
+    {
+      "name": "tortoise_query_points_by_tag",
+      "description": "DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). Kept for one release; will be removed in the next release — migrate now.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "query_points_by_tag",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_query_points_by_tag"
+    },
+    {
+      "name": "tortoise_get_point",
+      "description": "Get a single Point by ID. Returns all properties, or empty dict.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "get_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_point"
+    },
+    {
+      "name": "tortoise_suggest_entry_points",
+      "description": "Entity resolution — NL query → matching entities from the graph.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "suggest_entry_points",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_suggest_entry_points"
+    },
+    {
+      "name": "tortoise_search",
+      "description": "Hybrid semantic search — FTS + vector + structural RRF fusion with EP confidence annotation. Use when matching by MEANING (natural-language query); for exact structural/filter queries use tortoise_query. Full-scan mode: omit query, set kind → all Points of kind.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "tortoise_fts_query",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_search"
+    },
+    {
+      "name": "tortoise_ask",
+      "description": "Answer a question about captured memory — one bounded retrieve-then-read pass (an ANSWER, not ranked hits) with the full ask response shape (answer, abstained, evidence, cost_estimate_usd, ...). COST PROFILE: unlike tortoise_search (LLM-free), tortoise_ask consumes LLM tokens against the team's per-minute ask budget (60/min) — budget-exhausted calls return the structured quota_exceeded error.",
+      "group": "ask",
+      "group_source": "mapped",
+      "sdk_method": "ask",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_ask"
+    },
+    {
+      "name": "tortoise_expand_relationships",
+      "description": "Full relationship payload for ONE Point, incl. each related point's content (the expand side of the #1353 list/expand split — search returns bounded state entries; use this to read a neighbor's full text on demand).",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "expand_relationships",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_expand_relationships"
+    },
+    {
+      "name": "tortoise_recall",
+      "description": "Epistemic recall — four intents via mode (preset + override). mode='state' (UC1): current high-confidence state — multiplicative confidence gate (score = relevance^a × confidence^b × (1 + w_c·centrality)), excludes superseded/deprecated/retracted by default (include_superseded=True brings them back), object-centric (Objects + their Points ranked together), surfaces the most important arguments (operators), high-contention NANDs and mitigations, and flags contested claims with counter-evidence attached (never rank-penalized). mode='gaps' (UC2): load-bearing but under-supported claims — graph-structure query (score = load/(1+support); load = outgoing IMPL+NAND, support = incoming IMPL + Source edges; reads IMPL/NAND operator-mediated or direct per the reification rule); needs query (topic scope) or kind (population scan). mode='subgraph' (UC3): complete connected subgraph for a seed/topic — completeness-optimized (high recall, precision secondary), returns {nodes, edges, stats}; needs seed (node id, Source url, or topic text); depth 1-5, completeness core|full. mode='custom': raw params, full control.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "recall_state",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_recall"
+    },
+    {
+      "name": "tortoise_mine_conversations",
+      "description": "Mine agent conversations (single transcript or corpus batch) into the graph — extraction, entity reification, content dedup, temporal wiring, W-3 batch gate. Batch per-file failures reported non-fatally in 'errors'. WRITES to the graph; corpus mode walks the server filesystem — stdio/CLI only (excluded from tenant HTTP).",
+      "group": "mining",
+      "group_source": "mapped",
+      "sdk_method": "mine_corpus",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_mine_conversations"
+    },
+    {
+      "name": "tortoise_list_dedup_candidates",
+      "description": "Review queue for dedup/temporal candidates (candidate_type=content|temporal|entity).",
+      "group": "review",
+      "group_source": "mapped",
+      "sdk_method": "list_dedup_candidates",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_dedup_candidates"
+    },
+    {
+      "name": "tortoise_approve_merge",
+      "description": "Review a dedup/temporal candidate — action=merge|reject. Wiring deferred to promotion for live priors. WRITES review flags + wires edges (idempotent for repeats).",
+      "group": "review",
+      "group_source": "mapped",
+      "sdk_method": "approve_merge",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_approve_merge"
+    },
+    {
+      "name": "tortoise_promote_point",
+      "description": "Reviewer-gated draft→live promotion — the only path a draft extraction Point may go live (quarantine lock, R16 operator promotion, deferred dedup/temporal wiring). WRITES status + wires edges.",
+      "group": "review",
+      "group_source": "mapped",
+      "sdk_method": "promote_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_promote_point"
+    },
+    {
+      "name": "tortoise_belief_timeline",
+      "description": "Dated, ordered belief chain for a topic — decision Points with validFrom, NAND/CORRECTS links, superseded priors visible.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "belief_timeline",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_belief_timeline"
+    },
+    {
+      "name": "tortoise_compute_confidence",
+      "description": "Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}. #395: no-arg (no factors/anchors) runs LOCAL EP over the dirty subgraph on stdio/embedded; over HTTP, the no-arg path serves the graph-persisted dirty subgraph (#1163) and only returns diagnostic 'no_dirty_state_http' when the graph is truly clean. anchors+max_hops=None is clamped to a bounded default over HTTP. Calibration is required by default (#344): raises CalibrationError on uncalibrated graphs. Pass require_calibration=False to run on topology alone (explicit opt-out).",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "compute_confidence",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_compute_confidence"
+    },
+    {
+      "name": "tortoise_set_point_baseline",
+      "description": "Set Beta prior evidence for a claim.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "set_point_baseline",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_set_point_baseline"
+    },
+    {
+      "name": "tortoise_get_confidence",
+      "description": "Get EP confidence for a claim: {mean, variance, alpha, beta}.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "get_confidence",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_confidence"
+    },
+    {
+      "name": "tortoise_calibrate_summary",
+      "description": "Audit graph calibration state. Returns per-point guidance.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "calibrate_summary",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_calibrate_summary"
+    },
+    {
+      "name": "tortoise_dream",
+      "description": "Run EP stabilization (dreaming, #85). Default: incremental dirty subgraph. Set full=True for whole-graph. mode (epic 903): explicit strategy override {\"local\", \"stale-first\", \"full\"} — wins over full; budget: per-pass operator cap.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "dream",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_dream"
+    },
+    {
+      "name": "tortoise_dream_health",
+      "description": "Dream observability (epic 903-C7): zero-output silent-death alarm verdict + health record (last pass, coverage, failure rate, region_attempts, warm-start savings). Embedded call-triggered evaluator.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "dream_health_check",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_dream_health"
+    },
+    {
+      "name": "tortoise_update_point",
+      "description": "Update properties on a Point. Safe — modifies one Point only.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "update_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_update_point"
+    },
+    {
+      "name": "tortoise_create_operator",
+      "description": "Create an operator connecting Points. op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "create_operator",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_operator"
+    },
+    {
+      "name": "tortoise_annotate_operator",
+      "description": "Annotate an operator Point with structured epistemic dimensions (bias, precision, consistency, directness).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "annotate_operator",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_annotate_operator"
+    },
+    {
+      "name": "tortoise_get_operator",
+      "description": "Get an operator Point by ID. Returns all properties including annotation dimensions.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "get_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_operator"
+    },
+    {
+      "name": "tortoise_mitigate_operator",
+      "description": "Create a mitigation Point that modulates an operator's edge strength. Idempotent — second call updates existing mitigation.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "mitigate_operator",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_mitigate_operator"
+    },
+    {
+      "name": "tortoise_file_decision",
+      "description": "File a simple decision directly to the graph. Creates decision + options + evidence + IMPL edges atomically.",
+      "group": "journal",
+      "group_source": "mapped",
+      "sdk_method": "file_decision",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_file_decision"
+    },
+    {
+      "name": "tortoise_file_human_approval",
+      "description": "File a human approval of a planning artifact to the graph. Creates Event (eventKind: humanApproval) + decision Point (pointKind: humanApproval) + unidirectional IMPL fan-out (label approvedBy) so dependent claims strengthen.",
+      "group": "journal",
+      "group_source": "mapped",
+      "sdk_method": "file_human_approval",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_file_human_approval"
+    },
+    {
+      "name": "tortoise_delete_point",
+      "description": "Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "delete_point_wrapped",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_delete_point"
+    },
+    {
+      "name": "tortoise_invalidate",
+      "description": "Mark a Point outdated with a CORRECTS edge from the correcting Point.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "invalidate_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_invalidate"
+    },
+    {
+      "name": "tortoise_supersede",
+      "description": "Atomically replace old Point with new — CORRECTS edge + outdated flag. transfer_edges=True (default): full supersede — all edges move from old to new. transfer_edges=False: invalidate behavior — outdated flag + CORRECTS edge only, no edge transfer.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "supersede",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_supersede"
+    },
+    {
+      "name": "tortoise_events_poll",
+      "description": "Poll graph/claim events after an opaque cursor (at-least-once). Returns {events, next_cursor}. Event types: 11 registered claim types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, OperatorAnnotated, PointPromoted, OperatorPromoted, DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated).",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "events_poll",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_events_poll"
+    },
+    {
+      "name": "tortoise_retract_point",
+      "description": "Tombstone-retract a Point — status='retracted' (point stays in graph, excluded from default surfaces). Terminal; cannot retract operators or already-terminal points.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "retract_point",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_retract_point"
+    },
+    {
+      "name": "tortoise_entity_profile",
+      "description": "Multi-hop BFS from an entity with optional filters (pointKind, confidenceMin) — full neighborhood categorized by node type. Use for deep entity analysis; for a fast neighbor list use tortoise_list_topics.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "entity_profile",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_entity_profile"
+    },
+    {
+      "name": "tortoise_traverse",
+      "description": "Multi-hop graph traversal from entity following ALL relationship types. Returns {entity, nodes: [{node, relationship, depth}]}.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "traverse",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_traverse"
+    },
+    {
+      "name": "tortoise_checkpoint",
+      "description": "Session batch save — two-tier dedup (content hash + embedding similarity). Returns {filed: N, duplicates: M}.",
+      "group": "journal",
+      "group_source": "mapped",
+      "sdk_method": "checkpoint",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_checkpoint"
+    },
+    {
+      "name": "tortoise_diary_write",
+      "description": "Write an agent diary entry (AAAK format suggested). Creates a Point with pointKind=diary, authoredBy=agent.",
+      "group": "journal",
+      "group_source": "mapped",
+      "sdk_method": "diary_write",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_diary_write"
+    },
+    {
+      "name": "tortoise_diary_read",
+      "description": "Read recent diary entries for an agent, newest first.",
+      "group": "journal",
+      "group_source": "mapped",
+      "sdk_method": "diary_read",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_diary_read"
+    },
+    {
+      "name": "tortoise_list_graphs",
+      "description": "List all graph names in the database. Useful for namespace discovery.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "list_graphs",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_graphs"
+    },
+    {
+      "name": "tortoise_status",
+      "description": "Graph health + entity counts + FalkorDB connectivity. Returns {connected, counts, total_entities}.",
+      "group": "admin",
+      "group_source": "mapped",
+      "sdk_method": "status",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_status"
+    },
+    {
+      "name": "tortoise_health",
+      "description": "Health check + basic metrics: graph_size, last_ingest, error_count, uptime.",
+      "group": "admin",
+      "group_source": "mapped",
+      "sdk_method": "health",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_health"
+    },
+    {
+      "name": "tortoise_session_context",
+      "description": "Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "session_context",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_session_context"
+    },
+    {
+      "name": "tortoise_session_capture",
+      "description": "File an agent session into the graph (epic #909 capture path): turns become episodic Points, the conversation is LLM-extracted into epistemic Points, and the Session links to subject/project entities. #1927: session_recording is default-ON (ToS-covered) with an optional off-switch — returns 409 when the team disabled capture; 402 at quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped (extraction_mode \"no-provider\"); 422 for an invalid harness. session_id is the idempotency key (re-filing the same id mints zero new nodes). Only call this when the team has session recording enabled (the dashboard 'Memory sources > Agent sessions' toggle); if the call fails, tell the user it wasn't filed and do NOT retry. Requires hosted mode — stdio/self-hosted returns an honest error (no local fallback that bypasses the capture pipeline).",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_session_capture"
+    },
+    {
+      "name": "tortoise_graph_set_recording",
+      "description": "Set or clear a graph's session-recording override (#2302) — the MCP twin of PATCH /v1/graphs/{graph_id} (recording), sharing the same hosted_api core so the surfaces never drift. recording: true/false sets the per-graph override, null removes it (inherit the team default — never flips a team ON). Requires hosted mode + a team:manage-scoped key (or legacy full-access) — the capture 409 ('Session recording is disabled for this graph') routes agents here; call this tool to turn recording back on, then retry the capture.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_graph_set_recording"
+    },
+    {
+      "name": "tortoise_issue_insight",
+      "description": "Return a compact 'there's more in the graph' insight for a would-be issue — call BEFORE filing. Surfaces cross-session decisions / EP-tagged claims matching the title (semantic stage) plus prior indexed issues for the repo (repo= given). Fail-closed: empty graph -> no_prior_knowledge; populated graph + unindexed repo -> repo_not_indexed.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "issue_insight",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_issue_insight"
+    },
+    {
+      "name": "tortoise_ingest_corpus",
+      "description": "DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter from .md files, create/update Document nodes. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
+      "group": "sources",
+      "group_source": "mapped",
+      "sdk_method": "ingest_corpus",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_ingest_corpus"
+    },
+    {
+      "name": "tortoise_ingest",
+      "description": "Heterogeneous bulk write (epic #888 W4) — one call writes points + entities + sources + connections coherently (nodes first, then connections). Connections carrying 'operator' (IMPL/NAND) create operator Points per the reification rule (v3.5 §8); connections carrying 'relation' stay plain structural edges. Local refs address bundle items. Endpoint typing (#2062): operator-routed connections (reify:true / mitigation / part-whole) accept plain-Point or Event endpoints (by node id; eventId-only Events stay violations); direct-edge connections (plain IMPL/NAND) are plain-Point-only. granularity='bulk' (default) returns aggregated counts; granularity='granular' returns per-item results. promotion_policy='gated' (default) keeps points draft and never promotes connections (operator path: promote_source=False via #780); under gated ANY effective status other than 'draft' on a point item is REJECTED (INGEST_CONTRACT row 9 — case variants, nested props={...}, and terminal statuses included) — use promotion_policy='auto' or promote after ingest via update_point(status='live'). promotion_policy='auto' preserves the #131 promote-on-wire lifecycle (draft/null-status sources go live on first edge; terminal sources are never resurrected; deduped connections never retro-promote). Idempotent-ish: points dedup by content hash + kind, sources by url, operators by input set.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "ingest",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_ingest"
+    },
+    {
+      "name": "tortoise_taxonomy",
+      "description": "Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "taxonomy",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_taxonomy"
+    },
+    {
+      "name": "tortoise_list_topics",
+      "description": "Fast one-hop neighbor enumeration for an entity — quick discovery and navigation. Use for shallow context; for multi-hop filtered BFS use tortoise_entity_profile.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "list_topics",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_list_topics"
+    },
+    {
+      "name": "tortoise_analyze",
+      "description": "Answer natural language questions about the Tortoise epistemic graph. Ask things like: 'where is the disagreement?' 'what supports claim X?'",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "analyze",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_analyze"
+    },
+    {
+      "name": "tortoise_stale",
+      "description": "Find Points not updated in N days. Returns {stale, count, cutoff, limit}.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "stale_points",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_stale"
+    },
+    {
+      "name": "tortoise_review_connections",
+      "description": "Review graph connections (READ-ONLY — never mutates the graph). Hygiene counterpart to connect: mode=add surfaces related-but-missing connections as suggestions {from, to, suggested_relation, reason, similarity} (nudge, don't enforce); mode=prune flags illogical/stale IMPL/NAND connections {from, to, relation, issue, suggested_action, detail} with issue in (contradictory, stale, contested) and action in (review, prune, re-point); mode=both runs both and returns {add: [...], prune: [...]}. Optional scope (topic text or Point id) narrows the candidate pool to the retrieval-NEAREST points — a focus filter, not an exact-match or relevance gate (mode=add also applies similarity_threshold; mode=prune has no similarity bar).",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "review_connections",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_review_connections"
+    },
+    {
+      "name": "tortoise_find_cross_lens_candidates",
+      "description": "Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent): surface unverified candidate pairs between Points from DIFFERENT sources (cross-stream discovery over the vector index) with lens pair, cosine similarity, point context, and dedup vs existing operators. Payload carries a single #901 routing field (truth|relevance) but stays NEUTRAL — no op_type hint; the customer agent decides semantics and writes operators via the normal API. Gated on registered sourceKind (any tier, D3); hard cap 200 candidates/cycle (D4); top_k is hard-clamped to 100 so an agent cannot inflate the per-cycle recall budget. Empty results (not errors) when there is nothing to see (D8).",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "get_cross_lens_candidates",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_find_cross_lens_candidates"
+    },
+    {
+      "name": "tortoise_provenance",
+      "description": "Provenance chain — 'Who decided this?' Follows authoredBy → Subject → delegation.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "provenance",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_provenance"
+    },
+    {
+      "name": "tortoise_org_create",
+      "description": "Create isolated team graph via FalkorDB select_graph. EXCLUDED from tenant HTTP — provisioning belongs to /internal/provision behind FASTAPI_INTERNAL_KEY.",
+      "group": "admin",
+      "group_source": "mapped",
+      "sdk_method": "org_create",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_org_create"
+    },
+    {
+      "name": "tortoise_create_subject",
+      "description": "Create a Subject node (team, role, organization, person).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "create_subject",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_subject"
+    },
+    {
+      "name": "tortoise_create_object",
+      "description": "Create an Object node (product, customer, skill, etc.).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "create_object",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_object"
+    },
+    {
+      "name": "tortoise_create_event",
+      "description": "Create an Event node (meeting, decision, deployment, etc.).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "create_event",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_event"
+    },
+    {
+      "name": "tortoise_get_events",
+      "description": "Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "get_events",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_events"
+    },
+    {
+      "name": "tortoise_get_session",
+      "description": "Get a single agent session Event by session_id.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "get_session",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_session"
+    },
+    {
+      "name": "tortoise_index_sessions",
+      "description": "DEPRECATED — use tortoise_index_files. Index session .md files as AgentSession Events. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "index_sessions",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_index_sessions"
+    },
+    {
+      "name": "tortoise_index_files",
+      "description": "Index a corpus directory of .md files as Sources + Events/Documents (the unified index path — replaces tortoise_index_sessions + tortoise_ingest_corpus file semantics for local corpora). Returns the honest summary (file_count, indexed, updated, skipped, failed, aborted, ignored, errors[], by_kind). Idempotent — re-runs converge to skipped. On a shared graph, give each corpus a unique corpus_name (default = directory basename) to avoid cross-corpus url collisions. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "index_directory",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_index_files"
+    },
+    {
+      "name": "tortoise_search_sessions",
+      "description": "Search indexed agent sessions. Returns Events with narrative_arc snippets.",
+      "group": "sessions",
+      "group_source": "mapped",
+      "sdk_method": "search_sessions",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_search_sessions"
+    },
+    {
+      "name": "tortoise_create_document",
+      "description": "Create a Document node (research, planDoc, meetingNotes, etc.).",
+      "group": "sources",
+      "group_source": "mapped",
+      "sdk_method": "create_document",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_document"
+    },
+    {
+      "name": "tortoise_create_source",
+      "description": "Create a Source node for provenance (document, web, db, etc.). Sources track content origin — url is the permalink key. tier (T0-T4 / legacy alias) stores the credibility tier; sourceDate is the evidence-age clock.",
+      "group": "sources",
+      "group_source": "mapped",
+      "sdk_method": "create_source",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_source"
+    },
+    {
+      "name": "tortoise_get_source_reliability",
+      "description": "Derive a Source's reliability (0-1) — query-time, cache-consistency-checked. NOTE: refreshes the reliability cache on the Source node (write-through projection), so not read-only.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "get_source_reliability",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_source_reliability"
+    },
+    {
+      "name": "tortoise_assess_source",
+      "description": "Record an agent's assessment of a Source (0-1 score + rationale). Creates a pointKind='assessment' Statement Point; latest per (url, assessor) wins; weighted by assessor reputation.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "assess_source",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_assess_source"
+    },
+    {
+      "name": "tortoise_set_source_tier",
+      "description": "Set (or change) a Source's credibility tier (T0-T4). Non-destructive — never overwrites sourceKind type strings.",
+      "group": "memory",
+      "group_source": "defaulted",
+      "sdk_method": "set_source_tier",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_set_source_tier"
+    },
+    {
+      "name": "tortoise_get_entity",
+      "description": "Get any entity by ID, eventId, or url.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "get_entity",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_entity"
+    },
+    {
+      "name": "tortoise_update_entity",
+      "description": "Update any entity's properties.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "update_entity",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_update_entity"
+    },
+    {
+      "name": "tortoise_delete_entity",
+      "description": "Delete any entity by ID.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "delete_entity",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_delete_entity"
+    },
+    {
+      "name": "tortoise_create_entity",
+      "description": "Create an entity — type: subject|object|event|document. Event entities wire about* edges from aboutSubject/aboutObject/aboutPoint/aboutDocument props. Returns {node, nudges} — nudges suggest IMPL/NAND/mitigate connections to related Points (advisory).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "create_entity",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_entity"
+    },
+    {
+      "name": "tortoise_update",
+      "description": "Update a Point OR entity by id. Points get point-lifecycle semantics (draft→live promote via status, version increment for Point:Object, status validation); entities get a plain property update.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "update",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_update"
+    },
+    {
+      "name": "tortoise_delete",
+      "description": "Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+      "group": "memory",
+      "group_source": "mapped",
+      "sdk_method": "delete",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_delete"
+    },
+    {
+      "name": "tortoise_operator_action",
+      "description": "Consolidated operator write action — action=mitigate|annotate. mitigate: reason + strength (0-1) — creates/updates the mitigation Point (idempotent). annotate: bias/precision/consistency/directness (0-1).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "operator_action",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_operator_action"
+    },
+    {
+      "name": "tortoise_create_edge",
+      "description": "Create a typed structural edge between two entities. Relation: performs, produces, uses, memberOf, ownedBy, managedBy, about*, related, dependsOn, etc. Operator-less per the reification rule (v3.5 §8) — lazy promotion via operator_action when mitigation is needed. Returns {edge, created, nudges}.",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "create_edge",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_create_edge"
+    },
+    {
+      "name": "tortoise_get_governance",
+      "description": "Get all entities owned by a Subject.",
+      "group": "admin",
+      "group_source": "mapped",
+      "sdk_method": "get_owned_entities",
+      "sdk_method_resolves": true,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get_governance"
+    },
+    {
+      "name": "tortoise_overview",
+      "description": "Graph orientation in one call — consolidates the list_*/status/health/taxonomy/structure zoo. section: taxonomy|structure|structure_check|pointkinds|tags|sources|namespaces|graphs|topics|health|status|stale. Omit section → compact combined summary. topics requires entity_id.",
+      "group": "reasoning",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_overview"
+    },
+    {
+      "name": "tortoise_get",
+      "description": "Fetch a node by id — consolidates get_point/get_entity/get_operator/get_events/get_session/get_governance. type: point|operator|entity|event|session|events|governance. Omitted type → auto-detect by id lookup (id|eventId|url, then session_id/sessionId).",
+      "group": "graph",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_get"
+    },
+    {
+      "name": "tortoise_backfill_v25",
+      "description": "Backfill database to ONTOLOGY v2.5 schema. EXCLUDED from tenant HTTP — schema-level migration (operator-only).",
+      "group": "admin",
+      "group_source": "mapped",
+      "sdk_method": "backfill_v25",
+      "sdk_method_resolves": true,
+      "http_policy": false,
+      "hosted_only": false,
+      "has_rest_spec": false,
+      "mcp_handler": "tortoise_backfill_v25"
+    },
+    {
+      "name": "tortoise_onboarding_demo_create",
+      "description": "Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_demo_create"
+    },
+    {
+      "name": "tortoise_onboarding_state",
+      "description": "Return this team's onboarding progress (Q6 verification).",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_state"
+    },
+    {
+      "name": "tortoise_onboarding_seed",
+      "description": "File the two onboarding anchor Subjects (Organization/organization + User/naturalPerson linked memberOf) — interactive, ontology-precise (#1999 W3): call without names to discover gaps/collisions, with user-confirmed names to file.",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_seed"
+    },
+    {
+      "name": "tortoise_onboarding_session_recording",
+      "description": "Toggle automatic session recording for this team (Q3).",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_session_recording"
+    },
+    {
+      "name": "tortoise_onboarding_github_connect",
+      "description": "Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_github_connect"
+    },
+    {
+      "name": "tortoise_onboarding_github_index",
+      "description": "Start background GitHub indexing of an org's issues/PRs (Q2).",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_github_index"
+    },
+    {
+      "name": "tortoise_onboarding_github_status",
+      "description": "Return GitHub connection status for this team (Q1 verify).",
+      "group": "onboarding",
+      "group_source": "mapped",
+      "sdk_method": "",
+      "sdk_method_resolves": false,
+      "http_policy": true,
+      "hosted_only": false,
+      "has_rest_spec": true,
+      "mcp_handler": "tortoise_onboarding_github_status"
+    }
+  ],
+  "sdk_methods": [
+    {
+      "name": "annotate_ask_hits",
+      "signature": "(self, hits: 'list[dict]') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:12521",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "annotate_operator",
+      "signature": "(self, id: 'str', bias: 'float', precision: 'float', consistency: 'float', directness: 'float') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6141",
+      "bound_by_tools": [
+        "tortoise_annotate_operator"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "apikey_create",
+      "signature": "(self, org_id: 'str', created_by: 'str', *, graph_id: 'str | None' = None, scopes: 'list | None' = None, created_by_key_id: 'str | None' = None, delegation_depth: 'int | None' = None, prefix: 'str' = 'tt_', name: 'str | None' = None, created_via: 'str | None' = None, expires_at: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16047",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": true
+    },
+    {
+      "name": "apikey_list",
+      "signature": "(self, org_id: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:16151",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "apikey_revoke",
+      "signature": "(self, key_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16176",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "apikey_verify",
+      "signature": "(self, key_plaintext: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:16197",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "approve_merge",
+      "signature": "(self, candidate_id: 'str', action: 'str' = 'merge') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:5818",
+      "bound_by_tools": [
+        "tortoise_approve_merge"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "ask",
+      "signature": "(self, question: 'str', *, question_type: 'str | None' = None, question_date: 'str | None' = None, org_id: 'str | None' = None, _reader_factory=None, _selfhost_transport: 'bool' = False) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:13709",
+      "bound_by_tools": [
+        "tortoise_ask"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "ask_assembled",
+      "signature": "(self, question: 'str', *, question_date: 'str | None' = None, question_type: 'str | None' = None, caps: 'dict | None' = None, _reader_factory=None) -> 'AssemblyAnswer'",
+      "defined_at": "tortoise/sdk.py:14130",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "assess_source",
+      "signature": "(self, url: 'str', assessor: 'str', score: 'float', rationale: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19848",
+      "bound_by_tools": [
+        "tortoise_assess_source"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "audit",
+      "signature": "(self, point_kinds: 'list[str] | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6496",
+      "bound_by_tools": [
+        "tortoise_audit"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "backfill_about_entities",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8931",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "backfill_sources",
+      "signature": "(self, directory: 'str | None' = None, *, dry_run: 'bool' = False, corpus_name: 'str | None' = None, event_kinds: 'tuple[str, ...]' = ('AgentSession', 'DocumentCreated')) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:18850",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "backfill_v25",
+      "signature": "(self, dry_run: 'bool' = False) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20183",
+      "bound_by_tools": [
+        "tortoise_backfill_v25"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "batch_create_points",
+      "signature": "(self, points_list: 'list[dict]') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6708",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "belief_timeline",
+      "signature": "(self, topic: 'str', limit: 'int' = 50) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:5562",
+      "bound_by_tools": [
+        "tortoise_belief_timeline"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "calibrate_summary",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:11274",
+      "bound_by_tools": [
+        "tortoise_calibrate_summary"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "calibration_passed",
+      "signature": "(self) -> 'bool'",
+      "defined_at": "tortoise/sdk.py:20307",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "capture_session",
+      "signature": "(self, conversation: 'list[dict[str, str]]', session_id: 'str | None' = None, *, max_turns: 'int' = 500, harness: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:3119",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "check_structure",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6462",
+      "bound_by_tools": [
+        "tortoise_check_structure"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "checkpoint",
+      "signature": "(self, items: 'list[dict]', agent_name: 'str' = 'checkpoint', threshold: 'float' = 0.95) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:11446",
+      "bound_by_tools": [
+        "tortoise_checkpoint"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "cleanup_expired_invitations",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16610",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "close",
+      "signature": "(self) -> 'None'",
+      "defined_at": "tortoise/sdk.py:8886",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": true
+    },
+    {
+      "name": "commit_session",
+      "signature": "(self, conversation=None, session_id=None, *, summary=None, existing_state=None, extractor_model=None, chunk_size=None, base_url=None, api_key=None, mode: 'str' = 'fail-closed', extractor: 'str | None' = None, session_date: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:2956",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "complete_source",
+      "signature": "(self, url: 'str', content: 'str' = None, external_id: 'str' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20162",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "compute_confidence",
+      "signature": "(self, factors=None, evidence=None, anchors: 'list[str] | None' = None, max_hops: 'int' = 1, rel_filter: 'str' = 'IMPL|NAND', direction: 'str' = 'both', require_calibration: 'bool | None' = None, recency_decay: 'float | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:10816",
+      "bound_by_tools": [
+        "tortoise_compute_confidence"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "compute_reputation",
+      "signature": "(self, subject_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19972",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_derivation",
+      "signature": "(self, src_id: 'str', dst_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19664",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_direct_edge",
+      "signature": "(self, op_type: 'str', source_id: 'str', target_id: 'str', *, direction: 'str | None' = None, confidence: 'float | None' = None, weight: 'float | None' = None, label: 'str | None' = None, batch_id: 'str | None' = None, promote_source: 'bool' = True) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8349",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_document",
+      "signature": "(self, title: 'str', documentKind: 'str', **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19498",
+      "bound_by_tools": [
+        "tortoise_create_document"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_edge",
+      "signature": "(self, relation: 'str', from_id: 'str', to_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20064",
+      "bound_by_tools": [
+        "tortoise_create_edge"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_entity",
+      "signature": "(self, type: 'str', name: 'str', *, is_episodic: 'bool | None' = None, _server_id: 'str | None' = None, **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:17113",
+      "bound_by_tools": [
+        "tortoise_create_entity"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_event",
+      "signature": "(self, name: 'str', eventKind: 'str', *, is_episodic: 'bool | None' = None, _server_id: 'str | None' = None, **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:17296",
+      "bound_by_tools": [
+        "tortoise_create_event"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_object",
+      "signature": "(self, name: 'str', objectKind: 'str' = 'other', **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:17287",
+      "bound_by_tools": [
+        "tortoise_create_object"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_operator",
+      "signature": "(self, op_type: 'str', source_id: 'str', target_ids: 'list[str]', label: 'str | None' = None, direction: 'str' = 'bidirectional', promote_source: 'bool' = True) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:5960",
+      "bound_by_tools": [
+        "tortoise_create_operator"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "create_or_update_point",
+      "signature": "(self, kind: 'str', content: 'str', **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:2903",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_point",
+      "signature": "(self, kind: 'str', content: 'str', *, is_episodic: 'bool | None' = None, credibility: 'str | int | float | None' = None, **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:2400",
+      "bound_by_tools": [
+        "tortoise_create_point"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "create_source",
+      "signature": "(self, url: 'str', sourceKind: 'str', *, tier: 'str | None' = None, sourceDate: 'str | None' = None, source_path: 'str | None' = None, is_episodic: 'bool | None' = None, _merge_run_id: 'str | None' = None, **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19510",
+      "bound_by_tools": [
+        "tortoise_create_source"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "create_subject",
+      "signature": "(self, name: 'str', subjectKind: 'str' = 'other', **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:17278",
+      "bound_by_tools": [
+        "tortoise_create_subject"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "delete",
+      "signature": "(self, id: 'str') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:4424",
+      "bound_by_tools": [
+        "tortoise_delete"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "delete_entity",
+      "signature": "(self, id_val: 'str') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:20057",
+      "bound_by_tools": [
+        "tortoise_delete_entity"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "delete_point",
+      "signature": "(self, id: 'str') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:4556",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "delete_point_wrapped",
+      "signature": "(self, id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:4609",
+      "bound_by_tools": [
+        "tortoise_delete_point"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "diary_read",
+      "signature": "(self, agent_name: 'str', last_n: 'int' = 10, wing: 'str | None' = None) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:11622",
+      "bound_by_tools": [
+        "tortoise_diary_read"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "diary_write",
+      "signature": "(self, agent_name: 'str', entry: 'str', topic: 'str | None' = None, wing: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:11610",
+      "bound_by_tools": [
+        "tortoise_diary_write"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "dream",
+      "signature": "(self, dirty_only: 'bool' = True, full: 'bool' = False, max_hops: 'int' = 2, require_calibration: 'bool | None' = None, stamp_dreamed_at: 'bool' = True, mode: 'str | None' = None, budget: 'int | None' = None, warm_start: 'bool' = True) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:10237",
+      "bound_by_tools": [
+        "tortoise_dream"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "dream_health_check",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:9822",
+      "bound_by_tools": [
+        "tortoise_dream_health"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "dream_health_state",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:9971",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "events_poll",
+      "signature": "(self, after: 'str | None' = None, types: 'list[str] | None' = None, limit: 'int' = 100) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:2212",
+      "bound_by_tools": [
+        "tortoise_events_poll"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "expand_relationships",
+      "signature": "(self, point_id: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:14433",
+      "bound_by_tools": [
+        "tortoise_expand_relationships"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "file_decision",
+      "signature": "(self, options: 'list[str]', evidence: 'list[str]', choice: 'int') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8632",
+      "bound_by_tools": [
+        "tortoise_file_decision"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "file_human_approval",
+      "signature": "(self, approver_id: 'str', artifact_id: 'str', point_ids: 'list[str]', decision_content: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8688",
+      "bound_by_tools": [
+        "tortoise_file_human_approval"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_confidence",
+      "signature": "(self, claim_id: 'str', require_calibration: 'bool | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:11053",
+      "bound_by_tools": [
+        "tortoise_get_confidence"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_cross_lens_candidates",
+      "signature": "(self, *, threshold: 'float' = 0.72, max_candidates: 'int' = 200, routing: 'str' = 'truth', top_k: 'int' = 20) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:9126",
+      "bound_by_tools": [
+        "tortoise_find_cross_lens_candidates"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_entity",
+      "signature": "(self, id_val: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20048",
+      "bound_by_tools": [
+        "tortoise_get_entity"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_events",
+      "signature": "(self, eventKind: 'str | None' = None, limit: 'int' = 20) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:17486",
+      "bound_by_tools": [
+        "tortoise_get_events"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_org_structure",
+      "signature": "(self, subject_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20136",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_owned_entities",
+      "signature": "(self, subject_id: 'str') -> 'list'",
+      "defined_at": "tortoise/sdk.py:20093",
+      "bound_by_tools": [
+        "tortoise_get_governance"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_point",
+      "signature": "(self, id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6420",
+      "bound_by_tools": [
+        "tortoise_get_point",
+        "tortoise_get_operator"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_provenance_chain",
+      "signature": "(self, point_id: 'str') -> 'list'",
+      "defined_at": "tortoise/sdk.py:20107",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_session",
+      "signature": "(self, session_id: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:17499",
+      "bound_by_tools": [
+        "tortoise_get_session"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "get_source_reliability",
+      "signature": "(self, url: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19744",
+      "bound_by_tools": [
+        "tortoise_get_source_reliability"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_active_key_count",
+      "signature": "(self, org_id: 'str', graph_id: 'str') -> 'int'",
+      "defined_at": "tortoise/sdk.py:15699",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_count",
+      "signature": "(self, org_id: 'str') -> 'int'",
+      "defined_at": "tortoise/sdk.py:15543",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_delete",
+      "signature": "(self, org_id: 'str', graph_id: 'str') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:15582",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_key_ids",
+      "signature": "(self, org_id: 'str', graph_id: 'str') -> 'list[str]'",
+      "defined_at": "tortoise/sdk.py:15687",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_list",
+      "signature": "(self, org_id: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:15503",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_restore",
+      "signature": "(self, org_id: 'str', graph_id: 'str') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:15610",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_set_name",
+      "signature": "(self, org_id: 'str', graph_id: 'str', name: 'str') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:15722",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "graph_set_recording",
+      "signature": "(self, org_id: 'str', graph_id: 'str', value: 'bool | None') -> 'bool'",
+      "defined_at": "tortoise/sdk.py:15651",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "index_directory",
+      "signature": "(self, directory: 'str', *, file_type: 'str' = 'auto', corpus_name: 'str | None' = None, extract_metadata: 'bool' = True, llm_model: 'str | None' = 'gpt-5-mini', embedding_repair_backoff: 'float | None' = None, progress_file: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:17589",
+      "bound_by_tools": [
+        "tortoise_index_files"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "index_file",
+      "signature": "(self, path: 'str', file_type: 'str | None' = None, *, corpus_root: 'str | None' = None, corpus_name: 'str | None' = None, extract_metadata: 'bool' = True, llm_model: 'str | None' = 'gpt-5-mini', embedding_repair_backoff: 'float | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:17511",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "index_sessions",
+      "signature": "(self, directory: 'str', extract_metadata: 'bool' = True, llm_model: 'str | None' = 'gpt-5-mini', progress_file: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19317",
+      "bound_by_tools": [
+        "tortoise_index_sessions"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "ingest",
+      "signature": "(self, bundle: 'dict', granularity: 'str' = 'bulk', *, promotion_policy: 'str' = 'gated') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:7560",
+      "bound_by_tools": [
+        "tortoise_ingest"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "ingest_corpus",
+      "signature": "(self, directory: 'str', eventKind: 'str' = 'DocumentCreated', extract_metadata: 'bool' = False, llm_model: 'str | None' = 'gpt-5-mini', progress_file: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:11661",
+      "bound_by_tools": [
+        "tortoise_ingest_corpus"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invalidate_point",
+      "signature": "(self, id: 'str', corrected_by_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:4665",
+      "bound_by_tools": [
+        "tortoise_invalidate"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invitation_accept",
+      "signature": "(self, invitation_id: 'str', user_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16540",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invitation_create",
+      "signature": "(self, org_id: 'str', email: 'str', role: 'str', created_by: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16459",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invitation_get_by_id",
+      "signature": "(self, invitation_id: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:16584",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invitation_get_by_token",
+      "signature": "(self, token_plaintext: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:16535",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invitation_list",
+      "signature": "(self, org_id: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:16517",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "invitation_revoke",
+      "signature": "(self, invitation_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16593",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "issue_insight",
+      "signature": "(self, title: 'str', body: 'str | None' = None, repo: 'str | None' = None, limit: 'int' = 2) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:12278",
+      "bound_by_tools": [
+        "tortoise_issue_insight"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "link_source_to_entity",
+      "signature": "(self, source_url: 'str', entity_id: 'str', entity_label: 'str', source_kind: 'str' = 'document') -> 'None'",
+      "defined_at": "tortoise/sdk.py:20117",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_batch",
+      "signature": "(self, batch_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8229",
+      "bound_by_tools": [
+        "tortoise_list_batch"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_batches",
+      "signature": "(self, limit: 'int' = 20) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:8298",
+      "bound_by_tools": [
+        "tortoise_list_batches"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_dedup_candidates",
+      "signature": "(self, candidate_type: 'str' = 'content', limit: 'int' = 50) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:5749",
+      "bound_by_tools": [
+        "tortoise_list_dedup_candidates"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_drafts",
+      "signature": "(self, *, limit: 'int' = 50) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:5910",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_graphs",
+      "signature": "(self) -> 'list[str]'",
+      "defined_at": "tortoise/sdk.py:8826",
+      "bound_by_tools": [
+        "tortoise_list_graphs"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_namespaces",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6654",
+      "bound_by_tools": [
+        "tortoise_list_namespaces"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_pointkinds",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6588",
+      "bound_by_tools": [
+        "tortoise_list_pointkinds"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "list_relations",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:8843",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_sources",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6613",
+      "bound_by_tools": [
+        "tortoise_list_sources"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "list_tags",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6627",
+      "bound_by_tools": [
+        "tortoise_list_tags"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "list_topics",
+      "signature": "(self, entity_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6667",
+      "bound_by_tools": [
+        "tortoise_list_topics"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "membership_create",
+      "signature": "(self, org_id: 'str', user_id: 'str', role: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15899",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "membership_delete",
+      "signature": "(self, membership_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15989",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "membership_get",
+      "signature": "(self, membership_id: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:15951",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "membership_list",
+      "signature": "(self, org_id: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:15960",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "membership_update_role",
+      "signature": "(self, membership_id: 'str', new_role: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15969",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "migrate_orgs_to_registry",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15860",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "mine_corpus",
+      "signature": "(self, directory: 'str', *, extract_entities: 'bool' = True, progress_file: 'str | None' = None, model=None, event_log_path: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:12092",
+      "bound_by_tools": [
+        "tortoise_mine_conversations"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "mitigate_operator",
+      "signature": "(self, id: 'str', reason: 'str', strength: 'float' = 0.5, credibility: 'str | int | float | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6172",
+      "bound_by_tools": [
+        "tortoise_mitigate_operator"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "operator_action",
+      "signature": "(self, action: 'str', **kwargs) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6118",
+      "bound_by_tools": [
+        "tortoise_operator_action"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "org_create",
+      "signature": "(self, name: 'str', *, idempotency_key: 'str | None' = None, mint_key: 'bool' = True, owner_user_id: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15238",
+      "bound_by_tools": [
+        "tortoise_org_create"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "org_delete",
+      "signature": "(self, org_id: 'str', *, confirmation: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15797",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "org_get",
+      "signature": "(self, org_id: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:15757",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "org_list",
+      "signature": "(self) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:15766",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "org_update",
+      "signature": "(self, org_id: 'str', **fields) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15774",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "paginated_query",
+      "signature": "(self, kind: 'str | None' = None, skip: 'int' = 0, limit: 'int' = 20, *, include_retracted: 'bool' = False, **filters) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6358",
+      "bound_by_tools": [
+        "tortoise_paginated_query"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "promote_point",
+      "signature": "(self, point_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:5253",
+      "bound_by_tools": [
+        "tortoise_promote_point"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "provenance",
+      "signature": "(self, point_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8901",
+      "bound_by_tools": [
+        "tortoise_provenance"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "quarantine_batch",
+      "signature": "(self, batch_id: 'str', *, reason: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:5550",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "query",
+      "signature": "(self, kind: 'str | None' = None, *, include_retracted: 'bool' = False, **filters) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6305",
+      "bound_by_tools": [
+        "tortoise_query"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "query_points_by_tag",
+      "signature": "(self, tag: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6643",
+      "bound_by_tools": [
+        "tortoise_query_points_by_tag"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "recall_gaps",
+      "signature": "(self, query: 'str | None' = None, *, kind: 'str | None' = None, limit: 'int' = 20, min_load: 'int' = 1, max_support: 'int' = 2, include_superseded: 'bool' = False, gaps_ranker=None) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:15037",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "recall_state",
+      "signature": "(self, query: 'str | None' = None, *, kind: 'str | None' = None, limit: 'int' = 10, include_superseded: 'bool' = False, min_confidence: 'float' = 0.0, relevance_exp: 'float' = 1.0, confidence_exp: 'float' = 1.0, centrality_weight: 'float' = 0.1, object_centric: 'bool' = True, state_ranker=None, leg_trace: 'list[dict] | None' = None) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:14612",
+      "bound_by_tools": [
+        "tortoise_recall"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "recall_subgraph",
+      "signature": "(self, seed: 'str', *, depth: 'int' = 2, completeness: 'str' = 'full', max_nodes: 'int' = 500) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:15160",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "reconcile_sessions",
+      "signature": "(self, directory: 'str | None' = None, extract_metadata: 'bool' = False, llm_model: 'str | None' = 'gpt-5-mini') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19418",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": true
+    },
+    {
+      "name": "record_calibration",
+      "signature": "(self, *, precision: 'float | None' = None, sample_size: 'int | None' = None, mean_grounding_delta: 'float | None' = None, notes: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20222",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "resolve_id",
+      "signature": "(self, id_str: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:2909",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "restore_point_at",
+      "signature": "(self, point_id: 'str', at_date: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:14471",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "retract_point",
+      "signature": "(self, id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:5188",
+      "bound_by_tools": [
+        "tortoise_retract_point"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "retrieval_legs",
+      "signature": "(self, query: 'str', *, kind: 'str | None' = None, limit: 'int' = 10, lane: 'str | None' = None, require_hybrid: 'bool' = False) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:14799",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "review_connections",
+      "signature": "(self, mode: 'str' = 'both', scope: 'str | None' = None, *, similarity_threshold: 'float' = 0.72, variance_threshold: 'float' = 0.04, add_limit: 'int' = 20, prune_limit: 'int' = 50, similarity_fn=None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:9000",
+      "bound_by_tools": [
+        "tortoise_review_connections"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "search_sessions",
+      "signature": "(self, query: 'str', *, agent: 'str | None' = None, topics: 'list[str] | None' = None, after: \"'datetime | str | None'\" = None, before: \"'datetime | str | None'\" = None, limit: 'int' = 10, offset: 'int' = 0) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:17345",
+      "bound_by_tools": [
+        "tortoise_search_sessions"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "session_context",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:12216",
+      "bound_by_tools": [
+        "tortoise_session_context"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "session_index_health",
+      "signature": "(self, directory: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19332",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": true
+    },
+    {
+      "name": "set_point_baseline",
+      "signature": "(self, claim_id: 'str', alpha: 'float', beta: 'float', *, source: 'str' = 'set-by-author') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:10986",
+      "bound_by_tools": [
+        "tortoise_set_point_baseline"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "set_source_tier",
+      "signature": "(self, url: 'str', tier: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:19623",
+      "bound_by_tools": [
+        "tortoise_set_source_tier"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "signup_token_lookup",
+      "signature": "(self, token_plaintext: 'str') -> 'dict | None'",
+      "defined_at": "tortoise/sdk.py:16281",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "signup_token_recover",
+      "signature": "(self, token_plaintext: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16312",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "signup_token_revoke",
+      "signature": "(self, token_plaintext: 'str', org_id: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16392",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "stale_points",
+      "signature": "(self, days: 'int' = 30, limit: 'int' = 50) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:8991",
+      "bound_by_tools": [
+        "tortoise_stale"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "status",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:11642",
+      "bound_by_tools": [
+        "tortoise_status"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": true
+    },
+    {
+      "name": "suggest_entry_points",
+      "signature": "(self, query: 'str', *, limit: 'int' = 5, kind_filter: 'str | None' = None, graph_ranker=None) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:12119",
+      "bound_by_tools": [
+        "tortoise_suggest_entry_points"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "summarize_structure",
+      "signature": "(self) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6514",
+      "bound_by_tools": [
+        "tortoise_summarize_structure"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "supersede",
+      "signature": "(self, old_id: 'str', new_id: 'str', transfer_edges: 'bool' = True) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:4758",
+      "bound_by_tools": [
+        "tortoise_supersede"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "supersede_point",
+      "signature": "(self, old_id: 'str', new_id: 'str', *, valid_from: 'str | None' = None) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:4776",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "sweep_invite_ghost_memberships",
+      "signature": "(self, *, dry_run: 'bool' = False) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:16656",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "taxonomy",
+      "signature": "(self) -> 'dict[str, int]'",
+      "defined_at": "tortoise/sdk.py:6583",
+      "bound_by_tools": [
+        "tortoise_taxonomy"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "test_guard",
+      "signature": "(self) -> 'None'",
+      "defined_at": "tortoise/sdk.py:2035",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "topic_summarize",
+      "signature": "(self, topic: 'str', *, max_seeds: 'int' = 50, max_hops: 'int' = 1, include_relationships: 'bool' = True) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6672",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "tortoise_fts_query",
+      "signature": "(self, query: 'str | None' = None, kind: 'str | None' = None, *, entity_type: 'str' = 'point', structural_kind: 'str | None' = None, structural_hops: 'int' = 0, min_confidence: 'float' = 0.0, order_by: 'str' = 'relevance', graph_ranker=None, limit: 'int' = 10, threshold: 'float' = 0.0, relationship_filter: 'str | None' = None, traversal_path: 'str | None' = None, exclude_status: 'list[str] | None' = None, include_terminal: 'bool' = False, _elevated_timeout_ms: 'int | None' = None, pool_size: 'int | None' = None, leg_trace: 'list[dict] | None' = None, recency_field: 'str | None' = None, recency_boost: 'float' = 0.0, keep_numeric: 'bool' = False, search_keys_prf: 'bool' = False, entity_key_expansion: 'bool' = False, fusion_weights: 'dict | None' = None, fusion_k: 'int' = 60, w4_enrich: 'bool' = True) -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:12601",
+      "bound_by_tools": [
+        "tortoise_search"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "trash_graphs",
+      "signature": "(self, org_id: 'str') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:15632",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "traverse",
+      "signature": "(self, id: 'str', relationship_type: 'str', direction: 'str' = 'outgoing') -> 'list[dict]'",
+      "defined_at": "tortoise/sdk.py:6434",
+      "bound_by_tools": [
+        "tortoise_traverse"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "ulid",
+      "signature": "(self) -> 'str'",
+      "defined_at": "tortoise/sdk.py:20156",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": false
+    },
+    {
+      "name": "update",
+      "signature": "(self, id: 'str', **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:4404",
+      "bound_by_tools": [
+        "tortoise_update"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "update_entity",
+      "signature": "(self, id_val: 'str', **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:20051",
+      "bound_by_tools": [
+        "tortoise_update_entity"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "update_point",
+      "signature": "(self, id: 'str', *, is_episodic: 'bool | None' = None, **props) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:4440",
+      "bound_by_tools": [
+        "tortoise_update_point"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "validate_domain",
+      "signature": "(self, domain: 'str') -> 'dict'",
+      "defined_at": "tortoise/sdk.py:6480",
+      "bound_by_tools": [
+        "tortoise_validate_domain"
+      ],
+      "reached_by_mcp_handler": true,
+      "reached_by_cli": false
+    },
+    {
+      "name": "volunteer_context",
+      "signature": "(self, window: 'list[dict]', session_id: 'str | None' = None, prior_context: 'str | None' = None, min_confidence: 'float' = 0.7, max_pointers: 'int' = 3, why: 'bool' = True) -> 'dict'",
+      "defined_at": "tortoise/sdk.py:14869",
+      "bound_by_tools": [],
+      "reached_by_mcp_handler": false,
+      "reached_by_cli": true
+    }
+  ],
+  "group_source_note": "Corrected after implementation. `group_source` is now derived from the SOURCE: an entry is `explicit` only if its `ToolDefinition(...)` literal passes `group=`. It cannot be read at runtime, because `ToolDefinition.group` defaults to \"memory\" and `_apply_groups()` then overwrites every entry, so every row reads `explicit` from the object. True split: 1 explicit (tortoise_pack_install) / 90 mapped / 8 defaulted = 99."
+}

@@ -46,6 +46,18 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from tortoise.coverage_loop import (
+    DEFAULT_LOOP_GUARD_WINDOW as DEFAULT_POOL_GUARD_WINDOW,
+)
+from tortoise.coverage_loop import (
+    DEFAULT_LOOP_SESSION_CAP as DEFAULT_POOL_SESSION_CAP,
+)
+from tortoise.coverage_loop import (
+    session_diverse_order,
+)
+
+from .env_truthy import env_flag  # #4097: the declared truthy contract
+
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
 #: role prefixes/JSON.
@@ -83,6 +95,77 @@ DEFAULT_CONTEXT_ITEM_CAP = 40
 #: LightMem: compact evidence wins under tight budgets).
 DEFAULT_CONTEXT_TOKEN_CAP = 8000
 
+#: #4105: the ask lane's reader-context BYTE ceiling (32 KiB). Historically a
+#: hard literal at the ``assemble_context`` call site; it is a RESOLVED cap
+#: here for the same reason every other cap is — a byte ceiling that cannot be
+#: moved makes every item/token cap raised above it a SILENT NO-OP (the
+#: caller believes it widened the window; the reader still gets 32 KiB). It
+#: stays a separate bound from the token cap on purpose: it is the UTF-8
+#: invariant that keeps one pathological huge hit from blowing the prompt,
+#: and the token estimator is a whitespace heuristic, not a byte count. It is
+#: the FLOOR of the DERIVED ask-lane byte ceiling (``DEFAULT_ASK_CONTEXT_*``
+#: below), not the ask lane's effective default.
+DEFAULT_CONTEXT_BYTE_CAP = 32768
+
+#: #4105: minimum bytes-per-token the DERIVED byte ceiling assumes. When only
+#: the TOKEN cap is raised, the byte ceiling scales as
+#: ``max(DEFAULT_CONTEXT_BYTE_CAP, token_cap * this)`` so a raised token
+#: budget is never silently neutralised by a fixed byte ceiling. 8 is
+#: deliberately generous (the ask-lane corpus measures ~5.8 bytes/token), so
+#: the byte bound normally does NOT bind before the token bound — it is the
+#: cheap guard against a single pathological huge hit, not a second budget.
+#:
+#: It is emphatically NOT a promise that the TOKEN cap is enforced in bytes:
+#: ``estimate_tokens_ask`` charges unspaced CJK at ~4.6 bytes/estimated-token
+#: and emoji at ~2, so no single bytes-per-token factor can bound the
+#: ESTIMATED count on those pools. That bound is enforced directly, by
+#: charging the same non-whitespace surcharge in ``assemble_context``'s token
+#: accounting (``_ask_token_surcharge``) — the byte cap stays a UTF-8
+#: backstop, never the enforcement point.
+BYTES_PER_TOKEN_FLOOR = 8
+
+#: #4105: hard upper bounds on the resolved budget, so a typo'd env value
+#: falls back to the default instead of resolving an unbounded window. Both
+#: are TYPO GUARDS, deliberately generous rather than product limits: the
+#: 4M token bound sits above every model context window in use (the reader
+#: family's documented window is 1M), so a legitimate operator raise is not
+#: silently reset to the default; the byte bound is shared by the explicit
+#: env path, the dict path and the DERIVED path so no two of them can
+#: resolve the same nominal input to different ceilings.
+MAX_ASK_CONTEXT_TOKEN_CAP = 4_000_000
+MAX_ASK_CONTEXT_BYTE_CAP = 1 << 40
+
+#: #4105: the ask lane's MEASURED window defaults. These are ASK-LANE
+#: specific — the eval lane and the extraction lane keep the shared
+#: ``DEFAULT_CONTEXT_ITEM_CAP``/``DEFAULT_CONTEXT_TOKEN_CAP`` — because the
+#: ask lane is the surface the D3 instrument measured. On the frozen
+#: 21-question fixture at the historical 40/120/40/8000/32KiB defaults the
+#: byte ceiling bound at a mean 4,730 context tokens and all five
+#: answer-bearing turns the retriever had RANKED (fused ranks 67/84/89/93/147)
+#: failed to reach the reader.
+#:
+#: 16,000 — NOT 32,000 — is the measured default. Admission is monotone,
+#: but the READER is not: 32k admits every gold turn (including 0a995998's
+#: rank-147 turn) yet DILUTES the small reader, regressing four questions
+#: that passed at the historical caps (b0479f84, e831120c, f4f1d8a4_abs,
+#: eace081b) and dropping shape_rate to 6/21. At 16k (byte ceiling derived:
+#: 16,000 x 8) the recorded runs put shape_rate at 10-11/21 with abstain and
+#: grounding at 15-16/21 (the reader is stochastic: 4 of the 21 questions
+#: flip on byte-identical code, so a single run is not a rate) — the
+#: deterministic property this default buys is that ALL FIVE of the
+#: window-miss answer-bearing turns (fused ranks 67/84/89/93, plus
+#: 0a995998's rank-147 turn) now reach the reader. 0a995998's THIRD gold
+#: turn stays out, and the reason is a BUDGET bound, not a pool-depth one:
+#: it is rank 153, inside the 200-wide window, but the resolved 16k TOKEN
+#: budget fills first (97 hits admitted, ~15,981 estimated tokens).
+#: The 32k option remains one env var away and is reported.
+#: Metered cost stays under the documented $0.01/query structural target
+#: (16k prompt tokens x $0.21/M = $0.0034 + output).
+DEFAULT_ASK_RETRIEVAL_LIMIT = 200
+DEFAULT_ASK_CONTEXT_ITEM_CAP = 200
+DEFAULT_ASK_CONTEXT_TOKEN_CAP = 16000
+DEFAULT_ASK_POOL_SIZE = 200
+
 #: C2 (#1745) / #1945: evidence-mark boost rank-offset multipliers. The
 #: answer-string mark (d, #1763 — the point's content carries the GOLD
 #: ANSWER, the strongest/answer-precise signal) gets the highest
@@ -105,12 +188,18 @@ _POOL_CLAMP = (1, 10000)
 #: assembly caps are threaded IN TANDEM — raising only the assemble cap
 #: changes NOTHING (the gold is cut at ``result_ids[:limit]`` INSIDE
 #: ``tortoise_fts_query`` before dedup/assemble); raising only the window
-#: floods the reader budget. Measurement-gated: default OFF = the historical
-#: 40/40/8000 (byte-identical until the Step-0/6 measurements justify a
-#: raise).
+#: floods the reader budget. The pre-#4105 defaults were the historical
+#: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised them to
+#: 200/200/16000 (byte ceiling derived) so the ranked-but-unread gold turns
+#: reach the reader. #4105 also adds the POOL depth and the BYTE ceiling to
+#: that same resolution: a window raise past the pool is cut by the pool, and
+#: a window raise past 32 KiB was cut by an un-resolvable literal — both were
+#: silently accepted and dropped.
 ASK_RETRIEVAL_LIMIT_ENV = "TORTOISE_ASK_RETRIEVAL_LIMIT"
 ASK_CONTEXT_ITEM_CAP_ENV = "TORTOISE_ASK_CONTEXT_ITEM_CAP"
 ASK_CONTEXT_TOKEN_CAP_ENV = "TORTOISE_ASK_CONTEXT_TOKEN_CAP"
+ASK_CONTEXT_BYTE_CAP_ENV = "TORTOISE_ASK_CONTEXT_BYTE_CAP"
+ASK_POOL_SIZE_ENV = "TORTOISE_ASK_POOL_SIZE"
 
 #: A1/A4/A5 (#2070): ask-lane lever env names (all default ON for the ask
 #: lane — each is a quality fix, not a gated experiment; "0"/"false"/
@@ -122,26 +211,17 @@ ASK_EVIDENCE_BOOST_ENV = "TORTOISE_ASK_EVIDENCE_BOOST"
 ASK_FUSION_WEIGHTS_ENV = "TORTOISE_ASK_FUSION_WEIGHTS"
 ASK_FUSION_K_ENV = "TORTOISE_ASK_FUSION_K"
 
-#: A1/A3/A5/A6 knob env values: explicit 1/true/yes/on flips True, explicit
-#: 0/false/no/off flips False, anything else (unset OR garbage) falls back
-#: to ``default`` — a typo can never silently flip a knob.
-_ASK_TRUTHY = {"1", "true", "yes", "on"}
-_ASK_FALSY = {"0", "false", "no", "off"}
-
-
 def ask_env_bool(name: str, default: bool) -> bool:
     """Ask-lane env bool with a caller default (A1/A4/A5/A7 knob parsing).
     Unset/blank/garbage → ``default`` (a typo never flips a knob); explicit
     truthy (1/true/yes/on) → True; explicit falsy (0/false/no/off) → False.
+
+    #4097: delegates to the declared contract (`tortoise.env_truthy.env_flag`).
+    The pre-#4097 `_ASK_TRUTHY`/`_ASK_FALSY` locals had no referent OUTSIDE this
+    function, so they were deleted rather than kept as dead aliases; the shared
+    vocabularies live in `tortoise/env_truthy.py`.
     """
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
-        return default
-    if raw in _ASK_TRUTHY:
-        return True
-    if raw in _ASK_FALSY:
-        return False
-    return default
+    return env_flag(name, default)
 
 
 def ask_env_int(name: str, default: int, lo: int = 1, hi: int | None = None) -> int:
@@ -199,19 +279,217 @@ def ask_env_boost_float(name: str, default: float) -> float:
 
 
 def resolve_ask_retrieval_caps() -> dict:
-    """A6 (#2070): resolve the ask lane's retrieval-window limit + assembly
-    caps IN TANDEM (env-gated, default OFF = 40/40/8000). Returns
-    ``{"limit", "context_item_cap", "context_token_cap"}`` — the single
-    resolution ``ask()`` threads into BOTH ``tortoise_fts_query(limit=…)``
-    (the ``result_ids[:limit]`` cut INSIDE the retrieval call) and
-    ``assemble_context``, so a cap raise can never be half-applied."""
+    """A6 (#2070) / #4105: resolve the ask lane's retrieval-window limit,
+    pool depth and assembly caps IN TANDEM (env-gated; #4105 defaults
+    200/200/200/16000/128000 bytes, measured on the frozen D3 fixture). Returns
+    ``{"limit", "pool_size", "context_item_cap", "context_token_cap",
+    "context_byte_cap"}`` — the single resolution ``run_ask_lane()`` threads
+    into ``tortoise_fts_query(limit=…, pool_size=…)``, ``assemble_context``
+    and the A7 rerank budget guard, so a cap raise can never be
+    half-applied.
+
+    Three honesty invariants (#4105), each of which was a silent no-op
+    before:
+
+    * ``limit >= context_item_cap`` — the retrieval call cuts at
+      ``result_ids[:limit]`` BEFORE assembly, so an item cap above the
+      window could never be honoured; the window is raised to admit it.
+    * ``pool_size >= limit`` — the candidate window is the pool, and a turn
+      at rank R is admitted iff ``R <= min(limit, pool_size)``; a pool
+      above the window is wasted, a pool below it truncates silently.
+    * ``context_byte_cap`` is resolved (env), not a literal, and when NOT
+      set explicitly it is DERIVED from the token cap
+      (``max(DEFAULT_CONTEXT_BYTE_CAP, token_cap * BYTES_PER_TOKEN_FLOOR)``)
+      so raising the token budget is never neutralised by a fixed byte
+      ceiling. ``assemble_context`` reports the hits the byte cap dropped,
+      and the ask lane warns — the budget is never silently accepted and
+      dropped.
+    """
+    limit = ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_ASK_RETRIEVAL_LIMIT,
+                        hi=_POOL_CLAMP[1])
+    item_cap = ask_env_int(
+        ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_ASK_CONTEXT_ITEM_CAP,
+        hi=_POOL_CLAMP[1])
+    token_cap = ask_env_int(
+        ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_ASK_CONTEXT_TOKEN_CAP,
+        hi=MAX_ASK_CONTEXT_TOKEN_CAP)
+    # Invariant 1: the window can never be narrower than the assembly cap.
+    limit = max(limit, item_cap)
+    # Invariant 2: the pool can never be narrower than the window. The
+    # window is clamped to the SAME bound the SDK validates ``pool_size``
+    # against (1..10000), so an out-of-range env value falls back to the
+    # default at resolve time rather than handing the SDK a value it
+    # rejects (which would fail every ask with a retrieval error).
+    #
+    # NOTE the pool is an EXPLICIT ``pool_size`` to ``tortoise_fts_query``,
+    # which the SDK's ``resolve_pool_size(exact=True)`` contract treats as an
+    # exact override — so ``pool_size == limit`` at the defaults is a
+    # deliberate measured choice (the instrument's fusion depth), NOT a floor
+    # over the SDK's own ``limit*2`` resolution. Raise ``TORTOISE_ASK_POOL_SIZE``
+    # to deepen the candidate pool; that changes what fusion sees.
+    pool_size = max(
+        ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000), limit)
+    # Invariant 3: byte ceiling resolved; derived from the token cap when
+    # not set (or set to GARBAGE — a typo must not pin the ceiling to the
+    # 32 KiB floor and silently re-introduce the no-op) so a token raise is
+    # honoured in bytes too. Both paths share one parser and one upper
+    # clamp, so an explicit value and a derived one can never disagree
+    # about the bound.
+    byte_cap = _resolve_explicit_byte_cap(
+        os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, ""))
+    if byte_cap is None:
+        byte_cap = min(MAX_ASK_CONTEXT_BYTE_CAP,
+                       max(DEFAULT_CONTEXT_BYTE_CAP,
+                           token_cap * BYTES_PER_TOKEN_FLOOR))
     return {
-        "limit": ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_CONTEXT_ITEM_CAP),
-        "context_item_cap": ask_env_int(
-            ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_CONTEXT_ITEM_CAP),
-        "context_token_cap": ask_env_int(
-            ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_CONTEXT_TOKEN_CAP),
+        "limit": limit,
+        "pool_size": pool_size,
+        "context_item_cap": item_cap,
+        "context_token_cap": token_cap,
+        "context_byte_cap": byte_cap,
     }
+
+
+def _resolve_explicit_byte_cap(raw: str) -> int | None:
+    """Parse an explicit ``TORTOISE_ASK_CONTEXT_BYTE_CAP``-style value.
+
+    ``None`` means "no usable explicit value" — unset, blank, non-integer,
+    < 1 — so the caller DERIVES the ceiling instead. A negative or zero
+    value must never be honoured: it would drop every hit. The upper clamp
+    is shared with the derived path (``MAX_ASK_CONTEXT_BYTE_CAP``).
+    """
+    if not raw.strip():
+        return None
+    try:
+        candidate = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    if candidate < 1:
+        return None
+    return min(candidate, MAX_ASK_CONTEXT_BYTE_CAP)
+
+
+def resolve_byte_cap_from_caps(caps: dict) -> int:
+    """The ask-lane byte ceiling for a caps dict (#4105).
+
+    Precedence: an explicit ``context_byte_cap`` in the dict, else the
+    explicit ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` env, else a ceiling DERIVED
+    from the dict's own token cap (that token cap resolving the
+    ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` env knob when the dict carries none,
+    and only falling back to the ask-lane default when the env is unset too).
+    Each of the three legs is
+    VALIDATED and clamped exactly as ``resolve_ask_retrieval_caps`` validates
+    the env one, so a nominal value can never resolve to two different
+    ceilings depending on which seam a caller came through — an A/B
+    comparison across the two seams must compare behaviour, not budgets.
+
+    The env leg matters: without it a caller handing a LEGACY caps dict (one
+    that predates #4105) would silently assemble at a different ceiling than
+    the env-pinned ask lane. Falling back to the bare 32 KiB literal would
+    also re-introduce exactly the silent no-op #4105 removes on that seam,
+    so the last resort is always a DERIVED ceiling, never the literal.
+    """
+    explicit = caps.get("context_byte_cap")
+    if explicit is not None:
+        # A non-positive or absurd value must not be honoured (0/negative
+        # would drop every hit) — route it through the same parser the env
+        # path uses so the two agree on what is usable.
+        parsed = _resolve_explicit_byte_cap(str(explicit))
+        if parsed is not None:
+            return parsed
+    from_env = _resolve_explicit_byte_cap(
+        os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, ""))
+    if from_env is not None:
+        return from_env
+    return min(MAX_ASK_CONTEXT_BYTE_CAP,
+               max(DEFAULT_CONTEXT_BYTE_CAP,
+                   resolve_token_cap_from_caps(caps)
+                   * BYTES_PER_TOKEN_FLOOR))
+
+
+def _sanitize_cap(raw, default: int, hi: int) -> int:
+    """A caps-dict entry validated EXACTLY as ``ask_env_int`` validates env.
+
+    ``None``, a bool, a non-numeric value and an out-of-range value all fall
+    back to ``default`` — never a raise, never a zero/negative budget. The
+    dict seam and the env seam share this rule so one nominal value cannot
+    resolve to two different windows.
+    """
+    if raw is None or isinstance(raw, bool):
+        return default
+    if not isinstance(raw, int):
+        try:
+            raw = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return default
+    if raw < 1 or raw > hi:
+        return default
+    return raw
+
+
+def resolve_token_cap_from_caps(caps: dict) -> int:
+    """A caps dict's ``context_token_cap``, validated the same way the env
+    knob is (falling back to the ask-lane default).
+
+    THE single resolution of a caps dict's token budget: both the token
+    budget and the DERIVED byte ceiling of a legacy caps dict come from this
+    value, so they cannot be derived from different numbers (a raw read would
+    honour ``0`` / an out-of-range entry and RAISE on ``None`` or a
+    non-numeric string, resolving a different window — or a crash — on the
+    dict seam than the env seam resolves for the same nominal input). An
+    absent key resolves the SAME env knob the env seam reads
+    (``TORTOISE_ASK_CONTEXT_TOKEN_CAP``, else
+    ``DEFAULT_ASK_CONTEXT_TOKEN_CAP``), so a dict with no token cap resolves
+    like ``caps=None``.
+    """
+    if "context_token_cap" not in caps:
+        # An ABSENT key means "no dict-level pin" — resolve the SAME env knob
+        # the env seam uses (and that ``resolve_byte_cap_from_caps`` already
+        # honours for its byte leg) instead of the bare literal. Reading the
+        # literal here let a legacy caps dict resolve a DIFFERENT token budget
+        # — and therefore a different DERIVED byte ceiling — than the
+        # env-pinned ask lane, reintroducing the two-seams-two-windows class
+        # #4105 removes.
+        return ask_env_int(ASK_CONTEXT_TOKEN_CAP_ENV,
+                           DEFAULT_ASK_CONTEXT_TOKEN_CAP,
+                           hi=MAX_ASK_CONTEXT_TOKEN_CAP)
+    return _sanitize_cap(caps.get("context_token_cap"),
+                         DEFAULT_ASK_CONTEXT_TOKEN_CAP,
+                         MAX_ASK_CONTEXT_TOKEN_CAP)
+
+
+def resolve_item_cap_from_caps(caps: dict) -> int:
+    """A caps dict's ``context_item_cap``, validated like the env knob.
+
+    Same family as ``resolve_token_cap_from_caps``: a non-numeric or
+    out-of-range entry resolves to ``DEFAULT_ASK_CONTEXT_ITEM_CAP``, and an
+    ABSENT key resolves the env knob ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` (else
+    that default) — never reaching ``assemble_context`` and raising — so a
+    legacy caps dict cannot turn a bad entry into a failed ask when the env
+    seam falls back.
+    """
+    if "context_item_cap" not in caps:
+        return ask_env_int(ASK_CONTEXT_ITEM_CAP_ENV,
+                           DEFAULT_ASK_CONTEXT_ITEM_CAP, hi=_POOL_CLAMP[1])
+    return _sanitize_cap(caps.get("context_item_cap"),
+                         DEFAULT_ASK_CONTEXT_ITEM_CAP, _POOL_CLAMP[1])
+
+
+def resolve_limit_from_caps(caps: dict) -> int:
+    """A caps dict's retrieval-window ``limit``, validated like the env knob.
+
+    Invariant 1 of ``resolve_ask_retrieval_caps`` is re-applied here
+    (``limit >= context_item_cap``): the retrieval call cuts at
+    ``result_ids[:limit]`` BEFORE assembly, so a window narrower than the item
+    cap could never honour it.
+    """
+    if "limit" not in caps:
+        limit = ask_env_int(ASK_RETRIEVAL_LIMIT_ENV,
+                            DEFAULT_ASK_RETRIEVAL_LIMIT, hi=_POOL_CLAMP[1])
+    else:
+        limit = _sanitize_cap(caps.get("limit"),
+                              DEFAULT_ASK_RETRIEVAL_LIMIT, _POOL_CLAMP[1])
+    return max(limit, resolve_item_cap_from_caps(caps))
 
 
 def resolve_ask_boost_multipliers() -> dict:
@@ -277,11 +555,72 @@ def resolve_pool_size(
     return max(resolved, floor)
 
 
+#: R1 (#1540) / C4 (#2517): the raw-verbatim chunk pointKind. The PRODUCT
+#: constant is the single source — ``is_raw_chunk`` (below) and every
+#: eval-lane consumer (``tools/longmem_eval/ingest.py``'s re-export, its
+#: ``D5_POINTKIND_FILTER`` exclusion twin, and ``retrieve.py``'s
+#: ``CHUNK_KIND_FILTER`` equality twin) derive from it.
+SESSION_TRANSCRIPT_KIND = "session-transcript"
+
+#: #2517 / C4: the PRODUCT's verbatim source-turn pointKind — the episodic
+#: turn Points written by ``TortoiseSDK.capture_session`` and the hosted
+#: ``POST /v1/sessions`` turn loop (both SET ``pointKind='event'``,
+#: ``is_episodic=true`` and a ``[{role}] {content}`` body; see
+#: :func:`_is_turn_point`). This is the product's real verbatim material:
+#: ``session-transcript`` is written ONLY by the eval ingest lane
+#: (``tools/longmem_eval/ingest.py`` / ``ingest_v2.py``), never by a
+#: product writer. The literal is a product constant here so the READ side
+#: (``session_reinjection``'s default fetch kind, :func:`_is_turn_point`)
+#: has one home. The TURN literal is the one that is HARDCODED: ``sdk``'s
+#: capture turn loop, the hosted turn loop, the hosted demo seed, and both
+#: eval ingest legs all write ``"event"`` literally, so this constant is a
+#: read-side home, not a single source. ``SESSION_TRANSCRIPT_KIND`` is
+#: imported by the two eval ingest legs and has a derivation pin
+#: (``tests/test_session_reinjection_rules.py::
+#: test_chunk_kind_is_single_sourced_across_all_four_consumers``) — that pin
+#: covers ``is_raw_chunk`` / ``CHUNK_KIND_FILTER`` / ``D5_POINTKIND_FILTER``
+#: and a re-export equality, so it would not catch a hardcoded chunk literal
+#: either. There is no writer-parity pin for the turn kind: a writer that
+#: changed its literal would empty the fetch while this constant stayed
+#: "correct".
+#:
+#: ``pointKind``'s vocabulary is OPEN (``create_point`` accepts any
+#: registered kind), so this constant alone never proves a node is a
+#: TURN — see ``session_reinjection._TURN_SHAPE_FILTER`` for the shape
+#: predicate the fetch applies on top of it.
+TURN_POINT_KIND = "event"
+
+
+def session_key_of(hit: dict) -> str:
+    """A hit's pool session identity — the AUTHORITY for the retrieval
+    pool's bucket key (C4 #2517). ``session_id`` when present, else the
+    synthetic ``idx:{lme_session_index}`` bucket. :func:`dedup_pool` and
+    :func:`guard_and_recap_pool` default to it, and
+    ``coverage_loop._session_of`` delegates to it (function-local import —
+    the module stays a stdlib-only leaf at import time).
+
+    Collapse semantics (deliberate, pinned by
+    ``tests/test_session_reinjection_rules.py::test_session_key_matches_
+    the_historical_bucket_key``): a hit carrying NEITHER ``session_id`` NOR
+    ``lme_session_index`` maps to the single bucket ``idx:-1``. Two
+    identity-less hits therefore cap together under the C5 per-session
+    cap, and :func:`seeded_sessions` drops them all as phantom ``idx:``
+    buckets (never a real graph ``p.session_id``). This is a PRE-EXISTING
+    product collapse, not a C4 decision: the key expression is the
+    historical one (unchanged here), and the product-side fix is tracked in
+    #3591 (with the sibling camel-``sessionId`` gap in #4155) — C4 documents
+    and pins it; it introduces and fixes nothing. Hits that DO carry an
+    ``lme_session_index`` are distinct per index even when ``session_id``
+    is absent/empty (``""`` is falsy but not identity-less)."""
+    return (hit.get("session_id")
+            or f"idx:{hit.get('lme_session_index', -1)}")
+
+
 def is_raw_chunk(h: dict) -> bool:
     """True for a raw verbatim chunk (pointKind ``session-transcript``).
     Points of every other kind (extracted statements, episodic turn points)
     are the compact epistemic surface (D3 #1540: never chunk-capped)."""
-    return h.get("point_kind") == "session-transcript"
+    return h.get("point_kind") == SESSION_TRANSCRIPT_KIND
 
 
 def dedup_pool(annotated: list[dict], *,
@@ -289,8 +628,11 @@ def dedup_pool(annotated: list[dict], *,
                session_key: Callable[[dict], str] | None = None) -> list[dict]:
     """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
-    the hit's session_id when present, else its lme_session_index —
-    distinct sessions NEVER share a bucket (no ``-1`` collapse).
+    :func:`session_key_of` (the hit's session_id when present, else its
+    lme_session_index) —
+    distinct IDENTIFIED sessions never share a bucket. The sole shared
+    bucket is ``idx:-1``, for hits carrying neither identity (see
+    :func:`session_key_of`).
     Points/turn points are never capped (compact epistemic surface, D3).
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.
@@ -304,12 +646,7 @@ def dedup_pool(annotated: list[dict], *,
     if max_chunks_per_session < 1:
         raise ValueError("max_chunks_per_session must be >= 1, got "
                          f"{max_chunks_per_session!r}")
-    if session_key is None:
-        def _key(h: dict) -> str:
-            return (h.get("session_id") or
-                    f"idx:{h.get('lme_session_index', -1)}")
-    else:
-        _key = session_key
+    _key = session_key if session_key is not None else session_key_of
     seen: dict[str, int] = {}
     pool: list[dict] = []
     for h in annotated:
@@ -322,12 +659,44 @@ def dedup_pool(annotated: list[dict], *,
     return pool
 
 
+def guard_and_recap_pool(
+        items: list[dict], *,
+        guard: bool = True,
+        session_key: Callable[[dict], str] | None = None,
+        window: int = DEFAULT_POOL_GUARD_WINDOW,
+        per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
+        max_chunks_per_session: int) -> list[dict]:
+    """The shared merge discipline (C3-1 #2567 / C4 #2517): optional
+    session-diverse window guard THEN the C5 per-session raw-chunk re-cap,
+    in that order, over one contract.
+
+    ``guard=True`` (the default, and every C3-1 call) applies
+    ``coverage_loop.session_diverse_order`` — no session may hold more
+    than ``per_session_cap`` of the ``window`` ranks — then
+    :func:`dedup_pool`. ``guard=False`` skips ONLY the reorder and still
+    re-caps through :func:`dedup_pool` — the C4 ablation isolates the
+    guard without a second recap entry point (the guard→re-cap ordering
+    lives here exactly once). Additive: reordering never drops an item;
+    the re-cap may drop raw chunks beyond the per-session cap.
+    """
+    if guard:
+        items = session_diverse_order(
+            items, window=window, per_session_cap=per_session_cap,
+            session_key=session_key)
+    return dedup_pool(items, max_chunks_per_session=max_chunks_per_session,
+                      session_key=session_key)
+
+
 def estimate_tokens(text: str) -> int:
     """Rough LLM token estimate for a rendered context (whitespace tokens +
     10% markup allowance). ``assemble_context``'s budget accounting uses the
     identical per-block words, so ``estimate_tokens(render_context(...))``
     equals the assembly's ``context_tokens`` exactly (no per-block int
-    drift — the alignment invariant, R1 #1540)."""
+    drift — the alignment invariant, R1 #1540) **for a DEFAULT caller**,
+    which is what the eval lane re-exporting ``assemble_context`` is. The
+    ASK lane opts in to ``nonascii_token_surcharge`` (#4105) and its matching
+    estimator is ``estimate_tokens_ask``; a caller that opts in must use that
+    one, not this one."""
     return int(len(text.split()) * 1.1)
 
 
@@ -362,9 +731,11 @@ def estimate_tokens_ask(text: str) -> int:
     runs to ~0 words. The ask lane uses this conservative per-char
     multiplier for non-whitespace-delimited runs — pinned at ~0.6-0.7
     token/char (OVER-estimated versus the DeepSeek rate, so the meter can
-    never under-count). Because the multiplier is conservative, on
-    CJK-heavy pools the 32 KiB BYTE cap binds FIRST (32 KiB ≈ 10.9K chars ≈
-    ~6.5-7.6K estimated tokens < 8000).
+    never under-count). ``assemble_context`` charges this same surcharge in
+    its token accounting (:func:`_ask_token_surcharge`, #4105), so the
+    resolved TOKEN cap bounds ``context_tokens`` on CJK/emoji pools too —
+    the resolved byte ceiling (128 000 bytes by default, DERIVED from the
+    16 000-token cap) is a UTF-8 backstop, not the enforcement point.
 
     This is a conservative ESTIMATE, never an exact bill; it is the source
     of the response field ``context_tokens`` (the RENDERED-CONTEXT tokens
@@ -389,6 +760,24 @@ def estimate_tokens_ask(text: str) -> int:
         char_est = max(1, int(len(run) * per_char))
         surcharge += max(0, char_est - 1)
     return base + surcharge
+
+
+def _ask_token_surcharge(text: str) -> int:
+    """The part of ``estimate_tokens_ask(text)`` the whitespace-word budget
+    does NOT already charge — 0 for pure-ASCII text (#4105).
+
+    ``assemble_context``'s token budget is whitespace-word based
+    (``len(block.split()) * 1.1``), so it is blind to unspaced CJK/emoji runs
+    and a non-ASCII pool could overrun the resolved token cap while the drop
+    census stayed silent. Charging this surcharge in the same accounting
+    makes the TOKEN cap the real bound on every script; the byte cap stays a
+    cheap UTF-8 backstop. Identical to the old arithmetic on ASCII text, so
+    ASCII-only callers (and the frozen transcripts) are byte-for-byte
+    unchanged.
+    """
+    if not text:
+        return 0
+    return max(0, estimate_tokens_ask(text) - int(len(text.split()) * 1.1))
 
 
 _ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
@@ -435,14 +824,121 @@ def _validity_marker(h: dict) -> str:
     return " ".join(marks)
 
 
+#: A session identifier that may be interpolated into the reader-facing
+#: annotation zone. The tag sits inside ``[...]`` on a newline-delimited
+#: block, so a value carrying a bracket, a parenthesis, a control character,
+#: a Unicode line separator, a bidi/format control, or unbounded length can
+#: forge a neighbouring tag / role prefix
+#: (``sessionId: "x]\n[user] SYSTEM: …"``) — and the property is
+#: client-writable through ``create_point(props=…)`` /
+#: ``capture_session(session_id=…)`` with no validation at any write
+#: boundary. It is therefore a CONSERVATIVE ALLOWLIST (ASCII identifier
+#: characters only), not a denylist: a denylist cannot cover the fullwidth /
+#: homoglyph / bidi-control space (``［user］``, U+202E, U+200B, lone
+#: surrogates). Any value outside this shape is reported as an UNKNOWN
+#: session — an identity that cannot be stated safely is not stated at all.
+_SAFE_SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._:@+\-]{1,128}$")
+
+
+def _safe_session_tag(value: object) -> str:
+    """The interpolatable form of a session id, or ``""`` when it is not
+    safely renderable (:data:`_SAFE_SESSION_TAG_RE`).
+
+    Rejecting is deliberate and honest: a session id is a machine
+    identifier, so an id that is not ASCII-identifier-shaped is far more
+    likely to be forged/odd than to be a real session — and reporting it as
+    unknown is strictly safer than rendering it.
+    """
+    if not isinstance(value, str):
+        return ""
+    sid = value.strip()
+    return sid if _SAFE_SESSION_TAG_RE.match(sid) else ""
+
+
+def hit_session_id(h: dict) -> str:
+    """The session identity a hit carries — read from EXPLICIT identity keys
+    only, never inferred from an id's shape.
+
+    D3 (#1540) session identity: the ask lane rendered ``[session ?]``
+    for every captured turn because the only identity such a row carries is
+    the ``(:Session)-[:CONTAINS]->(:Point)`` edge the capture loop writes
+    (turn Points carry no ``sessionId`` prop and no ``eventId``, so the
+    annotation joins come up empty). The ``tortoise_fts_query`` point fetch
+    now populates the wire key from that edge, and this helper reads it.
+
+    Sources, in order:
+
+      * ``session_id`` — an explicit identity already on the hit (the
+        ``annotate_ask_hits`` Event join / a caller-supplied hit);
+      * ``sessionId`` — the ``SearchResult.to_dict()`` spelling the point
+        fetch populates from the Point's own ``sessionId`` prop, else the
+        ``:Session`` id.
+
+    ⛔ NOT a source: the ``{session_id}_t{i}`` turn-Point id prefix. It is
+    unverifiable — ANY caller id ending in ``_t<digits>`` would be read as a
+    session (``create_point`` accepts explicit ids; the shape of an id is
+    not evidence that a capture happened), and two adversarial review
+    cycles reproduced identity fabrication from exactly that inference. Per
+    the D3 contract, an identity that cannot be DERIVED is left absent
+    rather than guessed. An orphaned turn with no ``:Session`` edge is
+    therefore honestly unnamed.
+
+    Every source is filtered through :func:`_safe_session_tag`, so a value
+    that would break out of the bracketed annotation zone is reported as
+    absent. Absent everywhere ⇒ ``""``.
+    """
+    for key in ("session_id", "sessionId"):
+        sid = _safe_session_tag(h.get(key))
+        if sid:
+            return sid
+    return ""
+
+
+def _distinct_session_ids(hits: list[dict]) -> list[str]:
+    """The DISTINCT derived session ids of a hit list, in list order (D3).
+
+    ``hit_session_id`` per hit, blanks dropped, first-occurrence order
+    preserved (the list's own order — the ask lane's post-dedup/post-boost
+    ranking order, NOT raw RRF once ``apply_evidence_boost``/rerank ran).
+    A hit whose identity cannot be derived
+    contributes nothing — the field never guesses. Built from the SAME list
+    the evidence is rendered from, in the same order, so the field and the
+    evidence cover the same hits; the TAG they show can still differ when a
+    hit carries ``lme_session_index`` (the eval lane's index tag wins there —
+    see ``_render_block``).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        sid = hit_session_id(h)
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
 def _render_block(h: dict) -> str:
     """One hit's rendered context block — the SINGLE implementation shared
     by ``render_context`` and the token budget (factored out of
     ``render_context``, R1 #1540). ``question_date`` never appears here: it
     only prepends the ``Current Date:`` header once in ``render_context``.
-    Per-hit dates come from the hit's own ``session_date``."""
-    idx = h.get("lme_session_index")
-    prefix = f"[session {idx}]" if idx is not None and idx >= 0 else "[session ?]"
+    Per-hit dates come from the hit's own ``session_date``.
+
+    Session tag precedence (D3 identity): a hit that HAS the
+    ``lme_session_index`` key keeps its historical rendering — ``>= 0`` is
+    ``[session N]``, anything else (including an explicit ``None``, the
+    connected-assembly spine's spelling) is ``[session ?]`` — so the eval /
+    assembly lanes are byte-identical. Only a hit with the key ABSENT (the
+    ask/search case) is tagged with the derived session id
+    (:func:`hit_session_id`), falling back to ``[session ?]`` when the
+    identity is unknown."""
+    if "lme_session_index" in h:
+        idx = h["lme_session_index"]
+        prefix = (f"[session {idx}]"
+                  if idx is not None and idx >= 0 else "[session ?]")
+    else:
+        sid = hit_session_id(h)
+        prefix = f"[session {sid}]" if sid else "[session ?]"
     sdate = h.get("session_date")
     if sdate:
         prefix = f"{prefix} (session date {sdate})"
@@ -496,6 +992,8 @@ def assemble_context(
     question_date: str | None = None,
     context_item_cap: int | None = None,
     byte_cap: int | None = None,
+    nonascii_token_surcharge: bool = False,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Budget-capped, rank-interleaved reader context (C1 #1745).
 
@@ -512,22 +1010,58 @@ def assemble_context(
 
     ``byte_cap`` (#1987 Task 5, P1-2): keyword-only, default None = unchanged
     behavior (the extraction/search AND eval lanes are unaffected — the eval
-    re-export ``assemble_context as _assemble_context`` never passes it). The
-    ASK lane passes ``byte_cap=32768``: the assembled evidence is enforced to
-    BOTH the 8000-token estimate cap AND a 32 KiB UTF-8 byte cap
+    re-export ``assemble_context as _assemble_context`` never passes it).
+    ⚠️ #4105: the non-ASCII token surcharge is OPT-IN
+    (``nonascii_token_surcharge``, default False) and charged only when a
+    caller turns it on, so the shared function's DEFAULT accounting — and
+    therefore the eval re-export — stays byte-identical to the pre-#4105
+    arithmetic on every script. That is the #2070 boundary ("cap changes are
+    ask-lane-local; the eval re-export is byte-identical unless the
+    measurement explicitly opts in"): the shared function changes nothing by
+    default. The ASK lane opts in AND passes the resolved ``byte_cap``
+    (#4105 — it was a 32 KiB literal): the assembled evidence is enforced to
+    BOTH the resolved token cap AND the resolved byte cap (defaults
+    16 000 estimated tokens / 128 000 bytes; #4105)
     independently, by the SAME mechanism as the token cap — WHOLE-HIT DROP
     (lowest-ranked hits dropped until under budget, never mid-hit character
     truncation), so decoding the evidence never splits a character
-    (P2-18) and ``len(evidence.encode("utf-8")) <= 32768`` is a hard output
-    invariant by construction.
+    (P2-18) and the assembled BLOCKS are bounded by ``byte_cap`` by
+    construction. (A ``byte_cap`` below the once-prepended ``Current Date:``
+    header's own framing bytes is NOT honoured: the header is charged against
+    the budget but is not droppable, so it is emitted regardless. The same
+    framing floor applies to ``max_context_tokens``.)
+
+    ``stats`` (#4105): optional out-dict. When supplied it is updated with the
+    admission census (``items_selected``, ``claim_bearing``, ``bytes_used``,
+    ``words_used``, ``nonascii_token_surcharge``, ``dropped_by_token_cap``,
+    ``dropped_by_byte_cap``, ``byte_cap``, ``stopped_by``). It exists so a
+    caller can tell WHICH bound is binding — in particular,
+    ``dropped_by_byte_cap > 0`` means the byte ceiling alone kept
+    admitted-by-token hits out, so a byte ceiling that cannot be raised
+    silently caps the window. ``stopped_by`` names the drop-bound that fired
+    (``byte_cap`` / ``token_cap`` / ``item_cap``, else ``None``), preferring
+    the byte/token caps over ``item_cap`` and naming ``item_cap`` ONLY when
+    the item bound actually CUT the pool: the item bound is also "reached"
+    when the pool simply ended, so a pool that ended exactly at the bound is
+    ``None``, not ``item_cap``. The return value is unchanged
+    (a list of hits), so pure-function callers are unaffected.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
-    ``Current Date: …`` header words; the 1.1 markup multiplier applies
-    ONCE to the joined total, so ``context_tokens ==
-    estimate_tokens(render_context(...))`` holds exactly (no per-block
-    ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
-    the rest of the context.
+    ``Current Date: …`` header words + the per-block non-ASCII surcharge
+    (``_ask_token_surcharge``, #4105 — charged only when
+    ``nonascii_token_surcharge`` is on; zero for ASCII text, the estimator's
+    overage for unspaced CJK/emoji runs, so an opted-in caller's
+    ``context_tokens`` is bounded by
+    ``max_context_tokens`` on every script); the 1.1 markup multiplier
+    applies
+    ONCE per block on the CUMULATIVE raw total, so the accepted set's FINAL
+    check is exactly its reported value: ``context_tokens ==
+    estimate_tokens_ask(render_context(...))`` (the ask-lane estimator, which
+    carries the same surcharge — a plain ``estimate_tokens`` drops it, so the
+    name here must be the ask one). ``assemble_context`` therefore bounds the
+    reported ``context_tokens``, on ASCII and non-ASCII alike. Oversized hits
+    are SKIPPED (continue), never starving the rest of the context.
 
     Claim-text-less hits (#2978) consume NO item slot and NO budget. A hit
     that renders ONLY decorations (``[session N]`` / session date / speaker
@@ -558,6 +1092,23 @@ def assemble_context(
                     if question_date else 0)
     selected: list[dict] = []
     words = header_words
+    # #4105: the whitespace-word budget is blind to unspaced CJK/emoji runs,
+    # so the estimator's surcharge for those runs is charged HERE too — the
+    # resolved token cap then bounds ``context_tokens`` on every script
+    # rather than only on whitespace-delimited text. Zero for ASCII input,
+    # so ASCII-only callers are byte-identical to the pre-#4105 arithmetic.
+    surcharge = 0
+    # #4105: per-constraint drop census. ``dropped_by_byte_cap`` counts hits
+    # the TOKEN cap admitted but the BYTE cap refused — i.e. hits the byte
+    # ceiling alone kept out. That is the honest signal that the caller's
+    # byte budget, not its item/token budget, is the binding constraint.
+    dropped_by_token_cap = 0
+    dropped_by_byte_cap = 0
+    claim_bearing = 0
+    #: True only when the loop BROKE on the item bound with a pool item still
+    #: unexamined — i.e. the item cap actually cut the pool. A pool that
+    #: simply ENDED at the item bound must not be reported as item-bound.
+    item_bound_cut = False
     # The separator framing bytes (P1): render_context joins blocks with
     # "\n\n" AND appends a trailing "\n\n" after the header — account those
     # so ``len(evidence) <= byte_cap`` is a HARD invariant (not just the
@@ -567,6 +1118,7 @@ def assemble_context(
         if question_date else 0
     for h in pool:
         if len(selected) >= item_bound:
+            item_bound_cut = True
             break
         # #2978: a hit rendering ONLY decorations (no content AND no
         # supersession/validity marker text) carries nothing for the reader,
@@ -578,19 +1130,52 @@ def assemble_context(
         # semantics as the oversized-hit path below.
         if not _has_claim_text(h):
             continue
+        claim_bearing += 1
         block = _render_block(h)
         cost = len(block.split())
-        if int((words + cost) * 1.1) > max_context_tokens:
+        sur_cost = _ask_token_surcharge(block) if nonascii_token_surcharge else 0
+        if int((words + cost) * 1.1) + surcharge + sur_cost \
+                > max_context_tokens:
+            dropped_by_token_cap += 1
             continue  # skip this hit; keep later ones (no starvation)
-        if byte_cap is not None:
+        block_bytes = len(block.encode("utf-8")) + 2
+        if byte_cap is not None and bytes_used + block_bytes > byte_cap:
             # whole-hit drop under the byte cap — a hit is fully in or fully
             # out; the skip keeps later (lower-ranked) hits' chance like the
             # token cap (no starvation), mirroring the token-budget behavior.
-            if bytes_used + len(block.encode("utf-8")) + 2 > byte_cap:
-                continue
-            bytes_used += len(block.encode("utf-8")) + 2
+            dropped_by_byte_cap += 1
+            continue
+        # ``bytes_used`` is accumulated on EVERY accepted hit, not only when
+        # a byte cap is set: the admission census reports it, and a
+        # ``bytes_used`` that silently reads 0 on the no-byte-cap path (the
+        # eval / extraction / search callers) is exactly the lying-census
+        # class #4105 removes.
+        bytes_used += block_bytes
         selected.append(h)
         words += cost
+        surcharge += sur_cost
+    if stats is not None:
+        # ``stopped_by`` names the bound(s) that ACTUALLY dropped a hit, and
+        # prefers the byte/token caps over ``item_cap``: the item bound is
+        # also "reached" when the pool simply ended or when a later cap had
+        # already refused everything, so reporting it first would mislabel
+        # the binding constraint. ``item_cap`` is reported only when it is
+        # the sole bound that cut the pool.
+        stopped_by = (
+            "byte_cap" if dropped_by_byte_cap else
+            "token_cap" if dropped_by_token_cap else
+            "item_cap" if item_bound_cut else None)
+        stats.update({
+            "items_selected": len(selected),
+            "claim_bearing": claim_bearing,
+            "bytes_used": bytes_used,
+            "words_used": words,
+            "nonascii_token_surcharge": surcharge,
+            "dropped_by_token_cap": dropped_by_token_cap,
+            "dropped_by_byte_cap": dropped_by_byte_cap,
+            "byte_cap": byte_cap,
+            "stopped_by": stopped_by,
+        })
     return selected
 
 
@@ -788,7 +1373,11 @@ def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
 # evidence — a distilled point + its own source raw chunks + its source turns
 # all restate the same fact, each occupying a window slot. The reader window
 # is a FROZEN measurement lens (never a change target); the EVIDENCE PACKAGE
-# handed to it is the product. These helpers build that package over the
+# handed to it is the product. (#4105 later reopens the WINDOW itself for the
+# ask lane specifically — the caps are now resolved in tandem,
+# 200/200/200/16000/128000 bytes — while this wave's own thesis stands: the
+# package, not the window, is where the assembly work invests.) These helpers
+# build that package over the
 # annotated pool (pure functions over hit dicts — no graph dependency, so
 # the eval, MCP/SDK consumers and hermetic tests share the identical code).
 #
@@ -941,7 +1530,10 @@ def _pkg_differ_value_critical(a: str, b: str) -> bool:
 def _pkg_session(h: dict) -> str:
     """Slice A: a hit's session identity (the same bucket key the ask lane
     passes ``dedup_pool`` — session_id first, session_date, lme index
-    fallback; distinct sessions never share a bucket)."""
+    fallback). Distinct IDENTIFIED sessions never share a bucket; hits
+    carrying NONE of the three keys share the single bucket ``idx:-1``
+    (see :func:`session_key_of`, the retrieval-pool authority; the same
+    collapse is tracked in #3591)."""
     return (h.get("session_id")
             or h.get("session_date")
             or f"idx:{h.get('lme_session_index', -1)}")
@@ -951,8 +1543,15 @@ def _is_turn_point(h: dict) -> bool:
     """Slice A: True for a verbatim source TURN point (kind ``event`` or a
     ``[role] …`` content — the shape the deterministic leg writes turns as).
     Distinguished from a distilled statement so own-source turns can collapse
-    INTO their distilled point instead of standing as a duplicate slot."""
-    return (h.get("point_kind") == "event"
+    INTO their distilled point instead of standing as a duplicate slot.
+
+    ⚠️ DELIBERATELY BROADER than ``session_reinjection._TURN_SHAPE_FILTER``,
+    which needs BOTH conjuncts. This OR classifies a non-turn ``event``
+    point (the hosted demo/dashboard seed, which writes no ``is_episodic``)
+    as a turn; that is harmless for the collapse/slot decision here but it
+    is NOT the predicate the C4 fetch may use — see the constant for why.
+    """
+    return (h.get("point_kind") == TURN_POINT_KIND
             or bool(_ROLE_PREFIX_RE.match(str(h.get("content") or ""))))
 
 

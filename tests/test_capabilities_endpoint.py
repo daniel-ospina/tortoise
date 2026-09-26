@@ -1,9 +1,11 @@
 """#2004 (W8) builder capability catalog endpoint — docker-lane tests.
 
 GET /v1/capabilities (epic I-7) returns the registry-backed indexers+
-extractors catalog; the build-fork completion gate stays evaluable through
-the catalog-presented step edge (the dashboard write path PATCHes
-catalog_presented, agents checkpoint the step — both MERGE the same edge).
+extractors catalog. #3913 (owner ruling 2026-09-20): the build-fork
+completion gate is the two OBSERVED acts — harness-connected +
+first-points-filed — never a catalog render; the catalog-presented step edge
+stays an accepted, optional record (the agent/external checkpoint and the
+PATCH path still MERGE it; no dashboard path writes it since #3913).
 
 Runs in the docker lane (TORTOISE_DB_URI) — the gate assertions exercise
 real FalkorDB step-edge writes. URI-less runs (tier-2 embedded legs,
@@ -100,45 +102,79 @@ class TestCapabilitiesEndpoint:
 
 
 class TestBuildForkGate:
-    """The catalog-presented step edge keeps the build-fork gate evaluable
-    (surface 13 + DE2E-12: build completes WITHOUT decide — W8 keeps the
-    W1/W5 mechanism; the endpoint swap is source-only)."""
+    """#3913: the build-fork gate is the two OBSERVED acts (harness-connected +
+    first-points-filed) — decide/catalog complete nothing. The catalog-presented
+    id stays accepted and replay-safe."""
 
-    def _build_fork_active_org(self, client) -> tuple[str, str]:
+    def _build_fork_org(self, client) -> tuple[str, str]:
+        """Fork=build + BOTH observed acts → gate-satisfied org."""
         org_id, _email = _registered(client)
         _checkpoint(client, fork="build")
         _checkpoint(client, step="harness-connected")
         _checkpoint(client, step="first-points-filed")
         return org_id, _email
 
-    def test_catalog_presented_completes_build_fork_without_decide(self, client):
-        """build = harness-connected + first-points-filed + catalog-presented
-        → status complete; decide-completed alone can NEVER complete it."""
-        org_id, _ = self._build_fork_active_org(client)
-        # decide-completed alone: still active (decide is NOT the build gate)
-        r = _checkpoint(client, step="decide-completed")
-        assert r["onboarding"]["status"] == "active"
-        assert "catalog-presented" not in _completed(org_id)
-        # catalog-presented (checkpoint agent path) → complete
-        r2 = _checkpoint(client, step="catalog-presented")
+    def test_build_fork_completes_on_the_two_observed_acts(self, client):
+        """fork=build: harness-connected alone stays active (fail-closed);
+        adding first-points-filed completes it — no catalog-presented needed."""
+        org_id, _ = _registered(client)
+        _checkpoint(client, fork="build")
+        r = _checkpoint(client, step="harness-connected")
+        assert r["onboarding"]["status"] == "active", r  # only ONE observed act
+        r2 = _checkpoint(client, step="first-points-filed")
         assert r2["onboarding"]["status"] == "complete", r2
-        assert "catalog-presented" in r2["created_steps"]
+        assert "first-points-filed" in r2["created_steps"]
+        # #3913: the catalog step was never required and was never written here.
+        assert "catalog-presented" not in _completed(org_id)
+
+    def test_build_decide_alone_never_completes(self, client):
+        """decide-completed is a SELF-fork row — it can never complete build."""
+        _org_id, _ = _registered(client)
+        _checkpoint(client, fork="build")
+        r = _checkpoint(client, step="decide-completed")
+        assert r["onboarding"]["status"] == "active", r
 
     def test_catalog_presented_replay_is_noop(self, client):
-        """Re-presenting the catalog after completion → 200 idempotent
-        no-op (keyed-MERGE — the once-per-org catalog-presented edge never
-        regresses or double-fires)."""
-        _org_id, _ = self._build_fork_active_org(client)
+        """#3913: catalog-presented is no longer required, but the id stays
+        accepted — recording it is a 200 and a replay is a keyed-MERGE no-op
+        (never regresses or double-fires)."""
+        _org_id, _ = self._build_fork_org(client)
         first = _checkpoint(client, step="catalog-presented")
         assert first["onboarding"]["status"] == "complete"
+        assert "catalog-presented" in first["created_steps"]
         replay = _checkpoint(client, step="catalog-presented")
         assert replay["onboarding"]["status"] == "complete"
         assert "catalog-presented" in replay["noop_steps"]
 
-    def test_dashboard_patch_catalog_presented_completes_gate(self, client):
-        """The dashboard write surface (PATCH catalog_presented: true) marks
-        the SAME step edge → the build gate completes for the browser path."""
-        _org_id, _ = self._build_fork_active_org(client)
+    def test_patch_catalog_presented_marks_the_optional_edge(self, client):
+        """The PATCH surface (`catalog_presented: true`) still MERGEs the SAME
+        step edge — recording only, never a completion gate. The org here is
+        already completed by the two observed acts, so the meaningful assertion
+        is that the edge MERGED (the fail-closed arm — the PATCH alone on a
+        fresh build org — is
+        test_catalog_presented_alone_never_completes_a_build_org)."""
+        org_id, _ = self._build_fork_org(client)
         r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
         assert r.status_code == 200, r.text
-        assert r.json()["onboarding"]["status"] == "complete", r.text
+        # The edge MERGE is the meaningful assertion here (the fail-closed arm —
+        # the PATCH alone on a fresh build org — is
+        # test_catalog_presented_alone_never_completes_a_build_org).
+        # No `status == "complete"` assert: this org was already completed by
+        # `_build_fork_org`, so it would restate the fixture, not test the app.
+        assert "catalog-presented" in _completed(org_id)
+
+    def test_catalog_presented_alone_never_completes_a_build_org(self, client):
+        """Fail-closed guard (NOT a #3913 pin — it behaves the same on both
+        sides of the ruling): a FRESH build org that PATCHes
+        `catalog_presented: true` and nothing else stays ACTIVE. The catalog id
+        is an accepted record, never sufficient on its own. The test that
+        DISTINGUISHES the gate change is
+        test_build_fork_completes_on_the_two_observed_acts above."""
+        org_id, _ = _registered(client)
+        _checkpoint(client, fork="build")
+        r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"]["status"] == "active", r.text
+        assert r.json()["onboarding"]["onboarding_complete"] is False, r.text
+        # the record WAS merged — it is simply not a completion input
+        assert "catalog-presented" in _completed(org_id)

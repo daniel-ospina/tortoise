@@ -492,14 +492,14 @@ def test_cross_domain_query_multi_domain():
         ),
         "custom-domain": DomainRoutingConfig(
             key="custom-domain", name="Custom",
-            cypher_template="MATCH (d:Document) RETURN d LIMIT 10",
+            cypher_template="MATCH (s:Source) RETURN s LIMIT 10",
             query_patterns=["custom"],
         ),
     }
     router = DomainRouter(domains=domains)
     db = _mock_db({
         "product-strategy": [[[1, ["Point"], [["content", "ps"]]]]],
-        "custom-domain": [[[2, ["Document"], [["title", "doc1"]]]]],
+        "custom-domain": [[[2, ["Source"], [["title", "doc1"]]]]],
     })
     result = router.crossDomainQuery(
         ["product-strategy", "custom-domain"], "query", db

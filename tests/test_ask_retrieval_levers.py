@@ -18,7 +18,7 @@ Spec items 9/10 of docs/planning/2026-08-31-2070-scoping-package.md:
   ask knobs → identical query bytes and results.
 - retrieval_degraded honesty (A2): the ask lane still reports degraded
   when the vector leg is absent — never a silent success.
-- Product rerank degrade-path (A7): tortoise/rerank.py degrades to
+- Ask-lane (eval-only) rerank degrade-path (A7): tortoise/rerank.py degrades to
   untouched (applied False) on scorer failure, never raises.
 """
 from __future__ import annotations
@@ -36,6 +36,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise.sdk import TortoiseSDK
 
 _REPO = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _clean_ask_cap_env(monkeypatch):
+    """The mirror's byte ceiling is DERIVED from its own token cap, so an
+    ambient ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` would silently redirect it to
+    the env value and break the mirror contract (same guard as
+    ``tests/test_ask_retrieval_budget.py``)."""
+    from tortoise.retrieval import ASK_CONTEXT_BYTE_CAP_ENV
+    monkeypatch.delenv(ASK_CONTEXT_BYTE_CAP_ENV, raising=False)
+    yield
+
+
 _CACHED_DATASET = Path(
     os.environ.get(
         "TORTOISE_LME_DATASET",
@@ -75,14 +88,32 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
                   evidence_boost: bool = False,
                   limit: int = 40, item_cap: int = 40) -> list[dict]:
     """The ask lane's retrieval→annotate→dedup→boost→assemble sequence
-    (mirrors tools/ask_recall_bench.py::_retrieve_pipeline; no reader)."""
+    (the retrieval SEQUENCE mirrors tools/ask_recall_bench.py::
+    _retrieve_pipeline; no reader).
+
+    The BYTE ceiling deliberately does NOT mirror the bench's frozen
+    ``BYTE_CAP = 32768`` (that bench is the pre-#4105 baseline of record): it
+    is the LANE's resolved cap, derived below from this helper's own
+    8000-token budget (#4105 — the lane's ceiling was a 32 KiB literal, which
+    silently capped every item/token raise above it). A byte ceiling derived
+    from a token cap this helper does not apply would admit a different set
+    than the pipeline it mirrors."""
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
         apply_evidence_boost,
         assemble_context,
         dedup_pool,
         resolve_ask_boost_multipliers,
+        resolve_byte_cap_from_caps,
     )
+    # The byte ceiling is DERIVED from this helper's own 8000-token cap (not
+    # the product's 16000-token default) so the mirror stays a mirror: a byte
+    # ceiling derived from a token cap the helper does not apply would admit a
+    # different set than the pipeline it mirrors. ``_clean_ask_cap_env``
+    # pins the byte env OFF for the same reason — with it set, the derivation
+    # follows the ENV rather than this helper's token cap.
+    byte_cap = resolve_byte_cap_from_caps(
+        {"context_token_cap": 8000})
     hits = sdk.tortoise_fts_query(
         question, limit=limit, pool_size=120, include_terminal=True,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf)
@@ -102,7 +133,7 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
             boost_verbatim=mult["verbatim"], boost_source=mult["source"])
     return assemble_context(
         deduped, top_k=item_cap, max_context_tokens=8000,
-        context_item_cap=item_cap, byte_cap=32768)
+        context_item_cap=item_cap, byte_cap=byte_cap)
 
 
 def _recorded_questions() -> dict[str, dict]:
@@ -292,21 +323,32 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         _seed(sdk, q)
         from tortoise.embeddings import EmbeddingModel
         assert EmbeddingModel.get() is None  # the honest precondition
-        # the degraded flag is resolved by the ask() surface from leg_trace;
+        # the degraded flag is resolved by the ask lane from leg_trace;
         # the existing test_ask_sdk retrieval_degraded tests pin that path.
-        # Here we pin the lever knobs' default-off posture:
+        # Here we pin the #4105-resolved cap posture (the ask lane's window
+        # is now env-resolvable AND honest — the historical 40/40/8000
+        # truncated at a 32 KiB literal, so a raise above it was a no-op).
+        # Here we pin the shipped window LITERALLY: the cap posture is the
+        # measured 200/200/200/16000/128000. Inequalities alone cannot
+        # detect a changed literal, and the pre-#4105 pin was an exact dict —
+        # replacing it with three tautologies left the window unpinned.
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
-        assert caps == {"limit": 40, "context_item_cap": 40,
-                        "context_token_cap": 8000}
+        assert caps == {
+            "limit": 200,
+            "pool_size": 200,
+            "context_item_cap": 200,
+            "context_token_cap": 16000,
+            "context_byte_cap": 128000,
+        }
     finally:
         sdk.close()
 
 
-# ── A7: product rerank degrade-path (ported eval contract) ─────────────────
+# ── A7: ask-lane (eval-only) rerank degrade-path (ported eval contract) ────
 
 def test_product_rerank_off_by_default():
-    """A7: the product rerank is fail-safe OFF (env truthy-only)."""
+    """A7: the ask-lane rerank is fail-safe OFF (env truthy-only)."""
     os.environ.pop("TORTOISE_ASK_RERANK", None)
     from tortoise.rerank import rerank_enabled
     assert rerank_enabled() is False

@@ -13,6 +13,7 @@ from datetime import UTC
 import pytest
 
 from tortoise.metering import (
+    _calendar_month_period,
     _current_period,
     _ops_allowance,
     _reset_thresholds_for_tests,
@@ -20,6 +21,7 @@ from tortoise.metering import (
     get_current_usage,
     record_write_ops,
 )
+from tortoise.quota import QuotaCheckError
 
 
 @pytest.fixture(autouse=True)
@@ -54,15 +56,59 @@ def reg_sdk(monkeypatch, tmp_path):
     sdk.close()
 
 
+def _break_increment_only(monkeypatch, sdk) -> None:
+    """Break the increment's OWN row write, leaving the anchor read working.
+
+    ``_reg_sdk`` is the dependency of BOTH halves of the meter: ``_metering_anchor``
+    reads the billing anchor through it, and the increment issues its
+    ``MERGE (m:MeteringRecord …)`` through it. A blanket ``_reg_sdk`` raise is
+    therefore no longer a statement about the increment at all — since #3825 it
+    makes the WINDOW unresolvable, and window resolution RAISES by design (see
+    ``test_anchor_read_failure_raises_the_signal``, which pins that signal).
+
+    Injecting the failure BY STATEMENT — everything delegates to the real
+    registry except the increment's MERGE — lets the window resolve and breaks
+    only the increment, which is exactly the claim ``test_non_fatal_on_db_error``
+    and ``test_non_fatal_on_registry_failure`` have always made.
+    """
+    import tortoise.metering as metering_mod
+
+    real_reg = sdk._get_registry()
+
+    class _IncrementBrokenRegistry:
+        """Delegate every statement to the REAL registry; fail the increment."""
+
+        def query(self, cypher, *args, **kwargs):
+            if "MERGE (m:MeteringRecord" in cypher:
+                raise RuntimeError("registry increment write failed")
+            return real_reg.query(cypher, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_reg, name)
+
+    class _StubSDK:
+        def _get_registry(self):
+            return _IncrementBrokenRegistry()
+
+    monkeypatch.setattr(metering_mod, "_reg_sdk", lambda: _StubSDK())
+
+
 # ── Increment tests ─────────────────────────────────────────────────────────
 
 class TestRecordWriteOps:
     def test_increment_creates_record(self, reg_sdk):
-        sdk, tid = reg_sdk  # noqa: RUF059
+        _sdk, tid = reg_sdk
         result = record_write_ops(tid, tier="pro")
         assert result is not None
         assert result["write_ops"] == 1
-        assert result["period"] == _current_period()
+        # #3825: ``period`` is now the DERIVED month label of the resolved
+        # WINDOW; the window itself rides on period_start/period_end. For an
+        # org with no subscription (D13) the window IS the calendar month, so
+        # the label is unchanged from the pre-#3825 behaviour.
+        window = _current_period(tid)
+        assert result["period"] == window.label
+        assert result["period_start"] == window.start_iso
+        assert result["period_end"] == window.end_iso
         assert result["overage_eligible"] is True  # pro tier
         assert result["ops_allowance"] == 50000  # from pricing.json
 
@@ -107,20 +153,90 @@ class TestRecordWriteOps:
         result = record_write_ops("", tier="pro")
         assert result is None
 
-    def test_non_fatal_on_db_error(self, reg_sdk, monkeypatch):
-        """Metering failures are logged, never raised."""
-        sdk, tid = reg_sdk  # noqa: RUF059
-        # Break ALL future registry SDK connections by patching _reg_sdk
+    def test_non_fatal_on_db_error(self, reg_sdk, monkeypatch, caplog):
+        """A failed INCREMENT row write is logged, never raised.
+
+        #3825: only the increment is broken here (``_break_increment_only``).
+        A blanket ``_reg_sdk`` failure would now make the window unresolvable,
+        and window resolution RAISES by design — so the old shape could not
+        tell "I could not resolve the window" apart from "the row write
+        failed". The window resolves; the MERGE raises; the write is non-fatal
+        (the increment is dropped — it is NOT retried at any call site; that
+        residual is #3824's representation scope).
+        """
+        sdk, tid = reg_sdk
+        _break_increment_only(monkeypatch, sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
+            result = record_write_ops(tid, tier="pro")
+        assert result is None  # non-fatal: only the increment failed
+        assert any("increment failed" in r.message for r in caplog.records), (
+            [r.message for r in caplog.records]
+        )
+
+    def test_anchor_read_failure_raises_the_signal(self, reg_sdk, monkeypatch):
+        """The OTHER half of the pair (#3825): when the ANCHOR READ fails, the
+        org's window is unresolvable and the writer RAISES ``QuotaCheckError``.
+
+        #3981: that raise is a SIGNAL, not enforcement. This is the module
+        boundary; every production caller absorbs it, serves the request and
+        reports the dropped increment to the operator
+        (``metering.report_unmetered_increment``). The user-facing refusal is
+        the pre-spend admission gate, never this raise. The assertion below is
+        therefore about the WRITER's contract, not about a refused write.
+
+        ``test_non_fatal_on_db_error`` above pins the increment-RPC half (window
+        known → non-fatal). Together the two tests hold the paths APART: the
+        same monkeypatched seam, two different statements, two opposite
+        outcomes — which is what makes "a dropped increment undercounts the
+        cohort cap" a caught mutation rather than a silent one.
+        """
         import tortoise.metering as metering_mod
+
+        _sdk, tid = reg_sdk
+
         def _bad_reg():
             raise RuntimeError("db down")
+
         monkeypatch.setattr(metering_mod, "_reg_sdk", _bad_reg)
-        # Must not raise
-        result = record_write_ops(tid, tier="pro")
-        assert result is None
+        with pytest.raises(QuotaCheckError):
+            record_write_ops(tid, tier="pro")
 
 
 # ── Threshold events ────────────────────────────────────────────────────────
+
+# ── #4957: scope threshold-event capture to the METERING logger ─────────────
+#
+# These tests assert on threshold EVENTS, and only ``tortoise.metering`` emits
+# them. Filtering ``caplog.records`` by the bare word "threshold" matches ANY
+# logger's FORMATTED message, because ``caplog`` captures every logger that
+# propagates to root. pytest's ``tmp_path`` derives from the test's own name —
+# ``test_no_threshold_for_free_tier`` — so the unrelated
+# ``#4879: replay allowed for registry <path>`` WARNING emitted by
+# ``tortoise.embedded_lifecycle`` matched on its embedded path and reddened
+# main's ``test (b)`` (#4954 / #4962).
+#
+# The scope below is by LOGGER, so no other module's record can be mistaken for
+# a metering event, whatever it logs. An ABSENCE assertion is the shape
+# pollution breaks, and it is the shape used below.
+_METERING_LOGGER = "tortoise.metering"
+
+
+def _metering_records(caplog, needle: str = "threshold",
+                      levelno: int | None = None) -> list:
+    """Records the METERING logger emitted whose message contains ``needle``.
+
+    Scoped by logger NAME, not by the bare word alone (#4957): the word
+    "threshold" occurs in this test module's own tmpdir path, so an unscoped
+    filter matches another module's record and turns a real absence into a
+    failure. ``needle`` and ``levelno`` narrow WITHIN that scope.
+    """
+    return [
+        r for r in caplog.records
+        if r.name == _METERING_LOGGER
+        and (levelno is None or r.levelno == levelno)
+        and needle in r.message
+    ]
+
 
 class TestThresholdEvents:
     def test_80_percent_warning(self, reg_sdk, caplog):
@@ -131,11 +247,10 @@ class TestThresholdEvents:
         eighty_pct = int(allowance * 0.80)
 
         # Jump to 80% in one increment
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             record_write_ops(tid, tier="pro", n=eighty_pct)
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
-                    and "threshold" in r.message]
+        warnings = _metering_records(caplog, levelno=logging.WARNING)
         assert len(warnings) >= 1, (
             f"Expected at least one WARNING for 80% threshold, got: "
             f"{[r.message for r in caplog.records]}"
@@ -149,11 +264,10 @@ class TestThresholdEvents:
         _reset_thresholds_for_tests()
         allowance = 50000  # pro tier
 
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.ERROR, logger=_METERING_LOGGER):
             record_write_ops(tid, tier="pro", n=allowance)
 
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR
-                  and "threshold" in r.message]
+        errors = _metering_records(caplog, levelno=logging.ERROR)
         assert len(errors) >= 1, (
             f"Expected at least one ERROR for 100% threshold, got: "
             f"{[r.message for r in caplog.records]}"
@@ -172,20 +286,22 @@ class TestThresholdEvents:
         # First, set count to just below threshold
         record_write_ops(tid, tier="pro", n=eighty_pct - 1)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             # Next op crosses 80%
             record_write_ops(tid, tier="pro")
             # Next op stays above 80% — should NOT fire again
             record_write_ops(tid, tier="pro")
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
-                    and "80%" in r.message]
+        warnings = _metering_records(
+            caplog, needle="80%", levelno=logging.WARNING)
         assert len(warnings) == 1, (
             f"Expected exactly 1 WARNING for 80% threshold, got {len(warnings)}"
         )
 
     def test_no_threshold_for_free_tier(self, reg_sdk, caplog):
-        """Free/Solo tiers never trigger threshold events (no overage)."""
+        """Free (a zero-price tier) never triggers threshold events: no
+        overage. Solo is PAID and therefore metered since #4815 — see
+        test_paid_solo_tier_triggers_threshold_events."""
         sdk, tid = reg_sdk
         _reset_thresholds_for_tests()
         # Switch team to free tier
@@ -194,15 +310,86 @@ class TestThresholdEvents:
             params={"tid": tid},
         )
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
             record_write_ops(tid, tier="free", n=99999)
 
-        warnings = [r for r in caplog.records
-                    if "threshold" in r.message]
+        warnings = _metering_records(caplog)
         assert len(warnings) == 0, (
             f"Free tier should not trigger threshold events, got: {warnings}"
         )
 
+    def test_paid_solo_tier_triggers_threshold_events(self, reg_sdk, caplog):
+        """#4815: solo is a PAID tier, so overage is ON — it emits the
+        80%/100% threshold events exactly as pro/team do. This is the
+        ruling's observable metering consequence."""
+        sdk, tid = reg_sdk
+        _reset_thresholds_for_tests()
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $tid}) SET t.tier = 'solo'",
+            params={"tid": tid},
+        )
+
+        # Scoped to the METERING logger (#4957) — see _metering_records. This
+        # is a PRESENCE assertion, which is exactly the shape an unscoped
+        # caplog.records scan can false-PASS: any other module logging "80%"
+        # at WARNING would satisfy it without solo being metered at all.
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
+            record_write_ops(tid, tier="solo", n=99999)
+
+        warnings = _metering_records(
+            caplog, needle="80%", levelno=logging.WARNING)
+        errors = _metering_records(
+            caplog, needle="100%", levelno=logging.ERROR)
+        assert warnings, (
+            "Solo (paid) must fire the 80% threshold, got: "
+            f"{_metering_records(caplog)}"
+        )
+        assert errors, (
+            "Solo (paid) must fire the 100% threshold, got: "
+            f"{_metering_records(caplog)}"
+        )
+
+    def test_unrelated_logger_is_not_a_threshold_event(self, reg_sdk, caplog):
+        """#4957: another module's record must never count as a threshold event.
+
+        This is the shape that reddened main's ``test (b)``: the ``#4879``
+        replay-allowed WARNING from ``tortoise.embedded_lifecycle`` embeds the
+        embedded registry path, and pytest's ``tmp_path`` derives from the
+        test's own name (``test_no_threshold_for_free_tier``) — so a filter on
+        the bare word matched the test's OWN tmpdir.
+
+        The injected record reproduces that shape, and this test asserts through
+        the SAME helper the real absence assertion uses, so re-broadening the
+        filter fails here rather than re-arming on main.
+        """
+        sdk, tid = reg_sdk
+        _reset_thresholds_for_tests()
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $tid}) SET t.tier = 'free'",
+            params={"tid": tid},
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_METERING_LOGGER):
+            logging.getLogger("tortoise.embedded_lifecycle").warning(
+                "#4879: replay allowed for registry %s — gate=%s%s "
+                "(this construction holds the in-flight replay claim)",
+                "/tmp/pytest-of-runner/pytest-0/test_no_threshold_for_free_tier0",
+                "allow",
+                "",
+            )
+            record_write_ops(tid, tier="free", n=99999)
+
+        # Non-vacuous the other way too: the polluted record really IS captured,
+        # so the guard under test is the LOGGER SCOPE, not the record's absence.
+        assert any(
+            r.name == "tortoise.embedded_lifecycle" and "threshold" in r.message
+            for r in caplog.records
+        ), "the injected record must be captured, or this test proves nothing"
+
+        assert _metering_records(caplog) == [], (
+            "an unrelated logger's record was counted as a metering threshold "
+            f"event: {_metering_records(caplog)}"
+        )
 
 # ── Usage query tests ───────────────────────────────────────────────────────
 
@@ -221,7 +408,7 @@ class TestGetCurrentUsage:
         )
         usage = get_current_usage(team["id"])
         assert usage["write_ops_used"] == 0
-        assert usage["period"] == _current_period()
+        assert usage["period"] == _current_period(team["id"]).label
         assert usage["overage_eligible"] is False  # free tier
         sdk.close()
 
@@ -304,12 +491,24 @@ class TestGetCurrentUsageSupabaseDegrade:
 
         assert usage["write_ops_used"] == 0
         assert usage["write_ops_limit"] == _ops_allowance("free")
-        assert usage["period"] == _current_period()
+        # #3825: the FIRST control-plane read on this path is the metering
+        # WINDOW anchor, so with a wholly unreachable plane the WINDOW itself
+        # is unresolvable and the degrade renders the display placeholder
+        # label — never a calendar-month KEY (there is no row to key to).
+        assert usage["period"] == _calendar_month_period().label
+        assert usage["period_start"] is None
+        assert usage["period_end"] is None
         assert usage["overage_eligible"] is False
         assert usage["overage_cost_usd"] is None
-        # The failure is logged, not raised
+        # The failure is logged, not raised. #3825 changed WHICH read fails
+        # first — the WINDOW anchor now precedes the metering_records read, so
+        # with a wholly unreachable plane the window-unresolvable path logs
+        # its own (more precise) message and the supabase metering read never
+        # runs. The subject of this assertion is "a failure was logged", not
+        # a wording, so both messages are accepted.
         assert any(
-            "metering usage query failed" in r.message
+            ("metering usage query failed" in r.message
+             or "metering window unresolvable" in r.message)
             for r in caplog.records
         )
 
@@ -331,14 +530,20 @@ class TestGetCurrentUsageSupabaseDegrade:
                 self._seeded = seeded
 
             def query(self, *a, **k):
-                # First call (the seed read) succeeds; afterwards raise.
+                # First call (the WINDOW ANCHOR read) succeeds; afterwards
+                # raise (#3825 changed the read order: the anchor read is now
+                # FIRST, so the seed is the org row, not a ledger row).
                 if not hasattr(self, "_seeded_read"):
                     self._seeded_read = True
                     return self._seeded
                 raise RuntimeError("Supabase down (simulated blip)")
 
-        seeded = [{"org_id": "team-blip-002", "period": _current_period(),
-                   "write_ops": 55000}]
+        # The anchor resolves — an UNRESOLVABLE anchor is a different degrade
+        # (the zero view with a placeholder label), and this test is about a
+        # team that HAS usage whose metering read blows up.
+        seeded = [{"id": "team-blip-002", "subscription_id": "sub-blip-002",
+                   "current_period_start": "2026-09-03T00:00:00+00:00",
+                   "current_period_end": "2026-10-03T00:00:00+00:00"}]
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane",
             lambda: _ErrorAfterSeed(seeded),
@@ -360,10 +565,16 @@ class TestGetCurrentUsageSupabaseDegrade:
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
         import tortoise.supabase_control as sc
 
-        # pro tier: 55,000 ops used this period — over the allowance → overage
+        # pro tier: 55,000 ops used in the org's current WINDOW — over the
+        # allowance → overage. The org row carries no subscription, so the
+        # window is the D13 calendar month in UTC; the ledger row must be
+        # keyed on THAT window's start (the ledger key is the window, not the
+        # month label).
+        window = _calendar_month_period()
         fake = FakeControlPlane({
             "metering_records": [
-                {"org_id": "team-1", "period": _current_period(),
+                {"org_id": "team-1", "period_start": window.start_iso,
+                 "period_end": window.end_iso, "period": window.label,
                  "write_ops": 55000},
             ],
             "organizations": [{"id": "team-1", "tier": "pro"}],
@@ -372,7 +583,7 @@ class TestGetCurrentUsageSupabaseDegrade:
 
         usage = m.get_current_usage("team-1")
         assert usage["write_ops_used"] == 55000
-        assert usage["period"] == _current_period()
+        assert usage["period"] == window.label
         assert usage["overage_eligible"] is True  # pro tier
         # overage beyond the pro allowance, rounded up to the 10k block
         assert usage["overage_cost_usd"] is not None
@@ -382,48 +593,37 @@ class TestGetCurrentUsageSupabaseDegrade:
 # ── Period rollover ─────────────────────────────────────────────────────────
 
 class TestPeriodRollover:
-    def test_period_is_calendar_month_utc(self):
-        """_current_period returns YYYY-MM in UTC."""
-        period = _current_period()
-        assert len(period) == 7
-        assert period[4] == "-"
-        year, month = period.split("-")
-        assert 2026 <= int(year) <= 2099
-        assert 1 <= int(month) <= 12
+    """#3825 re-keyed this class.
 
-    def test_different_periods_are_separate_records(self, monkeypatch, tmp_path):
-        """Explicitly writing to a past period creates a separate record."""
-        from tortoise.sdk import TortoiseSDK
-        db = os.path.join(tmp_path, "metering.db")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        monkeypatch.setenv("TORTOISE_DB_PATH", db)
-        sdk = TortoiseSDK(db, namespace="registry")
-        team = sdk.org_create(name="period-team")
-        tid = team["id"]
+    ``test_period_is_calendar_month_utc`` is DELETED, not updated: it asserted
+    ``len(period) == 7`` and ``period[4] == "-"`` — i.e. it pinned the exact
+    month-STRING semantics D10 removes, and a half-open window is not a
+    7-character label. Keeping it green is incompatible with the decision. Its
+    surviving intent (D13: an org with no subscription meters on the calendar
+    month in UTC) is asserted below on the real window; the boundary-keyed
+    half moved to ``tests/test_metering_period_window.py`` (T8/T11), where it
+    drives the real increment instead of inserting ledger rows directly (the
+    anti-pattern ``(c.3)`` rejects — a direct insert bypasses the writer, and
+    the writer is where the row key is minted).
+    """
 
-        # Simulate writes in two periods by directly manipulating the registry
-        reg = sdk._get_registry()
-        reg.query(
-            "MERGE (m:MeteringRecord {org_id: $tid, period: '2026-07'}) "
-            "SET m.write_ops = coalesce(m.write_ops, 0) + 100",
-            params={"tid": tid},
-        )
-        reg.query(
-            "MERGE (m:MeteringRecord {org_id: $tid, period: '2026-08'}) "
-            "SET m.write_ops = coalesce(m.write_ops, 0) + 50",
-            params={"tid": tid},
-        )
+    def test_period_without_subscription_is_the_calendar_month_window(
+            self, reg_sdk):
+        """D13: no ``subscription_id`` → the calendar month in UTC, as a
+        half-open WINDOW (``period`` survives only as its derived label)."""
+        from datetime import datetime
 
-        # Verify separate records exist
-        rows = reg.query(
-            "MATCH (m:MeteringRecord {org_id: $tid}) "
-            "RETURN m.period, m.write_ops ORDER BY m.period",
-            params={"tid": tid},
-        ).result_set
-        assert len(rows) == 2
-        assert rows[0] == ["2026-07", 100]
-        assert rows[1] == ["2026-08", 50]
-        sdk.close()
+        _sdk, tid = reg_sdk
+        period = _current_period(tid)  # the fixture's Team has no subscription
+        now = datetime.now(UTC)
+        assert period.label == f"{now.year}-{now.month:02d}"
+        assert period.start.day == 1
+        assert (period.start.hour, period.start.minute, period.start.second,
+                period.start.microsecond) == (0, 0, 0, 0)
+        assert (period.end - period.start).days in (28, 29, 30, 31)
+        # the label is DERIVED from the window start, so it cannot drift from
+        # the key it labels
+        assert period.label == f"{period.start.year}-{period.start.month:02d}"
 
 
 # ── Pricing.json integration ────────────────────────────────────────────────
@@ -444,7 +644,12 @@ class TestPricingIntegration:
     def test_free_tier_has_no_overage(self):
         from tortoise.pricing import has_overage
         assert has_overage("free") is False
-        assert has_overage("solo") is False
+        assert has_overage("anon") is False
+
+    def test_solo_tier_has_overage(self):
+        # #4815: solo is a PAID tier → metered (no longer a hard cap).
+        from tortoise.pricing import has_overage
+        assert has_overage("solo") is True
 
     def test_pro_and_team_have_overage(self):
         from tortoise.pricing import has_overage
@@ -498,12 +703,21 @@ class TestAskMetering:
         assert get_ask_usage("selfhost")["ask_calls"] == 1
 
     def test_non_fatal_on_registry_failure(self, reg_sdk, monkeypatch, caplog):
-        sdk, tid = reg_sdk  # noqa: RUF059
+        """A failed ASK-increment row write is logged, never raised.
+
+        As in ``test_non_fatal_on_db_error`` (#3825), the failure is injected
+        into the increment's own ``MERGE (m:MeteringRecord …)`` so the anchor
+        read still resolves the window — only the increment is broken.
+        """
+        sdk, tid = reg_sdk
         from tortoise.metering import record_ask_usage
-        def _boom(*a, **k):
-            raise RuntimeError("registry down")
-        monkeypatch.setattr("tortoise.metering._reg_sdk", _boom)
-        assert record_ask_usage(tid, tokens_in=1) is None  # non-fatal
+
+        _break_increment_only(monkeypatch, sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
+            assert record_ask_usage(tid, tokens_in=1) is None  # non-fatal
+        assert any("increment failed" in r.message for r in caplog.records), (
+            [r.message for r in caplog.records]
+        )
 
     def test_concurrent_increments_sum(self, reg_sdk):
         """Two threads calling record_ask_usage concurrently → the final
@@ -606,29 +820,69 @@ class TestAskMetering:
         assert usage["ask_cost_usd"] == 0.0
 
     def test_period_rollover_straddle(self, reg_sdk, monkeypatch):
-        """P2-23: a record at T−1s lands in the OLD period; the new period
-        starts zero."""
+        """P2-23, RE-KEYED to a SUBSCRIPTION window (#3825 / D10).
+
+        The old form froze at the last second of a CALENDAR MONTH, because the
+        row key used to be a month label. Under D10 a subscription org's row
+        key is its BILLING PERIOD, and rollover happens when the ANCHOR
+        advances — NOT when the clock crosses a month boundary and NOT from
+        ``now`` (the frozen clock below never moves, so a self-anchored
+        mutation would collapse both writes into one row and RED here).
+
+        A record written before the renewal lands in the OLD window; after the
+        renewal the org records to a NEW row and the old row is frozen
+        byte-identical.
+        """
         from datetime import datetime
 
         from tortoise.metering import _current_period, get_ask_usage, record_ask_usage
-        sdk, tid = reg_sdk  # noqa: RUF059
-        # freeze at the LAST second of a period
-        base = datetime(2026, 8, 31, 23, 59, 59, tzinfo=UTC)
-        frozen = {"ts": base}
-        class _FakeDT:
+        sdk, tid = reg_sdk
+        reg = sdk._get_registry()
+
+        def _anchor(start_iso: str, end_iso: str) -> None:
+            reg.query(
+                "MATCH (t:Team {id: $tid}) "
+                "SET t.subscription_id = 'sub-straddle', "
+                "    t.current_period_start = $ps, "
+                "    t.current_period_end = $pe",
+                params={"tid": tid, "ps": start_iso, "pe": end_iso},
+            )
+
+        _anchor("2026-08-20T00:00:00+00:00", "2026-09-20T00:00:00+00:00")
+        # Freeze 1 second BEFORE the renewal instant, and never move the clock
+        # (a subclass of ``datetime`` so ``_anchor_instant``'s fromisoformat /
+        # isinstance checks keep working under the patch).
+        frozen = {"ts": datetime(2026, 9, 19, 23, 59, 59, tzinfo=UTC)}
+
+        class _FrozenDT(datetime):
             @staticmethod
             def now(tz=None):
                 return frozen["ts"]
-        monkeypatch.setattr("tortoise.metering.datetime", _FakeDT)
+
+        monkeypatch.setattr("tortoise.metering.datetime", _FrozenDT)
         record_ask_usage(tid, tokens_in=10)
-        old_period = _current_period()
-        assert old_period == "2026-08"
-        # roll the period
-        frozen["ts"] = datetime(2026, 9, 1, 0, 0, 1, tzinfo=UTC)
+        old = _current_period(tid)
+        assert old.start_iso == "2026-08-20T00:00:00+00:00"
+        assert get_ask_usage(tid)["ask_tokens_in"] == 10
+
+        # Stripe renews: the new period starts at EXACTLY the old window's
+        # end. Half-open [start, end) → the boundary instant belongs to the
+        # NEW window.
+        _anchor("2026-09-20T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
         record_ask_usage(tid, tokens_in=20)
+        new = _current_period(tid)
+        assert new.start_iso == old.end_iso
         usage = get_ask_usage(tid)
-        assert usage["period"] == "2026-09"
-        assert usage["ask_tokens_in"] == 20  # old period's record is frozen
+        assert usage["period_start"] == new.start_iso
+        assert usage["ask_tokens_in"] == 20  # the old window's row is frozen
+        # ...and the prior row is still on the ledger, unchanged
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid}) "
+            "RETURN m.period_start, m.ask_tokens_in "
+            "ORDER BY m.period_start",
+            params={"tid": tid},
+        ).result_set
+        assert rows == [[old.start_iso, 10], [new.start_iso, 20]]
 
     def test_migration_code_contract(self, monkeypatch):
         """Plan Task 6 Step 1: the migration↔code contract — the RPC name
@@ -657,17 +911,26 @@ class TestAskMetering:
         assert "ask_tokens_in   bigint" in mig
         assert "ask_tokens_out  bigint" in mig
         # (b) the RPC name + parameter set the EFFECTIVE migration defines —
-        # the newest file that recreates it (append-only: the parameter rename
-        # cannot be an edit to 20260829000001).
-        eff = (migdir / "20260915000001_tenancy_team_to_org.sql").read_text()
+        # the newest file that recreates it (append-only: a signature change
+        # cannot be an edit to 20260829000001/20260915000001, so #3825's
+        # migration owns it now — and it DROPs before CREATE, because a new
+        # argument list would otherwise be an OVERLOAD that leaves the old
+        # month-keyed function callable).
+        eff = (migdir / "20260918000001_metering_period_window.sql").read_text()
         sig = _re.search(
-            r"CREATE OR REPLACE FUNCTION public\.metering_increment_ask\((.*?)\)\s*RETURNS",
+            r"CREATE (?:OR REPLACE )?FUNCTION public\.metering_increment_ask\((.*?)\)\s*RETURNS",
             eff, _re.S)
         assert sig is not None, (
             "the effective migration must recreate metering_increment_ask")
         params = set(_re.findall(r"p_(\w+)\s+\w+", sig.group(1)))
-        assert params == {"org_id", "period", "calls", "tokens_in",
-                          "tokens_out", "cost_usd"}
+        # #3825: the month label is replaced by the half-open WINDOW. Asserted
+        # with ==, never a subset — a subset stops catching a dropped bound.
+        assert params == {"org_id", "period_start", "period_end", "calls",
+                          "tokens_in", "tokens_out", "cost_usd"}
+        # the OLD month-keyed signature must be DROPPED, not merely shadowed
+        assert _re.search(
+            r"DROP FUNCTION IF EXISTS public\.metering_increment_ask\(\s*text,\s*text,",
+            eff), "the month-keyed overload must be dropped, not left callable"
         # (c) the supabase-mode record path calls the SAME RPC with the
         # SAME p_* body keys (FakeControlPlane records the call body)
         from tests.fake_control_plane import FakeControlPlane
@@ -682,22 +945,31 @@ class TestAskMetering:
                          cost_usd=0.001)
         fn, body = fake.rpc_calls[-1]
         assert fn == "metering_increment_ask"
-        assert set(body) == {"p_org_id", "p_period", "p_calls",
-                             "p_tokens_in", "p_tokens_out", "p_cost_usd"}
+        # #3825: the WINDOW replaces the month label. Asserted with ==, never a
+        # subset — a subset would stop detecting a dropped window bound.
+        assert set(body) == {"p_org_id", "p_period_start", "p_period_end",
+                             "p_calls", "p_tokens_in", "p_tokens_out",
+                             "p_cost_usd"}
         assert body["p_org_id"] == "team-1"
         assert body["p_tokens_in"] == 100 and body["p_tokens_out"] == 50
-        # (d) the supabase-mode READ path selects the SAME ask_* columns
-        fake.seed("metering_records", [{"org_id": "team-1",
-                                         "period": body["p_period"],
-                                         "ask_calls": 1,
-                                         "ask_tokens_in": 100,
-                                         "ask_tokens_out": 50,
-                                         "ask_cost_usd": 0.001}])
+        assert body["p_period_start"] and body["p_period_end"]
+        # (d) the supabase-mode READ path selects the SAME ask_* columns, keyed
+        # on the SAME window start. Full replacement (not a seed/append) so the
+        # assertion cannot be satisfied by the row the RPC emulation just
+        # wrote: DISTINCT values make a mis-wired read show up.
+        fake.tables["metering_records"] = [{
+            "org_id": "team-1",
+            "period_start": body["p_period_start"],
+            "period_end": body["p_period_end"],
+            "period": "2026-09",
+            "ask_calls": 7, "ask_tokens_in": 700, "ask_tokens_out": 70,
+            "ask_cost_usd": 0.007,
+        }]
         usage = get_ask_usage("team-1")
-        assert usage["ask_calls"] == 1
-        assert usage["ask_tokens_in"] == 100
-        assert usage["ask_tokens_out"] == 50
-        assert abs(usage["ask_cost_usd"] - 0.001) < 1e-9
+        assert usage["ask_calls"] == 7
+        assert usage["ask_tokens_in"] == 700
+        assert usage["ask_tokens_out"] == 70
+        assert abs(usage["ask_cost_usd"] - 0.007) < 1e-9
 
 
 # ── #1987 Task 6: estimate_tokens_ask ───────────────────────────────────────

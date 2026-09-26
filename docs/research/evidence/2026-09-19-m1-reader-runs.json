@@ -1,0 +1,31 @@
+{
+  "note": "WAVE-R / M1 — real pinned-reader runs on the ask lane (ask_lane.run_ask_lane). Paid calls only; the reader leg is reported separately from retrieval. Provider pinned to deepseek-direct; model deepseek/deepseek-v4-flash. Measured 2026-09-19 on a heavily loaded box (load average ~40 / 10 CPUs) — absolute ms are pessimistic.",
+  "provider": "deepseek-direct",
+  "model": "deepseek-v4-flash",
+  "runs": [
+    {
+      "run": 1,
+      "ask_total_ms": 1120,
+      "reader_ms": 985,
+      "reader_share": 0.879,
+      "cost_estimate_usd": 0.00139293
+    },
+    {
+      "run": 2,
+      "ask_total_ms": 1702,
+      "reader_ms": 1531,
+      "reader_share": 0.9,
+      "cost_estimate_usd": 0.00139461
+    },
+    {
+      "run": 3,
+      "ask_total_ms": 1419,
+      "reader_ms": 993,
+      "reader_share": 0.7,
+      "cost_estimate_usd": 0.00117495
+    }
+  ],
+  "paid_calls_total": 3,
+  "reader_ms_p50": 993,
+  "reader_share_range": [0.7, 0.9]
+}
