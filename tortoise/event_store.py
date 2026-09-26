@@ -45,8 +45,9 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #   there is no saturating step (reproduced on FalkorDB 4.20.4).
 #
 # ``first_seq`` is NOT bumped and is compared app-side in `events_poll` (never
-# through the index), so it may legitimately sit at ``MAX_INT64``: the floor of a
-# log whose last write was ``MAX_SEQ``.
+# through the index), so it may legitimately sit ABOVE ``MAX_SEQ`` — e.g.
+# ``MAX_SEQ + 1``, the floor of a log whose last write was ``MAX_SEQ`` — and is
+# bounded only by ``MAX_INT64``.
 MAX_INT64 = 2 ** 63 - 1
 MAX_SEQ = 2 ** 53 - 1
 
@@ -219,10 +220,11 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
         raise ValueError(
             f"the re-established last_seq {last_seq} is outside the event-store "
             f"integer domain (0 <= last_seq <= {MAX_SEQ}) — it came from the "
-            f"carried value or from a replayed :GraphEvent.seq, and a counter "
-            f"beyond that range hands out seqs the range index cannot compare "
-            f"exactly (above MAX_SEQ) or that no cursor can ever match (below "
-            f"zero), so the events would be silently undeliverable")
+            f"carried value, from a replayed :GraphEvent.seq, or from a live "
+            f"counter the fold above preserved, and a counter beyond that range "
+            f"hands out seqs the range index cannot compare exactly (above "
+            f"MAX_SEQ) or that no cursor can ever match (below zero), so the "
+            f"events would be silently undeliverable")
     first_seq = min_seq if min_seq is not None else last_seq + 1
     if not 0 <= first_seq <= MAX_INT64:
         raise ValueError(
