@@ -110,6 +110,11 @@ from tortoise.projection import (
 )
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
+    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
+    _CAPTURE_EXTRACTION_DISABLED_WARNING,  # #4258: its canonical "stored, not extracted" notice
+    _CAPTURE_EXTRACTOR_LANE_DISABLED,  # #4258: the setting-disabled Session lane value
+    _CAPTURE_EXTRACTOR_LANES_RETRYABLE,  # #4258: the shared retry-eligible lane set
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
@@ -5204,6 +5209,7 @@ DEFAULT_ONBOARDING_STATE = {
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
+    "capture_extract": True,              # #4258: per-org user setting (default ON, #3892 owner ruling) — off = store the turns, skip extraction
     "demo_created": False,
     "org_created": False,
     "completed_at": None,
@@ -9826,11 +9832,13 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
-    "none" lane, #3892), and only for IN-PROCESS cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, the keyless
+    "none" lane, and the setting-disabled "disabled" lane — #3892/#4258), and
+    only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
-      keyless "none" lane (#3892) — AND the retrying request's
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, the
+      keyless "none" lane, or the setting-disabled "disabled" lane
+      (#3892/#4258) — AND the retrying request's
       `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
@@ -9890,6 +9898,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".
+    #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the SAME store-only outcome is
+    reachable by the USER — onboarding_state.capture_extract=false
+    (per-org, default ON when absent) stores the turns and skips extraction,
+    reported truthfully as receipt mode "extraction-disabled".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -9916,7 +9929,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (`_session_recording_allowed` -> `_get_onboarding_state`). It used to run
     # inline here, holding the single event loop for the resolution; it now
     # rides the shared offload seam like the other onboarding reads.
-    recording_ok, rec_layer = await _session_recording_allowed_off_loop(org)
+    # #4258: the SAME worker call also returns the onboarding state, so the
+    # `capture_extract` read below (and the completion disclosure further down)
+    # reuses it — ONE read per capture, not two.
+    recording_ok, rec_layer, _onboard_state = (
+        await _capture_gate_resolution_off_loop(org))
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -9953,6 +9970,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
     # pre-#3892 503-first refusal.
     no_provider = not _llm_provider_available()
+    # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    # default ON; reaffirmed by 5737715963): extraction into memory is a
+    # PER-ORG user setting, default ON. OFF is "store but don't extract" —
+    # the same store-only shape as the keyless path, but under its OWN truthful
+    # reason (a provider may well be configured). `store_only` is the single
+    # predicate every store-only decision below keys on, so the keyless and the
+    # user-disabled cases can never drift apart.
+    extract_enabled = _capture_extract_enabled(org, _onboard_state)
+    store_only = no_provider or not extract_enabled
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -10039,28 +10065,30 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
-    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
-    # content_hash resolution fold a re-attempt's partial claims onto the same
-    # nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+    # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+    # #4258 — content-addressed pt_<sha> ids + graph content_hash resolution
+    # fold a re-attempt's partial claims onto the same nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
     # replay skip closed). Retry fires only when the prior ran a CONVERGENT
-    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # lane (v2, the keyless "none" lane, or the setting-disabled "disabled"
+    # lane — #3892/#4258) AND this request runs v2
     # (env != m2) — otherwise replay (safe no-op).
     # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
     # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
     # captured without a key gets its memory points once a key appears, on an
     # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
-    # the same reason "v2" is: it minted no claims of its own, and its turn ids
-    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # the same reason "v2" and "disabled" (#4258) are: none of them minted
+    # claims of its own, and their turn ids are deterministic, so the
+    # re-attempt converges. The m2 exclusion is
     # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor in ("v2", "none")
+        and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -10086,7 +10114,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction estimate must not 402-block it — same rationale as the
     # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
     # sessions are unlimited since #4010, so it is vacuous in practice.
-    if (not session_existed or retry_failed_capture) and not no_provider:
+    if (not session_existed or retry_failed_capture) and not store_only:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -10389,11 +10417,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # that could downgrade a succeeded prior to capture_ok=False.
             state["attempted"] = True
             state["proj"] = proj
-            state["lane"] = "none"
+            # #4258: the SAME derivation as the durable record (see
+            # _store_only_lane) — the two lane writers cannot disagree.
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
-            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            # #4258: when the team ALSO turned extraction off, both reasons
+            # are true and both belong on the receipt — the no-provider branch
+            # wins the MODE (a missing key is the harder blocker), but the
+            # user's own setting must not vanish from the disclosure.
+            "warnings": ([_CAPTURE_NO_PROVIDER_WARNING] if extract_enabled
+                         else [_CAPTURE_NO_PROVIDER_WARNING,
+                               _CAPTURE_EXTRACTION_DISABLED_WARNING]),
             "mode": _CAPTURE_NO_PROVIDER_MODE,
             # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
             # (additive meta contract), empty here (not fabricated).
@@ -10413,12 +10449,48 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would be a FALSE statement of this state and would hide the
             # remedy. Disclose it, in the SAME words as sdk.capture_session.
             _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        elif (prior_capture_ok is False
+              and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+            # #4258: the prior was an EXTRACTION-DISABLED store — a provider
+            # key may well be configured, so the keyless warning above would be
+            # a false diagnosis. Disclose the real reason + remedy under its
+            # OWN words (the m2 lane refuses the re-attempt here too).
+            _replay_warnings.append(
+                _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
         meta = {"errors": [], "warnings": _replay_warnings,
                 "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
+    elif not extract_enabled:
+        # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+        # default ON; reaffirmed by 5737715963): the team turned extraction OFF.
+        # The turn loop above already ran UNCHANGED, so the
+        # Session + its turn Points are STORED and searchable; only the LLM
+        # extraction into memory points is skipped — exactly the keyless
+        # shape, reported under its own reason. Placed AFTER the replay
+        # branch: a re-capture of an ALREADY-SUCCEEDED session is honestly a
+        # replay (no extraction ran then either), and a FAILED prior falls
+        # through to here instead of re-attempting an extraction the user
+        # turned off. `lane` is the DISTINCT "disabled" value (never "none",
+        # which the replay disclosure reads as keyless) so a LATER re-capture
+        # with extraction back ON re-attempts through the #2335 TRUE-retry path,
+        # and the #3129 abandoned-marker write persists the RIGHT reason.
+        if state is not None and not session_existed:
+            state["attempted"] = True
+            state["proj"] = proj
+            # the SAME derivation as the durable record (see _store_only_lane)
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_EXTRACTION_DISABLED_WARNING],
+            "mode": _CAPTURE_EXTRACTION_DISABLED_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -10573,7 +10645,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or (retry_failed_capture and not no_provider):
+    if not session_existed or (retry_failed_capture and not store_only):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
@@ -10775,7 +10847,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # full transcript length on the abuse leg. The retry arm therefore applies
     # only when the retry can EXTRACT (a keyed retry mints points); the
     # grown-transcript arm still covers the keyless case that really writes.
-    if (not session_existed or (retry_failed_capture and not no_provider)
+    if (not session_existed or (retry_failed_capture and not store_only)
             or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt. A keyless
@@ -11040,8 +11112,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Non-fatal: a checkpoint hiccup never 500s a committed capture (mirrors
     # the receipt block).
     try:
-        legacy_mirror = bool(_get_onboarding_state(
-            org["org_id"]).get("onboarding_complete"))
+        legacy_mirror = bool(
+            _onboard_state.get("onboarding_complete"))
         _cd = _os.write_completed_step(
             proj, org["org_id"], "capture-disclosed",
             status_from_mirror=legacy_mirror)
@@ -11067,6 +11139,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # claim an extraction that did not happen) nor "replayed". Checked
         # before `route` for parity with sdk.capture_session.
         effective_mode = _CAPTURE_NO_PROVIDER_MODE
+    elif mode == _CAPTURE_EXTRACTION_DISABLED_MODE:
+        # #4258: the team turned extraction off — turns stored, extraction
+        # skipped by the USER's setting. Its own name for the same reason the
+        # keyless case has one: the causes are different and the receipt must
+        # not conflate them. Checked before `route` so an off setting is never
+        # reported as an "llm" extraction that did not run. (Unlike the keyless
+        # branch this has no SDK counterpart today: sdk.capture_session does
+        # not read the setting — that lane is the deferred follow-up #4288.)
+        effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -11225,13 +11306,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (#4014). A keyless attempt records this ONLY when it CREATES the session:
     # a keyless RE-capture must not rewrite a prior attempt's record (a prior
     # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
-    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_ok_record = False if store_only else _capture_ok
+    # #4258: distinguish the TWO store-only causes on the record — "none" is
+    # the keyless lane, "disabled" is the team's setting. Both are
+    # retry-eligible (see _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a later
+    # re-capture with extraction back ON still converges (#2335 TRUE retry).
     _capture_extractor_record = (
-        "none" if no_provider
+        _store_only_lane(no_provider, extract_enabled) if store_only
         else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
               else "v2"))
     _record_session_state = (
-        (not session_existed) if no_provider
+        (not session_existed) if store_only
         else (not session_existed or retry_failed_capture))
     if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
@@ -11311,7 +11396,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # per-point entries ride the enriched ``resp["points"]`` list (extra
     # wins on merge, D8).
     # #2335 WI-1d: the observation leg (hosted lane tag) — one structured
-    # line per capture; mode covers v2/m2/replayed/error — empty returns pre-emit.
+    # line per capture; mode covers v2/m2/replayed/error/no-provider/
+    # extraction-disabled — empty returns pre-emit.
     try:
         _emit_capture_observation(
             session_id=session_id, lane="hosted",
@@ -20457,6 +20543,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "demo_created": False,
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
+    "capture_extract": True,              # #4258: per-org user setting (default ON, #3892 owner ruling) — off = store the turns, skip extraction
     "org_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
@@ -20631,7 +20718,8 @@ def _graph_recording_override(org: dict) -> bool | None:
         return None
 
 
-def _session_recording_allowed(org: dict) -> tuple[bool, str]:
+def _session_recording_allowed(org: dict,
+                               state: dict | None = None) -> tuple[bool, str]:
     """C6 #2115 (D-C6-3): the EFFECTIVE session_recording for a capture.
 
     Resolution order: the graph's override (D-C6-1 storage) → when None the
@@ -20639,8 +20727,14 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     dashboard toggle + MCP tortoise_onboarding_session_recording write).
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``org``).
+
+    ``state`` may be passed by a caller that ALREADY read the onboarding
+    state (the capture hot path reads it once for BOTH this flag and
+    ``capture_extract``, #4258) — the read is a blocking control-plane round
+    trip, so it must not be repeated per capture.
     """
-    state = _get_onboarding_state(org["org_id"])
+    if state is None:
+        state = _get_onboarding_state(org["org_id"])
     if not state.get("session_recording"):
         # #1927 master kill (round-1 decision c2): the org-level OFF is
         # the user's explicit opt-out — a per-graph override NEVER re-enables
@@ -20659,6 +20753,85 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     if override is not None:
         return bool(override), "graph"
     return True, "team"
+
+
+def _capture_extract_enabled(org: dict, state: dict | None = None) -> bool:
+    """#4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the EFFECTIVE
+    ``capture_extract`` for a capture — a PER-ORG user setting, default ON.
+
+    Read with an EXPLICIT ``True`` default so an older stored onboarding state
+    (key absent — e.g. a team provisioned before this setting existed) can
+    never silently mean OFF. Deliberately NOT the ``session_recording``
+    polarity: that key is an opt-out, where absence correctly means OFF; this
+    one is read as an opt-in-consumed setting, where absence means ON.
+
+    ``state`` may be passed by a caller that already read it (see
+    ``_session_recording_allowed``) — the read is a blocking control-plane
+    round trip, so the capture hot path reads it ONCE, not twice (#4258).
+    """
+    if state is None:
+        state = _get_onboarding_state(org["org_id"])
+    return bool(state.get("capture_extract", True))
+
+
+def _store_only_lane(no_provider: bool, extract_enabled: bool) -> str:
+    """#4258: the Session lane recorded for a STORE-ONLY capture.
+
+    ONE derivation for BOTH writers of the lane — the durable
+    `_capture_extractor_record` and the #3129 abandoned-capture marker — so they
+    can never disagree. The user setting OUTRANKS the transient missing key when
+    both hold: it is the durable, user-controlled reason, and the M2-replay
+    disclosure keys on this value (diagnosing a configured-key team as keyless
+    would be a false statement, the defect this value exists to prevent). Both
+    lanes are retry-eligible (see `_CAPTURE_EXTRACTOR_LANES_RETRYABLE`).
+    """
+    if not extract_enabled:
+        return _CAPTURE_EXTRACTOR_LANE_DISABLED
+    return "none"
+
+
+def _capture_gate_resolution(org: dict) -> tuple[bool, str, dict]:
+    """#4258 + #4625 leg 12: resolve the recording gate AND read the
+    onboarding state ONCE, so both consumers share that one read.
+
+    The unit of offload is the RESOLUTION (the #3498 design), so the org
+    default read and the per-graph override probe stay in ONE worker — and
+    ``_capture_session_impl`` also gets the state its ``capture_extract`` read
+    (#4258) and its completion disclosure consume, so the hot path reads the
+    control plane ONCE per capture, not twice.
+
+    Sync by design: it is the callable handed to ``_graph_offload``, never
+    awaited inline.
+
+    Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
+    ``_get_onboarding_state`` auto-materializes defaults, but that write is
+    idempotent, so abandoning the worker on a bound miss is safe.
+    """
+    state = _get_onboarding_state(org["org_id"])
+    recording_ok, rec_layer = _session_recording_allowed(org, state)
+    return recording_ok, rec_layer, state
+
+
+async def _capture_gate_resolution_off_loop(org: dict) -> tuple[bool, str, dict]:
+    """`_capture_gate_resolution` off the event loop (#4625 leg 12).
+
+    The recording gate used to run inline in ``_capture_session_impl``, holding
+    the single event loop for the whole resolution — one of the py-spy
+    MainThread legs #4625 was measured on. The pool is ``graph`` and the bound
+    is the seam's standard REQUEST bound — the same contract its sibling read
+    wrappers keep (``_get_onboarding_projection_off_loop``): a capture must not
+    park a graph worker for the lane's cold-start allowance, and an over-bound
+    read fails closed (503) rather than hanging the capture.
+
+    Returns the onboarding state as well, for ``_capture_extract_enabled``
+    (#4258).
+    """
+    return await _graph_offload(
+        lambda: _capture_gate_resolution(org),
+        op="session_recording_allowed",
+        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
+    )
 
 
 async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
@@ -20680,15 +20853,18 @@ async def _session_recording_allowed_off_loop(org: dict) -> tuple[bool, str]:
     worker for the lane's cold-start allowance, and an over-bound read fails
     closed (503) rather than hanging the capture.
 
+    Thin 2-tuple adapter over the shared worker unit
+    (``_capture_gate_resolution_off_loop``), so this standalone entry point and
+    the capture path's state-returning variant can never drift on the gate
+    itself.
+
     Read-MOSTLY, not read-only (the #4625 work order §2): in the selfhost lane
     ``_get_onboarding_state`` auto-materializes defaults, but that write is
     idempotent, so abandoning the worker on a bound miss is safe.
     """
-    return await _graph_offload(
-        lambda: _session_recording_allowed(org),
-        op="session_recording_allowed",
-        timeout=_monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S,
-    )
+    recording_ok, rec_layer, _state = await _capture_gate_resolution_off_loop(org)
+    return recording_ok, rec_layer
+
 
 
 def _onboarding_defaults() -> dict:
@@ -21309,6 +21485,9 @@ class OnboardingStatePatchRequest(BaseModel):
     github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None
     session_recording: bool | None = None
+    # #4258: per-org user setting (default ON, #3892 owner ruling) — off means a
+    # capture stores its turns but skips extraction into memory points.
+    capture_extract: bool | None = None
     org_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None

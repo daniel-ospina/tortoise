@@ -3884,22 +3884,27 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         return 1
     # #4188: never report an unqualified success for a DEFERRED capture — a
     # keyless store is a 2xx with extraction skipped. Surface the receipt's
-    # no-provider mode + additive warnings (stderr), mirroring
-    # _cmd_session_import. Only the no-provider mode means "not extracted":
-    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
-    # exist — printing "memory points were not extracted" for it would be a
-    # false statement about the session.
+    # store-only mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. BOTH store-only modes mean "not extracted"
+    # (#4258 adds the team's extraction-disabled setting); "replayed" means a
+    # PRIOR capture SUCCEEDED, so its memory points DO exist — printing
+    # "memory points were not extracted" for it would be a false statement
+    # about the session.
     #
-    # #3971 merge resolution: this block is origin/main's (#4188) and is kept
-    # for its INTENT, but RETARGETED to this branch's variables. Main binds
-    # `result` only in its own direct-POST version of this function; on this
-    # branch the response body arrives via `summary.outcomes` as `body`, so
-    # `result` is unbound here and adopting the hunk verbatim would raise
-    # NameError. The success line also keeps `server_session` (the
-    # server-assigned id) rather than main's locally-derived `session_id`.
-    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    # #3971 merge resolution: main's hunk (#4188) is kept for its INTENT, but
+    # RETARGETED to this branch's variables + #4258's mode set. Main binds
+    # `result` only in its own direct-POST version of this function; here the
+    # response body arrives via `summary.outcomes` as `body`, so `result` is
+    # unbound and either side's hunk adopted verbatim would raise NameError.
+    # The success line keeps `server_session` (the server-assigned id) rather
+    # than the locally-derived `session_id`.
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
     _capture_mode = body.get("extraction_mode")
-    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+    if _capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                         _CAPTURE_EXTRACTION_DISABLED_MODE):
         print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
               "memory points were extracted", file=_sys.stderr)
     if body.get("warnings"):
@@ -4548,7 +4553,8 @@ def _cmd_sessions_import(args) -> int:
     configured. Re-import of the
     same content is a no-op (receipt exists ⇒ already imported). A re-POST of
     an already-extracted session converges server-side (same session_id ⇒ no
-    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    new Session or turn Points); a re-POST of a DEFERRED store-only session
+    (keyless, or the team's extraction-disabled setting — #4188/#4258)
     re-attempts extraction and mints its memory Points (#4188). pi parses its
     own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
@@ -4920,23 +4926,65 @@ def _cmd_sessions_import(args) -> int:
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
-    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
-    # the local failure breadcrumb is cleared.
-    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
-    # the local "imported" receipt would make every later explicit re-import
-    # skip the POST, so the session could never gain memory points once a key
-    # appears — and the owner ruling requires an EXPLICIT re-capture to
-    # extract (nothing here spends automatically). Deferred ⇒ NO local
-    # receipt: the server keeps the graph state truthful (capture_ok=False,
-    # lane "none") and re-running this import after the key is set re-attempts
+    # #4188/#4258: ANY store-only 2xx is DEFERRED — the keyless capture (no
+    # provider key) and the extraction-disabled capture (the team's per-org
+    # `capture_extract` setting) both STORE the turns and SKIP extraction.
+    # Writing the local "imported" receipt would make every later explicit
+    # re-import skip the POST, so the session could never gain memory points
+    # once extraction can run — and the owner ruling requires an EXPLICIT
+    # re-capture to extract (nothing here spends automatically). Deferred ⇒
+    # NO local receipt: the server keeps the graph state truthful
+    # (capture_ok=False; lane "none" for the keyless store, "disabled" for
+    # the setting-disabled store) and re-running this import re-attempts
     # extraction on the #2335 TRUE-retry lane.
-    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_EXTRACTION_DISABLED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_NO_PROVIDER_MODE,
+    )
     _clear_capture_error(harness)
-    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
-        print("import deferred: no LLM provider key — turns stored, "
-              "extraction skipped; re-run this import once a key is "
-              "configured.", file=_sys.stderr)
+    _capture_mode = result.get("extraction_mode")
+    _warns = result.get("warnings") or []
+    # #4258/#4188: a store-only 2xx is DEFERRED in TWO shapes — the store-only
+    # MODES, and a "replayed" receipt carrying an upgrade-refused warning (the
+    # server REPLAYS a FAILED store-only prior on the non-convergent M2 lane,
+    # which is still "no extraction ever ran"). Writing a local receipt for
+    # either would make every later re-import skip the POST on a stale receipt,
+    # so the session could never gain memory points, and would leave the
+    # warning's own remedy an instruction the CLI itself makes unreachable.
+    _upgrade_refused = (
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns
+        or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+    if (_capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                          _CAPTURE_EXTRACTION_DISABLED_MODE)
+            or _upgrade_refused):
+        # #4258: the missing key and the turned-off setting are INDEPENDENT
+        # reasons. When BOTH hold, the mode is "no-provider" but the receipt
+        # also carries the disabled warning — the remedy must then name both
+        # levers, or it sends the user to a key that will not extract.
+        _setting_off = (
+            _capture_mode == _CAPTURE_EXTRACTION_DISABLED_MODE
+            or _CAPTURE_EXTRACTION_DISABLED_WARNING in _warns
+            or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+        _keyless = (
+            _capture_mode == _CAPTURE_NO_PROVIDER_MODE
+            or _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns)
+        if _setting_off and _keyless:
+            _why = ("no LLM provider key, and extraction into memory is "
+                    "turned OFF for this team (capture_extract)")
+            _remedy = ("re-run this import once a key is configured and "
+                       "extraction is turned back on.")
+        elif _setting_off:
+            _why = ("extraction into memory is turned OFF for this team "
+                    "(capture_extract)")
+            _remedy = "re-run this import once extraction is turned back on."
+        else:
+            _why = "no LLM provider key"
+            _remedy = "re-run this import once a key is configured."
+        print(f"import deferred: {_why} — turns stored, extraction skipped; "
+              f"{_remedy}", file=_sys.stderr)
         return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({

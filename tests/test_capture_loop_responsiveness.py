@@ -1547,6 +1547,80 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
     assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
 
+
+def test_cancelled_extraction_disabled_capture_records_the_disabled_lane(
+        client, monkeypatch):
+    """#4258 (+ #3129): the abandoned-capture marker is a THIRD writer of the
+    Session `capture_extractor` lane. A capture abandoned while extraction is
+    turned OFF must leave lane `"disabled"` — NEVER the keyless `"none"` — or
+    the M2-replay disclosure later diagnoses a configured-key team as "stored
+    WITHOUT a provider key".
+
+    Mutation guard: setting either `state["lane"]` write to `"none"` (or to a
+    literal other than the shared `_store_only_lane` derivation) REDs this test
+    while leaving the completed-capture tests green — the marker is observable
+    only on the cancellation path, which is why it is pinned here.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+    from tortoise.sdk import _CAPTURE_EXTRACTOR_LANE_DISABLED
+
+    ha_mod._update_onboarding_state(TEST_ORG_ID, capture_extract=False)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def _stalled_audit(*a, **kw):
+        # the disabled branch reaches the audit seam with `state["lane"]`
+        # already set — parking HERE is the window the marker reads.
+        entered.set()
+        for _ in range(600):
+            if release.is_set():
+                break
+            await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(ha_mod, "_async_audit", _stalled_audit)
+    payload = {"conversation": _CONV, "session_id": "s-cancel-disabled",
+               "harness": _HARNESS}
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            assert entered.is_set(), "the capture never reached the audit seam"
+            task.cancel()  # client goes away mid-capture
+            with suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.2)  # let the cancellation settle
+            release.set()  # the parked audit finishes
+            for _ in range(400):
+                if not ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+
+    asyncio.run(_run())
+
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "s-cancel-disabled"}).result_set
+    assert rows, "the capture never merged its Session row"
+    capture_ok, lane = rows[0][0], rows[0][1]
+    assert capture_ok is False, (
+        f"an ABANDONED extraction-disabled capture left capture_ok="
+        f"{capture_ok!r} (#3129)")
+    assert lane == _CAPTURE_EXTRACTOR_LANE_DISABLED, (
+        f"an abandoned extraction-disabled capture recorded lane {lane!r} — "
+        f"the M2-replay disclosure would then diagnose a configured-key team "
+        f"as keyless (#4258)")
+    assert ha_mod._CAPTURE_IN_FLIGHT == 0, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
 # ── #3086: the capture WRITE path must not block the loop either ───────────
 #
 # The tests above pin the EXTRACTION off the loop and deliberately exclude the

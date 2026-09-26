@@ -531,8 +531,16 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby="settings-capture-heading">
         <h3 id="settings-capture-heading">Captured sessions</h3>
         <p className="dim small">
-          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory.
+          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory sources — extraction of those captures into memory is controlled by the toggle in Memory sources.
         </p>
+        {/* #4258: the extraction-off state is honest on this home too — a row
+            reading "0 extracted" must be distinguishable from a failure or a
+            missing provider key. */}
+        {!sessionsLoading && state && sessionsOn && state.capture_extract === false && (
+          <p className="dim small">
+            Extraction into memory is off — new captures made through this service are stored but not extracted, and those captures stay unextracted until extraction is turned back on and they are captured again. Change it under Memory sources above.
+          </p>
+        )}
         {/* #2000 (W4) review P2-3: honest states — never a fabricated
             "recording is off" while the onboarding state is still loading
             or failed to fetch (session_recording defaults ON, #1927). */}
@@ -3324,6 +3332,25 @@ function claimIntentInFlight() {
       await refreshOnboarding()
     } catch (e) {
       setRowError('sessions', (e && e.message) || 'Could not update session capture — try again.')
+    } finally {
+      setMemoryBusy('')
+    }
+  }
+
+  async function toggleCaptureExtract(next) {
+    if (memoryBusy) return
+    setMemoryBusy('extract')
+    setRowError('extract', '')
+    try {
+      // #4258: extraction into memory is a per-org USER setting (default ON,
+      // #3892 owner ruling). Off = the capture stores its turns but skips the
+      // LLM extraction into memory points. PATCH MERGE: no read-modify-write,
+      // no stale reads — the SAME endpoint the recording toggle uses.
+      await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ capture_extract: next }) })
+      await refreshOnboarding()
+    } catch (e) {
+      setRowError('extract', (e && e.message) || 'Could not update extraction — try again.')
     } finally {
       setMemoryBusy('')
     }
@@ -9120,6 +9147,7 @@ function claimIntentInFlight() {
               onToggleIssues: toggleIssues,
               onToggleDocs: toggleDocs,
               onToggleSessions: toggleSessionRecording,
+              onToggleCaptureExtract: toggleCaptureExtract,
               onConnectGithub: wizardConnectGithub,
               onIndexDocs: indexDocs,
               onReindexGithub: reindexGithub,
@@ -10166,6 +10194,12 @@ function MemorySources(props) {
     memoryBusy, memoryErrors,
     reposList, reposLoaded, reposLoadFailed, docsScope, issuesScope, branchLists,
     onToggleIssues, onToggleDocs, onToggleSessions,
+    // #4258: optional — the byte-pinned ARCHIVED wizard block (#2361 rollback)
+    // shares this component and must stay untouched, so its call site omits the
+    // prop; the LIVE Settings surface always passes it. `null` (not a no-op)
+    // so the row is NOT rendered where no handler exists — an inert switch
+    // that silently does nothing is worse than an absent one.
+    onToggleCaptureExtract = null,
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
   } = props
@@ -10192,6 +10226,9 @@ function MemorySources(props) {
 
   const githubConnected = !!state.github_connected
   const sessionsOn = !!state.session_recording
+  // #4258: per-org extraction setting — absence reads ON (matches the server's
+  // `.get("capture_extract", True)`), so an older stored state is never OFF.
+  const extractOn = state.capture_extract !== false
   const docsIndexed = !!state.github_docs_indexed
   // #1924: the Issues/Docs switches control their OWN source via a persisted
   // ENABLE intent (issues_enabled / docs_enabled) that is INDEPENDENT of the
@@ -10443,7 +10480,12 @@ function MemorySources(props) {
         />
         <div className="toggle-body">
           <h4>Agent session recording</h4>
-          <p>When on, sessions from tools with capture installed are filed to your graph as memory.</p>
+          <p>
+            When on, sessions from tools with capture installed are filed to your
+            graph as a memory source{onToggleCaptureExtract
+              ? '; whether they are also extracted into memory is controlled below.'
+              : '.'}
+          </p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
           <div className="harness-statuses">
             {HARNESS_ORDER.map((h) => {
@@ -10504,6 +10546,42 @@ function MemorySources(props) {
           </div>
         </div>
       </div>
+
+      {/* ── Extraction toggle (#4258) — when recording is on, decide whether a
+          captured session is ALSO extracted into memory points (default ON;
+          #3892 owner ruling 5723832861, reaffirmed by 5737715963). Off = store
+          the turns, skip extraction. Rendered only where a handler exists —
+          the archived wizard passes none, so an inert switch is not shown. ── */}
+      {onToggleCaptureExtract && (
+      <div className="toggle-row">
+        <button
+          type="button"
+          className="switch"
+          role="switch"
+          aria-checked={extractOn}
+          data-on={extractOn ? 'true' : 'false'}
+          aria-label="Extract sessions into memory"
+          onClick={() => onToggleCaptureExtract(!extractOn)}
+          disabled={!!memoryBusy || !sessionsOn}
+        />
+        <div className="toggle-body">
+          <h4>Extract sessions into memory</h4>
+          <p>
+            When on, each session captured through this service is also
+            extracted into memories once a provider key is configured. When
+            off, those sessions are stored only — their turns stay searchable,
+            but nothing is extracted, and captures made through this service
+            while this is off stay unextracted until extraction is turned back
+            on and they are captured again.
+          </p>
+          {!sessionsOn && (
+            <p className="dim small">Turn on agent session recording to change this.</p>
+          )}
+          {memoryErrors.extract && <p className="error" role="alert">{memoryErrors.extract}</p>}
+        </div>
+      </div>
+      )}
+      {/* ── End extraction toggle (#4258) ── */}
     </div>
   )
 }
