@@ -562,11 +562,6 @@ The convergence is on **two layers with different jobs**: the **source** carries
 
 **Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
 
----
-
-## 10. Two storage patterns worth taking from Hindsight (2026-09-23)
-The extractor doc §§11–13 carry the full verification. Two findings are **storage** decisions:
-
 #### ⭐ Where this stands (2026-09-25) — a status pointer, not a new rule
 
 - **The anchor shipped.** The read version rides on the `extractedFrom` link as `sourceVersion` (`#5256`, PR `#5288`), with the honest-absent rule (**`''`/blank/non-string hash ⇒ no property at all**), live == replay, and **no SDK/MCP surface change**.
@@ -576,6 +571,11 @@ The extractor doc §§11–13 carry the full verification. Two findings are **st
 - **The re-inference step has no owner** — filed as **#5422**, because acceptance A2 of `#5038` cannot complete without it. **`#5024` is its precondition** (a re-fetched `:Source` currently mutates in place, unjournalled: if the old version is overwritten there is nothing to mark stale).
 
 *This pointer records status only. `ONTOLOGY.md` §4.6 is owner-gated and is NOT edited by this work.*
+
+---
+
+## 10. Two storage patterns worth taking from Hindsight (2026-09-23)
+The extractor doc §§11–13 carry the full verification. Two findings are **storage** decisions:
 
 ### 10.1 Invalidate by RELOCATION, not by a flag
 Hindsight's `{"state":"invalidated"}` **"does not set a flag to be filtered later. It moves the row out of the active table into a separate archive … So recall needs no state predicate… no query pays for your cleanup."** Causal edges are **snapshotted onto the archived row** (so the archived fact still explains itself), and the move is **reversible**.

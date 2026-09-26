@@ -97,10 +97,10 @@ The honest recorded value is ABSENT, never `''` (which compares equal to a sourc
 **Acceptance:** per Point/per link `current`/`stale`/`unknown`, **`unknown` when either side is `NULL`/`''`**; never nested under `tortoise_stale`; **reported on the existing result row, not withheld** (Policy B: the stale fact stays readable and flagged). The enforcement form — ranked lower, or dropped from ordinary searches — is a **reopen of Policy B in the owner queue** and is NOT part of this task until answered.
 **Files:** Create `tools/source_currency.py` as the shared derivation helper (the read path consumes it; it is not a separate user-facing surface). Test: unit + integration.
 
-### Task 4: Close the loop on the residuals  — ✅ DONE (2026-09-25)
+### Task 4: Close the loop on the residuals  — ✅ DONE on the residuals it OWNS (2026-09-25); ⚠️ O5 remains outstanding by design
 **Intent:** make the deferred decisions and gaps visible where the next lane reads.
-**Status:** O1/O3 posted on **#5038** (the artifact the owner reads) ✔ · the re-inference-engine issue **filed as #5422** (acceptance A2's home) ✔ · the `#5024` dependency recorded in the §9.6 status pointer and in #5422 ✔ · the 2489 step-4 departure **moot under O1 = D** (O2 was only live if a version were carried) — recorded as moot rather than left implied ✔.
-**Acceptance:** O1/O3/O5 posted on **#5038**; a re-inference-engine issue filed (acceptance A2's home); the 2489 step-4 departure surfaced; the #5024 dependency recorded.
+**Status:** O1/O3 posted on **#5038** (the artifact the owner reads) ✔ · the re-inference-engine issue **filed as #5422** (acceptance A2's home) ✔ · the `#5024` dependency recorded in the §9.6 status pointer and in #5422 ✔ · the 2489 step-4 departure **moot under O1 = D** (O2 was only live if a version were carried) — recorded as moot rather than left implied ✔ · ⚠️ **O5 is NOT posted and is NOT closed**: it is an **owner-gated** ontology-wording change (§8 O5 — *this work ships no ontology text*), so this task is done on the three residuals it owns and **explicitly not** on the acceptance line's O5 clause. Closing it would require the owner to add the third state to `ONTOLOGY.md` §4.6; until then it stays outstanding (see R8).
+**Acceptance:** O1/O3/O5 posted on **#5038**; a re-inference-engine issue filed (acceptance A2's home); the 2489 step-4 departure surfaced; the #5024 dependency recorded. **⚠️ Read the O5 clause as NOT met:** the task deliberately does not satisfy it, because the ontology wording is the owner's (O5). The remaining clauses are met.
 **Files:** Modify `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6 (a pointer — §4.6 itself is owner-gated and must NOT be edited).
 
 ---
