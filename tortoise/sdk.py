@@ -22086,14 +22086,16 @@ class TortoiseSDK:
             #     makes the note reachable at all;
             # (3) node key, note, label, hash, title. `eventId` is required: a
             #     legacy raw-Cypher Event carries no `url` and no `id`, so without
-            #     it every such candidate keyed `''` and the tie-break did
-            #     nothing. `src` is required for the same reason one level up: a
-            #     fallback row has `ref` NULL, so the node key would be `''` for
-            #     EVERY fallback row, leaving source identity out of the order.
-            #     (The hash/title keys also fall back to `src` — what a full
-            #     end-to-end tie needs is hash AND title equal too, the
-            #     content-hash-mirror shape `tools/source_dedup_report.py`
-            #     measures.) label/hash/title then separate the shapes that share
+            #     it an event-only reference falls through to `src.url` — and
+            #     every event-only reference from the SAME source then keys
+            #     identically, leaving those rows to engine order. `src` is
+            #     required for the same reason one level up: a fallback row has
+            #     `ref` NULL, so the node key would be `''` for EVERY fallback row,
+            #     leaving source identity out of the order. (The hash/title keys
+            #     also fall back to `src` — what a full end-to-end tie needs is
+            #     hash AND title equal too, the content-hash-mirror shape
+            #     `tools/source_dedup_report.py` measures.) label/hash/title then
+            #     separate the shapes that share
             #     a key: an `:Event` colliding with a `:Source`, and two `:Source`
             #     nodes sharing a ``url`` whose hashes differ. (Same-``url``
             #     duplicates need a legacy/raw-Cypher write path: #5012's

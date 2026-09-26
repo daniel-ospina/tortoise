@@ -48,7 +48,10 @@ def _tmp(name: str) -> str:
 # ── the primitive ────────────────────────────────────────────────────────────
 
 def test_currency_status_is_a_read_of_the_pair():
-    """The three states, and the one that must never be confused with fresh."""
+    """The three states, and the one that must never be confused with fresh.
+
+    FAILS IF any state is mis-mapped — most importantly if an empty input returns
+    `current` instead of `unknown`."""
     assert currency_status("h1", "h1") == "current"
     assert currency_status("h1", "h2") == "stale"
     # ABSENT is unknown, never current — in both directions.
@@ -111,7 +114,10 @@ def _annotate(proj, ref_url, version, source="c.txt"):
 
 def test_provenance_chain_exposes_the_note_and_says_stale():
     """The note names a version the source no longer holds → the caller is told
-    the entity may be out of date, which is the whole point of writing it."""
+    the entity may be out of date, which is the whole point of writing it.
+
+    FAILS IF the pair is not reported at all, or if a link whose note differs
+    from the source's current version reads `current`."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _point_and_source(sdk, current="h2")
@@ -217,7 +223,10 @@ def test_provenance_chain_reads_the_note_when_a_bare_link_came_first():
 def test_provenance_chain_row_order_is_insertion_order_independent():
     """REGRESSION (#5199 review P2). Edge insertion order must not decide the
     order a caller sees: with several annotated references the sort keys must
-    break the tie on VALUES, not on creation sequence."""
+    break the tie on VALUES, not on creation sequence.
+
+    FAILS IF the order keys stop breaking ties on values — the reversed run then
+    disagrees with the forward one."""
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _point_and_source(sdk, current="h2")
@@ -241,11 +250,12 @@ def test_provenance_chain_row_order_is_insertion_order_independent():
 
 
 def test_provenance_chain_order_is_stable_for_event_only_targets():
-    """REGRESSION (#5199 review P2). A legacy raw-Cypher Event carries neither
-    `url` nor `id` (only `eventId`) — `link_source_to_event` and
-    `link_source_to_legacy_event` both document that. So a node-key tie-break of
-    `coalesce(ref.url, ref.id, '')` keys EVERY such candidate `''` and
-    discriminates nothing, leaving insertion order in charge.
+    """REGRESSION (#5199 review P2). A legacy raw-Cypher Event is addressed by
+    `eventId` alone — `link_source_to_event` documents that it carries no `id`
+    (`projection/edges.py`), and both it and `link_source_to_legacy_event` MATCH
+    on `eventId`. Without `eventId` in the node key such a reference falls through
+    to `src.url`, so every event-only reference from ONE source keys identically
+    and those rows are left to engine order.
 
     FAILS IF the order keys ignore `eventId`: the two events below carry the SAME
     note value, so `coalesce(ref.url, ref.id, '')` and the note both tie and only
@@ -440,6 +450,104 @@ def test_provenance_chain_prefers_a_resolved_reference_over_the_fallback():
         )
     finally:
         sdk.close()
+
+
+def test_provenance_chain_orders_object_references_by_id():
+    """REGRESSION (#5199 review P2). `:Object` references are a real writer shape
+    (identity/mention links), and an Object carries only `id` — so `ref.id` is the
+    ONLY node key that separates two Objects referenced by one source. It had no
+    test: removing it left every suite green while both rows fell through to
+    `src.url` and engine order took over.
+
+    FAILS IF `ref.id` is dropped from the node key: the two insertion orders
+    below would then disagree."""
+    def _objs(reverse: bool):
+        sdk = TortoiseSDK(_tmp("obj.db"))
+        proj = _point_and_source(sdk, current="h1")
+        order = ["obj-aaa", "obj-zzz"]
+        for oid in (reversed(order) if reverse else order):
+            proj.g.query(
+                f"MERGE (o:Object {{id:'{oid}'}}) "
+                f"WITH o MATCH (s:Source {{url:'c.txt'}}) "
+                f"CREATE (s)-[:references]->(o)"
+            )
+        try:
+            return [r["entity"].get("id") for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _objs(False) == _objs(True) == ["obj-aaa", "obj-zzz"], (
+        "Object references must be ordered by id, not insertion order"
+    )
+
+
+def test_provenance_chain_breaks_a_node_key_tie_by_the_note():
+    """REGRESSION (#5199 review P3). Two `references` edges to the SAME target can
+    carry different notes (a hand-built shape — the writers key a target by
+    identity, so they would merge to one edge). With the node key, the label, the
+    hash and the title all equal, the note is the only discriminator left.
+
+    FAILS IF the note key is dropped: both rows then tie on every remaining key
+    and come back in engine order."""
+    def _notes(reverse: bool):
+        sdk = TortoiseSDK(_tmp("notes.db"))
+        proj = _point_and_source(sdk, current="h1")
+        order = [("dup", "hZ"), ("dup", "hA")]
+        for url, note in (reversed(order) if reverse else order):
+            proj.g.query(
+                f"MERGE (d:Source {{url:'{url}'}}) "
+                f"WITH d MATCH (s:Source {{url:'c.txt'}}) "
+                f"CREATE (s)-[r:references]->(d) SET r.sourceVersion = $v",
+                params={"v": note},
+            )
+        try:
+            return [r["sourceVersion"] for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _notes(False) == _notes(True) == ["hA", "hZ"], (
+        "a full node-key tie must be broken by the note, not insertion order"
+    )
+
+
+def test_provenance_chain_breaks_a_node_key_tie_by_title():
+    """REGRESSION (#5199 review P3). Two DISTINCT `:Source` nodes sharing a `url`
+    AND a `contentHash` (a hand-built duplicate: `MERGE` on url would not produce
+    them) are separated only by their title — the last order key.
+
+    FAILS IF the title key is dropped: those rows tie end to end and come back in
+    engine order."""
+    def _titles(reverse: bool):
+        sdk = TortoiseSDK(_tmp("titles.db"))
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (p:Point {id:'pt_1', content:'a fact', pointKind:'fact', "
+            "status:'live', createdAt:'2024-01-01'})"
+        )
+        proj.g.query(
+            "CREATE (s:Source {url:'c.txt', sourceKind:'corpus', title:'c.txt', "
+            "contentHash:'h1', ingestedAt:'2024-01-01'})"
+        )
+        proj.g.query(
+            "MATCH (p:Point {id:'pt_1'}), (s:Source {url:'c.txt'}) "
+            "CREATE (p)-[:extractedFrom]->(s)"
+        )
+        order = ["two", "one"]
+        for title in (reversed(order) if reverse else order):
+            proj.g.query(
+                f"CREATE (d:Source {{url:'dup', title:'{title}', "
+                f"contentHash:'SAME', ingestedAt:'2024-01-01'}}) "
+                f"WITH d MATCH (s:Source {{url:'c.txt'}}) "
+                f"CREATE (s)-[:references]->(d)"
+            )
+        try:
+            return [r["entity"].get("title") for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _titles(False) == _titles(True) == ["one", "two"], (
+        "a full node-key-and-hash tie must be broken by title, not insertion order"
+    )
 
 
 # ── the deliberate cut ───────────────────────────────────────────────────────
