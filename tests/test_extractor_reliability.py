@@ -22,11 +22,26 @@ from tortoise import extractor_v2 as v2  # noqa: E402, I001, RUF100
 
 
 class _HTTPError(Exception):
-    """Duck-typed requests.HTTPError (no hard requests import needed)."""
+    """Duck-typed requests.HTTPError (no hard requests import needed).
 
-    def __init__(self, status_code: int):
+    ``body`` carries the response body so the #4959 key-limit carve-out is
+    exercised the way production delivers it (``err.response.text``); an
+    empty body is the signature-less 403 shape."""
+
+    def __init__(self, status_code: int, body: str = ""):
         super().__init__(f"HTTP {status_code}")
-        self.response = type("R", (), {"status_code": status_code})()
+        self.response = type("R", (), {"status_code": status_code,
+                                       "text": body})()
+
+
+# #4860: OpenRouter reports a spent key budget as HTTP 403, NOT the 402 its
+# credits-out case uses. A wrong credential is ALSO 403 but carries no
+# limit signature — the BODY is the discriminator.
+_OR_KEY_LIMIT_BODY = ('{"error":{"message":"Key limit exceeded (monthly '
+                      'limit). Add more credits at '
+                      'https://openrouter.ai/settings/keys","code":403}}')
+_OR_BAD_CREDENTIAL_BODY = ('{"error":{"message":"No auth credentials '
+                           'found","code":403}}')
 
 
 class _Flaky:
@@ -147,6 +162,98 @@ def test_classify_error_matrix():
     assert v2._classify_error(TimeoutError()) == "transient_timeout"
     assert v2._classify_error(ConnectionError()) == "transient_network"
     assert v2._classify_error(RuntimeError()) == "transient_unknown"
+
+
+def test_classify_error_key_limit_403_is_billing_not_forbidden():
+    """#4959: a 403 whose BODY carries the provider's key-limit signature is
+    the SAME condition as a 402 (this key's budget is spent), so it records
+    ``fatal_402_billing`` — the class the extraction-killer gate reads —
+    instead of ``fatal_403_forbidden``.
+
+    The body, not the status, is the discriminator: a signature-less 403 is
+    a genuine permission failure and keeps ``fatal_403_forbidden``; 402 is
+    unchanged."""
+    from tortoise.model_adapters import is_billing_exhausted
+
+    limit = _HTTPError(403, _OR_KEY_LIMIT_BODY)
+    assert is_billing_exhausted(limit) is True
+    assert v2._classify_error(limit) == "fatal_402_billing"
+    assert v2._classify_error(
+        _HTTPError(403, _OR_BAD_CREDENTIAL_BODY)) == "fatal_403_forbidden"
+    assert v2._classify_error(_HTTPError(403)) == "fatal_403_forbidden"
+    assert v2._classify_error(_HTTPError(402)) == "fatal_402_billing"
+
+
+def test_key_limit_403_census_fires_the_extraction_killer_gate():
+    """#4959 regression: the gate must FIRE on a key-limited 403 — prove the
+    class the classifier writes for a real key-limit 403 lands in
+    ``EXTRACTION_KILLER_CENSUS_CLASSES``, so an otherwise-healthy outcome
+    (points above the floor — the reval3 partial shape) is DEGRADED by the
+    census alone. The assertion is the gate's own membership + verdict, not
+    a string change."""
+    from tools.longmem_eval.report import (
+        EXTRACTION_KILLER_CENSUS_CLASSES,
+        _outcome_extraction_health,
+    )
+
+    census: dict[str, int] = {}
+    v2._bump_census(census, _HTTPError(403, _OR_KEY_LIMIT_BODY))
+    assert census == {"fatal_402_billing": 1}
+    assert set(census) & EXTRACTION_KILLER_CENSUS_CLASSES
+    # a points-healthy question is degraded by the census alone (before the
+    # fix its census key was fatal_403_forbidden — outside the killer set —
+    # and this returned "healthy"). The shape matters: a FULLY aborted session
+    # also bumps empty_embed_list (which fires the gate), so the carve-out's
+    # value is this PARTIAL shape — an embed list present, no empty_embed_list.
+    assert _outcome_extraction_health({
+        "question_id": "wp01", "error_classes": census,
+        "ingest": {"points": 202}, "points_total": 1000,
+    }) == "degraded"
+
+
+def test_classify_error_vocabulary_is_the_pinned_nine_classes():
+    """#4959: the census vocabulary is a fixed 9-class set (#1524) and #4959
+    REROUTES a 403 within it rather than adding a class. Pin the exact set so a
+    future add/rename is detectable — the #1787 ``llm_error_census`` emission
+    contract that also names it has no code presence (#5526), so this frozenset
+    is the only executable record of the contract."""
+    assert frozenset({
+        "fatal_401_auth", "fatal_402_billing", "fatal_403_forbidden",
+        "fatal_4xx", "transient_429_rate_limit", "transient_5xx",
+        "transient_timeout", "transient_network", "transient_unknown",
+    }) == v2._LLM_ERROR_CENSUS_CLASSES
+    assert len(v2._LLM_ERROR_CENSUS_CLASSES) == 9
+    probes = [
+        _HTTPError(401), _HTTPError(402), _HTTPError(403),
+        _HTTPError(403, _OR_KEY_LIMIT_BODY), _HTTPError(400),
+        _HTTPError(429), _HTTPError(503), TimeoutError(),
+        ConnectionError(), RuntimeError(),
+    ]
+    assert {v2._classify_error(e) for e in probes} \
+        <= v2._LLM_ERROR_CENSUS_CLASSES
+
+
+def test_classify_error_generic_limit_403_is_billing_broad_by_design():
+    """The census INHERITS the rotation seam's deliberately broad
+    ``"limit exceeded"`` signature (#4952), so a 403 whose body carries a
+    GENERIC provider-limit phrasing — rate / organization / token limit — also
+    records ``fatal_402_billing`` and degrades the run.
+
+    Pinned as an ACCEPTED consequence of reusing the single seam, not a bug:
+    the direction is fail-closed (a false degrade, never a false certificate),
+    the signature table is #4951's to narrow, and a second boundary inside the
+    extractor would re-create the divergence #4959 removes. A real 429 is
+    intercepted before the 403 branch and is unchanged."""
+    for body in (
+        '{"error":{"message":"Rate limit exceeded","code":403}}',
+        '{"error":{"message":"Organization limit exceeded","code":403}}',
+        '{"error":{"message":"Max token limit exceeded for this '
+        'organization","code":403}}',
+    ):
+        assert v2._classify_error(_HTTPError(403, body)) == "fatal_402_billing"
+    assert v2._classify_error(
+        _HTTPError(429, '{"error":{"message":"Rate limit exceeded"}}')
+    ) == "transient_429_rate_limit"
 
 
 def test_complete_stats_recorded_on_failure(monkeypatch):
