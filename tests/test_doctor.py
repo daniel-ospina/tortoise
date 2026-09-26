@@ -183,8 +183,18 @@ class TestDoctorPath:
 
     def test_doctor_db_uri_password_never_in_error_output(self, clear_db_env, capsys):
         """#720 P2 conf 78: a malformed URI carrying a password must not
-        print the credential — the 'bad port' error redacts the userinfo
-        (docker://:***@) while keeping host/port for debuggability."""
+        print the credential. #2987 review: the masked URI itself is no longer
+        echoed when its tail is credential-shaped (`127.0.0.1:notaport` — a
+        non-numeric port is indistinguishable from `host:pw`), so the line now
+        fails closed; the port value is still named by the exception text, so
+        the diagnostic survives.
+
+        Class B: (1) `docker://:sekritpass@127.0.0.1:notaport` — before the
+        #2987 fix the tail after the last '@' was emitted verbatim, which is
+        the same region the no-'@' branch already refuses to print; (2)
+        reachable: `doctor --db <malformed URI>` prints `_mask_uri_userinfo`
+        of the target, and --db is operator-supplied.
+        """
         rc = _run_doctor(["--db", "docker://:sekritpass@127.0.0.1:notaport/test_doctor"])
         out = capsys.readouterr().out
 
@@ -192,7 +202,8 @@ class TestDoctorPath:
         assert "sekritpass" not in out  # credential never reaches stdout
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
         assert "bad port" in probe
-        assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
+        assert "<uri-redacted-unrecognised-shape>" in probe  # fail closed
+        assert "notaport" in probe  # the bad port is still named by the reason
 
     def test_doctor_db_uri_password_with_at_sign_never_leaks(self, clear_db_env, capsys):
         """#720 conf 65: a password containing a raw @ must not leak —
@@ -206,7 +217,8 @@ class TestDoctorPath:
         assert "p@ss" not in out  # full credential (incl. @) never reaches stdout
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
         assert "bad port" in probe
-        assert "docker://:***@127.0.0.1:notaport" in probe  # masked, target intact
+        assert "<uri-redacted-unrecognised-shape>" in probe  # fail closed (#2987)
+        assert "notaport" in probe  # the bad port is still named by the reason
 
     def test_doctor_malformed_ipv6_uri_clean_error(self, clear_db_env, capsys):
         """#720 P2 conf 95: a malformed authority (dangling '[' → urlparse
@@ -223,7 +235,7 @@ class TestDoctorPath:
         probe = next(line for line in out.splitlines() if "Graph: FalkorDB" in line)
         assert "❌" in probe
         assert "bad URI" in probe  # actionable message, not a raw ValueError
-        assert "docker://:***@[abc" in probe  # masked, target intact
+        assert "<uri-redacted-unrecognised-shape>" in probe  # fail closed (#2987)
 
     def test_doctor_unsupported_scheme_uri_masks_credentials(self, clear_db_env, capsys):
         """#720 P2 conf 95: an unsupported-scheme URI (bolt://, mongodb://,
@@ -262,7 +274,7 @@ class TestDoctorPath:
         from tortoise.__main__ import _mask_uri_userinfo
 
         assert _mask_uri_userinfo("docker://user:p/ss@host:notaport/g") == \
-            "docker://:***@host:notaport/g"
+            "<uri-redacted-unrecognised-shape>"
         # slash + multiple @ combined: everything up to the host is hidden
         assert _mask_uri_userinfo("docker://user:p/ss@h1@host:7687/g") == \
             "docker://:***@host:7687/g"
@@ -304,8 +316,45 @@ class TestDoctorPath:
         assert _mask_uri_userinfo("~/.tortoise/tortoise.db") == "~/.tortoise/tortoise.db"
         assert _mask_uri_userinfo("C:\\foo\\tortoise.db") == "C:\\foo\\tortoise.db"
         # urlsplit raises on unmatched '[' — the mask still hides the
-        # credential instead of leaking it (and never raises in a handler)
-        assert _mask_uri_userinfo("docker://user:pw@[abc") == "docker://:***@[abc"
+        # credential instead of leaking it (and never raises in a handler).
+        # #2987 review: `[abc` is not a recognised-safe target, so the whole
+        # value fails closed rather than echoing the tail.
+        assert _mask_uri_userinfo("docker://user:pw@[abc") == \
+            "<uri-redacted-unrecognised-shape>"
+
+    def test_mask_uri_userinfo_post_at_remainder_fails_closed(self):
+        """#2987 review: the text after the LAST '@' must not be echoed when it
+        is credential-shaped, and a later `scheme://` must not ride through.
+
+        Class B: (1) `rediss://u:pw@host:S3nPw` and
+        `rediss://u:pw@h:1 rediss://:S3nPw` print the password before the fix
+        — the post-'@' remainder was appended verbatim (`i = len(line)`) and
+        never judged, while the SAME region with no '@' fails closed one branch
+        up; (2) reachable: `_mask_uri_userinfo` is the masker every CLI error
+        path uses, and the value is an operator-supplied `TORTOISE_DB_URI`.
+
+        ANTI-VACUOUS: a well-formed masked URI must keep its target — otherwise
+        this rule would fail closed on every normal target.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # credential-shaped post-'@' tail: same treatment as the no-'@' form
+        assert _mask_uri_userinfo("rediss://u:pw@host:S3nPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        assert _mask_uri_userinfo("rediss://:pw@:S3nPw:6379") == \
+            "<uri-redacted-unrecognised-shape>"
+        # a SECOND URI after a masked one, on the same line
+        assert _mask_uri_userinfo("rediss://u:pw@h:1 rediss://:S3nPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        assert _mask_uri_userinfo("rediss://u:pw@h:1 rediss://user:S3nPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # ANTI-VACUOUS: a recognised-safe target still prints, masked, intact
+        assert _mask_uri_userinfo("bolt://user:pw@host:7687/g") == \
+            "bolt://:***@host:7687/g"
+        assert _mask_uri_userinfo("rediss://u:pw@[::1]:6379/db") == \
+            "rediss://:***@[::1]:6379/db"
+        assert _mask_uri_userinfo("docker://:pw@host:7687/g") == \
+            "docker://:***@host:7687/g"
 
     def test_mask_uri_userinfo_delimiter_inside_password_fails_closed(self):
         """#2983: a literal '?'/'#' inside a password (RFC-invalid — it
@@ -371,6 +420,70 @@ class TestDoctorPath:
         assert _mask_uri_userinfo(
             "rediss://host1:1/db and rediss://u:p@host2:2/db") == \
             "rediss://:***@host2:2/db"
+
+    def test_mask_uri_userinfo_scheme_with_password_and_no_at_fails_closed(self):
+        """#2987: a value that lost its '@host' tail still carries a password.
+
+        Class B: (1) `rediss://:T4ilPw` and `rediss://user:T4ilPw` make this
+        fail — with no '@' the last-'@' boundary finds nothing and the value
+        passed through verbatim, so the password was printed; (2) reachable:
+        the CLI prints `_mask_uri_userinfo(target)` / `_mask_uri_userinfo(str(e))`
+        for a bad target (doctor, init), and an operator-supplied target may be
+        any bytes.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        # the empty-user form: `rediss://:pw@host` with the '@host' dropped
+        assert _mask_uri_userinfo("rediss://:T4ilPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # a non-empty user whose 'password' is not a port (ports are numeric)
+        assert _mask_uri_userinfo("rediss://user:T4ilPw") == \
+            "<uri-redacted-unrecognised-shape>"
+        # the SAME class hidden inside an error message: only the URI is
+        # replaced, so the prose stays diagnosable
+        assert _mask_uri_userinfo("Relative DB path 'rediss://:T4ilPw' rejected") == \
+            "Relative DB path 'rediss://<uri-redacted-unrecognised-shape>' rejected"
+        # ANTI-VACUOUS: a password-less host:port (numeric after the last ':')
+        # is not credential-shaped and must keep printing unchanged — otherwise
+        # this rule would fail closed on every normal target.
+        assert _mask_uri_userinfo("rediss://r-example.host.cloud:50317") == \
+            "rediss://r-example.host.cloud:50317"
+        assert _mask_uri_userinfo("docker://127.0.0.1:7687/tortoise") == \
+            "docker://127.0.0.1:7687/tortoise"
+
+    def test_mask_uri_userinfo_malformed_scheme_and_schemeless_fail_closed(self):
+        """#2987 cycle-2: an invalid/empty scheme is "no scheme", and a
+        scheme-less continuation line fails closed on any '@'.
+
+        Class B: (1) `1://user:T4ilPw` and `rediss://user:\npw@host` make this
+        fail — the first was walked past as an invalid scheme and echoed, the
+        second's `pw@host` continuation was echoed because only a colon-LED
+        scheme-less line was checked; (2) both are reachable through
+        `TORTOISE_DB_URI` / the CLI error paths, which print through this helper.
+        """
+        from tortoise.__main__ import _mask_uri_userinfo
+
+        for value in (
+            "1://user:T4ilPw",
+            "://user:T4ilPw",
+            "://:T4ilPw",
+            "+://user:T4ilPw",
+            "rediss://user:\nS3ntinelpw@host",
+            "rediss://u:pw@h:1\nuser:T4ilPw@host",
+            "  rediss://:T4ilPw",
+            "rediss://[::1]:6379:S3n",
+            "rediss://[::1]:6abc",
+            # an '@' BEFORE the scheme / a non-ASCII scheme or port
+            "T4ilPw@rediss://host:6379",
+            "user:T4ilPw@rediss://:S3ntinel",
+            "user:T4ilPw@rediss://user2:T4ilPw@host:6379",
+            "user:T4ilPw@1://host:6379",
+            "r\u00e9diss://user:T4ilPw",
+            "rediss://[::1]:\u0660",
+        ):
+            out = _mask_uri_userinfo(value)
+            assert "T4ilPw" not in out and "S3n" not in out, \
+                f"leaked {value!r} -> {out!r}"
 
     def test_mask_uri_userinfo_fuzz_never_emits_password_material(self):
         """#2983: exhaustive fuzz over passwords containing '?'/'#'/'@'/'/'.

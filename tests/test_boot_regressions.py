@@ -162,11 +162,136 @@ def _redact(uri: str) -> str:
         (":pw@host:6379/graph", "<uri-redacted-unrecognised-shape>"),
         # no userinfo → unchanged, so a target without credentials stays readable
         ("rediss://r-example.host.cloud:50317", "rediss://r-example.host.cloud:50317"),
+        # `host:port` is NOT credential-shaped — a numeric field after the last
+        # ':' is a port, so a password-less target must keep printing unchanged
+        ("rediss://127.0.0.1:7687/tortoise", "rediss://127.0.0.1:7687/tortoise"),
         # embedded/dev target
         (
             "docker://:falkordb@localhost:6379/tortoise_test_matrix",
             "docker://:***@localhost:6379/tortoise_test_matrix",
         ),
+        # #2987 residual 2: a scheme with a password but NO '@' — the copy-paste
+        # that dropped the '@host' tail. The '@'-only guard and the '@'-requiring
+        # sed rule both miss it, so it used to be echoed verbatim. The empty user
+        # before the ':' is the tell.
+        ("rediss://:falkordb", "<uri-redacted-unrecognised-shape>"),
+        # ...and the same shape with a non-empty user: the field after the last
+        # ':' is not a port (ports are numeric), so it is credential material.
+        ("rediss://user:pw", "<uri-redacted-unrecognised-shape>"),
+        # #2987 residual 1: sed is line-oriented, so only the line carrying the
+        # scheme was masked; the whole-value guard could not see line 2 because
+        # line 1 had already changed. Fail closed PER LINE instead.
+        (
+            "rediss://u:pw@h:1\n:secretpw@h:2",
+            "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
+        ),
+        # ...including a scheme-less continuation whose userinfo has a
+        # NON-empty user (only the 'user:...' continuation was caught before).
+        # The scheme sat on line 1, so line 2's '@' is the only tell.
+        (
+            "rediss://user:\npw@host",
+            "<uri-redacted-unrecognised-shape>\n<uri-redacted-unrecognised-shape>",
+        ),
+        # ...and the same shape as a continuation of a value whose first line
+        # masked normally.
+        (
+            "rediss://u:pw@h:1\nuser:pw@host",
+            "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
+        ),
+        # An '@' BEFORE the scheme is not reached by the last-'@'-after-the-
+        # scheme rule, so the canonical used to echo it. entrypoint.sh fails
+        # closed on any unmasked line carrying an '@'. The pre-scheme '@' must
+        # fail closed even when the tail IS masked (or fail-closed), not only
+        # when the whole line is unchanged.
+        (
+            "user:S3npw@rediss://host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "user:S3npw@rediss://:S3ntinel",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "user:S3npw@rediss://user2:S3ntinel@host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "user:S3npw@1://host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        # A scheme containing a non-ASCII letter is not a scheme
+        # (`str.isalpha()` would accept it, the shell's `[a-zA-Z]` does not).
+        # Include an `@`-bearing credential so the ASCII guard is the only thing
+        # that can make the canonical fail closed here — without it, `rédiss`
+        # parses as a valid scheme and the value is merely masked.
+        ("r\u00e9diss://user:pw", "<uri-redacted-unrecognised-shape>"),
+        (
+            "r\u00e9diss://user:S3npw@host:6379",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        # A bracketed IPv6 port that is a non-ASCII digit is not a port.
+        ("rediss://[::1]:\u0660", "<uri-redacted-unrecognised-shape>"),
+        # ...including a continuation line with NO scheme and no '@' — the
+        # empty user before the ':' is the only safe tell on such a line.
+        (
+            "rediss://u:pw@h:1\n:S3ntinelpw",
+            "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>",
+        ),
+        # A whole value with no scheme and no '@' but an empty user.
+        (":S3ntinelpw", "<uri-redacted-unrecognised-shape>"),
+        # The `@host` copy-paste that KEPT the port: two ':' is not a
+        # host:port (a genuine one has exactly one), so it is credential
+        # material. This is the variant both maskers used to leak.
+        ("rediss://user:pw:6379", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://:pw:6379", "<uri-redacted-unrecognised-shape>"),
+        # A trailing ':' with no port is not a port — fail closed.
+        ("rediss://host:", "<uri-redacted-unrecognised-shape>"),
+        # ...while a bracketed IPv6 host (with or without a numeric port) is a
+        # recognised-safe target and keeps printing unchanged.
+        ("rediss://[::1]:6379/tortoise", "rediss://[::1]:6379/tortoise"),
+        # ...but the port must be ALL digits: the old `:[0-9]*` tail match
+        # accepted `:6379:S3n` (`[0-9]` matched the leading digit and `*` the
+        # rest), so a bracketed credential failed OPEN while the canonical
+        # masked it.
+        ("rediss://[::1]:6379:S3n", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://[::1]:6379abc", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://[::1]:6abc", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://[::1]:", "<uri-redacted-unrecognised-shape>"),
+        # #2987: an invalid or EMPTY scheme is treated as "no scheme" (the
+        # predicate runs over the text after the first '://'), matching the
+        # shell; the canonical used to walk past it and echo the credential.
+        ("1://user:pw", "<uri-redacted-unrecognised-shape>"),
+        ("://user:pw", "<uri-redacted-unrecognised-shape>"),
+        ("://:pw", "<uri-redacted-unrecognised-shape>"),
+        ("+://user:pw", "<uri-redacted-unrecognised-shape>"),
+        # Leading whitespace before a no-'@' credential: the whole line fails
+        # closed (the shell replaces it wholesale), so the canonical must not
+        # keep the prefix.
+        ("  rediss://:pw", "<uri-redacted-unrecognised-shape>"),
+        # A no-'@' credential behind a SECOND '://' on the no-'@' line: the
+        # ^-anchored shell predicated only the first occurrence and echoed the
+        # second. It now fails closed rather than echo it. (The canonical masks
+        # the second occurrence while preserving the first URI — a format
+        # asymmetry; neither leaks.)
+        (
+            "rediss://host:6379 rediss://:S3ntinel",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        (
+            "rediss://host:6379 rediss://user:S3ntinel",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        # #2987 review: the post-'@' remainder is judged with the same predicate
+        # as the no-'@' authority, so `host:pw` behaves the same either way.
+        ("rediss://u:pw@host:S3nPw", "<uri-redacted-unrecognised-shape>"),
+        ("rediss://u:pw@:S3nPw:6379", "<uri-redacted-unrecognised-shape>"),
+        (
+            "rediss://u:pw@h:1 rediss://:S3nPw",
+            "<uri-redacted-unrecognised-shape>",
+        ),
+        # ...and a recognised-safe target still prints, masked, intact.
+        ("rediss://u:pw@host:6379/db", "rediss://:***@host:6379/db"),
+        ("rediss://u:pw@[::1]:6379/db", "rediss://:***@[::1]:6379/db"),
     ],
 )
 def test_redactor_masks_userinfo_and_keeps_the_target(uri: str, expected: str):
@@ -197,7 +322,58 @@ _BARE_URI_CORPUS = [
     "redis://:pw@db.example.com:6379/0?ssl=true",
     "docker://user:p@ss@host:7687/g#frag",
     "rediss://r-example.host.cloud:50317",
+    # the '@'-before-scheme shape (the canonical used to echo it verbatim),
+    # including a tail that IS masked / fail-closed — the pre-scheme credential
+    # was re-emitted as a "prose prefix" in those cases.
+    "user:S3npw@rediss://host:6379",
+    "user:S3npw@rediss://:S3ntinel",
+    "user:S3npw@rediss://user2:S3ntinel@host:6379",
+    "user:S3npw@1://host:6379",
+    # non-ASCII scheme letter / non-ASCII bracketed port
+    "r\u00e9diss://user:S3ntinel",
+    "rediss://[::1]:\u0660",
     "docker://:falkordb@localhost:6379/tortoise_test_matrix",
+    # #2987: the no-'@' credential shapes (and the port-retaining variant).
+    # These MUST be in the parity list — a corpus that omits the shapes the PR
+    # changes cannot pin the predicate it changed (PR #2984's review recorded
+    # that exact defect as "over-claimed parity").
+    "rediss://:falkordb",
+    "rediss://user:pw",
+    "rediss://:pw:6379",
+    "rediss://user:pw:6379",
+    "rediss://host:",
+    ":S3ntinelpw",
+    # An invalid/empty scheme and a scheme-less '@' continuation are treated as
+    # "no scheme" in both maskers (see _MALFORMED_VALUE_CORPUS for the leak
+    # assertion); keep them in the parity list too.
+    "1://user:pw",
+    "://user:pw",
+    "://:pw",
+    "+://user:pw",
+    "rediss://user:\npw@host",
+    "rediss://u:pw@h:1\nuser:pw@host",
+    "  rediss://:pw",
+    "rediss://[::1]:6379:S3n",
+    # A multi-line value: both implementations now walk lines, so parity holds
+    # here too (it did not before #2987 — the shell masked per line while the
+    # canonical's last-'@' rule consumed the whole message).
+    "rediss://u:pw@h:1\n:secretpw@h:2",
+    "rediss://u:pw@h:1\nrediss://:secretpw",
+    # ...and the recognised-safe shapes that must stay unchanged.
+    "rediss://127.0.0.1:7687/tortoise",
+    "rediss://[::1]:6379/tortoise",
+    # #2987 review: the text after the LAST '@' is judged, not echoed. A
+    # credential-shaped tail and a later `scheme://` both used to be re-emitted
+    # verbatim by BOTH maskers (the shell cannot reach a later occurrence at all).
+    "rediss://u:pw@host:S3nPw",
+    "rediss://u:pw@:S3nPw:6379",
+    "rediss://u:pw@h:1 rediss://:S3nPw",
+    "rediss://u:pw@h:1 rediss://user:S3nPw",
+    # Residual, documented by this corpus rather than hidden: text after an
+    # ASCII space is not bounded as an authority by EITHER implementation (a
+    # bare word there is indistinguishable from prose — `h:1 <word>` is a shape
+    # connection errors take). Parity holds; the word is not masked.
+    "rediss://u:pw@h:1 S3nPw",
 ]
 
 
@@ -211,11 +387,16 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
     as equivalent and was not.
 
     Scope: parity holds over the corpus below, which enumerates the bare-URI
-    shapes the entrypoint can receive. One deliberate, documented asymmetry:
-    the canonical helper additionally masks every `scheme://` occurrence inside
-    a longer message; the shell helper is `^`-anchored and does not, by design.
+    shapes the entrypoint can receive. One documented asymmetry remains: the
+    canonical helper additionally masks every `scheme://` occurrence inside a
+    longer message; the shell helper is `^`-anchored and does not, by design.
     Both now fail closed on a '?'/'#', a bare '://', or an '@' inside a
-    password (#2983).
+    password (#2983), and on a no-'@' credential shape (#2987).
+
+    #2987: parity now ALSO holds for multi-line values. The shell masks per
+    line and so does the canonical helper, and the corpus carries multi-line
+    shapes — a single-line-only corpus is what let the two predicates diverge
+    on `rediss://user:pw:6379` while this test stayed green.
     """
     from tortoise.__main__ import _mask_uri_userinfo
 
@@ -226,6 +407,262 @@ def test_shell_redactor_agrees_with_the_canonical_python_masker():
 def test_redactor_tolerates_an_empty_argument():
     """`set -u` is on in the entrypoint: an absent URI must not abort boot."""
     assert _redact("") == ""
+
+
+def test_redactor_fails_closed_per_line_on_a_multiline_value():
+    """#2987 residual 1 — the leak was a LINE, not a value.
+
+    Class B: (1) this fails on the value `rediss://u:pw@h:1\n:secretpw@h:2` —
+    `sed` is line-oriented, so line 2 was echoed and the whole-value guard could
+    not fire because line 1 had already changed; (2) the value is reachable
+    because the boot block prints whatever `$TORTOISE_DB_URI` holds, and an env
+    var may contain a newline.
+    """
+    assert _redact("rediss://u:pw@h:1\n:secretpw@h:2") == (
+        "rediss://:***@h:1\n<uri-redacted-unrecognised-shape>"
+    )
+    # A trailing newline with NO second-line userinfo is the safe shape: line 1
+    # masks and the blank tail carries nothing. It must not be over-redacted
+    # into a sentinel.
+    assert _redact("rediss://u:pw@h:1\n") == "rediss://:***@h:1\n"
+
+
+def test_multiline_values_are_masked_and_agree_across_both_maskers():
+    """#2987 — the leak was a LINE, not a value; both maskers now walk lines.
+
+    Class B: (1) the marker pair `S3n`/`tinel` makes this fail if either
+    implementation emits the second line's password; (2) reachable — the boot
+    block prints the raw env value, newline included.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    for uri in (
+        "rediss://u:S3npw@h:1\n:S3ntinelpw@h:2",
+        "rediss://u:S3npw@h:1\n:S3ntinelpw",
+        "rediss://u:S3npw@h:1\nrediss://:S3ntinelpw",
+    ):
+        shell = _redact(uri)
+        canonical = _mask_uri_userinfo(uri)
+        for out, label in ((shell, "shell"), (canonical, "canonical")):
+            assert "S3n" not in out, f"{label} leaked the password marker: {out!r}"
+            assert "tinel" not in out, f"{label} leaked the password marker: {out!r}"
+        assert shell == canonical, (
+            f"maskers disagree on the multi-line value {uri!r}: "
+            f"shell={shell!r} canonical={canonical!r}"
+        )
+
+
+def _redact_many(values: list[str]) -> list[str]:
+    """Run the shipped shell redactor over many values in ONE bash invocation.
+
+    Batching is what makes the grammar test below affordable: it enumerates
+    hundreds of values, and a subprocess per value would be seconds of process
+    churn. Values are NUL-delimited — a DB URI never contains a NUL, and it is
+    the only delimiter that survives both a newline-bearing value and `read -r`.
+    """
+    script = (
+        "set -euo pipefail\n"
+        + _redactor_body()
+        + "\nwhile IFS= read -r -d '' v; do _redact_uri \"$v\"; printf '\\0'; done\n"
+    )
+    payload = b"".join(value.encode() + b"\0" for value in values)
+    proc = subprocess.run(["bash", "-c", script], input=payload, capture_output=True)
+    assert proc.returncode == 0, f"redactor failed: {proc.stderr.decode()}"
+    chunks = proc.stdout.split(b"\0")
+    assert chunks[-1] == b"", "the redactor's NUL framing was lost"
+    return [chunk.decode() for chunk in chunks[:-1]]
+
+
+# A grammar over the AUTHORITY (the text after `<scheme>://`), enumerated so
+# the parity assertion cannot be satisfied by a human-chosen spot-check list.
+# It deliberately mixes the recognised-safe shapes with every way a dropped
+# '@host' can present: empty user, non-numeric tail, multi-':' credential,
+# trailing ':', bracketed IPv6, and an '@' that has been left in place.
+_AUTHORITY_GRAMMAR = [
+    "",
+    "user",
+    "host",
+    "host:6379",
+    "host:notaport",
+    "host:",
+    "127.0.0.1:7687",
+    "[::1]",
+    "[::1]:6379",
+    "[::1]:notaport",
+    "[::1",
+    "[S3ntinel",
+    ":S3ntinel",
+    ":S3ntinel:6379",
+    ":S3ntinel:notaport",
+    ":6379",
+    ":",
+    "::",
+    "user:S3ntinel",
+    "user:S3ntinel:6379",
+    "user:S3ntinel:notaport",
+    "user:6379",
+    "user:",
+    "user:pw",
+    "a:b:c:d",
+    "@host",
+    "user:S3ntinel@host:6379",
+    ":S3ntinel@host:6379",
+    "host:6379/db",
+    "host:6379?x",
+    "host:6379#y",
+    "host:6379'x",
+    "[::1]:6379/tortoise",
+    # #2987 T6: the bracketed-IPv6 port must be ALL digits. `[::1]:6379:S3n`
+    # (a dropped '@host' after the port) failed OPEN in the shell before the
+    # `:[0-9]*` tail match was tightened; `[::1]:6379abc`/`[::1]:6abc` are the
+    # same class with a non-numeric or digit-led suffix.
+    "[::1]:6379:S3n",
+    "[::1]:6379abc",
+    "[::1]:6abc",
+    "[::1]:",
+    # #2987 T6: the authority cut set is explicit ASCII in BOTH maskers. `\v`
+    # and `\f` are ASCII whitespace (the shell's old `[[:space:]]` cut there,
+    # the canonical's literal set did not); U+0660 is an Arabic-Indic digit
+    # (`str.isdigit()` accepts it, the shell's `[0-9]` does not).
+    "user:6379\vS3n",
+    "user:6379\fS3n",
+    "user:6379\u00a0S3n",
+    "host:\u0660",
+    "host:63\u0660",
+]
+
+
+# Full values (not just authorities) that a malformed or ABSENT scheme hides a
+# credential behind. Kept separate from `_AUTHORITY_GRAMMAR` (which prefixes a
+# valid scheme) because these violate the `scheme://authority` shape.
+_MALFORMED_VALUE_CORPUS = [
+    # invalid or EMPTY scheme — entrypoint.sh treats it as "no scheme"
+    "1://user:S3ntinel",
+    "://user:S3ntinel",
+    "://:S3ntinel",
+    "+://user:S3ntinel",
+    # a scheme-less continuation line with a non-empty user and an '@'
+    "rediss://user:\nS3ntinelpw@host",
+    "rediss://u:pw@h:1\nuser:S3ntinel@host",
+    # leading whitespace before a no-'@' credential
+    "  rediss://:S3ntinel",
+    # an '@' BEFORE the scheme (the last-'@'-after-the-scheme rule misses it),
+    # including tails that are masked / fail-closed
+    "user:S3ntinel@rediss://host:6379",
+    "user:S3ntinel@rediss://:S3ntinel",
+    "user:S3ntinel@rediss://user2:S3ntinel@host:6379",
+    "user:S3ntinel@1://host:6379",
+    # a scheme with a non-ASCII letter / a non-ASCII bracketed port
+    "r\u00e9diss://user:S3ntinel",
+    "r\u00e9diss://user:S3ntinel@host:6379",
+    "rediss://[::1]:\u0660",
+]
+
+
+def test_shell_and_canonical_agree_over_an_enumerated_authority_grammar():
+    """#2987 — parity is pinned by a grammar, not by a spot-check list.
+
+    Class B: (1) this fails on any authority where the shell and the canonical
+    helper disagree — e.g. `rediss://user:pw:6379` before the fix, where the
+    shell failed closed and the canonical printed the password; (2) reachable:
+    each enumerated authority is a value an operator can put in
+    `TORTOISE_DB_URI` / `--db`, and both mask functions are on that path.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    values = [
+        f"{scheme}://{authority}"
+        for scheme in ("rediss", "docker", "bolt")
+        for authority in _AUTHORITY_GRAMMAR
+    ]
+    shells = _redact_many(values)
+    assert len(shells) == len(values)
+    for value, shell in zip(values, shells, strict=True):
+        canonical = _mask_uri_userinfo(value)
+        assert shell == canonical, (
+            f"maskers disagree on {value!r}: shell={shell!r} canonical={canonical!r}"
+        )
+
+
+def test_shell_and_canonical_agree_on_malformed_scheme_and_schemeless_values():
+    """#2987 T6 — a malformed or ABSENT scheme must not hide a credential.
+
+    entrypoint.sh treats an invalid/empty scheme as "no scheme": it predicates
+    the text after the FIRST '://', and a scheme-less line fails closed on an
+    '@' anywhere (the scheme may be on an earlier line of a multi-line value).
+    The canonical walked past an invalid scheme and echoed the credential, and
+    only caught a colon-LED scheme-less line — a `pw@host` continuation leaked.
+
+    Class B: (1) the marker pair `S3n`/`tinel` makes this fail on any value that
+    still prints its credential, and the equality assertion fails on any
+    divergence; (2) each value is a copy-paste an operator can put in
+    `TORTOISE_DB_URI`, and both maskers are on that path.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    for value in _MALFORMED_VALUE_CORPUS:
+        shell = _redact(value)
+        canonical = _mask_uri_userinfo(value)
+        for out, label in ((shell, "shell"), (canonical, "canonical")):
+            assert "S3n" not in out, f"{label} leaked {value!r} -> {out!r}"
+            assert "tinel" not in out, f"{label} leaked {value!r} -> {out!r}"
+        assert shell == canonical, (
+            f"maskers disagree on {value!r}: shell={shell!r} canonical={canonical!r}"
+        )
+
+
+def test_neither_masker_emits_a_no_at_credential():
+    """#2987 — the leak bar: the password marker never survives either masker.
+
+    Class B: (1) the marker pair `S3n`/`tinel` makes this fail on any shape that
+    still prints its credential; (2) each shape is a copy-paste an operator can
+    produce by dropping the `@host` tail (with or without the port), and each is
+    reachable through `TORTOISE_DB_URI` at boot and through the CLI error paths.
+    """
+    from tortoise.__main__ import _mask_uri_userinfo
+
+    shapes = [
+        "rediss://:S3ntinel",
+        "rediss://user:S3ntinel",
+        "rediss://:S3ntinel:6379",
+        "rediss://user:S3ntinel:6379",
+        "rediss://:S3ntinel:notaport",
+        "rediss://user:S3ntinel:notaport",
+        "rediss://user:S3ntinel'",
+        "rediss://:S3ntinel'",
+        ":S3ntinel",
+        "rediss://u:pw@h:1\n:S3ntinel",
+        "rediss://u:pw@h:1\nrediss://:S3ntinel",
+        # A scheme-less continuation with a NON-empty user AND an '@': the
+        # scheme sat on line 1, so the '@' on line 2 is the only tell.
+        "rediss://u:pw@h:1\nuser:S3ntinel@host",
+        "rediss://user:\nS3ntinel@host",
+        # An invalid/empty scheme: the credential follows the '://'.
+        "1://user:S3ntinel",
+        "://user:S3ntinel",
+        "://:S3ntinel",
+        "+://user:S3ntinel",
+        # A no-'@' credential behind a SECOND '://' on the line. The shell
+        # (^-anchored) predicated only the first occurrence and echoed the
+        # second; it now fails closed. The canonical masks the second while
+        # preserving the first URI, so the two differ in FORMAT here but neither
+        # leaks — hence these are in the leak-bar list, not the parity corpus.
+        "rediss://host:6379 rediss://:S3ntinel",
+        "rediss://host:6379 rediss://user:S3ntinel",
+        "rediss://host rediss://:S3ntinel",
+        "rediss://host:6379\trediss://:S3ntinel",
+    ]
+    # NOT asserted: a continuation line with a NON-empty user (`user:pw:6379`).
+    # `_mask_uri_userinfo` cannot tell it from ordinary prose (`C:\foo`, an
+    # exception containing a colon), so both maskers leave it — a recorded
+    # residual, not a silent one (see the #2987 follow-up issue).
+    for value in shapes:
+        for label, out in (
+            ("shell", _redact(value)),
+            ("canonical", _mask_uri_userinfo(value)),
+        ):
+            assert "S3n" not in out, f"{label} leaked {value!r} -> {out!r}"
+            assert "tinel" not in out, f"{label} leaked {value!r} -> {out!r}"
 
 
 def _extract_boot_db_block(source: str) -> str:
@@ -264,6 +701,45 @@ def test_boot_db_block_never_emits_the_password(secret: str, branch: str):
     combined = proc.stdout + proc.stderr
     assert secret not in combined, f"password reached the boot log: {combined!r}"
     assert host in combined, "the target host should stay diagnosable"
+
+
+@pytest.mark.parametrize(
+    ("uri", "secret"),
+    [
+        # residual 1: the password is on the SECOND line, where the old
+        # line-oriented sed never looked.
+        ("rediss://Tortoise2:hunter2@r-example.host.cloud:50317\n:S3ntinelPw@r-example.host.cloud:50318", "S3ntinelPw"),
+        # residual 2: no '@' at all — the copy-paste that dropped '@host'.
+        ("rediss://:S3ntinelPw", "S3ntinelPw"),
+        ("rediss://Tortoise2:S3ntinelPw", "S3ntinelPw"),
+        # residual 2 with the PORT kept: two ':' is not a host:port.
+        ("rediss://Tortoise2:S3ntinelPw:6379", "S3ntinelPw"),
+        # residual 1 with a continuation line that has NO scheme and no '@'.
+        ("rediss://Tortoise2:hunter2@r-example.host.cloud:50317\n:S3ntinelPw", "S3ntinelPw"),
+        # no scheme at all, but userinfo: the pre-existing guard's shape.
+        (":S3ntinelPw@r-example.host.cloud:50317", "S3ntinelPw"),
+    ],
+)
+@pytest.mark.parametrize("branch", ["explicit", "cloud"])
+def test_boot_db_block_never_emits_a_malformed_uri_password(uri: str, secret: str, branch: str):
+    """#2987 — the black-box check over the MALFORMED shapes.
+
+    Class B: (1) the value that makes this fail is a password reachable only
+    through a shape the per-value guard cannot see — line 2 of a multi-line
+    value, or a `scheme://:pw` with no '@'; (2) it is reachable because the boot
+    block prints whatever the env var holds, and an operator-supplied secret is
+    exactly the malformed case the function exists for.
+    """
+    source = ENTRYPOINT.read_text()
+    script = "set -euo pipefail\n" + _redactor_body() + "\n" + _extract_boot_db_block(source)
+    var = "FALKORDB_CLOUD_URI" if branch == "cloud" else "TORTOISE_DB_URI"
+    env = {"PATH": os.environ.get("PATH", ""), var: uri}  # deliberately excludes the other var
+
+    proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+    assert proc.returncode == 0, f"boot block failed: {proc.stderr}"
+    combined = proc.stdout + proc.stderr
+    assert secret not in combined, f"password reached the boot log: {combined!r}"
 
 
 def test_entrypoint_prints_no_uri_through_a_raw_interpolation():
