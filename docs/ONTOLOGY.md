@@ -139,9 +139,11 @@ doc_status: live
 >   `docs/architecture/STORAGE-ARCHITECTURE.md` +
 >   `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (PR #5016) > the
 >   implementing issue.
-> - **Implementation status:** the code half is not landed — `#5026` (the label
->   migration), `#5024` (the unjournalled version transition), `#5038` (the
->   version model).
+> - **Implementation status:** `#5026` (the label migration) **landed** — PR
+>   #5127 merged 2026-09-25 (`294d5847e`): the `:Document` label is retired, and
+>   the legacy spelling survives only as a deprecated alias whose writes route to
+>   `:Source` keyed `url`. Still **open**: `#5024` (the unjournalled version
+>   transition) and `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
