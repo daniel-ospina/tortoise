@@ -6158,15 +6158,40 @@ class FalkorProjection(
         except Exception:
             return False
 
+    #: Cap-immune fixup precondition (#5312 review, P1). ``typeof`` is a
+    #: per-row predicate and the read takes a single bounded row, so
+    #: FalkorDB's server-global ``RESULTSET_SIZE`` (default 10 000) cannot
+    #: truncate it into a FALSE NEGATIVE. The pre-review form read every
+    #: ``search_keys`` unbounded and scanned client-side, so on a graph with
+    #: more than ``RESULTSET_SIZE`` Points an array beyond the cap was
+    #: invisible and the fixup was skipped again — the #5444 symptom surviving
+    #: precisely where the data volume is real (measured on docker 4.20.4:
+    #: 10 050 Points, arrays only in rows 10 001-10 050 → 10 000 rows returned,
+    #: 0 array-typed).
+    _ARRAY_SEARCH_KEYS_PROBE = (
+        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+        "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
+    )
+
     def _array_valued_search_keys_exist(self) -> bool:
         """Does any Point still store ``search_keys`` as an ARRAY?
 
         The one-time fixup's real precondition: FalkorDB's fulltext index does
         not index array-valued properties, so such Points are invisible to
-        ``queryNodes`` until ``_ensure_indexes`` flattens them. A probe that
-        cannot run returns True — assume the fixup is owed rather than skip
-        work we cannot prove unnecessary.
+        ``queryNodes`` until ``_ensure_indexes`` flattens them.
+
+        A probe that cannot run returns True — assume the fixup is owed rather
+        than skip work we cannot prove unnecessary.
         """
+        try:
+            return bool(self.g.query(self._ARRAY_SEARCH_KEYS_PROBE).result_set)
+        except Exception:
+            pass
+        # An engine without ``typeof`` (both supported engines have it —
+        # verified on embedded and FalkorDB 4.20.4): fall back to the
+        # client-side scan, which ``RESULTSET_SIZE`` can truncate. Kept as the
+        # pre-#5444 behaviour rather than fail-closed, which would re-bootstrap
+        # every marker-less graph.
         try:
             rows = self.g.query(
                 "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
@@ -6174,8 +6199,78 @@ class FalkorProjection(
             ).result_set
         except Exception:
             return True
-        return any(isinstance(row[0], (list, tuple))
-                   for row in rows if row)
+        return any(isinstance(row[0], (list, tuple)) for row in rows if row)
+
+    def _array_search_keys_rows(self) -> list:
+        """``(id, search_keys)`` for Points whose ``search_keys`` is an array.
+
+        Cap-aware (#5312 review, P1): the ``typeof`` predicate means the
+        ``RESULTSET_SIZE`` cap can only truncate the BATCH, never hide arrays
+        behind string rows — so a caller may loop until this returns empty.
+        Falls back to the untyped read on an engine without ``typeof`` (where
+        the cap can still hide arrays; caller beware).
+        """
+        try:
+            return self.g.query(
+                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+                "AND typeof(n.search_keys) = 'List' "
+                "RETURN n.id, n.search_keys"
+            ).result_set
+        except Exception:
+            return self.g.query(
+                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+                "RETURN n.id, n.search_keys"
+            ).result_set
+
+    def _fix_point_search_keys(self) -> None:
+        """The ONE-TIME Point data fixup, callable from EITHER create branch.
+
+        Flattens array-valued ``search_keys`` to a space-joined string, then
+        drop→recreates the Point FTS index and mints ``point_fts_v2``.
+
+        A shared helper on purpose (#5312 review, P1): the flatten used to live
+        ONLY in the legacy ``"already"`` branch, so a RESTORE/DR graph —
+        array-valued ``search_keys`` with no index (the dump carries no indexes
+        and skips the marker) — reached the FRESH-CREATE branch, which minted
+        the marker without flattening. That cemented "current" over an owed
+        fixup and made it permanently undetectable by the probe.
+
+        Batched: the read is bounded by ``RESULTSET_SIZE``, so loop until no
+        array rows remain rather than assuming one pass sees them all.
+        """
+        try:
+            for _ in range(200):  # bounded; 200 × RESULTSET_SIZE rows
+                rows = self._array_search_keys_rows()
+                if not rows:
+                    break
+                flattened = 0
+                for nid, sk in rows:
+                    if not isinstance(sk, (list, tuple)):
+                        continue
+                    flat = " ".join(
+                        str(k).strip() for k in sk if str(k).strip()
+                    )
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) SET n.search_keys = $flat",
+                        params={"id": nid, "flat": flat},
+                    )
+                    flattened += 1
+                if flattened == 0:
+                    break  # no progress — never spin
+            for drop_proc in ("db.idx.fulltext.drop",
+                              "db.idx.fulltext.dropIndex"):
+                try:
+                    self.g.query(f"CALL {drop_proc}('Point')")
+                    break
+                except Exception:
+                    continue
+            self.g.query(
+                "CALL db.idx.fulltext.createNodeIndex("
+                "'Point', 'content', 'search_keys')"
+            )
+            self.g.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+        except Exception:
+            pass
 
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
@@ -6436,12 +6531,23 @@ class FalkorProjection(
                         # index directly — mark the migration done so a later
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
-                        try:  # noqa: SIM105
-                            self.g.query(
-                                "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
-                            )
-                        except Exception:
-                            pass
+                        #
+                        # Mint the marker ONLY when nothing is owed (#5312
+                        # review, P1). A RESTORE/DR graph reaches THIS branch
+                        # too — array-valued search_keys with no index, because
+                        # the dump carries no indexes and skips the marker — so
+                        # an unconditional marker here would declare that owed
+                        # fixup done *permanently*: the probe then skips the
+                        # very check that would have found it.
+                        if self._array_valued_search_keys_exist():
+                            self._fix_point_search_keys()
+                        else:
+                            try:  # noqa: SIM105
+                                self.g.query(
+                                    "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
+                                )
+                            except Exception:
+                                pass
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
@@ -6471,37 +6577,7 @@ class FalkorProjection(
                                     "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    rows = self.g.query(
-                                        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-                                        "RETURN n.id, n.search_keys"
-                                    ).result_set
-                                    for nid, sk in rows:
-                                        if isinstance(sk, (list, tuple)):
-                                            flat = " ".join(
-                                                str(k).strip() for k in sk
-                                                if str(k).strip()
-                                            )
-                                            self.g.query(
-                                                "MATCH (n:Point {id:$id}) "
-                                                "SET n.search_keys = $flat",
-                                                params={"id": nid, "flat": flat},
-                                            )
-                                    for drop_proc in ("db.idx.fulltext.drop",
-                                                      "db.idx.fulltext.dropIndex"):
-                                        try:
-                                            self.g.query(
-                                                f"CALL {drop_proc}('Point')"
-                                            )
-                                            break
-                                        except Exception:
-                                            continue
-                                    self.g.query(
-                                        "CALL db.idx.fulltext.createNodeIndex("
-                                        "'Point', 'content', 'search_keys')"
-                                    )
-                                    self.g.query(
-                                        "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
-                                    )
+                                    self._fix_point_search_keys()
                             except Exception:
                                 pass
                         elif label == "Event":

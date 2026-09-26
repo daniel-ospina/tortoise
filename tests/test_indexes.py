@@ -602,29 +602,51 @@ _REDUNDANT_ON_INDEXED_GRAPH = (
 def _is_repeated_schema_work(cypher: str) -> bool:
     """A statement that may only run on a graph that still needs BUILDING.
 
-    DDL and marker WRITES. The fixup's precondition READS are deliberately
-    NOT in this set (#5444): the fast path must read the fixup's state to
-    know whether it is owed, and forbidding that read is what made the
-    marker-gate attempt unusable. ``_is_fast_path_read`` bounds them instead
-    — reads are allowed, writes and DDL are not, so a future "probe by
+    DDL, the marker WRITE, and the fixup's node-level ``SET`` (which the
+    earlier form missed — a repeat sweep that flattened every Point again
+    would otherwise have counted as clean). The fixup's precondition READS are
+    deliberately NOT in this set (#5444): the fast path must read the fixup's
+    state to know whether it is owed, and forbidding that read is what made
+    the marker-gate attempt unusable. ``_is_fast_path_read`` bounds them
+    instead — reads are allowed, writes and DDL are not, so a future "probe by
     rebuilding" still cannot hide here.
     """
     return (cypher.startswith(_REDUNDANT_ON_INDEXED_GRAPH)
             or "fulltext.createNodeIndex" in cypher
             or "fulltext.drop" in cypher
-            or cypher.startswith("MERGE (m:Meta"))
+            or cypher.startswith("MERGE (m:Meta")
+            or "SET n.search_keys" in cypher)
 
 
 #: The ONLY extra statements the fast path may issue (#5444): the cheap marker
-#: skip, then the fixup's real precondition. Reads only — never a write.
+#: skip, then the cap-immune fixup precondition. Pinned to the EXACT literals
+#: rather than by prefix (#5312 review, P2): a prefix match classifies ANY
+#: reworded statement as a permitted "read" — including a destructive one such
+#: as ``MATCH (n:Point) WHERE n.search_keys IS NOT NULL DETACH DELETE n`` — so
+#: it would hide behind the allowance below.
 _FAST_PATH_READS = (
-    "MATCH (m:Meta {key:'point_fts_v2'})",
-    "MATCH (n:Point) WHERE n.search_keys",
+    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1 LIMIT 1",
+    "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+    "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1",
 )
+
+#: Cypher DESTRUCTIVE verbs. A repeat sweep must issue none: the fixup — the
+#: only writer — belongs to the first sweep. Deliberately NOT the broad
+#: ``CREATE``: the two vector-API attempts are expected here and one of them is
+#: a ``CREATE VECTOR INDEX``. This replaces a `" SET "`/`" MERGE "` blacklist
+#: applied to the reads only, which a reworded destructive statement could
+#: evade (#5312 review, P2).
+_DESTRUCTIVE_VERBS = (" DETACH DELETE ", " DELETE ", " REMOVE ", " SET ",
+                      " MERGE ")
 
 
 def _is_fast_path_read(cypher: str) -> bool:
-    return cypher.startswith(_FAST_PATH_READS)
+    return " ".join(cypher.split()) in _FAST_PATH_READS
+
+
+def _is_destructive(cypher: str) -> bool:
+    padded = " " + " ".join(cypher.split()).upper() + " "
+    return any(v in padded for v in _DESTRUCTIVE_VERBS)
 
 
 @pytest.fixture
@@ -778,8 +800,17 @@ def test_repeat_sweep_runs_no_already_satisfied_ddl(graph_factory):
     assert len(reads) <= 2, (
         f"the fast path issued {len(reads)} precondition read(s): {reads} — "
         "bounded to the marker read plus one array read (#5444)")
-    assert not [c for c in reads if "SET " in c or "MERGE " in c], (
-        "the fast path must not WRITE the fixup state (#5444)")
+
+    # NO statement at all may write: the fixup belongs to the first sweep. This
+    # replaces a `" SET "`/`" MERGE "` blacklist applied to the reads only,
+    # which a reworded statement could evade (#5312 review, P2); the fast-path
+    # list above is pinned to exact literals, so a reworded probe is not
+    # counted as a permitted read in the first place.
+    writes = [c for c in seen if _is_destructive(c)]
+    assert writes == [], (
+        f"a second `_ensure_indexes()` issued destructive statement(s): "
+        f"{writes} — the fixup must run only on a graph that still owes it "
+        "(#5444)")
 
     assert seen.count("CALL db.indexes()") == 1, (
         f"the guard must cost exactly one catalogue probe, got {seen}")
