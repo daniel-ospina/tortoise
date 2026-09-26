@@ -999,6 +999,7 @@ surfaces:
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
   - test_retrieval.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
+  - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date (hermetic, no DB)
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
