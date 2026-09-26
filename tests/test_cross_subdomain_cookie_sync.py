@@ -58,11 +58,14 @@ is empty and `test_no_page_is_left_on_the_legacy_bridge` inverts the old
 per-page wiring assertion into the absence proof. See #3559 for the backlog.
 """
 
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import re
-import pytest
 from pathlib import Path
+
+# #3786: the session-bridge toolchain contract is owned by the sibling harness —
+# one guard, not a second variant. It FAILS (never skips) when node is absent.
+from tests.test_session_bridge_fragment_retention import _require_node
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED = REPO_ROOT / "website" / "assets" / "supabase-session.js"
@@ -570,14 +573,16 @@ def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
 
 def test_shared_script_syntax() -> None:
     """The wiring tests are string-presence based — a parse-error'd shared
-    script would pass them. Best-effort node --check (skips when node absent)."""
-    import shutil
+    script would pass them. `node --check` is the only thing that parses it.
+
+    #3786: a missing `node` used to SKIP here — green, exit 0, zero coverage,
+    which is indistinguishable from passing. It now FAILS by name unless the
+    explicit SESSION_BRIDGE_ALLOW_NO_TOOLCHAIN=1 opt-out is set, reusing the
+    session-bridge toolchain contract from the sibling harness."""
     import subprocess
 
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
-    subprocess.run([node, "--check", str(SHARED)], check=True)
+    _require_node()
+    subprocess.run(["node", "--check", str(SHARED)], check=True)
 
 
 def test_adapters_share_size_guard_and_localhost_handling() -> None:
