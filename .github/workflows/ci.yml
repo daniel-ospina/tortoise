@@ -106,6 +106,13 @@ jobs:
                   # skips dashboard-js-tests, so the behavioural tests for the
                   # very file under review would never run.
                   isfile("website/assets/supabase-session.js"),
+                  # #3787: `website/consent.js` is copied into the dashboard's
+                  # dist by `scripts/copy-shared-assets.mjs` as part of
+                  # `npm run build`, and the shipped-artifact guard in
+                  # src/distBundle.test.js reads that copy. Same rule as the
+                  # bridge entry above: naming the input is what makes the
+                  # guard run on the file it scans.
+                  isfile("website/consent.js"),
                   # #3525: the dashboard's security-headers guard also pins the
                   # MARKETING project's CSP, and it SCANS both projects'
                   # `functions/` trees (cookie writers, `text/html` producers) —
@@ -378,6 +385,9 @@ jobs:
                   # changes the served bundle — it too used to surface only
                   # through the committed dist rebuild.
                   isfile("product/pricing.json"),
+                  # #3787: the same copied build input — a consent-only change
+                  # changes the bundle this lane serves.
+                  isfile("website/consent.js"),
                   isfile(".github/workflows/ci.yml"),
               ),
               # ai-review-gate-tests (#2982): the signed-review merge gate's
