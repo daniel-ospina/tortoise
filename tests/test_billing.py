@@ -405,6 +405,30 @@ class TestApplyLimitsAndReconcile:
         assert t["tier"] == "pro"  # preserved — never downgraded on unparseable price
         assert t["subscription_status"] == "active"
 
+    def test_mirror_registry_lane_keeps_the_cancel_flag(self, monkeypatch,
+                                                        stripe_env, billing_sdk):
+        """The registry (selfhost) twin keeps ``cancel_at_period_end`` — a
+        ``:Team`` property with no ``organizations`` column. Pins the twin's
+        field set against the seam-aware refactor (#4726): a mutation that
+        routes the registry lane through ``update_org_billing``'s allow-list
+        drops the flag silently. Reachable in the fixture: ``billing_sdk``
+        writes the ``:Team`` node this test reads back.
+        """
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        sdk = billing_sdk
+        team = sdk.org_create("cancel-flag")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_cf'",
+            params={"id": team["id"]},
+        )
+        sub = {"id": "sub_cf", "status": "active", "cancel_at_period_end": True,
+               "items": {"data": [{"price": {"id": "price_200proMM"}}]}}
+        billing.mirror_subscription(sdk, team["id"], sub)
+        t = sdk.org_get(team["id"])
+        assert t["cancel_at_period_end"] is True
+        assert t["subscription_status"] == "active"
+        assert t["subscription_id"] == "sub_cf"
+
 
 # ── Checkout + Portal endpoints (#310, Task 5) ──────────────────────────────
 
@@ -1105,6 +1129,143 @@ class TestBillingSupabaseStore:
         r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
         assert r.status_code == 409, r.text
         assert called == [], "the active-status guard must reject before any Stripe call"
+
+    def test_mirror_subscription_writes_the_orgs_row_not_the_registry(
+            self, sb, monkeypatch):
+        """#4726: in Supabase mode ``mirror_subscription`` writes the billing
+        state to the authoritative ``organizations`` row, exactly as the
+        webhook's ``_set`` does. The pre-fix unconditional
+        ``MATCH (t:Team) SET`` matched 0 rows (silent no-op) and resurrected
+        the deleted registry graph by executing on it (#878).
+
+        Mutation that makes this fail: drop the Supabase branch — the mirror
+        then calls ``sdk._get_registry()`` (this sentinel raises) and the
+        row's ``subscription_status``/``subscription_id`` stay None.
+        Reachable in the fixture: the ``sb`` row exists and
+        ``get_control_plane`` is patched to it.
+
+        F3 (#4726 review): the seam PAYLOAD is pinned by a spy, not only
+        inferred from the resulting row. ``update_org_billing``'s ``allowed``
+        allow-list silently drops ``cancel_at_period_end``, so a row-only
+        assertion cannot see the exclusion at ``billing.py`` — deleting it
+        (passing ``dict(twin)``) left the old test GREEN. Exact-payload
+        equality reds that mutation: the failing value is a payload carrying
+        ``cancel_at_period_end``, reachable because the fixture's
+        ``sub`` sets it ``True``.
+        """
+        import tortoise.supabase_control as sc
+
+        _, fake = sb
+        sent: list[tuple[str, dict]] = []
+        real_update = sc.update_org_billing
+
+        def _spy(cp, org_id, updates):
+            sent.append((org_id, dict(updates)))
+            return real_update(cp, org_id, updates)
+
+        monkeypatch.setattr(sc, "update_org_billing", _spy)
+
+        class _NoRegistrySdk:
+            def _get_registry(self):  # pragma: no cover — must never run
+                raise AssertionError(
+                    "Supabase mode must not touch the registry graph (#878)")
+
+        sub = {"id": "sub_sb_4726", "status": "active",
+               "cancel_at_period_end": True,
+               "current_period_start": 1756512000,
+               "current_period_end": 1759104000,
+               "items": {"data": [{"price": {"id": "price_200proMM"}}]}}
+        summary = billing.mirror_subscription(
+            _NoRegistrySdk(), self.ORG_ID, sub,
+            customer_email="owner@example.com")
+        assert summary == {"tier": "pro", "interval": "monthly",
+                           "status": "active"}
+        # The seam sees the EXACT mirror payload (apply_limits' quota write is
+        # the earlier call; the status/period write is the last).
+        assert sent[-1] == (self.ORG_ID, {
+            "subscription_status": "active",
+            "subscription_id": "sub_sb_4726",
+            "current_period_start": 1756512000,
+            "current_period_end": 1759104000,
+            "customer_email": "owner@example.com",
+        }), sent
+        assert all("cancel_at_period_end" not in u for _, u in sent), sent
+        row = fake.tables["organizations"][0]
+        assert row["tier"] == "pro"
+        assert row["subscription_status"] == "active"
+        assert row["subscription_id"] == "sub_sb_4726"
+        assert row["customer_email"] == "owner@example.com"
+        # epoch ints are normalised by update_org_billing (PostgREST cannot
+        # bind a bare number to timestamptz) — both bounds land.
+        assert row["current_period_start"] == "2025-08-30T00:00:00+00:00"
+        assert row["current_period_end"] == "2025-09-29T00:00:00+00:00"
+        # ``cancel_at_period_end`` has no ``organizations`` column — it is the
+        # registry-twin property and must not be written to the row.
+        assert "cancel_at_period_end" not in row
+
+    def test_mirror_subscription_raises_when_the_org_row_is_absent(self, sb):
+        """#4726 F2: mirroring onto an org with NO ``organizations`` row must
+        fail closed, not return a success summary.
+
+        Failing value: the seam's PATCH matches 0 rows — the fixture row's id
+        is ``ORG_ID``, so ``org_absent_4726`` is absent; pre-fix the mirror
+        returned ``{'tier': 'pro', ...}`` while the row list stayed unchanged.
+        Reachable in the fixture: ``sb`` seeds exactly one org row, and the
+        ``None`` SDK is never reached (the Supabase branch raises first).
+        """
+        _, fake = sb
+        before = [dict(r) for r in fake.tables["organizations"]]
+        sub = {"id": "sub_absent_4726", "status": "active",
+               "items": {"data": [{"price": {"id": "price_200proMM"}}]}}
+        with pytest.raises(RuntimeError, match="no organizations row matched"):
+            billing.mirror_subscription(None, "org_absent_4726", sub)
+        assert fake.tables["organizations"] == before
+
+    def test_reconcile_org_reads_the_orgs_row_in_supabase_mode(self, sb, monkeypatch):
+        """#4726: ``reconcile_org`` reads the subscription/customer identifiers
+        from the same store the mirror writes — the orgs row — and never
+        constructs a registry-namespaced SDK (``sdk=None``).
+
+        Mutation that makes this fail: keep the registry read — the pre-fix
+        code calls ``sdk._get_registry()`` and raises AttributeError on
+        ``None``. Reachable in the fixture: the ``sb`` row is seeded with both
+        identifiers and ``StripeClient.get_subscription`` is stubbed to Stripe
+        truth.
+        """
+        _, fake = sb
+        fake.tables["organizations"][0].update({
+            "subscription_id": "sub_sb_4726r",
+            "stripe_customer_id": "cus_sb_4726r",
+        })
+        monkeypatch.setattr(
+            billing.StripeClient, "get_subscription",
+            lambda self, sid: {"id": sid, "status": "active",
+                               "items": {"data": [
+                                   {"price": {"id": "price_300teamM"}}]}})
+        summary = billing.reconcile_org(None, self.ORG_ID)
+        assert summary["action"] == "mirror_subscription"
+        assert summary["tier"] == "team"
+        row = fake.tables["organizations"][0]
+        assert row["tier"] == "team"
+        assert row["subscription_status"] == "active"
+        assert row["subscription_id"] == "sub_sb_4726r"
+
+    def test_reconcile_org_raises_when_the_row_is_absent(self, sb, monkeypatch):
+        """Supabase mode: an absent org row is a LOUD ``BillingError`` (the
+        registry lane's "not found" contract, now seam-aware) — never a
+        silent 0-row no-op, and never a registry-SDK construction.
+
+        Mutation that makes this fail: drop the ``if not row: raise`` — the
+        absent row then falls through to the no-op return. Reachable in the
+        fixture: ``sb`` holds only ``ORG_ID``, so a different id is absent.
+        """
+        _, _fake = sb
+        monkeypatch.setattr(
+            billing.StripeClient, "get_subscription",
+            lambda self, sid: (_ for _ in ()).throw(
+                AssertionError("must not reach Stripe for an absent org")))
+        with pytest.raises(BillingError, match="not found"):
+            billing.reconcile_org(None, "org_missing_4726")
 
 
 class TestWebhook:

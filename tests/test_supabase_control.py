@@ -774,6 +774,35 @@ class TestResolveApiKeyFailSoft:
         assert any("base-only read failed" in r.message for r in caplog.records)
 
 
+class TestUpdateOrgBillingSeam:
+    """#4726 F2: ``update_org_billing`` is documented fail-closed, and a
+    PATCH that matches no row is a dropped write — not a success."""
+
+    def test_update_org_billing_raises_when_the_row_is_absent(self, fake):
+        """Absent org row → loud RuntimeError, never a silent 0-row no-op.
+
+        Failing value: a PATCH result of ``[]`` for an id not present in
+        ``organizations`` (PostgREST's ``return=minimal`` body is empty for
+        both 0 and 1 matched rows, so the seam requests representation).
+        Reachable in the fixture: ``fake`` holds ``team-free-001`` / ``team-1``,
+        so ``no-such-org`` matches nothing.
+        """
+        from tortoise.supabase_control import update_org_billing
+
+        with pytest.raises(RuntimeError, match="no organizations row matched"):
+            update_org_billing(fake, "no-such-org", {"tier": "pro"})
+
+    def test_update_org_billing_writes_the_present_row(self, fake):
+        """The 0-row guard must not red the normal path: an existing row
+        PATCHes and returns None. Reachable in the fixture:
+        ``team-free-001`` exists.
+        """
+        from tortoise.supabase_control import update_org_billing
+
+        update_org_billing(fake, "team-free-001", {"tier": "pro"})
+        assert fake.tables["organizations"][0]["tier"] == "pro"
+
+
 class TestTeamByID:
     def test_team_by_id_additive_columns_missing_fail_soft(self, fake,
                                                            caplog):
