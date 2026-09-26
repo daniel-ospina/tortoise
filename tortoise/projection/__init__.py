@@ -1908,19 +1908,34 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
 # A node is owned by its (graph label, id) pair. Both the rebuild survivor
 # anchor (``last_recreate_seq``) and the replay fold (``_fold_entity_mutation``
 # → ``_delete_entity_by_id``) key on that pair, so a delete can never be
-# suppressed by — or match — a node of another kind. For MUTATION and DELETE
-# this table is the only declaration; the label→key mapping for RESOLUTION is a
-# deliberate SUPERSET declared separately at ``_RESOLVE_BRANCHES`` (which adds
-# ("Source", "url") for url-only ingestion stubs) and mirrored again in
-# ``navigation._ROOT_BRANCHES`` — so do NOT read this as the only label→key
-# table in the codebase, only as the authority for mutation/delete. A journal
-# ``label`` is NEVER interpolated into the Cypher label position (it must be a
-# member of ``_CANONICAL_ENTITY_LABELS``, else the fold falls back to the legacy
-# id-wide delete). Mirrored by the live writers ``sdk._delete_entity`` and
-# ``sdk._update_entity``.
+# suppressed by — or match — a node of another kind. This table is the PRIMARY
+# identity key per label. A label's identity is an OR-SET: the label→key mapping
+# for RESOLUTION is the deliberate SUPERSET declared at ``_RESOLVE_BRANCHES``
+# (which adds ("Source", "url") for url-only ingestion stubs) and mirrored again
+# in ``navigation._ROOT_BRANCHES``; the MUTATION/DELETE OR-set is this table PLUS
+# ``_CANONICAL_ENTITY_SECONDARY_ID_PROPS`` — so do NOT read this as the only
+# label→key table in the codebase, only as the primary authority for
+# mutation/delete. A journal ``label`` is NEVER interpolated into the Cypher
+# label position (it must be a member of ``_CANONICAL_ENTITY_LABELS``, else the
+# fold falls back to the legacy id-wide delete). Mirrored by the live writers
+# ``sdk._delete_entity`` and ``sdk._update_entity``.
 _CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
     ("Source", "id"), ("Event", "eventId"),
+)
+#: #4649 — the SECOND identity key a canonical label may be addressed by, so the
+#: write paths agree with the read path on what an entity's identity is. Only
+#: ``Source`` has one: ``url`` is a Source's canonical identity (``#5012``), and
+#: ``_link_source``/``_mint_source_stub`` mint url-only stubs with NO ``id`` —
+#: yet ``_CANONICAL_ENTITY_ID_PROPS`` matches them by ``id``, so every write to
+#: one matched nothing and ``_update_entity``'s ``return self._get_entity(...)``
+#: handed the caller the UNCHANGED node with no error (a silent write loss).
+#: The read path has always resolved them (``_RESOLVE_BRANCHES``'s own comment
+#: names the case). Consumers try the primary key first and fall back to these
+#: ONLY on a miss, so the primary MATCH text — and its #327 index plan — is
+#: unchanged for every id-carrying node.
+_CANONICAL_ENTITY_SECONDARY_ID_PROPS: tuple[tuple[str, str], ...] = (
+    ("Source", "url"),
 )
 _CANONICAL_ENTITY_LABELS: frozenset[str] = frozenset(
     label for label, _ in _CANONICAL_ENTITY_ID_PROPS)
@@ -1928,6 +1943,22 @@ _ENTITY_ID_PROP: dict[str, str] = {
     label: prop for label, prop in _CANONICAL_ENTITY_ID_PROPS}
 _NON_POINT_ENTITY_LABELS: frozenset[str] = (
     _CANONICAL_ENTITY_LABELS - {"Point"})
+_CANONICAL_ENTITY_SECONDARY_BY_LABEL: dict[str, tuple[str, ...]] = {
+    label: tuple(prop for lbl, prop in _CANONICAL_ENTITY_SECONDARY_ID_PROPS
+                 if lbl == label)
+    for label, _ in _CANONICAL_ENTITY_ID_PROPS
+}
+
+
+def secondary_entity_id_props(label: str) -> tuple[str, ...]:
+    """The non-primary identity keys ``label`` may be matched by (#4649).
+
+    Empty for every label whose identity is its single primary key. Used by the
+    live writers (``sdk._update_entity``/``_delete_entity``), the replay folds
+    (``_delete_entity_by_id``/``_fold_entity_mutation``) and the delete preview
+    so producer and fold consume ONE declaration and cannot drift.
+    """
+    return _CANONICAL_ENTITY_SECONDARY_BY_LABEL.get(label, ())
 
 # ── EntityMutated op vocabulary (#3299 / #3312 / #3377) ────────────────────
 # THE one declaration. tortoise/live.py's #2901 lesson applies verbatim: a
@@ -5943,9 +5974,11 @@ class FalkorProjection(
         legacy nodes exist), so matching ``Event {eventId:$id}`` reproduces
         the legacy ``n.id = $id`` lookup for Events exactly.
 
-        Per-call-site OR-sets (issue #327 scope table):
+        Per-call-site OR-sets (issue #327 scope table; ``_update/_delete_entity``
+        widened to include ``url`` by #4649 — the write path must agree with the
+        read path on what a Source's identity is):
         - _get_entity:              id | eventId | url
-        - _update/_delete_entity:   id | eventId
+        - _update/_delete_entity:   id | eventId | url (Source only by url)
         - create_edge source:       id | eventId | url ; target: id | eventId
         - create_about_edge source: id ; target: id | eventId
         - create_owned_by / about stub links: id only
@@ -6712,13 +6745,22 @@ class FalkorProjection(
             branches = _CANONICAL_ENTITY_ID_PROPS
         total = 0
         for label, prop in branches:
-            r = self.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n "
-                f"RETURN count(n)",
-                params={"id": id_val},
-            )
-            if r.result_set:
-                total += r.result_set[0][0] or 0
+            deleted = 0
+            # #4649: the identity is an OR-SET — primary key first (the MATCH
+            # text and its #327 index plan are unchanged), the label's
+            # SECONDARY key only when the primary missed. Without this a
+            # url-only :Source (no `id`; minted by `_link_source`) folds to a
+            # MISS and `rebuild_all` resurrects it from the creation record.
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = self.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) DETACH DELETE n "
+                    f"RETURN count(n)",
+                    params={"id": id_val},
+                )
+                deleted = (r.result_set[0][0] or 0) if r.result_set else 0
+                if deleted:
+                    break
+            total += deleted
         return total
 
     def _fold_entity_mutation(self, ev: dict) -> int:
@@ -6785,11 +6827,20 @@ class FalkorProjection(
                 _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
                 return 0
             prop = _ENTITY_ID_PROP[label]
-            r = self.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $s RETURN count(n)",
-                params={"id": rid, "s": state},
-            )
-            matched = r.result_set[0][0] if r.result_set else 0
+            matched = 0
+            # #4649: OR-SET — primary key first, the label's secondary key only
+            # on a miss (a url-only :Source has no `id`). Without the fallback
+            # the record folds to a MISS and `rebuild_all` reverts the write
+            # the live producer performed.
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = self.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $s "
+                    "RETURN count(n)",
+                    params={"id": rid, "s": state},
+                )
+                matched = (r.result_set[0][0] or 0) if r.result_set else 0
+                if matched:
+                    break
             if not matched:
                 _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
             return matched or 0

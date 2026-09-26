@@ -5489,9 +5489,13 @@ class TortoiseSDK:
           - Entity (Subject/Object/Event/Document/Source) → plain property
             update (delegates to update_entity).
           - Unknown id → returns {} (no write) — legacy-compatible.
+
+        #4649: resolution includes ``by_url`` so a url-keyed ``:Source`` (the
+        shape ``get_entity`` has always addressed, and ``_link_source`` mints)
+        routes to ``update_entity`` instead of silently returning ``{}``.
         """
         resolved = self._get_proj()._resolve_entity(
-            id, by_id=True, by_eventId=True)
+            id, by_id=True, by_eventId=True, by_url=True)
         if not resolved:
             return {}
         if resolved[0]["label"] == "Point":
@@ -5510,9 +5514,13 @@ class TortoiseSDK:
         :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
         JSONL `EntityMutated op="delete"` record, because the `PointRetracted`
         fold tombstones and a hard delete must replay as a hard delete.
+
+        #4649: resolution includes ``by_url``, matching ``get_entity`` — a
+        url-keyed ``:Source`` used to return ``False`` here (the node was never
+        found) while the read path resolved it.
         """
         resolved = self._get_proj()._resolve_entity(
-            id, by_id=True, by_eventId=True)
+            id, by_id=True, by_eventId=True, by_url=True)
         if not resolved:
             return False
         if resolved[0]["label"] == "Point":
@@ -18184,9 +18192,18 @@ class TortoiseSDK:
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
             classify_entity_mutation_op,
+            secondary_entity_id_props,
         )
 
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+            # #4649: a canonical label's identity is an OR-SET, not one key.
+            # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
+            # carry a secondary one (`Source` by `url` — url-only stubs minted
+            # by `_link_source` have no `id`, so the primary MATCH below used to
+            # miss and this surface returned the UNCHANGED node as success).
+            # The primary key is ALWAYS tried first (byte-identical MATCH text
+            # and #327 index plan), the secondary only on a miss.
+            id_keys = (prop, *secondary_entity_id_props(label))
             if label == "Point":
                 # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
                 # discipline on this generic surface too. `_sanitize_props`
@@ -18249,11 +18266,14 @@ class TortoiseSDK:
                         else None)
                 else:
                     point_props = props
-                res = proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
-                    "RETURN count(n)",
-                    params={"id": id_val, "p": point_props},
-                )
+                for match_prop in id_keys:
+                    res = proj.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
+                        "RETURN count(n)",
+                        params={"id": id_val, "p": point_props},
+                    )
+                    if res.result_set and res.result_set[0][0]:
+                        break
                 # Post-apply, per matched label — the `_delete_entity`
                 # emitter's ordering contract (a failed/no-op write never
                 # leaves a phantom record).
@@ -18317,6 +18337,22 @@ class TortoiseSDK:
                     # `properties(n)` in this RETURN to become a grouping key —
                     # the hazard the reading query below documents.
                     matched = bool(applied.result_set and applied.result_set[0][0])
+                    matched_prop = prop
+                    # #4649: same OR-SET as the generic branch below — a
+                    # url-keyed :Source has no `id`, so the primary MATCH above
+                    # misses it.
+                    if not matched:
+                        for match_prop in id_keys[1:]:
+                            applied = proj.g.query(
+                                f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                                "SET n += $props RETURN count(n)",
+                                params={"id": id_val, "props": props},
+                            )
+                            matched = bool(applied.result_set
+                                           and applied.result_set[0][0])
+                            if matched:
+                                matched_prop = match_prop
+                                break
 
                     # Journal everything the write changed EXCEPT `name`. The
                     # reason `name` is withheld — it moves the node before the
@@ -18329,7 +18365,7 @@ class TortoiseSDK:
                     if matched and rest:
                         keys = list(rest)
                         res = proj.g.query(
-                            f"MATCH (n:{label} {{{prop}:$id}}) "
+                            f"MATCH (n:{label} {{{matched_prop}:$id}}) "
                             "RETURN [k IN $keys | properties(n)[k]] AS vals",
                             params={"id": id_val, "keys": keys},
                         )
@@ -18373,14 +18409,22 @@ class TortoiseSDK:
                         )
                     continue
                 keys = list(props)
-                res = proj.g.query(
-                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $props "
-                    "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                    params={"id": id_val, "props": props, "keys": keys},
-                )
-                # No match => [] for THIS form. Do NOT add `count(n)`: beside
-                # `properties(n)` it becomes a grouping key, so a miss yields no
-                # row and a duplicate-id match yields one row PER GROUP.
+                res = None
+                # #4649: OR-SET — primary identity key first, then the label's
+                # secondary key(s) only if the primary matched nothing.
+                for match_prop in id_keys:
+                    res = proj.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
+                        "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                        params={"id": id_val, "props": props, "keys": keys},
+                    )
+                    # No match => [] for THIS form. Do NOT add `count(n)`: beside
+                    # `properties(n)` it becomes a grouping key, so a miss yields
+                    # no row and a duplicate-id match yields one row PER GROUP.
+                    # A non-empty `keys` with a result row means the write
+                    # landed on THIS branch's node.
+                    if res.result_set:
+                        break
                 if not keys or not res.result_set:
                     continue
                 vals = list(res.result_set[0][0])
@@ -18406,16 +18450,28 @@ class TortoiseSDK:
         # matched them by id/eventId; no caller relies on it).
         # #3860: the ONE label→id-property table, shared with the replay fold
         # (``projection._delete_entity_by_id``) so the producer and the fold
-        # cannot drift.
-        from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+        # cannot drift. #4649: the identity is an OR-SET — the primary key
+        # first, the label's ``secondary_entity_id_props`` only on a miss, so a
+        # url-keyed :Source (no `id`) is FOUND instead of `delete()` returning
+        # False for a node `get_entity` can address.
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            secondary_entity_id_props,
+        )
         total = 0
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
-            r = proj.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
-                params={"id": id_val},
-            )
-            if r.result_set and r.result_set[0][0]:
-                total += r.result_set[0][0]
+            deleted = 0
+            for match_prop in (prop, *secondary_entity_id_props(label)):
+                r = proj.g.query(
+                    f"MATCH (n:{label} {{{match_prop}:$id}}) DETACH DELETE n "
+                    "RETURN count(n)",
+                    params={"id": id_val},
+                )
+                deleted = (r.result_set[0][0] or 0) if r.result_set else 0
+                if deleted:
+                    break
+            if deleted:
+                total += deleted
                 # #3299: journal the destruction at the write surface that
                 # performs it. Post-hoc (after the live write succeeds,
                 # matching every other emitter) so a failed/no-op delete

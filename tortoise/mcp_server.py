@@ -4224,7 +4224,10 @@ def _preview_delete_entity(sdk, id: str) -> dict:
     # — and drift makes this preview UNDER-report the blast radius (a label
     # whose id property moved would match nothing and silently drop out of the
     # count), which is the dangerous direction.
-    from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+    from tortoise.projection import (
+        _CANONICAL_ENTITY_ID_PROPS,
+        secondary_entity_id_props,
+    )
     proj = sdk._get_proj()
     seen: set = set()
     nodes: list[str] = []
@@ -4235,14 +4238,23 @@ def _preview_delete_entity(sdk, id: str) -> dict:
         # an id value are both deleted, and their internal ids differ, so
         # this neither over- nor under-counts. (Matches the writer, which
         # never dedups by logical id.)
-        for (internal,) in proj.g.query(
-            f"MATCH (n:{label} {{{prop}:$id}}) RETURN ID(n)",
-            params={"id": id},
-        ).result_set:
-            if internal in seen:
-                continue
-            seen.add(internal)
-            nodes.append(id)
+        # #4649: the SAME OR-SET the writer and the replay fold use — primary
+        # key first, the label's secondary key if the primary matched nothing.
+        # A url-keyed :Source has no `id`, so without this the preview
+        # UNDER-reports the blast radius (the dangerous direction).
+        for match_prop in (prop, *secondary_entity_id_props(label)):
+            hit = False
+            for (internal,) in proj.g.query(
+                f"MATCH (n:{label} {{{match_prop}:$id}}) RETURN ID(n)",
+                params={"id": id},
+            ).result_set:
+                hit = True
+                if internal in seen:
+                    continue
+                seen.add(internal)
+                nodes.append(id)
+            if hit:
+                break
     # `_delete_entity` does NOT run the Tag GC (only `delete_point` does).
     edges = _preview_delete_edges(sdk, sorted(seen))
     return _preview_result(
