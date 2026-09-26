@@ -97,9 +97,10 @@ The honest recorded value is ABSENT, never `''` (which compares equal to a sourc
 **Acceptance:** per Point/per link `current`/`stale`/`unknown`, **`unknown` when either side is `NULL`/`''`**; never nested under `tortoise_stale`; **reported on the existing result row, not withheld** (Policy B: the stale fact stays readable and flagged). The enforcement form — ranked lower, or dropped from ordinary searches — is a **reopen of Policy B in the owner queue** and is NOT part of this task until answered.
 **Files:** Create `tools/source_currency.py` as the shared derivation helper (the read path consumes it; it is not a separate user-facing surface). Test: unit + integration.
 
-### Task 4: Close the loop on the residuals
+### Task 4: Close the loop on the residuals  — ✅ DONE (2026-09-25)
 **Intent:** make the deferred decisions and gaps visible where the next lane reads.
-**Acceptance:** O1/O3/O5 posted on **#5038** (the artifact the owner reads); a re-inference-engine issue filed (acceptance A2's home); the 2489 step-4 departure surfaced; the #5024 dependency recorded.
+**Status:** O1/O3 posted on **#5038** (the artifact the owner reads) ✔ · the re-inference-engine issue **filed as #5422** (acceptance A2's home) ✔ · the `#5024` dependency recorded in the §9.6 status pointer and in #5422 ✔ · the 2489 step-4 departure **moot under O1 = D** (O2 was only live if a version were carried) — recorded as moot rather than left implied ✔.
+**Acceptance:** O1/O3/O5 posted on **#5038**; a re-inference-engine issue filed (acceptance A2's home); the 2489 step-4 departure surfaced; the #5024 dependency recorded.
 **Files:** Modify `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6 (a pointer — §4.6 itself is owner-gated and must NOT be edited).
 
 ---
@@ -128,7 +129,7 @@ Docker lane (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_m
 - **O4 — Documents.** *Options:* extend `create_document`'s `extractedFrom` (`sdk.py:20684`) / restrict to `label="Point"`. *Analysis:* §3.3 declares `extractedFrom` as `Point → Source`; #5026 retires `:Document`. *Recommendation:* restrict.
 - **O5 — the §4.6 third-state wording.** `unknown` is an addition to §4.6's binary text; owner-gated. *Recommendation:* the owner adds it; this work ships no ontology text.
 - **O6 — the capture-lane anchor.** *Options:* reorder materialization before extraction / accept `unknown`. *Recommendation:* accept `unknown` now; file the reorder with a named owner.
-- **O7 — acceptance A2's home.** No re-inference-engine issue exists. *Recommendation:* file it.
+- **O7 — acceptance A2's home.** ✅ **RESOLVED — filed as #5422.** No re-inference-engine issue existed; A2 could never be marked complete and the plan pointed nowhere for it. #5422 is its home, filed as a scoping gap (not a design) with its precondition (#5024) and its already-decided constraints recorded so they are not re-opened. *Original recommendation:* file it.
 - **O8 — sequencing.** PR #5207/#5199 is OPEN and `CONFLICTING` across the same three files; **#5093** ("lane L1: projection-keys — the replay keys (#5026 → #5025 → #5024)") is the containing lane; #5026 FIRST, #5025 SECOND; #5024 edits `projection/entities.py`; **#3644** owns interval-closing. *Recommendation:* land #5207 and the #5093 lane first, then rebase.
 
 ## 9. Outcome of this scoping pass

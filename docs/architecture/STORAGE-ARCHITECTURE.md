@@ -567,6 +567,16 @@ The convergence is on **two layers with different jobs**: the **source** carries
 ## 10. Two storage patterns worth taking from Hindsight (2026-09-23)
 The extractor doc §§11–13 carry the full verification. Two findings are **storage** decisions:
 
+#### ⭐ Where this stands (2026-09-25) — a status pointer, not a new rule
+
+- **The anchor shipped.** The read version rides on the `extractedFrom` link as `sourceVersion` (`#5256`, PR `#5288`), with the honest-absent rule (**`''`/blank/non-string hash ⇒ no property at all**), live == replay, and **no SDK/MCP surface change**.
+- **The currency CHECK is a read** (this section's model): it compares the recorded `sourceVersion` against the source's current `contentHash`, with **no stored `status`** field — so it belongs on the **existing** read surfaces and needs **no new tool and no new SDK method**.
+- **Policy B governs what a stale fact does:** it stays **readable and flagged**; **nothing is withheld**. The enforcement form — returned *lower* than the current fact, or *dropped* from ordinary searches — is an **open reopen of Policy B in the owner queue on `#5038`** (research report: `docs/research/2026-09-25-5038-source-currency-read-path.md`). **Until it is answered, no read path withholds a stale fact.**
+- **A non-re-read successor records no version** (owner, O1) and reads `unknown` until it is itself read from a source; `ONTOLOGY.md` §4.6 is unmodified and the §4.6 reopen was not taken.
+- **The re-inference step has no owner** — filed as **#5422**, because acceptance A2 of `#5038` cannot complete without it. **`#5024` is its precondition** (a re-fetched `:Source` currently mutates in place, unjournalled: if the old version is overwritten there is nothing to mark stale).
+
+*This pointer records status only. `ONTOLOGY.md` §4.6 is owner-gated and is NOT edited by this work.*
+
 ### 10.1 Invalidate by RELOCATION, not by a flag
 Hindsight's `{"state":"invalidated"}` **"does not set a flag to be filtered later. It moves the row out of the active table into a separate archive … So recall needs no state predicate… no query pays for your cleanup."** Causal edges are **snapshotted onto the archived row** (so the archived fact still explains itself), and the move is **reversible**.
 
