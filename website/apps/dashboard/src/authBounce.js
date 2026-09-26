@@ -27,12 +27,13 @@
 // ever appears — see the follow-up recorded on #3930.
 //
 // `/admin` and `/welcome` are owned by Pages Functions, which win inbound
-// routing, so the SPA is never served at them: the only path this module can
-// PRODUCE today is `/team` (200-rewritten to the app document) plus the app root.
-// `/welcome` IS still a legitimate destination to NAME — `functions/welcome.ts`
-// echoes `url.pathname` verbatim into its own `next=`, so `/welcome/` arrives as
-// a real value the consumer must accept (serving is the Function's business, not
-// this list's). The exported list is therefore the CONSUMER allowlist — what a
+// routing, so the SPA is never served at them: the paths this module can
+// PRODUCE today are `/team` and `/team/` (200-rewritten to the app document by
+// `public/_redirects`) plus the app root. `/welcome` IS still a legitimate
+// destination to NAME — `functions/welcome.ts` puts `url.pathname + url.search`,
+// percent-encoded, into its own `next=`, so `/welcome/?reset=1` arrives as a real
+// value the consumer must accept (serving is the Function's business, not this
+// list's). The exported list is therefore the CONSUMER allowlist — what a
 // return-to may NAME — which is why it also carries the two Function-owned
 // routes. The asymmetry is deliberate and is asserted by the drift test.
 //

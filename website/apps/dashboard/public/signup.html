@@ -724,8 +724,25 @@
     function isConsoleReturnTo() {
       // Boundary-checked like every other /admin predicate in this fix: a bare
       // `indexOf("/admin") === 0` also matches `/administrator`.
+      // The QUERY and FRAGMENT are stripped BEFORE matching: the early block
+      // carries `u.search` on an allowed route, so a deep link to
+      // `/auth?next=%2Fadmin%3Ftab%3Ddrafts` legitimately yields
+      // `/admin?tab=drafts` — comparing the raw string missed it and handed the
+      // console's own destination to the claim card (cycle-6 review).
       var r = window.__ADMIN_RETURN_TO;
-      return !!r && (r === "/admin" || r.indexOf("/admin/") === 0);
+      if (typeof r !== "string") return false;
+      var p = r.split("?")[0].split("#")[0];
+      return p === "/admin" || p.indexOf("/admin/") === 0;
+    }
+    // #3080/#3930: the destination of the ANON_TEAM_NO_OWNER funnel (the banner
+    // shown when an API key belongs to an unclaimed team). A NAMED helper rather
+    // than an inline ternary because the call site sits inside the big script,
+    // which no test harness extracts — so an inline expression could be reverted
+    // to the pre-#3930 `window.__ADMIN_RETURN_TO || claimCardUrl()` with every
+    // test still green (cycle-6 review). Extracted and EXECUTED by
+    // `tests/test_admin_return_to.py`.
+    function claimFunnelUrl() {
+      return isConsoleReturnTo() ? window.__ADMIN_RETURN_TO : claimCardUrl();
     }
     // #1082: claim intent in flight (non-secret marker, set by the dashboard
     // claim card on app.premiselabs.co).
@@ -1404,7 +1421,7 @@
             // the SPA's mount gate bounce them straight back to /auth (the
             // claim card never renders and the pending marker is left set for
             // its TTL). Send them to the claim card, exactly as before #3930.
-            window.location.href = isConsoleReturnTo() ? window.__ADMIN_RETURN_TO : claimCardUrl();
+            window.location.href = claimFunnelUrl();
             return;
           }
           if (code === "KEY_NOT_USER_MINTED") {

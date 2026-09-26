@@ -202,6 +202,7 @@ def _blocks() -> dict[str, str]:
             for name in (
                 "claimCardUrl",
                 "isConsoleReturnTo",
+                "claimFunnelUrl",
                 "claimPending",
                 "claimRedirectTarget",
                 "oauthNextPath",
@@ -270,9 +271,8 @@ function mkEnv(search, cookie, session, origin) {
 function runEarly(search, cookie, origin, seam) {
   // #3930: /auth lives on the APP origin (#4054). The app-host cases pass it
   // explicitly. `seam` pre-sets the #2744 __DASHBOARD_BASE_URL so the early
-  // block's own origin-validation and composition are exercised too.
-  // `seam` pre-sets the #2744 __DASHBOARD_BASE_URL so the early block's own
-  // origin-validation and composition are exercised (they were not before).
+  // block's own origin-validation and composition are exercised (they were not
+  // before).
   const e = mkEnv(search, cookie, undefined, origin || ORIGIN);
   if (seam !== undefined && seam !== null) e.win.__DASHBOARD_BASE_URL = seam;
   new Function('window', 'document', 'URLSearchParams', early)(e.win, e.doc, URLSearchParams);
@@ -316,16 +316,19 @@ function runTargets(ret, cookie, seamBase) {
   e.win.__DASHBOARD_BASE_URL = rawBase;
   const make = new Function(
     'window', 'document', 'URLSearchParams',
-    claimSrc + '\\nreturn { claim: claimRedirectTarget, oauth: oauthNextPath };',
+    claimSrc + '\\nreturn { claim: claimRedirectTarget, oauth: oauthNextPath, funnel: claimFunnelUrl };',
   );
   const fns = make(e.win, e.doc, URLSearchParams);
-  return { nav: fns.claim(), oauth: fns.oauth() };
+  return { nav: fns.claim(), oauth: fns.oauth(), funnel: fns.funnel() };
 }
 
-// The seam's ORIGIN rule, as the early block applies it, so a seam-plus-return-to
-// models the COMPOSED value rather than the raw seam (the raw seam survives only
-// when there is no `next`). Kept in step with the shipped `dashboardOrigin` by
-// the tests that assert both paths.
+// A TEST-SIDE MODEL of the seam's origin rule, used ONLY to compose the value the
+// early block would have left in `window.__DASHBOARD_BASE_URL` when it has a
+// return-to. It is NOT a second copy of `dashboardOrigin` and it is NOT kept in
+// step by the tests in this file — a foreign-origin seam alongside a return-to is
+// what `test_early_block_validates_and_composes_the_dashboard_base` drives
+// directly against the SHIPPED helper. This model is exercised by
+// `test_claim_card_honours_the_dashboard_seam_origin`.
 function seamOrigin(raw) {
   const own = APP;
   if (typeof raw !== "string") return own;
@@ -362,10 +365,11 @@ function runConsumer(status, ret, cookie, opts) {
   return { nav: e.navigations, errors: errors };
 }
 
-const out = { early: [], headGate: [], claim: [], consumer: [], gate: [] };
+const out = { early: [], headGate: [], claim: [], funnel: [], consumer: [], gate: [] };
 for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2], c[3]));
 for (const c of cases.headGate) out.headGate.push(runHeadGate(c[0], c[1], c[2]));
 for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1], c[2]));
+for (const c of cases.funnel) out.funnel.push(runTargets(c[0], c[1], c[2]));
 for (const c of cases.consumer) out.consumer.push(runConsumer(c[0], c[1], c[2], c[3]));
 
 // #3080: execute the gate's real decision table (not a substring check).
@@ -393,10 +397,9 @@ console.log(JSON.stringify(out));
 
 
 def _run(cases: dict) -> dict:
+    _require_node()
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
-    for key in ("early", "headGate", "claim", "consumer", "gate"):
+    for key in ("early", "headGate", "claim", "funnel", "consumer", "gate"):
         cases.setdefault(key, [])
     cases.setdefault("tokenReason", [])
     cases.setdefault("adminResponse", [])
@@ -802,6 +805,23 @@ _VITE_ASSET_TAG = re.compile(
 )
 
 
+def _require_node() -> None:
+    """Fail, don't skip, when node is absent.
+
+    `pytest.skip` would report the suite GREEN with every behavioural test in
+    this file silently unrun — the #3080/#3930/#3952 contract would evaporate
+    while CI stayed green. The sibling harness
+    (`tests/test_cross_subdomain_cookie_sync.py`) fails by name in the same
+    condition (#3786); this mirrors it.
+    """
+    if not shutil.which("node"):
+        pytest.fail(
+            "node is required for the auth-bounce behavioural contract "
+            "(this file executes the shipped page JS) — install node; a skip "
+            "here would hide the whole #3080/#3930 contract"
+        )
+
+
 def _console_asset_refs() -> list[str]:
     """Vite-emitted asset refs in the COMMITTED console shell.
 
@@ -855,7 +875,12 @@ def test_console_bundle_resolves_under_admin_from_every_entry_path(doc_url: str)
     by `test_vite_base_is_the_console_public_path` below; the staging/mount
     destination is not asserted here (filed as #3954).
     """
-    for ref in _console_asset_refs():
+    refs = _console_asset_refs()
+    # Non-vacuity: a bare `for` loop asserts nothing when the list is EMPTY, so a
+    # regression that stops finding the refs would leave this test green (the
+    # cycle-6 review proved it: stubbing the helper to `[]` gave 71/71 pass).
+    assert refs, "the console shell's asset refs were not found — this test would otherwise be vacuous"
+    for ref in refs:
         resolved = urlparse(urljoin(doc_url, ref)).path
         # The invariant is DOCUMENT-INDEPENDENCE: the bundle lives at one place,
         # so resolving a reference from any entry path must name that same place.
@@ -880,7 +905,9 @@ def test_console_bundle_files_are_present() -> None:
     A shape-only assertion stays green on the very outcome it exists to prevent: a
     ref to a nonexistent hash is exactly the 404 that blanks the console.
     """
-    for ref in _console_asset_refs():
+    refs = _console_asset_refs()
+    assert refs, "the console shell's asset refs were not found — this test would otherwise be vacuous"
+    for ref in refs:
         resolved = urlparse(urljoin(f"{ORIGIN}/admin/", ref)).path
         rel = resolved.removeprefix("/admin/")
         assert (DIST_INDEX.parent / rel).is_file(), (
@@ -947,8 +974,8 @@ def _spa_bounce_target(pathname: str, search: str) -> str:
     Python restatement of it. A change to the module's rules reds these tests.
     """
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
+    _require_node()
+    node = shutil.which("node")
     script = (
         "import { authBounceTarget } from " + json.dumps(SPA_BOUNCE_JS.as_uri()) + ";"
         "process.stdout.write(authBounceTarget({ pathname: " + json.dumps(pathname)
@@ -1107,6 +1134,50 @@ def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
     assert rows[3]["nav"] == APP_ORIGIN + "/?claim=1", rows[3]
     assert rows[4]["nav"] == APP_ORIGIN + "/team?session_id=abc", rows[4]
     assert rows[4]["oauth"] == "/team?session_id=abc", rows[4]
+
+
+def test_the_anon_team_funnel_prefers_the_console_return_to() -> None:
+    """The ANON_TEAM_NO_OWNER funnel destination, EXECUTED.
+
+    That call site sits inside the big script, which no harness extracts — so the
+    expression could be reverted to the pre-#3930
+    `window.__ADMIN_RETURN_TO || claimCardUrl()` (which sends a still-signed-out
+    console visitor to the claim card, and a /team visitor to /team where the
+    SPA mount gate bounces them straight back to /auth) with every test still
+    green. It is a NAMED helper (`claimFunnelUrl`) precisely so it can be driven
+    here; the pre-#3930 expression reds this test.
+    """
+    rows = _run({"funnel": [
+        ["/admin", "", None],
+        ["/admin?tab=drafts", "", None],
+        ["/admin/blog", "", None],
+        ["/administrator", "", None],
+        ["/administer", "", None],
+        ["/team?session_id=abc", "", None],
+        [None, "", None],
+    ]})["funnel"]
+    # The console return-to wins, INCLUDING when it carries a query (the early
+    # block carries `u.search` on an allowed route). It is returned as the RAW
+    # same-origin PATH — a valid `window.location.href` target.
+    assert rows[0]["funnel"] == "/admin", rows[0]
+    assert rows[1]["funnel"] == "/admin?tab=drafts", rows[1]
+    assert rows[2]["funnel"] == "/admin/blog", rows[2]
+    # Every other value is the claim card — never the return-to.
+    for row in rows[3:]:
+        assert row["funnel"] == APP_ORIGIN + "/?claim=1", row
+    # STATIC half: the extracted helper is only load-bearing if the CALL SITE
+    # still calls it. Without this, reverting line ~1424 to the pre-#3930 inline
+    # ternary leaves the helper as dead code and the rows above still pass.
+    callsite = _strip_comments(SIGNUP.read_text(encoding="utf-8"))
+    assert "window.location.href = claimFunnelUrl();" in callsite, (
+        "the ANON_TEAM_NO_OWNER funnel must navigate via the extracted "
+        "claimFunnelUrl() — an inline expression puts the decision back inside "
+        "the big script, where no harness can execute it (cycle-6 review)"
+    )
+    assert "window.location.href = isConsoleReturnTo() ?" not in callsite, (
+        "the console-vs-claim-card decision must not be re-inlined as a "
+        "`location.href =` ternary — that is the pre-#3930 form this pins"
+    )
 
 
 def test_early_block_validates_and_composes_the_dashboard_base() -> None:

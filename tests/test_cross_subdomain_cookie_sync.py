@@ -214,6 +214,35 @@ def _extract_fn_body(text: str, name: str) -> str:
     raise AssertionError(f"unbalanced function body: {name}")
 
 
+def _drop_semicolons_outside_strings(s: str) -> str:
+    """Drop `;` ONLY when it is not inside a '...' / "..." / `...` literal.
+
+    Escapes are honoured, so `'\\';'` does not open a phantom literal. Used by
+    `_normalize_helper` so that a semicolon's role as a STATEMENT terminator is
+    erased while its role as a cookie-attribute separator is preserved.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if quote is not None:
+            out.append(c)
+            if c == "\\" and i + 1 < len(s):
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+            out.append(c)
+        elif c != ";":
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _normalize_helper(src: str) -> str:
     """Collapse a helper declaration to a comparable token stream so the ES5
     shared-bridge form (`var f = function () { return X; };`), the ES6 oauth.py
@@ -229,8 +258,13 @@ def _normalize_helper(src: str) -> str:
     # normalize the signature: ES5 `function ()` == ES6 `() =>`
     s = s.replace("function ()", "() =>").replace("function()", "() =>")
     # drop semicolons BEFORE unwrapping so oauth's trailing `;` can't defeat
-    # the `$` anchor on the expression-body regex
-    s = s.replace(";", "")
+    # the `$` anchor on the expression-body regex. Quote-AWARE: a blanket
+    # `.replace(";", "")` also mangles the cookie attribute STRINGS
+    # (`'; Domain='` → `' Domain='`), so a lost `;` — the exact #1857/#1225
+    # production break this parity guard exists to catch, because the browser
+    # then folds Domain into the cookie VALUE and the cookie silently goes
+    # host-only — compared EQUAL (cycle-6 review).
+    s = _drop_semicolons_outside_strings(s)
     # unwrap expression bodies: `() => (X)` → `() => X` (dashboard/oauth style)
     s = re.sub(r"\(\s*\)\s*=>\s*\((.*?)\)$", r"() => \1", s, flags=re.DOTALL)
     # unwrap single-return block bodies: `() => { return X; }` → `() => X`
@@ -259,6 +293,18 @@ def test_adapters_share_host_conditional_attribute_logic() -> None:
     """
     helpers = ("isLocal", "isPremiselabsHost", "domainAttr", "secureAttr")
     copies = [("shared", _read(SHARED)), ("dash", _read(DASHBOARD)), ("oauth", _read(OAUTH))]
+    # NON-VACUITY SELF-GUARD (cycle-6 review): the extraction and the normalizer
+    # are the test's own machinery, and nothing here asserts either works —
+    # stubbing `_extract_helper` to `return ""` or `_normalize_helper` to a
+    # constant left all 14 tests green, so every drift could pass unnoticed.
+    probe = _extract_helper(copies[0][1], "domainAttr")
+    assert probe.strip(), "_extract_helper returned nothing — this test would be vacuous"
+    assert _normalize_helper(probe) != _normalize_helper(probe.replace("Domain", "Nope")), (
+        "_normalize_helper does not distinguish semantic drift — this test would be vacuous"
+    )
+    assert _normalize_helper("var f = function () { return X; };") == _normalize_helper(
+        "const f = () => X"
+    ), "_normalize_helper must still equate the ES5 and ES6 spellings"
     for name in helpers:
         normalized = [
             (label, _normalize_helper(_extract_helper(text, name)))
@@ -387,9 +433,13 @@ def test_auth_bounce_preserves_search_params() -> None:
     `test_admin_return_to.py` own the behaviour.
     """
     dash = _read(DASHBOARD)
+    norm = _strip_js_comments(dash)
     # Both bounce sites (the 401-provision path and the mount gate) pass the
     # search string and the #1909 error fragment through the local helper.
-    assert dash.count("bounceToAuth(window.location.search, oauthErrorHash())") >= 2, (
+    # Counted on the COMMENT-STRIPPED source: on raw source a commented-out call
+    # site keeps the count at 2, so half the bounce could be deleted and this
+    # test would still pass (cycle-6 review).
+    assert norm.count("bounceToAuth(window.location.search, oauthErrorHash())") >= 2, (
         "the auth bounce must preserve search params + the #1909 error fragment "
         "(both the 401-provision and the mount-gate bounce)"
     )
@@ -590,8 +640,15 @@ def test_blog_admin_adapter_keeps_host_conditional_cookie_scope() -> None:
 
 
 def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
-    """Attribute-sequence drift (Path/SameSite/Secure/Max-Age/expiry) breaks a
-    sibling reader even when the constants match.
+    """The write/remove templates must agree on the COOKIE_PATH value expression
+    and on the ORDER of the appended attributes (Domain, Path, SameSite, Expires
+    for the write; Domain, Path, SameSite, Max-Age for the removal) — a reordered
+    or inlined template breaks a sibling reader even when the constants match.
+
+    Scope, stated exactly: this compares the constant's value and the attribute
+    SEQUENCE and the Path-source expression. It does NOT compare the Max-Age /
+    Expires VALUES (`7 * 24 * 3600 * 1000` is checked by presence, and the
+    expiry expression is not compared across the two files).
 
     #4054 retarget: parity is between the two copies that still implement the
     SESSION adapter — the shared bridge and the oauth.py inline port. The
@@ -619,6 +676,21 @@ def test_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     assert "7 * 24 * 3600 * 1000" in shared and "7 * 24 * 3600 * 1000" in oauth
     # storageKey parity — the cookie name written/read must be the same on both sides
     assert "storageKey" in shared and "storageKey" in oauth
+    # ATTRIBUTE-SEQUENCE parity — the claim in this test's docstring. The
+    # presence checks above pass on a REORDERED template, which is the drift
+    # named here (a reader parsing `Name=Value; Domain=…; Path=…` breaks on a
+    # different order even when every attribute is present).
+    attr_pat = re.compile(r";\s*([A-Za-z-]+)=")
+    seq_shared = attr_pat.findall(shared)
+    seq_oauth = attr_pat.findall(oauth)
+    want_seq = ["Domain", "Path", "SameSite", "Expires", "Path", "SameSite", "Max-Age"]
+    assert seq_shared[:7] == want_seq, f"shared write/remove attribute order drifted: {seq_shared[:7]}"
+    assert seq_oauth == want_seq, f"oauth write/remove attribute order drifted: {seq_oauth}"
+    # The Path VALUE must still be the COOKIE_PATH CONSTANT on both sides: an
+    # inlined literal (`+ "; Path=/admin" +`) leaves the constant (and the
+    # presence check above) intact while writing a path no sibling reads.
+    assert "' + COOKIE_PATH" in shared, "shared must compose Path from COOKIE_PATH, not a literal"
+    assert '" + COOKIE_PATH' in oauth, "oauth must compose Path from COOKIE_PATH, not a literal"
 
 
 def test_shared_script_syntax() -> None:
