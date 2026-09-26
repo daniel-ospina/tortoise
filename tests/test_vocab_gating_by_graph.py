@@ -43,7 +43,12 @@ from tortoise.commit_schema import (
     compile_vocab,
     validate_payload_dict,
 )
-from tortoise.extractor_v2 import build_master_list, master_kind_forms
+from tortoise.extractor_v2 import (
+    CORE_OBJECT_KEYS,
+    _build_master_from_brief,
+    build_master_list,
+    master_kind_forms,
+)
 from tortoise.pack_state import (
     _KIND_PROP_KEYS,
     graph_installed_namespaces,
@@ -463,8 +468,6 @@ class TestPackKindDerivationFromBrief:
         tuple, so the brief and a filtered pack_kinds genuinely differ —
         order included (the brief's insertion order is prompt-visible).
         """
-        from tortoise.extractor_v2 import CORE_OBJECT_KEYS
-
         master = build_master_list()
         brief = compile_value_brief()
         expected = [k for k in brief
@@ -473,6 +476,69 @@ class TestPackKindDerivationFromBrief:
         assert list(master["pack_kinds"]) == expected, \
             "pack_kinds must be exactly the brief's non-core keys, in order"
         assert VENTURE_TRANCHE in master["pack_kinds"]
+
+    def test_every_catalog_pack_reaches_the_master_list(self, venture_catalog):
+        """The general guard: NO shipped catalog pack's namespace may be
+        absent from `pack_kinds` — the exact property the hardcoded tuple
+        violated.
+
+        FAIL-ON: the master re-applies a namespace allowlist. The oracle is
+        the registry's own `packs` (the compile INPUT), never the master —
+        under this hermetic catalog the pre-fix code reds with
+        `missing == ['venture']`.
+        REACHABLE: the registry genuinely holds the venture namespace and its
+        manifest genuinely declares kinds, so `missing` is a real comparison
+        and not an empty-vs-empty tautology.
+        """
+        from tortoise.pack_registry import PackRegistry, default_packs_dir
+
+        reg = PackRegistry(default_packs_dir())
+        reg.load_all()
+        assert "venture" in reg.packs, "fixture: the catalog must load venture"
+        kinds = build_master_list()["pack_kinds"]
+        missing = [ns for ns in reg.packs
+                   if not any(k.startswith(f"{ns}:") for k in kinds)]
+        assert not missing, f"shipped catalog packs absent from pack_kinds: {missing}"
+
+    def test_core_namespaced_brief_key_lands_in_objects_never_pack_kinds(self):
+        """A non-canonical `core:*` key must not enter `pack_kinds`.
+
+        FAIL-ON: the derivation classifies by `CORE_OBJECT_KEYS` membership
+        alone, so the stray key rides `pack_kinds` — and `render_s2_prompt`
+        derives the core-only prompt's pack-namespace list from exactly that
+        section, telling the model `core:` is a PACK namespace whose content
+        must be `unclassified`.
+        REACHABLE: `compile_value_brief` tolerates a non-canonical `core:*`
+        key by design (it filters only collisions with the canonical 16 — the
+        legacy/bypass `core` `:PackManifest` it defends against), so a brief
+        can genuinely carry one.
+        """
+        brief = {
+            "core:Project": {"description": "A project"},
+            "core:FinancialReport": {"description": "a bypass core kind"},
+            VENTURE_TRANCHE: {"description": "A financing tranche"},
+            "memory_granularity": {},
+        }
+        master = _build_master_from_brief(brief)
+        assert "core:FinancialReport" not in master["pack_kinds"]
+        assert master["objects"].get("core:FinancialReport") == \
+            "a bypass core kind", "the stray core kind must stay offered"
+        assert VENTURE_TRANCHE in master["pack_kinds"]
+
+    def test_brief_core_keys_are_exactly_the_canonical_object_kinds(self):
+        """The derivation rests on `CORE_OBJECT_KEYS` being the brief's whole
+        core key set; nothing else pins that equality.
+
+        FAIL-ON: `compile_value_brief`'s core dict gains or renames a key
+        while `CORE_OBJECT_KEYS` (the `objects` seed AND the `pack_kinds`
+        skip set) stays put — the stray key is then mis-sectioned with no
+        other test noticing.
+        REACHABLE: the real brief carries 16 core keys, and the comparison is
+        a SET equality, so an addition and a removal each red it.
+        """
+        core_keys = {k for k in compile_value_brief() if k.startswith("core:")}
+        assert core_keys == set(CORE_OBJECT_KEYS), \
+            "the brief's core keys and the canonical object kinds drifted"
 
 
 class TestGraphInstalledNamespaces:
