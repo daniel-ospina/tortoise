@@ -22038,13 +22038,25 @@ class TortoiseSDK:
 
         #5199 — the note is readable for **every** link: one row is returned per
         ``(source, reference)`` hop, so a source that carries several references
-        reports each one's note rather than one arbitrarily chosen hop. Rows are
-        ordered deterministically (resolved before the self-terminal fallback,
-        annotated before unannotated, then by node key and note), so neither
-        engine plan order nor insertion order decides what a caller sees. Before
+        reports each one's note rather than one arbitrarily chosen hop. Before
         this a bare containment link could win and report ``unknown`` for a chain
         whose note was right there — the ordinary shape, since `hosted_api` gives
         one Source a document derivation link AND external containment links.
+
+        Row order is a **presentation** choice, pinned for the two distinctions
+        that carry meaning: **resolved** links before the self-terminal fallback,
+        and **annotated** links before unannotated ones. Identity keys follow
+        (node key, note, label, content hash, title) so the shapes the writers
+        produce have a stable order — a fallback row for one source cannot
+        displace another's, a duplicate `:Source` sharing a ``url`` is separated
+        by its hash, and an `:Event` colliding with a `:Source` on its key is
+        separated by its label.
+
+        It is **not** a total order, and this docstring will not pretend it is:
+        two rows agreeing on every ordering key (same url/id, label, hash, title)
+        come back in engine order, and may still differ in a property the order
+        does not read (``ingestedAt``, say). **Select the link you want by its
+        source/target identity, not by row position.**
 
         Each row's pair speaks for THAT ``references`` link only, and these rows
         are **NOT** §4.6's Point-level aggregate: §4.6 aggregates the Point's
@@ -22061,26 +22073,36 @@ class TortoiseSDK:
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
             "OPTIONAL MATCH (src)-[ref_edge:references]->(ref) "
             "WITH src, ref_edge, ref "
-            # Deterministic order, so engine plan / insertion order can never
-            # decide what a caller sees. Deliberately NO `LIMIT`: one row per
-            # link, because a Point extracted from several sources — or a source
-            # referencing several things — must not have its remaining notes
-            # dropped.
+            # Order pinned for the two distinctions that carry meaning (resolved
+            # before fallback, annotated before unannotated), then by identity
+            # keys. See the docstring: this is NOT a total order — rows equal on
+            # every key come back in engine order. Deliberately NO `LIMIT`: one
+            # row per link, because a Point extracted from several sources — or a
+            # source referencing several things — must not have its remaining
+            # notes dropped.
             # (1) a resolved reference beats the self-terminal fallback;
             # (2) an ANNOTATED reference beats an unannotated one — this is what
             #     makes the note reachable at all;
-            # (3) node key, then the note itself. `eventId` is required: a legacy
-            #     raw-Cypher Event carries no `url` and no `id`, so without it
-            #     every such candidate keyed `''` and the tie-break did nothing.
-            #     `src` is required for the same reason one level up: a
+            # (3) node key, note, label, hash, title. `eventId` is required: a
+            #     legacy raw-Cypher Event carries no `url` and no `id`, so without
+            #     it every such candidate keyed `''` and the tie-break did
+            #     nothing. `src` is required for the same reason one level up: a
             #     fallback row has `ref` NULL, so every ``ref``-based key is `''`
             #     and the fallback rows of a Point with SEVERAL reference-less
-            #     sources (the D10 legacy-document shape `ingest.add_document`
-            #     produces) would tie end to end, leaving ingestion order in
-            #     charge of which document a caller sees first.
+            #     sources (the D10 legacy-document shape — `tortoise/ingest.py`
+            #     omits `source_url` at every `api.add_document` site) would tie
+            #     end to end. label/hash/title then separate the shapes that share
+            #     a key: an `:Event` colliding with a `:Source`, and two duplicate
+            #     `:Source` nodes sharing a ``url`` (the duplication
+            #     `tools/source_dedup_report.py` exists to find, #5012).
+            #     This is NOT a total order — rows equal on every key come back in
+            #     engine order; see the docstring.
             "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
             "coalesce(ref.url, ref.id, ref.eventId, src.url, src.id, ''), "
-            "coalesce(ref_edge.sourceVersion, '') "
+            "coalesce(ref_edge.sourceVersion, ''), "
+            "labels(coalesce(ref, src)), "
+            "coalesce(ref.contentHash, src.contentHash, ''), "
+            "coalesce(ref.title, src.title, '') "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
             "labels(coalesce(ref, src)) as labels, "

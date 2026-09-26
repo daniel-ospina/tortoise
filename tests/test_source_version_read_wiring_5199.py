@@ -10,7 +10,10 @@ version — but never the note, so even that reader could not compare the two.
 
 What this wiring ships: that reader reports the note, the source's current
 version, and a derived ``currency`` **per link** — one row per
-``(source, reference)`` hop, ordered deterministically.
+``(source, reference)`` hop, pinned so resolved links come before the
+self-terminal fallback and annotated links before unannotated ones. That is a
+**presentation** order, not a total one — the reader's docstring says so, and
+tests below pin the shapes that could otherwise tie.
 
 What it deliberately does NOT ship is a currency on the SEARCH hit, and the
 reason is worth keeping: a hit is a **Point**, and a Point's currency is an
@@ -270,7 +273,8 @@ def test_provenance_chain_orders_reference_less_sources_by_key():
     self-terminal fallback row whose `ref` is NULL, so EVERY `ref`-based order
     key evaluates to `''`. For a Point with several such sources the rows tied
     end to end and insertion order decided which document a caller sees first —
-    the D10 legacy-document shape, reachable through `ingest.add_document`,
+    the D10 legacy-document shape, reachable through the `api.add_document` sites
+    in `tortoise/ingest.py`,
     which omits `source_url` at every site.
 
     FAILS IF the order keys ignore `src`: the two insertion orders below would
@@ -301,6 +305,81 @@ def test_provenance_chain_orders_reference_less_sources_by_key():
 
     assert _bare(False) == _bare(True) == ["c1.txt", "c2.txt"], (
         "reference-less sources must be ordered by key, not by insertion order"
+    )
+
+
+def test_provenance_chain_separates_duplicate_sources_sharing_a_url():
+    """REGRESSION (#5199 review P1). Two `:Source` nodes CAN share a `url` —
+    `tools/source_dedup_report.py` exists because the duplication is measured
+    (#5012) — so a fallback row pair agrees on the node key (`src.url`) and ties,
+    differing only in the properties a caller reads. Leaving those in engine
+    order hands `rows[0]` to insertion sequence again, one level deeper than the
+    `src` fix alone reaches.
+
+    FAILS IF the order stops at the node key: reversing the `extractedFrom`
+    insertion order would then swap the two rows."""
+    def _dup(reverse: bool):
+        sdk = TortoiseSDK(_tmp("dup.db"))
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (p:Point {id:'pt_1', content:'a fact', pointKind:'fact', "
+            "status:'live', createdAt:'2024-01-01'})"
+        )
+        # Same url, different content — two distinct documents. The titles sort
+        # AGAINST the hashes on purpose: if `contentHash` were dropped from the
+        # order keys, `title` would then produce the opposite order and this test
+        # would fail, so the assertion pins the hash key specifically.
+        for h, title in (("H1", "two"), ("H2", "one")):
+            proj.g.query(
+                f"CREATE (s:Source {{url:'dup.txt', title:'{title}', "
+                f"contentHash:'{h}', ingestedAt:'2024-01-01'}})"
+            )
+        order = ["H1", "H2"]
+        for h in (reversed(order) if reverse else order):
+            proj.g.query(
+                f"MATCH (p:Point {{id:'pt_1'}}), (s:Source {{contentHash:'{h}'}}) "
+                f"CREATE (p)-[:extractedFrom]->(s)"
+            )
+        try:
+            return [r["source"].get("contentHash") for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _dup(False) == _dup(True) == ["H1", "H2"], (
+        "duplicate :Source nodes must be separated by hash/title, not insertion order"
+    )
+
+
+def test_provenance_chain_separates_an_event_from_a_source_on_a_shared_key():
+    """REGRESSION (#5199 review P1). Nothing keeps an `:Event`'s `eventId` and a
+    `:Source`'s `url` in disjoint namespaces, so one source can reference both
+    with the SAME string — the node key ties, and because the note is the
+    source's own `contentHash` it is identical on every edge from that source, so
+    the note key ties too. Only the target's LABEL separates them, and without it
+    the two rows come back in engine order.
+
+    FAILS IF `labels(...)` is dropped from the order keys."""
+    def _collide(reverse: bool):
+        sdk = TortoiseSDK(_tmp("collide.db"))
+        proj = _point_and_source(sdk, current="h2")
+        creates = {
+            "Event": "MERGE (e:Event {eventId:'x'}) ",
+            "Source": "MERGE (e:Source {url:'x'}) ",
+        }
+        order = ["Event", "Source"]
+        for label in (reversed(order) if reverse else order):
+            proj.g.query(
+                creates[label]
+                + "WITH e MATCH (s:Source {url:'c.txt'}) "
+                + "CREATE (s)-[r:references]->(e) SET r.sourceVersion = 'note'"
+            )
+        try:
+            return [r["labels"][0] for r in sdk.get_provenance_chain("pt_1")]
+        finally:
+            sdk.close()
+
+    assert _collide(False) == _collide(True) == ["Event", "Source"], (
+        "an :Event and a :Source sharing a key must be separated by label"
     )
 
 
