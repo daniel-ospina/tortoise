@@ -1097,10 +1097,11 @@ def test_real_workflow_halves_are_consistent():
     # halves carry every fast file exactly once and tilt is bounded.
     # #3400: the tilt invariant is now DURATION, not count. The full-matrix
     # halves are packed by measured weight (LPT), so a correct split is
-    # duration-balanced while carrying very different file counts — the real
-    # pool splits 195/325 at 27.95m/27.95m (one 855s file + ~130 sub-second
-    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
-    # encoded the duration-blind parity split this issue exists to remove.
+    # duration-balanced while carrying very different file counts — the count
+    # difference is the design (a few multi-minute files against the long tail
+    # of sub-second ones), and the assertion below checks the balance, not the
+    # count. The old `abs(count_a - count_b) <= 3` assertion encoded the
+    # duration-blind parity split this issue exists to remove.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
                                     workflow_halves_issues,
                                     HALF_DURATION_IMBALANCE_RATIO)
@@ -1287,8 +1288,9 @@ def test_duration_integrity():
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────
 # The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
-# duration-blind, so half (b) collected the slow files by luck (37.1m vs
-# 18.8m on the real pool) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# duration-blind, so half (b) collected the slow files by luck, tilted the split
+# far past the ratio the assertion below allows, and blew the 55m watchdog
+# (#3400). These pin the LPT pack (#1473)
 # on the full-matrix path and the coverage floor that keeps the `durations`
 # map from rotting back to a handful of entries.
 
@@ -1309,7 +1311,7 @@ def test_full_matrix_split_is_duration_balanced():
 
     Four heavy files + many 2s files: parity can cluster the heavies on one
     half; LPT must not.  The assertion is the *duration* ratio, not a count
-    ratio — the correct duration split of the real pool is 195/325 files.
+    ratio — a correct pack of the real pool carries unequal counts.
     """
     from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
     heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
@@ -1898,6 +1900,148 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
 
 
+_LEGACY_OPT_IN_VAR = "TORTOISE_TEST_SWEEP_LEGACY"
+_TEAM_OPT_IN_VAR = "TORTOISE_TEST_SWEEP_TEAM_STRAYS"
+
+
+def _env_map(container: object, where: str) -> dict:
+    """The ``env`` map of a workflow/job/step, or `{}` when absent.
+
+    A non-mapping container (a malformed workflow shape) is a hard error, not
+    a skip: this scanner backs a "the var is set by NO workflow" pin, so an
+    unreadable shape must fail closed with a clear message rather than crash
+    with an opaque `AttributeError` (or, worse, pass vacuously).
+    """
+    if not isinstance(container, dict):
+        raise AssertionError(
+            f"{where}: malformed workflow shape — expected a mapping, got "
+            f"{type(container).__name__}"
+        )
+    env = container.get("env")
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise AssertionError(f"{where}: `env` is not a mapping")
+    return env
+
+
+def _opt_in_sites(wf: dict, label: str, var: str) -> list[str]:
+    """Where ``wf`` sets env var ``var`` — structured, never a raw-text scan.
+
+    An ``env`` map key is a real setting at ANY of the three scopes GitHub
+    Actions inherits through — workflow-level, job-level, step-level (a
+    workflow-level token reaches every job and step, so scanning only the job
+    and step maps would leave the pin green while CI armed the opt-in); a
+    ``run`` script is inspected only after shell comments are stripped, so a
+    YAML or shell comment that merely NAMES the variable is not a hit. Returns
+    ``"<label>:<workflow>"`` / ``"<label>:<job>"`` / ``"<label>:<job> step N"``
+    labels for assertion messages.
+    """
+    sites: list[str] = []
+    if var in _env_map(wf, f"{label}:<workflow>"):
+        sites.append(f"{label}:<workflow>")
+    jobs = wf.get("jobs")
+    if jobs is None:
+        return sites
+    if not isinstance(jobs, dict):
+        raise AssertionError(f"{label}: `jobs` is not a mapping")
+    for job_name, job in jobs.items():
+        if var in _env_map(job, f"{label}:{job_name}"):
+            sites.append(f"{label}:{job_name}")
+        steps = job.get("steps")
+        if steps is None:
+            continue
+        if not isinstance(steps, list):
+            raise AssertionError(f"{label}:{job_name}: `steps` is not a list")
+        for i, step in enumerate(steps, start=1):
+            if var in _env_map(step, f"{label}:{job_name} step {i}"):
+                sites.append(f"{label}:{job_name} step {i}")
+            script = step.get("run")
+            if isinstance(script, str):
+                stripped = "\n".join(_strip_shell_comments(line)
+                                     for line in script.splitlines())
+                if var in stripped:
+                    sites.append(f"{label}:{job_name} step {i} (run)")
+    return sites
+
+
+def test_legacy_residue_opt_in_is_never_set_in_ci():
+    """#3634 Task 3: TORTOISE_TEST_SWEEP_LEGACY is a MANUAL operator opt-in and
+    is set by NO workflow — not just by the one python-ci.yml lane.
+
+    Contrast with the team-stray opt-in pinned just above: that pass is safe on
+    a dedicated, fresh-per-job container (nothing accumulates there without it),
+    so CI sets it inside the full==true docker gate. The legacy residue cohort
+    lives on a LONG-LIVED dev docker whose residue may include a live eval or
+    tenant name the next automated session does not own, so CI sets it on no
+    lane — a future edit that exports it (any workflow, any job, any gate) reds
+    by design.
+
+    SCOPE: EVERY file in `.github/workflows/` (`.yml` and `.yaml`, via
+    `_workflow_files`), parsed as YAML. The original python-ci.yml-only text pin
+    was too narrow: `post-merge-validation.yml` already sets the SIBLING
+    destructive opt-in (`TORTOISE_TEST_SWEEP_TEAM_STRAYS`) and was unscanned, so
+    "nowhere in python-ci.yml" was not the claim the docstring made. Analysis is
+    structured, not raw text: the variable must not be a workflow/job/step
+    `env` key nor appear in a `run` script after comments are stripped, so a
+    comment that merely NAMES it does not red.
+    """
+    wf_dir = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    workflows = _workflow_files(wf_dir)
+    assert workflows, "no workflow files found — the scan would pass vacuously"
+    import yaml
+    parsed = [(p.name, yaml.safe_load(p.read_text()) or {}) for p in workflows]
+
+    # POSITIVE CONTROL — the same scanner must FIND the sibling destructive
+    # opt-in that CI deliberately sets; without it, a scanner (or a glob) that
+    # found nothing would satisfy this pin vacuously.
+    team_sites = [s for label, wf in parsed
+                  for s in _opt_in_sites(wf, label, _TEAM_OPT_IN_VAR)]
+    assert team_sites, (
+        "the scanner did not find TORTOISE_TEST_SWEEP_TEAM_STRAYS in any "
+        "workflow, though post-merge-validation.yml sets it — the scan is "
+        "vacuous, not clean"
+    )
+
+    offenders = [s for label, wf in parsed
+                 for s in _opt_in_sites(wf, label, _LEGACY_OPT_IN_VAR)]
+    assert not offenders, (
+        "the legacy residue opt-in is a manual operator action — never a CI "
+        "setting; found in " + ", ".join(offenders)
+    )
+
+
+def test_opt_in_scanner_reads_workflow_level_env():
+    """#3634 Task 3 (N1): `_opt_in_sites` must read the WORKFLOW-level `env:`
+    map, not only `jobs.<id>.env` / `jobs.<id>.steps[].env`.
+
+    GitHub Actions inherits a workflow-level `env` into every job and step, so
+    a top-level `TORTOISE_TEST_SWEEP_LEGACY: "1"` arms the destructive manual
+    opt-in on every lane while a jobs-only scan stays green — the exact bypass
+    the pin above exists to close. Synthetic, not the real files, so deleting
+    the workflow-level branch reds HERE directly.
+    """
+    wf = {"env": {_LEGACY_OPT_IN_VAR: "1"},
+          "jobs": {"test": {"steps": [{"run": "echo hi"}]}}}
+    assert _opt_in_sites(wf, "wf", _LEGACY_OPT_IN_VAR) == ["wf:<workflow>"], \
+        "the workflow-level `env` map is not scanned"
+    # Keyed, not prose: a sibling var is untouched, and a `run` comment that
+    # merely names the var is not a setting.
+    assert _opt_in_sites(wf, "wf", _TEAM_OPT_IN_VAR) == []
+    assert _opt_in_sites(
+        {"jobs": {"test": {"steps":
+                            [{"run": "true  # " + _LEGACY_OPT_IN_VAR}]}}},
+        "wf", _LEGACY_OPT_IN_VAR) == []
+    # A malformed shape fails closed and legibly — a clear AssertionError, not
+    # an AttributeError from `.get`/`.items` on a non-mapping.
+    import pytest as _pytest
+    for bad in ({"env": "x"}, {"jobs": []}, {"jobs": {"j": "x"}},
+                {"jobs": {"j": {"steps": "x"}}},
+                {"jobs": {"j": {"steps": ["x"]}}}):
+        with _pytest.raises(AssertionError):
+            _opt_in_sites(bad, "wf", _LEGACY_OPT_IN_VAR)
+
+
 def test_drift_gate_cannot_skip_the_test_matrix():
     """#2656: the manifest drift gate must never be a prerequisite of the test
     matrix.
@@ -2046,58 +2190,168 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert "${{ join(needs.*.result, ' ') }}" in script, (
         "python-ci-gate must join `needs.*.result` — reading a subset means a "
         "red drift never reaches the check (#2656)")
+    # Defence in depth must not be deletable either: the per-leg rows below cover
+    # every declared leg, but the plain sweep is what catches a leg that reaches
+    # `needs:` WITHOUT a row (a shape the row-set assertion below forbids, so
+    # this is redundancy — deliberately kept and pinned rather than dropped).
+    assert re.search(r"grep -qE 'failure\|cancelled'", script), (
+        "the aggregate must keep the `failure|cancelled` sweep over "
+        "`needs.*.result` as defence in depth (#5219)")
 
-    # Render the GitHub expression into literal results and actually RUN the
+    # Render the GitHub expressions into literal results and actually RUN the
     # aggregate's script: this is what turns "the words are present" into "a
     # failed drift really exits non-zero". (Guarded: the assertion is about the
     # shell logic, which is the thing that has to be right on the runner.)
     if shutil.which("bash"):
-        def _verdict(*results: str) -> int:
-            rendered = script.replace("${{ join(needs.*.result, ' ') }}",
-                                      " ".join(results))
-            return subprocess.run(["bash", "-c", rendered],
+        job_names = list(jobs["python-ci-gate"].get("needs") or [])
+
+        # Derive each leg's selector from the WORKFLOW itself, not from a literal
+        # list here: a leg whose job-level `if:` reads a selector output may
+        # legitimately skip when that output is false; a leg with no diff gate
+        # (its `if:` names no selector output) must therefore ALWAYS be SUCCESS.
+        # Deriving it makes the rows and the jobs' own `if:`s unable to drift.
+        def _selector_of(leg: str) -> str:
+            outs = re.findall(r"needs\.changes\.outputs\.(\w+)",
+                              str(jobs[leg].get("if") or ""))
+            return outs[0] if outs else "-"
+
+        SELECTOR = {leg: _selector_of(leg) for leg in job_names}
+        DECLINABLE = {leg: sel for leg, sel in SELECTOR.items() if sel != "-"}
+        ALWAYS = [leg for leg, sel in SELECTOR.items() if sel == "-"]
+        # Default is "selected": an unexpected `skipped` is then a LOST shard,
+        # which is the polarity #5219 is about.
+        SELECTED = {out: "true" for out in DECLINABLE.values()}
+
+        # Every leg in `needs:` must have exactly ONE row, and that row's
+        # selector must be the output the job's own `if:` reads. Without this a
+        # shard added to `needs:` with no row — or with the wrong selector —
+        # would be certified green while `skipped` (the `lost-shard` shape).
+        rows: dict[str, str] = {}
+        for line in script.splitlines():
+            m = re.match(
+                r"^([\w-]+)\|\$\{\{\s*needs\.[\w-]+\.result\s*\}\}\|(.*)$",
+                line.strip())
+            if m:
+                rows[m.group(1)] = m.group(2).strip()
+        assert set(rows) == set(job_names), (
+            "every leg in `python-ci-gate.needs` must have exactly one row in "
+            "the aggregate's per-leg check; "
+            f"rows={sorted(rows)} vs needs={sorted(job_names)}")
+        for leg, selector in SELECTOR.items():
+            if selector == "-":
+                assert rows[leg] == "-", (
+                    f"`{leg}` has no diff gate, so its row must use `-` (must "
+                    f"always be SUCCESS); got {rows[leg]!r}")
+            else:
+                found = re.search(r"outputs\.(\w+)", rows[leg])
+                assert found and found.group(1) == selector, (
+                    f"`{leg}`'s row must gate on `{selector}` — the output its "
+                    f"own `if:` reads; got {rows[leg]!r}")
+
+        def _render(results: dict, selected: dict) -> str:
+            rendered = script.replace(
+                "${{ join(needs.*.result, ' ') }}",
+                " ".join(results.get(name, "skipped") for name in job_names))
+            # `needs.<job>.result` renders as EMPTY when <job> is absent from
+            # `needs:` — GitHub's own semantics, and the reason a leg dropped
+            # from the required check's list must fail closed here rather than
+            # quietly vanish.
+            rendered = re.sub(r"\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}",
+                              lambda m: results.get(m.group(1), ""), rendered)
+            rendered = re.sub(
+                r"\$\{\{\s*needs\.changes\.outputs\.(\w+)\s*\}\}",
+                lambda m: selected.get(m.group(1), ""), rendered)
+            unrendered = re.findall(r"\$\{\{[^}]*\}\}", rendered)
+            assert not unrendered, (
+                "this harness must render every GitHub expression the aggregate "
+                f"uses, or it proves nothing; unrendered: {unrendered}")
+            return rendered
+
+        def _verdict(results: dict, selected: dict | None = None) -> int:
+            sel = dict(SELECTED)
+            sel.update(selected or {})
+            return subprocess.run(["bash", "-c", _render(results, sel)],
                                   capture_output=True).returncode
 
-        count = len(jobs["python-ci-gate"].get("needs") or [])
-        green = ["success"] * count
-        assert _verdict(*green) == 0, (
+        green = {name: "success" for name in job_names}
+        assert _verdict(green) == 0, (
             "an all-green matrix must pass the required check")
+        # EVERY leg, not just the last one: a required check that cannot red on
+        # a given leg is a check that does not observe it (#5219).
         for red in ("failure", "cancelled"):
-            assert _verdict(*green[:-1], red) == 1, (
-                f"a `{red}` need must FAIL python-ci-gate — otherwise a drift "
-                "does not block the merge (#2656)")
-        assert _verdict(*green[:-1], "skipped") == 0, (
-            "a skipped need is not a failure (docs-only PRs skip the matrix)")
+            for leg in job_names:
+                bad = dict(green)
+                bad[leg] = red
+                assert _verdict(bad) == 1, (
+                    f"a `{red}` for `{leg}` must FAIL python-ci-gate — a leg "
+                    "the required check does not observe is a leg it cannot "
+                    "block (#5219)")
+        # An always-run leg has NO selector that can decline it, so a `skipped`
+        # one is a lost shard. This is the half of "`skipped` is not a pass"
+        # that covers the legs the gate cannot see skip: a silently skipped
+        # `changes`/`manifest-integrity`/`surface-guard` must red the check.
+        assert ALWAYS, "the aggregate must have always-run legs to assert on"
+        for leg in ALWAYS:
+            lost = dict(green)
+            lost[leg] = "skipped"
+            assert _verdict(lost) == 1, (
+                f"`{leg}` has no diff gate, so a `skipped` {leg} is a lost "
+                "shard and must red the required check")
+        # A leg the selector DID select reporting `skipped` is a lost shard...
+        for leg, selector in DECLINABLE.items():
+            lost = dict(green)
+            lost[leg] = "skipped"
+            assert _verdict(lost) == 1, (
+                f"`{leg}` skipped although the selector SELECTED it is a lost "
+                "shard — the required check must not certify it (#5219)")
+            # ... while one the selector DECLINED may skip: a diff that does not
+            # touch the leg must not be blocked by the gate's own shape.
+            declined = dict(green)
+            declined[leg] = "skipped"
+            assert _verdict(declined, {selector: "false"}) == 0, (
+                f"`{leg}` skipped because `{selector}` declined it must not "
+                "red the required check")
+        # A docs-only diff selects nothing at all.
+        declined_all = dict(green)
+        for leg in DECLINABLE:
+            declined_all[leg] = "skipped"
+        assert _verdict(declined_all,
+                        {sel: "false" for sel in DECLINABLE.values()}) == 0, (
+            "an all-declined (docs-only) diff must stay green")
+        # And the shape #5219 was actually about: a leg dropped from `needs:`
+        # must fail closed instead of vanishing — for EVERY leg, not just one.
+        for leg in job_names:
+            dropped = dict(green)
+            dropped.pop(leg)
+            assert _verdict(dropped) == 1, (
+                f"`{leg}` REMOVED from `needs:` must fail closed, not "
+                "disappear — that is the exact #5219 shape")
 
 
-def test_required_gate_excludes_the_long_legs():
-    """The required check's transitive `needs:` closure IS the merge-path
-    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
+def test_required_gate_covers_the_long_legs():
+    """#5219: the required check must OBSERVE every shard it certifies.
 
-    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
-    (strict up-to-date protection + `gh pr merge --auto --merge`, see
-    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
-    what releases the merge — the workflow run does not have to finish. When
-    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
-    ~30m on a green run, against a ~20m main-merge cadence) the head went
-    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
-    must NOT depend on the >15m legs — directly OR transitively — and those legs
-    must still EXIST: they move out of the gate, they are not deleted, and they
-    keep running pre-merge (advisory) and post-merge on main.
+    `python-ci-gate` is a REQUIRED status check AND the only `merge_condition`
+    of the Mergify merge queue, so its `needs:` list IS its whole claim: a leg
+    absent from it is a leg the gate cannot block, however red the run is.
 
-    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
-    this change left the push-only `canary-streak` in `needs:`, and because
-    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
-    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
-    not scheduled while `test (a)` ran, though every short leg had completed).
-    A direct-`needs` assertion cannot see that shape.
+    From 2026-09-24T15:25Z (#5017) until #5219 the list omitted `test`,
+    `test-slow` and `test-carve-out`, and the hole was not theoretical: on the
+    MERGED heads of #4838 (30c5b45) and #4633 (81401cc), `test (a)`, `test (b)`
+    and `test-carve-out` were all `completed/failure` while `python-ci-gate`
+    was `completed/success`. Across PRs at the time, the only thing separating
+    a gate that reddened on a failing `test` from one that passed was WHICH
+    VERSION of the workflow the PR head carried — heads with the pre-#5017 list
+    failed the gate, heads with the post-#5017 list passed it.
 
-    Keeping them running on the PR lane (rather than skipping them there) is
-    deliberate and belongs to the same contract: the `--admin` rail requires
-    the PR lane to EXECUTE every test shard main's lane executes
-    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
-    shard is not coverage — so a push-only leg would make every `--admin` merge
-    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    #5017 removed those legs DELIBERATELY to cut merge-path latency (`test (a)`
+    measured 30.0–31.5m against a ~20m main-merge cadence, so heads went BEHIND
+    before the merge could land — 0/41 PRs ever CLEAN). #5219 reverses that
+    trade on the owner's call: the integrity of the required check over
+    merge-path latency. This test pins the reversal so the shards cannot be
+    quietly dropped again — and it pins the DIRECT edge, not only the closure:
+    a transitive path is the `canary-streak` → `test` shape that satisfies a
+    closure-only assertion while nullifying the intent.
     """
     workflow = _load_python_ci()
     jobs = workflow["jobs"]
@@ -2116,21 +2370,40 @@ def test_required_gate_excludes_the_long_legs():
 
     for leg in ("test", "test-slow", "test-carve-out"):
         assert leg in jobs, (
-            f"{leg} must still RUN — the latency fix removes it from the "
-            "required aggregate, it does not delete the leg")
-        assert leg not in closure, (
-            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
-            "`needs:` — directly or transitively — which re-adds the ~30m "
-            "merge-path latency this change removes. A skipped intermediate "
-            "job does NOT break the chain: its own `needs:` still hold the "
-            "aggregate (the `canary-streak` → `test` shape).")
+            f"{leg} must exist — the required check must aggregate it, not "
+            "replace it")
+        assert leg in direct, (
+            f"{leg} must be a DIRECT need of `python-ci-gate`. The required "
+            "check — and the merge queue, whose only `merge_condition` it is — "
+            "must observe the shard it certifies; a gate that goes green while "
+            "this leg is red is the #5219 defect")
+        assert leg in closure
     assert "manifest-integrity" in closure, (
         "the required aggregate must still include the manifest drift gate, "
         "or a drift stops blocking merges (#2656)")
 
-    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
-    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
-    # pin that too: both triggers must remain, and no leg may be silenced.
+    # The OTHER half of the dropped-shard defence (#5219). The drift test pins
+    # rows -> needs; this pins needs -> the workflow's own universe of PR-lane
+    # jobs. Without it, deleting a leg from `needs:` AND its row is a
+    # self-consistent edit that passes every test while the shard sits outside
+    # the required check — and that pair is the NATURAL edit, because dropping
+    # the entry alone leaves an orphan row, which IS caught, so the author
+    # deletes both.
+    #
+    # A push-only job is exempt by DERIVATION, not by name: on a pull request it
+    # reports only `skipped`, so it carries no PR-lane signal.
+    push_only = {name for name, spec in jobs.items()
+                 if "github.event_name" in str(spec.get("if") or "")}
+    must_aggregate = set(jobs) - set(direct) - {"python-ci-gate"} - push_only
+    assert not must_aggregate, (
+        "every job in this workflow that reports on the PR lane must be a "
+        "`python-ci-gate` need — otherwise its failure cannot block a merge, "
+        f"which is the #5219 defect. Missing: {sorted(must_aggregate)}")
+
+    # `leg in jobs` alone only proves the leg is DEFINED. The contract leans on
+    # the legs still EXECUTING on the PR lane — the `--admin` rail's lane parity
+    # requires the PR lane to have run every shard main's lane runs — so pin
+    # that too: both triggers must remain, and no leg may be silenced.
     triggers = workflow.get("on", workflow.get(True)) or {}
     assert "push" in triggers and "pull_request" in triggers, (
         "the long legs must still run on push (post-merge detection on main) "
@@ -2340,6 +2613,24 @@ def test_tortoise_api_change_selects_api_and_core():
     assert "test_api.py" in selected, "api-registered pinner must run"
     assert "test_extractor.py" in selected, "core-registered pinner must run"
     assert "test_projection.py" in selected, "core slow-leg pinner must run"
+
+
+def test_tortoise_oauth_change_selects_api_and_core():
+    # #3036: `tortoise/oauth.py` is the hosted OAuth implementation. Its pinning
+    # tests are `api`-registered (test_oauth_mcp.py, test_oauth_token_fault.py,
+    # test_3036_oauth_retention.py, test_attribution_actor.py,
+    # test_user_identity_authority.py) and one is api+core
+    # (test_control_plane_offload_3498.py). Before #3036 mapped it, an
+    # oauth.py-only change fell through to `core` and silently skipped every
+    # api pinner — the #2938/#3154/#4367 silent-drop class, on the very file a
+    # retention or token-flow fix must change. CORE_ALSO keeps the core half.
+    r = _sel(["tortoise/oauth.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["api", "core"]
+    selected = set(r["test_files"]) | set(r["slow_selected"])
+    assert "test_3036_oauth_retention.py" in selected, "the sweep suite must run"
+    assert "test_oauth_mcp.py" in selected, "api-registered pinner must run"
+    assert "test_control_plane_offload_3498.py" in selected, "api+core pinner must run"
 
 
 def test_surface_audit_skips_removal_for_unmapped_surfaces(tmp_path):
