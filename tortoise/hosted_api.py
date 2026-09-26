@@ -4512,13 +4512,19 @@ async def get_current_org_gated(request: Request) -> dict:
     if override is not None:
         org = await _invoke_override(override, request)
         # #4488: publish the resolved org on the ASGI scope, exactly as the
-        # real lanes do (``get_current_org`` :3982, ``_get_current_org_
-        # supabase`` :4100, ``_session_user_org`` :4248). This branch resolves
+        # real lanes do (``get_current_org`` :3864, ``_get_current_org_
+        # supabase`` :3982, ``_session_user_org`` :4248). This branch resolves
         # an org WITHOUT stamping it, and an embed tally armed by
         # ``EmbedMeteringMiddleware`` resolves its org at FLUSH time from
         # exactly this key — so an unattributed tally filed a SPURIOUS
         # UNMETERED_INCREMENT operator alert ("no resolvable org … the ledger
         # will read short") for a capture whose org was never in doubt.
+        # There are TWO such branches, not one: the same hole existed on
+        # ``get_current_org_session`` below, which guards the encoding write
+        # routes (POST /v1/objects, /v1/subjects, /v1/points) — so both are
+        # stamped. Neither is reachable in production (nothing outside tests
+        # sets ``dependency_overrides``), but a test-only hole that files real
+        # operator alerts is still a hole.
         # ``.get`` not ``[]``: an override is test-supplied and may return a
         # bare dict; a missing id must not turn a metering lookup into a 500.
         if org.get("org_id"):
@@ -4704,6 +4710,14 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
     override = overrides.get(get_current_org)
     if override is not None:
         org = await _invoke_override(override, request)
+        # #4488: publish here too — see the twin note on ``get_current_org_
+        # gated`` above. This branch guards the encoding WRITE routes
+        # (POST /v1/objects, /v1/subjects, /v1/points), so leaving it
+        # unpublishing kept the tally unattributable on exactly the routes the
+        # embed meter exists to measure. Guarded with ``.get`` for the same
+        # reason: an override may return a bare dict.
+        if org.get("org_id"):
+            request.state.org_id = org["org_id"]
         return org
     # Session JWT (eyJ...) — verify + resolve the user's org.
     user = await get_current_user(request)
