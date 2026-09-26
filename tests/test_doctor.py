@@ -572,6 +572,74 @@ class TestDoctorPreInit:
         # probe skipped → the missing dir tree was NOT created
         assert not os.path.exists(os.path.dirname(db_path))
 
+    def test_a_legacy_collision_does_not_recommend_a_refusing_command(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The hint's own invariant: never name a command that REFUSES.
+
+        `install_capture` refuses when the legacy extension is already disabled
+        at `.tortoise-capture.disabled` (it will not overwrite the previous
+        backup).  The detector cannot report that collision — its legacy blind
+        spot is #3713 — so in that state the only finding is `stale-artifact`,
+        no manual-fix kind is present, and the hint used to print
+        `tortoise install pi`: a command that then refuses.
+
+        Mutation: drop the `_legacy_collision` arm in `_cmd_doctor` — this REDs
+        on the assertion that the refusing command is absent.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        res = _ci.install_capture("pi", home=tmp_path)
+        assert res.ok, res.error
+        root = _ci.pi_home(tmp_path)
+        installed = root / _pi_seam_name()
+        installed.write_text("// tortoise-hook-version: 0\n// body\n",
+                             encoding="utf-8")
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()      # the legacy directory
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()    # its backup name, taken
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert "Capture hooks" in out, out
+        assert "tortoise install pi" not in out, (
+            "the hint recommends a command that refuses in this state")
+        assert _ci.PI_DISABLED_DIRNAME in out, out
+
+    def test_a_memory_error_is_not_reported_as_an_unavailable_check(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Resource exhaustion must not be laundered into "check unavailable".
+
+        `MemoryError` is an `Exception`, so the per-harness
+        `except MemoryError: raise` is re-caught by the handler around the
+        whole block — a simulated exhaustion used to print
+        `check unavailable: simulated exhaustion`, abort the harness loop, and
+        leave rc at 0, contradicting the comment that says exhaustion is not a
+        refusal.
+
+        Mutation: remove the outer `except MemoryError: raise` — this REDs,
+        because doctor then prints the laundered warning instead of raising.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise import config as _config
+        from tortoise import hook_install as _hi
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _ci.install_capture("pi", home=tmp_path).ok
+
+        def _boom(*_a, **_k):
+            raise MemoryError("simulated exhaustion")
+
+        monkeypatch.setattr(_hi, "detect_artifact_install", _boom)
+        with pytest.raises(MemoryError):
+            _run_doctor([])
+
     def test_no_flags_fresh_machine_reports_not_set_up(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """The canonical first-run scenario: no flags, no env, no ~/.tortoise
         → doctor reports 'not set up yet — run tortoise init' (rc 0) instead

@@ -6357,6 +6357,10 @@ def _cmd_doctor(args):
     # green row for an install Codex never reads (#3818) — the same silent
     # no-capture the row exists to catch.
     try:
+        from tortoise.capture_install import (
+            LEGACY_PI_DIRNAME,
+            PI_DISABLED_DIRNAME,
+        )
         from tortoise.hook_install import (
             ARTIFACT_CONTRACTS,
             HARNESS_LAYOUTS,
@@ -6450,21 +6454,48 @@ def _cmd_doctor(args):
             # refusing command — the same mistake `hooks status` avoids.
             _manual = sorted({f.kind for f in findings
                               if is_manual_fix(f.kind)})
+            # A collision the DETECTOR cannot see, so it cannot arrive as a
+            # finding: `install_capture` refuses when the legacy extension is
+            # already disabled at `PI_DISABLED_DIRNAME` (it will not overwrite
+            # the previous backup).  The detector's legacy blind spot is #3713;
+            # this guard exists only so the hint below never names a command
+            # that refuses, which is this block's own invariant.
+            _legacy_collision = (
+                _harness == "pi"
+                and (_root / LEGACY_PI_DIRNAME).exists()
+                and ((_root / PI_DISABLED_DIRNAME).exists()
+                     or (_root / PI_DISABLED_DIRNAME).is_symlink())
+            )
             if _manual:
                 _hint = ("needs a manual fix before "
                          f"`tortoise hooks upgrade --harness {_harness}` "
                          f"can run ({', '.join(_manual)})" if _layout is not None
                          else "needs a manual fix before `tortoise install "
                          f"{_harness}` can run ({', '.join(_manual)})")
+            elif _legacy_collision:
+                _hint = (f"a legacy capture extension is already disabled at "
+                         f"{PI_DISABLED_DIRNAME} — move one aside")
             else:
                 _hint = (f"run `tortoise hooks status --harness {_harness}` "
                          "for the repair path" if _layout is not None else
                          f"run `tortoise install {_harness}` to repair")
+            # The finding's OWN detail names the repair command too, so it is
+            # the second place a refusing recommendation can come from.  In the
+            # collision state it is replaced by the read-only query, which
+            # cannot refuse.
+            _detail = (f"({first.kind}: {first.detail})" if not _legacy_collision
+                       else f"({first.kind}; run `tortoise hooks status "
+                            f"--harness {_harness}` for the repair path)")
             results.append((
                 _label, "❌",
-                f"{len(blocking)} stale issue(s) — {_hint} "
-                f"({first.kind}: {first.detail})",
+                f"{len(blocking)} stale issue(s) — {_hint} {_detail}",
             ))
+    except MemoryError:
+        # The inner `except MemoryError: raise` is re-caught by the handler
+        # below, because MemoryError is an Exception — so the refusal has to be
+        # repeated at THIS level or resource exhaustion reads as an
+        # unavailable check (and rc stays 0).
+        raise
     except Exception as e:
         results.append(("Capture hooks", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))

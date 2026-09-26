@@ -353,11 +353,17 @@ def read_hook_version(path: str | os.PathLike[str]) -> int | None:
     on ``session-start.sh``) is exactly this case, so ``None`` is a
     first-class *stale* signal, never an error.  The ``is_file`` gate also
     keeps a FIFO/socket at the path from blocking on ``read_text``.
+
+    ``is_file`` and ``read_text`` share one guard because ``is_file`` raises as
+    readily as ``read_text`` does: ``pathlib`` swallows only ENOENT, ENOTDIR,
+    EBADF and ELOOP, so a non-searchable parent directory reaches the caller as
+    ``PermissionError`` instead of ``None``.  ``None`` is the only failure
+    signal this reader emits for a path the user can edit.
     """
     p = Path(path)
-    if not p.is_file():
-        return None
     try:
+        if not p.is_file():
+            return None
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None

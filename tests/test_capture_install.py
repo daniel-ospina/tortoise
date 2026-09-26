@@ -3498,6 +3498,70 @@ def test_read_hook_version_reports_an_unrepresentable_marker_as_unmarkered(
     assert [f.kind for f in blocking] == ["unversioned-artifact"], blocking
 
 
+def test_read_hook_version_returns_none_for_a_non_searchable_parent(tmp_path):
+    """The reader's only failure signal is `None` (#4680 review).
+
+    `Path.is_file` re-raises EACCES — pathlib ignores ENOENT, ENOTDIR, EBADF
+    and ELOOP only — so a non-searchable parent reached every caller as
+    `PermissionError`, contradicting the docstring this reader is trusted on.
+    The reader is wired to a USER-EDITABLE artifact, so `None` must be the
+    whole of its failure surface.
+
+    Mutation: move `p.is_file()` back OUTSIDE the `try` — this REDs with
+    `PermissionError` instead of returning None.
+    """
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses the permission bits")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    target = locked / "session-start.sh"
+    target.write_text("# tortoise-hook-version: 3\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        assert hook_install.read_hook_version(target) is None
+    finally:
+        locked.chmod(0o700)
+
+
+def test_pi_artifact_kinds_are_reported_on_the_finding_they_describe(home):
+    """Every artifact kind the seam can report is pinned behaviourally.
+
+    Only `stale-artifact` had one, so a `<`↔`>` swap (ahead), a `!=`↔`==` swap
+    on the byte compare (modified), or a dropped structural branch all
+    survived the suite — the shape of a finding is part of its contract.
+
+    Mutation: compare the marker with `>` instead of `<` → the ahead arm REDs;
+    compare bytes with `==` instead of `!=` → the modified arm REDs.
+    """
+    res = install_capture("pi", home=home)
+    assert res.ok, res.error
+    root = capture_install.pi_home(home)
+    installed = root / capture_install.PI_EXTENSION_NAME
+    current = hook_install.contract_version_for("pi")
+    shipped = installed.read_text(encoding="utf-8")
+
+    def kinds() -> dict[str, bool]:
+        return {f.kind: f.blocking
+                for f in hook_install.detect_artifact_install(root, "pi")}
+
+    # A NEWER marker than the contract is ahead, and non-blocking: the seam is
+    # not from this checkout, so the repair must not call it stale.
+    installed.write_text(
+        shipped.replace(f"tortoise-hook-version: {current}",
+                        f"tortoise-hook-version: {current + 1}"),
+        encoding="utf-8")
+    assert kinds() == {"ahead-artifact": False}, kinds()
+
+    # The SAME marker with different bytes is ours but drifted, and it blocks.
+    installed.write_text(shipped + "// drifted\n", encoding="utf-8")
+    assert kinds() == {"modified-artifact": True}, kinds()
+
+    # A directory at the artifact path is structural, not a version state.
+    installed.unlink()
+    installed.mkdir()
+    assert kinds() == {"not-a-regular-file": True}, kinds()
+
+
 def test_manual_fix_predicate_covers_both_seam_classes():
     """`is_manual_fix` is the ONE declaration of "the automated repair refuses
     this kind", consulted by `hooks status` and by `doctor`.  It must know the
