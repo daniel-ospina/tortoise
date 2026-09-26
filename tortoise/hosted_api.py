@@ -15643,15 +15643,21 @@ def _forget_bucket_charge(buckets, key) -> None:
     is a no-op — it can never refund a FOREIGN entry (#3124 review). The
     existing concurrent-over-removal tolerance (a simultaneous accept's newest
     entry may be the one popped) is unchanged and documented at the caller.
+
+    A `key` equal to the reserved overflow sentinel is sent straight to the
+    attributed scan: `buckets.get(sentinel)` IS the shared overflow list, so
+    the owned-bucket branch would `pop()` an arbitrary FOREIGN entry (#3124
+    review) — the same structural boundary `_bucket_route` enforces.
     """
-    bucket = buckets.get(key)
-    if bucket:
-        bucket.pop()
-        return
-    if key in buckets:
-        # Present but EMPTY — no charge was recorded for this key, so there is
-        # nothing to refund and the shared overflow must not be touched.
-        return
+    if key != _BUCKET_OVERFLOW_KEY:
+        bucket = buckets.get(key)
+        if bucket:
+            bucket.pop()
+            return
+        if key in buckets:
+            # Present but EMPTY — no charge was recorded for this key, so there
+            # is nothing to refund and the shared overflow must not be touched.
+            return
     overflow = buckets.get(_BUCKET_OVERFLOW_KEY)
     if not overflow:
         return

@@ -9987,6 +9987,12 @@ class TestBoundedIpBucketStore:
         store2 = {sentinel: [(1.0, "other")], "k": []}
         _ha_mod._forget_bucket_charge(store2, "k")
         assert store2[sentinel] == [(1.0, "other")], store2[sentinel]
+        # The reserved sentinel itself must never pop a foreign entry: an owned
+        # lookup for it returns the shared overflow list (#3124 review).
+        store3 = {sentinel: [(1.0, "victim-a"), (2.0, "victim-b")]}
+        _ha_mod._forget_bucket_charge(store3, sentinel)
+        assert store3[sentinel] == [(1.0, "victim-a"), (2.0, "victim-b")], (
+            f"a sentinel-keyed forget popped a foreign entry: {store3[sentinel]}")
 
     def test_reserved_sentinel_key_cannot_poison_the_overflow(
             self, monkeypatch):
@@ -10383,10 +10389,13 @@ class TestBoundedMiddlewareStore:
         assert 429 in codes, "an all-live cap must produce the overflow 429"
 
     def test_middleware_has_no_periodic_full_scan(self, monkeypatch):
-        """The old 60 s wholesale `.items()` prune is gone: a tracked key must
-        do no store-wide iteration even when the deadline has elapsed."""
+        """#3124: the old 60 s wholesale `.items()` prune is gone — a tracked
+        key must do no store-wide iteration, on ANY dispatch."""
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         mw, _next = self._middleware(monkeypatch, max_buckets=100)
+        assert not hasattr(mw, "_last_cleanup"), (
+            "the 60 s sweep's deadline attribute is back — a periodic O(n) "
+            "prune has been reintroduced")
         mw._buckets = _BucketCountingStore()
         now = _ha_mod.time.time()
         # Pre-seed several OTHER keys so a full reversed()/items() sweep would
@@ -10399,7 +10408,6 @@ class TestBoundedMiddlewareStore:
 
         async def _run():
             await mw.dispatch(self._MwReq(), _next)  # create the bucket
-            mw._last_cleanup = 0  # would force the OLD wholesale scan
             mw._buckets.scans = mw._buckets.yielded = 0
             await mw.dispatch(self._MwReq(), _next)  # tracked key
             return mw._buckets.scans, mw._buckets.yielded
