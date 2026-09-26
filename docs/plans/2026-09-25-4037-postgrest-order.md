@@ -154,8 +154,9 @@ docstring frame is "CI green while prod 500s"):
   honoured, not ignored, and the bare `asc`/`desc` defaults follow Postgres
   (NULLs last on `asc`, first on `desc`).
 - `test_order_multi_term_is_stable` — `a.desc,b.asc` resolves `a`-ties by `b`.
-- `test_order_unparseable_term_raises` (parametrized: `"-x"`, `"a b"`,
-  `"a.desc.desc"`, `"a.asc.nullslast.desc"`) — any permissive fallback reds.
+- `test_order_unparseable_term_raises` (parametrized with all six:
+  `"-x"`, `"a b"`, `"a.desc.desc"`, `"a.asc.nullslast.desc"`, `"a..b"`,
+  `"a.desc."`) — any permissive fallback reds.
   An **empty/absent** order is NOT in this list: it is deliberately accepted,
   because the real seam guards with `if order:` — pinned separately by
   `test_falsy_order_is_accepted_like_the_real_seam`.
