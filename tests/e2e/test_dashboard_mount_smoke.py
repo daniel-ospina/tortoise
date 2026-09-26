@@ -1,6 +1,6 @@
 """#2709 (P0) authed-mount regression guard (RUN_DASHBOARD_E2E opt-in).
 
-Boot smoke for the TDZ bug class (#2426 / #2621 / #2709): the #2698 wizard
+Boot smoke for the TDZ bug class (#2449 / #2621 / #2709): the #2698 wizard
 "auto-open key modal" effect listed `harnessKey` — a `const` declared ~4,500
 lines later in App() — in its deps array. Deps arrays are evaluated eagerly
 during render, so App() threw
@@ -52,8 +52,10 @@ TEAM_ROW = {
     "name": "Mount Smoke",
     "tier": "free",
     "anon": False,
-    # role:'owner' → isOwnerAdmin True — exercises the #2709 effect body's
-    # owner-gated branch (a role-less row would make the branch vacuous).
+    # role:'owner' → isOwnerAdmin True. Note: the #2709 effect's owner-gated
+    # BRANCH also needs wizardStep === 2 (only reached under /welcome), which
+    # this boot smoke does not drive — the crash is caught regardless because
+    # React evaluates the deps array on EVERY render of App().
     "role": "owner",
 }
 
@@ -138,21 +140,32 @@ def _wire_boot(page: Page) -> None:
 
 
 def test_authed_mount_renders_with_zero_console_errors(page: Page) -> None:
-    """#2709: a signed-in user's boot must render the dashboard shell with
+    """#2709: a signed-in user's boot must render the Overview surface with
     ZERO page errors / console errors (regression: TDZ ReferenceError from the
-    #2698 wizard effect deps white-screened every authenticated mount)."""
+    wizard effect deps white-screened every authenticated mount)."""
     errors: list[str] = []
     page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
     page.on("console", lambda msg: (errors.append(f"console.{msg.type}: {msg.text}")
                                     if msg.type == "error" else None))
     _wire_boot(page)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # (a) real shell content: the app nav renders once App() mounts.
-    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
-    # settle post-mount effects (the #2709 auto-open-modal effect + loadAll)
-    # before asserting the console is clean.
-    page.wait_for_timeout(1500)
-    # (b) zero console/page errors — the sharp net for uncaught render throws.
+    try:
+        # (a) the Overview surface rendered — the sr-only live region flips to
+        # "Overview loaded" only once team + graphs + members + backups all
+        # resolve (all mocked above). This is the deterministic post-mount
+        # barrier: no fixed sleep, and it asserts the actual user journey
+        # rather than a tab-bar label that renders on every tab.
+        expect(page.locator('p[role="status"]')).to_contain_text(
+            "Overview loaded", timeout=25_000)
+    except AssertionError as exc:
+        # surface the captured TDZ error (if any) alongside the timeout — on the
+        # buggy bundle the body is empty and only this makes the regression
+        # legible in CI output.
+        raise AssertionError(
+            f"{exc}\n#2709: authed mount did not reach the Overview surface. "
+            f"console/page errors: {errors or '(none captured)'}") from exc
+    # (b) zero console/page errors — the sharp net for uncaught render throws
+    # (this also covers errors surfaced by post-mount effects).
     assert errors == [], \
         "#2709 regression guard: authed mount produced errors:\n" + "\n".join(errors)
 
@@ -163,6 +176,8 @@ def test_unauthed_load_redirects_to_auth(page: Page) -> None:
     what hid the bug in the first place; keep it pinned)."""
     errors: list[str] = []
     page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+    page.on("console", lambda msg: (errors.append(f"console.{msg.type}: {msg.text}")
+                                    if msg.type == "error" else None))
     _wire_routes(page)
     # no cookie seeded — plain anonymous load
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
@@ -170,4 +185,5 @@ def test_unauthed_load_redirects_to_auth(page: Page) -> None:
     # (wrangler :8788); assert navigation happened away from the app origin.
     page.wait_for_url("**/auth**", timeout=20_000)
     assert page.url.startswith(AUTH_HOST), f"expected auth redirect, got {page.url}"
+    assert errors == [], "unauthed redirect produced page errors:\n" + "\n".join(errors)
     assert errors == [], "unauthed redirect produced page errors:\n" + "\n".join(errors)
