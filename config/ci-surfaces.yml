@@ -1417,6 +1417,11 @@ surfaces:
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
   - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
+  # #4509: the S3 link-before-create prior lookup excludes the capture's own
+  # turn echoes BEFORE the callee's [:limit] cut — the retrieval-layer opt-in
+  # `exclude_turn_echo_session` seam (tortoise/retrieval.py predicate +
+  # tortoise/sdk.py pre-truncation filter). Hermetic (embedded store).
+  - test_prior_bound_4509.py
   - test_sdk.py
   - test_sdk_dedup.py
   - test_search_engine_recency.py
@@ -1833,6 +1838,7 @@ durations:
   test_invites_http.py: 13.6
   test_relationships_bounded.py: 17.6
   test_extractor_v2.py: 17.2
+  test_prior_bound_4509.py: 22.0
   test_fly_machines_guard.py: 13.1
   test_ask_sdk.py: 3.9
   test_battery_seed_ingest.py: 3.9

@@ -138,6 +138,34 @@ def test_fallback_snapshot_status_and_kind_semantics(sdk):
     assert b["id"] not in ids_ex and a["id"] in ids_ex
 
 
+def test_fallback_snapshot_turn_echo_exclusion_is_pre_ranking(sdk):
+    """#4509: the degraded fallback honours the same OPT-IN turn-echo exclusion
+    as the primary path — the capture's own turn echoes are dropped from the
+    CORPUS before ranking (so they cannot consume the window), and naming
+    another session is a no-op.
+
+    FALSIFIER — (1) *what value makes this test fail?* Whether ``fb_t0`` is in
+    the excluded result and whether ``fb_real`` survives. (2) *reachable?* Yes:
+    the fallback returns the whole corpus on a non-matching query, so all four
+    rows are in the window; only the corpus filter can remove the echoes."""
+    for i in range(3):
+        sdk.create_point("event", f"[user] unrelated filler {i}",
+                         id=f"fb_t{i}", is_episodic=True)
+    sdk.create_point("statement", "unrelated filler prior", id="fb_real")
+
+    default = [r["id"] for r in _no_match_query(sdk)]
+    assert {"fb_t0", "fb_t1", "fb_t2", "fb_real"} <= set(default), default
+
+    other = [r["id"] for r in sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, exclude_turn_echo_session="other")]
+    assert other == default, (default, other)
+
+    opted = [r["id"] for r in sdk.tortoise_fts_query(
+        query=FTS_MISS, limit=10, exclude_turn_echo_session="fb")]
+    assert "fb_real" in opted, opted
+    assert not any(i.startswith("fb_t") for i in opted), opted
+
+
 def test_fallback_snapshot_supersede_decoration(sdk):
     """E5 Task 5 (#1537): the embedded TF-IDF fallback decorates its hits
     with the promoted epistemic state (fetch_point_epistemic_state — the D8
