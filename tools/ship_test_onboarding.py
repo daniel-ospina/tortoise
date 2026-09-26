@@ -215,29 +215,40 @@ def claims_connection(text: str | None) -> bool:
 
 
 def server_observed(projection: dict | None, *,
-                    accept_wire_complete: bool = True) -> bool:
-    """True iff the SERVER'S OWN projection records a connection.
+                    accept_wire_complete: bool = False) -> bool:
+    """True iff the SERVER'S OWN projection records an OBSERVED CONNECTION.
 
-    The vocabulary is the SAME the shipped client uses — but the two shipped
-    derivations DIFFER, so the caller must pick the one matching the surface
-    it is judging:
+    #4646: the shipped client has ONE connection predicate now — both surfaces
+    (``overview.js::overviewConnection`` and ``main.jsx::serverHarnessConnected``)
+    read ``connectionObservation.js::harnessConnectionObserved``, which is
+    EDGE-ONLY. So the guard's default vocabulary is edge-only: the
+    ``harness-connected`` agent step edge. That is the fact the client may
+    claim, and the guard's question — "does this screen claim a connection the
+    server did not observe?" — is decidable against it.
 
-    * ``accept_wire_complete=True`` (default) matches
-      ``overview.js::overviewConnection``: the ``harness-connected`` agent step
-      edge, node ``status == 'complete'``, or jsonb ``onboarding_complete``.
-      Cases 1/2 of ``onboarding/state.py::resolve_wire_completion`` DO accept
-      the legacy wire-complete forms with zero agent step edges (the
-      grandfathered cohort), so this is PARITY WITH THE SERVER'S OWN COMPLETION
-      CONTRACT — which is what makes the guard's question decidable: "does the
-      screen claim more than the server's own projection?".
-    * ``accept_wire_complete=False`` matches ``main.jsx::serverHarnessConnected``
-      (the WIZARD's derivation), which is EDGE-ONLY. Judging the wizard screen
-      with the Overview vocabulary would report a false failure for a
-      grandfathered org that honestly renders the wizard's negative.
+    ``accept_wire_complete=True`` is NOT a surface's vocabulary. It accepts the
+    WIRE-COMPLETE FORMS — node ``status == 'complete'``, or a true
+    ``onboarding_complete`` — the shapes
+    ``onboarding/state.py::resolve_wire_completion`` treats as complete for the
+    grandfathered cohort. On a REAL projection a true ``onboarding_complete`` is
+    not the raw jsonb flag but that function's OWN output (`hosted_api.py`:
+    ``state["onboarding_complete"] = resolve_wire_completion(node_status,
+    raw_flag, steps)``), so probe and rule agree by construction. This is a
+    NAMED-FORM check, deliberately NOT a second implementation of the rule: it
+    does not re-check the zero-agent-edge condition, because duplicating the
+    server's ``_NON_AGENT_STEPS`` here would be a third constant to drift. The
+    only shape where the probe accepts more than the rule is one the server never
+    serves (a hand-built dict with a true flag AND agent steps) — pinned in
+    ``tests/test_ship_test_onboarding.py`` so the boundary is explicit rather than
+    implied. It must never be used to JUDGE a surface: before #4646 the Overview
+    card accepted those forms, so judging the card with them was parity; the card
+    is edge-only now, and accepting wire-complete for it would both pass a hidden
+    connection it no longer shows and fail an honest negative.
 
-    The property this instrument proves is the client's honesty, not the
-    server's history; a screen that renders exactly what the server reports is
-    honest even for a grandfathered org.
+    The property this instrument proves is the client's honesty: it may claim a
+    connection only when the server OBSERVED one. A wire-complete org with no
+    edge has nothing for the server to have observed, so the honest screen for
+    it is the observation phrase — not "Connected".
     """
     if not isinstance(projection, dict):
         return False
@@ -267,8 +278,7 @@ class Verdict:
 
 # The guard's rules, in priority order. A violation is a FAIL — the guard
 # exists to catch a lying UI, so "not sure" must never resolve to pass.
-def judge(ui: str, projection: dict | None, *, expected_surface: bool = True,
-          accept_wire_complete: bool = True) -> Verdict:
+def judge(ui: str, projection: dict | None, *, expected_surface: bool = True) -> Verdict:
     """Decide whether a screen's connection claim is honest.
 
     Two directions, both REQUIRED:
@@ -279,12 +289,13 @@ def judge(ui: str, projection: dict | None, *, expected_surface: bool = True,
       its own defect, and the positive direction of the walk).
 
     ``projection`` is the server's ``/v1/onboarding/state`` payload (the
-    ``onboarding`` object), or ``None`` when that read failed.
-    ``accept_wire_complete`` picks the shipped derivation that matches the
-    surface under judgement (see ``server_observed``): True for the Overview
-    card, False for the wizard's final screen.
+    ``onboarding`` object), or ``None`` when that read failed. There is
+    deliberately no ``accept_wire_complete`` parameter (#4646): the shipped
+    client has ONE edge-only connection predicate, so a screen is judged against
+    the observed edge. The wire-complete FORMS live in ``server_observed``'s own
+    explicit probe, which nothing that judges a screen may set.
     """
-    observed = server_observed(projection, accept_wire_complete=accept_wire_complete)
+    observed = server_observed(projection)
 
     if ui == ABSENT and expected_surface:
         return Verdict(False, "surface-missing", ui, observed,
@@ -445,30 +456,37 @@ def verdict_for(neg: Verdict, observed_after: bool, pos: Verdict, *,
     return f"incomplete: {pos.detail}"
 
 
-def connection_verdict(ui: str, surface_kind: str, projection: dict | None,
-                       page_text: str | None, *,
-                       expected_surface: bool = True) -> Verdict:
-    """The walk's per-surface decision, as one PURE function.
+def connection_verdict(ui: str, projection: dict | None,
+                      page_text: str | None, *,
+                      expected_surface: bool = True) -> Verdict:
+    """The walk's connection decision, as one PURE function.
+
+    There is deliberately NO ``surface`` parameter: with ONE edge-only predicate
+    (#4646) a surface cannot select a vocabulary, and accepting one would invite
+    the misreading that it can — which is exactly the trap the removed per-surface
+    switch was (it read `accept = surface_kind == "card"`). The walk records WHICH
+    DOM surface produced the state in the step's ``extra['surface']`` field;
+    the verdict
+    does not depend on it. Do not give a new surface its own vocabulary: fix the
+    client so it reads the one predicate.
 
     Extracted so the two call-site behaviours cycle 1 got wrong are unit-
     testable without a browser:
 
     * the ALL-PAGE sweep reads `page_text` — pass the UNTRUNCATED body, never
       the bounded artifact copy, or a claim rendered past the cap hides; and
-    * the vocabulary is chosen per surface (`card` → the Overview's
-      wire-complete forms, `wizard` → the wizard's edge-only form), so a
-      grandfathered org honestly rendering the wizard's negative is not a
-      false failure.
+    * the vocabulary is the shipped client's ONE connection predicate (#4646):
+      EVERY surface is edge-only, so each is judged with the same observed
+      edge. (Before #4646 the card additionally accepted the server's
+      wire-complete forms; a per-surface `accept` switch is gone with them.)
 
     A positive claim anywhere on the page promotes a non-CONNECTED resolved
     state to CONNECTED (the smuggle class T5); an ABSENT surface is judged
     as-is, so it can never be promoted into a claim.
     """
-    accept = surface_kind == "card"
     if ui != ABSENT and claims_connection(page_text) and ui != CONNECTED:
         ui = CONNECTED
-    return judge(ui, projection, expected_surface=expected_surface,
-                 accept_wire_complete=accept)
+    return judge(ui, projection, expected_surface=expected_surface)
 
 
 # ── DOM probes (real browser; the page is the source of truth) ──────────────
@@ -479,10 +497,13 @@ def connection_surface_kind(page, selector: str = OVERVIEW_CONNECTION_SELECTOR) 
     """Which connection surface the active page shows — ``"card"`` (the
     Overview grid), ``"wizard"`` (the wizard's final screen), or ``"none"``.
 
-    The two surfaces use DIFFERENT derivations in the shipped client (the
-    Overview accepts the server's wire-complete forms; the wizard requires the
-    ``harness-connected`` edge), so the guard must judge each with that
-    surface's vocabulary. One definition, used by both the reader and the walk.
+    #4646: the two surfaces share ONE edge-only connection predicate
+    (``connectionObservation.js::harnessConnectionObserved``, consumed by
+    ``overview.js`` and ``main.jsx``), so the guard judges both with the same
+    vocabulary. The return value names WHERE the status was read (the surfaces
+    render it in different DOM nodes; the walk records it alongside the
+    verdict) — it does not select a derivation. One definition, used by both the
+    reader and the walk.
     """
     if page.locator(selector).count():
         return "card"
@@ -1815,20 +1836,22 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
             return _finalize(obs, out_dir, td)
         ui = read_connection_surface(page)
         # The UNTRUNCATED body feeds the sweep: scrub()'s cap is for the
-        # recorded artifact only. `connection_verdict` picks the surface's
-        # own vocabulary and applies the all-page smuggle promotion.
+        # recorded artifact only. `connection_verdict` applies the ONE
+        # edge-only vocabulary (#4646 — it takes no surface argument, so no
+        # surface can select one) and the all-page smuggle promotion.
         raw = page_body(page)
         surface = connection_surface_kind(page)
         page_claims = claims_connection(raw)
         obs.assertions["walk_completed"] = ui != ABSENT
-        neg = connection_verdict(ui, surface, projection, raw)
+        neg = connection_verdict(ui, projection, raw)
         ui = neg.ui
         if ui == ABSENT:
             obs.add(name="before-observation", url=page.url, ui=ui, ok=False,
                     observed=neg.observed,
                     detail="no connection surface reached — the negative direction was not measured",
                     screenshot=shot(page, "before-observation"),
-                    extra={"projection": projection, "rule": neg.rule, "body": scrub(raw)})
+                    extra={"projection": projection, "rule": neg.rule, "surface": surface,
+                           "body": scrub(raw)})
             obs.verdict = INCOMPLETE_NO_SURFACE
             obs.reason = failure_reason(obs.verdict,
                                        session_state=session_state)
@@ -1837,6 +1860,7 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
                 observed=neg.observed, ok=neg.ok, detail=neg.detail,
                 screenshot=shot(page, "before-observation"),
                 extra={"projection": projection, "rule": neg.rule,
+                       "surface": surface,
                        "projection_status": projection_status,
                        "page_claims_connection": page_claims, "body": scrub(raw)})
         obs.assertions["no_claim_before_observation"] = neg.ok
@@ -1882,7 +1906,11 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
                     projection_status, projection = read_projection(ctx, args.base_url)
                     saw_readable = saw_readable or projection_readable(
                         projection_status, projection)
-                    if server_observed(projection):
+                    # The SAME edge-only question as the probe below (#4646): this
+                    # is the break criterion, so riding on the default here would
+                    # let a wire-complete form end the wait on an org that never
+                    # observed the edge — the #4291 false-product-finding class.
+                    if server_observed(projection, accept_wire_complete=False):
                         break
                     page.wait_for_timeout(1000)
                 if not saw_readable:
@@ -1892,7 +1920,15 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
                         "projection_unreadable",
                         f"GET /api/v1/onboarding/state -> {projection_status}")
                     return _finalize(obs, out_dir, td)
-                observed_after = server_observed(projection)
+                # The post-write poll asks the SERVER-OBSERVED question, so it
+                # is edge-only like every screen judgement (#4646): the probe is
+                # named explicitly rather than riding on the default, because
+                # re-accepting the wire-complete forms HERE would break on a
+                # grandfathered org's first read and report the honest screen as
+                # `positive_not_shown` (blaming the product for the absence the
+                # server really has). Pinned by
+                # `test_walk_is_judged_edge_only_on_a_wire_complete_org`.
+                observed_after = server_observed(projection, accept_wire_complete=False)
                 # `ok` stays the WRITE's outcome (that is what the step is
                 # named for); whether the server observed it is `observed`.
                 obs.steps[-1].observed = observed_after
@@ -1915,13 +1951,14 @@ def _walk(pw, args, obs, td, out_dir, shots, email, password) -> Observation:
                 f"GET /api/v1/onboarding/state -> {projection_status}")
             return _finalize(obs, out_dir, td)
         ui = read_connection_surface(page)
-        pos = connection_verdict(ui, connection_surface_kind(page), projection,
-                                 page_body(page))
+        surface = connection_surface_kind(page)
+        pos = connection_verdict(ui, projection, page_body(page))
         ui = pos.ui
         obs.add(name="after-observation", url=page.url, ui=ui,
                 observed=pos.observed, ok=pos.ok and pos.observed, detail=pos.detail,
                 screenshot=shot(page, "after-observation"),
                 extra={"projection": projection, "rule": pos.rule,
+                       "surface": surface,
                        "projection_status": projection_status,
                        "body": recorded_body(page)})
         # The positive half is only PROVEN when the server observation
@@ -2417,16 +2454,27 @@ def mutation_selfcheck() -> int:
             print(f"  BAD   GREEN (want RED)  reformat {text!r}")
         else:
             print(f"  ok    RED   (want RED)  reformat {text!r}")
-    # Surface-aware vocabulary: the WIZARD is edge-only
-    # (main.jsx::serverHarnessConnected), so a grandfathered wire-complete org
-    # honestly rendering the wizard's negative must NOT be judged as hiding a
-    # connection; the Overview (overview.js::overviewConnection) accepts it.
+    # #4646: the shipped client has ONE edge-only connection predicate, so both
+    # surfaces are judged with the SAME vocabulary — a card claiming "Connected ✓"
+    # for a wire-complete org with no observed edge is now caught (before #4646
+    # the card accepted those forms, so the guard passed it), and a card honestly
+    # rendering the observation phrase for that org is no longer a false failure.
     grandfather = {"status": "complete", "completed_steps": []}
-    wizard_view = judge(NOT_CONNECTED, grandfather, accept_wire_complete=False)
-    card_view = judge(CONNECTED, grandfather, accept_wire_complete=True)
+    honest = "No connection observed yet"
+    # Exercise the seam the walk actually calls (`connection_verdict`), so the ONE
+    # vocabulary is pinned end to end. Note the two surfaces are now the SAME
+    # computation — the surface is deliberately not an input (#4646), so a second
+    # identically-computed row labelled after the wizard would be parity theatre
+    # (the round-2 finding, which the parameter removal re-created). The
+    # regression that CAN be caught is pinned at the WALK level instead:
+    # `test_walk_is_judged_edge_only_on_a_wire_complete_org`.
+    card_claims = connection_verdict(CONNECTED, grandfather, "Connected ✓")
+    honest_verdict = connection_verdict(NOT_CONNECTED, grandfather, honest)
     for name, v, expect in (
-            ("wizard vocabulary is edge-only (grandfathered org is honest)", wizard_view, True),
-            ("overview vocabulary accepts the server's wire-complete form", card_view, True)):
+            ("an edge-only vocabulary is honest for a grandfathered org",
+             honest_verdict, True),
+            ("a card claiming Connected on a wire-complete org with NO edge is RED",
+             card_claims, False)):
         ok = v.ok is expect
         print(f"  {'ok ' if ok else 'BAD'} {'GREEN' if v.ok else 'RED':5} "
               f"(want {'GREEN' if expect else 'RED':5})  {name}")
