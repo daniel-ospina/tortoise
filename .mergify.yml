@@ -89,10 +89,8 @@ queue_rules:
 #   setting removes the click. It removes no check.
 #
 # DO NOT RESTATE THE REASONING HERE
-#   Three review cycles each found defects only in this comment's prose about
-#   *why* the change is safe — never in the setting itself. A narrative claim
-#   has no artifact to check it against, so it re-stales on every reading; the
-#   fix is to put the reasoning where it can be maintained and cited:
+#   Reasoning belongs where it can be maintained and cited, not duplicated into a
+#   comment that nothing re-reads:
 #     · #3016 — the base race this queue exists to remove
 #     · #5215 — merge throughput, and what the click actually cost
 #     · #5426 — `ai-review-gate` is red whenever no valid recorded review marker
