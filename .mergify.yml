@@ -35,13 +35,17 @@
 #      Re-read it when it changes; a stale list is a silent deadlock.
 #   3. `check-success` is deliberate, never `check-pending` or `-check-failure`:
 #      a skipped or neutral check must not read as a pass.
-#   4. ⛔ REMOVING A LINE FROM `queue_conditions` DOES NOT REMOVE IT FROM THE
-#      ENTRY GATE. Mergify injects branch-protection rules as conditions itself,
-#      and `branch_protection_injection_mode` defaults to `queue` — injected for
-#      *queuing and merging*. A required context is therefore an entry condition
-#      whether or not this file names it. The entry gate is changed ONLY by
-#      `branch_protection_injection_mode` (set on the rule below), never by
-#      editing the list.
+#   4. `branch_protection_injection_mode` DECIDES WHAT THE ENTRY GATE IS, and
+#      this rule sets it to `merge` (see the queue rule below). Mergify injects
+#      branch-protection rules as conditions itself, so the mode is load-bearing:
+#        * `queue` (the DEFAULT, NOT used here) injects every required context for
+#          QUEUING AND MERGING — under it, deleting a line from `queue_conditions`
+#          is a no-op, because the context is re-injected for entry anyway;
+#        * `merge` (SET HERE) injects them for the MERGE only — so here the entry
+#          gate IS the `queue_conditions` list, and editing that list is exactly
+#          how entry is changed.
+#      Read the mode before reasoning about the list; the same list behaves
+#      differently under the two modes.
 #
 # Last reconciled with the live required set: 2026-09-26
 #   queue_conditions (entry) : pricing-artifact, docs, test-isolation,
@@ -93,11 +97,14 @@ queue_rules:
     # Speculative batching: PRs that merge cleanly together are tested as one
     # group, so a single CI cycle can certify several merges.
     #
-    # Raised 2 -> 4 (2026-09-26). The two observed batch failures were both on a
-    # batch of ONE and both caused by main's own red (`test (a)`/`test (b)`), so
-    # they say nothing whatever about multi-PR batch size — they are NOT evidence
-    # that a larger batch is safe, and an earlier draft of this comment read them
-    # as if they were.
+    # Raised 2 -> 4 (2026-09-26), deliberately NOT higher. The two observed batch
+    # failures (#5293, #5335) were each a batch of ONE, both for #4617, and they
+    # failed on a GREEN base: at #5335's base main's own run was fully green while
+    # the batch failed `test_dashboard_client_paths_resolve.py::…` and
+    # `test_oauth_token_fault.py::…` (and #5293 failed a different test-(b) case).
+    # So these are COMPOSITION failures — the thing a queue exists to catch — not
+    # base red, and they are therefore NOT evidence that a larger batch is safe.
+    # An earlier draft of this comment claimed the opposite; it was wrong.
     #
     # Sizing: a full CI cycle is ~37 min measured on recent green runs (`test (a)`
     # 36.4 and 37.2 min; `python-ci-gate` ~36.8 min after `changes`), so batch 4
