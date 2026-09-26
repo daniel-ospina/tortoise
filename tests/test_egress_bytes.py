@@ -35,7 +35,6 @@ import pathlib
 import re
 import threading
 import time
-import uuid
 
 import pytest
 from fastapi import FastAPI, Request, Response
@@ -303,16 +302,28 @@ class TestWriter:
     def test_org_overflow_sentinel_is_outside_the_id_shapes(self):
         """The org sentinel must be outside the shapes org ids are generated in.
 
-        Org ids are GENERATED, not chosen: the provisioning lanes use
-        ``uuid4().hex[:26]`` and the registry lane ``org_<name>``. This pins the
-        SHAPE of those generators (via a sample of the uuid form) rather than
-        calling them — they live in the provisioning paths, not in a reusable
-        constructor — so a sentinel moved into either shape fails here.
+        Org ids are GENERATED, not chosen: the API-key/org lanes mint them with
+        ``hosted_api._short_id()`` and the create-org lane pre-mints with
+        ``_new_org_org_id()`` (both module-level, so they are called here for
+        real — an assertion on a locally-built uuid4 would bind to nothing and
+        could not fail when a generator changed shape). Their output must stay
+        outside the sentinel's hex-26 shape AND differ from it, so moving either
+        generator onto ``__other__`` reds this test. The registry lane's
+        ``org_<name>`` form is composed at its call site rather than by a
+        function, so that one is asserted textually.
         """
-        assert not re.fullmatch(r"[0-9a-f]{26}", monitoring.EGRESS_OVERFLOW)
-        assert not monitoring.EGRESS_OVERFLOW.startswith("org_")
-        # The generator the shape test above stands in for, exercised once.
-        assert re.fullmatch(r"[0-9a-f]{26}", uuid.uuid4().hex[:26])
+        sentinel = monitoring.EGRESS_OVERFLOW
+        assert not re.fullmatch(r"[0-9a-f]{26}", sentinel), (
+            f"the sentinel {sentinel!r} sits inside the hex-26 id shape")
+        assert not sentinel.startswith("org_")
+
+        for generator in (ha._short_id, ha._new_org_org_id):
+            for _ in range(4):
+                value = generator()
+                assert re.fullmatch(r"[0-9a-f]{26}", value), (
+                    f"{generator.__name__} left the hex-26 id shape: {value!r}")
+                assert value != sentinel, (
+                    f"{generator.__name__} produced the overflow sentinel: {value!r}")
 
     def test_control_characters_are_stripped_from_labels(self):
         """A percent-decoded path carries control characters into the exposition.
