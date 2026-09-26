@@ -174,6 +174,22 @@ fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
 
+# Fails ONLY the `origin/main` tip lookup, so the `--merged` walk still runs.
+# That is the single combination under which the fail-closed guard in
+# `_branch_terminal_state` is reachable: predicate 2 (which can only DOWNGRADE a
+# hit) has its ancestor set but NOT the tip to judge it against.
+GIT_STUB_NO_MAIN_TIP = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "rev-parse" ]; then
+  for a in "$@"; do
+    if [ "$a" = "origin/main" ]; then
+      exit 1
+    fi
+  done
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
 SURFACE_ROWS = (
     "open PRs",
     "recently-closed PRs",
@@ -1032,6 +1048,15 @@ class CollisionPreflightTest(unittest.TestCase):
     # generalises: a universal claim about a set is checkable, so it gets checked
     # and it breaks; describe the structure instead of universalising over it.
 
+    def _defaults_seen_by_the_tool(self) -> set:
+        """What the tool's own refusal set computes for this repo.
+
+        Reaches into the module rather than re-deriving the rule in the test: a
+        test that re-implemented the parse could pass while the tool's parse was
+        broken — which is exactly the failure mode P1-A was.
+        """
+        return _tool_module()._default_branch_names("git", str(self.repo), 30)
+
     def _git_out(self, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=self.repo, check=True,
                               capture_output=True, text=True).stdout.strip()
@@ -1060,7 +1085,9 @@ class CollisionPreflightTest(unittest.TestCase):
         # collide with the branch it is standing on. Without the auto-detection
         # this is a COLLISION — the guard is what makes it CLEAN.
         _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-auto")
-        rc, out = self.run_tool()
+        # `cwd=self.repo`: auto-detection now requires that the process is
+        # STANDING IN the target checkout, so the test must actually run from it.
+        rc, out = self.run_tool(cwd=self.repo)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("your own branch", out)
@@ -1170,13 +1197,43 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("your own PR", out)
 
-    def test_caller_checkout_still_auto_declares(self):
-        # The other half: a checkout the CALLER chose (here `--repo PATH`, and
-        # the `--repo`-omitted case sets the same flag) keeps the best-effort
-        # auto-detection. Without this, the P1-2 fix could be "disable
+    def test_standing_in_the_checkout_still_auto_declares(self):
+        # The other half: the checkout the process is STANDING IN keeps the
+        # best-effort auto-detection. Without this, the fix could be "disable
         # auto-detection entirely" and the suite would not notice.
         _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-mine")
-        rc, out = self.run_tool()          # `--repo <self.repo>` == an explicit PATH
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own branch", out)
+
+    def test_another_lanes_worktree_named_with_repo_is_not_mine(self):
+        # P2-1, the fail-open it fixes: `--repo PATH` naming ANOTHER lane's
+        # worktree used to declare THAT lane's branch and worktree as the
+        # caller's own — reporting CLEAN on its live work. Naming a path says
+        # where to LOOK, not whose work lives there. The caller must say so
+        # explicitly with --self-branch/--self-worktree.
+        other = self.tmp / "other-lane"
+        other.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "worktree", "add", "-q", "-b", f"fix/{ISSUE}-theirs",
+                        str(other), "HEAD"], cwd=self.repo, check=True,
+                       capture_output=True, text=True)
+        (other / "wip.txt").write_text("wip\n")
+        _git(other, "add", "wip.txt")
+        _git(other, "commit", "-qm", "their live work")
+
+        self.gh_fixtures(closed_prs=[])
+        # (a) The caller is elsewhere (the pytest cwd), so this is NOT its
+        #     checkout and the branch must block.
+        rc, out = self.run_tool(repo_arg=str(other))
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own", out)
+
+        # (b) Standing IN it does make it the caller's, so the convenience
+        #     returns — proving the rule is about standing in, not a blanket
+        #     refusal.
+        rc, out = self.run_tool(repo_arg=str(other), cwd=other)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("your own branch", out)
@@ -1184,13 +1241,13 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_default_branch_is_never_auto_declared(self):
         # ⛔ THE P0, AND IT IS THE *DEFAULT* INVOCATION. `setUp` leaves the
         # fixture checkout on `main`, and `run_tool()` passes `--repo <path>` —
-        # `caller_checkout` is True. So auto-detection sees `main` and declares
+        # the process stands in it. So auto-detection sees `main` and declares
         # it, and because the self arm runs FIRST for EVERY PR, an open PR whose
         # head branch is `main` (the ordinary shape for a fork PR) is demoted to
         # weak before the closing-reference test is ever reached: COLLISION
         # becomes CLEAN on real in-flight work.
         #
-        # The earlier `caller_checkout` guard fixed only the SEARCHED-clone case
+        # An earlier guard fixed only the SEARCHED-clone case
         # and left this one open, which is why the rule is now "never the DEFAULT
         # branch" rather than "only a caller's checkout".
         self.assertEqual(self._git_out("rev-parse", "--abbrev-ref", "HEAD"), "main")
@@ -1199,7 +1256,83 @@ class CollisionPreflightTest(unittest.TestCase):
             "headRefName": "main", "state": "open",
             "closingIssuesReferences": [{"number": ISSUE}],
         }])
-        rc, out = self.run_tool()
+        # `cwd=self.repo` is load-bearing: auto-detection only runs when the
+        # process stands in the checkout, so without it this test would pass
+        # because NO detection happened, not because the default was refused.
+        rc, out = self.run_tool(cwd=self.repo)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("your own", out)
+
+    def test_case_variant_default_branch_is_refused(self):
+        # ⛔ P1-A, the case half, driven at the UNIT level because the scenario
+        # is not constructible here: this box's filesystem is case-INSENSITIVE,
+        # so a repo holding both `main` and `Main` cannot exist, and
+        # `git branch -m Main` dies with 128 on the collision. The rule is a
+        # pure function of (name, defaults), so test it as one — and pin BOTH
+        # the widening AND the residual gap, so neither can drift unnoticed.
+        mod = _tool_module()
+        seeds = {"main", "master"}
+        for variant in ("Main", "MAIN", "mAiN", "Master", "MASTER"):
+            self.assertTrue(
+                mod._is_default_branch(variant, seeds),
+                f"{variant!r} must be refused as a default-branch spelling",
+            )
+        # The resolved `origin/HEAD` name is added to the same set, so a
+        # slash-bearing default is covered by the same comparison.
+        self.assertTrue(mod._is_default_branch("release/2024",
+                                               seeds | {"release/2024"}))
+        # THE HONEST HALF: a default branch outside the seed set is still
+        # auto-declared when `origin/HEAD` is unresolvable. This is a KNOWN,
+        # bounded gap (a normal clone resolves the symref, which covers every
+        # real default name); asserting it means the limitation is recorded
+        # rather than assumed away.
+        self.assertFalse(mod._is_default_branch("trunk", seeds),
+                         "if this ever becomes True, the seeds grew — update "
+                         "the docstring that documents the gap")
+
+    def test_default_branch_names_come_from_origin_head(self):
+        # The mechanism, not just the comparison: `origin/HEAD` must be READ
+        # (full ref, not `--short`) and the remote component dropped. Without
+        # this, the parser could regress to `rsplit("/", 1)[-1]` again and only
+        # the slash test would notice.
+        _git(self.repo, "update-ref", "refs/remotes/origin/release/2024", "HEAD")
+        _git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+             "refs/remotes/origin/release/2024")
+        self.assertEqual(
+            self._defaults_seen_by_the_tool(),
+            {"main", "master", "release/2024"},
+        )
+
+    def test_default_branch_with_a_slash_is_never_auto_declared(self):
+        # ⛔ P1-A. The default branch is read from
+        # `git symbolic-ref --short refs/remotes/origin/HEAD`, which prints
+        # `origin/<branch>`. Parsing that with `rsplit("/", 1)[-1]` registered a
+        # default branch named `release/2024` as `2024` — so the REAL name was
+        # missing from the refusal set and `release/2024` was auto-declared,
+        # re-opening the P0 through a parse. Exactly one component (the remote)
+        # may be dropped.
+        _git(self.repo, "checkout", "-q", "-b", "release/2024")
+        _git(self.repo, "update-ref", "refs/remotes/origin/release/2024", "HEAD")
+        _git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+             "refs/remotes/origin/release/2024")
+        # The FULL ref is what the tool reads; `_short_branch` (already tested)
+        # drops the one remote component. `--short` would print
+        # `origin/release/2024` and is deliberately NOT used, because
+        # `_short_branch` refuses to rewrite a bare `origin/x`.
+        self.assertEqual(
+            self._git_out("symbolic-ref", "refs/remotes/origin/HEAD"),
+            "refs/remotes/origin/release/2024",
+        )
+        self.gh_fixtures(open_prs=[{
+            "number": 5199, "title": "fix: land the thing", "body": "",
+            "headRefName": "release/2024", "state": "open",
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }])
+        # `cwd=self.repo`: the process must be standing in the checkout for
+        # auto-detection to be attempted at all — otherwise this would pass for
+        # the wrong reason (no detection, rather than a correct refusal).
+        rc, out = self.run_tool(cwd=self.repo)
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("your own", out)
@@ -1213,7 +1346,7 @@ class CollisionPreflightTest(unittest.TestCase):
             "headRefName": "main", "state": "open",
             "closingIssuesReferences": [{"number": ISSUE}],
         }])
-        rc, out = self.run_tool(self_branches=("main",))
+        rc, out = self.run_tool(self_branches=("main",), cwd=self.repo)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("not a competing claim", out)
@@ -1222,10 +1355,35 @@ class CollisionPreflightTest(unittest.TestCase):
         # The sensitivity half: the fix must not be "stop auto-declaring". A
         # lane branch (the fleet's normal shape) still gets the convenience.
         _git(self.repo, "checkout", "-q", "-b", f"fix/{ISSUE}-lane")
-        rc, out = self.run_tool()
+        rc, out = self.run_tool(cwd=self.repo)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("your own branch", out)
+
+    def test_remote_branch_note_does_not_report_a_terminal_test(self):
+        # P2-3. The `--merged` walk is meaningless for `refs/remotes`, so
+        # reporting its count claimed that N remote refs had been found merged
+        # and downgraded when the surface refused to judge a single one.
+        # ⛔ `origin/main` MUST exist for the negative assertion to mean
+        # anything. Without it the `--merged` walk fails, and the PRE-change tool
+        # emitted the "detection UNAVAILABLE" note — which ALSO lacks the count
+        # phrase, so `assertNotIn` passed for the wrong reason and the defect it
+        # names was uncatchable.
+        #
+        # Scope, stated exactly: the `assertIn` is the load-bearing half — the
+        # note text is what a regression to the pre-fix shape changes first. The
+        # `assertNotIn` now guards the COUNT path, which a single mutation cannot
+        # reach (the walk is skipped for `refs/remotes` AND the note branch is
+        # keyed on the namespace); it fires if both halves are reverted together,
+        # which is what reverting the P2-3 commit would do.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "update-ref", "refs/remotes/origin/fix/9999-x", "HEAD")
+        self.gh_fixtures(open_prs=[])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        remote_row = [ln for ln in out.splitlines() if ln.startswith("remote branches")][0]
+        self.assertIn("terminal tests are NOT applied here", remote_row)
+        self.assertNotIn("already merged into main", remote_row)
 
     def test_remote_tracking_ref_is_not_judged_terminal(self):
         # C2-5. A remote-tracking ref is a local CACHE of the last fetch, not the
@@ -1259,7 +1417,8 @@ class CollisionPreflightTest(unittest.TestCase):
         # union hides it for a body reference, but GitHub also derives closing
         # references from the title and commit messages, where the body need not
         # contain a closing keyword at all.
-        for bad in (["3061"], [{"number": "3061"}], [{"number": None}], ["x"]):
+        for bad in (["3061"], [{"number": "3061"}], [{"number": None}], ["x"],
+                    [{"number": True}]):
             with self.subTest(element=bad[0]):
                 self.gh_fixtures(open_prs=[{
                     "number": 5150, "title": "unrelated", "body": "",
@@ -1360,16 +1519,106 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("matched issue-number", out)
 
     def test_branch_merged_into_origin_main_is_terminal(self):
-        # The second, independent arm: ancestry DOES cover a fast-forward /
-        # merge-commit landing. Its own sensitivity half is the next test.
-        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        # The second, independent arm: a branch whose work LANDED and which main
+        # has since advanced PAST is immutable history, not in-flight work.
+        #
+        # ⛔ THIS TEST USED TO PIN A FAIL-OPEN DEFECT. It created the branch AT
+        # main's tip with NO COMMITS and asserted CLEAN. That is not a landing —
+        # it is the ordinary state of a lane between `git worktree add` and its
+        # first commit, which is EXACTLY when a second lane is most likely to
+        # dispatch the same issue. Plain ancestry called it "merged into main"
+        # and demoted it. The arm is now STRICT (tip != main's tip), and this
+        # test builds a genuine landing: a commit on the branch, then main
+        # advanced past it by a merge.
         ref = f"fix/{ISSUE}-ancestor-landed"
-        _git(self.repo, "branch", ref)
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / "landed.txt").write_text("landed\n")
+        _git(self.repo, "add", "landed.txt")
+        _git(self.repo, "commit", "-qm", "the work")
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "land it", ref)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         self.gh_fixtures(closed_prs=[])
         rc, out = self.run_tool(issue=ISSUE)
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("merged into main", out)
+
+    def test_worktree_on_a_fresh_branch_still_blocks(self):
+        # ⛔ THE P1-B GUARD, worktree side. `add_worktree` is exactly the state
+        # between `git worktree add` and the first commit: the branch tip IS
+        # origin/main's tip, so plain ancestry calls it "merged into main".
+        #
+        # ⛔ THE ASSERTION IS ON THE `local worktrees` ROW, NOT THE VERDICT, and
+        # that is the whole point. `add_worktree` creates a BRANCH as well as a
+        # worktree, so the local-branches surface raises the same hit and the
+        # verdict stays COLLISION even if the worktree surface is broken
+        # entirely — a VERIFIER PROVED IT by disabling `scan_worktree_surface`
+        # and watching this test still pass. An assertion the wrong code path can
+        # satisfy is the own-masking failure this file has already produced once
+        # (a worktree check masked by a branch check). It is therefore not
+        # claimed to prove the `main_tip` WIRING: feeding the scanner `None`
+        # disables predicate 2 and can only leave the row BLOCKING (fail-closed),
+        # and omitting the argument at all is a `TypeError` now that the
+        # parameter is required. What this pins is the row's own verdict.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.add_worktree("fresh", f"fix/{ISSUE}-fresh-wt")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        wt_row = [ln for ln in out.splitlines()
+                  if ln.startswith("local worktrees")][0]
+        self.assertIn("HIT", wt_row, wt_row)
+        self.assertNotIn("merged into origin/main", wt_row)
+
+    def test_unresolvable_main_tip_never_downgrades(self):
+        # ⛔ THE FAIL-CLOSED CORE, and the sensitivity partner of
+        # `test_branch_merged_into_origin_main_is_terminal`: the SAME repo state
+        # (a genuine landing, strictly behind main, so predicate 2 would fire)
+        # but with the tip lookup broken.
+        #
+        # Predicate 2 can only ever DOWNGRADE a hit, so an unknown tip makes
+        # "just created" and "landed behind main" indistinguishable, and the
+        # safe answer to "I cannot tell" is to leave the ref BLOCKING. Getting
+        # this backwards is a fail-OPEN: the tool reports CLEAN on a ref it did
+        # not manage to clear. A false COLLISION costs a re-check; a false CLEAN
+        # costs a duplicated dispatch.
+        ref = f"fix/{ISSUE}-landed-no-tip"
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / "landed.txt").write_text("landed\n")
+        _git(self.repo, "add", "landed.txt")
+        _git(self.repo, "commit", "-qm", "the work")
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "land it", ref)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        # Precondition: the ancestor walk STILL SEES this branch, so predicate 2
+        # is genuinely in play and only the tip is missing.
+        merged = self._git_out("for-each-ref", "--format=%(refname)",
+                               "--merged=origin/main", "refs/heads")
+        self.assertIn(f"refs/heads/{ref}", merged)
+
+        self.gh_fixtures(closed_prs=[])
+        git_stub = _write_exec(self.tmp / "git-stub-no-tip", GIT_STUB_NO_MAIN_TIP)
+        rc, out = self.run_tool(git_bin=git_stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
+
+    def test_branch_created_at_main_tip_with_no_commits_still_blocks(self):
+        # ⛔ THE P1-B GUARD, and the mutation the test above cannot catch: if the
+        # arm were non-strict (plain ancestry), this branch — created at
+        # origin/main's tip, no commits of its own — is trivially "an ancestor
+        # of main" and would be demoted. It must BLOCK, because a branch named
+        # after the issue IS the claim.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-fresh")
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
 
     def test_unmerged_branch_off_main_still_blocks(self):
         # ...and here the only difference is that the branch carries a commit

@@ -61,7 +61,7 @@ Design contract
    ``(?<![0-9])N(?![0-9])`` means ``3061`` never matches ``30610`` — so the
    tool cannot manufacture a collision out of an unrelated number.
 
-Surfaces (6 rows; 5 are hit-capable, the 6th is the issue metadata surface)
+Surfaces (6 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body closing
@@ -508,6 +508,51 @@ class Hit:
     strength: str  # "strong" (issue number / closing reference) | "weak"
 
 
+def _is_default_branch(name: str, defaults: set[str]) -> bool:
+    """Is `name` one of the repo's default-branch names?
+
+    Case-INSENSITIVE on purpose. The `main`/`master` fallback seeds are
+    exact-case, and when `origin/HEAD` cannot be resolved (a bare clone, a
+    fetched-only mirror, a single-ref CI checkout) those seeds are ALL the tool
+    has. A default branch spelled `Main` would then equal no seed, be
+    auto-declared as a self-branch, and demote every PR whose head it is — the
+    P0 re-entered through a spelling. Git branch names ARE case-sensitive, so
+    this is a deliberate WIDENING of the refusal set; erring toward refusing
+    leaves the hit BLOCKING, which is the fail-closed direction.
+
+    The residual gap is stated, not hidden: a default branch outside the seed
+    set entirely (say `trunk` or `develop`) is still auto-declared when
+    `origin/HEAD` is unresolvable. Resolving the symref is the real fix and it
+    covers every normal clone; the seeds are a fallback for the clones that have
+    no symref. This is asserted by
+    `test_case_variant_default_branch_is_refused`, which pins BOTH the widening
+    and the gap so neither can drift unnoticed.
+    """
+    return name.lower() in {n.lower() for n in defaults}
+
+
+def _standing_in(path: str | None) -> bool:
+    """True when `path` IS the directory this process is running from.
+
+    The ONLY condition under which self-identity is auto-detected, and
+    deliberately narrower than "the caller named this path". Naming a path says
+    where to LOOK, not whose work lives there: `--repo /other/lane` points at
+    another lane's checkout, and auto-declaring ITS branch and worktree as the
+    caller's own reported CLEAN on that lane's live work. Standing in a
+    directory is the one thing that does make its checkout yours.
+
+    `realpath` on both sides: `/var` and `/private/var` are the same place on
+    macOS and the two producers disagree on the spelling (the same trap
+    `Identity.owns_worktree` documents).
+    """
+    if not path:
+        return False
+    try:
+        return os.path.realpath(path) == os.path.realpath(os.getcwd())
+    except OSError:  # pragma: no cover - defensive
+        return False
+
+
 def _default_branch_names(git_bin: str, cwd: str, timeout: float) -> set[str]:
     """Names of the repo's DEFAULT branch, so auto-declaration can refuse them.
 
@@ -526,11 +571,23 @@ def _default_branch_names(git_bin: str, cwd: str, timeout: float) -> set[str]:
     """
     names = {"main", "master"}
     rc, out, _err, _to = _run(
-        [git_bin, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        # NO `--short`: the short form is `origin/<branch>`, which
+        # `_short_branch` deliberately refuses to rewrite (a bare `origin/x` is
+        # indistinguishable from a local branch literally named `origin/x`). Ask
+        # for the full ref so the tested helper — which drops exactly ONE
+        # component, and only the remote one — does the parsing.
+        [git_bin, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
         cwd, timeout,
     )
     if rc == 0 and out.strip():
-        names.add(out.strip().rsplit("/", 1)[-1])
+        # ⛔ `rsplit("/", 1)[-1]` was WRONG here and re-opened the very hole this
+        # function exists to close. It kept only the LAST component, so a default
+        # branch named `release/2024` was registered as `2024`: the real name was
+        # missing from the refusal set, `release/2024` was auto-declared as a
+        # self-branch, and the self arm (which runs FIRST for every PR, branch and
+        # worktree) demoted genuine in-flight work on the default branch — CLEAN
+        # on real work. The P0 re-entered through a parse.
+        names.add(_short_branch(out.strip()))
     return names
 
 
@@ -650,18 +707,16 @@ class RepoTarget:
     path: str | None = None
     source: str = "unresolved"
     requested: bool = False
-    # Whether `path` is a checkout the CALLER named, rather than one the tool
-    # FOUND by searching for a clone of the requested slug.
-    #
-    # This is a correctness flag, not bookkeeping, and it is ONE of TWO
-    # conditions on the best-effort self-identity detection (the other is the
-    # default-branch refusal in `main`). It is deliberately NOT described as
-    # "the caller's own checkout": `--repo PATH` naming somebody else's checkout
-    # sets it too, so it means only "the caller pointed at this", never "this is
-    # theirs". What it does establish is the difference that matters here — a
-    # checkout that was SEARCHED FOR is exactly the canonical hub clone, whose
-    # current branch is certain not to be the caller's private work.
-    caller_checkout: bool = False
+    # NO `named_by_caller` / `caller_checkout` field. An earlier revision carried
+    # one to mean "the caller pointed at this checkout rather than a clone found
+    # by search", and used it to decide which refs were the caller's own — so
+    # `--repo <another lane's worktree>` declared THAT lane's branch and worktree
+    # as the caller's and reported CLEAN on its live work. The distinction is
+    # NOT an ownership gate (a path is where to LOOK, not whose work lives
+    # there), and once `_standing_in` superseded it as the gate the field had no
+    # reader left. Deleting it is deliberate: a write-only field whose docstring
+    # explains a use that no longer exists is an invitation for the next reader
+    # to "restore" the gate. The reasoning lives on `_standing_in`.
 
 
 @dataclass
@@ -1259,6 +1314,16 @@ def _pr_terminal_state(pr: dict) -> str | None:
     return None
 
 
+def _is_issue_number(value: object) -> bool:
+    """True only for a genuine issue number.
+
+    ⛔ NOT `isinstance(value, int)`: `bool` subclasses `int`, so `True` passes —
+    and `issue in [True]` is true for issue #1. One predicate, used by both the
+    mapping and the bare-value arm, so they cannot drift apart.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _closing_ref_numbers(pr: dict) -> list[int]:
     """The issue numbers GITHUB ITSELF computed as closed by this PR.
 
@@ -1288,9 +1353,15 @@ def _closing_ref_numbers(pr: dict) -> list[int]:
         )
     numbers: list[int] = []
     for item in refs:
-        if isinstance(item, dict) and isinstance(item.get("number"), int):
+        # ⛔ `isinstance(..., int)` is TRUE FOR `bool` (`bool` subclasses `int`),
+        # so `[{"number": true}]` appended `True` — and `issue in [True]` is true
+        # for issue #1. GitHub does not emit it and the effect would only ADD a
+        # hit (fail-closed), but a type check that silently accepts the wrong
+        # type is not a type check. Both arms exclude it, so the element falls
+        # through to the refusal below rather than being read as a number.
+        if isinstance(item, dict) and _is_issue_number(item.get("number")):
             numbers.append(item["number"])
-        elif isinstance(item, int):
+        elif _is_issue_number(item):
             numbers.append(item)
         else:
             # ⛔ The contract above is applied PER ELEMENT, not just to the
@@ -1387,7 +1458,7 @@ def _ancestor_merged_refs(
 
 def _branch_terminal_state(
     ref: str, sha: str | None, merged_head_shas: set[str],
-    ancestor_merged: set[str] | None,
+    ancestor_merged: set[str] | None, main_tip: str | None,
 ) -> str | None:
     """Why this branch ref CANNOT be in flight, or None when it might be.
 
@@ -1408,8 +1479,39 @@ def _branch_terminal_state(
          squash-merge older than the window is simply NOT detected, and the
          branch keeps blocking (fail-closed — the safe direction, but the doc
          must not imply full coverage).
-      2. The tip is an ANCESTOR of origin/main — a merge or rebase that kept
-         history. One `for-each-ref --merged` per namespace.
+      2. The tip is a STRICT ancestor of origin/main — a merge or rebase that
+         kept history. One `for-each-ref --merged` per namespace.
+
+         ⛔ STRICT, because plain ancestry is AMBIGUOUS and the ambiguity is
+         fail-open. A branch created at main's tip that has NO COMMITS OF ITS OWN
+         YET is trivially "an ancestor of main" — the ordinary state of a lane
+         between `git worktree add` and its first commit, which is PRECISELY when
+         another lane may dispatch the same issue. Demoting it reported CLEAN on
+         a lane that had already claimed the issue by creating the branch. The
+         tip-equals-main-tip exclusion separates "just created" from "landed
+         behind main". The cost is that a FAST-FORWARD landing (branch tip ==
+         main tip) is no longer detected and keeps blocking — the fail-closed
+         direction, and this repo squash-merges anyway.
+
+    ⛔ `main_tip` HAS NO DEFAULT, AND `None` MEANS "DO NOT APPLY PREDICATE 2".
+    Both halves are load-bearing:
+
+      * No default, because a defaulted `main_tip=None` made strictness OPT-IN:
+        any caller that omitted it silently got plain (non-strict) ancestry, so
+        the fail-open this arm exists to close was one forgotten argument away.
+      * `None` disables the arm rather than loosening it, because this predicate
+        can only ever DOWNGRADE a hit. An unknown tip makes "just created" and
+        "landed behind main" indistinguishable, and the safe answer to "I cannot
+        tell" is to leave the ref BLOCKING. A tip that cannot be resolved (no
+        `origin/main`, no local checkout) therefore costs a false COLLISION at
+        worst, never a false CLEAN.
+
+    The residual ambiguity is stated rather than hidden: a ref whose tip is
+    strictly behind main is read as terminal even if its own work never landed,
+    and a fast-forward landing is missed entirely. Predicate 1 is the EXACT one
+    (a merged PR record names the branch's head); this arm is the secondary,
+    approximate one, and the durable fix for what it cannot resolve is the
+    stage-1 registry (decision D1).
 
     BOTH apply to LOCAL branches only. A remote-tracking ref is a local CACHE of
     the last fetch, not the remote's state: a branch that was squash-merged and
@@ -1436,7 +1538,14 @@ def _branch_terminal_state(
     if sha and sha in merged_head_shas:
         return ("squash-merged — its tip SHA is a merged PR's head, so its content "
                 "already landed even though its commits are not ancestors of main")
-    if ancestor_merged is not None and ref in ancestor_merged:
+    if (
+        # `main_tip is not None` FIRST: this predicate DOWNGRADES, so an
+        # unresolvable tip must leave the ref blocking (see the docstring).
+        main_tip is not None
+        and ancestor_merged is not None
+        and ref in ancestor_merged
+        and sha != main_tip
+    ):
         return "merged into origin/main (its tip is an ancestor of main)"
     return None
 
@@ -1444,7 +1553,7 @@ def _branch_terminal_state(
 def scan_branch_surface(
     surface: Surface, refs: list[tuple[str, str]], issue: int,
     identity: Identity, merged_head_shas: set[str],
-    ancestor_merged: set[str] | None,
+    ancestor_merged: set[str] | None, main_tip: str | None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -1472,7 +1581,9 @@ def scan_branch_surface(
                 "weak",
             )
             continue
-        terminal = _branch_terminal_state(ref, sha, merged_head_shas, ancestor_merged)
+        terminal = _branch_terminal_state(
+            ref, sha, merged_head_shas, ancestor_merged, main_tip,
+        )
         if terminal is not None:
             surface.add(
                 ref,
@@ -1513,6 +1624,7 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
 def scan_worktree_surface(
     surface: Surface, blocks: list[dict], issue: int, identity: Identity,
     merged_head_shas: set[str], ancestor_merged: set[str] | None,
+    main_tip: str | None,
 ) -> None:
     """Untruncated worktree scan — NUMBER match on the full path and branch.
 
@@ -1537,7 +1649,7 @@ def scan_worktree_surface(
             )
             continue
         terminal = _branch_terminal_state(
-            branch, block.get("head"), merged_head_shas, ancestor_merged,
+            branch, block.get("head"), merged_head_shas, ancestor_merged, main_tip,
         )
         if terminal is not None:
             surface.add(
@@ -2441,6 +2553,18 @@ def run_preflight(
     # than re-issuing the identical query (and so its unavailability is
     # reported once, consistently, on every surface that depends on it).
     ancestor_merged_local: set[str] | None = None
+    # `origin/main`'s tip, resolved ONCE: the ancestor arm must be STRICT (see
+    # `_branch_terminal_state`), and that needs the tip to compare against. If it
+    # cannot be resolved the arm is NOT applied and already-merged refs keep
+    # blocking — the fail-closed direction, never a silent loosening.
+    main_tip: str | None = None
+    if target.path is not None:
+        _rc, _out, _err, _to = _run(
+            [git_bin, "rev-parse", "--verify", "--quiet", "origin/main"],
+            cwd, timeout,
+        )
+        if _rc == 0 and _out.strip():
+            main_tip = _out.strip()
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -2459,14 +2583,33 @@ def run_preflight(
             # could not run: the test only ever DOWNGRADES a hit, so the run
             # stays fail-closed, but the note says so rather than reporting an
             # inability as "nothing is merged".
-            ancestor_merged = _ancestor_merged_refs(git_bin, cwd, namespace, timeout)
+            # ⛔ The `--merged` walk is ONLY meaningful for `refs/heads`.
+            # `_branch_terminal_state` refuses to judge a remote-tracking ref (it
+            # is a fetch cache), so running the walk on `refs/remotes` and
+            # reporting its count told the reader that N remote refs had been
+            # found merged and downgraded — when the surface had refused to
+            # judge a single one. A walk FAILURE there printed an alarming
+            # warning about a test that cannot affect that row. Report what is
+            # measured.
             if namespace == "refs/heads":
+                ancestor_merged = _ancestor_merged_refs(
+                    git_bin, cwd, namespace, timeout
+                )
                 ancestor_merged_local = ancestor_merged
+            else:
+                ancestor_merged = None
             scan_branch_surface(
-                surface, refs, issue, identity, merged_head_shas, ancestor_merged,
+                surface, refs, issue, identity, merged_head_shas,
+                ancestor_merged, main_tip,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
-            if ancestor_merged is None:
+            if namespace != "refs/heads":
+                surface.note += (
+                    "; terminal tests are NOT applied here (a remote-tracking ref "
+                    "is a local fetch cache, so judging it terminal could call a "
+                    "reused live branch merged)"
+                )
+            elif ancestor_merged is None:
                 surface.note += (
                     "; ⚠ 'merged into main' detection UNAVAILABLE (for-each-ref "
                     "--merged failed) — already-merged refs are NOT downgraded by "
@@ -2507,7 +2650,8 @@ def run_preflight(
             # "untruncated" enumeration implied the terminal test had run.
             _wt_ancestor = ancestor_merged_local
             scan_worktree_surface(
-                surface, blocks, issue, identity, merged_head_shas, _wt_ancestor,
+                surface, blocks, issue, identity, merged_head_shas,
+                _wt_ancestor, main_tip,
             )
             surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
             if _wt_ancestor is None:
@@ -2854,19 +2998,16 @@ def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
         # resolved slug is what is sent to gh).
         if current and current.lower() == slug_explicit.lower():
             target.path = path
-            target.caller_checkout = True
         else:
+            # A clone FOUND by searching, which is very often the ordinary
+            # checkout the caller is sitting in but is NOT evidence that it is
+            # theirs — hence `_standing_in`, not this branch, decides identity.
             target.path = find_local_clone(slug_explicit, args.git, timeout, roots)
-            # Searched for, NOT chosen by the caller (`caller_checkout` stays
-            # False). See the field's docstring: this is the fail-open case.
     else:
         slug, how = resolve_slug(args.gh, args.git, path, timeout)
         target.slug = slug
         target.path = path
         target.source = f"{source} ({how})"
-        # `--repo` omitted (path == cwd) or `--repo PATH` (the caller named it):
-        # either way the caller chose this checkout.
-        target.caller_checkout = True
     return target, 0
 
 
@@ -3092,7 +3233,7 @@ def main(argv: list[str] | None = None) -> int:
     # `--self-worktree` are ALWAYS authoritative and are never second-guessed.
     #
     # The best-effort auto-detection below is a different matter, and it is
-    # gated on `caller_checkout` deliberately. Adding a ref to the self set
+    # gated on `_standing_in` deliberately. Adding a ref to the self set
     # REMOVES hits, so "it can only leave more hits" — the claim this block used
     # to make — is false: it is the FAIL-OPEN direction. And the checkout is not
     # always the caller's. With `--repo owner/name`, `_resolve_target` searches
@@ -3109,7 +3250,7 @@ def main(argv: list[str] | None = None) -> int:
     self_worktrees = {
         w.strip().rstrip("/") for w in args.self_worktree if w and w.strip()
     }
-    if target.path and target.caller_checkout:
+    if target.path and _standing_in(target.path):
         self_worktrees.add(target.path.rstrip("/"))
         rc, out, _err, _to = _run(
             [args.git, "rev-parse", "--abbrev-ref", "HEAD"],
@@ -3129,9 +3270,10 @@ def main(argv: list[str] | None = None) -> int:
             # that is the caller ASSERTING it, and the assertion is theirs to
             # make. This only refuses to make it for them.
             _branch = out.strip()
-            if _branch not in _default_branch_names(
+            _defaults = _default_branch_names(
                 args.git, cwd_for_identity, args.timeout
-            ):
+            )
+            if not _is_default_branch(_branch, _defaults):
                 self_branches.add(_branch)
 
     identity = Identity(
