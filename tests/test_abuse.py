@@ -16,6 +16,7 @@ Covers (plan Task 2/4/9 + scoping deltas 8/9/11/13/14):
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -896,6 +897,45 @@ class TestDecisionPathObservability:
         errors = [r.getMessage() for r in caplog.records
                   if r.levelno == logging.ERROR]
         assert any("suspend_org" in m and "#4872" in m for m in errors)
+        # the record names the RESOLVED kind, not a generic "DECISION FAULT"
+        assert any("kind=ABUSE_ENFORCEMENT_FAULT" in m for m in errors)
+
+    def test_traceback_is_bounded_but_the_record_keeps_firing(
+            self, caplog, monkeypatch):
+        """#4872 amplification guard: the stack is bounded, the residual is not."""
+        monkeypatch.setattr(oa, "alert_store", lambda: None)
+        abuse._fault_traceback_at.clear()
+        try:
+            _fs, eng = self._engine("window_sum")
+            with caplog.at_level(logging.ERROR, logger="tortoise.abuse"):
+                for _ in range(3):
+                    eng._evaluate("org-11", abuse.EVENT_POINT_CREATE,
+                                  500, 3600, T0)
+            errors = [r for r in caplog.records
+                      if r.levelno == logging.ERROR]
+            assert len(errors) == 3          # every occurrence is still recorded
+            assert sum(1 for r in errors if r.exc_info) == 1  # stack once
+            assert all("kind=ABUSE_DECISION_FAULT" in r.getMessage()
+                       for r in errors)
+        finally:
+            abuse._fault_traceback_at.clear()
+
+    def test_traceback_window_boundary(self):
+        """The gate's window and its per-lane keying, at the exact boundary.
+
+        Exercises the ``now`` seam directly, so the 60s constant is pinned by
+        value instead of by "the dict was cleared".
+        """
+        abuse._fault_traceback_at.clear()
+        try:
+            assert abuse._fault_traceback_due("window_sum", now=100.0) is True
+            assert abuse._fault_traceback_due("window_sum",
+                                              now=159.99) is False
+            assert abuse._fault_traceback_due("window_sum", now=160.0) is True
+            # keyed PER LANE: another lane is not suppressed by this one
+            assert abuse._fault_traceback_due("suspend_org", now=100.5) is True
+        finally:
+            abuse._fault_traceback_at.clear()
 
     def test_lane_inventory_matches_the_declared_kinds(self):
         kinds = {kind for kind, _fb in abuse.DECISION_FAULT_LANES.values()}
@@ -903,19 +943,55 @@ class TestDecisionPathObservability:
                          oa.ABUSE_ENFORCEMENT_FAULT_KIND}
         assert abuse._UNKNOWN_LANE_KIND in kinds
 
-    def test_declared_lanes_match_the_source_call_sites(self):
-        """The completeness fence: a new swallow site or renamed token is RED."""
-        import ast
+    @staticmethod
+    def _method(tree, name):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(name)
 
+    def test_declared_lanes_match_the_source_call_sites(self):
+        """Completeness fence: no swallow on the decision path is unwired.
+
+        Two independent assertions: (1) EVERY ``except`` handler inside
+        ``AbuseEngine._evaluate``/``_flag`` calls ``report_abuse_decision_fault``
+        — so an ADDED uninstrumented swallow REDs, which is the defect #4872 is
+        about; (2) the emitted lane tokens equal ``DECISION_FAULT_LANES``
+        exactly once each — so a renamed token REDs.
+        """
         src = Path(abuse.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
         emitted: list[str] = []
-        for node in ast.walk(ast.parse(src)):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "report_abuse_decision_fault"
-                    and node.args
-                    and isinstance(node.args[0], ast.Constant)):
-                emitted.append(node.args[0].value)
+        unwired: list[str] = []
+        for fn in ("_evaluate", "_flag"):
+            for node in ast.walk(self._method(tree, fn)):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "report_abuse_decision_fault"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    emitted.append(node.args[0].value)
+                if isinstance(node, ast.ExceptHandler) and not any(
+                        isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Name)
+                        and c.func.id == "report_abuse_decision_fault"
+                        for c in ast.walk(node)):
+                    unwired.append(f"{fn}:{node.lineno}")
+                # `with contextlib.suppress(Exception):` is the evasion FORM
+                # of the same swallow, and `contextlib` is used in this very
+                # module — so a try/except-only fence would leave the
+                # "every swallow is wired" claim false.
+                if isinstance(node, ast.With) and any(
+                        isinstance(item.context_expr, ast.Call)
+                        and ((isinstance(item.context_expr.func, ast.Attribute)
+                              and item.context_expr.func.attr == "suppress")
+                             or (isinstance(item.context_expr.func, ast.Name)
+                                 and item.context_expr.func.id == "suppress"))
+                        for item in node.items):
+                    unwired.append(f"{fn}:{node.lineno} (contextlib.suppress)")
+        assert unwired == [], (
+            "uninstrumented swallow on the abuse decision path: "
+            + ", ".join(unwired))
         assert sorted(emitted) == sorted(abuse.DECISION_FAULT_LANES)
         assert len(emitted) == len(set(emitted))  # each lane wired exactly once
         # the four superseded debug swallows are gone from the source

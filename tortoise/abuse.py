@@ -101,12 +101,18 @@ def suspended_message() -> str:
 #: path (#4872): swallow site -> ``(incident kind, fallback)``. ``fallback`` is
 #: what the handler DID when the store call failed, i.e. the enforcement
 #: CONSEQUENCE — and it is NOT recoverable from the lane name, which is why the
-#: incident carries it: ``rule_event_between`` fails TOWARD a suspension
-#: (``continuity_true``), the opposite direction from ``window_sum`` /
-#: ``suspend_org``. This map is the single source of truth for both values, so
-#: the token and the code cannot drift as a pair, and it is pinned against the
-#: source by ``tests/test_abuse.py`` (a new swallow site or a renamed token is
-#: RED, not silent).
+#: incident carries it. TWO lanes fail TOWARD a suspension and the rest away
+#: from one: ``rule_event_between`` (``continuity_true``) and
+#: ``clean_window_episode_end`` — the latter because a failed guard read OR
+#: clear write leaves the flag episode ARMED, so the stale anchor survives and a
+#: later over-threshold evaluation can still reach ``suspend_org``. The
+#: away-from-suspension lanes are ``window_sum``, ``latest_flag_at`` (``reflag``)
+#: and the two enforcement ACTION lanes. This map is the single source of truth
+#: for both values, so the token and the code cannot drift as a pair, and it is
+#: pinned against the source by ``tests/test_abuse.py``: every ``except`` handler
+#: inside ``_evaluate``/``_flag`` must call ``report_abuse_decision_fault`` (an
+#: ADDED uninstrumented swallow is RED), and the emitted tokens must equal this
+#: map's keys exactly once each (a renamed token is RED).
 #:
 #: ``clean_window_episode_end`` names the clean-window episode-END LEG (its
 #: guard read OR its clear write), NOT the ``latest_flag_at`` method: H2 and H3
@@ -136,6 +142,29 @@ DECISION_FAULT_LANES: dict[str, tuple[str, str]] = {
 #: so it reports as the decision kind with ``fallback="unknown"``.
 _UNKNOWN_LANE_KIND = "ABUSE_DECISION_FAULT"
 
+#: Traceback-suppression window (seconds) for the fault ERROR record. The
+#: COMPACT record still fires on EVERY occurrence — it is the residual for a
+#: deployment with no alert channel — but the ``exc_info`` stack is emitted at
+#: most once per lane per window. The fault cause is shared substrate, so a
+#: substrate outage makes every decision-path store call raise, and
+#: ``record_point_create`` evaluates TWICE per write (R1 + R2): without this the
+#: debug-to-ERROR elevation would emit two multi-KB stacks per write request for
+#: the whole outage, i.e. a log-amplification path on the request path.
+_FAULT_TRACEBACK_WINDOW_S = 60.0
+_fault_traceback_at: dict[str, float] = {}
+_fault_traceback_lock = threading.Lock()
+
+
+def _fault_traceback_due(lane: str, now: float | None = None) -> bool:
+    """True at most once per ``lane`` per ``_FAULT_TRACEBACK_WINDOW_S``."""
+    now = time.monotonic() if now is None else now
+    with _fault_traceback_lock:
+        last = _fault_traceback_at.get(lane)
+        if last is not None and now - last < _FAULT_TRACEBACK_WINDOW_S:
+            return False
+        _fault_traceback_at[lane] = now
+        return True
+
 
 def report_abuse_decision_fault(lane: str, org_id: str,
                                 rule: str | None = None,
@@ -153,9 +182,12 @@ def report_abuse_decision_fault(lane: str, org_id: str,
     away.
 
     The alert is PLATFORM-SCOPED (one shared substrate cause, one incident) and
-    the local ERROR record carries ``exc_info`` — the PostgREST message is the
-    durable diagnosis. For a deployment with no alert channel configured the
-    ERROR record is the residual (the ``UNMETERED_INCREMENT`` contract).
+    the local ERROR record is the durable diagnosis, carrying the resolved
+    ``kind`` and the PostgREST message. For a deployment with no alert channel
+    configured the ERROR record is the residual (the ``UNMETERED_INCREMENT``
+    contract), and it fires on EVERY occurrence; only the ``exc_info`` stack is
+    bounded to one per lane per ``_FAULT_TRACEBACK_WINDOW_S`` (see
+    ``_fault_traceback_due``).
 
     Never raises: the alert must not become a new failure path on an enforcement
     path (a signal that can raise is a bypass by another name). The retained
@@ -165,13 +197,13 @@ def report_abuse_decision_fault(lane: str, org_id: str,
     with contextlib.suppress(Exception):  # the alert must never raise
         kind, fallback = DECISION_FAULT_LANES.get(lane, (_UNKNOWN_LANE_KIND, "unknown"))
         logger.error(
-            "ABUSE DECISION FAULT (#4872): lane=%s org=%s rule=%s "
+            "ABUSE FAULT (#4872): kind=%s lane=%s org=%s rule=%s "
             "error=%s: %s — the abuse enforcement decision could not complete; "
             "the retained state is the handler's fallback (%s), which may point "
             "TOWARD or AWAY from a suspension",
-            lane, org_id or "<none>", rule or "<none>",
+            kind, lane, org_id or "<none>", rule or "<none>",
             type(error).__name__, error, fallback,
-            exc_info=error,
+            exc_info=error if _fault_traceback_due(lane) else None,
         )
         from tortoise.operator_alert import alert_abuse_fault
 
