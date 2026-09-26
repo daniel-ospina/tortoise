@@ -3670,32 +3670,70 @@ def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
     return frozenset(found)
 
 
+def _deaccent_with_map(t: str) -> tuple[str, list[int]]:
+    """``_deaccent`` plus the raw index each surviving character came from.
+
+    The same filtering as ``_deaccent`` (NFD, drop the non-spacing marks),
+    without the final NFC recomposition, because the caller has to map a match
+    found in the folded text back to the span it came from in the raw one.
+    """
+    chars: list[str] = []
+    src: list[int] = []
+    for i, ch in enumerate(str(t or "")):
+        for d in unicodedata.normalize("NFD", ch):
+            if unicodedata.category(d) == "Mn":
+                continue
+            chars.append(d)
+            src.append(i)
+    return "".join(chars), src
+
+
+def _canonicalise_coordinations(text: str) -> str:
+    """Rewrite every ``_COORDINATION_PHRASES`` phrase to its operator.
+
+    Two passes over ONE text, and the second is what stops a phrase from
+    leaking its own ``as`` into a slot and masking the operator swap it stands
+    for.  The FIRST matches the text as written, so a separator BETWEEN the
+    phrase's words is the separator it is ("as well as", "as-well-as",
+    "as\u0338well as").  The SECOND matches the DE-ACCENTED text, because a
+    phrase WORD can carry a diacritic ("as w\u00e9ll as") or a non-spacing mark
+    inside it ("as we\u0338ll as") that no separator-based pattern sees; the
+    match is spliced back into the raw text at its mapped span, so the phrase
+    is replaced rather than left as two stray ``as`` tokens.
+    """
+    out = text
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        out = pattern.sub(f" {operator} ", out)
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        folded, src = _deaccent_with_map(out)
+        spans = [(src[m.start()], src[m.end() - 1] + 1)
+                 for m in pattern.finditer(folded)]
+        for start, end in reversed(spans):
+            out = out[:start] + f" {operator} " + out[end:]
+    return out
+
+
 def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
     """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
 
-    Read from the RAW token stream, through ``_wordlist_hits`` — and therefore
-    through the word-part split and ``_deaccent``, PER TOKEN.  That matters: a
-    member carrying a non-composing combining mark ("a\u0338nd") is still that
-    member, while a mark standing where a separator would be still SEPARATES
-    ("and\u0338the" holds `and`).  Reading the FLATTENED form instead LOSES the
-    first — ``_flat_words`` turns the mark into a separator, so the member is
-    split in two before ``_deaccent`` can drop it, the slot reads empty, and the
-    guard fails OPEN.  (A member fused to a separator, "and/or", survives
-    flattening and is not the reason; the raw read is what makes the marked
-    spelling work.)
-
     A multi-word coordination is canonicalised to its operator first
-    (``_COORDINATION_PHRASES``, matched case-INSENSITIVELY).  The text is
-    case-folded with ``_norm`` for that pass, and NOT de-accented as a whole:
-    ``_deaccent`` over the claim would glue a mark-separated member to its
-    neighbour ("and\u0338the" → "andthe") before ``_wordlist_hits`` could split
-    it, which is the same fail-open by another route.  The phrase pass lowercases
+    (``_COORDINATION_PHRASES``, case-INSENSITIVELY, including the marks a
+    phrase word may carry — see ``_canonicalise_coordinations``).  The members
+    are then read from the RAW token stream through ``_wordlist_hits`` — and
+    therefore through the word-part split and ``_deaccent``, PER TOKEN.  That
+    matters: a member carrying a non-spacing combining mark ("a\u0338nd") is
+    still that member, while a mark standing where a separator would be still
+    SEPARATES ("and\u0338the" holds `and`).  Reading the FLATTENED form
+    instead LOSES the first — ``_flat_words`` turns the mark into a separator,
+    so the member is split in two before ``_deaccent`` can drop it, the slot
+    reads empty, and the guard fails OPEN.  De-accenting the WHOLE claim loses
+    the second instead: the mark glues the member to its neighbour before
+    ``_wordlist_hits`` can split it.  Canonicalising first, per the paragraph
+    above, means neither route has to be chosen.  The phrase pass lowercases
     only because the member pass below it is case-insensitive too — a capital
     must not make one pass and the other disagree about one phrase.
     """
-    text = _norm(content)
-    for pattern, operator in _COORDINATION_PHRASE_RE:
-        text = pattern.sub(f" {operator} ", text)
+    text = _canonicalise_coordinations(_norm(content))
     found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)
     return tuple(found & slot for slot in _CONNECTIVE_SLOTS)
 

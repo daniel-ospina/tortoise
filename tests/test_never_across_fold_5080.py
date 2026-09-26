@@ -1047,10 +1047,33 @@ class TestDistinguishingDifference:
         # The mark INSIDE the phrase: still the coordination, not a stray `as`.
         assert v2._connective_slots("we ship as\u0338well as the client") == \
             (frozenset({"and"}), frozenset(), frozenset(), frozenset())
+        # A mark or a diacritic inside a phrase WORD, too.  The phrase's `as`
+        # is a standalone token here, so left uncanonicalised it fills the
+        # clause AND comparison slots and MASKS the operator swap the phrase
+        # stands for — `as well as` (an `and`) folds into a bare comparison
+        # `as`, which is the fail-open class this boundary exists to close.
+        for spelled in ("as we\u0338ll as", "as w\u00e9ll as"):
+            phrase = f"we ship the server {spelled} the client"
+            assert v2._connective_slots(phrase) == (frozenset({"and"}),
+                                                    frozenset(), frozenset(),
+                                                    frozenset()), spelled
+            assert v2._connective_swap(phrase,
+                                       "we ship the server as the client"), \
+                spelled
+            assert v2.distinguishing_difference(
+                phrase, "we ship the server as the client") \
+                == "substituted_content", spelled
+            assert not v2.fold_allowed(phrase,
+                                       "we ship the server as the client"), \
+                spelled
         for prior, candidate in (("we ship a\u0338nd test", "we ship or test"),
                                  ("we ship and test", "we ship o\u0338r test"),
                                  ("we ship the server and\u0338the client",
-                                  "we ship the server or the client")):
+                                  "we ship the server or the client"),
+                                 ("we ship as we\u0338ll as the client",
+                                  "we ship as the client"),
+                                 ("we ship as w\u00e9ll as the client",
+                                  "we ship as the client")):
             assert v2._connective_swap(prior, candidate), (prior, candidate)
             assert v2.distinguishing_difference(prior, candidate) \
                 == "substituted_content", (prior, candidate)
