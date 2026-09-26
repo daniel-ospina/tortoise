@@ -105,7 +105,9 @@ export function isAppReturnPath(pathname) {
  *                ordinary deep link (`/team?stale=1`) suppress the session
  *                probe and show a signed-in visitor the sign-in card.
  *
- * The remaining query is carried VERBATIM and is not credential-filtered. That is
+ * The remaining query is preserved — re-serialised through `URLSearchParams`,
+ * so it is equivalent but not byte-identical (`?a=%20b` becomes `a=+b`) — and is
+ * not credential-filtered. That is
  * intentional: under the BFF no app URL carries a credential in its query (the
  * fragment rule is #1566 and `oauthErrorHash()` owns it), and the value is
  * re-validated as a same-origin path by both the consumer and `safeNext`.

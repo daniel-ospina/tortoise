@@ -39,7 +39,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url))
 const dashboardRoot = join(here, '..')
-const signupHtml = readFileSync(join(dashboardRoot, 'public', 'signup.html'), 'utf8')
+const signupHtml = stripComments(readFileSync(join(dashboardRoot, 'public', 'signup.html'), 'utf8'))
 const mainJsx = stripComments(readFileSync(join(here, 'main.jsx'), 'utf8'))
 
 /** The `next` the bounce offers, or null when it offers none. */
@@ -184,9 +184,12 @@ test('tolerates a non-string or absent search and a null options bag', () => {
 
 // ── wiring pin: main.jsx must use the module ───────────────────────────────
 
-/** Extract a top-level `function <name>() { … }` from source by brace counting. */
+/** Extract the LAST top-level `function <name>() { … }` from source by brace
+ * counting. LAST, not first: JS hoisting means the last duplicate declaration
+ * wins at runtime, so taking the first would read a function that never runs —
+ * a correct decoy above an evasive broken body would satisfy the pin. */
 function functionBody(src, name) {
-  const start = src.indexOf(`function ${name}(`)
+  const start = src.lastIndexOf(`function ${name}(`)
   assert.ok(start !== -1, `${name} not found in main.jsx`)
   const open = src.indexOf('{', start)
   assert.ok(open !== -1, `no body for ${name}`)

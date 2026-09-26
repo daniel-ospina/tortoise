@@ -126,8 +126,12 @@ def _strip_js_comments(src: str) -> str:
     CODE, not prose. A comment quoting the pre-#3930 destination must neither
     red this test nor satisfy its positive pin (#3930 review).
 
-    Mirrors src/testSupport.js::stripComments: `//` preceded by `:` is left
-    alone so `https://` inside a string survives.
+    A PARTIAL port of src/testSupport.js::stripComments, not a mirror: it keeps
+    that function's `:`-prefixed-`//` guard (so `https://` inside a string
+    survives) but has no quote/template awareness — a `//` inside a `'`/`"`/` `
+    literal IS treated as a comment here, where the JS original preserves it.
+    Verified byte-identical on today's main.jsx; do not reuse this for a file
+    where `//` appears inside a string.
     """
     out = []
     i = 0

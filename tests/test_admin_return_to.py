@@ -234,18 +234,21 @@ function runHeadGate(search, cookie, session) {
 
 // Mimic the async post-session bounce: whatever claimRedirectTarget() returns is
 // assigned to window.location.href, so it must be a NAVIGATION target.
-function runTargets(ret, cookie) {
+function runTargets(ret, cookie, seamBase) {
   // #3930/#4054: the /auth page IS on the app origin, and `claimCardUrl()`
   // builds from `window.location.origin` — so the mock must be the app origin
   // or the claim-card assertion would pin the mock, not production.
   const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
   // PRODUCTION FIDELITY (#3930 review): signup.html computes
-  //   window.__DASHBOARD_BASE_URL = window.location.origin + ret
+  //   window.__DASHBOARD_BASE_URL = <seam origin | location.origin> + ret
   // and /auth is served on the APP origin (#4054), so the base the page reads
   // is APP + ret. Injecting `ORIGIN + ret` pinned a host production can never
   // produce, so a wrong-origin regression could not fail the tests below.
-  const DASHBOARD_URL = APP + (ret || '');
+  // `claimCardUrl()` reads THIS window property, so it must be set too —
+  // otherwise only its fallback branch is ever executed.
+  const DASHBOARD_URL = seamBase || (APP + (ret || ''));
+  e.win.__DASHBOARD_BASE_URL = DASHBOARD_URL;
   const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
     'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
@@ -265,8 +268,10 @@ function runConsumer(status, ret, cookie, opts) {
   if (opts.adminStale) e.win.__ADMIN_STALE = true;
   if (opts.oauthError) e.win.__OAUTH_ERROR = true;
   // PRODUCTION FIDELITY (#3930 review): see runTargets — the page's
-  // __DASHBOARD_BASE_URL is `window.location.origin + ret` on the APP origin.
-  const DASHBOARD_URL = APP + (ret || '');
+  // __DASHBOARD_BASE_URL is `location.origin + ret` on the APP origin, and
+  // `claimCardUrl()` reads that window property.
+  const DASHBOARD_URL = opts.seamBase || (APP + (ret || ''));
+  e.win.__DASHBOARD_BASE_URL = DASHBOARD_URL;
   const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
     'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
@@ -284,7 +289,7 @@ function runConsumer(status, ret, cookie, opts) {
 const out = { early: [], headGate: [], claim: [], consumer: [], gate: [] };
 for (const c of cases.early) out.early.push(runEarly(c[0], c[1], c[2]));
 for (const c of cases.headGate) out.headGate.push(runHeadGate(c[0], c[1], c[2]));
-for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1]));
+for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1], c[2]));
 for (const c of cases.consumer) out.consumer.push(runConsumer(c[0], c[1], c[2], c[3]));
 
 // #3080: execute the gate's real decision table (not a substring check).
@@ -928,8 +933,9 @@ def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
         # The producer must emit a PATH, never an origin: `urlsplit` proves the
         # target carries no scheme and no netloc. That is a STRING-SHAPE check,
         # not a resolution — the same-origin property itself is asserted below
-        # on the consumer side (`row["base"] == APP_ORIGIN + want`), and from a
-        # foreign base by authBounce.test.js's resolution test.
+        # on the consumer side (`row["base"] == APP_ORIGIN + want`), and by
+        # authBounce.test.js's resolution test, which resolves `next` against
+        # the app origin and requires the origin to be unchanged.
         assert target.startswith("/auth"), f"{pathname}: not a /auth target: {target}"
         resolved = urlsplit(target)
         assert not resolved.scheme and not resolved.netloc, f"the bounce named an origin: {target}"
@@ -1020,6 +1026,40 @@ def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
     assert rows[3]["nav"] == APP_ORIGIN + "/?claim=1", rows[3]
     assert rows[4]["nav"] == APP_ORIGIN + "/team?session_id=abc", rows[4]
     assert rows[4]["oauth"] == "/team?session_id=abc", rows[4]
+
+
+def test_claim_card_honours_the_dashboard_seam_origin() -> None:
+    """The #2744 seam still routes the claim card to the DASHBOARD, not to /auth.
+
+    In the split-origin local preview /auth and the dashboard are on different
+    ports, so `claimCardUrl()` must not inherit the port that served the auth
+    page. It reads the ORIGIN of `__DASHBOARD_BASE_URL` — which since #3930 may
+    itself carry a path+query — so a pathful base must contribute its origin
+    ONLY, never smear `…/team?session_id=abc/?claim=1` into the card URL.
+
+    Without this test the seam branch is unreachable in the harness (the driver
+    used to leave `__DASHBOARD_BASE_URL` unset, so only the fallback ran).
+    """
+    auth_port = "http://127.0.0.1:8788"
+    dash_port = "http://127.0.0.1:8790"
+    assert auth_port != dash_port
+    # `cases.claim` entries are [ret, cookie, seamBase].
+    rows = _run({
+        "claim": [
+            ["/team?session_id=abc", "tt_claim_pending=1", dash_port],
+            ["/team?session_id=abc", "tt_claim_pending=1", dash_port + "/team?session_id=abc"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "not a url"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "//evil.com"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "/\\evil.com"],
+            ["/team?session_id=abc", "tt_claim_pending=1", "javascript:alert(1)"],
+        ],
+    })["claim"]
+    for row in rows[:2]:
+        assert row["nav"] == dash_port + "/?claim=1", row
+    # A malformed, protocol-relative, backslash-authority or non-special-scheme
+    # base must fall back to THIS document's origin, never off-site.
+    for row in rows[2:]:
+        assert row["nav"] == APP_ORIGIN + "/?claim=1", row
 
 
 @pytest.mark.parametrize(
