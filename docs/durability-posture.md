@@ -95,16 +95,18 @@ build that does not recognise a version must **refuse the rebuild** rather than
 accept the file and wipe over a class it cannot see. The reserved numbers are
 `1` base (`:Batch`/`:Session` only), `2` = `1` + `config_snapshot` (#2814),
 `3` **contested** (#5327 claims it for `event_meta` and #5241 for
-`graph_identity`), and `4` = `3` + `onboarding_snapshot` / `onboarding_step_links`
-(#4641). Two rules follow. **The constant may only increase**, and a payload
-shape that is not a superset of the previous one takes a **new integer** —
-reusing a number for a disjoint payload is the failure the gate exists to
-prevent, and a build that reuses one reopens the wipe on a class it cannot see.
-Because the version check protects only the build that *reads* it, the
-section-set refusal in `_validate_prewipe_snapshot` is not optional: a build
-that cannot restore a section key must refuse the file whatever the version
-says. The two guards are what make the gate symmetric across siblings that land
-at different times. This is the #2814 rollout window one generation on — a
+`graph_identity`), and `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
+(#4641) — a **distinct** integer taken *because* `3` is contested, deliberately
+carrying neither sibling's section. Two rules follow. **The constant may only
+increase**, and a payload shape that is not a superset of the previous one
+takes a **new integer** — reusing a number for a disjoint payload is the
+failure the gate exists to prevent, and a build that reuses one reopens the
+wipe on a class it cannot see. Because the version check protects only the
+build that *reads* it, the section-set refusal in `_validate_prewipe_snapshot`
+is not optional: a build that cannot restore a section key must refuse the file
+whatever the version says. The two guards are what make the gate symmetric
+across siblings that land at different times. This is the #2814 rollout window
+one generation on — a
 **retired** (entry-less) artifact is stamped with the *current* version, so a
 build whose read set excludes it refuses on a retired file until it is deleted.
 
@@ -352,11 +354,11 @@ gate in `tests/test_durability_posture.py` fails the build if a
   the retired, entry-less one).
 - **#4641 residual (state-UNKNOWN)** — a rescue file that cannot say whether
   the graph it describes ever had onboarding state reports **UNKNOWN, not
-  absent**: either it predates onboarding preservation (carrying no
-  `onboarding_snapshot`/`onboarding_step_links` key, or carrying only one of the
-  two), or it carries this build's own `onboarding_unknown` marker inherited
-  from an earlier interrupted rebuild. The restore reports it as
-  `onboarding_state_unknown`, an ERROR line, and a gap in `onboarding_gap`,
+  absent**: it either predates onboarding preservation (carrying no
+  `onboarding_snapshot`/`onboarding_step_links` key), carries only ONE of the
+  two onboarding sections, or carries this build's own `onboarding_unknown`
+  marker inherited from an earlier interrupted rebuild. The restore reports it
+  as `onboarding_state_unknown`, an ERROR line, and a gap in `onboarding_gap`,
   mirroring #2814's `legacy_sidecar_no_config_record`. The signal is **carried
   forward** across this run's own sidecar write as a metadata key
   (`onboarding_unknown`), because this build writes both sections (empty), so
