@@ -18,8 +18,10 @@
 // Vite bundle), so the two route lists are copies — and a silent drift between
 // them is exactly the #3930 symptom (a return-to emitted but dropped).
 //
-// NON-VACUITY: the mutation control at the end rebuilds the pre-#3930 bounce
-// (`'/auth' + search + hash`) and shows the core assertion reds on it.
+// NON-VACUITY: the wiring pin EXECUTES the real `bounceToAuth` body against the
+// real module and asserts the destination it emits, so it cannot be satisfied
+// by a decoy token elsewhere in the function (a text pin could — see the note
+// at the pin). The regression itself is proven red by the branch's RED run.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -69,6 +71,7 @@ test('rejects everything that is not an app route', () => {
     // prefix confusion
     '/welcomex',
     '/welcomex/y',
+    '/welcomes',
     '/administrator',
     '/administer',
     // the app root: the default landing needs no return-to
@@ -199,14 +202,35 @@ function functionBody(src, name) {
 }
 
 test('main.jsx delegates its bounce to this module', () => {
-  // Scoped to bounceToAuth's OWN body: a file-scoped match would still pass if
-  // bounceToAuth reverted to the pathname-dropping form while a second call
-  // elsewhere in the file satisfied the pin.
-  const body = functionBody(mainJsx, 'bounceToAuth')
   assert.match(mainJsx, /import\s*\{[^}]*\bauthBounceTarget\b[^}]*\}\s*from\s*'\.\/authBounce\.js'/, 'the module is not imported')
-  assert.match(body, /window\.location\.replace\(/, 'bounceToAuth no longer navigates')
-  assert.match(body, /authBounceTarget\(\{/, 'bounceToAuth does not call authBounceTarget')
-  assert.match(body, /pathname:\s*window\.location\.pathname/, 'the bounce does not read the pathname')
+  // EXECUTE the real body against the real module. A text pin for the token
+  // `pathname: window.location.pathname` is bypassable: a decoy object literal
+  // anywhere in the body satisfies it while the call itself drops the pathname.
+  // Only running the function proves the pathname is what the destination is
+  // built FROM.
+  const body = functionBody(mainJsx, 'bounceToAuth')
+  const makeBounceToAuth = new Function('window', 'authBounceTarget', `${body}; return bounceToAuth`)
+  const calls = []
+  const bounce = makeBounceToAuth(
+    { location: { pathname: '/team', replace: (u) => calls.push(u) } },
+    authBounceTarget,
+  )
+  bounce('?session_id=abc', '')
+  assert.equal(
+    calls[0],
+    '/auth?session_id=abc&next=%2Fteam%3Fsession_id%3Dabc',
+    'a signed-out /team deep link must carry its pathname (and query) to /auth',
+  )
+  // And a pathname that is NOT an app route must carry nothing: the wiring
+  // inherits the module's allowlist rather than forwarding whatever the
+  // document's pathname happens to be.
+  const calls2 = []
+  const bounce2 = makeBounceToAuth(
+    { location: { pathname: '/blog', replace: (u) => calls2.push(u) } },
+    authBounceTarget,
+  )
+  bounce2('', '')
+  assert.equal(calls2[0], '/auth', 'a non-route pathname must not become a return-to')
   // The pre-#3930 destination built itself from the origin + search + hash only.
   assert.doesNotMatch(mainJsx, /['"]\/auth['"]\s*\+\s*search/, 'the pathname-dropping bounce is back')
 })
@@ -225,22 +249,4 @@ test('signup.html mirrors the route allowlist and the subtree set', () => {
   assert.doesNotMatch(signupHtml, /path !== "\/admin" && path !== "\/admin\/"/, 'the /admin-only predicate is back')
   // The query must ride the return-to, or /team?session_id= loses the handoff.
   assert.match(signupHtml, /var ret = path \+ u\.search/, 'the return-to no longer carries the query')
-})
-
-// ── mutation control ──────────────────────────────────────────────────────
-
-test('mutation control: the pre-#3930 bounce fails these assertions', () => {
-  // Rebuild the exact shape #3930 removed and show the core property is absent
-  // from it — so this file is not passing over an unchanged implementation.
-  // NOTE: this is a NON-VACUITY control for `nextOf`/`isAppReturnPath` (a local
-  // restatement cannot fail when the shipped module regresses); the shipped
-  // module's own guards are covered by the corpus tests above and, end to end,
-  // by tests/test_admin_return_to.py (which executes the shipped producer).
-  const legacyBounce = (search = '', hash = '') => '/auth' + search + hash
-  const legacy = legacyBounce('?session_id=abc', '')
-  assert.equal(legacy, '/auth?session_id=abc')
-  assert.equal(nextOf(legacy), null, 'the legacy bounce must carry no return-to')
-  const fixed = authBounceTarget({ pathname: '/team', search: '?session_id=abc' })
-  assert.equal(nextOf(fixed), '/team?session_id=abc')
-  assert.notEqual(legacy, fixed)
 })

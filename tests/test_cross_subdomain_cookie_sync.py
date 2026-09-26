@@ -121,6 +121,34 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_js_comments(src: str) -> str:
+    """Blank out `//` and `/* */` comments so a text assertion below matches
+    CODE, not prose. A comment quoting the pre-#3930 destination must neither
+    red this test nor satisfy its positive pin (#3930 review).
+
+    Mirrors src/testSupport.js::stripComments: `//` preceded by `:` is left
+    alone so `https://` inside a string survives.
+    """
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/" and not (out and out[-1] == ":"):
+            while i < n and src[i] != "\n":
+                i += 1
+        elif c == "/" and nxt == "*":
+            i += 2
+            while i < n and not (src[i] == "*" and i + 1 < n and src[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def _extract_helper(text: str, name: str) -> str:
     """Extract the full declaration source of a named helper from either
     adapter style: ES5 `var f = function () { ... };` (shared bridge) or ES6
@@ -365,7 +393,10 @@ def test_auth_bounce_preserves_search_params() -> None:
     # separate fallback) is gone. It is built by the pure module from THIS
     # document's pathname, so the destination can never name another origin.
     # Whitespace-tolerant: a prettier re-wrap of the call must not red this.
-    norm = dash.replace('"', "'")
+    # Comments are stripped first: `_read` returns raw source, so an assertion
+    # on it can be satisfied (or reddened) by PROSE. Ported from
+    # src/testSupport.js::stripComments, same `:`-prefixed-`//` guard for URLs.
+    norm = _strip_js_comments(dash).replace('"', "'")
     assert re.search(
         r"authBounceTarget\(\{\s*pathname:\s*window\.location\.pathname,\s*search,\s*errorHash:\s*hash\s*\}\)",
         norm,
@@ -373,9 +404,8 @@ def test_auth_bounce_preserves_search_params() -> None:
         "the bounce must be the same-origin /auth navigation that consumes the "
         "preserved search/hash (and, since #3930, the pathname)"
     )
-    # The pre-#3930 destination, matched as CODE (`location.replace("/auth" +`)
-    # so a comment quoting it cannot red a doc-only change (#3930).
-    assert not re.search(r"location\.replace\(\s*['\"]/auth['\"]\s*\+", dash), (
+    # The pre-#3930 destination, matched as CODE — see _strip_js_comments.
+    assert not re.search(r"location\.replace\(\s*['\"]/auth['\"]\s*\+", norm), (
         "the pathname-dropping destination is back (#3930)"
     )
 

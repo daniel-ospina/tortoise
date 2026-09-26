@@ -240,7 +240,12 @@ function runTargets(ret, cookie) {
   // or the claim-card assertion would pin the mock, not production.
   const e = mkEnv('', cookie, undefined, APP);
   e.win.__ADMIN_RETURN_TO = ret || null;
-  const DASHBOARD_URL = ret ? ORIGIN + ret : APP;
+  // PRODUCTION FIDELITY (#3930 review): signup.html computes
+  //   window.__DASHBOARD_BASE_URL = window.location.origin + ret
+  // and /auth is served on the APP origin (#4054), so the base the page reads
+  // is APP + ret. Injecting `ORIGIN + ret` pinned a host production can never
+  // produce, so a wrong-origin regression could not fail the tests below.
+  const DASHBOARD_URL = APP + (ret || '');
   const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
     'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
@@ -259,7 +264,9 @@ function runConsumer(status, ret, cookie, opts) {
   e.win.__ADMIN_RETURN_TO = ret || null;
   if (opts.adminStale) e.win.__ADMIN_STALE = true;
   if (opts.oauthError) e.win.__OAUTH_ERROR = true;
-  const DASHBOARD_URL = ret ? ORIGIN + ret : APP;
+  // PRODUCTION FIDELITY (#3930 review): see runTargets — the page's
+  // __DASHBOARD_BASE_URL is `window.location.origin + ret` on the APP origin.
+  const DASHBOARD_URL = APP + (ret || '');
   const WELCOME_URL = DASHBOARD_URL;
   const make = new Function(
     'window', 'document', 'URLSearchParams', 'DASHBOARD_URL', 'WELCOME_URL',
@@ -336,10 +343,12 @@ def _run(cases: dict) -> dict:
 
 def test_next_is_honoured_for_admin_paths() -> None:
     """A well-formed /admin return-to becomes the post-login destination."""
-    cases = {"early": [[p, ""] for p in ("?next=/admin", "?next=/admin/blog", "?next=%2Fadmin%2Fblog", "?next=/admin/")], "headGate": [], "claim": []}
+    # /admin is served on the APP origin (functions/admin/[[path]].ts), so the
+    # page runs there and __DASHBOARD_BASE_URL resolves to the app origin.
+    cases = {"early": [[p, "", APP_ORIGIN] for p in ("?next=/admin", "?next=/admin/blog", "?next=%2Fadmin%2Fblog", "?next=/admin/")], "headGate": [], "claim": []}
     expected = ["/admin", "/admin/blog", "/admin/blog", "/admin/"]
     for result, want in zip(_run(cases)["early"], expected, strict=True):
-        assert result["base"] == ORIGIN + want, f"{result} != {ORIGIN + want}"
+        assert result["base"] == APP_ORIGIN + want, f"{result} != {APP_ORIGIN + want}"
         assert result["ret"] == want, f"__ADMIN_RETURN_TO not set: {result}"
 
 
@@ -376,7 +385,7 @@ def test_navigation_target_for_admins_is_the_console() -> None:
     forever.
     """
     (t,) = _run({"early": [], "headGate": [], "claim": [["/admin/blog", ""]]})["claim"]
-    assert t["nav"] == f"{ORIGIN}/admin/blog", t["nav"]
+    assert t["nav"] == f"{APP_ORIGIN}/admin/blog", t["nav"]
 
 
 def test_oauth_next_path_is_the_admin_return_to() -> None:
@@ -435,7 +444,7 @@ def test_stale_bounce_suppresses_forwarding_without_destroying_the_session() -> 
 def test_valid_session_still_reaches_the_console() -> None:
     """A 200 from /api/session forwards to the return-to (the happy path)."""
     (ok,) = _run({"consumer": [[200, "/admin/blog", "", {}]]})["consumer"]
-    assert ok["nav"] == [f"{ORIGIN}/admin/blog"], ok["nav"]
+    assert ok["nav"] == [f"{APP_ORIGIN}/admin/blog"], ok["nav"]
     assert ok["errors"] == [], f"a healthy session produced an error: {ok['errors']}"
 
 
@@ -916,10 +925,11 @@ def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
     ]
     targets = [_spa_bounce_target(pathname, search) for pathname, search, _ in cases]
     for (pathname, _, _), target in zip(cases, targets, strict=True):
-        # The producer must name a PATH, never an origin: resolve it against a
-        # foreign base and require it to stay on the app origin. (`startswith`
-        # alone would pass for `/auth/../..//evil.com`, and grepping for `//`
-        # before `next=` is a tautology — this is the assertion that can fail.)
+        # The producer must emit a PATH, never an origin: `urlsplit` proves the
+        # target carries no scheme and no netloc. That is a STRING-SHAPE check,
+        # not a resolution — the same-origin property itself is asserted below
+        # on the consumer side (`row["base"] == APP_ORIGIN + want`), and from a
+        # foreign base by authBounce.test.js's resolution test.
         assert target.startswith("/auth"), f"{pathname}: not a /auth target: {target}"
         resolved = urlsplit(target)
         assert not resolved.scheme and not resolved.netloc, f"the bounce named an origin: {target}"
@@ -933,7 +943,7 @@ def test_spa_producer_reaches_the_auth_page_end_to_end() -> None:
 
     for (pathname, search, want), ret, dest in zip(cases, rets, destinations, strict=True):
         assert ret == want, f"the /auth page dropped the SPA's return-to: {pathname}{search} → {ret!r}"
-        assert dest["nav"] == ORIGIN + want, f"post-login nav: {dest['nav']!r}, want {ORIGIN + want!r}"
+        assert dest["nav"] == APP_ORIGIN + want, f"post-login nav: {dest['nav']!r}, want {APP_ORIGIN + want!r}"
         assert dest["oauth"] == want, f"the OAuth next: {dest['oauth']!r}, want {want!r}"
 
 
@@ -1003,12 +1013,12 @@ def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
             ["/team?session_id=abc", ""],               # no claim → the return-to
         ],
     })["claim"]
-    assert rows[0]["nav"] == ORIGIN + "/admin/blog", rows[0]
-    assert rows[1]["nav"] == ORIGIN + "/admin/blog", rows[1]
+    assert rows[0]["nav"] == APP_ORIGIN + "/admin/blog", rows[0]
+    assert rows[1]["nav"] == APP_ORIGIN + "/admin/blog", rows[1]
     assert rows[2]["nav"] == APP_ORIGIN + "/?claim=1", rows[2]
     assert rows[2]["oauth"] == "/?claim=1", rows[2]
     assert rows[3]["nav"] == APP_ORIGIN + "/?claim=1", rows[3]
-    assert rows[4]["nav"] == ORIGIN + "/team?session_id=abc", rows[4]
+    assert rows[4]["nav"] == APP_ORIGIN + "/team?session_id=abc", rows[4]
     assert rows[4]["oauth"] == "/team?session_id=abc", rows[4]
 
 
@@ -1018,6 +1028,7 @@ def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
         "?next=/team/x",              # a single page owns no sub-paths
         "?next=/welcome/x",
         "?next=/welcomex",            # prefix confusion
+        "?next=/welcomes",            # prefix confusion (plural)
         "?next=/administrator",
         "?next=/",                    # the app root needs no return-to
         "?next=/auth",                # a return-to to /auth would loop

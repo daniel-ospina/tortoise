@@ -151,7 +151,9 @@ store unreachable) — shows "Checking your session…" while it waits, and on *
 `src/authBounce.js::authBounceTarget({ pathname: window.location.pathname, search, errorHash })`. That
 builds a **same-origin** `/auth?<search>&next=<pathname+query>#<errorHash>` target, and `replace()`
 (not `push`) is used, so Back cannot land on the signed-out page and re-trigger the bounce. The
-**query string is preserved** (it carries the #1224 OAuth error banner) and, since #3930, the
+**query string is preserved** (it carries the #1224 OAuth error banner) — minus two params the caller may not
+supply: `next` (this module is its single writer) and `stale` (a server-gate verdict, not a deep link's) —
+and, since #3930, the
 **requested pathname** rides as `/auth`'s `next` — the one carrier the auth page reads. The auth page
 re-validates that value (origin comparison + the route allowlist mirrored from `authBounce.js`:
 `/welcome` and `/team` as single pages, `/admin` as a console subtree) before navigating, so a

@@ -649,11 +649,18 @@
     // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
     // claimable anon team).
     const DASHBOARD_URL = window.__DASHBOARD_BASE_URL;
-    // #1511: the app-ROOT claim card. Built from the ORIGIN, never from
-    // __DASHBOARD_BASE_URL — since #3930 the base may itself carry a
-    // path+query (/team?session_id=…), so appending "/?claim=1" to it would
-    // produce `…/team?session_id=abc/?claim=1`.
-    function claimCardUrl() { return window.location.origin + "/?claim=1"; }
+    // #1511: the app-ROOT claim card. Built from the ORIGIN of the dashboard
+    // base, never from the base itself — since #3930 the base may carry a
+    // path+query (/team?session_id=…), so appending "/?claim=1" to the raw
+    // value would produce `…/team?session_id=abc/?claim=1`.
+    // #3930 review: the __DASHBOARD_BASE_URL SEAM (#2744) is still honoured —
+    // its ORIGIN only — so the split-origin local preview (/auth and the
+    // dashboard on different ports) still lands the claim card on the
+    // dashboard rather than on whatever host served /auth.
+    function claimCardUrl() {
+      var base = window.__DASHBOARD_BASE_URL || window.location.origin;
+      try { return new URL(base).origin + "/?claim=1"; } catch (e) { return window.location.origin + "/?claim=1"; }
+    }
     // #3080: the CONSOLE return-to. /admin has no claim card, so its return-to
     // wins unconditionally — appending ?claim=1 would land the user on a dead
     // route.
