@@ -60,6 +60,8 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import subprocess
+from typing import Any
 
 import pytest
 
@@ -554,7 +556,7 @@ class _FakeProc:
         self.stderr = stderr
 
 
-def test_relationship_census_binds_type_names_instead_of_interpolating():
+def test_relationship_census_never_puts_a_type_name_in_the_query_text():
     """⛔ The injection regression guard.
 
     Relationship-type names are READ FROM THE GRAPH. Interpolating one into
@@ -562,14 +564,14 @@ def test_relationship_census_binds_type_names_instead_of_interpolating():
     clauses: review demonstrated a type stored as
     ``IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r`` producing a query that
     DELETED the graph's relationships and returned the deletion count as a
-    "count". The tool must bind the name, never splice it.
+    "count". The name must never appear in a query — the census reads it as a
+    RETURN VALUE (`RETURN type(r), count(r)`), so there is no interpreter for
+    it to reach at all, and no allowlist is needed to count types nobody
+    anticipated.
     """
     evil = "IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r"
     graph = _FakeGraph([
-        [[2]],            # total
-        [["OK"], [evil]],  # CALL db.relationshipTypes()
-        [[1]],            # by_type['IMPL]->() ...'] (sorted first: 'I' < 'O')
-        [[1]],            # by_type['OK']
+        [[evil, 1], ["OK", 1]],   # MATCH ()-[r]->() RETURN type(r), count(r)
         [[0]], [[0]], [[0]], [[0]],   # by_slot x4
         [[0]],            # ep_bearing
         [[0]],            # all_four_slots
@@ -577,34 +579,53 @@ def test_relationship_census_binds_type_names_instead_of_interpolating():
 
     census = relationship_census(graph)
 
-    for cypher, _params in graph.calls:
+    for cypher, params in graph.calls:
+        assert evil not in cypher, (
+            f"a graph-sourced type name reached the query TEXT: {cypher!r}")
         assert "DELETE" not in cypher, (
             f"a graph-sourced type name reached the query TEXT: {cypher!r}")
-        assert evil not in cypher, (
-            f"a graph-sourced type name was interpolated into a Cypher "
-            f"pattern: {cypher!r}")
-    bound = [p for _c, p in graph.calls if p]
-    assert {"rtype": evil} in bound, (
-        f"the type name was never bound as a parameter — bound params were "
-        f"{bound!r}")
+        assert not params, (
+            f"the aggregate query needs no parameters: {cypher!r} / "
+            f"{params!r}")
     assert census["by_type"] == {evil: 1, "OK": 1}
+    assert census["total"] == 2
 
 
-def test_relationship_census_refuses_a_breakdown_that_does_not_reconcile():
-    # 3 relationships, but the per-type counts only account for 2 — an empty or
-    # partial `by_type` beside a non-zero total reads to a human as "there are
-    # relationships and none of any type". Fail closed instead.
+def test_relationship_census_refuses_an_unreadable_per_type_row():
+    # A row the tool cannot read must fail loud: reporting a PARTIAL breakdown
+    # as the whole one would make `total` a lie, which is the failure this
+    # census exists to expose in other people's code.
+    for bad_row in ([], ["IMPL"], [None, 3], ["IMPL", "3"], ["IMPL", True]):
+        graph = _FakeGraph([[
+            bad_row,
+            ["OK", 1],
+        ]])
+        with pytest.raises(CensusError, match="unreadable per-type row"):
+            relationship_census(graph)
+
+
+def test_relationship_census_derives_total_and_breakdown_from_one_query():
+    """The total and the breakdown MUST come from the same round-trip.
+
+    Reading a total and then each type's count separately let the two disagree
+    under any concurrent write (an edge added between them is in the breakdown
+    but not the total), so a healthy graph aborted on a false refusal.
+    """
     graph = _FakeGraph([
-        [[3]],            # total
-        [["IMPL"], ["NAND"]],
-        [[1]],            # IMPL
-        [[1]],            # NAND  (1 + 1 != 3)
+        [["IMPL", 3], ["NAND", 4]],
         [[0]], [[0]], [[0]], [[0]],
         [[0]],
         [[0]],
     ])
-    with pytest.raises(CensusError, match="do not reconcile"):
-        relationship_census(graph)
+
+    census = relationship_census(graph)
+
+    counting = [c for c, _p in graph.calls if "type(r)" in c]
+    assert len(counting) == 1, (
+        f"the census issued {len(counting)} counting queries; a separate total "
+        f"read can disagree with the breakdown under a concurrent write: "
+        f"{counting}")
+    assert census["total"] == 7, "the total must be the breakdown's own sum"
 
 
 def test_scalar_refuses_every_unreadable_result_shape():
@@ -628,13 +649,17 @@ def test_scalar_refuses_every_unreadable_result_shape():
         edge_census._scalar(_Raising(), "MATCH (n) RETURN count(n)")
 
 
-def test_relationship_types_refuses_an_unreadable_type_listing():
+def test_rows_refuses_an_unreadable_result_set():
     class _NoResultSet:
         def query(self, cypher, params=None):
             return object()          # no `.result_set` at all
 
     with pytest.raises(CensusError, match="no result set"):
-        edge_census._relationship_types(_NoResultSet())
+        edge_census._rows(_NoResultSet(), "MATCH ()-[r]->() RETURN type(r), count(r)")
+    # An EMPTY result set is legal (an empty graph has no rows) — the two must
+    # not be conflated, or emptiness becomes an error.
+    assert edge_census._rows(_FakeGraph([[]]),
+                             "MATCH ()-[r]->() RETURN type(r), count(r)") == []
 
 
 def test_container_query_treats_a_server_side_error_as_a_failure(monkeypatch):
@@ -646,15 +671,48 @@ def test_container_query_treats_a_server_side_error_as_a_failure(monkeypatch):
     """
     monkeypatch.setattr(
         edge_census, "_docker",
-        lambda *a, check=True: _FakeProc(
+        lambda *a, check=True, **k: _FakeProc(
             0, "errMsg: Invalid input 'THIS IS NOT CYPHER'", ""))
     with pytest.raises(CensusError, match="probe query failed"):
         edge_census._container_query("c", "g", "THIS IS NOT CYPHER")
 
+    # `errMsg` is only FalkorDB's CYPHEL wrapper. Every other refusable command
+    # returns its bare error token on STDOUT with returncode 0 — verified live:
+    # `LPUSH <stringkey> v` -> rc=0, stdout `WRONGTYPE Operation against a key
+    # holding the wrong kind of value`, and the same shape covers OOM/NOAUTH/
+    # LOADING/MISCONF/READONLY. Missing these left a stage that did nothing with
+    # its `used_memory` delta attributed to it.
+    for token_reply in ("WRONGTYPE Operation against a key holding the wrong "
+                        "kind of value",
+                        "OOM command not allowed when used memory > 'maxmemory'",
+                        "NOAUTH Authentication required.",
+                        "LOADING Redis is loading the dataset in memory",
+                        "MISCONF Redis is configured to save RDB snapshots"):
+        monkeypatch.setattr(
+            edge_census, "_docker",
+            lambda *a, _r=token_reply, check=True, **k: _FakeProc(0, _r, ""))
+        with pytest.raises(CensusError, match="probe query failed"):
+            edge_census._container_query("c", "g", "SOME STAGE")
+
     monkeypatch.setattr(edge_census, "_docker",
-                        lambda *a, check=True: _FakeProc(1, "", "boom"))
+                        lambda *a, check=True, **k: _FakeProc(1, "", "boom"))
     with pytest.raises(CensusError, match="probe query failed"):
         edge_census._container_query("c", "g", "GOOD CYPHER")
+
+    # An EMPTY reply is a failure too — a successful GRAPH.QUERY always prints
+    # its statistics, so silence means the query did not run.
+    monkeypatch.setattr(edge_census, "_docker",
+                        lambda *a, check=True, **k: _FakeProc(0, "", ""))
+    with pytest.raises(CensusError, match="probe query failed"):
+        edge_census._container_query("c", "g", "SOME STAGE")
+
+    # ⛔ POSITIVE CONTROL: a real success reply must NOT raise, or the predicate
+    # above would "fix" the false-negative by making the probe unable to run.
+    monkeypatch.setattr(
+        edge_census, "_docker",
+        lambda *a, check=True, **k: _FakeProc(
+            0, "1) 1) 1) 5000\n2) 1) 1) 1)\n", ""))
+    edge_census._container_query("c", "g", "UNWIND range(1,2) AS i CREATE (:Point)")
 
 
 def test_probe_marginals_refuses_a_declared_stage_that_did_not_grow():
@@ -746,14 +804,45 @@ def test_run_probe_removes_the_container_when_a_stage_fails(monkeypatch):
     assert all(check is False for a, check in docker_calls if a[0] == "rm")
 
 
+def test_run_probe_removes_the_container_when_docker_run_fails(monkeypatch):
+    """⛔ The failure the `--rm` flag does NOT cover.
+
+    `--rm` reaps a container that STARTED. If `docker run` itself fails — port
+    collision, a missing image digest, a full disk — the tool's own teardown is
+    the only thing that can clear the half-created container by that name, and
+    the next run would then fail on a name conflict rather than on the real
+    error. The start is inside the `try` for exactly this case; pin it.
+    """
+    docker_calls: list[tuple] = []
+
+    def failing_run(*args, check=True, **kwargs):
+        docker_calls.append((args, check))
+        if args[0] == "run":
+            raise subprocess.CalledProcessError(125, ["docker", *args],
+                                                output="", stderr="port busy")
+        return _FakeProc(0, "", "")
+
+    monkeypatch.setattr(edge_census, "docker_available", lambda: True)
+    monkeypatch.setattr(edge_census, "_docker", failing_run)
+
+    with pytest.raises(CensusError, match="could not start"):
+        run_probe(n=5_000)
+
+    removed = [a for a, _c in docker_calls if a[0] == "rm"]
+    assert removed, "a failed `docker run` left the probe container behind"
+    # The name `docker run` was told to use is the name removed — not a
+    # regenerated one, which would leave the original behind forever.
+    run_args = next(a for a, _c in docker_calls if a[0] == "run")
+    assert removed[0][2] == run_args[run_args.index("--name") + 1]
+    assert all(check is False for a, check in docker_calls if a[0] == "rm")
+
+
 def test_main_returns_exit_2_when_the_cap_count_cannot_be_read(
         monkeypatch, capsys):
     """A fail-closed cap read must reach the tool's exit-2 path, not a traceback."""
     class _FakeProj:
         g = _FakeGraph([
-            [[0]],            # total
-            [["IMPL"]],       # types (reconciled: 0 == 0)
-            [[0]],            # by_type['IMPL']
+            [],               # no relationships -> empty breakdown, total 0
             [[0]], [[0]], [[0]], [[0]],
             [[0]],
             [[0]],
@@ -810,16 +899,14 @@ def test_uri_census_without_org_never_constructs_the_sdk(monkeypatch, capsys):
     graph the tool advertises itself as only reading.
     """
     graph = _FakeGraph([
-        [[0]],            # total
-        [["IMPL"]],       # types (reconciled: 0 == 0)
-        [[0]],            # by_type['IMPL']
+        [],               # no relationships -> empty breakdown, total 0
         [[0]], [[0]], [[0]], [[0]],   # by_slot x4
         [[0]],            # ep_bearing
         [[0]],            # all_four_slots
         [[0]], [[0]],     # node_census: resident, point_label
     ])
     monkeypatch.setattr(edge_census, "_raw_graph_from_uri",
-                        lambda _uri, _graph: graph)
+                        lambda _uri, _graph, **kwargs: graph)
 
     def no_sdk(*_args, **_kwargs):
         raise AssertionError(
@@ -837,3 +924,134 @@ def test_uri_census_without_org_never_constructs_the_sdk(monkeypatch, capsys):
     assert view["nodes"]["capped_points"] is None, (
         "a URI census without --org must not report a cap denominator — "
         "reading it would require the SDK")
+
+
+def test_uri_and_org_census_read_the_same_graph(monkeypatch, capsys):
+    """`--uri` and `--org` must not measure DIFFERENT graphs.
+
+    The `--org` path adds the cap's own count to the same census. If it opened
+    a second handle from the default URI instead of the one it censused, the
+    report would pair an edge count from graph A with a cap count from graph B
+    and read as authoritative. Both halves are proved to come from ONE handle.
+    """
+    graph = _FakeGraph([
+        [["IMPL", 2000]],          # this graph HAS relationships
+        [[0]], [[0]], [[0]], [[0]],
+        [[0]],
+        [[0]],
+        [[2000]], [[2000]],        # resident, point_label
+    ])
+
+    class _FakeProj:
+        g = graph
+
+    class _FakeSDK:
+        def _get_proj(self):
+            return _FakeProj()
+
+        def close(self):
+            pass
+
+    seen: list[Any] = []
+
+    def fake_open(_uri, _graph, *_a, **_k):
+        seen.append("sdk")
+        return _FakeSDK()
+
+    def fake_raw(_uri, _graph, **_k):
+        seen.append("raw")
+        return graph
+
+    monkeypatch.setattr(edge_census, "_open_sdk", fake_open)
+    monkeypatch.setattr(edge_census, "_raw_graph_from_uri", fake_raw)
+    monkeypatch.setattr(edge_census, "_assert_graph_exists",
+                        lambda *_a, **_k: seen.append("exists"))
+    monkeypatch.setattr(edge_census, "_org_capped_points",
+                        lambda _org, _sdk: 2000)
+
+    rc = edge_census.main(["census", "--uri", "docker://:pw@host:6379/g",
+                           "--org", _ORG, "--json"])
+
+    assert rc == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["edges"]["total"] == 2000
+    assert view["nodes"]["capped_points"] == 2000
+    assert seen.count("sdk") == 1, (
+        f"exactly one handle must serve both halves: opens were {seen}")
+    assert "raw" not in seen, (
+        f"--uri --org opened a SECOND handle for the census; the cap count and "
+        f"the edge count could then come from different graphs: {seen}")
+    assert seen[0] == "exists", (
+        f"the existence check must run BEFORE the SDK open (the SDK would "
+        f"create a missing graph): {seen}")
+
+
+def test_printable_neutralises_a_terminal_control_sequence():
+    """A graph-sourced name must not drive the terminal that prints it.
+
+    The report is an interpreter like any other: a stored relationship-type
+    name can carry ESC sequences (OSC 52 clipboard writes, forged rows) or a
+    newline that fabricates report lines. `--json` is safe (`json.dumps`
+    escapes); the human-readable path needs this sanitiser.
+    """
+    evil = "IMPL\x1b]52;c;aGF4\x07\n  by slot  msg_beta  -88888"
+    out = edge_census._printable(evil)
+
+    assert "\x1b" not in out and "\x07" not in out and "\n" not in out, (
+        f"a control character survived into the report line: {out!r}")
+    assert "\\x1b" in out and "\\x07" in out, (
+        f"the sequence must be VISIBLE as escaped text, not silently dropped "
+        f"(a dropped character hides the attack): {out!r}")
+    assert edge_census._printable("IMPL") == "IMPL"
+    assert edge_census._printable("caf\u00e9") == "caf\u00e9", (
+        "ordinary non-ASCII must pass through untouched")
+
+
+def test_raw_graph_refuses_to_create_a_nonexistent_graph(monkeypatch):
+    """Reading a graph that does not exist must NOT create it.
+
+    FalkorDB materialises the keyspace on the first query, so a typo'd graph
+    name would be CREATED by the act of measuring it. The tool refuses unless
+    told otherwise; `--create-if-missing` is the deliberate opt-in.
+    """
+    import falkordb
+
+    import tortoise.projection as proj
+
+    class _Client:
+        def list_graphs(self):
+            return ["other"]
+
+        def select_graph(self, name):
+            raise AssertionError(f"select_graph({name!r}) must not be reached")
+
+    monkeypatch.setattr(falkordb, "FalkorDB", lambda **_k: _Client())
+    monkeypatch.setattr(proj, "resolve_db_endpoint",
+                        lambda uri, name: proj.DbEndpoint(
+                            host="h", port=1, username=None, password=None,
+                            ssl=False,
+                            graph_name=name or uri.rsplit("/", 1)[-1]))
+
+    with pytest.raises(CensusError, match="does not exist"):
+        edge_census._raw_graph_from_uri("docker://:pw@h:6379/typo", None)
+
+    class _Client2(_Client):
+        def select_graph(self, name):
+            return f"graph:{name}"
+
+    monkeypatch.setattr(falkordb, "FalkorDB", lambda **_k: _Client2())
+    assert edge_census._raw_graph_from_uri(
+        "docker://:pw@h:6379/typo", None, create_if_missing=True) == "graph:typo"
+
+
+def test_main_maps_bad_target_input_to_exit_2(monkeypatch, capsys):
+    """A bad URI scheme / graph name is a DIAGNOSTIC, not a traceback."""
+    monkeypatch.setattr(
+        edge_census, "_raw_graph_from_uri",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            ValueError("unsupported URI scheme 'mysql'")))
+
+    rc = edge_census.main(["census", "--uri", "mysql://h/g", "--json"])
+
+    assert rc == 2
+    assert "unsupported URI scheme" in capsys.readouterr().err

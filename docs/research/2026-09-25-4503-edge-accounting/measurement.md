@@ -14,17 +14,22 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 # The edge class is outside every accounting surface — measured
 
 **Issue:** [#4503](https://github.com/danielospina/tortoise/issues/4503) · **Lane:** `obj7-4503-edges` · **Date:** 2026-09-25
-**Base:** `origin/main` @ `536ca7d2a` (branch rebased there; every locator below re-read at that HEAD)
+**Base:** `origin/main` @ `debe10cbc` (branch rebased there; every locator below re-read at that HEAD)
 **Instrument:** `tools/edge_census.py` (shipped with this report) · **Status:** measurement only.
 
 > **What the instrument touches.** Over a **`--uri`** connection a census reads through a raw
 > `falkordb` client and issues no DDL — nothing on the target graph is created, altered or deleted;
 > this is the path to use against a graph you do not own. Two paths DO open the SDK (which ensures
 > indexes on that graph, idempotently, and on an embedded database may run a health recovery):
-> `--embedded`, whose backend *is* the SDK, and `--org`, which must call the cap's own function
-> rather than reimplement its predicate. A read against a production graph should therefore use a
-> **URI and no `--org`**. Relationship-type names read from the graph are **bound as `$rtype`,
-> never interpolated** into a Cypher pattern.
+> `--embedded`, whose backend *is* the SDK, and `--uri` **combined with `--org`** — the cap count
+> must come from the cap's own function rather than a reimplementation of its predicate, and the
+> census is then taken from that one SDK handle so both halves describe the same graph. A read
+> against a production graph you do not own should therefore use a **URI and no `--org`**.
+> Relationship-type names read from the graph are never interpolated into a Cypher pattern: the
+> census returns them as **values** (`RETURN type(r), count(r)`), so there is no interpreter for a
+> crafted name to reach — stronger than binding it as `$rtype`, which still requires the name to be
+> a first-class query parameter. A graph that does not exist is **refused**, never created by the
+> act of measuring it (`--create-if-missing` is the deliberate opt-in).
 
 > ⛔ **No price change, no cap change, no quota change, no engine change.**
 > The findings that imply one are recorded as an **owner question** (issue #4503, protocol shape), not acted on.
@@ -50,7 +55,7 @@ count is not wrong, it is **absent**.
 
 ---
 
-## 1. The three surfaces, verified at `536ca7d2a`
+## 1. The three surfaces, verified at `debe10cbc`
 
 | surface | what it counts | relationship term | evidence |
 |---|---|---|---|

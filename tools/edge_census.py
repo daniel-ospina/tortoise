@@ -16,10 +16,10 @@ the node-resident EP state fixed by #2884, it is never journaled (#5380).
 This tool measures that. Its reads are **read-only**, and the boundary is
 worth stating exactly:
 
-- A census over a **`--uri`** connection reads through a **raw `falkordb`
-  client** and issues no DDL whatsoever. Nothing on the caller's graph is
-  created, altered or deleted. This is the path to use against a graph you do
-  not own.
+- A census over a **`--uri`** connection and **without `--org`** reads through
+  a **raw `falkordb` client** and issues no DDL whatsoever. Nothing on the
+  caller's graph is created, altered or deleted. This is the path to use
+  against a graph you do not own.
 - A census over **`--embedded <path>`** necessarily opens the **SDK**, because
   the embedded backend is the SDK's own entry point — so it constructs a
   projection, which ensures indexes on that database (idempotent; the
@@ -28,14 +28,25 @@ worth stating exactly:
   database you need left untouched.
 - **`--org`** also opens the **SDK**, on either path, because the cap's count
   must come from the cap's own function rather than a second implementation of
-  its predicate. A read against a production graph should therefore use a URI
-  and no ``--org``.
+  its predicate. With ``--uri`` the SDK is the **only** handle — the census is
+  taken from that same handle, so the edge count and the cap count can never
+  describe two different graphs. A read against a production graph you do not
+  own should therefore use a URI and no ``--org``.
+- A graph that **does not exist** is REFUSED, never created. FalkorDB
+  materialises the keyspace on the first query, so a mistyped graph name would
+  otherwise be created by the act of measuring it; ``--create-if-missing`` is
+  the deliberate opt-in.
 - The only writes the tool itself performs are inside a **disposable isolated
   container it starts and removes itself** (``--network none``, ``--rm``), for
   the RAM probe.
 
-Relationship-type names are read from the graph and are therefore **bound as
-``$rtype``, never interpolated** into a Cypher pattern.
+Relationship-type names are read from the graph and are therefore never
+interpolated into Cypher. The census returns the name as a **value**
+(``RETURN type(r), count(r)``), so a name crafted to look like Cypher has no
+interpreter to reach at all — strictly stronger than binding it as a parameter,
+and it counts types no allowlist has ever heard of. Names that reach the
+**human-readable** report are also sanitised (``_printable``): a stored name can
+carry ANSI/OSC sequences or newlines, and the report is an interpreter too.
 
 Two subcommands
 ---------------
@@ -132,32 +143,22 @@ def _scalar(graph: Any, cypher: str, params: dict | None = None) -> int:
     return value
 
 
-def _relationship_types(graph: Any) -> list[str]:
-    """Discovered relationship types, via ``db.relationshipTypes()``.
+def _rows(graph: Any, cypher: str,
+          params: dict | None = None) -> list[Any]:
+    """Run a multi-row query, failing LOUD on an unreadable result.
 
-    Discovered rather than hardcoded so a new relationship type is counted
-    without a code change — and so the census cannot undercount by omission.
-
-    The NAMES are returned, never interpolated into Cypher: a stored type name
-    is graph data, and a name crafted to look like Cypher is an injection
-    primitive (``tortoise/security.py`` says the same about a raw/imported
-    undeclared type). ``relationship_census`` binds them as ``$rtype``.
+    The multi-row sibling of :func:`_scalar`: an unreadable result set is an
+    error, never an empty list. A census that cannot read a breakdown must not
+    report one as absent.
     """
     try:
-        result = graph.query("CALL db.relationshipTypes()")
+        result = graph.query(cypher, params=params)
     except Exception as exc:
-        raise CensusError(f"db.relationshipTypes() failed: {exc}") from exc
+        raise CensusError(f"query failed: {cypher!r}: {exc}") from exc
     rows = getattr(result, "result_set", None)
     if rows is None:
-        # An UNREADABLE result is an error. An empty list stays legal — an
-        # empty graph legitimately has none — and the reconciliation against
-        # `total` in `relationship_census` catches the dangerous case.
-        raise CensusError("db.relationshipTypes() returned no result set")
-    types = []
-    for row in rows:
-        if row and isinstance(row[0], str) and row[0]:
-            types.append(row[0])
-    return sorted(types)
+        raise CensusError(f"query returned no result set: {cypher!r}")
+    return list(rows)
 
 
 # ── the census ─────────────────────────────────────────────────────────────
@@ -168,7 +169,7 @@ def relationship_census(graph: Any) -> dict[str, Any]:
     Returns a dict with:
 
     - ``total`` — every relationship, of every type.
-    - ``by_type`` — ``{type: count}`` for every discovered type.
+    - ``by_type`` — ``{type: count}`` for every relationship type present.
     - ``by_slot`` — ``{slot: count}`` for each of :data:`EP_EDGE_SLOTS` —
       edges carrying that property.
     - ``ep_bearing`` — edges carrying **at least one** slot.
@@ -177,33 +178,31 @@ def relationship_census(graph: Any) -> dict[str, Any]:
     Both ``ep_bearing`` and ``all_four_slots`` are reported because a
     half-written edge is a different thing from a fully-messaged one, and the
     difference is invisible if only one of the two is printed.
+
+    ⛔ The total and the breakdown come from **one** query. Reading a total and
+    then each type's count as separate round-trips let the two disagree under
+    any concurrent write — an edge added between them is counted in the
+    breakdown but not the total — so a *healthy* graph aborted on a false
+    refusal. One aggregate read cannot disagree with itself.
+
+    ⛔ The type NAME never enters the query text: it is returned as a **value**
+    (``RETURN type(r), count(r)``), so a name crafted to look like Cypher has
+    no interpreter to reach. Interpolating it into the pattern
+    (``-[r:TYPE]->``) was a WRITE primitive — review demonstrated a type stored
+    as ``IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r`` producing a query that
+    DELETED the graph's relationships and returned the deletion count as a
+    "count". Returning it as data removes the primitive entirely and counts
+    types the allowlist has never heard of.
     """
-    total = _scalar(graph, "MATCH ()-[r]->() RETURN count(r)")
-    # ⛔ `type(r) = $rtype`, NOT `-[r:TYPE]->`: the type name comes FROM THE
-    # GRAPH, and interpolating it into the pattern lets a crafted name close
-    # the pattern and inject clauses. Demonstrated in review: a type stored as
-    # ``IMPL]->() DELETE r WITH 1 AS x MATCH ()-[r`` produced a query that
-    # DELETED the graph's relationships and returned the deletion count — a
-    # WRITE against a graph this tool promises only to read, reported as a
-    # count. Binding the name removes the primitive entirely and still counts
-    # types the allowlist has never heard of.
-    types = _relationship_types(graph)
-    by_type = {
-        rtype: _scalar(
-            graph,
-            "MATCH ()-[r]->() WHERE type(r) = $rtype RETURN count(r)",
-            params={"rtype": rtype},
-        )
-        for rtype in types
-    }
-    # Fail closed on a breakdown that does not reconcile with the total: an
-    # empty `by_type` beside a non-zero `total` is the "2000 relationships,
-    # none of any type" lie that a reader takes as "no relationships".
-    typed = sum(by_type.values())
-    if typed != total:
-        raise CensusError(
-            f"per-type counts do not reconcile with the total: "
-            f"sum(by_type)={typed} total={total} types={types!r}")
+    by_type: dict[str, int] = {}
+    for row in _rows(graph, "MATCH ()-[r]->() RETURN type(r), count(r)"):
+        if (not row or len(row) < 2 or not isinstance(row[0], str)
+                or isinstance(row[1], bool) or not isinstance(row[1], int)):
+            raise CensusError(
+                f"unreadable per-type row from the graph: {row!r} — refusing "
+                f"to report a partial breakdown as the whole one")
+        by_type[row[0]] = row[1]
+    total = sum(by_type.values())
     by_slot = {
         slot: _scalar(
             graph,
@@ -378,9 +377,18 @@ def probe_marginals(stages: Sequence[Stage]) -> list[dict[str, Any]]:
     return out
 
 
-def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+def _docker(*args: str, check: bool = True,
+            timeout: float | None = 60.0) -> subprocess.CompletedProcess:
+    """Run ``docker`` with a BOUND.
+
+    ``timeout`` matters: the readiness loop's own deadline is only checked
+    BETWEEN iterations, so a single wedged ``docker exec`` (a hung daemon, a
+    socket in an uninterruptible state) would block past it indefinitely. The
+    bound turns that into an ordinary failure.
+    """
     return subprocess.run(
-        ["docker", *args], capture_output=True, text=True, check=check)
+        ["docker", *args], capture_output=True, text=True, check=check,
+        timeout=timeout)
 
 
 def docker_available() -> bool:
@@ -408,20 +416,37 @@ def _container_used_memory(container: str) -> int:
 def _container_query(container: str, graph: str, cypher: str) -> None:
     """Run one staged write in the probe container, failing LOUD on refusal.
 
-    ⛔ ``redis-cli`` exits 0 on a SERVER-SIDE error — a syntax error, an OOM, a
-    constraint violation all come back as ``errMsg: ...`` on STDOUT with
-    returncode 0 (verified against a live FalkorDB). Checking the exit code
-    alone therefore turns a stage that did nothing into a stage whose
-    ``used_memory`` delta is attributed to it — a false marginal, exactly the
-    "silence is how a probe lies" failure ``probe_marginals`` exists to catch.
+    ⛔ ``redis-cli`` exits 0 on a SERVER-SIDE error, so the exit code alone is
+    not a verdict. Worse, the error is not always spelled ``errMsg`` — only the
+    FalkorDB-wrapped Cypher errors are. Every other refusable command returns a
+    bare error token on STDOUT with returncode 0: ``WRONGTYPE ...``,
+    ``OOM command not allowed ...``, ``NOAUTH``, ``LOADING``, ``MISCONF``,
+    ``READONLY``, ``BUSY``. Accepting any of those leaves a stage that did
+    nothing with its ``used_memory`` delta attributed to it — a false marginal,
+    which is exactly the "silence is how a probe lies" failure
+    ``probe_marginals`` exists to catch.
+
+    An EMPTY stdout is also a failure: a successful ``GRAPH.QUERY`` always
+    prints its statistics.
     """
     proc = _docker("exec", container, "redis-cli", "GRAPH.QUERY", graph, cypher,
                    check=False)
     out = proc.stdout or ""
-    if proc.returncode != 0 or "errMsg" in out or "ERR " in out:
+    head = out.lstrip()
+    if (proc.returncode != 0 or not head or "errMsg" in out
+            or any(head.startswith(tok) for tok in _REDIS_ERROR_TOKENS)):
         raise CensusError(
             f"probe query failed in {container!r}: {cypher!r}: "
             f"{(proc.stderr or out).strip()[:400]}")
+
+
+#: Error tokens ``redis-cli`` prints on STDOUT with returncode 0. FalkorDB's
+#: own Cypher refusals arrive wrapped in ``errMsg``; every other refusable
+#: command returns the bare token as the FIRST thing it writes.
+_REDIS_ERROR_TOKENS = (
+    "ERR", "errMsg", "WRONGTYPE", "OOM ", "NOAUTH", "LOADING", "MISCONF",
+    "READONLY", "BUSY", "NOSCRIPT", "EXECABORT", "NOPERM", "WRONGPASS",
+)
 
 
 #: Label every probe container, so an orphan from a SIGKILLed run is
@@ -591,7 +616,38 @@ def run_probe(
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
-def _raw_graph_from_uri(uri: str, graph_name: str | None):
+def _assert_graph_exists(uri: str, graph_name: str | None,
+                        *, create_if_missing: bool = False) -> None:
+    """Refuse to measure a graph that does not exist yet.
+
+    ⛔ A read against a graph that does not exist still has a side effect:
+    FalkorDB materialises the keyspace on the first query, so a bare ``MATCH``
+    creates an empty graph of that name. On a production instance a typo'd
+    graph name would therefore be created by the very act of measuring it.
+
+    ``GRAPH.LIST`` does not itself create anything (verified against a live
+    instance), so this check is side-effect free — unlike the query it guards.
+    """
+    from falkordb import FalkorDB
+
+    from tortoise.projection import resolve_db_endpoint
+
+    endpoint = resolve_db_endpoint(uri, graph_name)
+    client = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl)
+    if endpoint.graph_name not in client.list_graphs() and not create_if_missing:
+        raise CensusError(
+            f"graph {endpoint.graph_name!r} does not exist on "
+            f"{endpoint.host}:{endpoint.port} — and reading a non-existent "
+            f"graph CREATES it (FalkorDB materialises the keyspace on the "
+            f"first query), so this tool will not be the thing that creates "
+            f"it. Check the name, or pass --create-if-missing to accept that "
+            f"side effect deliberately")
+
+
+def _raw_graph_from_uri(uri: str, graph_name: str | None,
+                        *, create_if_missing: bool = False):
     """A RAW FalkorDB handle — no SDK, so no DDL touches the caller's graph.
 
     ⛔ The SDK is the obvious handle here and it is the WRONG one for a
@@ -602,6 +658,12 @@ def _raw_graph_from_uri(uri: str, graph_name: str | None):
     is "read, change nothing" must not open a handle that writes schema and
     then recommend itself against a live production graph.
 
+    ⛔ A read against a graph that DOES NOT EXIST still has a side effect:
+    FalkorDB materialises the keyspace on the first query, so a bare ``MATCH``
+    creates an empty graph of that name. On a production instance a typo'd
+    graph name would therefore be created by the very act of measuring it. The
+    existence check below costs one ``GRAPH.LIST`` and refuses instead.
+
     This path reuses the repo's own URI parser (``resolve_db_endpoint``, the
     canonical derivation) and nothing else.
     """
@@ -610,10 +672,27 @@ def _raw_graph_from_uri(uri: str, graph_name: str | None):
     from tortoise.projection import resolve_db_endpoint
 
     endpoint = resolve_db_endpoint(uri, graph_name)
+    _assert_graph_exists(uri, graph_name, create_if_missing=create_if_missing)
     client = FalkorDB(host=endpoint.host, port=endpoint.port,
                       username=endpoint.username, password=endpoint.password,
                       ssl=endpoint.ssl)
     return client.select_graph(endpoint.graph_name)
+
+
+def _printable(name: str) -> str:
+    """Make a GRAPH-SOURCED string safe to print.
+
+    A relationship-type name is graph data, and the report is an interpreter
+    like any other: control bytes in a stored name drive the terminal — clear
+    screen, set the window title, OSC 52 clipboard writes — and an embedded
+    newline forges report rows (demonstrated in review with a type name
+    containing both an OSC 52 sequence and ``\\n  by slot  msg_beta  -88888``).
+    The ``--json`` path needs none of this (``json.dumps`` escapes), so this is
+    the human-readable path's sanitiser only.
+    """
+    return "".join(
+        ch if ch.isprintable() and ch != "\x7f" else f"\\x{ord(ch):02x}"
+        for ch in name)
 
 
 def _open_sdk(uri: str | None, graph_name: str | None, embedded: str | None):
@@ -677,7 +756,8 @@ def _print_census(view: dict[str, Any], *, as_json: bool) -> None:
     print(f"relationships: {edges['total']}")
     for rtype, count in sorted(edges["by_type"].items(),
                                key=lambda kv: -kv[1]):
-        print(f"  by type  {rtype:<24} {count}")
+        # GRAPH-SOURCED name: sanitise before it reaches the terminal.
+        print(f"  by type  {_printable(rtype):<24} {count}")
     for slot in EP_EDGE_SLOTS:
         print(f"  by slot  {slot:<24} {edges['by_slot'][slot]}")
     print(f"  EP-bearing (>=1 slot)          {edges['ep_bearing']}")
@@ -712,6 +792,11 @@ def _build_parser() -> argparse.ArgumentParser:
     census.add_argument("--graph", help="graph name override")
     census.add_argument("--embedded", help="embedded DB path (no URI)")
     census.add_argument("--org", help="org id — also read the cap's own count")
+    census.add_argument(
+        "--create-if-missing", action="store_true",
+        help="accept that reading a NON-EXISTENT graph creates it (FalkorDB "
+             "materialises the keyspace on the first query); without this the "
+             "census refuses instead of creating a graph by accident")
     census.add_argument("--json", action="store_true", help="emit JSON")
 
     probe = sub.add_parser(
@@ -776,6 +861,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # else the tool cannot answer honestly.
         print(f"edge_census: external command failed: {exc}", file=sys.stderr)
         return 2
+    except (ValueError, RuntimeError) as exc:
+        # Ordinary BAD INPUT, not a crash: an unsupported URI scheme
+        # (`resolve_db_endpoint`), an invalid graph name or an empty production
+        # URI (`TortoiseSDK.__init__`). These are the tool's own diagnostics —
+        # a traceback here is a contract deviation, not extra information.
+        print(f"edge_census: {exc}", file=sys.stderr)
+        return 2
 
 
 def _run_census(args: Any, uri: str | None) -> int:
@@ -790,21 +882,31 @@ def _run_census(args: Any, uri: str | None) -> int:
     """
     sdk = None
     try:
-        if args.embedded:
-            sdk = _open_sdk(None, args.graph, args.embedded)
+        if args.embedded or (uri and args.org):
+            # ⛔ ONE handle. `--org` needs the SDK (the cap count must come from
+            # the cap's own function), so the census is taken from THAT SDK's
+            # graph. Opening a raw handle for the census and a second SDK for
+            # the cap read `--uri` twice, and any divergence between them — a
+            # different default graph, a re-resolution — would pair an edge
+            # count from graph A with a cap count from graph B.
+            # The existence check stays OUTSIDE the SDK: the SDK's own open
+            # would CREATE a missing graph (and ensure indexes on a present
+            # one), so the refusal has to come first.
+            if uri:
+                _assert_graph_exists(
+                    uri, args.graph,
+                    create_if_missing=args.create_if_missing)
+            sdk = _open_sdk(uri, args.graph, args.embedded)
             graph = sdk._get_proj().g
         elif uri:
-            graph = _raw_graph_from_uri(uri, args.graph)
+            graph = _raw_graph_from_uri(uri, args.graph,
+                                        create_if_missing=args.create_if_missing)
         else:
             raise CensusError("census needs --uri, --embedded, or "
                               "TORTOISE_DB_URI")
         edges = relationship_census(graph)
         nodes = node_census(graph)
-        capped = None
-        if args.org:
-            if sdk is None:
-                sdk = _open_sdk(uri, args.graph, None)
-            capped = _org_capped_points(args.org, sdk)
+        capped = _org_capped_points(args.org, sdk) if args.org else None
         view = accounting_view(edges=edges, nodes=nodes,
                                capped_points=capped)
         if args.org:
