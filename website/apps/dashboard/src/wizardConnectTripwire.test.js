@@ -25,6 +25,11 @@ import { dirname, join } from 'node:path'
 // #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
 // the guards below can assert the RENDERED prompt instead of parsing source.
 import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
+// #4637: the pin below asserts against the SHARED quote-aware stripper rather
+// than the local `stripBlockAndWholeLineComments` above, which does not remove
+// inline/trailing `//` — a trailing comment carrying the pinned text kept that
+// pin green (the file-wide unification is #3102's).
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -1496,11 +1501,38 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   // review P2: the Overview answered "is a key live" with its own
   // `durableConnect.source === 'rows-durable'` — a second derivation that agreed
   // today but could drift. One question, one gate.
-  const src = stripBlockAndWholeLineComments(mainJsx)
+  // The shared, quote-aware stripper — NOT the local
+  // `stripBlockAndWholeLineComments` above, which leaves inline/trailing `//`
+  // intact, so a trailing comment carrying the pinned text kept a pin green
+  // (the file-wide unification is #3102's).
+  const src = stripComments(mainJsx)
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
-  assert.match(src, /\{snippetKey \|\| connectGate\.mode === 'existing'/,
-    'the re-entry Overview routes its live-key claim through the gate')
+  // #4637: the Overview's live-key claim is ONE derivation — `ownerKeyLive` of
+  // the gate's mode — and since the cycle-6 restructuring it is not a statement
+  // in main.jsx at all: BOTH owner arms spread `ownerCardProps({ variant,
+  // isBuildFork, connectGate })` from the note module, whose `keyLive` comes from
+  // `ownerKeyLive(connectGate.mode)`. The old inline form tested the gate but ALSO
+  // the in-memory `snippetKey`, which stays truthy after its row is revoked (the
+  // gate's `durableConnectKey` row-truth check drops it), so the card could claim
+  // a key was live with nothing usable behind it. The member arm keeps its own
+  // key-state branch: its two lead-ins assert nothing about which key is usable.
+  //
+  // A source pin is no longer the guard for the derivation: the note module's
+  // render tests EXECUTE `ownerKeyLive`/`ownerCardProps`/`keyTabAffordance`, and
+  // `onboardingEmptyStateKeyNote.test.js` additionally COMPILES these call sites
+  // and asserts the effective props for every gate mode (a spread, an alias or a
+  // wrapped second authority changes the value and fails there). What is pinned
+  // here is the negative that keeps the derivation in the module: main.jsx must
+  // not call the gate authority itself.
+  assert.doesNotMatch(src, /ownerKeyLive\(/,
+    'main.jsx must not derive the live-key fact itself — the note module owns it')
+  assert.equal((src.match(/ownerCardProps\(\{/g) || []).length, 2,
+    'both owner arms must spread the one prop derivation')
+  assert.equal((src.match(/keyTabAffordance\(\{/g) || []).length, 1,
+    'the re-entry affordance must apply the module derivation at exactly one site')
+  assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
+    'the member arm of the re-entry card still consults the gate for its key state')
   // BOTH keyed arms render the derived affordance (no drift between them)
   assert.equal((src.match(/\bwizardKeyAffordance\b/g) || []).length, 4,
     'one definition + exactly three render sites (build fork + shared arm + Codex Desktop arm)')
