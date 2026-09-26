@@ -3198,9 +3198,21 @@ _CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
 _COORDINATION_PHRASES = (("as well as", "and"),)
 _PHRASE_EDGE_LEFT = r"(?<![^\W_])"
 _PHRASE_EDGE_RIGHT = r"(?![^\W_])"
+# A phrase WORD is matched mark- and separator-TOLERANT between its letters
+# (``[\W_]*``), while the SEPARATOR between the phrase's words is required
+# (``[\W_]+``).  Both halves are needed because the phrase pass reads the text
+# through TWO de-accentings and neither is complete alone: one deletes a mark
+# (so an accent inside a word leaves the word intact but a mark standing where
+# a separator sits fuses two words), the other keeps that mark as a space (so
+# the separator survives but a word carrying an accent is split).  Tolerating
+# non-word characters INSIDE a word is what makes the separator-preserving read
+# see ``w e l l`` as the word it is.  The ends stay anchored, so only the
+# phrase's own skeleton is loosened.
 _COORDINATION_PHRASE_RE = tuple(
     (re.compile(_PHRASE_EDGE_LEFT
-                + r"[\W_]+".join(re.escape(w) for w in phrase.split())
+                + r"[\W_]+".join(
+                    r"[\W_]*".join(re.escape(c) for c in w)
+                    for w in phrase.split())
                 + _PHRASE_EDGE_RIGHT, re.IGNORECASE), operator)
     for phrase, operator in _COORDINATION_PHRASES
 )
@@ -3670,18 +3682,28 @@ def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
     return frozenset(found)
 
 
-def _deaccent_with_map(t: str) -> tuple[str, list[int]]:
+def _deaccent_with_map(t: str, drop: str = "") -> tuple[str, list[int]]:
     """``_deaccent`` plus the raw index each surviving character came from.
 
     The same filtering as ``_deaccent`` (NFD, drop the non-spacing marks),
     without the final NFC recomposition, because the caller has to map a match
     found in the folded text back to the span it came from in the raw one.
+
+    ``drop`` is what a dropped mark becomes.  Empty (the default) is
+    ``_deaccent``'s own read — the mark vanishes, so ``as\u0338well`` reads as
+    one token ``aswell``.  A single space keeps the SEPARATOR a mark can stand
+    for, which the phrase pattern reads as a non-word run: the variant a phrase
+    whose separator IS a mark needs.  Both reads share one ``src`` map, so a
+    match found in either splices back at the same raw span.
     """
     chars: list[str] = []
     src: list[int] = []
     for i, ch in enumerate(str(t or "")):
         for d in unicodedata.normalize("NFD", ch):
             if unicodedata.category(d) == "Mn":
+                if drop:
+                    chars.append(drop)
+                    src.append(i)
                 continue
             chars.append(d)
             src.append(i)
@@ -3694,21 +3716,38 @@ def _canonicalise_coordinations(text: str) -> str:
     Two passes over ONE text, and the second is what stops a phrase from
     leaking its own ``as`` into a slot and masking the operator swap it stands
     for.  The FIRST matches the text as written, so a separator BETWEEN the
-    phrase's words is the separator it is ("as well as", "as-well-as",
-    "as\u0338well as").  The SECOND matches the DE-ACCENTED text, because a
-    phrase WORD can carry a diacritic ("as w\u00e9ll as") or a non-spacing mark
-    inside it ("as we\u0338ll as") that no separator-based pattern sees; the
-    match is spliced back into the raw text at its mapped span, so the phrase
-    is replaced rather than left as two stray ``as`` tokens.
+    phrase's words is the separator it is ("as well as", "as-well-as").
+    The SECOND matches the DE-ACCENTED text, because a phrase WORD can carry a
+    diacritic ("as w\u00e9ll as") or a non-spacing mark inside it ("as
+    we\u0338ll as") that no separator-based pattern sees.
+
+    The second pass reads TWO variants of that same de-accenting, because
+    deleting a mark and KEEPING it as the separator it can stand for are both
+    right and neither alone is complete: a phrase whose mark sits between its
+    words ("as\u0338well as") is a phrase only in the separator-preserving
+    variant, and one whose mark sits inside a word is a phrase only in the
+    deleting one — so a phrase that does BOTH ("as\u0338w\u00e9ll as") is
+    found by neither alone and stays two stray ``as`` tokens.  Both variants
+    share one ``src`` map, so a match from either splices back at its own raw
+    span; coinciding spans are merged before the (reversed) splice.
     """
     out = text
     for pattern, operator in _COORDINATION_PHRASE_RE:
         out = pattern.sub(f" {operator} ", out)
     for pattern, operator in _COORDINATION_PHRASE_RE:
         folded, src = _deaccent_with_map(out)
-        spans = [(src[m.start()], src[m.end() - 1] + 1)
-                 for m in pattern.finditer(folded)]
-        for start, end in reversed(spans):
+        separated, sep_src = _deaccent_with_map(out, " ")
+        spans: list[tuple[int, int]] = []
+        for variant, index_map in ((folded, src), (separated, sep_src)):
+            spans.extend((index_map[m.start()], index_map[m.end() - 1] + 1)
+                         for m in pattern.finditer(variant))
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        for start, end in reversed(merged):
             out = out[:start] + f" {operator} " + out[end:]
     return out
 

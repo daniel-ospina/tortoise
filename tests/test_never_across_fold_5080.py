@@ -1052,7 +1052,13 @@ class TestDistinguishingDifference:
         # clause AND comparison slots and MASKS the operator swap the phrase
         # stands for — `as well as` (an `and`) folds into a bare comparison
         # `as`, which is the fail-open class this boundary exists to close.
-        for spelled in ("as we\u0338ll as", "as w\u00e9ll as"):
+        for spelled in ("as we\u0338ll as", "as w\u00e9ll as",
+                        # BOTH at once: a mark where the separator is AND a
+                        # diacritic in the word.  A pass that only deletes
+                        # marks reads these as "aswell as" and finds no
+                        # separator; a pass that only keeps them misses the
+                        # diacritic.  Only the two read together find them.
+                        "as\u0338w\u00e9ll as", "as\u0338we\u0338ll as"):
             phrase = f"we ship the server {spelled} the client"
             assert v2._connective_slots(phrase) == (frozenset({"and"}),
                                                     frozenset(), frozenset(),
@@ -1073,6 +1079,10 @@ class TestDistinguishingDifference:
                                  ("we ship as we\u0338ll as the client",
                                   "we ship as the client"),
                                  ("we ship as w\u00e9ll as the client",
+                                  "we ship as the client"),
+                                 ("we ship as\u0338w\u00e9ll as the client",
+                                  "we ship as the client"),
+                                 ("we ship as\u0338we\u0338ll as the client",
                                   "we ship as the client")):
             assert v2._connective_swap(prior, candidate), (prior, candidate)
             assert v2.distinguishing_difference(prior, candidate) \
