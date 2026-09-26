@@ -846,6 +846,40 @@ def test_is_persistable_prop_value_matches_engine_type_model():
     assert not ok(b"x") and not ok({1, 2}) and not ok(None)
 
 
+def test_falkor_guarded_merge_filters_non_persistable_prop_values():
+    """#2962: the guarded meeting MERGE builds its OWN full prop set in
+    `_event_guarded_merge` and writes it with `SET e += $props` — a
+    dict/nested-valued unknown prop must be filtered by the SAME
+    `_is_persistable_prop_value` predicate `_persist_extra_props` uses,
+    instead of reaching the engine and raising."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()
+    try:
+        proj._upsert_event(
+            {
+                "eventId": "ev-guarded-2962",
+                "eventKind": "meeting",
+                "source_file": "doc.txt",
+                "subject": "pi-agent",
+                "object": "worktree-guard",
+                "startedAt": "2026-07-17T22:00:00Z",
+                "participants": ["pi-agent"],
+                "custom_nested": {"a": {"b": 1}},  # non-persistable
+            },
+            guard=True,
+            guard_source_file="doc.txt",
+        )  # must not raise
+        row = proj.query(
+            "MATCH (e:Event {eventId:'ev-guarded-2962'}) "
+            "RETURN e.source_file, e.custom_nested"
+        ).result_set
+        assert row and row[0][0] == "doc.txt", row
+        assert row[0][1] is None, row  # filtered, not written
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
 def test_falkor_rebuild_malformed_revised_content_does_not_crash():
     """#2958 review / #2795: a PointRevised carrying a non-string
     `new_content` (a hand-edited or corrupt JSONL line — rebuild is the
