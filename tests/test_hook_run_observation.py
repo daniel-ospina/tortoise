@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tortoise.__main__ import _hook_run_file
+from tortoise.__main__ import _hook_run_file, _HookRunUnreadable, _read_hook_run
 from tortoise.capture_install import install_capture
 
 REPO = Path(__file__).resolve().parent.parent
@@ -385,6 +385,101 @@ def test_an_unparseable_record_is_not_reported_as_no_record(tmp_path, payload, w
         (why, jpayload["hook_run"])
 
 
+def test_an_unstatable_record_path_is_not_reported_as_no_record(tmp_path):
+    """A record path that cannot even be STAT-ED — an unsearchable state
+    directory — is not evidence that no run happened.  `Path.is_file()`
+    swallows the `OSError` and returns `False`, so the old gate rendered a
+    confident "no run recorded" about a file nobody read: the #3797 defect on
+    the very reason set added for it (`record-unreadable`).
+
+    Mutation: put the `is_file()` gate back — the stat failure collapses to
+    `None`, the reason goes `hook-script-missing`/null and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "project"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+    receipts = home / "receipts"
+    runs = home / "hook-runs"
+    runs.mkdir(parents=True)
+    (runs / "claude.json").write_text(
+        json.dumps({"kind": "hook-run", "harness": "claude",
+                    "recorded_at": "2026-09-26T00:00:00Z"}), encoding="utf-8")
+    runs.chmod(0o000)
+    try:
+        proc = _cli(["hooks", "status", "--harness", "claude",
+                     "--dir", str(root)], home=home, receipt_dir=receipts,
+                    cwd=tmp_path, timeout=60)
+        _proc, payload = _status(home, receipts, tmp_path, root=root,
+                                 json_out=True)
+    finally:
+        runs.chmod(0o755)
+    line = _status_line(proc.stdout)
+    assert line is not None, proc.stdout
+    assert "cannot tell whether a run was recorded" in line, line
+    assert "no run recorded" not in line, line
+    assert payload["hook_run"]["observed"] is None, payload["hook_run"]
+    assert payload["hook_run"]["reason"] == "record-unreadable", \
+        payload["hook_run"]
+
+
+def test_the_read_arm_does_not_swallow_an_unenumerated_failure(monkeypatch):
+    """The read arm's catch-all is deliberately NOT `(OSError, UnicodeError)`:
+    the next unenumerated read failure is the same silent-suppression bug the
+    parse arm was widened for, and an escape here to a bare `return None`
+    reads as "no record", i.e. as a run that never happened.
+
+    Mutation: `return None` in place of the read arm's catch-all raise — this
+    REDs (nothing else can reach it: the stat gate above it refuses every
+    non-regular file and `read_text` otherwise raises `OSError`)."""
+    import stat as _stat
+
+    import tortoise.__main__ as cli
+
+    class _Boom:
+        def stat(self):
+            return type("S", (), {"st_mode": _stat.S_IFREG | 0o600})()
+
+        def read_text(self, **_kw):
+            raise RuntimeError("an unenumerated read failure")
+
+    monkeypatch.setattr(cli, "_hook_run_file", lambda _h: _Boom())
+    with pytest.raises(cli._HookRunUnreadable):
+        cli._read_hook_run("claude")
+
+
+def test_the_reader_raises_for_an_unparseable_record_but_not_a_foreign_one(
+        tmp_path, monkeypatch):
+    """The parse boundary, pinned at the FUNCTION it belongs to.
+
+    The CLI-level test for the pathological record cannot see this: when the
+    raise escapes, `_print_hook_run`'s outer catch renders the IDENTICAL honest
+    line and `_hook_run_json` the identical `record-unreadable` reason, so both
+    routes are byte-identical at the surface.  Only a direct assertion
+    distinguishes them.
+
+    Mutation: `return None` in place of the parse arm's raise — the `raises`
+    assertions RED.  Conversely a raise in place of the foreign-record `return
+    None` REDs the final assertion: the boundary is a boundary, not an
+    over-broad net."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
+    path = _hook_run_file("claude")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    for payload in ("", '{"kind": "hook-run", "harness": "cla',
+                    "[" * 200000 + "]" * 200000):
+        path.write_text(payload, encoding="utf-8")
+        with pytest.raises(_HookRunUnreadable):
+            _read_hook_run("claude")
+
+    # Parses, but is not THIS harness's record: no observation, not unreadable.
+    path.write_text(json.dumps({"kind": "capture-failure"}), encoding="utf-8")
+    assert _read_hook_run("claude") is None
+
+
 def test_a_non_executable_writer_is_not_called_qualified(tmp_path):
     """A current version marker is not enough: `detect_install` also requires
     the OWNER's exec bit, and its `not-executable` finding is blocking.  A
@@ -644,10 +739,12 @@ def test_a_pathologically_nested_record_cannot_silence_the_surface(tmp_path):
     `except Exception: return` that printed NOTHING — and silence is the
     original defect: the surface must still say what it could not tell.
 
-    Mutation: narrow the catch in `_read_hook_run` back to
-    `(OSError, UnicodeError)` — a `RecursionError` is neither, so it escapes
-    and this REDs on the `Traceback` assertion (the line itself still says
-    what it could not tell)."""
+    What THIS test pins is that half — remove BOTH catches and the line
+    disappears, and this REDs.  It does NOT pin the inner catch's breadth:
+    when a narrowed parse arm lets `RecursionError` escape, the caller's outer
+    catch renders the IDENTICAL line, so that narrowing is an EQUIVALENT
+    mutant here.  The boundary itself is pinned directly, at the function,
+    by `test_the_reader_raises_for_an_unparseable_record_but_not_a_foreign_one`."""
     home = tmp_path / "home"
     home.mkdir()
     root = tmp_path / "project"

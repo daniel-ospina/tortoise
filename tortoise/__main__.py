@@ -4182,11 +4182,27 @@ def _read_hook_run(harness: str) -> dict | None:
     settings.json).
     """
     import json as _json
+    import stat as _stat
 
     from tortoise.hook_install import KIND_HOOK_RUN
 
     path = _hook_run_file(harness)
-    if not path.is_file():
+    try:
+        st_mode = path.stat().st_mode
+    except FileNotFoundError:
+        # Absent (including a broken symlink): the writer gap decides whether
+        # that absence is evidence or an opinion we cannot form.
+        return None
+    except OSError as e:
+        # The path could not even be STAT-ED — an unsearchable state directory,
+        # a symlink loop.  `is_file()` would swallow this into `False` and the
+        # caller would render a real absence about a record nobody read, which
+        # is the #3797 defect on the very reason set added for it.
+        raise _HookRunUnreadable(str(e)) from e
+    if not _stat.S_ISREG(st_mode):
+        # A FIFO, directory or socket at the record path: never open it
+        # (`open()` on a FIFO blocks forever), and do not call it "read" — the
+        # writer gap reports what can be said about this machine.
         return None
     try:
         raw = path.read_text(encoding="utf-8")
@@ -4197,8 +4213,11 @@ def _read_hook_run(harness: str) -> dict | None:
         raise _HookRunUnreadable(str(e)) from e
     except MemoryError:
         raise
-    except Exception:
-        return None
+    except Exception as e:
+        # Same class as the parse arm below, and the same reason the read arm is
+        # not `(OSError, UnicodeError)` only: an unenumerated read failure must
+        # not be swallowed into a rendered claim of absence.
+        raise _HookRunUnreadable(str(e)) from e
     try:
         data = _json.loads(raw)
     except MemoryError:
