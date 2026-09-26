@@ -484,6 +484,59 @@ _EDGE_SLOTS = (
 )
 
 
+def derive_marginals(stages: list[Stage], *, n: int,
+                     edges: int) -> dict[str, Any]:
+    """Turn raw stage readings into the reported marginals.
+
+    Extracted from ``run_probe`` so the ARITHMETIC is reachable without docker.
+    ``run_probe`` needs a container, so before this split a divisor could be
+    changed to the wrong denominator — ``/ n`` where ``/ edges`` belongs — with
+    the whole suite still green. The module calls that property load-bearing
+    ("a per-element number without its ``n`` is not reproducible"), so the
+    divisors are pinned by tests against this function directly.
+
+    Every edge marginal is measured from the stage that PRECEDED the edges (the
+    dressed-node stage) — not from the bare-node stage. Dividing
+    ``(final - bare_nodes)`` by the edge count would fold the keyword-prop node
+    cost into the per-edge figure, which is the dressed-vs-bare mistake this
+    census exists to avoid.
+    """
+    derived = probe_marginals(stages)
+    by_label = {d["label"]: d for d in derived}
+    baseline = stages[0].used_memory
+    bare_node = by_label["bare :Point node (label + id only)"]["marginal_bytes"]
+    kw_point = by_label["+ keyword-only Point props"]
+    kw_point_used = kw_point["used_memory"]
+    # / n — the keyword-only stage holds n NODES, not edges.
+    kw_point_total = round((kw_point_used - baseline) / n, 1)
+    bare_edge = by_label["bare :IMPL edge (no properties)"]["marginal_bytes"]
+    attrs = by_label["+ real IMPL attrs "
+                     "(direction,confidence,weight,label,batch_id)"]
+    ep_stage = by_label["+ the four EP message slots"]
+    # / edges — the EP-slot delta is the cost of dressing `edges` EDGES.
+    dressed_edge = round((ep_stage["used_memory"] - kw_point_used) / edges, 1)
+
+    return {
+        "derived": derived,
+        "summary_bytes": {
+            "bare_node": bare_node,
+            "keyword_only_point_total": kw_point_total,
+            "bare_edge": bare_edge,
+            "edge_attrs_delta": attrs["marginal_bytes"],
+            "edge_ep_slots_delta": ep_stage["marginal_bytes"],
+            "ep_bearing_edge_total": dressed_edge,
+        },
+        "ratios": {
+            "ep_bearing_edge_over_keyword_only_point": round(
+                dressed_edge / kw_point_total, 3) if kw_point_total else None,
+        },
+        "caveat": ("every marginal is delta / per_element at THIS n; the "
+                   "bare-node figure moved 101.8 B (n=20000) to 173.6 B "
+                   "(n=5000) between runs — allocation granularity, so a "
+                   "figure without its n is not reproducible"),
+    }
+
+
 def run_probe(
     *,
     n: int = 5000,
@@ -564,23 +617,7 @@ def run_probe(
         log(f"removing container {container!r}")
         _docker("rm", "-f", container, check=False)
 
-    derived = probe_marginals(stages)
-    by_label = {d["label"]: d for d in derived}
-    baseline = stages[0].used_memory
-    bare_node = by_label["bare :Point node (label + id only)"]["marginal_bytes"]
-    # Every edge marginal is measured from the stage that PRECEDED the edges
-    # (the dressed-node stage) — not from the bare-node stage. Dividing
-    # (final - bare_nodes) by the edge count would fold the keyword-prop node
-    # cost into the per-edge figure, which is the dressed-vs-bare mistake this
-    # census exists to avoid.
-    kw_point = by_label["+ keyword-only Point props"]
-    kw_point_used = kw_point["used_memory"]
-    kw_point_total = round((kw_point_used - baseline) / n, 1)
-    bare_edge = by_label["bare :IMPL edge (no properties)"]["marginal_bytes"]
-    attrs = by_label["+ real IMPL attrs "
-                     "(direction,confidence,weight,label,batch_id)"]
-    ep_stage = by_label["+ the four EP message slots"]
-    dressed_edge = round((ep_stage["used_memory"] - kw_point_used) / edges, 1)
+    measured = derive_marginals(stages, n=n, edges=edges)
 
     # Small-n runs are dominated by fixed per-instance overhead: at n=800 the
     # bare-node marginal measured 731 B against 101.8 B at n=20,000. Flag it in
@@ -605,23 +642,7 @@ def run_probe(
              "per_element": s.per_element}
             for s in stages
         ],
-        "derived": derived,
-        "summary_bytes": {
-            "bare_node": bare_node,
-            "keyword_only_point_total": kw_point_total,
-            "bare_edge": bare_edge,
-            "edge_attrs_delta": attrs["marginal_bytes"],
-            "edge_ep_slots_delta": ep_stage["marginal_bytes"],
-            "ep_bearing_edge_total": dressed_edge,
-        },
-        "ratios": {
-            "ep_bearing_edge_over_keyword_only_point": round(
-                dressed_edge / kw_point_total, 3) if kw_point_total else None,
-        },
-        "caveat": ("every marginal is delta / per_element at THIS n; the "
-                   "bare-node figure moved 101.8 B (n=20000) to 173.6 B "
-                   "(n=5000) between runs — allocation granularity, so a "
-                   "figure without its n is not reproducible"),
+        **measured,
     }
 
 
@@ -726,12 +747,19 @@ def _open_sdk(uri: str | None, graph_name: str | None, embedded: str | None):
 
     prior = os.environ.get("TORTOISE_DB_URI")
     try:
-        if uri:
-            os.environ["TORTOISE_DB_URI"] = uri
-            return TortoiseSDK(graph_name=graph_name)
+        # ⛔ `embedded` is checked FIRST. It used to be second, and that order
+        # was a P0: `main()` folded an ambient ``TORTOISE_DB_URI`` into `uri`
+        # even when ``--embedded`` was passed, so `--embedded /tmp/local.db`
+        # with that variable set in the environment opened the URI reader
+        # instead — running ``_ensure_indexes()`` on a graph the user never
+        # named and then censusing it. Whichever database the caller named
+        # must win over one inherited from the environment.
         if embedded:
             os.environ.pop("TORTOISE_DB_URI", None)
             return TortoiseSDK(embedded, graph_name=graph_name)
+        if uri:
+            os.environ["TORTOISE_DB_URI"] = uri
+            return TortoiseSDK(graph_name=graph_name)
     finally:
         if prior is None:
             os.environ.pop("TORTOISE_DB_URI", None)
@@ -790,8 +818,11 @@ def _print_census(view: dict[str, Any], *, as_json: bool) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="edge_census",
-        description="Read-only edge census + isolated per-edge RAM probe "
-                    "(#4503). No cap, meter, price or graph is changed.")
+        description="Edge census + isolated per-edge RAM probe (#4503). A "
+                    "census over --uri WITHOUT --org issues no DDL; --embedded "
+                    "always ensures indexes on its own database, and --uri "
+                    "with --org is refused unless --accept-schema-writes is "
+                    "given. No cap, meter or price is ever changed.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     census = sub.add_parser("census", help="count relationships and EP slots")
@@ -856,10 +887,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "census":
+            # ⛔ An ambient ``TORTOISE_DB_URI`` must NOT be folded in when
+            # ``--embedded`` names the database. It was, and because the SDK
+            # open preferred the URI, `--embedded /tmp/local.db` against a box
+            # with that variable set silently opened the URI graph instead:
+            # it ran ``_ensure_indexes()`` there with NO consent flag, and then
+            # reported that graph's counts. Two failures from one root cause —
+            # schema written to a graph the user never named, and a measurement
+            # of the wrong graph. Naming both is contradictory, so it is
+            # refused rather than silently resolved in either direction.
+            if args.embedded and args.uri:
+                raise CensusError(
+                    "--embedded and --uri name two different databases; pass "
+                    "exactly one")
             # `--uri` first, then the environment: a password on argv is
             # visible to every process listing on the host. Same variable the
             # SDK reads, so both spellings reach the same connection.
-            uri = args.uri or os.environ.get("TORTOISE_DB_URI") or None
+            uri = args.uri or (None if args.embedded
+                               else os.environ.get("TORTOISE_DB_URI")) or None
             return _run_census(args, uri)
         result = run_probe(n=args.n, image=args.image,
                            log=lambda m: print(m, file=sys.stderr))

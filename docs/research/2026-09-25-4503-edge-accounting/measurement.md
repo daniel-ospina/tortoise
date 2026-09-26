@@ -14,7 +14,20 @@ aboutObjects: tortoise/quota.py, tortoise/metering.py, product/pricing.json cost
 # The edge class is outside every accounting surface — measured
 
 **Issue:** [#4503](https://github.com/danielospina/tortoise/issues/4503) · **Lane:** `obj7-4503-edges` · **Date:** 2026-09-25
-**Base:** `origin/main` @ `debe10cbc` (branch rebased there; every locator below re-read at that HEAD)
+**Base:** `origin/main` @ `a2a08beaa` (every locator below re-verified there on 2026-09-26)
+Measured at: origin/main@a2a08beaafc9af5b95c08cfb106b96784fcdbd91 on 2026-09-26
+**Measurement history.** The figures in §2–§4 were taken on **2026-09-25** against this branch's tree
+(based on `origin/main` @ `99a98ddc5`); every locator in §1 was re-read against `a2a08beaa` on
+**2026-09-26** and is unchanged. Two things make that re-verification sound, and neither is an
+assumption:
+- `tools/edge_census.py` is **branch-only** — it does not exist on `origin/main` at all
+  (`git cat-file -e origin/main:tools/edge_census.py` fails), so no intervening main commit can have
+  altered the instrument. (An empty `git diff <a> <b> -- tools/edge_census.py` would NOT have shown
+  this: absent at both ends also diffs empty.)
+- The two commits between `99a98ddc5` and `a2a08beaa` change `tortoise/assembly.py`,
+  `tortoise/commit_ops.py`, `tortoise/projection/entities.py` and tests. The only property they touch
+  in the measured path is `supersedes_by` (a 200-char truncation fix), which `tools/edge_census.py`
+  never sets — `grep supersede` in it returns nothing.
 **Instrument:** `tools/edge_census.py` (shipped with this report) · **Status:** measurement only.
 
 > **What the instrument touches.** Over a **`--uri`** connection a census reads through a raw
@@ -60,7 +73,7 @@ count is not wrong, it is **absent**.
 
 ---
 
-## 1. The three surfaces, verified at `debe10cbc`
+## 1. The three surfaces, verified at `a2a08beaa`
 
 | surface | what it counts | relationship term | evidence |
 |---|---|---|---|
@@ -102,7 +115,7 @@ bare :IMPL edge (no properties)                                   4876168  per_e
 |---|---|---|---|
 | bare `:Point` node (label + `id`) | **173.6** | 5,000 | tool receipt above |
 | bare `:Point` node (label + `id`) | **101.8** | 20,000 | hand-run probe, same method (see §2.3) |
-| **dressed keyword-only Point** (`id`,`content`,`pointKind`,`status`,`confidence`,`createdAt`) | **353.9** | 5,000 | tool receipt above |
+| **dressed keyword-only Point** (`id`,`content`,`pointKind`,`status`,`confidence`,`createdAt`,`is_episodic`) | **353.9** | 5,000 | tool receipt above |
 | bare `:IMPL` edge (no properties) | **84.9** | 4,999 | tool receipt above |
 | bare `:IMPL` edge (no properties) | **89.8** | 19,999 | hand-run probe, same method |
 | **dressed `IMPL` edge** (the real attr set — `direction`,`confidence`,`weight`,`label`,`batch_id`) | **209.5** | 4,999 | = 84.9 + 124.6 |
