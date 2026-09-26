@@ -1889,6 +1889,22 @@ def store_github_credentials(cp, org_id: str, *, token_enc: str, org: str) -> No
     )
 
 
+def clear_github_credentials(cp, org_id: str) -> None:
+    """Clear ``teams.github_token_enc`` + ``github_org`` (service role).
+
+    #4946: the disconnect endpoint's local half — the encrypted OAuth token
+    is removed, not merely a dashboard flag flipped. ``None`` PATCHes both
+    columns to NULL; a missing org row is a no-op, so a repeated disconnect
+    is idempotent.
+    """
+    cp.query(
+        "organizations",
+        method="PATCH",
+        filters=[("id", "eq", org_id)],
+        json_body={"github_token_enc": None, "github_org": None},
+    )
+
+
 # ── Org deletion cascade (E2E-6-D, issue #302 security baseline) ──────────
 #
 # Two-phase deletion: soft delete (immediate access kill + grace stamp) then

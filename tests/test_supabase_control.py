@@ -26,6 +26,7 @@ from tortoise.supabase_control import (
     active_api_keys,
     api_key_by_id,
     claim_membership,
+    clear_github_credentials,
     count_graph_keys,
     delete_graph_row,
     expired_bootstrap_keys,
@@ -1490,6 +1491,24 @@ class TestGithubCredentials:
         with pytest.raises(RuntimeError):
             store_github_credentials(ErrorControlPlane(), "team-free-001",
                                      token_enc="x", org="acme")
+
+    def test_clear_then_read_round_trip(self, fake):
+        """#4946: the disconnect path's local half is a real clear (both
+        columns NULL), not merely a dashboard flag flip."""
+        fake.tables["organizations"][0].update(
+            {"github_token_enc": "enc-blob", "github_org": "acme"})
+        clear_github_credentials(fake, "team-free-001")
+        assert github_credentials(fake, "team-free-001") == {
+            "github_token_enc": None, "github_org": None}
+
+    def test_clear_missing_team_is_a_noop(self, fake):
+        """Idempotent: a repeated disconnect (or a missing org row) must not
+        raise — the endpoint calls this unconditionally."""
+        clear_github_credentials(fake, "no-such-team")
+
+    def test_clear_fail_closed_on_error(self):
+        with pytest.raises(RuntimeError):
+            clear_github_credentials(ErrorControlPlane(), "team-free-001")
 
 
 # ── Real-client request encoding (#3686 review) ─────────────────────────────
