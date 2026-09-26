@@ -10653,6 +10653,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 "eid": event_id, "sid": session_id,
                                 "harness": source_harness, "ing": now},
                     )
+                # #4936 (mirror of the sdk capture stamp): the minted-point
+                # join above CANNOT reach an operator whose endpoint RE-KEYED
+                # to a pre-existing graph node (#4716 Part 1) — the payload
+                # point resolved to the existing node, so it is not in
+                # ``minted_ids`` (a folded-only capture mints nothing at all,
+                # leaving the join unreached). Stamp exactly the operator ids
+                # this capture CREATED, surfaced on the extraction meta by
+                # ``sdk._extract_session_v2`` (the apply_payload_operators
+                # return). ``eventId IS NULL`` is the no-clobber guard; the
+                # join's ``draft`` guard is deliberately NOT repeated (these
+                # ids are Points this call created — draft at creation — so a
+                # concurrent promotion flipping one to 'live' must not defeat
+                # the stamp). The join is kept — it is the only surface
+                # covering operators created outside apply_payload_operators
+                # (the M2 projection path).
+                operator_ids = list(meta.get("operator_ids") or [])
+                if operator_ids:
+                    proj.g.query(
+                        "MATCH (o:Point {is_operator:true}) "
+                        "WHERE o.id IN $ids "
+                        "AND o.eventId IS NULL "
+                        "SET o.eventId=$eid, o.source_session=$sid, "
+                        "    o.source_harness=$harness, "
+                        "    o.ingested_at=$ing",
+                        params={"ids": operator_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
                 if retry_failed_capture:
                     # #2335 WI-2b / review (PR #2473): a RETRY heals the
                     # failed first attempt's provenance gap (mirror of the

@@ -43,7 +43,7 @@ import yaml
 from tests._live_utils import LIVE_URI_SKIP_REASON
 from tortoise import extractor_v2 as v2
 from tortoise.commit_ops import apply_supersessions
-from tortoise.extractor_v2 import CHAINS, PACK_NS, _PACK_TRIGGERS
+from tortoise.extractor_v2 import CHAINS, _PACK_TRIGGERS
 from tortoise.pack_registry import CORE_KINDS, PackRegistry, default_packs_dir
 from tortoise.pack_state import ensure_tenant_packs, get_tenant_packs
 from tortoise.search_engine import fetch_point_epistemic_state
@@ -546,12 +546,19 @@ class TestPackFitLayers:
 class TestPackWiringGuards:
     def test_every_shipped_pack_namespace_reaches_the_extraction_master_list(
             self, registry):
-        """A pack whose namespace is absent from `PACK_NS` compiles in the
+        """A pack whose namespace never reaches ``pack_kinds`` compiles in the
         registry but is INVISIBLE to the extractor — the pack ships inert. This
-        is the guard for that whole class of bug, not just venture."""
-        missing = [ns for ns in registry.packs if f"{ns}:" not in PACK_NS]
+        is the guard for that whole class of bug, not just venture.
+
+        The pack-kind set is derived from the compiled value brief (#5165), so
+        the default (ungated catalog-union) path must carry every shipped
+        namespace; a namespace absent here can never be offered by the prompt.
+        """
+        master_ns = {k.split(":", 1)[0]
+                     for k in v2.build_master_list()["pack_kinds"]}
+        missing = [ns for ns in registry.packs if ns not in master_ns]
         assert not missing, (
-            f"packs invisible to the extractor (absent from PACK_NS): {missing}")
+            f"packs invisible to the extractor (absent from pack_kinds): {missing}")
 
     def test_venture_kinds_are_in_the_master_list_and_its_forms(self):
         master = v2.build_master_list()
