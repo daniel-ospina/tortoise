@@ -15,12 +15,11 @@ work-owning boundary and written through ``metering.record_embedding_usage``.
 
 THE FLEET BAR FOR THIS FILE
 ---------------------------
-The integration tests for each boundary drive the REAL writer/reader (registry
-lane) or the real seam (Supabase lane); the unit tests below them replace
-``metering.record_embedding_usage`` with a recording stub, which is why each
-one names the mutation that must make it RED. The two HTTP-boundary tests
-(authored in ``TestMiddleware``) drive the real pure-ASGI middleware and the
-``/v1/team`` route.
+The integration tests drive the REAL writer/reader (registry lane) or the real
+seam (Supabase lane); the unit tests below them replace
+``metering.record_embedding_usage`` with a recording stub. The HTTP boundary is
+driven end-to-end through the real pure-ASGI middleware (``TestMiddleware``)
+and the real ``/v1/team`` route (``TestTeamRoute``).
 
 DECLARED RESIDUAL (not a claim)
 -------------------------------
@@ -266,6 +265,29 @@ class TestMeted:
             t.join()
         assert len(calls) == 1, calls
 
+    def test_async_arm_skips_the_offload_when_nothing_encoded(
+            self, monkeypatch):
+        # Same guard on the async arm: a decorated runner that encoded nothing
+        # (the common case for the seed runners) must not pay a thread hop.
+        # Mutation: dropping the ``is_empty()`` guard in ``__aexit__`` → RED.
+        calls = _capture_writer(monkeypatch)
+        hops: list = []
+        real = asyncio.to_thread
+
+        async def _spy(fn, *a, **kw):
+            hops.append(fn)
+            return await real(fn, *a, **kw)
+
+        monkeypatch.setattr(asyncio, "to_thread", _spy)
+
+        async def _run():
+            async with em.meted(ORG):
+                pass                          # deliberately encodes nothing
+
+        asyncio.run(_run())
+        assert calls == []
+        assert hops == []
+
     def test_meted_flushes_even_when_the_body_raises(self, monkeypatch):
         # Mutation: only flushing on the happy path → no write after the raise.
         calls = _capture_writer(monkeypatch)
@@ -464,15 +486,32 @@ class TestEmbeddingsHook:
         # REGRESSION GUARD, not a mutation pin: the hook must leave the
         # un-instrumented call byte-identical (the eval doubles and the longmem
         # harness call this with no tally armed). Two independent total-guards
-        # protect it (``note_encode``'s None check and ``_note_embed_encode``'s
-        # except), so no SINGLE production mutation reds it — each guard is
-        # pinned on its own by test_unarmed_note_is_a_noop.
+        # protect it — ``note_encode``'s None check (pinned by
+        # test_unarmed_note_is_a_noop) and ``_note_embed_encode``'s except
+        # (pinned by test_the_hook_cannot_cost_the_caller_its_vectors) — so no
+        # SINGLE production mutation reds this test.
         import tortoise.embeddings as emb
         monkeypatch.setattr(emb.EmbeddingModel, "get", classmethod(
             lambda cls: _FakeModel()))
         out = emb.compute_embeddings(["x"])
         assert out and out[0] == [0.0, 0.0, 0.0]
-        assert em.current_tally() is None
+
+    def test_the_hook_cannot_cost_the_caller_its_vectors(self, monkeypatch):
+        # ``_note_embed_encode``'s except, pinned on its own. The hook sits on
+        # the VALUE-RETURN path (deliberately outside every value-guarding
+        # try), so this except is the only thing between a measurement fault
+        # and a discarded batch — the #4280 shape.
+        # Mutation: removing the except → the RuntimeError below propagates out
+        # of compute_embeddings → RED.
+        import tortoise.embeddings as emb
+        monkeypatch.setattr(emb.EmbeddingModel, "get", classmethod(
+            lambda cls: _FakeModel()))
+
+        def _boom(**kw):
+            raise RuntimeError("measurement fault")
+
+        monkeypatch.setattr(em, "note_encode", _boom)
+        assert emb.compute_embeddings(["x"]) == [[0.0, 0.0, 0.0]]
 
     def test_tfidf_fallback_is_not_counted_as_an_encode(self, monkeypatch):
         # Mutation: noting the encode BEFORE the model call (so a failed encode
@@ -777,7 +816,6 @@ class TestMiddleware:
                    "state": {"org_id": ORG}})
         assert len(calls) == 1 and calls[0]["org_id"] == ORG
         assert alerts == []
-        assert em.current_tally() is None
 
     def test_get_does_not_arm(self, monkeypatch):
         # Mutation: arming on GET → the tally is armed, so the encode below
@@ -788,7 +826,28 @@ class TestMiddleware:
         self._run({"type": "http", "method": "GET",
                    "state": {"org_id": ORG}}, note=True)
         assert calls == []
-        assert em.current_tally() is None
+
+    def test_no_offload_when_the_request_encoded_nothing(self, monkeypatch):
+        # P2 (round 5): the thread hop is spent BEFORE ``flush_tally`` discovers
+        # the tally is empty, so a zero-encode non-GET request used to pay for a
+        # call that does nothing — on the SAME small default executor the real
+        # ledger writes use, which the request's ``finally`` then waits behind.
+        # Measured: that no-op hop was essentially the entire per-request cost
+        # of this middleware, paid by every POST and every OPTIONS preflight.
+        # Mutation: dropping the ``is_empty()`` guard → one hop → RED.
+        calls = _capture_writer(monkeypatch)
+        hops: list = []
+        real = asyncio.to_thread
+
+        async def _spy(fn, *a, **kw):
+            hops.append(fn)
+            return await real(fn, *a, **kw)
+
+        monkeypatch.setattr(asyncio, "to_thread", _spy)
+        self._run({"type": "http", "method": "POST",
+                   "state": {"org_id": ORG}}, note=False)
+        assert calls == []
+        assert hops == []
 
     def test_post_with_no_org_alerts(self, monkeypatch):
         # Mutation: silently dropping the work when no org is resolvable → the
