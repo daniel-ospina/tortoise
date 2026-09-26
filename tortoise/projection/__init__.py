@@ -5686,11 +5686,14 @@ class FalkorProjection(
         #
         # Placement: this runs HERE, before pass 2, while the analogous config
         # verification runs after pass 2b. That is safe only because NO later
-        # pass touches this class — the only bulk delete (the label-scoped
-        # Points wipe) is elsewhere entirely, and every later `DELETE` is
-        # `:SUPERSEDES`-scoped. A future pass-2 change that touched
-        # `:OnboardingState` would silently green this check; move it to the
-        # end if that happens.
+        # pass touches this class — the only bulk delete in `rebuild_all` is
+        # the unconditional `MATCH (n) DETACH DELETE n` above, and every later
+        # `DELETE` matches `(old:Point {id:$old})-[r]->(t)` (or the supersede
+        # re-point sweep's `(op:Point)` edge), so its source endpoint is
+        # always a `:Point` and it cannot match `:OnboardingState`,
+        # `:OnboardingStep`, `onboards` or `COMPLETED_STEP`. A future pass-2
+        # change that touched the class would silently green this check; move
+        # it to the end if that happens.
         onboarding_expected_orgs = {
             e.get("org_id") for e in onboarding_snapshot
             if isinstance(e, dict) and isinstance(e.get("org_id"), str)}
@@ -5780,9 +5783,11 @@ class FalkorProjection(
             )
         if not onboarding_verified:
             # "Could not confirm" must not be reported as "confirmed" in
-            # EITHER direction: the missing counts are None above, so this
-            # branch must not print the expected denominators as "ABSENT" and
-            # assert the data is gone — absence was never observed.
+            # EITHER direction: the missing sets are still EMPTY here (the
+            # verification read never ran, so nothing was observed absent), so
+            # this branch must not print the expected denominators as "ABSENT"
+            # and assert the data is gone. The `None` values for those counts
+            # are produced by the return mapping below, not by the sets here.
             logger.error(
                 "rebuild: onboarding-state post-restore verification "
                 "COULD NOT RUN (%d restore failure(s)) — the rebuilt "
