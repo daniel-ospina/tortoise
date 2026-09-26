@@ -1743,6 +1743,48 @@ def test_cmd_rebuild_reports_unverified_not_gone(tmp_path, capsys,
     assert "are gone" not in out.err, out.err
 
 
+def test_cmd_rebuild_reports_unverified_and_unknown_together(
+        tmp_path, capsys, monkeypatch):
+    """UNVERIFIED and UNKNOWN are independent and must BOTH be printed.
+
+    `onboarding_unknown` comes from the pre-wipe rescue file;
+    `onboarding_verified` from the post-restore read. They are computed
+    independently and the projection logs an ERROR for each, so a CLI `elif`
+    between the two silently drops one. The combined shape is reachable: a
+    pre-preservation rescue file AND a failed verification read (#4641 review
+    round 7).
+    """
+    import argparse
+
+    from tortoise.__main__ import _cmd_rebuild
+    from tortoise.projection import FalkorProjection
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "onboarding_expected": 2, "onboarding_verified": False,
+              "onboarding_restored": 0, "onboarding_missing_orgs": None,
+              "onboarding_missing_links": None,
+              "onboarding_missing_onboards": None,
+              "onboarding_restore_failures": 0,
+              "onboarding_gap": 1, "onboarding_missing_total": 0,
+              "onboarding_state_unknown": True}
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir: dict(counts))
+    sdk, events = _mk_sdk(tmp_path)
+    sdk.close()
+    _write_journal(events, [])
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "u.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "UNVERIFIED" in out.err, out.err
+    assert "UNKNOWN, not absent" in out.err, (
+        f"the UNKNOWN line was suppressed by the UNVERIFIED one:\n{out.err}")
+    # Neither shape may be re-described as observed loss (round 7).
+    assert "are gone" not in out.err, out.err
+
+
 def test_onboarding_union_leftover_wins_and_keeps_unpaired_entries():
     """The union policy, by value: leftover verbatim, fresh-only appended.
 
@@ -2016,9 +2058,11 @@ def test_onboarding_gap_warns_in_the_recover_or_raise_caller(graph, caplog):
     # Assert the CALLER's own message, not just the substring "onboarding":
     # `rebuild_all` already logs an ERROR naming onboarding on this path, so a
     # looser match would pass even with the consumer removed (verified by
-    # mutation). `recovery completed with` is produced ONLY by this caller.
-    assert any("recovery completed with" in r.getMessage()
-               and "onboarding" in r.getMessage()
+    # mutation). `recovery completed but the rebuilt graph's onboarding state
+    # is NOT confirmed intact` is produced ONLY by this caller.
+    assert any("recovery completed but the rebuilt graph's onboarding state"
+               in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
                for r in caplog.records), (
         f"the recovery caller discarded the onboarding gap: "
         f"{[r.getMessage() for r in caplog.records]}")
@@ -2168,12 +2212,18 @@ def test_unknown_is_reported_even_when_fresh_state_exists(graph, caplog):
     self-heal can make the fresh capture non-empty while the state the old
     build destroyed is still unknown. Gating on emptiness would report a clean
     `N of N restored` (#4641 review round 7).
+
+    The planted file carries only ONE of the two onboarding sections, so this
+    also discriminates the `or` predicate from the `and` one: under `and` a
+    half-recorded file reads as fully recorded and the assertion below fails.
     """
     events, sdk = graph
     _write_journal(events, [])
     _write_onboarding_state(sdk, "org-live", fork="build",
                             steps=("harness-connected",))
-    _plant(Path(_sidecar_path(events)), _legacy_pre_onboarding_sidecar())
+    half = _legacy_pre_onboarding_sidecar(version=3)
+    half["onboarding_snapshot"] = []          # only one of the two keys
+    _plant(Path(_sidecar_path(events)), half)
 
     with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
         result = sdk._get_proj().rebuild_all(str(events))

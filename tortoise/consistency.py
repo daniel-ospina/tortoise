@@ -975,11 +975,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
         (crash mid-append) are skipped, not fatal.
 
     Returns {recovered, log_points, db_points, reason} — plus `onboarding_gap`
-    (only when a completed replay left an onboarding state/edge restore gap it
-    could not close, #4641). `recovered` is still True in that case: the
-    rebuild did complete and refusing to open the store would be strictly
-    worse, so the gap is PROPAGATED for the caller to branch on rather than
-    swallowed into a success-shaped result.
+    and (only for a rescue file that predates onboarding preservation)
+    `onboarding_state_unknown`, set whenever a completed replay left the
+    graph's onboarding state NOT confirmed intact (#4641). `onboarding_gap` is
+    the trigger flag (non-zero for a confirmed loss, an unverified restore, or
+    a state-UNKNOWN rescue file); `reason` carries an ADDITIVE clause naming
+    which of the three applies. `recovered` is still True in every one of those
+    cases: the rebuild did complete and refusing to open the store would be
+    strictly worse, so the signal is PROPAGATED for the caller to branch on
+    rather than swallowed into a success-shaped result.
     """
     import json as _json
     import os
@@ -1075,12 +1079,15 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # purely-value-preserving change: `reason` has a suffix APPENDED below
         # for the gap case (in-repo callers only log it). `recovered` itself is
         # unchanged, exactly as the sticky config-reset marker is.
-        # The projection returns the gap as ONE canonical count — it owns the
-        # definition. Summing the granular keys here double-counted a single
+        # The projection returns the shapes as canonical counts — it owns the
+        # definitions. Summing the granular keys here double-counted a single
         # destroyed org (it lands in BOTH `onboarding_restore_failures` and
         # `onboarding_missing_orgs`) and let a transient restore failure read
-        # as loss; reading the one key also keeps this caller and the CLI from
-        # drifting apart (#4641 review round 6).
+        # as loss. `onboarding_gap` is the trigger (non-zero for all three
+        # shapes) and `onboarding_missing_total` discriminates a real loss from
+        # an UNKNOWN/unverified one, so a caller that must not describe all
+        # three as loss reads the key it needs rather than re-deriving either
+        # from the granular keys (#4641 review rounds 6-7).
         onboarding_gap = int(counts.get("onboarding_gap") or 0)
         onboarding_missing_total = int(
             counts.get("onboarding_missing_total") or 0)

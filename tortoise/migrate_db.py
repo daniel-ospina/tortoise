@@ -188,22 +188,20 @@ def migrate(force: bool = False) -> dict:
                 proj.close()
             # #4641: the JSONL rebuild path is one of the three routes that
             # performs the unconditional wipe, so a completed rebuild can
-            # still carry an onboarding state/edge gap the replay could not
-            # close (those writes ride no journal record). Reporting
-            # `migrated` while swallowing it is the silent partial loss the
-            # class exists to stop, so name it here as the other two callers
-            # (`consistency.recover_from_log`, the CLI) now do.
+            # still leave the migrated graph's onboarding state NOT confirmed
+            # intact — an onboarding restore gap (those writes ride no journal
+            # record), an unverified restore, or a state-UNKNOWN rescue file.
+            # Reporting `migrated` while swallowing it is the silent partial
+            # loss the class exists to stop, so name it here as the other
+            # callers (`consistency.recover_from_log`, the CLI) now do. Which
+            # of the three shapes applies is on the rebuild ERROR lines and in
+            # the returned counts, so this line must not describe them all as
+            # a loss the replay could not close.
             if rebuild_counts.get("onboarding_gap"):
                 logger.warning(
-                    "rebuild: the migrated graph has %s onboarding "
-                    "state/edge restore gap(s) the replay could not close "
-                    "%s — re-run onboarding for the affected org(s) and see "
-                    "the rebuild ERROR log (#4641)",
-                    rebuild_counts.get("onboarding_gap"),
-                    "(state UNKNOWN: the pending rescue file predates "
-                    "onboarding preservation)"
-                    if rebuild_counts.get("onboarding_state_unknown")
-                    else "")
+                    "rebuild: the migrated graph's onboarding state is NOT "
+                    "confirmed intact — re-run onboarding for the affected "
+                    "org(s) and see the rebuild ERROR log (#4641)")
 
         # Integrity verification (node-ID-set equality vs source) before marker
         target_nodes = _count_nodes(target)

@@ -322,9 +322,12 @@ gate in `tests/test_durability_posture.py` fails the build if a
   verbatim. Every writer co-writes both in one statement
   (`write_completed_step`), and the edge-traversing readers
   (`completed_steps`, `decide_completed_edge_exists`) match through the parent
-  edge — but the readers that key the step's OWN `org_id`
-  (`_prune_orphan_decide_step`, `remove_decide_completed_edge`) would no
-  longer find a re-keyed diverged step under its original org. Like the anchor
+  edge — but `_prune_orphan_decide_step`, the one reader that keys the step's
+  OWN `org_id` with no parent constraint, would no longer find a re-keyed
+  diverged step under its original org. (`remove_decide_completed_edge` also
+  names the step's `org_id`, but its query constrains the parent state's to the
+  same value, so a diverged step was already unmatchable through it; the re-key
+  normalizes the step and makes it matchable again.) Like the anchor
   divergence above, this too is a raw/hand-edited graph only. The remedy is
   the same as for #2814: the operator deletes the pending rescue file (never
   the retired, entry-less one).

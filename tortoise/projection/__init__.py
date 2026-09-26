@@ -733,11 +733,11 @@ def _capture_onboarding_snapshot(g) -> tuple[list[dict], list[tuple[str, str]]]:
     ``s.org_id`` from the parent in the same statement) and to the
     edge-traversing readers (`completed_steps`, `decide_completed_edge_exists`
     — which match through the parent edge), so the re-key is a no-op on any
-    graph a writer produced. It is NOT a no-op for the readers that key the
-    step node's own ``org_id`` (`_prune_orphan_decide_step`,
-    `remove_decide_completed_edge`, both ``{org_id, step_id:'decide-completed'}``):
+    graph a writer produced. It is NOT a no-op for
+    `_prune_orphan_decide_step`, the one reader that keys the step node's own
+    ``org_id`` with no parent constraint (``{org_id, step_id:'decide-completed'}``):
     a raw/hand-edited graph whose step ``org_id`` DIVERGES from its parent's is
-    re-keyed onto the parent, and those readers would no longer find it under
+    re-keyed onto the parent, and that reader would no longer find it under
     its original org. That divergence is the documented residual in
     `docs/durability-posture.md` (#4641).
 
@@ -3319,19 +3319,23 @@ class FalkorProjection(
                 from tortoise.consistency import recover_from_log
                 result = recover_from_log(events_dir, self)
                 if result.get("recovered"):
-                    # #4641: a completed recovery can still have left an
-                    # onboarding state/edge gap it could not close (raw writes
-                    # no journal event carries). Reporting only the clean
-                    # "auto-recovered" line there IS the silent partial loss,
-                    # so name the gap on the same line the operator reads.
+                    # #4641: a completed recovery can still leave the graph's
+                    # onboarding state NOT confirmed intact — a restore gap
+                    # (raw writes no journal event carries), an unverified
+                    # restore, or a state-UNKNOWN rescue file. Reporting only
+                    # the clean "auto-recovered" line there IS the silent
+                    # partial loss, so name it on the same line the operator
+                    # reads. Which of the three it is lives in `reason` and in
+                    # the rebuild ERROR log; the aggregate gap is the trigger.
                     if result.get("onboarding_gap"):
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
-                            "(%s events) BUT with %s onboarding state/edge "
-                            "restore gap(s) the replay could not close — "
-                            "re-run onboarding for the affected org(s) (#4641)",
+                            "(%s events) BUT its onboarding state is NOT "
+                            "confirmed intact — re-run onboarding for the "
+                            "affected org(s) and see the rebuild ERROR log "
+                            "(#4641). Recovery reason: %s",
                             events_dir, result.get("log_points"),
-                            result.get("onboarding_gap"))
+                            result.get("reason"))
                     else:
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
@@ -3362,10 +3366,11 @@ class FalkorProjection(
                 f"See operations/skills/tortoise-rebuild/SKILL.md")
         if result.get("onboarding_gap"):
             logger.warning(
-                "recovery completed with %s onboarding state/edge restore "
-                "gap(s) the replay could not close — re-run onboarding for "
-                "the affected org(s) (#4641)",
-                result.get("onboarding_gap"))
+                "recovery completed but the rebuilt graph's onboarding state "
+                "is NOT confirmed intact — re-run onboarding for the "
+                "affected org(s) and see the rebuild ERROR log (#4641). "
+                "Recovery reason: %s",
+                result.get("reason"))
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
@@ -5743,11 +5748,12 @@ class FalkorProjection(
         if onboarding_unknown:
             logger.error(
                 "rebuild: the leftover pre-wipe snapshot at %s predates "
-                "onboarding preservation and carries no onboarding record, "
-                "so whether the destroyed graph held any onboarding state "
-                "CANNOT be determined — this is a state-UNKNOWN signal, not "
-                "proof the state is absent. Re-run onboarding for any org "
-                "whose onboarding state is uncertain (#4641).",
+                "onboarding preservation and does not carry the complete "
+                "onboarding record, so whether the destroyed graph held any "
+                "onboarding state CANNOT be determined — this is a "
+                "state-UNKNOWN signal, not proof the state is absent. "
+                "Re-run onboarding for any org whose onboarding state is "
+                "uncertain (#4641).",
                 snapshot_path,
             )
         if not onboarding_verified:

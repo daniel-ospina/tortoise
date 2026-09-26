@@ -87,11 +87,13 @@ def _cmd_rebuild(args):
         # not close a gap (the operator-facing counterpart of the
         # `onboarding_gap` key the embedded auto-recovery path now warns on).
         # The three shapes below are NOT mutually exclusive: a
-        # pre-preservation rescue file (UNKNOWN) can coexist with a confirmed
-        # partial loss. Each is printed on its own so one cannot suppress the
-        # other (#4641 review round 7). `onboarding_gap` is the projection's
-        # aggregate and is the max of exactly these three sources, so printing
-        # each source is equivalent to printing the aggregate.
+        # pre-preservation rescue file (UNKNOWN) can coexist with an
+        # unverified restore and with a confirmed partial loss. Each is
+        # printed on its own so one cannot suppress the other, and the CLI
+        # reports the sources SEPARATELY rather than printing the projection's
+        # aggregate `onboarding_gap`: that aggregate is a max, so it collapses
+        # coexisting sources into one number and a UNKNOWN would be absorbed
+        # into a loss count (#4641 review round 7).
         onboarding_unverified = counts.get("onboarding_verified") is False
         onboarding_unknown = bool(counts.get("onboarding_state_unknown"))
         onboarding_missing_total = counts.get("onboarding_missing_total") or 0
@@ -121,13 +123,14 @@ def _cmd_rebuild(args):
                 "(#4641).",
                 file=sys.stderr,
             )
-        elif onboarding_unknown:
+        if onboarding_unknown:
             print(
                 "Onboarding: the leftover pre-wipe snapshot predates "
-                "onboarding preservation and carries no onboarding record — "
-                "whether the destroyed graph held any onboarding state CANNOT "
-                "be determined (UNKNOWN, not absent). Re-run onboarding for "
-                "any org whose onboarding state is uncertain (#4641).",
+                "onboarding preservation and does not carry the complete "
+                "onboarding record — whether the destroyed graph held any "
+                "onboarding state CANNOT be determined (UNKNOWN, not "
+                "absent). Re-run onboarding for any org whose onboarding "
+                "state is uncertain (#4641).",
                 file=sys.stderr,
             )
         if onboarding_missing_total:
