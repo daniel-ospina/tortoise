@@ -138,19 +138,55 @@ function shippedScripts() {
   return out
 }
 
-// #3787: the FIRST occurrence of an attribute name, lower-cased, or null. HTML
-// gives an attribute name the ASCII case-insensitivity of its tag, allows an
-// attribute to start with `/` as well as whitespace, and IGNORES a duplicate —
-// the first wins in every browser. All three defeated a `src` regex scan
-// (review cycle 2, each reproduced against a real build and confirmed in
-// Chromium: `<SCRIPT SRC=…>` was read as an inline body with empty text,
-// `<script/src=…>` was missed entirely, and `<script src=A src=B>` read the LAST
-// src while the browser loaded A).
-function firstAttr(attrs, name) {
-  for (const a of attrs.matchAll(/(?:^|[\s/])([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/g)) {
-    if (a[1].toLowerCase() === name) return a[2].replace(/^(["'])([\s\S]*)\1$/, '$2')
+// #3787: the name/value pairs of a start tag's attribute slice, parsed with the
+// same tokenizer states as `tagEnd` — a quote opens a value only after `=`, and
+// whitespace is HTML's `[\t\n\f\r ]`. This is what makes `firstAttr` a reader
+// rather than a regex over raw text: fuzzing 3,840 tag shapes against a browser
+// oracle showed the regex reading a `src=` that lies INSIDE another attribute's
+// quoted value (`<script -q=" src=/local.js " src="https://evil/e.js">`) and
+// aliasing `src\u00a0=` to `src` (review cycle 7). Names are lower-cased, and an
+// attribute with no value gets `''`, as the browser does.
+function tagAttrs(html, from, end) {
+  const out = []
+  const flush = () => { out.push([name.toLowerCase(), value]); name = ''; value = '' }
+  let state = 'beforeName'
+  let name = ''
+  let value = ''
+  let quote = null
+  for (let i = from; i < end; i++) {
+    const ch = html[i]
+    if (quote !== null) {
+      if (ch === quote) { quote = null; flush(); state = 'beforeName' }
+      else value += ch
+      continue
+    }
+    if (state === 'unquoted') {
+      if (HTML_WS.test(ch)) { flush(); state = 'beforeName' }
+      else value += ch
+      continue
+    }
+    if (HTML_WS.test(ch)) { if (state === 'name') state = 'afterName'; continue }
+    if (state === 'beforeValue') {
+      if (ch === '"' || ch === "'") quote = ch
+      else { state = 'unquoted'; value = ch }
+      continue
+    }
+    if (ch === '=' && state !== 'beforeName') { state = 'beforeValue'; value = ''; continue }
+    if (ch === '/' && state !== 'name') continue // the self-closing marker
+    state = 'name'
+    name += ch
   }
-  return null
+  if (quote !== null || state === 'unquoted') out.push([name.toLowerCase(), value])
+  else if (state === 'name' || state === 'afterName' || state === 'beforeValue') out.push([name.toLowerCase(), ''])
+  return out
+}
+
+// #3787: the first pair's value for `name` (lower-cased) in a parsed attribute
+// list, or null. Duplicates already lost in `tagAttrs`, so this is the browser's
+// own first-wins rule.
+function firstAttr(attrs, name) {
+  const hit = attrs.find(([n]) => n === name)
+  return hit === undefined ? null : hit[1]
 }
 
 // #3787: the index of the `>` that ENDS a start tag beginning at `from`, or -1.
@@ -198,11 +234,16 @@ function tagEnd(html, from) {
   return -1
 }
 
-// #3787: every `<script …>` element in a page, with the src the BROWSER would
-// load (first duplicate wins) and the element's text. A tag carrying a `src` is
-// never an inline body, and a tag whose text is discarded by that rule (a `src`
-// tag with no closing tag swallows the rest of the document as its ignored text)
-// is discarded here too, because that is what the browser does.
+// #3787: every `<script …>` element in a page, and the element's text. The
+// `src` is a BEST-EFFORT reading of the attribute slice (see `firstAttr`), used
+// only for local-reference resolution and for the supabase-name clause — both
+// backstopped by the whole-document probes. It is deliberately NOT what clause
+// 2(d)'s off-origin refusal reads: a browser oracle fuzz (3,840 tag shapes) found
+// spellings where this reading differs from the `src` the browser loads, and an
+// over-approximating raw scan is used there instead. A tag carrying a `src` is
+// never treated as an inline body, and a tag whose text is discarded by that rule
+// (a `src` tag with no closing tag swallows the rest of the document as its
+// ignored text) is discarded here too, because that is what the browser does.
 function scriptTags(html) {
   const out = []
   const open = /<script(?=[\t\n\f\r />])/gi
@@ -217,7 +258,7 @@ function scriptTags(html) {
       out.push({ src: null, body: '' })
       break
     }
-    const attrs = html.slice(open.lastIndex, end)
+    const attrs = tagAttrs(html, open.lastIndex, end)
     const rest = html.slice(end + 1)
     const close = rest.search(/<\/script\s*>/i)
     const body = close === -1 ? rest : rest.slice(0, close)
@@ -644,6 +685,13 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   //      is a real loader whose raw text carries none of the probe literals
   //      (reproduced with the guard green, cycle 4). NOT closed — the decoder that
   //      closed it is the withdrawal note on `pageContexts` above.
+  //   8. the page `<script>` reader (`tagEnd`/`firstAttr`) is a BEST-EFFORT reader,
+  //      not a conformant HTML parser: fuzzing 3,840 start-tag shapes against a
+  //      browser oracle found spellings where it reads a different `src`. Its
+  //      consumers are backstopped (see the `p.srcs` note), and the one clause
+  //      that could not be — the off-origin refusal — reads a raw over-approximate
+  //      scan instead. Exotic malformed tags can still mislead the LOCAL-reference
+  //      and supabase-name readings; they cannot open an off-origin load.
   //
   // Class-B (the lane's doctrine): each message names the value that makes it
   // fail, and each context is REACHABLE — these are the scripts and pages the
@@ -673,12 +721,9 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // false positives, each reproduced against the guard, to close a deliberately
   // obfuscated spelling no legitimate page writes.
   //
-  // `p.srcs` is deliberately NOT pinned non-empty by a count assertion: the
-  // cheap check that would do it (parsed elements vs `</script>` closers) reds a
-  // page carrying a literal `</script>` inside a quoted attribute value, and a
-  // false positive on a clean build is the failure mode this file treats as
-  // fatal. What clause 2(d) consumes is instead made CORRECT at the source, in
-  // `tagEnd`.
+  // `p.srcs` is not pinned non-empty by a count assertion: a malformed tag can
+  // yield no element, and the clauses that carry the invariant enumerate `<script`
+  // occurrences directly rather than relying on this list.
   const pageContexts = pages.map((p) => ({ name: `${p.name}#document`, js: p.html, folded: foldStringLiterals(p.html) }))
 
   // (3) COVERAGE FIRST. A scan that inspected nothing passes vacuously, and a
@@ -706,20 +751,30 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // Every local `<script src>` on EVERY shipped page is part of the executable
   // surface whatever its extension, so it must exist on disk and be scanned. A
   // reference the build did not emit is a hard fail (a broken/half-written
-  // build), never a silently skipped file. `p.srcs` comes from `scriptTags()`,
-  // so it holds the src the BROWSER would load — not the one a greedy regex
-  // happens to match (review cycle 2: a duplicate attribute and a `/`-prefixed
-  // one both defeated a regex scan while the page named the vendored library
-  // verbatim).
+  // build), never a silently skipped file.
+  //
+  // `p.srcs` is a BEST-EFFORT reading, not a conformant HTML parse: a browser
+  // oracle was fuzzed with 3,840 start-tag shapes and `scriptTags()`/`firstAttr`
+  // read the wrong `src` for some of them (a `src=` inside another attribute's
+  // quoted value, a `<script` literal in a comment or RCDATA, JS `\s` in an
+  // attribute name). That is survivable here for two reasons, and the second is
+  // why clause 2(d) below is NOT read off `p.srcs`:
+  //   * the uses below are BACKSTOPPED — a missed LOCAL reference only means a
+  //     file is not scanned twice (the whole-dist walk already covers every
+  //     executable), and a missed supabase-looking page reference is caught by
+  //     clause 2(b)/(c) over the page's own document text;
+  //   * the OFF-ORIGIN refusal has no backstop — an off-origin URL naming
+  //     neither supabase nor `vendor/` is invisible to every content probe — so
+  //     it is asserted from a raw scan that cannot desync (see below).
   const refs = new Map()
   const dangling = []
-  const offOrigin = []
   for (const p of pages) {
-    for (const ref of p.srcs) {
-      if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:') || ref.startsWith('blob:')) {
-        offOrigin.push(`${p.name} → ${ref}`)
-        continue
-      }
+    for (const raw of p.srcs) {
+      // `.trim()` mirrors the URL parser, which strips leading/trailing
+      // whitespace: `<script src=" /consent.js ">` LOADS that local file, and
+      // without this the guard reds it as a dangling reference (review cycle 7).
+      const ref = raw.trim()
+      if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:') || ref.startsWith('blob:')) continue
       const rel = ref.replace(/^\//, '')
       const abs = join(dist, rel)
       // `isFile()` matters: a page naming a DIRECTORY (`<script src="/assets">`)
@@ -734,6 +789,31 @@ test('#3787 (follow-up to #3503 P1): no script or page the dist ships can re-ing
   // Clause 2(d): an off-origin script is outside every content probe in this
   // guard, and the CSP that would block one at runtime is a header, not a build
   // property — so the artifact pin is asserted here.
+  //
+  // Every `<script` OCCURRENCE is enumerated independently of `scriptTags()`'s
+  // element walk, and each one's tag extent comes from `tagEnd` with its
+  // attributes from `tagAttrs`. Two earlier versions of this clause were
+  // falsified against a browser oracle: reading `p.srcs` let a desync hide a real
+  // element (a `<script` literal inside a COMMENT made a phantom element swallow
+  // the next one), and a windowed raw regex red an `<img src="https://…">` that
+  // merely followed a `<script` and red an UNTERMINATED tag the browser discards.
+  // Enumerating occurrences means a phantom element cannot hide a later one, a
+  // tag-bounded window cannot reach an `<img>`, and `tagEnd === -1` is inert. A
+  // `<script` literal in a comment or RCDATA is still read as a tag — an
+  // over-approximation that can only fail closed, the same fail-closed side as the
+  // page-document prose probe (residual 4). 0 hits on all five shipped pages.
+  const OFF_ORIGIN = /^(?:https?:)?\/\//i
+  const offOrigin = []
+  for (const p of pages) {
+    const opener = /<script(?=[\t\n\f\r />])/gi
+    let o
+    while ((o = opener.exec(p.html)) !== null) {
+      const end = tagEnd(p.html, opener.lastIndex)
+      if (end === -1) continue // the browser emits no element for an unterminated tag
+      const src = firstAttr(tagAttrs(p.html, opener.lastIndex, end), 'src')
+      if (src !== null && OFF_ORIGIN.test(src)) offOrigin.push(`${p.name} → ${src}`)
+    }
+  }
   assert.deepEqual(offOrigin, [],
     `${offOrigin.join(', ')} loads a script from another origin — an off-origin bundle is outside ` +
     'every content probe in this guard, so it is refused outright (#3787)')
