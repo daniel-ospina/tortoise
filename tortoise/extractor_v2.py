@@ -2488,6 +2488,10 @@ _MIN_OVERLAP_TOKENS = 2
 # E5 fact-value contradiction frame: stopword-stripped shared tokens on the
 # longer side must reach 0.5. A small LOCAL closed-class set (importing the
 # eval's ingest_v2._STOPWORDS into tortoise/ would invert the layering).
+# ⛔ A frame word can still be a load-bearing OPERATOR — `and` in "we ship and
+# test" asserts a different relation from `or`, while the same `and` coordinates
+# two list items.  Membership here is by commonest role; the role is read from
+# the PAIR in `_connective_swap` (#5139).
 _FRAME_STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "but", "if", "then", "else", "of",
     "to", "in", "on", "at", "for", "with", "from", "by", "about",
@@ -3110,6 +3114,112 @@ _CONDITION_PHRASES = (
     "as long as", "so long as", "in case", "in the event", "on condition that",
     "provided that", "assuming that", "in the case that", "conditional on",
 )
+# A connective is FRAME (syntax) or an OPERATOR (meaning), and one spelling does
+# both jobs.  `and` COORDINATES two list items in "we ship the server and the
+# client", which must fold against the comma paraphrase; the same `and` is the
+# conjunction OPERATOR in "we ship and test", where `or` asserts something else.
+# `_FRAME_STOPWORDS` holds the token by its commonest role and the content
+# skeleton is a set, so the role cannot be read from the token — it is read from
+# the PAIR: each entry below is one SLOT, and a pair is a rival claim when BOTH
+# sides fill the SAME slot and each side owns a member the other LACKS (#5139).
+# The slot is the family, never a position: a position-keyed comparison would
+# refuse the paraphrases below, and a set (not a sequence) is what keeps
+# `and then` / `, then` folding.
+#
+# A slot is a DECLARED grouping of RIVAL operators — not a set of synonyms and
+# not a partition into relation sub-families.  Splitting the clause-relation
+# slot by relation would make `and` against `but` a CROSS-slot difference and so
+# fold it, reopening the memory-loss class this table exists to close; the cost
+# of keeping it coarse is that a swap between two members that happen to be
+# near-synonyms (`but`/`yet`, `because`/`as`, `for`/`as`) is refused too.  That
+# over-block is deliberate and is part of the declared residual set.
+#
+# What keeps the legitimate folds folding:
+#   * ONE side only — a comma list owns no `and`, so one side fills the slot, the
+#     connective did no work, and the pair is the documented broadening.
+#   * A SHARED member with a one-sided extra — "we wait for the build and the
+#     tests" against "we wait for the build, the tests" shares `for`; only ONE
+#     side is missing a member, which is the same broadening.
+#   * A SYNONYM pair that is nowhere a slot — `with`/`by` are spelled
+#     differently and assert the SAME relation, so "we ship with the courier"
+#     folds into "we ship by the courier"; the place (`in`/`on`/`at`) and
+#     relation (`of`/`for`/`about`) prepositions are that same kind of set.  ⚠️
+#     `for` is the EXCEPTION: it is a clause-relation slot member below, so its
+#     prepositional use is over-blocked — see the ⚠️ note after the table.
+#   * DIFFERENT slots are a rewording, not a swap — `to` (transfer direction)
+#     against `and` (clause relation) is the phase-D seam's own restatement, and
+#     it folds.
+# `as` fills two slots because it is polysemous (comparative "taller as", causal
+# "as it rained"); `and` is the counterpart of `or`, `but`, `nor`, `so`, `yet`,
+# `as` and `for` in one clause-relation slot.  Membership is read from the
+# TOKENS, so a member need not be a frame word to be caught — `yet`, `because`,
+# `although` and `whereas` are not frame words.
+#
+# ⚠️ Deliberate OVER-blocks, taken because the boundary's asymmetry says a wrong
+# keep is noise while a wrong drop is memory loss, and each is pinned as a
+# declared residual rather than silently absorbed:
+#   * `for` as a clause-relation member refuses the instrumental rewording
+#     "use the tool for a hammer"/"as a hammer".  Pruning it out would reopen
+#     the memory-loss class this table exists to close.
+#   * the coarse clause-relation slot refuses the within-relation synonyms
+#     `but`/`yet` and `because`/`as`.
+#   * a one-sided EXTRA operator inside an already-shared slot still folds
+#     ("we ship and test" / "we ship and test but we wait") — the extra is read
+#     as the broadening case, and closing it needs syntax.
+# `before`/`after` are deliberately NOT slots: both are ordinary content tokens
+# (neither is a frame word), so each side keeps its own ordering word and the
+# two-sided substitution rule already refuses the swap.
+_CONNECTIVE_SLOTS = (
+    # clause relation — the logical/causal/contrastive link between two
+    # predications.
+    frozenset({"and", "or", "but", "nor", "so", "yet", "as", "for",
+               "because", "although", "though", "whereas"}),
+    frozenset({"then", "else"}),
+    frozenset({"than", "as"}),
+    frozenset({"to", "from"}),
+)
+_CONNECTIVE_MEMBERS = frozenset().union(*_CONNECTIVE_SLOTS)
+# Multi-word COORDINATIONS.  `as well as` IS `and`, so it is canonicalised to
+# its operator before the slots are read.  Left as written its `as` fills the
+# clause-relation slot and REFUSES the legitimate `as well as` ⇄ `and` fold;
+# deleting the phrase instead would lose the `and`/`or` contrast, because
+# `as well as` against `or` would then read as one-sided and fold.
+#
+# Matched case-insensitively on a phrase EDGE that is "not alphanumeric", so
+# "it was well as expected" and "the gas well as a fuel" are not rewritten into
+# a coordination they are not.  `\b` is NOT that edge: `_` is a word character
+# to `re`, so `\b` would leave Markdown-emphasised "_as well as_"
+# uncanonicalised — the same phrase to a reader, and a MISS, which is the lossy
+# direction.
+#
+# The flag and the caller's `_norm` are both present because either alone
+# suffices for case; keeping both means no call path can depend on which one
+# happened.
+_COORDINATION_PHRASES = (("as well as", "and"),)
+_PHRASE_EDGE_LEFT = r"(?<![^\W_])"
+_PHRASE_EDGE_RIGHT = r"(?![^\W_])"
+_PHRASE_MARK_GAP = "\x00"
+# A phrase WORD is matched mark-TOLERANT between its letters, but only for the
+# gap a DROPPED MARK leaves (``\x00*``), while the SEPARATOR between the
+# phrase's words may be any non-word run (``[\W_]+``).  Both halves are needed
+# because the phrase pass reads the text through TWO de-accentings and neither
+# is complete alone: one deletes a mark (so an accent inside a word leaves the
+# word intact but a mark standing where a separator sits fuses two words), the
+# other keeps that mark as the gap it can stand for (so the separator survives
+# but a word carrying an accent is split).  The gap is a SENTINEL rather than
+# a non-word class for a reason: ``[\W_]*`` also admits a real token inside a
+# word, so the contraction ``we'll`` would spell ``well`` and ``as we'll, as``
+# would canonicalise to ``and`` — deleting the very comparison operators this
+# guard exists to keep.  A sentinel is only ever produced by a dropped mark.
+# The ends stay anchored, so only the phrase's own skeleton is loosened.
+_COORDINATION_PHRASE_RE = tuple(
+    (re.compile(_PHRASE_EDGE_LEFT
+                + r"[\W_]+".join(
+                    (_PHRASE_MARK_GAP + "*").join(re.escape(c) for c in w)
+                    for w in phrase.split())
+                + _PHRASE_EDGE_RIGHT, re.IGNORECASE), operator)
+    for phrase, operator in _COORDINATION_PHRASES
+)
 # Relative days + month names.  Not interchangeable with the value dimension:
 # "shipped in march" vs "shipped in april" carries no number.
 _DATE_WORDS = frozenset({
@@ -3634,6 +3744,152 @@ def _deaccent(t: str) -> str:
         "NFC", "".join(c for c in decomposed if unicodedata.category(c) != "Mn"))
 
 
+def _wordlist_hits(content: str, words: frozenset[str]) -> frozenset[str]:
+    """Every member of a closed-class word list the claim carries.
+
+    ONE walk, shared by the marker tables: a token is looked up whole AND by
+    its word-parts (``_lookup_keys``), so a member fused to a separator
+    ("if!then", "and/or") is still that member and a de-accented spelling
+    agrees with the table's plain one.  A hit can only ADD a marker downstream,
+    and a marker only ever refuses a fold, so over-reading is the safe
+    direction.
+    """
+    found: set[str] = set()
+    for t in _guard_tokens(content):
+        found.update(k for k in _lookup_keys(t) if k in words)
+    return frozenset(found)
+
+
+def _deaccent_with_map(t: str, drop: str = "") -> tuple[str, list[int]]:
+    """``_deaccent`` plus the raw index each surviving character came from.
+
+    The same filtering as ``_deaccent`` (NFD, drop the non-spacing marks),
+    without the final NFC recomposition, because the caller has to map a match
+    found in the folded text back to the span it came from in the raw one.
+
+    ``drop`` is what a dropped mark becomes.  Empty (the default) is
+    ``_deaccent``'s own read — the mark vanishes, so ``as\u0338well`` reads as
+    one token ``aswell``.  ``_PHRASE_MARK_GAP`` keeps the SEPARATOR a mark can
+    stand for, which the phrase pattern reads as a non-word run: the variant a
+    phrase whose separator IS a mark needs.  A sentinel rather than a space,
+    so the phrase pattern can tell a mark-derived gap from a real space and
+    never let a real token stand inside a word.  Both reads share one ``src``
+    map, so a match found in either splices back at the same raw span.
+    """
+    chars: list[str] = []
+    src: list[int] = []
+    for i, ch in enumerate(str(t or "")):
+        for d in unicodedata.normalize("NFD", ch):
+            if unicodedata.category(d) == "Mn":
+                if drop:
+                    chars.append(drop)
+                    src.append(i)
+                continue
+            chars.append(d)
+            src.append(i)
+    return "".join(chars), src
+
+
+def _canonicalise_coordinations(text: str) -> str:
+    """Rewrite every ``_COORDINATION_PHRASES`` phrase to its operator.
+
+    Two passes over ONE text, and the second is what stops a phrase from
+    leaking its own ``as`` into a slot and masking the operator swap it stands
+    for.  The FIRST matches the text as written, so a separator BETWEEN the
+    phrase's words is the separator it is ("as well as", "as-well-as").
+    The SECOND matches the DE-ACCENTED text, because a phrase WORD can carry a
+    diacritic ("as w\u00e9ll as") or a non-spacing mark inside it ("as
+    we\u0338ll as") that no separator-based pattern sees.
+
+    The second pass reads TWO variants of that same de-accenting, because
+    deleting a mark and KEEPING it as the separator it can stand for are both
+    right and neither alone is complete: a phrase whose mark sits between its
+    words ("as\u0338well as") is a phrase only in the separator-preserving
+    variant, and one whose mark sits inside a word is a phrase only in the
+    deleting one — so a phrase that does BOTH ("as\u0338w\u00e9ll as") is
+    found by neither alone and stays two stray ``as`` tokens.  Both variants
+    share one ``src`` map, so a match from either splices back at its own raw
+    span; coinciding spans are merged before the (reversed) splice.
+
+    The sentinel a dropped mark leaves is a character a claim could also
+    CONTAIN, so the raw text is read with it replaced first — a literal NUL
+    becomes a separator and never a word gap, which keeps the sentinel
+    unproducible from outside (one char for one char, so every splice index
+    still addresses the caller's text).
+    """
+    out = text.replace(_PHRASE_MARK_GAP, " ")
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        out = pattern.sub(f" {operator} ", out)
+    for pattern, operator in _COORDINATION_PHRASE_RE:
+        folded, src = _deaccent_with_map(out)
+        separated, sep_src = _deaccent_with_map(out, _PHRASE_MARK_GAP)
+        spans: list[tuple[int, int]] = []
+        for variant, index_map in ((folded, src), (separated, sep_src)):
+            spans.extend((index_map[m.start()], index_map[m.end() - 1] + 1)
+                         for m in pattern.finditer(variant))
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        for start, end in reversed(merged):
+            out = out[:start] + f" {operator} " + out[end:]
+    return out
+
+
+def _connective_slots(content: str) -> tuple[frozenset[str], ...]:
+    """Membership in each ``_CONNECTIVE_SLOTS`` slot, one entry per slot.
+
+    A multi-word coordination is canonicalised to its operator first
+    (``_COORDINATION_PHRASES``, case-INSENSITIVELY, including the marks a
+    phrase word may carry — see ``_canonicalise_coordinations``).  The members
+    are then read from the RAW token stream through ``_wordlist_hits`` — and
+    therefore through the word-part split and ``_deaccent``, PER TOKEN.  That
+    matters: a member carrying a non-spacing combining mark ("a\u0338nd") is
+    still that member, while a mark standing where a separator would be still
+    SEPARATES ("and\u0338the" holds `and`).  Reading the FLATTENED form
+    instead LOSES the first — ``_flat_words`` turns the mark into a separator,
+    so the member is split in two before ``_deaccent`` can drop it, the slot
+    reads empty, and the guard fails OPEN.  De-accenting the WHOLE claim loses
+    the second instead: the mark glues the member to its neighbour before
+    ``_wordlist_hits`` can split it.  Canonicalising first, per the paragraph
+    above, means neither route has to be chosen.  The phrase pass lowercases
+    only because the member pass below it is case-insensitive too — a capital
+    must not make one pass and the other disagree about one phrase.
+    """
+    text = _canonicalise_coordinations(_norm(content))
+    found = _wordlist_hits(text, _CONNECTIVE_MEMBERS)
+    return tuple(found & slot for slot in _CONNECTIVE_SLOTS)
+
+
+def _connective_swap(a: str, b: str) -> frozenset[str]:
+    """A slot BOTH sides fill where EACH side owns a member the other lacks.
+
+    Empty when the pair does not swap operators: a slot filled on ONE side only
+    is the documented broadening (`and` against a comma list); a slot filled on
+    neither says nothing; and a shared member with a one-sided extra has a
+    member the other side lacks on ONE side only — the broadening case again,
+    not a swap ("we wait for the build and the tests" against "we wait for the
+    build, the tests" shares `for` and only one side is missing `and`).  Both
+    sides owning an extra is what a swap looks like, and it is why a SHARED
+    member cannot mask one: "we ship as planned and test" against "we ship as
+    planned or test" shares `as` and still swaps `and` for `or`.
+
+    The role of a load-bearing connective is thus decided by the pair, which is
+    what a token-level predicate cannot do — and a non-empty result is a
+    substituted-content difference, the same dimension a swapped content token
+    reaches.
+    """
+    out: set[str] = set()
+    for slot_a, slot_b in zip(_connective_slots(a), _connective_slots(b),
+                              strict=True):
+        only_a, only_b = slot_a - slot_b, slot_b - slot_a
+        if only_a and only_b:
+            out |= only_a | only_b
+    return frozenset(out)
+
+
 def _flat_words(s: str) -> str:
     """The claim with every non-word character turned into a single space.
 
@@ -3664,9 +3920,7 @@ def _condition_markers(content: str) -> frozenset[str]:
     whitespace token whose parts are "if" and "the", and matching only the
     whole token left the condition invisible.
     """
-    found: set[str] = set()
-    for t in _guard_tokens(content):
-        found.update(k for k in _lookup_keys(t) if k in _CONDITION_MARKERS)
+    found = set(_wordlist_hits(content, _CONDITION_MARKERS))
     flat = _flat_words(content)
     found.update(p for p in _CONDITION_PHRASES if p in flat)
     return frozenset(found)
@@ -3983,12 +4237,21 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     poss_a, poss_b = _possessives(a), _possessives(b)
     if (poss_a or poss_b) and poss_a != poss_b:
         out.add("substituted_content")
+    # A load-bearing CONNECTIVE, read from the pair (#5139).  `and`/`or` are
+    # frame words by their commonest role — the role that keeps
+    # "we ship the server and the client" folding into the comma paraphrase —
+    # and they are also operators, so a swap between two members of one slot is
+    # a substituted content token even though neither side's skeleton holds it.
+    # See `_CONNECTIVE_SLOTS` for the one-sided, synonym and cross-slot cases
+    # that must keep folding.
+    if _connective_swap(a, b):
+        out.add("substituted_content")
     # A one-sided STATE word (#5134).  Read from the PAIR, not the token: the
     # state word is refused only when it is the whole distinguishing content of
-    # a copula predicate, which is the same pair-read shape PR #5320 (open,
-    # #5139) uses for the load-bearing connective.  A one-sided token that is
-    # not that remains the documented broadening case.  See `_POLARITY_MEMBERS`
-    # for why a token list cannot decide and which residuals are pinned.
+    # a copula predicate, which is the same pair-read shape the connective guard
+    # above uses (#5139).  A one-sided token that is not that remains the
+    # documented broadening case.  See `_POLARITY_MEMBERS` for why a token list
+    # cannot decide and which residuals are pinned.
     if _polarity_drop(a, b, content_a, content_b):
         out.add("substituted_content")
     # Negation and condition are SCOPE-bearing, and a set cannot express that:

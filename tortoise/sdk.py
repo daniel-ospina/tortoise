@@ -5816,6 +5816,75 @@ class TortoiseSDK:
                 f"{method} cannot terminalize a dead {role}")
         return {"id": point_id, "status": status, "outdated": outdated}
 
+    def _assert_window_start_not_inverted(self, point_id: str, now: str) -> None:
+        """#5358: refuse an INVERTED predecessor window BEFORE any mutation.
+
+        The stamp block in ``invalidate_point`` writes ``validTo = now`` from
+        an independent fact and never reads the point's window START, so a
+        future-dated predecessor (``validFrom > now`` — reachable,
+        ``create_point`` / ``update_point`` accept a caller ``validFrom``)
+        would persist ``validTo < validFrom``; ``restore_point_at``'s
+        ``_covers`` then covers NO instant and the point silently disappears
+        from every temporal query while the system reports honest absence
+        (#4021's sibling, separate root).
+
+        The comparison reuses the READ path's measure — ``_created_sort_key``,
+        the SAME key ``_covers`` orders with — and its PRESENCE predicate
+        (``is not None``, NOT truthiness: a falsey-but-present ``validFrom``
+        such as ``0`` is a real window start; #3985 owns the truthiness
+        divergence elsewhere). Refusal fires only on a DECIDABLE inversion:
+        both the stored start and ``now`` must be parseable to an instant.
+        An unparseable stored ``validFrom`` (e.g. ``""``) buckets LAST in
+        ``_created_sort_key`` (``(1, text)`` vs a parseable ``(0, epoch)``),
+        which would read as "greater than now" purely as an ordering-fallback
+        artifact — refusing on that would be a guess, not a comparison, so it
+        proceeds and stamps as before (that point's window already covers no
+        PARSEABLE instant, so the write cannot newly hide it from any
+        parseable query instant). EVERY matching node is examined, not just
+        the first: the writer's stamp block MATCHes **EVERY** node carrying
+        the id, and point ids are not unique (the duplicate fan-out is a
+        tested shape), so a first-row-only read could pass the guard and still
+        stamp an inverted window on a sibling node. Equality is NOT an
+        inversion: ``>`` is strict, so a zero-length ``[now, now]`` window is
+        fine.
+
+        Shared by the writer (``invalidate_point``) and the MCP dry-run
+        preview (``_preview_invalidate``) so the two cannot drift — the
+        preview contract is that a preview over an input the write would
+        reject must reject it too (#4057).
+        """
+        proj = self._get_proj()
+        vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+            params={"id": point_id},
+        ).result_set
+        if not vf_rows:
+            return
+        from .search_engine import _created_sort_key
+        k_now = _created_sort_key(now)
+        if k_now[0] != 0:
+            return  # `now` is a fresh ISO stamp; defensive symmetry
+        # The writer's stamp block MATCHes and stamps EVERY node carrying this
+        # id — point ids are not unique (the duplicate fan-out is a tested
+        # shape: test_dry_run_preview's count tests), so the guard must refuse
+        # on ANY parseable stored start after `now`, never merely the first
+        # row the server happens to return (row order is server-dependent).
+        for row in vf_rows:
+            stored_vf = row[0]
+            if stored_vf is None:
+                continue
+            k_vf = _created_sort_key(stored_vf)
+            if k_vf[0] == 0 and k_vf[1] > k_now[1]:
+                raise ValueError(
+                    f"invalidate_point: cannot invalidate {point_id!r} — its "
+                    f"validFrom {stored_vf!r} is AFTER now ({now!r}), so "
+                    f"stamping validTo=now would persist an inverted window "
+                    f"(validTo < validFrom) and the point would disappear "
+                    f"from every temporal query. retract_point is the "
+                    f"window-agnostic route (it does not touch the window): "
+                    f"call retract_point({point_id!r}) instead."
+                )
+
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
@@ -5833,6 +5902,15 @@ class TortoiseSDK:
         - corrected_by point missing, an OPERATOR, or already terminal →
           ValueError (structural failure: would orphan an outdated point, or
           wire a CORRECTS edge from an operator / a dead claim).
+        - the predecessor's ``validFrom`` is AFTER ``now`` → ValueError
+          (#5358). The stamp block writes ``validTo = now`` unconditionally,
+          so a future-dated predecessor would persist an INVERTED window
+          (``validTo < validFrom``); ``restore_point_at``'s ``_covers`` then
+          covers no instant and the point silently vanishes from every
+          temporal query. Fail-closed refusal BEFORE any mutation (no partial
+          write, no journal event), naming ``retract_point`` — the
+          window-agnostic route — as the caller's way forward. Equality is
+          well-formed (a zero-length ``[now, now]`` window is legal).
         Because ``outdated=true`` is itself terminal, repeating an invalidate
         now raises (#2498) instead of re-asserting: the old #330 "re-assert"
         contract let a dead claim's ``expiredAt`` move forward and minted one
@@ -5860,6 +5938,10 @@ class TortoiseSDK:
         self._assert_lifecycle_guard(
             corrected_by_id, method="invalidation", role="corrector")
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #5358: refuse an INVERTED predecessor window BEFORE any mutation.
+        # The check is shared with the MCP dry-run preview
+        # (`_preview_invalidate`) so the writer and its preview cannot drift.
+        self._assert_window_start_not_inverted(id, now)
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
         # validated-emit-then-mutate (mirrors supersede_point's #432 anti-
