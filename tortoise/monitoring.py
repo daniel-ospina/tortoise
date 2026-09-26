@@ -2588,8 +2588,68 @@ def _counter_val(counter) -> int:
     return 0
 
 
+#: #3253: the budget for the ``graph_size`` taxonomy round-trip that
+#: ``metrics()`` runs after a successful probe. Five label ``COUNT`` queries on
+#: the WARM projection ``probe_db`` just built are normally sub-millisecond;
+#: this is a wide margin for a large/loaded graph, and a stall now yields a
+#: per-call ``graph_size_error`` instead of pinning the health call for as long
+#: as the server stalls. Derived from (not restated beside) ``PROBE_TIMEOUT`` so
+#: the health surfaces keep ONE latency knob.
+#:
+#: ⚠️ It is a SEPARATE phase, not a widening of the reachability gate: it
+#: bounds the COUNT, so the caller's total grows by this much (see the shape
+#: totals in ``metrics()``) but the probe's own fast-degrade budget is
+#: untouched. It is captured at IMPORT time, so monkeypatching
+#: ``PROBE_TIMEOUT`` (as the probe-budget tests do) does NOT move it.
+GRAPH_SIZE_TIMEOUT = PROBE_TIMEOUT
+
+#: Name of the DEDICATED process-lifetime daemon worker the ``graph_size``
+#: count runs on. Deliberately NOT ``_probe_worker()``: a stalled label count
+#: on the SINGLE probe slot would hold it and block the NEXT health probe's
+#: ``RETURN 1``, turning a graph_size problem into a false ``degraded`` — the
+#: #3143 symptom class. A separate pool isolates the two failure domains; its
+#: own bounded backlog (``_SingleSlotWorker.MAX_BACKLOG``) fails fast once the
+#: slot is held past the budget, so a persistently stalled count reports
+#: ``graph_size_error`` instead of queueing without bound.
+GRAPH_SIZE_WORKER_NAME = "tortoise-graph-size-worker"
+
+#: Prefix of the per-call ``graph_size_error`` marker's structural cases; a
+#: count that RAISES supplies its own message after the colon. Defined once so
+#: callers/tests can match a symbol instead of re-typing the literal.
+_GRAPH_SIZE_UNAVAILABLE = "graph_size not measured"
+
+
+def _bounded_graph_size(target, timeout: float) -> int:
+    """``sum(target.taxonomy().values())`` bounded by ``timeout`` (#3253).
+
+    Runs the count on the DEDICATED ``GRAPH_SIZE_WORKER_NAME`` daemon worker
+    and refuses to wait past ``timeout`` (see ``GRAPH_SIZE_TIMEOUT``). RAISES
+    on failure — the taxonomy error, or a ``TimeoutError`` naming the budget
+    when the count overruns it — so ``metrics()`` can record a per-call
+    ``graph_size_error`` instead of leaving ``graph_size: 0`` to be misread as
+    an empty graph. The worker thread is abandoned, never cancelled (CPython
+    #87185), and is a daemon, so a stalled count cannot block interpreter
+    exit.
+    """
+    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
+    try:
+        counts = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        # ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError`` on
+        # py3.12, so a ``TimeoutError`` raised INSIDE ``taxonomy()`` (e.g. a
+        # redis socket read timeout) is caught here too. ``future.done()``
+        # separates the two: a callable that already finished raised its OWN
+        # error and must keep it, not be relabelled as a budget overrun.
+        if future.done():
+            raise
+        raise TimeoutError(
+            f"graph_size count exceeded its {timeout}s budget") from exc
+    return sum(counts.values())
+
+
 def metrics(sdk=None, setup_timeout=None) -> dict:
-    """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
+    """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
+    errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
     #1384; ``falkordb`` keeps the legacy message form for backward compat.
@@ -2617,16 +2677,19 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     PROBE_TIMEOUT`` when an explicit allowance is passed) and never drag an
     extra unbounded taxonomy round-trip onto the health call, and its failure
     must not inflate the very ``errors`` field this response reports. A
-    degraded report carries graph_size 0 with the probe error. The count
-    itself (``taxonomy()``) carries NO budget of its own — it is safe only
-    because it runs after a successful ``RETURN 1`` (a reachable server is
-    expected to answer label counts promptly; that is an assumption, not a
-    measurement), so the MCP tool's total latency is ``setup_timeout +
-    PROBE_TIMEOUT`` PLUS that round-trip. If the probe SUCCEEDS but the count
-    raises, the report is ``status="ok"`` with ``graph_size 0`` and an
-    incremented ``errors`` counter — the failure is recorded, never raised, so
-    ``ok`` + 0 is deliberately indistinguishable from a genuinely empty graph
-    and callers needing certainty must read ``errors``.
+    degraded report carries graph_size 0 with the probe error.
+
+    #3253: the count itself is now BOUNDED by ``GRAPH_SIZE_TIMEOUT`` on a
+    DEDICATED daemon worker (never the shared probe slot), so the MCP tool's
+    total latency is ``setup_timeout + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the explicit-allowance shape and ``PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the platform shape — a BOUNDED tail, never "as long as the server
+    stalls". Whether ``graph_size`` was MEASURED is reported per call through
+    ``graph_size_error``: ``None`` means it was (so a 0 is a genuinely empty
+    graph), a string means it was not (a raised count OR a budget overrun),
+    which makes the two distinguishable WITHOUT diffing the cumulative
+    ``errors`` counter. A failed count still increments ``errors`` and is
+    never raised; ``graph_size`` stays 0 for backward compatibility.
 
     #3143: ``setup_timeout`` (named to match ``probe_db``'s keyword — the
     previous ``probe_setup_timeout`` SHADOWED the module function of the same
@@ -2649,17 +2712,29 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         status = "degraded"
     else:
         status = "unknown"
+    # #3253: ``graph_size_error is None`` ⟺ ``graph_size`` was MEASURED, so a
+    # caller can tell a failed count from a genuinely empty graph on the SAME
+    # call — no second call to diff the cumulative ``errors`` counter.
     graph_size = 0
-    try:
-        if target is not None and db["ok"] is True:
-            graph_size = sum(target.taxonomy().values())
-    except Exception:
-        record_error()
+    graph_size_error: str | None = None
+    if target is None:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: no probe target"
+    elif db["ok"] is not True:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: db probe failed"
+    else:
+        try:
+            graph_size = _bounded_graph_size(target, GRAPH_SIZE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            graph_size_error = (
+                f"{_GRAPH_SIZE_UNAVAILABLE}: {str(exc)[:160] or type(exc).__name__}"
+            )
+            record_error()
     return {
         "status": status,
         "db": db,
         "falkordb": "connected" if db["ok"] is True else db["error"] or "unreachable",
         "graph_size": graph_size,
+        "graph_size_error": graph_size_error,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),
         "uptime": round(time.monotonic() - _start, 2),
