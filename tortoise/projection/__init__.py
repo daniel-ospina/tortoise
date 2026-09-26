@@ -1873,6 +1873,12 @@ _NO_PROJECTION_FOLD = frozenset({
     "CalibrationRecorded",  # :Meta milestone marker (audit)
     "DedupeRecorded",       # #784 content-dedup audit
     "DedupeRejected",       # #784 content-dedup audit
+    # #1370: a refused/suspected subject binding is an AUDIT record — the
+    # edge it declined to write must NOT be replayed from it (the confidence
+    # gate is a write-time policy decision, not graph state). Recognized-and-
+    # intentionally-not-folded; without this entry every replay would log an
+    # "unrecognized event type" warning per refusal.
+    "EntityBindingRefused",
 })
 
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so

@@ -62,6 +62,13 @@ surfaces:
   # monkeypatches — tortoise/monitoring.py (the offload pool), plus the
   # billing/notify paths the Stripe tests drive — which fall through to `core`.
   - test_analytics_offloop_4015.py
+  # #4456: the billing notification's off-loop contract (the Stripe webhook's
+  # blocking sync Resend/Telegram send). Same dual registration as the loop-
+  # responsiveness guards above: the file it guards is tortoise/hosted_api.py
+  # (which selects `api`), and the `core` half is load-bearing for the seams it
+  # monkeypatches — tortoise/monitoring.py (the offload pool) and the
+  # tortoise/notify.py notifier — which fall through to `core`.
+  - test_notify_offloop_4456.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
@@ -170,6 +177,9 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  # #1370: dual-registered with `core` — the same test file covers the hosted
+  # commit seam (tortoise/hosted_api.py), so a hosted-only change must run it too.
+  - test_subject_binding_1370.py
   - test_verbatim_span.py  # #5007: the fourth layer's SPAN link is a POINTER into the Source's raw text, not a payload — schema all-or-nothing + node round-trip + the "no verbatim text on the node" trap (registered here with test_commit_schema.py: it guards the same contract, and `tortoise/sdk.py` selects this surface)
   - test_cross_subdomain_cookie_sync.py
   - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
@@ -559,6 +569,12 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
+  # #1370: write-time subject binding — the confidence-gated, fail-closed
+  # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
+  # under `core` like its sibling binder guard (test_capture_entity_attachment_
+  # 3664.py) and the unpatterened engine modules it exercises (subject_binding,
+  # session_link, projection/entities, sdk). It also covers hosted_api.py.
+  - test_subject_binding_1370.py
   - test_ci_expected_manifests.py
   - test_ci_guard_invocation.py
   - test_client_cli_probe.py
@@ -954,6 +970,7 @@ surfaces:
   - test_never_across_fold_5080.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
+  - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
   - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all

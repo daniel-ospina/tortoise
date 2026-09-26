@@ -5450,9 +5450,71 @@ def _control_plane_unavailable() -> HTTPException:
     )
 
 
+class _OffloadRefused:
+    """Sentinel for a REFUSED best-effort offload (#4456).
+
+    ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
+    when the pool refused the submission (backlog full — or, on a cancellable
+    lane, cancelled before any worker ran it): the work did NOT happen. A
+    plain bound miss still returns ``None``, because the worker that picked
+    the submission up runs it to completion (the seam abandons only the
+    await). Callers that ignore the return value are unaffected; a
+    delivery-sensitive caller can tell a real drop from a later-than-bound
+    completion instead of reading both as ``None``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "OFFLOAD_REFUSED"
+
+
+#: Public discriminator returned by a REFUSED best-effort offload (#4456).
+OFFLOAD_REFUSED = _OffloadRefused()
+
+#: Rate limit for the ``BILLING_NOTIFY_REFUSED`` ERROR floor (#4456 plan §4).
+#: The shared telemetry pool is reachable by any tenant, so ONE saturation
+#: refuses a notify per billing webhook for EVERY tenant — the repo already
+#: ruled against per-drop alert amplification (``operator_alert._log_shed``),
+#: so the ERROR line is shed-logged too. One line per window is enough to see
+#: the outage; the suppressed count is deliberately not carried.
+_BILLING_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference
+#: point is undefined, so a fresh-boot clock would suppress every line).
+_LAST_BILLING_REFUSED_LOG: float | None = None
+_BILLING_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_billing_notify_refused(org_id: str | None,
+                                event_type: str | None) -> None:
+    """The rate-limited ERROR floor for a REFUSED billing notify (#4456 AC3).
+
+    Emitted BEFORE the incident escalation, so it survives the two reasons the
+    alert channel can be ABSENT (no ``DR_ISSUES_PAT``, or an unbuildable
+    object store — the documented residual): without it, a permanently-lost
+    billing notification reads only as the ``_cp_offload`` best-effort WARNING
+    plus ``alert_operator``'s "no alert channel" WARNING, indistinguishable
+    from routine telemetry noise. Never raises.
+    """
+    global _LAST_BILLING_REFUSED_LOG
+    with suppress(Exception):
+        now = time.monotonic()
+        with _BILLING_REFUSED_LOG_LOCK:
+            if (_LAST_BILLING_REFUSED_LOG is not None
+                    and now - _LAST_BILLING_REFUSED_LOG
+                    < _BILLING_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_BILLING_REFUSED_LOG = now
+        _logger.error(
+            "webhook: billing notify REFUSED by the control-plane offload "
+            "seam (org=%s event_type=%s) — the WebhookEvent marker is already "
+            "committed, so Stripe's retry sees is_first=False and this "
+            "notification is LOST", org_id, event_type)
+
+
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                       pool: str = "auth", timeout: float | None = None,
-                      unavailable=None):
+                      unavailable=None, cancel_on_timeout: bool = True):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -5494,6 +5556,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     await, never the worker thread (CPython #87185), so abandoning a grant that
     is mid-write would claim a retryable state it cannot observe (#2863).
 
+    ``cancel_on_timeout=False`` (#4456) makes the bound DELIVERY-preserving:
+    the bound abandons only the AWAIT, so a submission still QUEUED when the
+    bound expires STILL RUNS (the default ``True`` cancels a queued submission
+    and the worker skips it — a silent DROP, not an abandonment). A
+    ``best_effort=True`` call then returns :data:`OFFLOAD_REFUSED` — instead
+    of ``None`` — when the pool genuinely REFUSED the submission, so the
+    caller can escalate a real drop instead of swallowing it as a success.
+
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
     callers touch, and every routed site is covered by a behavioural test.
@@ -5503,13 +5573,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
         return await run_control_plane_call(
-            fn, op=op, pool=effective_pool, timeout=timeout)
+            fn, op=op, pool=effective_pool, timeout=timeout,
+            cancel_on_timeout=cancel_on_timeout)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
-            return None
+            return OFFLOAD_REFUSED if exc.refused else None
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -11539,6 +11610,19 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #1370 / #4934: the SAME kind→label routing + gated binder as the local
+    # capture seam (anti-drift — both call `subject_binding`). Subject-kind
+    # names are excluded from the legacy `about_entities` channel below: the
+    # binder is the only confidence-gated aboutSubject producer, and the raw
+    # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
+    from tortoise.subject_binding import bind_point_subjects, is_subject_kind
+    # F6: EXACT names (no `.lower()` fold) so the skip and the case-SENSITIVE
+    # `MATCH (o:Object {name:$n})` resolution agree, derived from the entities
+    # whose KIND is a subject kind.
+    subject_entity_names = {
+        er.entity.name for er in reconcile.entities
+        if is_subject_kind(er.entity.kind)
+    }
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
     document_basename = _document_source_basename(payload)
@@ -11622,6 +11706,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
+            if str(name) in subject_entity_names:
+                # #1370 (F5): DELIBERATE drop, not a hand-off. This loop writes
+                # `aboutObject` ONLY — the binder reads a Point's `slots`, not
+                # an Event's `about_entities`, so nothing replaces this edge.
+                # The attribution is intentionally not emitted because the only
+                # permitted Event→Subject writer would have to be UN-GATED
+                # (bypassing the fail-closed contract the issue exists for).
+                # No edge, no Object stub, no id-less `MERGE`. Residual recorded
+                # in the scoping doc.
+                continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities. MERGE creates the :Object on demand
@@ -11707,6 +11801,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # matching create_point); supersede candidates (changed content) get a NEW
     # content-addressed id + supersede_point (CORRECTS + outdated + edge
     # transfer, PL2). Non-episodic (the quota discriminator). ──
+    # #1370 (G1): payload point id → the id `create_point` actually RESOLVED
+    # the write to (the payload id on a fresh create, the canonical's id on a
+    # content-hash dedup hit). The binder below is keyed on this, never on the
+    # payload id, so it can only bind a Point the write actually addressed.
+    point_resolved_ids: dict[str, str] = {}
     for pr in reconcile.points:
         pid = pr.point.id
         if pr.action == "merge":
@@ -11727,7 +11826,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11748,13 +11847,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            if isinstance(_rid, str) and _rid:
+                point_resolved_ids[pr.point.id] = _rid
             sdk.supersede_point(pr.existing_id, pid)
         else:
             point_props = {}
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11773,23 +11875,37 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            if isinstance(_rid, str) and _rid:
+                point_resolved_ids[pr.point.id] = _rid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
             params={"sid": session_id, "pid": pid},
         )
 
-    # ── 6. Entities — :Object nodes MERGE by name (#452); objectKind + the
-    # S5 gate-result flag (passes_frequency_gate written WITH flag, amendment
-    # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
-    # NOT exist, §4.2). ──
+    # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
+    # become :Subject (with subjectKind) so the Subject layer is reachable and
+    # the vocabulary does not leak into Object.objectKind; everything else stays
+    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
+    # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
+    # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
-        sdk.create_entity(
-            "object", er.entity.name,
-            objectKind=er.entity.kind,
-            passes_frequency_gate=er.entity.passes_frequency_gate,
-            is_episodic=False,
-        )
+        if is_subject_kind(er.entity.kind):
+            sdk.create_entity(
+                "subject", er.entity.name,
+                subjectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
+        else:
+            sdk.create_entity(
+                "object", er.entity.name,
+                objectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
@@ -11843,11 +11959,35 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
         for name in pr.point.about_entities:
+            if str(name) in subject_entity_names:
+                continue  # #1370: the gated binder owns aboutSubject
             proj.g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
                 "MERGE (p)-[:aboutObject]->(o)",
                 params={"pid": pid, "name": name},
             )
+        # #1370: write-time, confidence-gated, fail-closed subject binding —
+        # the SAME shared driver the local capture seam calls. Only for a
+        # point this commit actually WROTE, and only against the id the write
+        # actually RESOLVED to.
+        #
+        # Hosted/local parity rule (G1): the local seam binds the id
+        # `create_point` resolved to, gated on `created_here`; a content-hash
+        # dedup hit resolves to a DIFFERENT node than the payload id, so the
+        # payload id addresses nothing. Binding the payload id made
+        # `link_entity` match no endpoint, return 0, and the binder's F7 path
+        # read that as "already present" — a phantom link. So bind the id
+        # recorded in step 5, and if this point has no resolved id (no write
+        # happened here), do NOT bind (fail-closed).
+        if pr.action in ("new", "supersede") and pr.point.slots:
+            resolved_pid = point_resolved_ids.get(pr.point.id)
+            if resolved_pid:
+                try:
+                    bind_point_subjects(proj, sdk, point_id=resolved_pid,
+                                        slots=pr.point.slots)
+                except Exception:  # noqa: BLE001, RUF100 — never sinks a commit
+                    _logger.warning("subject binding failed for %s",
+                                    resolved_pid, exc_info=True)
 
     # ── 7. Operators — shared commit semantics via apply_payload_operators
     # (#1532 D3; extracted verbatim from this block so the commit and capture
@@ -24030,6 +24170,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     repos_count = await _cp_offload(
         lambda: _github_repos_count(token), op="github_repos_count",
         best_effort=True)
+    if repos_count is OFFLOAD_REFUSED:
+        # #4456: a REFUSED best-effort offload never ran; keep the pre-seam
+        # client-visible outcome for this display-only count (``None``)
+        # instead of leaking the seam's sentinel into the JSON body.
+        repos_count = None
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -27770,10 +27915,68 @@ async def webhooks_stripe(request: Request):
             # the webhook AND strand the notification — follow it. (#4352 had
             # already moved the analytics POST behind ``_cp_offload``; what
             # this change adds here is the notify-first order and the guards.)
-            notify_billing_event(
-                notify_kind, {"org_id": org_id, "tier": tier},
-                {"subscription_status": etype},
-            )
+            #
+            # #4456: the notify ITSELF is blocking sync HTTP — Resend via
+            # ``httpx.post(..., timeout=15.0)`` plus Telegram on its own 15 s
+            # timeout (tortoise/notify.py) — and ``hosted_api`` runs a SINGLE
+            # uvicorn worker, so calling it inline held the one event loop for
+            # up to ~30 s and stalled EVERY concurrent request (the #2988 /
+            # #3498 class). It is routed through the #3498 seam rather than
+            # the issue's proposed ``asyncio.to_thread`` DELIBERATELY:
+            # ``to_thread`` submits to the loop's SHARED default executor,
+            # whose workers are NON-daemon and are JOINED at shutdown (#2850),
+            # so a black-holed socket would delay uvicorn's shutdown — and a
+            # notify would park one of the six workers the /health probe and
+            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # on the capture-cost lane). The telemetry pool is a
+            # process-lifetime DAEMON pool with a bounded backlog, so a wedged
+            # notify is abandoned at the seam's wait bound instead of
+            # delaying shutdown, and it can never occupy an auth slot.
+            #
+            # #4456 P1: the wait bound must NOT cancel a QUEUED submission.
+            # ``wait_for`` cancels the awaitable, ``asyncio.wrap_future``
+            # propagates that to the concurrent future, and a queued
+            # ``Future.cancel()`` SUCCEEDS — the worker later SKIPS the
+            # callable (``set_running_or_notify_cancel()`` is False), so the
+            # notification is DROPPED, not abandoned. Because the
+            # ``WebhookEvent`` marker was committed BEFORE the notify
+            # (``is_first=True``), Stripe's retry sees ``is_first=False`` and
+            # the notification is lost PERMANENTLY. ``cancel_on_timeout=False``
+            # keeps the bound on the AWAIT — the loop is freed and the webhook
+            # still returns promptly — while guaranteeing the queued
+            # submission still runs.
+            #
+            # ``best_effort=True`` + the guard keep the never-raise contract
+            # AT THE HAND-OFF: an offload failure is swallowed by the seam —
+            # but a REFUSAL (backlog full: the callable never ran) is a REAL
+            # drop, so the seam returns ``OFFLOAD_REFUSED`` and it is escalated
+            # through the existing operator-alert path instead of being
+            # silently swallowed. Any raise is caught here rather than
+            # reaching the handler's ``except Exception`` → 500, which would
+            # strand a claimed event and cost the payment's ack.
+            try:
+                result = await _cp_offload(
+                    lambda: notify_billing_event(
+                        notify_kind, {"org_id": org_id, "tier": tier},
+                        {"subscription_status": etype}),
+                    op="billing_notify", best_effort=True,
+                    cancel_on_timeout=False)
+                if result is OFFLOAD_REFUSED:
+                    with suppress(Exception):
+                        from tortoise.operator_alert import (
+                            alert_billing_notify_refused,
+                        )
+
+                        # The ERROR line is emitted BEFORE the escalation and
+                        # the subject is platform-scoped ("") — see
+                        # ``_log_billing_notify_refused`` and
+                        # ``alert_billing_notify_refused`` (#4456).
+                        _log_billing_notify_refused(org_id, etype)
+                        alert_billing_notify_refused(org_id, etype)
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: billing notify failed (non-fatal): %s",
+                    _safe_log(exc))
             try:
                 await _async_audit(
                     request, org_id, notify_kind,
