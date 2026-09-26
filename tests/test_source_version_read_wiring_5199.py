@@ -309,15 +309,23 @@ def test_provenance_chain_orders_reference_less_sources_by_key():
 
 
 def test_provenance_chain_separates_duplicate_sources_sharing_a_url():
-    """REGRESSION (#5199 review P1). Two `:Source` nodes CAN share a `url` —
-    `tools/source_dedup_report.py` exists because the duplication is measured
-    (#5012) — so a fallback row pair agrees on the node key (`src.url`) and ties,
-    differing only in the properties a caller reads. Leaving those in engine
-    order hands `rows[0]` to insertion sequence again, one level deeper than the
-    `src` fix alone reaches.
+    """REGRESSION (#5199 review P1). Two `:Source` nodes can share a `url` — it
+    takes a legacy/raw-Cypher write path (`#5012`'s measured duplication is
+    canonical identity across DIFFERENT raw urls), but nothing prevents it — and
+    a pair of fallback rows from them agrees on the node key (`src.url`), so
+    without a further key the pair is handed to the engine. They are different
+    documents, so that is not a benign tie.
 
-    FAILS IF the order stops at the node key: reversing the `extractedFrom`
-    insertion order would then swap the two rows."""
+    BOTH the node and the edge creation order are reversed, so the
+    insertion-order half of the assertion is real rather than vacuous, and the
+    explicit expected order pins the key that does the work.
+
+    FAILS IF `contentHash` is dropped from the order keys: `title` then decides,
+    and since the titles deliberately sort AGAINST the hashes the answer becomes
+    `["H2", "H1"]` instead of `["H1", "H2"]`. (The equality half only bites when
+    the order stops being deterministic at all — with `title` still present both
+    runs agree, so that half is a guard against a future regression, not the
+    half this mutation trips.)"""
     def _dup(reverse: bool):
         sdk = TortoiseSDK(_tmp("dup.db"))
         proj = sdk._get_proj()
@@ -329,13 +337,12 @@ def test_provenance_chain_separates_duplicate_sources_sharing_a_url():
         # AGAINST the hashes on purpose: if `contentHash` were dropped from the
         # order keys, `title` would then produce the opposite order and this test
         # would fail, so the assertion pins the hash key specifically.
-        for h, title in (("H1", "two"), ("H2", "one")):
+        order = [("H1", "two"), ("H2", "one")]
+        for h, title in (reversed(order) if reverse else order):
             proj.g.query(
                 f"CREATE (s:Source {{url:'dup.txt', title:'{title}', "
                 f"contentHash:'{h}', ingestedAt:'2024-01-01'}})"
             )
-        order = ["H1", "H2"]
-        for h in (reversed(order) if reverse else order):
             proj.g.query(
                 f"MATCH (p:Point {{id:'pt_1'}}), (s:Source {{contentHash:'{h}'}}) "
                 f"CREATE (p)-[:extractedFrom]->(s)"

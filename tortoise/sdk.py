@@ -22049,8 +22049,9 @@ class TortoiseSDK:
         (node key, note, label, content hash, title) so the shapes the writers
         produce have a stable order — a fallback row for one source cannot
         displace another's, a duplicate `:Source` sharing a ``url`` is separated
-        by its hash, and an `:Event` colliding with a `:Source` on its key is
-        separated by its label.
+        by its hash **when the hashes differ**, and an `:Event` colliding with a
+        `:Source` on its key is separated by its label. Where those keys still
+        agree, the residue paragraph below applies.
 
         It is **not** a total order, and this docstring will not pretend it is:
         two rows agreeing on every ordering key (same url/id, label, hash, title)
@@ -22092,9 +22093,11 @@ class TortoiseSDK:
             #     sources (the D10 legacy-document shape — `tortoise/ingest.py`
             #     omits `source_url` at every `api.add_document` site) would tie
             #     end to end. label/hash/title then separate the shapes that share
-            #     a key: an `:Event` colliding with a `:Source`, and two duplicate
-            #     `:Source` nodes sharing a ``url`` (the duplication
-            #     `tools/source_dedup_report.py` exists to find, #5012).
+            #     a key: an `:Event` colliding with a `:Source`, and two `:Source`
+            #     nodes sharing a ``url`` whose hashes differ. (Same-``url``
+            #     duplicates need a legacy/raw-Cypher write path: #5012's
+            #     measured duplication is CANONICAL identity across DIFFERENT raw
+            #     urls, so this key is defensive rather than a response to it.)
             #     This is NOT a total order — rows equal on every key come back in
             #     engine order; see the docstring.
             "ORDER BY ref IS NULL, ref_edge.sourceVersion IS NULL, "
