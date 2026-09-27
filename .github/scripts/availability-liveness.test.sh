@@ -37,6 +37,7 @@
 #     16. alert search fails                    → exit 1, no create/close
 #     17. missing GH_TOKEN                       → exit 1 before any gh call
 #     18. HEARTBEAT_MAX_AGE_MIN garbage/0        → normalized to the measured default
+#     18e. a VALID explicit integer is honoured    → not force-defaulted to 90
 #     18f/18g/18h. int-overflow values (threshold, heartbeat_epoch, epoch:) are
 #         unparseable → the default / STALE, never a wrapped-negative "LIVE"
 #     19. the produced alert body NAMES the channel independence (not Telegram)
@@ -396,7 +397,7 @@ seed_heartbeat 30
 export HEARTBEAT_MAX_AGE_MIN=2h
 run_checker
 assert_eq "$RC" "0" "18b: '2h' is REJECTED to the 90-min default, not digit-stripped to 2 min"
-assert_contains "$OUT" "threshold=90 min" "18b: …the ACTIVE threshold is 90 (mutation D: a %s fallback of '' errors the compare and mutes the check)"
+assert_contains "$OUT" "threshold=90 min" "18b: …the ACTIVE threshold is 90 (an EMPTY fallback would error the compare and mute the check)"
 
 reset_case
 seed_heartbeat 30
