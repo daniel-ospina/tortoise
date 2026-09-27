@@ -7116,8 +7116,20 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     if cost_val is None:
         acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
     else:
-        acc["cost_usd"] = round(
-            float(acc.get("cost_usd", 0.0)) + cost_val, 6)
+        rolled = float(acc.get("cost_usd", 0.0)) + cost_val
+        if math.isfinite(rolled):
+            acc["cost_usd"] = round(rolled, 6)
+        else:
+            # #5822 cycle-4 P3: the charge is FINITE but the ACCUMULATED total
+            # overflows to ``inf`` (two legitimate-looking ``1e308`` charges).
+            # Guarding the OPERAND cannot bound the RESULT, so the consequences
+            # cycle 3 fixed for a non-finite input return here: the row is
+            # dropped from ``analytics_events``, and ``inf + x == inf`` would
+            # swallow every later valid charge. An unusable TOTAL is disclosed
+            # exactly like an unusable charge.
+            cost_val = None
+            acc["calls_without_cost"] = (
+                int(acc.get("calls_without_cost", 0)) + 1)
     has_usage = bool(ptoks or ctoks or cost_val is not None)
     lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
             .setdefault(model or "unknown", _empty_cost_bucket()))
@@ -7127,7 +7139,12 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     if cost_val is None:
         lane["calls_without_cost"] += 1
     else:
-        lane["cost_usd"] = round(lane["cost_usd"] + cost_val, 6)
+        rolled_lane = lane["cost_usd"] + cost_val
+        if math.isfinite(rolled_lane):
+            lane["cost_usd"] = round(rolled_lane, 6)
+        else:
+            # a per-route overflow is disclosed, never written as ``inf``
+            lane["calls_without_cost"] += 1
     if not has_usage:
         acc["calls_without_usage"] = (
             int(acc.get("calls_without_usage", 0)) + 1)

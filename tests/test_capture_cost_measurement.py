@@ -1739,6 +1739,44 @@ def test_accumulate_call_cost_rejects_a_non_finite_charge():
     assert cost["calls_without_cost"] == 1, cost
 
 
+def test_accumulate_call_cost_bounds_the_accumulated_total():
+    """#5822 cycle-4 P3 — guarding the OPERAND cannot bound the RESULT.
+
+    Both charges here are FINITE, so the ``math.isfinite(cost_val)`` guard
+    passes them; only their SUM overflows. ``1e308 + 1e308 == inf``, and the
+    consequences are exactly the ones the non-finite-input fix addressed: the
+    emitted row raises ``ValueError`` under httpx's ``allow_nan=False`` and is
+    dropped from ``analytics_events`` (surviving only in the JSONL fallback),
+    and ``inf + x == inf`` swallows every later valid charge in the session.
+
+    The overflowed charge is disclosed instead of written.
+
+    REDs on: summing into ``acc``/``lane`` without re-checking finiteness.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    stats: dict = {}
+    for _ in range(2):
+        _accumulate_call_cost(
+            stats, prompt_tokens=100, completion_tokens=10, cost_usd=1e308,
+            provider="openrouter", model="point-model")
+
+    cost = stats["cost"]
+    assert math.isfinite(cost["cost_usd"]), (
+        f"the accumulated total must never be inf: {cost!r}")
+    assert cost["cost_usd"] == 1e308, cost      # the first, representable charge
+    assert cost["calls"] == 2, cost             # both calls still counted
+    assert cost["calls_without_cost"] == 1, (
+        f"the overflowed charge is disclosed, not written: {cost!r}")
+
+    lane = cost["by_route"]["openrouter"]["point-model"]
+    assert math.isfinite(lane["cost_usd"]), lane
+    assert lane["calls_without_cost"] == 1, lane
+
+    # and the row must remain JSON-encodable exactly as the analytics sink does
+    assert math.isfinite(json.loads(json.dumps(cost))["cost_usd"]), cost
+
+
 def test_m2_missing_usage_block_is_disclosed_never_fabricated(
         tmp_path, monkeypatch):
     """A provider response with NO usage block must not be turned into a
