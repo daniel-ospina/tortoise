@@ -233,6 +233,57 @@ _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
     "or capture the session under a convergent lane, to extract"
 )
 
+#: #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+#: default ON; reaffirmed by 5737715963): the truthful
+#: ``extraction_mode`` for a capture whose org turned extraction OFF
+#: (onboarding_state.capture_extract = false). A member of the SAME
+#: ``extraction_mode`` vocabulary as ``_CAPTURE_NO_PROVIDER_MODE`` — a
+#: distinct name because the reason differs (the USER chose it; a provider may
+#: well be configured), so it must be folded into neither "no-provider"
+#: (false) nor "llm" (would claim an extraction that did not run).
+_CAPTURE_EXTRACTION_DISABLED_MODE = "extraction-disabled"
+
+#: #4258: the canonical additive warning for the extraction-disabled capture.
+#: Mirrors ``_CAPTURE_NO_PROVIDER_WARNING``'s "STORED … searchable" shape so
+#: the "stored, not extracted" state reads the same in every surface's words,
+#: and names the remedy (turn it back on, re-capture).
+_CAPTURE_EXTRACTION_DISABLED_WARNING = (
+    "extraction into memory is turned OFF for this team "
+    "('capture_extract'); the session's turns were STORED and remain "
+    "searchable, but LLM extraction into memory points was skipped — turn "
+    "extraction back on (dashboard: Memory sources > Extract sessions into "
+    "memory) and re-capture the session to extract"
+)
+
+#: #4258: the sibling of ``_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING`` for a
+#: prior stored with extraction TURNED OFF (session lane ``"disabled"``) that
+#: is re-captured while the deployment sits on the non-convergent M2 lane. It
+#: exists because the keyless warning would be a FALSE diagnosis here — a
+#: provider key IS configured, the user's own setting was the reason nothing
+#: was extracted. Names every lever that actually applies.
+_CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING = (
+    "this session's turns were stored with extraction turned OFF "
+    "('capture_extract') and no extraction has ever run for it; extraction "
+    "was NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 selects a "
+    "non-convergent lane (re-running it could mint duplicate claims) — unset "
+    "it, turn extraction back on, and re-capture the session to extract"
+)
+
+#: #4258: the Session `capture_extractor` lane recorded when the team's
+#: extraction setting (not a missing key) is why nothing was extracted. A
+#: DISTINCT value from "none" (the keyless lane) on purpose: the M2-replay
+#: disclosure treats `capture_extractor == "none"` as proof of a keyless prior,
+#: so overloading it would emit the keyless warning ("stored WITHOUT a provider
+#: key") for a team whose key IS configured. Shared by BOTH capture lanes so the
+#: retry gate cannot diverge (a value one lane writes, the other must read).
+_CAPTURE_EXTRACTOR_LANE_DISABLED = "disabled"
+
+#: #4258: the lanes a FAILED prior capture may be re-attempted from. All three
+#: minted no claims of their own and their turn ids are deterministic, so the
+#: re-attempt converges. Shared (hosted + SDK) — see the lane constant above.
+_CAPTURE_EXTRACTOR_LANES_RETRYABLE = (
+    "v2", "none", _CAPTURE_EXTRACTOR_LANE_DISABLED)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
@@ -1827,7 +1878,7 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
     the logs when the self-surfacing failure fires. Emitted at the shared
     resp/effective-mode assembly. NOTE the mode COVERAGE is v2/m2/replayed/
-    error/no-provider — an "empty" line can never fire here: the empty/blank conversation
+    error/no-provider/extraction-disabled — an "empty" line can never fire here: the empty/blank conversation
     gate RETURNS before the Session MERGE + shared emit point on both lanes
     (no Session is written, so there is no capture to observe; the empty
     population is not a GO candidate). Same for the 402/turn-cap raise paths
@@ -4284,8 +4335,9 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
-        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or
-        # the keyless "none" lane, #3892). v2 point ids are content-addressed
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+        # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+        # #4258). v2 point ids are content-addressed
         # (pt_<sha>) and
         # its dedup resolves against the GRAPH (content_hash MATCH), so a
         # re-attempt folds the failed attempt's partial claims onto the same
@@ -4294,16 +4346,17 @@ class TortoiseSDK:
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
         # #1727 hole the replay skip closed). Retry fires only when the prior
-        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
-        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
+        # attempt ran a CONVERGENT lane (v2, the keyless "none" lane —
+        # #3892 — or the setting-disabled "disabled" lane, #4258) AND this
+        # request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a
         # FAILED prior attempt is re-attempted (#2335 TRUE retry) — that is
         # how a session captured without a key gets its memory points once a
-        # key appears. "none" is retry-eligible for the same reason "v2" is
-        # (it minted no claims of its own, and its turn ids are deterministic,
-        # so the re-attempt converges).
+        # key appears. "none" is retry-eligible for the same reason "v2" and
+        # "disabled" (#4258) are: none of them minted claims of its own, and
+        # their turn ids are deterministic, so the re-attempt converges.
         # The m2 exclusion is UNCHANGED and deliberate: M2 dedups per-capture
         # only, so re-running it can mint duplicate claims (the #1727/#2473
         # hole). An earlier revision of this change admitted a "none" prior
@@ -4320,7 +4373,7 @@ class TortoiseSDK:
         # a claim-free M2 retry provable; see issue #3996.
         retry_failed_capture = (
             session_existed and prior_capture_ok is False
-            and prior_capture_extractor in ("v2", "none")
+            and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
             and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
@@ -4442,6 +4495,14 @@ class TortoiseSDK:
                 # constant so the hosted lane discloses the SAME state.
                 _replay_warnings.append(
                     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+            elif (prior_capture_ok is False
+                  and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+                # #4258: the prior was an EXTRACTION-DISABLED store (the hosted
+                # lane writes this lane value) — a provider key may be
+                # configured, so the KEYLESS warning above would be a false
+                # diagnosis. Disclose the real reason + every real lever.
+                _replay_warnings.append(
+                    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
             meta = {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": [], "warnings": _replay_warnings, "mode": "replayed",
@@ -4956,7 +5017,8 @@ class TortoiseSDK:
         resp["surfaced"] = surfaced_marker(
             extracted, verified_ids=verified_ids)
         # #2335 WI-1d: the observation leg — one structured line per capture
-        # at the shared assembly (mode covers v2/m2/replayed/error — empty returns pre-emit).
+        # at the shared assembly (mode covers v2/m2/replayed/error/no-provider/
+        # extraction-disabled — empty returns pre-emit).
         try:
             _emit_capture_observation(
                 session_id=session_id, lane="sdk",
