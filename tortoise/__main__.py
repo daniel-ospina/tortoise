@@ -8449,7 +8449,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "restore":
         from tortoise.backup import restore
-        result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
+        from tortoise.log import TornTailResurrectionError
+        try:
+            result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
+        except TornTailResurrectionError as e:
+            # #3316: the same operator contract as `tortoise rebuild` — the
+            # refusal is an intended outcome for this journal, so surface it as
+            # a message and exit non-zero rather than as a traceback.
+            print(f"Refused: {e}", file=sys.stderr)
+            return 1
         print(f"Restored {result['events']} events — {result['status']}")
         return 0
     elif args.cmd == "serve":

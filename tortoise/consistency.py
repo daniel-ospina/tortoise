@@ -1085,11 +1085,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # loop silently discarded corruption ANYWHERE in the file, not just the
     # torn tail.
     log_path = os.path.join(events_dir, files[0])
-    from tortoise.log import (
-        TORN_TAIL_REVIVAL_EVENT_TYPES,
-        EventLog,
-        describe_torn_tail_revival,
-    )
+    from tortoise.log import EventLog, describe_torn_tail_revival
 
     log = EventLog(log_path)
     try:
@@ -1140,11 +1136,6 @@ def recover_from_log(events_dir: str, projection) -> dict:
     applied = 0
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
-    # A record that was READ but could not be APPLIED is a second way a
-    # removal reaches the graph's absence: its type is known, so the revival
-    # set is consulted directly (#3316). A non-revival record stays a
-    # tolerated legacy-line skip (the pre-existing contract).
-    revival_failures: list[str] = []
     for seq, ev in enumerate(events):
         if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
             entity_link_events.append((seq, ev))
@@ -1154,9 +1145,6 @@ def recover_from_log(events_dir: str, projection) -> dict:
             applied += 1
         except Exception:
             torn += 1
-            if (isinstance(ev, dict)
-                    and ev.get("type") in TORN_TAIL_REVIVAL_EVENT_TYPES):
-                revival_failures.append(str(ev.get("type")))
     if entity_link_events:
         try:
             applied += projection.fold_deferred_entity_links(
@@ -1164,21 +1152,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
         except Exception:
             torn += len(entity_link_events)
     after = _node_count()
-    # A fold of a REMOVAL that did not apply is not a data-LOSS skip: the
-    # removal is missing and the state it removed is live again, so the
-    # recovery is not trustworthy even though the graph is non-empty.
-    ok = (applied > 0 and after is not None and after > 0
-          and not revival_failures)
-    _revived = ", ".join(sorted(set(revival_failures)))
-    reason = (f"replayed {applied} events from {files[0]}"
-              + (f" ({torn} skipped)" if torn else "")
-              + (f" ({_revived} could not be applied — removed state is live "
-                 "again)" if revival_failures else ""))
-    if not ok:
-        reason = (f"replay produced an empty graph ({applied} applied, "
-                  f"{torn} skipped)"
-                  + (f"; {_revived} could not be applied — removed state is "
-                     "live again" if revival_failures else ""))
+    ok = applied > 0 and after is not None and after > 0
     return {"recovered": ok, "log_points": len(events),
             "db_points": after if after is not None else 0,
-            "reason": reason}
+            "reason": f"replayed {applied} events from {files[0]}"
+            + (f" ({torn} skipped)" if torn else "") if ok
+            else "replay produced an empty graph"}

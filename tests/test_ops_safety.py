@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -29,7 +30,21 @@ from tortoise.projection import FalkorProjection
 
 
 def _mk_tmp() -> str:
-    return tempfile.mkdtemp(prefix="tortoise_ops_safety_")
+    d = tempfile.mkdtemp(prefix="tortoise_ops_safety_")
+    _TMP_DIRS.append(d)
+    return d
+
+
+# Every temp dir this module mints is removed after the test that made it —
+# otherwise each run leaks a redislite file set per test (there are ~20).
+_TMP_DIRS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_module_tmp_dirs():
+    yield
+    while _TMP_DIRS:
+        shutil.rmtree(_TMP_DIRS.pop(), ignore_errors=True)
 
 
 def _point_event(i: int) -> dict:
@@ -265,12 +280,18 @@ def test_rebuild_cli_bypasses_health_gate():
 # direction keeps its pre-existing tolerance (S15/T12, cycle-21), and a
 # COMPLETE journal folds identically in both directions.
 #
-# The classification is by RECORD TYPE, read from the raw (possibly
-# truncated) bytes — the signal `EventLog.read_all` now exposes as
-# `torn_trailing_raw`. `ObjectRetracted`, which issue #3316 names, is not on
-# this tree (its implementation, PR #3326, was closed unmerged); the records
-# that reach the same outcome here are the hard-delete `EntityMutated`
-# (op=delete) and `PointRetracted`, and both are covered by the same set.
+# The classification is an ALLOWLIST of provably-additive record types
+# (`TORN_TAIL_HARMLESS_EVENT_TYPES` in tortoise/log.py): anything unlisted, and
+# anything whose type did not survive the tear, is REFUSED. The polarity is
+# deliberate — a new event type defaults to refused, not tolerated, because the
+# inverse (listing the removal types) fails OPEN and a new terminal type would
+# silently resurrect. The record type is read from the raw (possibly truncated)
+# bytes; `EventLog.read_all` exposes them as `torn_trailing_raw`.
+#
+# `ObjectRetracted`, which issue #3316 names, is not on this tree (its
+# implementation, PR #3326, was closed unmerged); `PointRetracted` and the
+# hard-delete `EntityMutated` reach the same outcome here, and both are refused
+# by the same allowlist.
 #
 # The engines covered are `FalkorProjection.rebuild`, `FalkorProjection.
 # rebuild_all`, `recover_from_log`, and `backup.restore`'s JSONL fallback;
@@ -278,10 +299,14 @@ def test_rebuild_cli_bypasses_health_gate():
 
 
 def _write_journal(path: str, *lines: str) -> None:
-    """Write journal lines verbatim (the last one may be a torn tail)."""
+    """Write journal lines verbatim, with ``append``'s own shape.
+
+    No trailing newline after the LAST line: ``append`` writes
+    ``json + "\\n"`` in one syscall, so a physically torn record is an
+    unterminated fragment — the fixture must be byte-identical to that.
+    """
     with open(path, "w", encoding="utf-8") as fh:
-        for line in lines:
-            fh.write(line + "\n")
+        fh.write("\n".join(lines))
 
 
 def _point_added(pid: str) -> str:
@@ -361,7 +386,17 @@ def test_torn_record_with_no_legible_type_fails_closed():
         proj.g.query("MATCH (n) DETACH DELETE n")
         result = recover_from_log(tmp, proj)
         assert result["recovered"] is False, result
-        assert "torn" in result["reason"], result
+        # The reason names the revival branch and the unreadable type — not
+        # the bare substring "torn", which the mid-file-corruption reason
+        # also contains.
+        assert "refusing to replay" in result["reason"], result
+        assert "<unreadable>" in result["reason"], result
+        # FINAL STATUS: nothing was applied, so the earlier Point is not live
+        # either. A regression that applied the replay and THEN set
+        # recovered=False would leave `maybe-1` alive and fail here.
+        live = proj.g.query(
+            "MATCH (n:Point {id:'maybe-1'}) RETURN count(n)").result_set[0][0]
+        assert live == 0, "a refused replay must not have applied anything"
     finally:
         proj.close()
 
@@ -395,8 +430,14 @@ def test_complete_log_with_a_removal_still_replays_identically():
 
 
 def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
-    """The CLI rebuild engine refuses the same journal, and refuses it BEFORE
-    the graph wipe — a refusal after the wipe is not a refusal."""
+    """`rebuild_all` refuses the journal, and refuses it BEFORE the graph wipe.
+
+    The sentinel is a ``:Canary`` node, NOT a ``:Point``: the journal's own
+    ``PointAdded`` would recreate a Point even after a wipe (and the #2943
+    snapshot restores ``:Point``), so a Point-shaped assertion would stay green
+    for a wipe-then-refuse implementation. The canary is captured by neither
+    and is the only thing that can falsify "before the wipe".
+    """
     tmp = _mk_tmp()
     db_path = os.path.join(tmp, "rebuild_torn.db")
     log_dir = os.path.join(tmp, "log")
@@ -410,13 +451,66 @@ def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
 
     proj = FalkorProjection(db_path, skip_health_check=True)
     try:
-        proj.g.query(
-            "CREATE (n:Point {id:'sentinel', content:'s', status:'live'})")
+        proj.g.query("CREATE (n:Canary {id:'pre-wipe'})")
         with pytest.raises(RuntimeError, match="resurrect"):
             proj.rebuild_all(log_dir)
         count = proj.g.query(
-            "MATCH (n:Point {id:'sentinel'}) RETURN count(n)").result_set[0][0]
+            "MATCH (n:Canary) RETURN count(n)").result_set[0][0]
         assert count == 1, "the graph was wiped despite the refusal"
+    finally:
+        proj.close()
+
+
+def test_rebuild_refuses_a_torn_removal_tail_before_the_wipe():
+    """The apply-only engine (``FalkorProjection.rebuild``) refuses the same
+    journal before its own wipe — a separate engine from ``rebuild_all``."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "rebuild_apply.db")
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    journal = os.path.join(log_dir, "events.jsonl")
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(journal, _point_added("gone-1"), full[:full.index('"op"')])
+
+    proj = FalkorProjection(db_path, skip_health_check=True)
+    try:
+        proj.g.query("CREATE (n:Canary {id:'pre-wipe'})")
+        with pytest.raises(RuntimeError, match="resurrect"):
+            proj.rebuild(EventLog(journal))
+        canary = proj.g.query(
+            "MATCH (n:Canary) RETURN count(n)").result_set[0][0]
+        assert canary == 1, "the graph was wiped despite the refusal"
+        applied = proj.g.query(
+            "MATCH (n:Point {id:'gone-1'}) RETURN count(n)").result_set[0][0]
+        assert applied == 0, "the journal was replayed despite the refusal"
+    finally:
+        proj.close()
+
+
+def test_recover_from_log_refuses_mid_file_corruption():
+    """The reader swap in ``recover_from_log``: a malformed MID-FILE line is
+    refused (the old local loop dropped any malformed line anywhere), and the
+    refusal precedes the replay, so nothing from the journal is applied."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "midfile_corrupt.db")
+    _write_journal(
+        os.path.join(tmp, "events.jsonl"),
+        _point_added("before-1"),
+        "{not json at all",
+        _point_added("after-1"),
+    )
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is False, result
+        assert "malformed line 2" in result["reason"], result
+        total = proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+        assert total == 0, "records were replayed despite mid-file corruption"
     finally:
         proj.close()
 

@@ -44,53 +44,83 @@ from pathlib import Path
 # ── torn-tail revival classification (#3316) ────────────────────────────
 #
 # ``read_all`` tolerates a torn TRAILING line on purpose: a crash mid-append
-# is an expected artifact, and a dropped REGISTRATION record means data LOSS.
-# The other direction is not symmetric. A dropped TERMINAL record — a
-# retraction, a supersession, a hard delete — means data RESURRECTION: the
-# replay rebuilds the graph WITHOUT the removal, so state a later read serves
-# as current comes back.
+# is an expected artifact, and a raised parse would kill the very recovery tool
+# the tolerance exists to save (epic #900 S15/T12).
 #
-# A replay engine must therefore not treat every torn tail as tolerable. The
-# records below are the ones whose loss can revive state; a replayed journal
-# that dropped one is not a recovery of that journal.
-TORN_TAIL_REVIVAL_EVENT_TYPES = frozenset({
-    # Point lifecycle (``PointsMerged`` deletes the merged-away Points).
-    "PointRetracted", "PointSuperseded", "PointInvalidated", "PointsMerged",
-    # Object lane: ``ObjectSuperseded`` exists on this tree; ``ObjectRetracted``
-    # is the "$2977" lane (#3316 names it) and is listed so a journal carrying
-    # one is not silently replayed once that lane lands.
-    "ObjectSuperseded", "ObjectRetracted",
-    # The generic durable-mutation record: ``op="delete"`` is a hard delete and
-    # a ``state`` op can terminalize. A torn record's ``op`` may not have
-    # survived the tear, so it can never be proven non-destructive.
-    "EntityMutated",
+# That tolerance was written for ONE direction. A dropped RECORDATION line
+# (a registration, a revision, an annotation) means data LOSS, which the
+# tolerance accepts. The other direction is not symmetric: a dropped REMOVAL
+# or other TERMINAL line — ``PointRetracted``, ``PointsMerged``,
+# ``EntityMutated`` op=delete, ``ObjectSuperseded``, a ``DirectEdgeRepoint``
+# delete leg, a ``ConfidenceChanged`` carrying ``outdated=true`` — means
+# RESURRECTION. The replay rebuilds the graph WITHOUT the removal, so state
+# the journal recorded as gone is served as current again, while recovery
+# reports success (#3316).
+#
+# So the classifier is an ALLOWLIST of record types whose loss is provably the
+# data-LOSS direction: their folds only ADD or UPDATE state, and none removes,
+# tombstones or terminalizes. A torn tail whose type is legible and wholly
+# inside this set keeps the pre-existing tolerance. EVERYTHING ELSE is refused:
+# an unlisted type and an unreadable type cannot be proven harmless, and a
+# silent resurrection is worse than a loud refusal — the refusal touches no
+# graph and leaves the journal for the operator.
+#
+# ⛔ THE POLARITY IS DELIBERATE: a NEW event type defaults to REFUSED, not
+# tolerated. Adding one here is the claim that its loss cannot revive state —
+# check its fold in ``tortoise.projection`` first. The inverse (listing the
+# removal types instead) fails OPEN: a new terminal type would silently
+# resurrect, which is exactly the defect class this exists to close.
+TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
+    # Point / operator lifecycle additions and updates.
+    "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
+    "PointPromoted", "OperatorPromoted",
+    # Object / document / session lane additions.
+    "ObjectRegistered", "DocumentCreated", "SourceCreated",
+    "SessionRecorded", "EventRecorded", "SubjectAdded",
+    # Bookkeeping records (no fold, or an additive edge/prop write).
+    "EntityLinked", "BatchIdStamped", "DedupeRecorded",
 })
 
 # ``"type"`` is matched anywhere in the partial record (the JSONL envelope is
 # ``event_id`` / ``ts`` / ``type`` / …), so a tear after the type field is
-# legible; one before it is not, and an unlegible type is NOT assumed
-# harmless.
+# legible; one before it is not, and an unlegible type is NOT assumed harmless.
 _RECORD_TYPE_RE = re.compile(r'"type"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+
+
+def record_types_from_partial(raw: str) -> list[str]:
+    """Every legible ``type`` value in a possibly-truncated JSONL record.
+
+    ALL of them, not just the first: the envelope carries ``type`` before any
+    payload, but ``append`` is public and ``read_all`` parses arbitrary bytes,
+    so a nested payload dict can carry a ``type`` too. Classification is
+    conservative over the whole set (see :func:`torn_record_may_revive_state`).
+    """
+    return _RECORD_TYPE_RE.findall(raw)
 
 
 def record_type_from_partial(raw: str) -> str | None:
     """Best-effort ``type`` of a possibly-truncated JSONL record.
 
-    Returns ``None`` when the type did not survive the tear.
+    Returns ``None`` when the type did not survive the tear. For an operator
+    message only — classification must use
+    :func:`record_types_from_partial`.
     """
-    m = _RECORD_TYPE_RE.search(raw)
-    return m.group(1) if m else None
+    types = record_types_from_partial(raw)
+    return types[0] if types else None
 
 
 def torn_record_may_revive_state(raw: str) -> bool:
     """True when dropping *raw* (a torn trailing record) could REVIVE state.
 
-    False only for a record whose type is legible AND is not a
-    removal/terminal record — the data-LOSS direction the torn-tail tolerance
-    was designed for. An illegible type is True: it cannot be proven harmless.
+    False only when EVERY legible type is inside
+    :data:`TORN_TAIL_HARMLESS_EVENT_TYPES` — the data-LOSS direction the
+    torn-tail tolerance was designed for. An unreadable type, and a record
+    naming any type outside the set, are both True: neither can be proven
+    harmless.
     """
-    t = record_type_from_partial(raw)
-    return t is None or t in TORN_TAIL_REVIVAL_EVENT_TYPES
+    types = record_types_from_partial(raw)
+    return not types or any(
+        t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types)
 
 
 def torn_tail_revival_records(raws) -> list[str]:
@@ -165,15 +195,23 @@ class EventLog:
         The raw text of every skipped trailing line is kept in
         :attr:`torn_trailing_raw` so a replay engine can tell a harmful tear
         from a harmless one (:func:`torn_record_may_revive_state`);
-        :attr:`torn_trailing_count` remains the count.
+        :attr:`torn_trailing_count` remains the count. Both are reset on EVERY
+        call (including a missing file), so a reused ``EventLog`` never
+        reports a previous call's tear.
+
+        Lines are split on ``"\n"`` — the byte ``append`` terminates a record
+        with. ``str.splitlines()`` would ALSO split on U+2028/U+2029/U+0085,
+        which ``json.dumps(..., ensure_ascii=False)`` writes RAW inside a
+        content string, so a valid single-line record would be read as two and
+        the first fragment would look like mid-file corruption.
         """
         import logging
-        if not self.path.exists():
-            return []
         self.torn_trailing_count = 0
         self.torn_trailing_raw: list[str] = []
+        if not self.path.exists():
+            return []
         out = []
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        lines = self.path.read_text(encoding="utf-8").split("\n")
         for idx, raw in enumerate(lines):
             line = raw.strip()
             if not line:

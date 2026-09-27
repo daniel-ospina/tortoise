@@ -170,8 +170,10 @@ def restore(backup_dir: str, db_path: str,
             # torn trailing removal record was dropped by ``read_all`` and the
             # state it removed would come back live on the replay below, so
             # refuse BEFORE the fold — the RDB path above already returned
-            # when the snapshot itself carried the graph, and nothing has been
-            # applied yet here.
+            # when the snapshot itself carried the graph. The destination
+            # event file and (when present) the snapshot were copied by the
+            # block above: those are restore's OWN targets, not the source,
+            # and no record has been applied to the graph here.
             refuse_torn_tail_revival(log.torn_tail_revival_records())
             hard_delete_seqs = journal_hard_delete_seqs(records)
             deferred_links: list[tuple[int, dict]] = []

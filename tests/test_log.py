@@ -286,6 +286,28 @@ def test_cursor_token_opaque():
     print("PASS test_cursor_token_opaque")
 
 
+def test_append_read_all_roundtrips_line_separator_unicode():
+    """A record whose content contains U+2028/U+2029/U+0085 round-trips.
+
+    ``append`` writes with ``ensure_ascii=False``, so those separators land
+    RAW inside the JSON string. ``read_all`` must split on ``"\\n"`` only —
+    ``str.splitlines()`` would split this one record into two, and the first
+    fragment would read as mid-file corruption (which the #3316 refusal then
+    turns into a failed recovery).
+    """
+    p = _tmp("events.jsonl")
+    log = EventLog(p)
+    event = {
+        "type": "PointAdded",
+        "point": {"id": "sep-1", "content": "a\u2028b\u2029c\u0085d",
+                  "context": "x"},
+    }
+    log.append(event)
+    assert log.read_all() == [event]
+    assert log.torn_trailing_count == 0
+    print("PASS test_append_read_all_roundtrips_line_separator_unicode")
+
+
 def _run_all():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
