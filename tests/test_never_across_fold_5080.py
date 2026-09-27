@@ -1780,36 +1780,49 @@ class TestDistinguishingDifference:
                 ("cat and dog cat to dog", "dog to cat dog and cat"),
                 ("backpressure control is missing from the ingest queue",
                  "the ingest queue is missing backpressure control"),
-                ("the cat and the dog", "the dog and the cat")):
+                ("the cat and the dog", "the dog and the cat"),
+                # The reordered-phrase class, in both its shapes: fronted and
+                # in situ.  Pinned for order-independence here as well as in
+                # `test_the_fail_closed_residuals_keep_both_claims`, because the
+                # seam reads the pair in capture order and a one-sided read of
+                # either span is what this call-out exists to catch.
+                ("in staging the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record in staging"),
+                ("we shipped the crate from the depot to the store",
+                 "we shipped the crate to the store from the depot")):
             assert (v2.distinguishing_difference(a, b)
                     == v2.distinguishing_difference(b, a)), (a, b)
             assert v2.fold_allowed(a, b) == v2.fold_allowed(b, a), (a, b)
 
     def test_the_fail_closed_residuals_keep_both_claims(self):
-        """The reorderings the guard refuses although they do not differ.
+        """The reorderings the guard refuses: what they have in common.
 
-        The opposite side of the residual below: a shape the token stream
-        cannot tell from a genuine inversion is REFUSED, so both claims are
-        kept.  That is the SAFE direction — a duplicate costs less than a
-        deleted rival — and it is pinned so the over-refusal is a recorded
-        boundary, not an accident.  A comma-list reorder is separated only by
-        the second block's determiner, which is the same raw shape a reduced
-        relative has once the comma is gone:
-        ``the cat the dog chased`` against ``the dog the cat chased`` is a
-        genuine difference the guard must not fold.
+        A shape the token stream cannot tell from a genuine inversion is
+        REFUSED, so both claims are kept.  That is the SAFE direction — a
+        duplicate costs less than a deleted rival — and each pair is pinned so
+        the over-refusal is a recorded boundary, not an accident.  They do NOT
+        all have the same status: the comma-list reorder and the reordered
+        phrase/adjunct do not differ (an over-refusal, i.e. a lost dedup),
+        while the reduced relative DOES differ and must not fold.  A comma-list
+        reorder is separated only by the second block's determiner, which is
+        the same raw shape a reduced relative has once the comma is gone:
+        ``the cat the dog chased`` against ``the dog the cat chased``.
         """
         for a, b in (
                 ("we ship the server, the client",
                  "we ship the client, the server"),
                 ("the cat the dog chased", "the dog the cat chased"),
-                # A whole CLAUSE or adjunct moving as a UNIT is a legitimate
+                # A whole CLAUSE or phrase/adjunct that reorders — fronted, or
+                # trading places IN SITU around a relator — is a legitimate
                 # reorder, but the token walk sees only a block crossing another
-                # and refuses it — FAIL-CLOSED, both claims kept, and pinned so
-                # the class is a recorded boundary rather than a surprise.
+                # and refuses it — FAIL-CLOSED, both claims kept, pinned so the
+                # class is a recorded boundary rather than a surprise.
                 ("in staging the alpha engine processed the delta record",
                  "the alpha engine processed the delta record in staging"),
                 ("the deploy succeeded as the build completed",
-                 "as the build completed the deploy succeeded")):
+                 "as the build completed the deploy succeeded"),
+                ("we shipped the crate from the depot to the store",
+                 "we shipped the crate to the store from the depot")):
             assert v2.distinguishing_difference(a, b) == "substituted_content", \
                 (a, b)
             assert not v2.fold_allowed(a, b), (a, b)
@@ -1943,7 +1956,7 @@ class TestDistinguishingDifference:
         # head/tail search, so only the attempt counter can stop it.
         inside = tuple((i, f"t{i}")
                        for i in range(v2._BLOCK_EXCHANGE_MAX_TOKENS))
-        assert len(inside) <= v2._BLOCK_EXCHANGE_MAX_TOKENS
+        assert len(inside) == v2._BLOCK_EXCHANGE_MAX_TOKENS
         assert v2._block_exchange(inside, inside) \
             == v2._EXCHANGE_BUDGET_EXCEEDED
         assert v2._role_inversion_is_unscannable(
@@ -1959,6 +1972,7 @@ class TestDistinguishingDifference:
         assert v2._role_inversion(long_a, long_a) is False
         # Every such long pair is refused, whatever the two claims say...
         assert not v2.fold_allowed(long_a, long_b)
+        assert not v2.supersede_allowed(long_a, long_b)
         # ...EXCEPT the pair where nothing changed at all, which must still
         # read as the same claim rather than as a rival.
         assert v2.distinguishing_difference(long_a, long_a) is None

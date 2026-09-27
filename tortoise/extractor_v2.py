@@ -4242,11 +4242,15 @@ _BLOCK_EXCHANGE_BUDGET = 5000
 # candidates perform, so the two together bound the product.  Above it the
 # scan is not attempted and the sentinel is returned — the same FAIL-CLOSED
 # direction as the budget, and for the same reason.  The value is a SAFETY
-# bound and not a similarity threshold: it is deliberately generous (measured
-# worst case ≈0.5 s per call at the ceiling, versus minutes without it), and a
-# change to it is a deliberate act, not a tuning knob —
+# bound and not a similarity threshold: the two bounds form a PRODUCT (the
+# budget bounds the number of decompositions, this bounds the length of each,
+# so dropping either one re-opens the blow-up), and a change to it is a
+# deliberate act, not a tuning knob —
 # `test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up` pins the
-# literal so it cannot drift.
+# literal so it cannot drift.  Measured on the fixture box: the scan itself is
+# ≈5 ms at the ceiling and the whole `fold_allowed` call ≈80 ms; with BOTH
+# bounds removed the same shape grows as ≈n^4.4 (0.19 s at 60 content tokens,
+# 1.74 s at 100, 7.74 s at 140), so it reaches minutes at a few hundred.
 _BLOCK_EXCHANGE_MAX_TOKENS = 200
 _EXCHANGE_BUDGET_EXCEEDED = (-1, -1, -1, -1)
 
@@ -4498,22 +4502,29 @@ def _role_inversion(a: str, b: str) -> bool:
         bounds exist so one comparison cannot run away on the capture path
         (the seam runs the boundary once per retrieved candidate), and an
         undecided pair must not delete a rival.  Both claims are kept;
-      * a WHOLE-CLAUSE or adjunct FRONTING (``in staging the alpha engine
-        processed the delta record`` against ``the alpha engine processed the
-        delta record in staging``, or ``as the build completed the deploy
-        succeeded`` against its mirror) is refused — FAIL-CLOSED, both claims
-        kept.  The moved phrase changed places as a UNIT, so the pair is a
+      * a whole-clause or phrase/adjunct REORDER — the phrase moving to the
+        FRONT (``in staging the alpha engine processed the delta record``
+        against ``the alpha engine processed the delta record in staging``, or
+        ``as the build completed the deploy succeeded`` against its mirror) OR
+        the two phrases trading places IN SITU around a relator (``we shipped
+        the crate from the depot to the store`` against ``we shipped the crate
+        to the store from the depot``) — is refused: FAIL-CLOSED, both claims
+        kept.  The reordered phrase moved as a UNIT, so the pair is a
         legitimate reorder, but the token walk sees only that a block crossed
-        another and cannot tell a moved adjunct from a re-assigned argument; a
+        another and cannot tell a moved phrase from a re-assigned argument; a
         dedicated check needs the phrase's span, which this walk does not keep.
+        A BARE adverb or adjunct with no relator between the blocks is NOT
+        this class — it keeps folding as the RE-FLOW of the first bullet.
 
     The list above is the residuals FOUND SO FAR, each pinned in
     ``tests/test_never_across_fold_5080.py``.  It is an enumeration of the
-    known ones, NOT a proof of completeness: the rule is a token-level reading
-    of a structural shape, so any construction the reading cannot distinguish
-    from a re-assigned slot lands on the FAIL-CLOSED side (both claims kept) —
-    safe, but a cost.  A new shape must be pinned when it is found, and this
-    list extended; it must not be read as a closed set.
+    KNOWN ones, NOT a proof of completeness: the rule is a token-level reading
+    of a structural shape, so a construction the reading cannot distinguish
+    from a re-assigned slot is refused (FAIL-CLOSED, both claims kept) while a
+    construction covered by a declared exemption above — the coordination
+    straddle, a FAIL-OPEN in the DELETE direction — still folds and can lose a
+    rival.  A newly found shape must be pinned and added here, and it can land
+    on EITHER side; "not listed" must not be read as "safe".
     """
     # Orientation-invariant.  The in-capture seam calls
     # `fold_allowed(prior, candidate)`, so which claim is first must not change
