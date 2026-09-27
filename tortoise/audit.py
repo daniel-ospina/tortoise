@@ -2,8 +2,9 @@
 
 Identifies: missing sourceKind (point-level legacy + Source-level canonical),
 missing sourceDate, superseded gaps (missing CORRECTS edge), live IMPL/NAND
-edges into superseded points, naive-IMPL heuristics, missing mitigations, and
-legacy ``mitigates`` edges.
+edges into superseded points, naive-IMPL heuristics, missing mitigations,
+legacy ``mitigates`` edges, and inverted validity windows (``validTo`` before
+``validFrom`` — the point is unreadable to temporal queries, #5361).
 
 Ontology (docs/ONTOLOGY.md §5 edge vocabulary):
   - Operators write ``(op:Point {is_operator:true})-[:IMPL|NAND]->(tgt)``.
@@ -64,6 +65,9 @@ SAMPLE_LIMIT = 50
 # support). This is a LOW-severity advisory check — the documented residual
 # cap is deliberate (see the check docstring).
 CHECK5_FETCH_LIMIT = 10000
+# Check 8's inversion predicate is a Python primitive, so it cannot be counted
+# in Cypher — the scan is paged instead: O(page) client memory, exact count.
+CHECK8_PAGE = 5000
 
 # Check 5 contradiction keywords — word-boundary matched against target
 # content. Advisory only: this check NEVER auto-converts IMPL→NAND (a false
@@ -597,6 +601,70 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         )
         for src_url, ev_id, ev_content in rows7
     ], count7)
+
+    # ── 8. inverted_validity_window (high, #5361) ──────────────────
+    # A Point whose persisted window END precedes its START (validTo <
+    # validFrom) is unreadable to temporal queries: restore_point_at's
+    # `_covers` requires validFrom <= t <= validTo, and no instant satisfies
+    # both, so the point silently disappears — indistinguishable from honest
+    # absence. HIGH because this is a real integrity failure, not a style
+    # nit: a live point is invisible to the temporal read path while that path
+    # reports it as merely absent.
+    #
+    # The measure is the READ PATH's own, never a string compare:
+    # `_created_sort_key` (the exact key `_covers` orders with — mixed-format
+    # ISO/epoch safe) plus `is not None` PRESENCE (never truthiness; a
+    # falsey-but-present bound is #3985). A naive `validTo < validFrom`
+    # string compare misreports open-ended and unparseable values (and raises
+    # on a ``None``), which is the bug class this guard must not have. ABSENT
+    # (None) bounds are open intervals — legal, not reported. An UNPARSEABLE
+    # bound buckets as (1, <text>) and is a DIFFERENT concern (#5360) — not
+    # reported here.
+    #
+    # The count is exact, and the scan is PAGED. The ordering is defined by a
+    # Python primitive, so it cannot be counted in Cypher; but this tool is
+    # reachable over MCP with no `point_kinds`, and materializing every bounded
+    # Point in one result set is an unbounded cost no sibling check pays. Pages
+    # keep client memory at O(page) while the count stays exact, so
+    # `check_capped` remains False — this is a real total, not check 5's
+    # deliberately upper-bounded fetch (CHECK5_FETCH_LIMIT).
+    from tortoise.search_engine import _created_sort_key
+    issues8: list[AuditIssue] = []
+    count8 = 0
+    offset = 0
+    while True:
+        window_rows = _rows(
+            proj,
+            f"MATCH (n:Point) WHERE {_kinds_w('n')} "
+            "AND n.validFrom IS NOT NULL AND n.validTo IS NOT NULL "
+            "RETURN n.id, n.validFrom, n.validTo "
+            "ORDER BY n.id "
+            f"SKIP {offset} LIMIT {CHECK8_PAGE}",
+            params=params,
+        )
+        for wid, w_from, w_to in window_rows:
+            k_from = _created_sort_key(w_from)
+            k_to = _created_sort_key(w_to)
+            if k_from[0] != 0 or k_to[0] != 0:
+                continue  # unparseable bound — owned by #5360, not this check
+            if k_to < k_from:
+                count8 += 1
+                if len(issues8) < SAMPLE_LIMIT:
+                    issues8.append(AuditIssue(
+                        issue_type="inverted_validity_window",
+                        severity="high",
+                        node_id=str(wid),
+                        detail=(f"Point {wid} has an inverted validity window "
+                                f"(validFrom {w_from!r} > validTo {w_to!r}) — no "
+                                "instant is covered, so temporal queries cannot "
+                                "see it"),
+                        fix=(f"Repair the window: tortoise_update_point('{wid}', "
+                             "{'validTo': '<at-or-after validFrom>'})"),
+                    ))
+        if len(window_rows) < CHECK8_PAGE:
+            break
+        offset += CHECK8_PAGE
+    _record("inverted_validity_window", issues8, count8)
 
     return AuditResult(
         issues=issues,

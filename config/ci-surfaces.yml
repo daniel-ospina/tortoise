@@ -556,6 +556,19 @@ surfaces:
   # the re-key regression drives the real embedded capture commit, so this is
   # the `core` surface (same home as test_4716 above).
   - test_operator_idempotency_4971.py
+  # #5361: both halves of the inverted-validity-window guard. Registered under
+  # `core` ALONE, which is the surface that actually selects them: the audit half
+  # guards tortoise/audit.py (no SOURCE_PATTERNS entry → `core` fallback) and the
+  # read-path half tests TortoiseSDK.restore_point_at; both halves' measure is
+  # `_created_sort_key` in tortoise/search_engine.py, also `core`. The registration
+  # is load-bearing rather than cosmetic: without it the files are ABSENT from the
+  # run set selected by `--changed-files "tortoise/audit.py"` (surfaces ['core'],
+  # full=false) — the one diff that can break them.
+  # NOTE `--changed-files` takes a newline-separated string, not a path — a path
+  # argument is read as an unknown changed file and fail-closes to full=true,
+  # which masks exactly this gap.
+  - test_5361_inverted_window_audit.py
+  - test_5361_inverted_window_read_path.py
   - test_ask_eval_only.py
   - test_backfill_ghost_members_guard.py
   - test_backup_ledger_5062.py

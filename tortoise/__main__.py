@@ -8479,7 +8479,7 @@ def main(argv: list[str] | None = None) -> int:
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
-    au = sp.add_parser("audit", help="Audit graph wiring quality (8 checks: source tiering, superseded gaps, mitigation coverage)")
+    au = sp.add_parser("audit", help="Audit graph wiring quality (9 checks: source tiering, superseded gaps, mitigation coverage, inverted validity windows)")
     au.add_argument("--db", default=None, help=(
         f"DB target override — URI ({uri_schemes_hint}) or absolute path "
         "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)"))

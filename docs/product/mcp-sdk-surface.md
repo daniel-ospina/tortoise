@@ -127,6 +127,9 @@ the gate *fails* on — not about what goes *unrecorded*.
 |---|---|---|---|
 | `tortoise_analyze` | `why` | TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off) | yes — the response is byte-identical when the flag is off |
 | `tortoise_session_capture` | `capture_redactions` | always — the count of credential-shaped spans redacted from this capture's stored turn text (0 when nothing matched) | n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911) |
+| `sdk:restore_point_at` | `malformed` | only in the honest-absence branch, and only when a chain window is inverted (validTo before validFrom, so it covers no instant) | yes — no flag; the found and ambiguous replies are byte-identical, and this key is ABSENT rather than false when no window is inverted (#5361) |
+| `sdk:restore_point_at` | `malformed_ids` | the same condition as malformed, and always alongside it — the ids of the chain entries carrying an inverted window | yes — absent when no window is inverted (#5361) |
+| `sdk:restore_point_at` | `nearest.malformed` | ALWAYS in the honest-absence branch, on every call that reports a nearest entry; true iff that entry is the inverted one | NO — deliberately not gated. nearest gains this key (true or false) whenever it is present, so the absence-branch reply gains one key on every call; the found and ambiguous replies are untouched (#5361) |
 
 A field belongs in that table from the moment it is added — an off-by-default field that is
 not recorded here has no approval behind it, and the carve-out does not cover it.

@@ -8585,8 +8585,10 @@ class TortoiseSDK:
         Runs the audit checks (missing sourceKind point-level legacy + Source-
         level canonical, missing sourceDate, superseded points without a
         CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL
-        heuristic, low-confidence operators without mitigation, and legacy
-        ``mitigates`` edges). Returns per-check counts (uncapped) + capped
+        heuristic, low-confidence operators without mitigation, legacy
+        ``mitigates`` edges, and inverted validity windows — a persisted
+        ``validTo`` earlier than ``validFrom``, which no instant satisfies).
+        Returns per-check counts (uncapped) + capped
         samples + summary + exit_code (0 clean, 1 issues found — the
         check-consistency precedent).
 
@@ -16330,6 +16332,14 @@ class TortoiseSDK:
           {found: false, nearest: {...}, chain: [...]} — honest absence:
             the date lies outside every window (before the earliest / after
             the latest); ``nearest`` is the closest window for context.
+            When a chain window is INVERTED (``validTo`` before
+            ``validFrom``, so it covers no instant at all) the reply also
+            carries ``malformed: true`` and ``malformed_ids``, and the
+            affected ``nearest`` entry carries ``malformed: true``. Without
+            that flag a corrupt window is indistinguishable from a point
+            that honestly has no window at this date (#5361). Detection is
+            scoped to THIS branch: a covering window cannot be inverted, so
+            the signal is only needed where absence is being reported.
 
         Legacy undated points: no ``validFrom`` ⇒ open start; a superseded
         point without ``validTo`` ⇒ open end (covers everything before the
@@ -16418,6 +16428,27 @@ class TortoiseSDK:
 
         # Honest absence: no window covers. Report the nearest window.
         out["found"] = False
+
+        # #5361: an inverted window (validTo before validFrom) covers NO
+        # instant, so `_covers` can never match it and this reply is otherwise
+        # byte-identical to a point that honestly has no window at this date.
+        # The read path is where the ambiguity costs most: a caller reads
+        # corruption as "nothing was true then". Flag it, using the same
+        # primitive `_covers` orders with.
+        def _inverted(vf, vt) -> bool:
+            if vf is None or vt is None:
+                return False          # open end — a legal interval
+            kf, kt = _created_sort_key(vf), _created_sort_key(vt)
+            if kf[0] != 0 or kt[0] != 0:
+                return False          # unparseable — #5360's concern
+            return kt < kf
+
+        malformed = [e for e in chain
+                     if _inverted(e["valid_from"], e["valid_to"])]
+        if malformed:
+            out["malformed"] = True
+            out["malformed_ids"] = [e["id"] for e in malformed]
+
         nearest = None
         best = None
         for e in chain:
@@ -16439,7 +16470,9 @@ class TortoiseSDK:
         if nearest is not None:
             out["nearest"] = {"id": nearest["id"],
                                "valid_from": nearest["valid_from"],
-                               "valid_to": nearest["valid_to"]}
+                               "valid_to": nearest["valid_to"],
+                               "malformed": _inverted(nearest["valid_from"],
+                                                      nearest["valid_to"])}
         return out
 
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
