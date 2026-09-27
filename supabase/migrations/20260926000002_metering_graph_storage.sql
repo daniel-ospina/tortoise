@@ -49,14 +49,22 @@ ALTER TABLE public.metering_records
     ADD COLUMN IF NOT EXISTS graph_storage_spread_mb double precision NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS graph_storage_measured_at timestamptz;
 
--- ⛔ EVERY NUMERIC COLUMN IS ``NOT NULL DEFAULT 0``, and that is load-bearing,
--- not tidiness. A metering row is created by whichever lane writes FIRST — a
--- plain write (``metering_increment``), an ask, a capture — and those RPCs do
--- NOT mention the graph-storage columns. ``NULL + n`` is NULL in SQL, so a
--- later lane relying on arithmetic would stick at NULL forever and the reader
--- would render 0 with no error anywhere: a permanently dead figure that looks
--- like "no graph". The gauge SETTER itself does not do arithmetic, but the
--- NOT NULL DEFAULT keeps the row self-consistent for any future reader.
+-- ⛔ EVERY NUMERIC COLUMN ABOVE IS ``NOT NULL DEFAULT 0`` **EXCEPT**
+-- ``graph_storage_indices_mb``, which is deliberately NULLABLE with no default
+-- (the engine may not report an index share at all, and "not reported" must
+-- stay distinguishable from "reported as zero" — the same distinction this
+-- meter exists to keep). The exception is stated HERE, where the invariant is,
+-- because a reader who trusts the rule and does arithmetic on
+-- ``graph_storage_indices_mb`` would silently get NULL.
+--
+-- The NOT NULL DEFAULT is load-bearing, not tidiness. A metering row is created
+-- by whichever lane writes FIRST — a plain write (``metering_increment``), an
+-- ask, a capture — and those RPCs do NOT mention the graph-storage columns.
+-- ``NULL + n`` is NULL in SQL, so a later lane relying on arithmetic would stick
+-- at NULL forever and the reader would render 0 with no error anywhere: a
+-- permanently dead figure that looks like "no graph". The gauge SETTER itself
+-- does not do arithmetic, but the NOT NULL DEFAULT keeps the row self-consistent
+-- for any future reader.
 -- (20260917000001's ``capture_cost_usd`` carries the same reasoning.)
 
 COMMENT ON COLUMN public.metering_records.graph_storage_mb IS
