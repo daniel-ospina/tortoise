@@ -2,10 +2,11 @@
   "status": "OK",
   "window": {
     "hours": 336.0,
-    "end": "2026-09-27T10:27:35Z",
+    "end": "2026-09-27T10:49:51Z",
     "queue_runs_in_window": 1268,
-    "queue_branches_in_window": 126,
-    "main_sha": "d6f99aa"
+    "queue_branches_in_window": 111,
+    "main_sha": "74a88cf8382dd4fef08c25bbeba49baa7f05d3f6",
+    "main_sha_source": "resolved origin/main at capture"
   },
   "parallelism": {
     "effective_max_parallel_checks": 5,
@@ -58,40 +59,20 @@
         "size": 10
       },
       {
-        "at": "2026-09-26T13:48:59Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-26T14:49:50Z",
         "size": 15
-      },
-      {
-        "at": "2026-09-26T16:20:19Z",
-        "size": 1
       },
       {
         "at": "2026-09-26T17:02:13Z",
         "size": 5
       },
       {
-        "at": "2026-09-26T17:42:47Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-26T18:17:00Z",
         "size": 5
       },
       {
-        "at": "2026-09-26T18:51:10Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-26T19:30:33Z",
         "size": 5
-      },
-      {
-        "at": "2026-09-26T20:11:28Z",
-        "size": 1
       },
       {
         "at": "2026-09-26T20:42:37Z",
@@ -102,80 +83,40 @@
         "size": 1
       },
       {
-        "at": "2026-09-26T21:15:28Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-26T21:44:10Z",
         "size": 5
-      },
-      {
-        "at": "2026-09-26T22:24:05Z",
-        "size": 1
       },
       {
         "at": "2026-09-26T23:07:04Z",
         "size": 5
       },
       {
-        "at": "2026-09-26T23:44:40Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-27T00:23:43Z",
         "size": 5
-      },
-      {
-        "at": "2026-09-27T01:02:39Z",
-        "size": 1
       },
       {
         "at": "2026-09-27T01:33:18Z",
         "size": 5
       },
       {
-        "at": "2026-09-27T02:12:32Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-27T02:52:55Z",
         "size": 5
-      },
-      {
-        "at": "2026-09-27T03:27:15Z",
-        "size": 1
       },
       {
         "at": "2026-09-27T04:09:11Z",
         "size": 5
       },
       {
-        "at": "2026-09-27T04:46:07Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-27T05:25:18Z",
         "size": 5
-      },
-      {
-        "at": "2026-09-27T06:04:43Z",
-        "size": 1
       },
       {
         "at": "2026-09-27T06:37:05Z",
         "size": 5
       },
       {
-        "at": "2026-09-27T07:11:13Z",
-        "size": 1
-      },
-      {
         "at": "2026-09-27T07:18:00Z",
         "size": 5
-      },
-      {
-        "at": "2026-09-27T07:58:22Z",
-        "size": 1
       },
       {
         "at": "2026-09-27T08:37:07Z",
@@ -183,7 +124,7 @@
       }
     ],
     "wave_size_counts": {
-      "1": 24,
+      "1": 9,
       "2": 1,
       "5": 15,
       "10": 1,
@@ -193,14 +134,19 @@
     "live_queue_refs_at_observation": null,
     "live_queue_refs_note": "a momentary count, recorded as CORROBORATION only: a queue branch is short-lived, so this number is not the effective value",
     "formation_size_distribution": {
-      "1": 25,
+      "1": 10,
       "2": 101
     },
     "sampling_caveat": "Event-derived: queue-branch create/delete and per-run start/end timestamps from the Actions API. The wave grouping is bounded to a 360s formation gap, so two genuinely separate waves closer than that gap are merged into one; per-ref polling would alias SHORT-LIVED branches downward (M3), which is why the event timestamps, not the poll, set the value."
   },
   "batches": {
-    "events": 106,
+    "events": 111,
     "batch_sizes": [
+      1,
+      1,
+      1,
+      1,
+      1,
       1,
       1,
       1,
@@ -309,19 +255,14 @@
       2
     ],
     "max_batch_size": 2,
-    "bisection_singles": 20,
+    "bisection_singles": 15,
     "conflicted_set": {
       "total": 166,
       "conflicting": 21,
       "unknown": 1
     },
-    "verified_at": "2026-09-27T10:27:35Z",
+    "verified_at": "2026-09-27T10:49:51Z",
     "bisection_prs": [
-      3405,
-      3405,
-      3405,
-      3405,
-      3405,
       5494,
       5476,
       5476,
@@ -403,7 +344,7 @@
         ],
         "stacked_prs": [],
         "main_sha": "0b3e4a9",
-        "bisection": true
+        "bisection": false
       },
       {
         "at": "2026-09-25T21:26:49Z",
@@ -414,7 +355,7 @@
         ],
         "stacked_prs": [],
         "main_sha": "c2a193d",
-        "bisection": true
+        "bisection": false
       },
       {
         "at": "2026-09-25T22:19:12Z",
@@ -425,7 +366,7 @@
         ],
         "stacked_prs": [],
         "main_sha": "294d584",
-        "bisection": true
+        "bisection": false
       },
       {
         "at": "2026-09-25T22:26:13Z",
@@ -436,7 +377,7 @@
         ],
         "stacked_prs": [],
         "main_sha": "456f2a4",
-        "bisection": true
+        "bisection": false
       },
       {
         "at": "2026-09-25T22:41:12Z",
@@ -447,7 +388,7 @@
         ],
         "stacked_prs": [],
         "main_sha": "536ca7d",
-        "bisection": true
+        "bisection": false
       },
       {
         "at": "2026-09-26T12:01:07Z",
@@ -1895,11 +1836,12 @@
     ]
   },
   "invalidations": {
-    "red_waves": 29,
-    "waves": 42,
+    "red_waves": 16,
+    "waves": 27,
     "batch_waves": 18,
     "red_batch_waves": 12,
     "discarded_speculative": 48,
+    "unobserved_waves": 1,
     "heavy_leg_conclusions": {
       "failure": 91,
       "success": 30
@@ -1912,9 +1854,7 @@
         "head_batch_prs": [
           5033
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -1924,9 +1864,7 @@
         "head_batch_prs": [
           5159
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 0
       },
       {
@@ -1936,9 +1874,7 @@
         "head_batch_prs": [
           4617
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 0
       },
       {
@@ -1948,9 +1884,7 @@
         "head_batch_prs": [
           4617
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 0
       },
       {
@@ -1960,9 +1894,7 @@
         "head_batch_prs": [
           3405
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -1972,9 +1904,7 @@
         "head_batch_prs": [
           3405
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -1984,9 +1914,7 @@
         "head_batch_prs": [
           3405
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -1996,9 +1924,7 @@
         "head_batch_prs": [
           3405
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -2008,9 +1934,7 @@
         "head_batch_prs": [
           3405
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -2021,9 +1945,7 @@
           5286,
           5504
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -2034,21 +1956,7 @@
           5513,
           5500
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
-        "discarded_speculative": 0
-      },
-      {
-        "at": "2026-09-26T13:48:59Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5494
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -2059,21 +1967,7 @@
           5481,
           5479
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
-        "discarded_speculative": 0
-      },
-      {
-        "at": "2026-09-26T16:20:19Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5476
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -2084,22 +1978,8 @@
           5476,
           5474
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-26T17:42:47Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5476
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-26T18:17:00Z",
@@ -2109,22 +1989,8 @@
           5474,
           5436
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-26T18:51:10Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5474
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-26T19:30:33Z",
@@ -2134,22 +2000,8 @@
           5473,
           5436
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-26T20:11:28Z",
-        "wave_size": 1,
-        "red": false,
-        "head_batch_prs": [
-          5473
-        ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-26T20:42:37Z",
@@ -2159,9 +2011,7 @@
           5462,
           5435
         ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "success",
         "discarded_speculative": 0
       },
       {
@@ -2172,21 +2022,7 @@
           5393,
           5341
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
-      },
-      {
-        "at": "2026-09-26T21:15:28Z",
-        "wave_size": 1,
-        "red": false,
-        "head_batch_prs": [
-          5419
-        ],
-        "heavy_leg_conclusions": [
-          "success"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 0
       },
       {
@@ -2197,22 +2033,8 @@
           5397,
           5383
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-26T22:24:05Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5397
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-26T23:07:04Z",
@@ -2222,22 +2044,8 @@
           5395,
           5369
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-26T23:44:40Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5395
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T00:23:43Z",
@@ -2247,22 +2055,8 @@
           5393,
           5383
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T01:02:39Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5393
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T01:33:18Z",
@@ -2272,22 +2066,8 @@
           5393,
           5383
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T02:12:32Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5393
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T02:52:55Z",
@@ -2297,22 +2077,8 @@
           5383,
           5369
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T03:27:15Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5383
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T04:09:11Z",
@@ -2322,22 +2088,8 @@
           5371,
           5369
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T04:46:07Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5371
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T05:25:18Z",
@@ -2347,22 +2099,8 @@
           5369,
           5334
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T06:04:43Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5369
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T06:37:05Z",
@@ -2372,22 +2110,8 @@
           5356,
           5343
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T07:11:13Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5356
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T07:18:00Z",
@@ -2397,47 +2121,36 @@
           5343,
           5341
         ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
+        "heavy_leg_conclusion": "failure",
         "discarded_speculative": 4
-      },
-      {
-        "at": "2026-09-27T07:58:22Z",
-        "wave_size": 1,
-        "red": true,
-        "head_batch_prs": [
-          5343
-        ],
-        "heavy_leg_conclusions": [
-          "failure"
-        ],
-        "discarded_speculative": 0
       },
       {
         "at": "2026-09-27T08:37:07Z",
         "wave_size": 5,
-        "red": false,
+        "red": null,
         "head_batch_prs": [
           5341,
           5307
         ],
-        "heavy_leg_conclusions": [],
+        "heavy_leg_conclusion": null,
         "discarded_speculative": 0
       }
     ],
     "waste_ratio": 2.67,
-    "verified_at": "2026-09-27T10:27:35Z"
+    "verified_at": "2026-09-27T10:49:51Z"
   },
   "capacity": {
     "queued": 32,
     "in_progress": 125,
     "combined": 139,
-    "oldest_minutes": 12690.6,
-    "oldest_at": "2026-09-25T01:22:56Z",
+    "headroom": "UNKNOWN",
+    "headroom_batches": "UNKNOWN",
+    "headroom_reason": "capacity_at_first_failure is UNKNOWN: I9 refuses (exit 2), never passes (plan \u00a73 I9)",
+    "oldest_minutes": 12693.5,
+    "oldest_at": "2026-09-25T01:25:50Z",
     "capacity_at_first_failure": "UNKNOWN",
     "capacity_at_first_failure_batches": "UNKNOWN",
-    "capacity_at_first_failure_reason": "the earliest failed-to-start run waited 2410 min, above the 360-min stale bound: its creation and its failure are different windows, so no capacity-at-a-moment can be read from it (UNKNOWN, never a guess)",
+    "capacity_at_first_failure_reason": "all 1 failed-to-start candidate(s) in the window have an unlocalizable wait (none, or above the 360-min stale bound): their creation and their failure are different windows, so no capacity-at-a-moment can be read (UNKNOWN, never a guess)",
     "max_queue_wait_minutes": 12693.5,
     "runs_delayed_over_60min": 174,
     "configured_max_parallel_checks": 5,
@@ -2447,29 +2160,34 @@
       "in_progress": 125,
       "queued_plus_running": 139
     },
-    "verified_at": "2026-09-27T10:27:35Z",
+    "verified_at": "2026-09-27T10:49:51Z",
     "records": {
       "queued": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       },
       "in_progress": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       },
       "oldest_minutes": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       },
       "capacity_at_first_failure": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       }
     }
   },
   "batch-size": {
-    "events": 106,
+    "events": 111,
     "batch_sizes": [
+      1,
+      1,
+      1,
+      1,
+      1,
       1,
       1,
       1,
@@ -2578,23 +2296,26 @@
       2
     ],
     "max_batch_size": 2,
-    "bisection_singles": 20,
+    "bisection_singles": 15,
     "conflicted_set": {
       "total": 166,
       "conflicting": 21,
       "unknown": 1
     },
-    "verified_at": "2026-09-27T10:27:35Z"
+    "verified_at": "2026-09-27T10:49:51Z"
   },
   "parallelism-headroom": {
     "queued": 32,
     "in_progress": 125,
     "combined": 139,
-    "oldest_minutes": 12690.6,
-    "oldest_at": "2026-09-25T01:22:56Z",
+    "headroom": "UNKNOWN",
+    "headroom_batches": "UNKNOWN",
+    "headroom_reason": "capacity_at_first_failure is UNKNOWN: I9 refuses (exit 2), never passes (plan \u00a73 I9)",
+    "oldest_minutes": 12693.5,
+    "oldest_at": "2026-09-25T01:25:50Z",
     "capacity_at_first_failure": "UNKNOWN",
     "capacity_at_first_failure_batches": "UNKNOWN",
-    "capacity_at_first_failure_reason": "the earliest failed-to-start run waited 2410 min, above the 360-min stale bound: its creation and its failure are different windows, so no capacity-at-a-moment can be read from it (UNKNOWN, never a guess)",
+    "capacity_at_first_failure_reason": "all 1 failed-to-start candidate(s) in the window have an unlocalizable wait (none, or above the 360-min stale bound): their creation and their failure are different windows, so no capacity-at-a-moment can be read (UNKNOWN, never a guess)",
     "max_queue_wait_minutes": 12693.5,
     "runs_delayed_over_60min": 174,
     "configured_max_parallel_checks": 5,
@@ -2604,25 +2325,25 @@
       "in_progress": 125,
       "queued_plus_running": 139
     },
-    "verified_at": "2026-09-27T10:27:35Z",
+    "verified_at": "2026-09-27T10:49:51Z",
     "records": {
       "queued": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       },
       "in_progress": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       },
       "oldest_minutes": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       },
       "capacity_at_first_failure": {
-        "verified_at": "2026-09-27T10:27:35Z",
+        "verified_at": "2026-09-27T10:49:51Z",
         "source": "Actions API run timestamps"
       }
     }
   },
-  "verified_at": "2026-09-27T10:27:35Z"
+  "verified_at": "2026-09-27T10:49:51Z"
 }

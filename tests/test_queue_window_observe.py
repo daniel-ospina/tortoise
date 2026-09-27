@@ -28,20 +28,36 @@ def _iso(dt):
 
 
 def run(branch, title, minutes_ago, name="Python CI", conclusion="failure",
-        wait_min=0.0, duration_min=40.0):
+        wait_min=0.0, duration_min=40.0, status="completed", attempt=1):
     created = NOW - timedelta(minutes=minutes_ago)
     started = created + timedelta(minutes=wait_min)
     updated = started + timedelta(minutes=duration_min)
     return {
-        "id": abs(hash((branch, title, minutes_ago, name))) % 10**10,
+        "id": abs(hash((branch, title, minutes_ago, name, attempt))) % 10**10,
         "head_branch": branch,
         "display_title": title,
         "name": name,
-        "status": "completed",
+        "status": status,
         "conclusion": conclusion,
+        "run_attempt": attempt,
         "created_at": _iso(created),
         "run_started_at": _iso(started),
         "updated_at": _iso(updated),
+    }
+
+
+def queued_only(branch, minutes_ago):
+    """A run still waiting: no `run_started_at`, `status: queued`."""
+    return {
+        "id": abs(hash((branch, minutes_ago))) % 10**10,
+        "head_branch": branch,
+        "display_title": "merge queue: checking #1 on main (abc1234)",
+        "name": "Python CI",
+        "status": "queued",
+        "conclusion": None,
+        "created_at": _iso(NOW - timedelta(minutes=minutes_ago)),
+        "run_started_at": None,
+        "updated_at": _iso(NOW - timedelta(minutes=minutes_ago)),
     }
 
 
@@ -72,6 +88,12 @@ def test_main_sha_is_read_from_the_queue_title():
     assert obs._main_sha_from_title(
         "merge queue: checking #1 on main (5b6cb9367)") == "5b6cb9367"
     assert obs._main_sha_from_title("nope") is None
+
+
+def test_ts_is_none_on_garbage():
+    assert obs._ts("garbage") is None
+    assert obs._ts(None) is None
+    assert obs._ts("2026-09-27T09:00:00Z") == NOW
 
 
 # ---------------------------------------------------------------------------
@@ -125,14 +147,57 @@ def test_sweep_max_concurrency_counts_overlaps():
     assert at == t + timedelta(minutes=7)
 
 
+def test_sweep_max_concurrency_of_nothing_is_unknown_not_zero():
+    # an empty read must never read as "nothing queued, nothing running"
+    assert obs.sweep_max_concurrency([]) == (None, None)
+
+
+def test_oldest_queued_minutes_of_nothing_is_unknown():
+    assert obs.oldest_queued_minutes([], NOW) == (None, None)
+
+
+def test_oldest_queued_minutes_is_the_exact_max_not_a_grid_sample():
+    intervals = [
+        (NOW - timedelta(minutes=90), NOW - timedelta(minutes=3)),
+        (NOW - timedelta(minutes=5), NOW),
+    ]
+    oldest, at = obs.oldest_queued_minutes(intervals, NOW)
+    assert oldest == pytest.approx(87, abs=0.01)
+    assert at == NOW - timedelta(minutes=3)
+
+
 # ---------------------------------------------------------------------------
-# M5 — a single after a batch is a BISECTION, not a formation.
+# M4 — a queued run with no start time is VISIBLE, not absent.
+# ---------------------------------------------------------------------------
+
+def test_queue_intervals_include_a_still_queued_run():
+    intervals = obs.queue_intervals([queued_only("feat/jam", 600)], NOW)
+    assert intervals, "a still-queued run must not vanish from the queue read"
+    oldest, _ = obs.oldest_queued_minutes(intervals, NOW)
+    assert oldest == pytest.approx(600, abs=1)
+
+
+def test_zero_length_queue_wait_is_dropped_not_counted_as_active():
+    r = run("mergify/merge-queue/aa", "merge queue: checking #1 on main (abc)",
+            minutes_ago=10, wait_min=0.0, duration_min=20.0)
+    assert obs.queue_intervals([r], NOW) == []
+
+
+def test_running_intervals_close_an_in_progress_run_at_now():
+    r = run("mergify/merge-queue/aa", "merge queue: checking #1 on main (abc)",
+            minutes_ago=30, duration_min=5.0, status="in_progress", conclusion=None)
+    intervals = obs.running_intervals([r], NOW)
+    assert len(intervals) == 1
+    assert intervals[0][1] == NOW
+
+
+# ---------------------------------------------------------------------------
+# M5 — a single after a BATCH is a bisection; a repeat single is not.
 # ---------------------------------------------------------------------------
 
 def test_bisection_singles_are_separated_from_formations():
     forms = _formations([(2, 60), (1, 30)])
-    # the single's PR (1000) was in the earlier pair -> bisection
-    forms[1]["batch_prs"] = [1000]
+    forms[1]["batch_prs"] = [1000]  # the pair's first PR
     bisections = obs.bisection_singles(forms)
     assert [f["branch"] for f in bisections] == [forms[1]["branch"]]
 
@@ -143,11 +208,18 @@ def test_a_genuinely_new_single_is_a_formation_not_a_bisection():
     assert obs.bisection_singles(forms) == []
 
 
-def test_bisection_lookback_bound_is_respected():
-    forms = _formations([(2, 10_000), (1, 30)])
-    forms[1]["batch_prs"] = [1000]
-    # the earlier batch is far outside the lookback -> not a bisection
-    assert obs.bisection_singles(forms, lookback_seconds=3600) == []
+def test_a_repeat_single_is_not_a_bisection():
+    # the prior formation is a single, not a batch: a split needs a BATCH parent
+    forms = _formations([(1, 90), (1, 30)])
+    forms[1]["batch_prs"] = forms[0]["batch_prs"]
+    assert obs.bisection_singles(forms) == []
+
+
+def test_a_split_older_than_two_hours_is_still_a_bisection():
+    # unbounded lookback: PR 4617 forms alone twice, 3 h 05 apart in the data
+    forms = _formations([(2, 400), (1, 200)])
+    forms[1]["batch_prs"] = [forms[0]["batch_prs"][0]]
+    assert len(obs.bisection_singles(forms)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -155,44 +227,52 @@ def test_bisection_lookback_bound_is_respected():
 # ---------------------------------------------------------------------------
 
 def test_red_wave_discards_wave_size_minus_one():
-    waves = [_formations([(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)])]
-    runs = [run(w[0]["branch"], "merge queue: checking #1 + #2 together on main (abc)",
-                minutes_ago=0, conclusion="failure") for w in waves]
+    forms = _formations([(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)])
+    waves = obs.cluster_waves(forms)
+    head = waves[0][0]["branch"]  # the EARLIEST branch is the wave head
+    runs = [run(head, "merge queue: checking #1 + #2 together on main (abc)",
+                minutes_ago=0, conclusion="failure")]
     reds = obs.red_waves(waves, runs)
     assert reds[0]["red"] is True
     assert reds[0]["discarded_speculative"] == 4
 
 
-def test_green_wave_discards_nothing():
-    waves = [_formations([(2, 0), (2, 1)])]
-    runs = [run(waves[0][0]["branch"], "merge queue: checking #1 + #2 together on main (abc)",
-                minutes_ago=0, conclusion="success")]
+def test_unobserved_wave_head_is_unknown_not_zero_waste():
+    forms = _formations([(2, 0), (2, 1), (2, 2)])
+    waves = obs.cluster_waves(forms)
+    reds = obs.red_waves(waves, [])  # no heavy-leg run observed for the head
+    assert reds[0]["red"] is None
+    assert reds[0]["discarded_speculative"] == 0  # a floor, NOT "verified clean"
+
+
+def test_a_rerun_green_wave_head_is_not_red():
+    forms = _formations([(2, 0), (2, 1)])
+    waves = obs.cluster_waves(forms)
+    head = waves[0][0]["branch"]
+    runs = [
+        run(head, "merge queue: checking #1 + #2 together on main (abc)",
+            minutes_ago=5, conclusion="failure", attempt=1),
+        run(head, "merge queue: checking #1 + #2 together on main (abc)",
+            minutes_ago=1, conclusion="success", attempt=2),
+    ]
     reds = obs.red_waves(waves, runs)
     assert reds[0]["red"] is False
     assert reds[0]["discarded_speculative"] == 0
 
 
 # ---------------------------------------------------------------------------
-# M4 — capacity: a stale wait yields UNKNOWN, never a guessed number.
+# M4 — capacity: a stale or unlocalizable wait yields UNKNOWN, never a guess.
 # ---------------------------------------------------------------------------
 
-def test_oldest_queued_minutes_tracks_the_oldest_waiting_run():
-    oldest, at = obs.oldest_queued_minutes(
-        [(NOW - timedelta(minutes=90), NOW + timedelta(minutes=1)),
-         (NOW - timedelta(minutes=5), NOW + timedelta(minutes=1))],
-        NOW, step_minutes=5,
-    )
-    assert oldest == pytest.approx(90, abs=5)
-    assert at is not None
+def _queue_run(branch, title, minutes_ago, **kw):
+    return run(branch, title, minutes_ago, **kw)
 
 
 def test_capacity_at_first_failure_is_unknown_on_a_stale_wait():
-    # the shape the live window showed: one startup_failure, queued ~40 h
     runs = [
-        # a queue branch so the record is built at all
         run("mergify/merge-queue/aa", "merge queue: checking #1 + #2 together on main (abc)",
-            minutes_ago=3100, name="Python CI", conclusion="failure",
-            wait_min=0.0, duration_min=40.0),
+            minutes_ago=3100, conclusion="failure", duration_min=40.0),
+        # the live shape: one startup_failure, queued ~40 h
         run("feat/x", "merge queue: checking #1 on main (abc)", minutes_ago=3000,
             name="Python CI", conclusion="startup_failure", wait_min=2380,
             duration_min=0.0),
@@ -203,29 +283,39 @@ def test_capacity_at_first_failure_is_unknown_on_a_stale_wait():
     assert "stale bound" in cap["capacity_at_first_failure_reason"]
 
 
-def test_capacity_at_first_failure_is_read_when_the_wait_is_localizable():
-    base = run("mergify/merge-queue/aa", "merge queue: checking #1 + #2 together on main (abc)",
-               minutes_ago=200, conclusion="failure", wait_min=0.0, duration_min=40.0)
-    # a run that NEVER held a runner, with a localizable wait
-    starving = run("feat/y", "merge queue: checking #9 on main (abc)", minutes_ago=180,
-                   name="CI", conclusion="startup_failure", wait_min=90.0,
-                   duration_min=40.0)
-    record = obs.build_record([base, starving], window_hours=24, now=NOW)
+def test_a_stale_candidate_does_not_discard_a_localizable_later_one():
+    runs = [
+        run("mergify/merge-queue/aa", "merge queue: checking #1 + #2 together on main (abc)",
+            minutes_ago=900, conclusion="failure", duration_min=40.0),
+        run("feat/stale", "merge queue: checking #7 on main (abc)", minutes_ago=800,
+            conclusion="startup_failure", wait_min=700, duration_min=0.0),
+        run("feat/local", "merge queue: checking #8 on main (abc)", minutes_ago=200,
+            conclusion="startup_failure", wait_min=30, duration_min=0.0),
+    ]
+    record = obs.build_record(runs, window_hours=24, now=NOW)
     cap = record["capacity"]
     assert cap["capacity_at_first_failure"] != obs.UNKNOWN
-    assert isinstance(cap["capacity_at_first_failure"], int)
-    # I9's unit trap: the runs reading and the batch reading are both recorded,
-    # because `configured_max_parallel_checks` is in BATCHES, not runs.
-    assert "capacity_at_first_failure_batches" in cap
-    assert cap["capacity_at_first_failure_batches"] >= 1
+    assert "2 acquisition-failure candidate(s)" in cap["capacity_at_first_failure_reason"]
+
+
+def test_a_candidate_with_no_start_time_does_not_crash():
+    # a startup_failure frequently has no run_started_at; formatting it must not
+    # raise (this was a live TypeError before the fix)
+    r = {
+        "head_branch": "feat/y", "display_title": "merge queue: checking #9 on main (abc)",
+        "name": "Python CI", "status": "completed", "conclusion": "startup_failure",
+        "created_at": _iso(NOW - timedelta(minutes=100)), "run_started_at": None,
+        "updated_at": _iso(NOW - timedelta(minutes=100)),
+    }
+    record = obs.build_record([r], window_hours=24, now=NOW)
+    assert record["status"] == obs.UNKNOWN or (
+        record["capacity"]["capacity_at_first_failure"] == obs.UNKNOWN)
 
 
 def test_a_delayed_run_is_not_a_runner_acquisition_failure():
-    # a run that waited 90 min and then RAN was delayed, not starved: it must
-    # not manufacture a capacity number out of ordinary queue pressure.
     runs = [
         run("mergify/merge-queue/aa", "merge queue: checking #1 + #2 together on main (abc)",
-            minutes_ago=200, conclusion="failure", wait_min=0.0, duration_min=40.0),
+            minutes_ago=200, conclusion="failure", duration_min=40.0),
         run("feat/z", "merge queue: checking #8 on main (abc)", minutes_ago=180,
             name="CI", conclusion="success", wait_min=90.0, duration_min=40.0),
     ]
@@ -264,27 +354,50 @@ def _corpus():
     return runs
 
 
+def _build(runs, **kw):
+    # inject the config so the test does not depend on the repo's live
+    # `.mergify.yml` (PR #5527 sets `max_parallel_checks: 3` there)
+    return obs.build_record(runs, kw.pop("window_hours", 24), now=NOW, **kw)
+
+
 def test_record_effective_parallelism_is_the_repeatable_wave_size():
-    record = obs.build_record(_corpus(), window_hours=24, now=NOW)
+    record = _build(_corpus())
     assert record["parallelism"]["effective_max_parallel_checks"] == 5
     assert record["parallelism"]["max_observed_batches"] == 5
 
 
+def test_record_effective_parallelism_ignores_a_one_off_larger_wave():
+    # DISCRIMINATING: a "max observed" implementation would return 7 here
+    runs = []
+    for wave_i, offset in enumerate((900, 600, 300)):
+        size = 7 if wave_i == 0 else 5
+        for k in range(size):
+            branch = f"mergify/merge-queue/x{wave_i}b{k}"
+            runs.append(run(branch,
+                            f"merge queue: checking #{3000 + k * 2} + #{3001 + k * 2} "
+                            "together on main (5b6cb93)",
+                            minutes_ago=offset + k, conclusion="failure"))
+    record = _build(runs)
+    assert record["parallelism"]["max_observed_batches"] == 7
+    assert record["parallelism"]["effective_max_parallel_checks"] == 5
+
+
 def test_record_batch_sizes_exclude_bisections_and_reconcile():
-    record = obs.build_record(_corpus(), window_hours=24, now=NOW)
+    record = _build(_corpus())
     batches = record["batches"]
-    assert batches["events"] == len(batches["batch_sizes"])
+    assert batches["events"] == len(batches["batch_sizes"]) == 10
     assert batches["max_batch_size"] == max(batches["batch_sizes"])
     assert batches["max_batch_size"] == 2
-    assert batches["bisection_singles"] >= 1
+    assert batches["bisection_singles"] == 2
     assert set(batches) >= {"events", "batch_sizes", "max_batch_size", "verified_at"}
 
 
 def test_record_has_every_capacity_field_the_instrument_requires():
-    record = obs.build_record(_corpus(), window_hours=24, now=NOW)
+    record = _build(_corpus())
     cap = record["capacity"]
     for key in ("queued", "in_progress", "oldest_minutes",
-                "capacity_at_first_failure", "configured_max_parallel_checks"):
+                "capacity_at_first_failure", "configured_max_parallel_checks",
+                "headroom"):
         assert key in cap, key
     for key in ("queued", "in_progress", "oldest_minutes",
                 "capacity_at_first_failure"):
@@ -292,22 +405,29 @@ def test_record_has_every_capacity_field_the_instrument_requires():
         assert cap["records"][key]["verified_at"]
 
 
+def test_headroom_is_unknown_when_the_capacity_sample_is_unknown():
+    record = _build(_corpus())
+    assert record["capacity"]["headroom"] == obs.UNKNOWN
+
+
 def test_record_counts_the_red_wave_invalidations():
-    record = obs.build_record(_corpus(), window_hours=24, now=NOW)
+    record = _build(_corpus())
     inv = record["invalidations"]
-    # 4 waves: two 5-branch batch waves + two bisection singles (size 1)
-    assert inv["waves"] == 4
+    # bisections are excluded from waves, so there are two 5-branch waves
+    assert inv["waves"] == 2
     assert inv["batch_waves"] == 2
-    assert inv["red_waves"] == 4
-    assert inv["discarded_speculative"] == 8  # two batch waves x (5-1)
+    assert inv["red_waves"] == 2
+    assert inv["discarded_speculative"] == 8  # two waves x (5-1)
     assert inv["waste_ratio"] == pytest.approx(4.0)
 
 
-def test_bisection_wave_discards_no_speculation():
-    record = obs.build_record(_corpus(), window_hours=24, now=NOW)
-    singles = [w for w in record["invalidations"]["per_wave"] if w["wave_size"] == 1]
-    assert singles
-    assert all(w["discarded_speculative"] == 0 for w in singles)
+def test_record_flags_an_unobserved_wave_head():
+    # keep the queue branches but rename the leg, so no head outcome is observed
+    runs = [dict(r, name="CI") for r in _corpus()]
+    record = _build(runs)
+    assert record["invalidations"]["unobserved_waves"] >= 1
+    assert record["invalidations"]["red_waves"] == 0
+    assert record["invalidations"]["discarded_speculative"] == 0
 
 
 def test_record_refuses_an_empty_enumeration_as_unknown_not_zero():
@@ -316,15 +436,42 @@ def test_record_refuses_an_empty_enumeration_as_unknown_not_zero():
     assert "reason" in record
 
 
+def test_record_refuses_a_window_with_no_runs_instead_of_widening():
+    # the corpus is 5 days old but an 8 h window is asked for: reporting the old
+    # data under the requested window is the fail-open shape we must avoid
+    old = [run("mergify/merge-queue/aa",
+               "merge queue: checking #1 + #2 together on main (abc)",
+               minutes_ago=5 * 24 * 60, conclusion="failure", duration_min=40.0)]
+    record = obs.build_record(old, window_hours=8, now=NOW)
+    assert record["status"] == obs.UNKNOWN
+    assert "inside the 8" in record["reason"]
+
+
 def test_record_reports_configured_value_and_its_source():
-    record = obs.build_record(_corpus(), window_hours=24, now=NOW)
+    record = _build(_corpus())
     assert record["parallelism"]["configured_max_parallel_checks"] == 5
     assert "max_parallel_checks" not in record["parallelism"]["configured_source"]
+
+
+def test_basis_is_honest_when_the_effective_value_is_unknown():
+    runs = [run("mergify/merge-queue/aa",
+                "merge queue: checking #1 + #2 together on main (abc)",
+                minutes_ago=100, conclusion="failure", duration_min=40.0)]
+    record = _build(runs)
+    assert record["parallelism"]["effective_max_parallel_checks"] == obs.UNKNOWN
+    assert "no repeatable wave" in record["parallelism"]["basis"]
 
 
 def test_configured_max_parallel_checks_reads_a_real_setting(tmp_path):
     cfg = tmp_path / "mergify.yml"
     cfg.write_text("queue_rules:\n  - name: main\n    max_parallel_checks: 3\n")
+    value, source = obs.configured_max_parallel_checks(cfg)
+    assert value == 3 and source == "config"
+
+
+def test_configured_max_parallel_checks_tolerates_a_trailing_comment(tmp_path):
+    cfg = tmp_path / "mergify.yml"
+    cfg.write_text("    max_parallel_checks: 3  # a deliberate cap\n")
     value, source = obs.configured_max_parallel_checks(cfg)
     assert value == 3 and source == "config"
 
@@ -339,7 +486,7 @@ def test_configured_max_parallel_checks_falls_back_to_the_documented_default(
 
 
 # ---------------------------------------------------------------------------
-# CLI contract — empty is exit 2, and the record is JSON.
+# CLI contract — empty/failed is exit 2, and the record is JSON.
 # ---------------------------------------------------------------------------
 
 def test_cli_exits_2_on_an_empty_read(tmp_path):
@@ -348,7 +495,23 @@ def test_cli_exits_2_on_an_empty_read(tmp_path):
     assert obs.main(["--from-json", str(runs), "--window-hours", "8"]) == 2
 
 
-def test_cli_writes_a_json_record(tmp_path, capsys):
+def test_cli_exits_2_on_an_unparseable_line(tmp_path):
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text('{"head_branch": "x"}\n{not json}\n')
+    assert obs.main(["--from-json", str(runs), "--window-hours", "8"]) == 2
+
+
+def test_cli_overwrites_a_stale_out_file_with_unknown(tmp_path):
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("")
+    out = tmp_path / "record.json"
+    out.write_text('{"status": "OK", "parallelism": {"effective_max_parallel_checks": 5}}')
+    assert obs.main(["--from-json", str(runs), "--window-hours", "8",
+                     "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
+
+
+def test_cli_writes_a_json_record(tmp_path):
     runs = tmp_path / "runs.jsonl"
     runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
     out = tmp_path / "record.json"
@@ -357,3 +520,53 @@ def test_cli_writes_a_json_record(tmp_path, capsys):
     record = json.loads(out.read_text())
     assert record["status"] == "OK"
     assert record["parallelism"]["effective_max_parallel_checks"] == 5
+
+
+# ---------------------------------------------------------------------------
+# The committed evidence must agree with the doc that cites it. A reviewer
+# caught the doc's M5/M6 numbers drifting from the JSON it referenced, so the
+# correspondence is pinned here rather than re-checked by eye.
+# ---------------------------------------------------------------------------
+
+DOC = REPO / "docs" / "ci" / "merge-throughput-measurements.md"
+M3_M6 = REPO / "docs" / "ci" / "merge-throughput-m3-m6-records.json"
+M4_CAP = REPO / "docs" / "ci" / "merge-throughput-m4-capacity-records.json"
+
+
+def test_committed_records_match_the_doc():
+    if not (DOC.exists() and M3_M6.exists() and M4_CAP.exists()):
+        pytest.skip("measurement records not committed in this checkout")
+    doc = DOC.read_text()
+    short = json.loads(M3_M6.read_text())
+    long_ = json.loads(M4_CAP.read_text())
+
+    # headline values, read from the records and asserted present in the doc
+    eff = short["parallelism"]["effective_max_parallel_checks"]
+    assert (str(eff), str(long_["parallelism"]["effective_max_parallel_checks"])) == ("5", "5")
+    assert "**5**" in doc
+
+    # M5: the fresh window is all pairs; the 14 d window keeps its singles
+    fresh_sizes = set(short["batches"]["batch_sizes"])
+    assert fresh_sizes == {2}, fresh_sizes
+    assert short["batches"]["bisection_singles"] == 5
+    dist_long = long_["parallelism"]["formation_size_distribution"]
+    assert dist_long == {"1": 10, "2": 101}, dist_long
+    assert "`{1: 10, 2: 101}`" in doc
+    assert "`{2: 30}`" in doc
+
+    # M6: discarded speculative batches
+    assert short["invalidations"]["discarded_speculative"] == 20
+    assert long_["invalidations"]["discarded_speculative"] == 48
+    assert "**20**" in doc and "**48**" in doc
+    assert short["invalidations"]["unobserved_waves"] == 1
+
+    # M4: capacity is UNKNOWN in both windows, and headroom is never invented
+    for rec in (short, long_):
+        assert rec["capacity"]["capacity_at_first_failure"] == obs.UNKNOWN
+        assert rec["capacity"]["headroom"] == obs.UNKNOWN
+        assert rec["capacity"]["capacity_at_first_failure"] is not None
+
+    # the window's provenance is recorded, never inferred
+    for rec in (short, long_):
+        assert len(rec["window"]["main_sha"]) == 40
+        assert rec["window"]["main_sha_source"]

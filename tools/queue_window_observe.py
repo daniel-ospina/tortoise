@@ -72,18 +72,12 @@ DEFAULT_MAX_PARALLEL_CHECKS = 5
 #: size is the observable proxy for the effective parallelism.
 WAVE_GAP_SECONDS = 360
 
-#: A size-1 branch whose PR appeared in an EARLIER batch is a bisection re-run,
-#: not a formation. Mergify re-tests a failed batch by splitting it.
-BISECTION_LOOKBACK_SECONDS = 7200
-
 #: A queue wait at or above this is a runner-acquisition failure candidate.
 STARVATION_MIN_WAIT_MINUTES = 60.0
 #: Above this, the wait is a stale/abandoned queue entry, not a concurrency
 #: ceiling: its creation moment and its failure moment are different windows, so
 #: no single "capacity at first failure" can be read from it. UNKNOWN, not a guess.
 STALE_QUEUE_WAIT_MINUTES = 360.0
-#: A required verifier for records: the plan's 7-day window for M1/M2/M3/M5/M6.
-DEFAULT_RECORD_WINDOW_DAYS = 7
 
 #: Sampling caveat recorded with every event-derived number (M3's own words).
 SAMPLING_CAVEAT = (
@@ -233,13 +227,20 @@ def repeatable_wave_size(waves):
 
 
 def sweep_max_concurrency(intervals):
-    """Max number of intervals alive at once, and when. Pure sweep line."""
+    """Max number of intervals alive at once, and when. Pure sweep line.
+
+    Returns `(None, None)` when NO interval could be formed — an empty read is
+    UNKNOWN, never `0`, so a failed enumeration cannot masquerade as "nothing
+    queued, nothing running" (which a threshold check would pass).
+    """
     events = []
     for start, end in intervals:
         if start is None or end is None or end < start:
             continue
         events.append((start, 1))
         events.append((end, -1))
+    if not events:
+        return None, None
     events.sort(key=lambda e: (e[0], e[1]))
     cur = best = 0
     best_at = None
@@ -251,78 +252,106 @@ def sweep_max_concurrency(intervals):
     return best, best_at
 
 
-def queue_intervals(runs):
-    """[(created_at, run_started_at)] — the window a run spent waiting."""
+def queue_intervals(runs, now=None):
+    """[(created_at, run_started_at_or_now)] — the window a run spent waiting.
+
+    A run that is STILL queued has no `run_started_at`; it is closed at `now`
+    rather than dropped, because a jammed queue is precisely the M4 shape and
+    dropping it would read as "nothing queued".
+    """
+    now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9
     out = []
+    pending = {"queued", "pending", "requested", "waiting"}
     for r in runs:
         created, started = _ts(r.get("created_at")), _ts(r.get("run_started_at"))
-        if created and started and started >= created:
+        if created is None:
+            continue
+        if started is not None and started > created:
+            # A zero-length wait is a DEGENERATE interval (it never queued).
+            # Keeping it would let `sweep_max_concurrency` read 0 — the
+            # fail-open this function's guard exists to prevent.
             out.append((created, started))
+        elif started is None and (r.get("status") in pending or not r.get("run_started_at")) \
+                and now >= created:
+            out.append((created, now))
     return out
 
 
-def running_intervals(runs):
-    """[(run_started_at, updated_at)] — the window a run held a runner."""
+def running_intervals(runs, now=None):
+    """[(run_started_at, updated_at_or_now)] — the window a run held a runner."""
+    now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9
     out = []
     for r in runs:
         started, updated = _ts(r.get("run_started_at")), _ts(r.get("updated_at"))
-        if started and updated and updated >= started:
+        if started is None:
+            continue
+        if r.get("status") == "in_progress" and now > started:
+            # A currently-running job holds a runner until NOW: `updated_at` only
+            # advances on a status transition, so using it would truncate the
+            # window and bias concurrency downward.
+            out.append((started, now))
+        elif updated is not None and updated > started:
             out.append((started, updated))
     return out
 
 
-def oldest_queued_minutes(intervals, now, step_minutes=5):
-    """Max age of the oldest still-queued run, sampled every `step_minutes`."""
-    if not intervals:
+def oldest_queued_minutes(intervals, now):
+    """The exact max age of the oldest still-queued run, ignoring `now`.
+
+    Analytic rather than grid-sampled: a sample grid anchors at the first
+    `created_at`, so it never evaluates an interval's end and systematically
+    UNDER-reports (a downward bias on a `--max` threshold can only flip
+    red->green).
+    """
+    best = 0.0
+    best_at = None
+    for start, end in intervals:
+        if start is None or end is None or end < start:
+            continue
+        age = (end - start).total_seconds() / 60.0
+        if age > best:
+            best = age
+            best_at = end
+    if best_at is None:
         return None, None
-    start = min(s for s, _ in intervals)
-    step = timedelta(minutes=step_minutes)
-    oldest = 0.0
-    oldest_at = None
-    at = start
-    while at <= now:
-        active = [s for s, e in intervals if s <= at < e]
-        if active:
-            age = (at - min(active)).total_seconds() / 60.0
-            if age > oldest:
-                oldest = age
-                oldest_at = at
-        at += step
-    if oldest_at is None:
-        return None, None
-    return oldest, oldest_at
+    return best, best_at
 
 
-def bisection_singles(formations_list, lookback_seconds=BISECTION_LOOKBACK_SECONDS):
-    """Size-1 formations whose PR appeared in an earlier batch.
+def bisection_singles(formations_list):
+    """Size-1 formations whose PR appeared in an EARLIER BATCH (size >= 2).
 
     Mergify re-tests a red batch by splitting it, so these are bisection re-runs
-    — NOT evidence that batching failed to pair. Separating them is M5's whole
-    question (the plan's premise "observed batch size is 1" conflated the two).
+    — NOT evidence that batching failed to pair. Two guards keep the split
+    honest: the prior formation must be a real batch (a repeat single is a
+    formation, not a bisection), and the lookback is unbounded in time (a fixed
+    2 h bound misclassifies a split whose batch is older — PR #4617 forms alone
+    twice 3 h 05 apart, the second of which a 2 h bound would call fresh).
     """
-    seen_prs = set()
     out = []
-    for f in formations_list:
-        if f["size"] == 1:
-            pr = f["batch_prs"][0]
-            prior = [
-                g for g in formations_list
-                if g is not f and g["at"] <= f["at"] and pr in g["batch_prs"]
-                and (f["at"] - g["at"]).total_seconds() <= lookback_seconds
-            ]
-            if prior:
-                out.append(f)
-                continue
-        seen_prs.update(f["batch_prs"])
+    for i, f in enumerate(formations_list):
+        if f["size"] != 1:
+            continue
+        pr = f["batch_prs"][0]
+        prior_batch = any(
+            g["size"] >= 2 and pr in g["batch_prs"]
+            for g in formations_list[:i]
+            if g["at"] <= f["at"]
+        )
+        if prior_batch:
+            out.append(f)
     return out
 
 
 def red_waves(waves, runs):
-    """Per wave: the head batch's heavy-leg conclusion + discarded speculations.
+    """Per wave: the head batch's heavy-leg verdict + discarded speculations.
 
     In serial mode a red invalidates the speculative batches above it, so a red
     head of an N-branch wave wastes N-1 speculative validations (plan <C3> term
     iii). This is the M6 term; the plan says MEASURE it, not assume it.
+
+    `red` is `True`/`False`/**`None`**: a head whose heavy leg was never OBSERVED
+    is UNKNOWN, never "not red" — treating an unobserved head as green would
+    report zero waste for exactly the in-flight wave the capture caught.
     """
     heavy = {}
     for r in runs:
@@ -330,21 +359,28 @@ def red_waves(waves, runs):
             continue
         branch = r.get("head_branch")
         conclusion = r.get("conclusion")
-        if branch and conclusion:
-            heavy.setdefault(branch, []).append(conclusion)
+        if not branch or not conclusion:
+            continue
+        # Newest attempt per (branch, name): a batch that reds and is then
+        # re-run green is not a red wave.
+        attempt = r.get("run_attempt") or 1
+        key = (branch, r.get("name"))
+        if key not in heavy or attempt > heavy[key][0]:
+            heavy[key] = (attempt, conclusion)
     out = []
     for wave in waves:
         head = wave[0]
-        conclusions = heavy.get(head["branch"]) or []
-        red = "failure" in conclusions
+        conclusion = heavy.get((head["branch"], HEAVY_LEG))
+        verdict = None if conclusion is None else conclusion[1]
+        red = None if verdict is None else (verdict == "failure")
         out.append({
             "at": head["at"],
             "wave_size": len(wave),
             "head_branch": head["branch"],
             "head_batch_prs": head["batch_prs"],
-            "heavy_leg_conclusions": conclusions,
+            "heavy_leg_conclusion": verdict,
             "red": red,
-            "discarded_speculative": (len(wave) - 1) if red else 0,
+            "discarded_speculative": ((len(wave) - 1) if red else 0),
         })
     return out
 
@@ -362,7 +398,8 @@ def configured_max_parallel_checks(config_path=None):
     except OSError:
         return DEFAULT_MAX_PARALLEL_CHECKS, "documented-default (config unreadable)"
     for line in text.splitlines():
-        m = re.match(r"\s*max_parallel_checks:\s*(\d+)\s*$", line)
+        # A trailing comment is legal YAML and must not defeat the scan.
+        m = re.match(r"\s*max_parallel_checks:\s*[\"']?(\d+)[\"']?\s*(?:#.*)?$", line)
         if m:
             return int(m.group(1)), "config"
     return DEFAULT_MAX_PARALLEL_CHECKS, "documented-default (not set in .mergify.yml)"
@@ -373,7 +410,7 @@ def configured_max_parallel_checks(config_path=None):
 # ---------------------------------------------------------------------------
 
 def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
-                 conflicted_set=None):
+                 conflicted_set=None, resolved_main_sha=None, config_path=None):
     """Assemble the observation record from a list of workflow-run dicts."""
     now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9 (see header)
     all_runs = [r for r in runs if isinstance(r, dict)]
@@ -382,23 +419,46 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         return {"status": UNKNOWN, "reason": "no merge-queue runs enumerated"}
 
     cutoff = now - timedelta(hours=window_hours)
-    in_window = [r for r in queue_runs if (_ts(r.get("created_at")) or now) >= cutoff]
+
+    def in_window_of(corpus):
+        # An unparseable `created_at` is EXCLUDED, never treated as `now` — that
+        # would pull every malformed row into the window.
+        return [
+            r for r in corpus
+            if (lambda t: t is not None and t >= cutoff)(_ts(r.get("created_at")))
+        ]
+
+    in_window = in_window_of(queue_runs)
     if not in_window:
-        in_window = queue_runs  # never silently empty: fall back to the full read
+        # NO silent widening: reporting out-of-window data under the requested
+        # window is the fail-open shape the UNKNOWN policy exists to stop.
+        return {"status": UNKNOWN,
+                "reason": f"no merge-queue runs inside the {window_hours}h window"}
 
     # Capacity (M4) is a property of the RUNNERS, not of the queue: a starved
     # non-queue run is exactly the signal M4 needs, so it reads the whole
     # corpus. Parallelism/batches (M3/M5/M6) read the queue branches only.
-    all_in_window = [
-        r for r in all_runs if (_ts(r.get("created_at")) or now) >= cutoff
-    ]
+    all_in_window = in_window_of(all_runs)
     if not all_in_window:
-        all_in_window = all_runs
+        return {"status": UNKNOWN,
+                "reason": f"no runs inside the {window_hours}h window"}
 
     forms = formations(in_window)
-    waves = cluster_waves(forms)
+    # Bisections FIRST: a size-1 re-run must not be clustered into a wave, or it
+    # inflates the wave size and hence the effective parallelism (M3).
+    bisections = bisection_singles(forms)
+    bisection_branches = {f["branch"] for f in bisections}
+    formed = [f for f in forms if f["branch"] not in bisection_branches]
+    formed_sizes = [f["size"] for f in formed]
+
+    waves = cluster_waves(formed)
     wave_size, wave_counts = repeatable_wave_size(waves)
-    effective, basis = wave_size, "largest wave size observed in >=2 waves"
+    effective = wave_size
+    basis = (
+        "largest wave size observed in >=2 waves"
+        if effective is not None
+        else "no repeatable wave in the window: effective is UNKNOWN"
+    )
     if effective is None and confirmed_max_parallel is not None:
         # Only when no wave repeats does a direct ref listing stand in — and it
         # still cannot be the "max observed" reading on its own (M3).
@@ -406,16 +466,13 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         basis = "direct ref listing (no repeatable wave in the window)"
 
     size_dist = {}
-    for f in forms:
+    for f in formed:
         size_dist[f["size"]] = size_dist.get(f["size"], 0) + 1
-    bisections = bisection_singles(forms)
-    bisection_branches = {f["branch"] for f in bisections}
-    formed = [f for f in forms if f["branch"] not in bisection_branches]
-    formed_sizes = [f["size"] for f in formed]
 
     reds = red_waves(waves, in_window)
     discarded = sum(w["discarded_speculative"] for w in reds)
-    red_count = sum(1 for w in reds if w["red"])
+    red_count = sum(1 for w in reds if w["red"] is True)
+    unobserved_waves = sum(1 for w in reds if w["red"] is None)
     batch_waves = [w for w in waves if len(w) >= 2]
 
     heavy = [r for r in in_window if r.get("name") == HEAVY_LEG and r.get("conclusion")]
@@ -424,8 +481,8 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         heavy_dist[r["conclusion"]] = heavy_dist.get(r["conclusion"], 0) + 1
 
     # ---- capacity (M4) -------------------------------------------------
-    q_iv = queue_intervals(all_in_window)
-    r_iv = running_intervals(all_in_window)
+    q_iv = queue_intervals(all_in_window, now)
+    r_iv = running_intervals(all_in_window, now)
     max_queued, _qat = sweep_max_concurrency(q_iv)
     max_running, _rat = sweep_max_concurrency(r_iv)
     max_combined, _cat = sweep_max_concurrency(q_iv + r_iv)
@@ -433,13 +490,11 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
 
     starvation = [
         r for r in all_in_window
-        # "Demonstrably failed to acquire a runner" means the run NEVER HELD one:
-        # `startup_failure` (the workflow never created a job) or a completed run
-        # with no `run_started_at` at all. A run that waited 63 min and then RAN
-        # was DELAYED, not starved — counting it would manufacture a capacity
-        # number out of ordinary queue pressure.
+        # "Demonstrably failed to acquire a runner" means the run NEVER HELD one
+        # and its workflow never created a job: `startup_failure` is the one
+        # API signal for that. A run that waited and then RAN was DELAYED, not
+        # starved; a `cancelled` run was interrupted, not starved.
         if r.get("conclusion") == "startup_failure"
-        or (r.get("status") == "completed" and not r.get("run_started_at"))
     ]
     # Delays are reported separately from acquisition failures (M4's own split).
     waits = [
@@ -454,24 +509,19 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
     capacity_at_first_failure_batches = UNKNOWN
     capacity_reason = "no run in the window failed to acquire a runner"
     if starvation:
-        # The EARLIEST candidate in the window is the "first failure".
+        # Walk candidates in time order and use the FIRST whose wait is
+        # localisable; a stale earliest entry must not discard a usable later
+        # one (I9 says UNKNOWN only when NO sample exists).
         starvation.sort(key=lambda r: _ts(r.get("created_at")) or now)
-        first = starvation[0]
-        created = _ts(first.get("created_at"))
-        wait = _minutes(created, _ts(first.get("run_started_at")))
-        if wait is not None and wait > STALE_QUEUE_WAIT_MINUTES:
-            capacity_reason = (
-                f"the earliest failed-to-start run waited {wait:.0f} min, above the "
-                f"{STALE_QUEUE_WAIT_MINUTES:.0f}-min stale bound: its creation and its "
-                "failure are different windows, so no capacity-at-a-moment can be read "
-                "from it (UNKNOWN, never a guess)"
-            )
-        else:
+        for candidate in starvation:
+            created = _ts(candidate.get("created_at"))
+            wait = _minutes(created, _ts(candidate.get("run_started_at")))
+            if wait is None or wait > STALE_QUEUE_WAIT_MINUTES:
+                continue
             active = [
                 (s, e) for s, e in (q_iv + r_iv) if s is not None and e is not None
                 and s <= created <= e
             ]
-            capacity_at_first_failure = len(active)
             # I9 compares `capacity_at_first_failure` against
             # `configured_max_parallel_checks`, but the two are in DIFFERENT
             # UNITS: the former counts concurrent workflow RUNS, the latter
@@ -482,25 +532,66 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
                 r.get("head_branch") for r in all_in_window
                 if r.get("head_branch")
                 and str(r.get("head_branch")).startswith(QUEUE_REF_PREFIX)
-                and (lambda s, e: s is not None and e is not None and s <= created <= e)(
-                    _ts(r.get("run_started_at")), _ts(r.get("updated_at"))
-                )
+                and (lambda s, e: s is not None and e is not None
+                     and s <= created <= e)(
+                         _ts(r.get("run_started_at")), _ts(r.get("updated_at")))
             }
+            capacity_at_first_failure = len(active)
             capacity_at_first_failure_batches = len(head_branches)
             capacity_reason = (
-                f"concurrency at the earliest failed-to-start run "
-                f"({first.get('name')} @ {_iso(created)}, wait {wait:.0f} min): "
+                f"concurrency at the earliest LOCALIZABLE failed-to-start run "
+                f"({candidate.get('name')} @ {_iso(created)}, wait {wait:.0f} min): "
                 f"{capacity_at_first_failure} concurrent runs = "
-                f"{capacity_at_first_failure_batches} concurrent queue batches"
+                f"{capacity_at_first_failure_batches} concurrent queue batches "
+                f"({len(starvation)} acquisition-failure candidate(s) in the window)"
             )
-
-    configured, configured_source = configured_max_parallel_checks()
+            break
+        else:
+            capacity_reason = (
+                f"all {len(starvation)} failed-to-start candidate(s) in the window "
+                f"have an unlocalizable wait (none, or above the "
+                f"{STALE_QUEUE_WAIT_MINUTES:.0f}-min stale bound): their creation "
+                "and their failure are different windows, so no "
+                "capacity-at-a-moment can be read (UNKNOWN, never a guess)"
+            )
+    configured, configured_source = configured_max_parallel_checks(config_path)
     verified_at = _iso(now)
 
+    # I9's `headroom = capacity_at_first_failure - configured`. Recorded in BOTH
+    # units because the two readings are in different ones (runs vs batches) and
+    # the verdict flips between them — the unit defect this lane files as F4.
+    if capacity_at_first_failure == UNKNOWN:
+        headroom = UNKNOWN
+        headroom_reason = (
+            "capacity_at_first_failure is UNKNOWN: I9 refuses (exit 2), never "
+            "passes (plan §3 I9)"
+        )
+    else:
+        headroom = capacity_at_first_failure - configured
+        headroom_reason = (
+            f"{capacity_at_first_failure} concurrent runs - {configured} batches; "
+            "UNITS DIFFER (see F4) — the batch-unit headroom below is the "
+            "one comparable to `configured_max_parallel_checks`"
+        )
+    headroom_batches = (
+        UNKNOWN
+        if capacity_at_first_failure_batches == UNKNOWN
+        else capacity_at_first_failure_batches - configured
+    )
+
+    def num_or_unknown(value):
+        # An empty interval read is UNKNOWN, never 0. The instrument's field
+        # check rejects a non-numeric value, but ACCEPTS a legitimate 0 — so a
+        # failed enumeration returned as 0 would pass it.
+        return UNKNOWN if value is None else value
+
     capacity = {
-        "queued": max_queued,
-        "in_progress": max_running,
-        "combined": max_combined,
+        "queued": num_or_unknown(max_queued),
+        "in_progress": num_or_unknown(max_running),
+        "combined": num_or_unknown(max_combined),
+        "headroom": headroom,
+        "headroom_batches": headroom_batches,
+        "headroom_reason": headroom_reason,
         "oldest_minutes": None if oldest is None else round(oldest, 1),
         "oldest_at": _iso(oldest_at),
         "capacity_at_first_failure": capacity_at_first_failure,
@@ -510,8 +601,9 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         "runs_delayed_over_60min": delayed_over_60,
         "configured_max_parallel_checks": configured,
         "configured_source": configured_source,
-        "samples": {"queued": max_queued, "in_progress": max_running,
-                    "queued_plus_running": max_combined},
+        "samples": {"queued": num_or_unknown(max_queued),
+                    "in_progress": num_or_unknown(max_running),
+                    "queued_plus_running": num_or_unknown(max_combined)},
         "verified_at": verified_at,
         "records": {
             key: {"verified_at": verified_at, "source": "Actions API run timestamps"}
@@ -539,9 +631,14 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
             "hours": window_hours,
             "end": verified_at,
             "queue_runs_in_window": len(in_window),
-            "queue_branches_in_window": len(forms),
-            "main_sha": max(
+            "queue_branches_in_window": len(formed),
+            "main_sha": resolved_main_sha or max(
                 (f["main_sha"] for f in forms if f["main_sha"]), default=None
+            ),
+            "main_sha_source": (
+                "resolved origin/main at capture"
+                if resolved_main_sha
+                else "unresolved: max() over queue-title shas (provenance only)"
             ),
         },
         "parallelism": {
@@ -585,12 +682,14 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
                 1 for w in reds if w["red"] and w["wave_size"] >= 2
             ),
             "discarded_speculative": discarded,
+            "unobserved_waves": unobserved_waves,
             "heavy_leg_conclusions": heavy_dist,
             "per_wave": [
                 {
-                    "at": _iso(w["at"]), "wave_size": w["wave_size"], "red": w["red"],
+                    "at": _iso(w["at"]), "wave_size": w["wave_size"],
+                    "red": w["red"],
                     "head_batch_prs": w["head_batch_prs"],
-                    "heavy_leg_conclusions": w["heavy_leg_conclusions"],
+                    "heavy_leg_conclusion": w["heavy_leg_conclusion"],
                     "discarded_speculative": w["discarded_speculative"],
                 }
                 for w in reds
@@ -613,10 +712,19 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
 # Live reads (read-only).
 # ---------------------------------------------------------------------------
 
-def _gh_jsonl(args):
-    proc = subprocess.run(args, capture_output=True, text=True)
+def _gh_jsonl(args, timeout=180):
+    """Run a read-only `gh api` and return parsed JSON lines.
+
+    Returns a list on success and **None** on any failure (missing binary,
+    non-zero exit, timeout, or an unparseable line). `None` is distinct from
+    `[]` so a caller can never mistake a failed read for an empty one.
+    """
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
     if proc.returncode != 0:
-        return []
+        return None
     out = []
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -625,31 +733,59 @@ def _gh_jsonl(args):
         try:
             out.append(jsonlib.loads(line))
         except ValueError:
-            continue
+            # A torn page or a truncated file: the read is NOT complete.
+            return None
     return out
 
 
 def fetch_runs(pages=8):
-    """Workflow runs, newest first, as JSON objects. Read-only."""
-    return _gh_jsonl([
+    """Workflow runs, newest first, as JSON objects. Read-only.
+
+    Returns a `(runs, truncated)` pair: `runs` is `None` on a failed read, and
+    `truncated` is True when the read hit the page cap (so a busy window cannot
+    be silently analysed over a subset).
+    """
+    lines = _gh_jsonl([
         "gh", "api",
         f"repos/{OWNER_REPO}/actions/runs?per_page=100",
         "--paginate", "--jq", ".workflow_runs[]",
-    ])[: pages * 100]
+    ])
+    if lines is None:
+        return None, False
+    cap = pages * 100
+    return lines[:cap], len(lines) > cap
 
 
 def live_queue_refs():
-    """The merge-queue refs that exist right now (direct confirmation of M3)."""
-    proc = subprocess.run(
-        ["git", "ls-remote", "origin", f"refs/heads/{QUEUE_REF_PREFIX}*"],
-        capture_output=True, text=True, cwd=str(REPO),
-    )
+    """The merge-queue refs that exist right now (corroboration for M3)."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "origin", f"refs/heads/{QUEUE_REF_PREFIX}*"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     if proc.returncode != 0:
         return None
     return [line.split("refs/heads/")[-1] for line in proc.stdout.splitlines() if line]
 
 
+def resolve_origin_main():
+    """The resolved `origin/main` sha at capture (read-only). None on failure."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "origin", "refs/heads/main"],
+            capture_output=True, text=True, cwd=str(REPO), timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.split()[0]
+
+
 def read_jsonl(path):
+    """Parse a JSONL file. Returns None if any line fails to parse."""
     out = []
     try:
         with open(path, encoding="utf-8") as fh:
@@ -660,9 +796,9 @@ def read_jsonl(path):
                 try:
                     out.append(jsonlib.loads(line))
                 except ValueError:
-                    continue
+                    return None
     except OSError:
-        return []
+        return None
     return out
 
 
@@ -687,28 +823,44 @@ def main(argv=None):
     parser.add_argument("--conflicts-json", help="the instrument's --json .conflicts")
     args = parser.parse_args(argv)
 
+    truncated = False
     if args.from_json:
         runs = read_jsonl(args.from_json)
     elif args.live:
-        runs = fetch_runs()
+        runs, truncated = fetch_runs()
     else:
         parser.error("one of --from-json / --live is required")
 
-    if not runs:
-        print(jsonlib.dumps({"status": UNKNOWN, "reason": "empty run enumeration"}))
+    def emit_unknown(reason):
+        body = {"status": UNKNOWN, "reason": reason}
+        if args.out:
+            # Always write: a stale record left on disk is read as current.
+            Path(args.out).write_text(jsonlib.dumps(body, indent=2) + "\n",
+                                      encoding="utf-8")
+        print(jsonlib.dumps(body))
         return 2
+
+    if runs is None:
+        return emit_unknown("run enumeration failed or contained an unparseable line")
+    if not runs:
+        return emit_unknown("empty run enumeration")
 
     conflicted = None
     if args.conflicts_json:
         try:
             data = jsonlib.loads(Path(args.conflicts_json).read_text(encoding="utf-8"))
-            conflicted = {
-                "total": data.get("total"),
-                "conflicting": sum(
-                    1 for i in data.get("items", []) if i.get("conflicting")
-                ),
-                "unknown": sum(1 for i in data.get("items", []) if i.get("unknown")),
-            }
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                conflicted = {
+                    "total": data.get("total"),
+                    "conflicting": sum(
+                        1 for i in data["items"]
+                        if isinstance(i, dict) and i.get("conflicting")
+                    ),
+                    "unknown": sum(
+                        1 for i in data["items"]
+                        if isinstance(i, dict) and i.get("unknown")
+                    ),
+                }
         except (OSError, ValueError):
             conflicted = None
 
@@ -716,8 +868,13 @@ def main(argv=None):
     confirmed = len(refs) if refs is not None else None
     record = build_record(
         runs, args.window_hours, confirmed_max_parallel=confirmed,
-        conflicted_set=conflicted,
+        conflicted_set=conflicted, resolved_main_sha=resolve_origin_main(),
     )
+    if truncated:
+        record["window"]["truncated"] = True
+        record["window"]["truncated_note"] = (
+            "the run read hit its page cap: capacity readings are a LOWER bound"
+        )
     text = jsonlib.dumps(record, indent=2, sort_keys=False)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
