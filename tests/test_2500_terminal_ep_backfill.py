@@ -17,11 +17,15 @@ prior history, or writes on a dry run must FAIL here:
   3. ``ep_alpha``/``ep_beta`` survive (the #2490 recovery vector);
   4. the ``outdated=true``-only shape (``invalidate_point``: flag set, status
      untouched) IS swept;
-  5. a prior-only terminal claim (no posterior, no confidence) is OUT of scope;
-  6. a second run reports ``found == 0`` (idempotent by construction);
-  7. ``--dry-run`` writes NOTHING and reports the same ``found``;
-  8. the issue's LITERAL post-condition is pinned as unsatisfiable, and the
-     corrected one (the sweep predicate) as the real post-condition.
+  5. a prior-only terminal claim (no STORED posterior) IS swept — the readers
+     fall back to the prior, so that is exactly the frozen class (#2490's
+     0.904 repro) — while ``ep_alpha``/``ep_beta`` survive it;
+  6. an OPERATOR flagged terminal is NEVER swept (the terminal predicate has no
+     ``is_operator`` gate, so the exclusion is explicit);
+  7. a second run reports ``found == 0`` (idempotent by construction);
+  8. ``--dry-run`` writes NOTHING and reports the same ``found``;
+  9. the write cannot drive the issue's LITERAL post-condition to zero, and the
+     sweep's own predicate is the real post-condition.
 """
 from __future__ import annotations
 
@@ -195,35 +199,71 @@ def test_outdated_flag_without_terminal_status_is_swept(sdk):
 
 # ── 5. scope: a prior-only terminal claim is OUT of the sweep ─────────────
 
-def test_prior_only_terminal_claim_is_out_of_scope(sdk):
-    """No stored posterior and no confidence → nothing frozen to vacate. The
-    prior (ep_alpha/ep_beta) is the history #2490 preserves; writing a
-    posterior onto it would override the prior read, not vacate a measurement.
+def test_prior_only_terminal_claim_is_swept_so_the_prior_stops_ranking(sdk):
+    """A terminal claim with a PRIOR but no stored posterior READS at that
+    prior — ``coalesce(posterior, ep, 1.0)`` — which is #2490's 0.904 repro.
 
-    The second row is the DEGENERATE shape that makes the sweep's MEASURED
-    clause (``posterior_alpha IS NOT NULL OR confidence IS NOT NULL``)
-    load-bearing rather than merely descriptive: a stray ``posterior_beta``
-    with no alpha and no confidence is NOT a writer-produced posterior state
-    (EP always flushes alpha+beta+confidence together), so it is out of scope
-    by the issue's own predicate.
+    This is the class the FIRST head of PR #5769 missed: the sweep compared
+    the raw stored columns, so an absent posterior counted as "already
+    vacuous" while every reader counted it as the prior. Both rows here change
+    the read (0.909 and 0.25), so both must be swept; ``ep_alpha``/``ep_beta``
+    survive as the #2490 recovery vector.
     """
     pid = sdk.create_point("statement", "prior-only retracted",
                            status="live")["id"]
     sdk._get_proj().g.query(
-        "MATCH (n:Point {id:$id}) SET n.status='retracted', n.ep_alpha=7.0, "
-        "n.ep_beta=3.0", params={"id": pid})
+        "MATCH (n:Point {id:$id}) SET n.status='retracted', n.ep_alpha=10.0, "
+        "n.ep_beta=1.0", params={"id": pid})
     degenerate = sdk.create_point("statement", "beta-only retracted",
                                   status="live")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status='retracted', "
         "n.posterior_beta=3.0", params={"id": degenerate})
+
+    def read(point_id):
+        return GraphRanker(sdk._get_proj())._fetch_signals(
+            [point_id], "point")[point_id]["confidence"]
+
+    assert read(pid) == pytest.approx(10.0 / 11.0), (
+        "the PRIOR is what the reader reads when no posterior was computed")
+    assert read(degenerate) == pytest.approx(0.25)
+
+    report = sweep.backfill_terminal_ep_vacuity(sdk._get_proj())
+    assert report["found"] == 2 and report["swept"] == 2
+    assert read(pid) == pytest.approx(0.5), "the frozen prior must stop ranking"
+    assert read(degenerate) == pytest.approx(0.5)
+    after = _stored(sdk, pid)
+    assert (after["ep_alpha"], after["ep_beta"]) == (10.0, 1.0), (
+        "the prior history must survive the sweep")
+
+
+def test_operator_with_a_terminal_flag_is_never_swept(sdk):
+    """``_terminal_expression`` has NO ``is_operator`` gate, and
+    ``invalidate_point`` used to flag an operator node ``outdated=true``
+    (``tortoise/sdk.py:6253`` — "``invalidate_point`` had no guard at all").
+
+    Without the sweep's explicit operator conjunct this row would have its EP
+    state decayed, which is not what the issue asks for (it is about terminal
+    CLAIMS). The operator is created through the SDK so it carries the real
+    ``is_operator``/``op_type`` markers, not planted ones.
+    """
+    premise_a = sdk.create_point("statement", "premise a")["id"]
+    premise_b = sdk.create_point("statement", "premise b")["id"]
+    op = sdk.create_operator("IMPL", premise_a, [premise_b])["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.outdated=true, n.confidence=0.9, "
+        "n.posterior_alpha=9.0, n.posterior_beta=1.0", params={"id": op})
+
+    # The terminal predicate alone WOULD match this row — that is what makes
+    # the operator conjunct load-bearing rather than decorative.
+    assert int(sdk._get_proj().g.query(
+        f"MATCH (n:Point {{id:$id}}) WHERE {sweep._terminal_expression('n.status')} "
+        "RETURN count(n)", params={"id": op}).result_set[0][0]) == 1
+
     report = sweep.backfill_terminal_ep_vacuity(sdk._get_proj())
     assert report["found"] == 0 and report["swept"] == 0
-    after = _stored(sdk, pid)
-    assert after["confidence"] is None
-    assert after["posterior_alpha"] is None
-    assert (after["ep_alpha"], after["ep_beta"]) == (7.0, 3.0)
-    assert _stored(sdk, degenerate)["posterior_beta"] == 3.0
+    assert _stored(sdk, op)["confidence"] == 0.9, (
+        "an operator's EP state is not a terminal claim's frozen posterior")
 
 
 def test_partial_decay_row_is_completed(sdk):
@@ -264,27 +304,30 @@ def test_dry_run_writes_nothing_and_reports_the_match_set(sdk):
     assert real["found"] == 1 and real["swept"] == 1
 
 
-# ── 8. the post-condition: the issue's LITERAL one is unsatisfiable ───────
+# ── 8. the post-condition: the LITERAL one cannot reach zero ──────────────
 
-def test_issue_literal_postcondition_is_unsatisfiable_but_sweep_predicate_is_zero(sdk):
+def test_issue_literal_postcondition_cannot_reach_zero_once_anything_is_swept(sdk):
     """The issue's Indicator asks for 0 rows matching ``terminal AND
     (posterior_alpha IS NOT NULL OR confidence IS NOT NULL)`` after the run.
 
-    That can NEVER hold: the write SETS those columns to 1.0/0.5, so the
-    literals stay NOT NULL by design. The satisfiable post-condition is the
-    sweep's own predicate (no terminal row whose stored value DIFFERS from the
-    vacuous tuple) — pinned here as the real contract, with the literal one
-    pinned as permanently non-zero so a future reader does not "fix" the script
-    to chase an impossible report.
+    The claim is NOT that this can never be 0 — it IS 0 on a graph with nothing
+    measured-terminal to sweep, and stays 0 there. The accurate, load-bearing
+    claim is narrower: **for any row the sweep WRITES, the literal predicate
+    cannot become 0**, because the write SETS those columns to 1.0/0.5 and they
+    therefore stay NOT NULL by design. A future reader must not "fix" the
+    script to chase a report its own write makes impossible.
+
+    The real post-condition is the sweep's own predicate, pinned as 0 here.
     """
     for i, status in enumerate(sorted(TERMINAL_EXCLUDED_STATUSES)):
         _freeze(sdk, f"frozen {status} {i}", status=status)
-    sweep.backfill_terminal_ep_vacuity(sdk._get_proj())
     g = sdk._get_proj().g
+    assert _terminal_count(g) == len(TERMINAL_EXCLUDED_STATUSES)
+    sweep.backfill_terminal_ep_vacuity(sdk._get_proj())
     assert _sweep_predicate_count(g) == 0, "the real post-condition must hold"
     assert _terminal_count(g) == len(TERMINAL_EXCLUDED_STATUSES), (
-        "the issue's literal predicate stays non-zero — the write keeps the "
-        "columns NOT NULL, which is the corrected reading of its Indicator")
+        "every swept row still carries the columns the write SET — so the "
+        "issue's literal predicate cannot be driven to zero")
 
 
 # ── the sweep's write is #2490's decay, verbatim ──────────────────────────

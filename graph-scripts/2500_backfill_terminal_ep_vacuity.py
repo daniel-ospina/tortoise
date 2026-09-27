@@ -25,19 +25,30 @@ going forward. It is a DATA sweep only — it changes no read path.
 
 Idempotency
 -----------
-The MATCH requires a stored EP column whose value DIFFERS from the vacuous
-tuple, which is exactly the post-condition a second run finds empty — so
-re-running is a no-op by construction. ``--dry-run`` reports (and NAMES) the
-rows it would change, without writing.
+The MATCH requires the EFFECTIVE belief read (``coalesce(posterior, prior)``)
+to differ from the vacuous tuple, which is exactly the post-condition a second
+run finds empty — so re-running is a no-op by construction. ``--dry-run``
+reports (and NAMES) the rows it would change, without writing.
+
+⚠️ Why the comparison is against the READ, not the stored column: the readers
+fall back to the PRIOR when no posterior was ever computed
+(``coalesce(n.posterior_alpha, n.ep_alpha, 1.0)``), so a terminal claim with a
+prior but no stored posterior READS at that prior — exactly #2490's 0.904
+repro. A predicate that treated an absent posterior as "already vacuous"
+skipped that whole class (caught in review of PR #5769).
 
 Scope
 -----
 ``:Point`` only: the EP belief columns (``posterior_alpha``, ``posterior_beta``,
 ``confidence``) and the lifecycle vocabulary (``status``, ``outdated``) are
-Point semantics — no other label carries them. Operator nodes ARE
-``:Point``-labelled (``is_operator=true``) but the imported terminal predicate
-excludes them (an operator is never written a terminal status or the
-``outdated`` flag).
+Point semantics — no other label carries them.
+
+Operator nodes ARE ``:Point``-labelled (``is_operator=true``), so they need an
+EXPLICIT exclusion: the terminal predicate does NOT gate on ``is_operator``,
+and ``invalidate_point`` used to flag an operator node ``outdated=true``
+(``tortoise/sdk.py:6253`` — "``invalidate_point`` had no guard at all"). The
+sweep therefore carries the house operator predicate (``ep.py:890``) in its
+WHERE, so an operator's EP state is never decayed by this script.
 
 NOT touched, deliberately: ``ep_alpha``/``ep_beta`` — the persisted prior
 history and, per #2490, the SOLE recovery vector if a terminal state is ever
@@ -75,17 +86,14 @@ DEFAULT_URI = "docker://:falkordb@localhost:6379/tortoise"
 # vocabulary, and re-deriving it here would duplicate the NULL/flag handling.
 from tortoise.live import _terminal_expression, decay_clause  # noqa: E402
 
-#: The stored EP columns #2490's decay writes (and therefore the only columns
-#: this sweep may inspect or touch).
-_DECAY_COLUMNS = ("confidence", "posterior_alpha", "posterior_beta")
-
-#: The stored EP columns whose PRESENCE scopes the sweep to measured claims
-#: (the issue's "with stored EP columns"). A prior-only terminal claim — one
-#: carrying ``ep_alpha``/``ep_beta`` but no posterior and no confidence — is
-#: deliberately OUT of scope: its prior IS the prior history #2490 preserves,
-#: and writing a posterior onto it would override the prior read instead of
-#: vacating a frozen measurement.
-_MEASURED_COLUMNS = ("posterior_alpha", "confidence")
+#: The PRIOR fallback each consumer uses when no posterior was ever computed —
+#: the ``coalesce(n.posterior_alpha, n.ep_alpha, 1.0)`` chain in
+#: ``GraphRanker._fetch_signals`` and the EP readers. The sweep must compare
+#: against the effective READ, not the raw stored column: a terminal claim with
+#: a prior but no stored posterior reads at that prior (0.909 on a (10, 1)
+#: baseline — #2490's 0.904 repro class), so treating an absent posterior as
+#: "already vacuous" silently skips it.
+_PRIOR_FALLBACK = {"alpha": 1.0, "beta": 1.0}
 
 
 def _vacuous_targets(alias: str = "n") -> dict[str, float]:
@@ -110,26 +118,45 @@ def _graph_of(proj):
     return getattr(proj, "g", proj)
 
 
-def _sweep_where(alias: str = "n") -> str:
-    """The sweep's WHERE: terminal AND a stored EP column that is NOT vacuous.
+def _unaligned(alias: str = "n") -> str:
+    """TRUE when a terminal claim's EFFECTIVE belief is not yet vacuous.
 
-    Three conjuncts, each load-bearing:
+    Compares the readers' own coalesce chain (``posterior`` else ``prior`` else
+    1.0) against #2490's decay targets — see ``_PRIOR_FALLBACK``. ``confidence``
+    is separate because the readers prefer a STORED confidence over the
+    posterior mean, so a stored non-vacuous confidence is unaligned even when
+    the posterior is already (1, 1). An ABSENT confidence is read from the
+    posterior mean, which the two arms above already cover.
+    """
+    arms = [
+        f"coalesce({alias}.posterior_{k}, {alias}.ep_{k}, "
+        f"{_PRIOR_FALLBACK[k]}) <> {_VACUOUS[f'posterior_{k}']}"
+        for k in ("alpha", "beta")
+    ]
+    arms.append(
+        f"({alias}.confidence IS NOT NULL "
+        f"AND {alias}.confidence <> {_VACUOUS['confidence']})")
+    return " OR ".join(arms)
+
+
+def _sweep_where(alias: str = "n") -> str:
+    """The sweep's WHERE — three load-bearing conjuncts:
 
       1. ``_terminal_expression`` — the canonical terminal predicate (status in
          the #2901 vocabulary OR the legacy ``outdated=true`` flag).
-      2. a MEASURED stored EP column is present — scopes the sweep to claims
-         that actually carry a frozen posterior (never a prior-only row).
-      3. at least one decay column DIFFERS from the vacuous tuple — the
-         post-condition of the write, so a second run matches nothing.
+      2. NOT an operator. This conjunct is NOT redundant: the terminal
+         predicate has no ``is_operator`` gate, and ``invalidate_point`` used
+         to flag an operator node ``outdated=true`` (``sdk.py:6253``), so
+         without it a legacy-flagged operator is swept. Mirrors ``ep.py:890``.
+      3. ``_unaligned`` — the effective belief read differs from the vacuous
+         tuple, which is the post-condition of the write, so a second run
+         matches nothing.
     """
-    measured = " OR ".join(f"{alias}.{c} IS NOT NULL" for c in _MEASURED_COLUMNS)
-    differs = " OR ".join(
-        f"coalesce({alias}.{c}, {_VACUOUS[c]}) <> {_VACUOUS[c]}"
-        for c in _DECAY_COLUMNS
-    )
     return (f"{_terminal_expression(f'{alias}.status')} "
-            f"AND ({measured}) "
-            f"AND ({differs})")
+            f"AND ({alias}.is_operator IS NULL "
+            f"OR {alias}.is_operator = false) "
+            f"AND {alias}.op_type IS NULL "
+            f"AND ({_unaligned(alias)})")
 
 
 def _statements(alias: str = "n") -> tuple[str, str, str]:
