@@ -278,9 +278,15 @@ function wizardRenderSites(src, relPath = 'main.jsx') {
  *
  * LAST, because that is the one that wins in JavaScript. A `SpreadElement` is a
  * candidate too — it comes last and can carry the key, so a spread after the bare
- * property overrides it rather than being a harmless flourish. A computed
- * `['connected']` key and a `connected :` with a space before the colon resolve to
- * the same name here, which is exactly what the text checks kept missing.
+ * property overrides it rather than being a harmless flourish.
+ *
+ * Keys are normalized through their LITERAL name: `connected`, `'connected'`,
+ * `"connected"` and `['connected']` all resolve to the same name here, which is
+ * what the text checks kept missing. A computed key this cannot resolve to a
+ * literal (`[SOME_VAR]`, `['con' + 'nected']`, ``[`connected`]``) is returned as a
+ * BINDING, not skipped: it can evaluate to `connected` at run time and override the
+ * bare property, so it is refused rather than assumed inert — the same fail-closed
+ * rule as an argument the guard cannot read.
  */
 function lastConnectedBinding(options) {
   if (options?.type !== 'ObjectExpression') return null
@@ -291,9 +297,18 @@ function lastConnectedBinding(options) {
       continue
     }
     const key = prop.key
-    const name = key?.type === 'Identifier' && !prop.computed ? key.name
-      : key?.type === 'StringLiteral' ? key.value
-      : null
+    const literalName = key?.type === 'StringLiteral'
+      ? key.value
+      : key?.type === 'TemplateLiteral' && (key.expressions ?? []).length === 0
+        ? (key.quasis?.[0]?.value?.cooked ?? null)
+        : null
+    if (prop.computed && literalName === null) {
+      last = { kind: 'computed key this guard cannot resolve', value: null }
+      continue
+    }
+    const name = prop.computed ? literalName
+      : key?.type === 'Identifier' ? key.name
+      : literalName
     if (name !== 'connected') continue
     last = prop.type === 'ObjectProperty'
       ? { kind: 'property', value: prop.value }
@@ -372,8 +387,9 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
       `${where} must pass its options as an object literal that binds \`connected\` — an argument `
       + 'this guard cannot resolve is refused, not assumed harmless')
     assert.equal(binding.kind, 'property',
-      `${where} binds \`connected\` with a ${binding.kind} LAST — a spread or a method placed after `
-      + 'the bare property overrides it, so the property is written out in full')
+      `${where} binds \`connected\` with a ${binding.kind} LAST — anything placed after the bare `
+      + 'property that can carry the key overrides it, so the property is written out in full: '
+      + '`connected: serverHarnessConnected`')
     const value = binding.value
     const shown = value?.type === 'Identifier' ? value.name : (value?.type ?? 'nothing')
     assert.ok(value?.type === 'Identifier' && value.name === 'serverHarnessConnected',
