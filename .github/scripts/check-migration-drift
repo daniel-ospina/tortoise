@@ -30,6 +30,11 @@
 # Fail-closed by contract: any error exits 2 with an actionable message. A
 # missing secret must fail the deploy, not silently skip the gate.
 set -euo pipefail
+# Byte-deterministic collation: the version set-diff (sort/comm) and the
+# out-of-order ordering comparison below both sort raw version strings. The
+# Supabase CLI sequences migration files by filename, so the lexical (= byte)
+# order here matches the order `supabase db push` would apply them in.
+export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 API_URL="${DRIFT_API_URL:-https://api.supabase.com}"
@@ -135,12 +140,38 @@ for v in $REPO_AHEAD; do
 done
 
 # ── 6. Report + exit ──────────────────────────────────────────────────────
+# Newest version prod has already applied — the ordering reference. String
+# comparison (not `[ -lt ]`, which parses leading zeros as octal and is wrong
+# for the variable-width prefixes this repo allows). An empty remote set (fresh
+# project) means nothing is applied yet, so no repo-ahead version is out of
+# order. A blocking version that sorts BEFORE this reference cannot be applied
+# as-is: `supabase db push --include-all` applies the whole repo-pending set in
+# filename order, so it would land on top of a later migration (#4278).
+REMOTE_MAX="$(printf '%s\n' "$REMOTE_VERSIONS" | sort | tail -n1)"
+BLOCK_SAFE=""
+BLOCK_OOO=""
+for v in $BLOCKING; do
+  if [ -n "$REMOTE_MAX" ] && [[ "$v" < "$REMOTE_MAX" ]]; then
+    BLOCK_OOO="$BLOCK_OOO $v"
+  else
+    BLOCK_SAFE="$BLOCK_SAFE $v"
+  fi
+done
+REPO_AHEAD_N="$(printf '%s' "$REPO_AHEAD" | wc -w | tr -d ' ')"
+BLOCKING_N="$(printf '%s' "$BLOCKING" | wc -w | tr -d ' ')"
+
 echo "check-migration-drift: repo migrations vs prod (project $PROJECT_REF)"
 if [ -n "$REMOTE_AHEAD" ]; then
   echo "  remote-ahead (WARN, safe direction — repo code can't depend on objects the repo doesn't know): $REMOTE_AHEAD"
 fi
 if [ -n "$NON_CONFORMING" ]; then
   echo "  non-conforming migration filenames (applied by NOBODY — rename to ^[0-9]+_ pattern): $NON_CONFORMING" >&2
+fi
+# Warn-class is repo-ahead but not blocking, so it is absent from the BLOCKING
+# list below — yet `supabase db push --include-all` still pushes it. Report it
+# before any exit so a short blocking list is never read as the whole job.
+if [ -n "$WARN_ONLY" ]; then
+  echo "  warn-only repo-ahead migrations (index-only, no correctness dependency; not order-checked — a non-unique index out of order has no correctness effect): $WARN_ONLY"
 fi
 
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
@@ -149,21 +180,80 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     files="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
     echo "    - $v  [$files]"
   done
-  echo "  Remediation: pure-prefix rename ONE file to the next free prefix (content unchanged) —"
-  echo "    e.g. git mv ${v}_a.sql ${v}_b.sql → <next-free>_a.sql, then apply via supabase-deploy dispatch."
+  if [ -n "$BLOCK_OOO" ]; then
+    # The same refusal applies here: once the rename is done the deploy still
+    # runs `--include-all` over the WHOLE repo-pending set, so a repo-ahead
+    # version older than prod's newest applied would be applied out of order
+    # (#4278). Name it before the apply step, and require the rename target to
+    # sort after REMOTE_MAX so the renamed file is not itself out of order.
+    echo "  OUT OF ORDER after the rename (older than prod's newest applied version $REMOTE_MAX) — resolve these FIRST:$BLOCK_OOO"
+    echo '    The deploy runs `supabase db push --include-all`, which applies the whole repo-pending set.'
+    echo "  Remediation (in this order):"
+    echo "    1. rename ONE duplicate file to a free prefix that sorts AFTER $REMOTE_MAX;"
+    echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
+    echo "       already applied but unrecorded -> supabase migration repair --linked"
+    echo "       --status applied <version>);"
+    echo "    3. then apply via supabase-deploy dispatch."
+  else
+    echo "  Remediation: pure-prefix rename ONE file to the next free prefix (content unchanged) —"
+    echo "    e.g. git mv ${v}_a.sql ${v}_b.sql → <next-free>_a.sql, then apply via supabase-deploy dispatch."
+  fi
   exit 1
 fi
 if [ -n "$BLOCKING" ]; then
   echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
   for v in $BLOCKING; do echo "    - $v"; done
-  echo "  Remediation: apply migrations first —"
-  echo "    gh workflow run supabase-deploy.yml --ref main"
-  echo "    # or manually: supabase db push --linked --include-all"
-  echo "    # rename-repair case: supabase migration repair --linked --status applied <version>"
+  # Say whether this list is the whole repo-pending set or a filtered subset:
+  # the heading alone reads as "the work", but `--include-all` also pushes the
+  # warn-class members reported above, which are not listed here (#4278).
+  if [ "$BLOCKING_N" = "$REPO_AHEAD_N" ]; then
+    echo "  note: BLOCKING list above is the COMPLETE repo-ahead set — $BLOCKING_N of $REPO_AHEAD_N repo-ahead pending"
+  else
+    echo "  note: BLOCKING list above is a FILTERED subset of repo-ahead — $BLOCKING_N of $REPO_AHEAD_N repo-ahead pending; non-blocking members are not listed but are still pushed by --include-all"
+  fi
+
+  if [ -n "$BLOCK_OOO" ]; then
+    echo "  OUT OF ORDER (sort before prod's newest applied version $REMOTE_MAX) — do NOT apply these as-is:"
+    for v in $BLOCK_OOO; do echo "    - $v"; done
+    echo "    Applying one now lands it ON TOP of its successor, which is the state"
+    echo "    this gate just refused. Decide per version FROM PROD — the gate cannot"
+    echo "    tell 'never applied' from 'applied but not recorded':"
+    echo "      (a) never applied: re-land its DDL as a FORWARD migration with the next"
+    echo "          free prefix, so it sorts after $REMOTE_MAX, and drop/rename the"
+    echo "          original file so it is no longer repo-ahead;"
+    echo "      (b) already in prod with no schema_migrations row: record it WITHOUT"
+    echo "          running DDL — supabase migration repair --linked --status applied <version>"
+    echo "    A blanket repair hides real drift (#1001) — verify in prod first."
+  fi
+
+  if [ -n "$BLOCK_SAFE" ]; then
+    if [ -n "$REMOTE_MAX" ]; then
+      echo "  PENDING AFTER $REMOTE_MAX (safe to append):$BLOCK_SAFE"
+    else
+      echo "  PENDING (nothing applied yet — safe to append):$BLOCK_SAFE"
+    fi
+    if [ -n "$BLOCK_OOO" ]; then
+      # One ORDERED remediation. `--include-all` pushes the whole repo-pending
+      # set, so the apply step is only correct after the OOO versions above are
+      # resolved — printing it as a separate standing instruction would hand the
+      # reader the very action the OOO block refuses.
+      echo "  Remediation (in this order):"
+      echo "    1. resolve each OUT OF ORDER version above (a or b);"
+      echo "    2. then dispatch the deploy for the pending set above —"
+      echo "       gh workflow run supabase-deploy.yml --ref main"
+      echo '    `supabase db push --include-all` applies the WHOLE repo-pending set in'
+      echo "    filename order, so step 2 before step 1 would apply the out-of-order"
+      echo "    versions too."
+    else
+      echo "  Remediation: apply migrations first —"
+      echo "    gh workflow run supabase-deploy.yml --ref main"
+      echo "    # or manually: supabase db push --linked --include-all (whole pending set, filename order)"
+    fi
+  fi
+  if [ -z "$BLOCK_OOO" ]; then
+    echo "    # rename-repair case: supabase migration repair --linked --status applied <version>"
+  fi
   exit 1
-fi
-if [ -n "$WARN_ONLY" ]; then
-  echo "  warn-only repo-ahead migrations (index-only, no correctness dependency): $WARN_ONLY"
 fi
 echo "check-migration-drift: OK (no blocking drift)"
 exit 0
