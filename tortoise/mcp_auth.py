@@ -770,9 +770,10 @@ class StaticKeyMiddleware(BaseHTTPMiddleware):
         if request.method != "POST":
             return await call_next(request)
         if self._api_key is None:
-            return JSONResponse(
-                {"jsonrpc": "2.0", "error": {"code": -32099, "message": "Static auth misconfigured: no API key set."}, "id": None},
-                status_code=503,
+            return _jsonrpc_error(
+                -32099,
+                "Static auth misconfigured: no API key set.",
+                status=503,
             )
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):

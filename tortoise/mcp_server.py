@@ -3958,19 +3958,21 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 # ``-32602`` / ``data: ""``, for a perfectly well-formed request, with no
 # validator involved. That arm is reproduced at the SDK-session level (see
 # tests/test_mcp_http.py::TestToolCallAdmissionBoundary::
-# test_second_arm_of_the_signature_is_a_broken_incoming_stream), but NOT through
-# the HTTP surface: in that reproduction the error write lands on a write stream
-# that is itself closing, so it is not yet shown to be client-visible. It is
-# therefore reported rather than papered over -- there is no "member" to name
-# in that arm, and inventing one would be a lie. The underlying defect there is
-# the SDK's, not tortoise's: an internal failure is reported as INVALID_PARAMS.
+# test_second_arm_of_the_signature_is_a_broken_incoming_stream), where the
+# session's write stream is alive and the error IS written back; it is NOT
+# reproduced through the HTTP surface, and nothing here shows the transport can
+# reach that state -- so whether it is client-visible on ``/mcp`` is
+# unestablished. It is therefore reported rather than papered over -- there is
+# no "member" to name in that arm, and inventing one would be a lie. The
+# underlying defect there is the SDK's, not tortoise's: an internal failure is
+# reported as INVALID_PARAMS.
 #
-# The fix runs the SDK's OWN model at the boundary, so there is exactly ONE
-# validator and one reason: no second opinion that could drift from the SDK,
-# nothing accepted that the SDK would reject, nothing refused that it accepts.
-# See tests/test_mcp_http.py::TestToolCallAdmissionBoundary, which pins the
-# verdict against the SDK's own live ``ServerSession`` -- not against a copy of
-# the expressions below -- so a drift in either expression fails loudly.
+# The fix runs the SDK's OWN model for the ENVELOPE VERDICT, so an envelope is
+# never refused that the session would serve. That guarantee is exact for the
+# envelope and is pinned against a live ``ServerSession`` in
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary. It is NOT a claim about
+# the transport gates, which are a transcription with a documented drift edge --
+# see `_transport_would_dispatch_jsonrpc_post`.
 def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
     """The SDK's own validation errors for a ``tools/call`` envelope, or None.
 
@@ -4307,10 +4309,12 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     class ToolCallAdmissionMiddleware(BaseHTTPMiddleware):
         """Answer a rejected ``tools/call`` with the SDK's OWN reason (#3656).
 
-        See ``_tools_call_rejection`` above for why this surface has exactly one
-        producer SITE of ``-32602`` and exactly one validator. Scope is
-        deliberately narrow, and each narrowing is a case where the SDK does NOT
-        emit the opaque signature:
+        See ``_tools_call_rejection`` above for why this surface has one producer
+        SITE of the OPAQUE ``-32602`` signature -- this middleware, when it
+        answers, is a second producer of ``-32602`` with a real reason -- and one
+        validator for the envelope verdict (the SDK's own model, which the guard
+        runs rather than replaces). Scope is deliberately narrow, and each
+        narrowing is a case where the SDK does NOT emit the opaque signature:
 
         * ``POST`` only, and only to the transport's own endpoint
           (``mcp_path``), and only when the SDK's own gates would let the body

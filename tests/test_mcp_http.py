@@ -64,8 +64,12 @@ def seeded_registry_sdk(tmp_path):
 def _mounted_test_client(app):
     """Wrap the MCP app in a Starlette Mount at /mcp (mirrors hosted_api).
 
-    The MCP sub-app routes live at / (http_app(path="/")); the parent strips
-    the mount prefix, so /mcp → sub-app / — same as production mounting.
+    The MCP sub-app routes live at / (http_app(path="/")). Starlette's Mount
+    leaves the prefix on ``scope["path"]`` and records it in ``root_path``
+    (measured: a POST to /mcp arrives as path '/mcp/' with root_path '/mcp');
+    the router strips it while matching, so the sub-app route is / -- same as
+    production mounting. ``mcp_server._routed_path`` does the same strip for the
+    #3656 admission guard, which is why the guard works when mounted here.
     Composes the MCP app's lifespan into the parent (Starlette Mount does NOT
     auto-run sub-app lifespans — same fix as hosted_api._lifespan).
     Returns a TestClient; enter with `with` to trigger lifespan.
@@ -2586,12 +2590,15 @@ class TestToolCallAdmissionBoundary:
         Origin/Host must still be refused -- the guard must not answer 200 for a
         request the outer guard rejected.
 
-        Measured for the same reason as the header gates: the transport ALSO
-        runs its own host/origin check inside, so a divergence here would mean
-        the outer check is the only one that fires and the guard sits in front
-        of its answer. Posted to ``/mcp/`` (the mount root, trailing slash):
-        from ``/mcp`` Starlette redirects, and httpx drops ``Authorization`` on
-        a redirect to a different Host -- which would make this measure the test
+        Measured for the same reason as the header gates: the SDK transport's
+        own host/origin branch is DISABLED here (`create_http_app` builds the
+        transport without security settings, so DNS-rebinding protection
+        defaults off inside it), which makes the outer
+        `HostOriginGuardMiddleware` the ONLY host/origin check -- so this
+        middleware must sit behind it and must not answer for a request it
+        refused. Posted to ``/mcp/`` (the mount root, trailing slash): from
+        ``/mcp`` Starlette redirects, and httpx drops ``Authorization`` on a
+        redirect to a different Host -- which would make this measure the test
         client, not the guard.
         """
         from tortoise.mcp_server import create_http_app
