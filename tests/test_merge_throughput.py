@@ -1753,3 +1753,134 @@ def test_cli_each_numeric_flag_refuses_on_a_real_payload(tmp_path):
         out = _run_cli("check", "cycle", flag, value, "--input", str(rec))
         assert out.returncode == 2, (flag, out.stdout + out.stderr)
         assert flag in out.stderr
+
+
+# ---------------------------------------------------------------------------
+# Round-7 hardening: pin constants, near-miss tolerances, sentinel coverage.
+# ---------------------------------------------------------------------------
+
+def test_committed_constants_are_pinned():
+    assert mt.MIN_OPEN_PR_POPULATION == 10
+    assert mt.DEFAULT_RECORD_WINDOW_DAYS == 7
+    assert mt.M4_RECORD_WINDOW_DAYS == 14
+    assert mt.GAP_VALUE_TOLERANCE == 0.10
+    assert mt.CEILING_TOLERANCE == 0.10
+
+
+def test_min_population_can_only_raise_the_committed_floor():
+    nine = {"items": [{"number": i, "conflicting": False} for i in range(9)],
+            "total_count": 9, "read_ok": True}
+    ten = {"items": [{"number": i, "conflicting": False} for i in range(10)],
+           "total_count": 10, "read_ok": True}
+    assert run_check("conflicts", json=nine, max=5) == 2
+    assert run_check("conflicts", json=nine, max=5, min_population=1) == 2
+    assert run_check("conflicts", json=ten, max=5) == 0
+
+
+def test_freshness_window_is_bounded_not_a_band():
+    # 20 days is inside the mutated windows but outside both committed windows.
+    capacity = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+                "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+                "records": {f: {"verified_at": _iso(20)}
+                            for f in mt._CAPACITY_FRESH_FIELDS}}
+    assert run_check("capacity", json=capacity, min_headroom=1,
+                     require_fresh=True) == 2
+    drain = {"merges_per_hour": 12.5, "merges": 300, "window_hours": 24,
+             "verified_at": _iso(8)}
+    assert run_check("drain-rate", json=drain, min=12, require_fresh=True) == 2
+
+
+def test_committed_default_thresholds_are_used():
+    six = {"items": [{"number": i, "conflicting": i < 6} for i in range(12)],
+           "total_count": 12, "read_ok": True}
+    assert run_check("conflicts", json=six) == 1
+    assert run_check("fast-files-unclassified",
+                     json={"fast_files_unclassified": ["test_x.py"]}) == 1
+
+
+def test_incomplete_results_sentinel_is_not_complete():
+    conflicts = {"items": [{"number": i, "conflicting": False} for i in range(12)],
+                 "total_count": 12, "read_ok": True, "incomplete_results": "true"}
+    assert run_check("conflicts", json=conflicts, max=5) == 2
+    assert run_check("conflicts", json={**conflicts, "incomplete_results": 1},
+                     max=5) == 2
+    assert run_check("conflicts", json={**conflicts, "incomplete_results": False},
+                     max=5) == 0
+    dm = {"durations_map": {"age_days": 1, "sampled_keys": 15, "tolerance": 0.5},
+          "diverged": [], "read_ok": True, "incomplete_results": True}
+    assert run_check("durations-map", json=dm, max_age_days=14) == 2
+
+
+def test_partial_pagination_is_unconditional_with_a_valid_population():
+    base = {"items": [{"number": i, "conflicting": False} for i in range(12)],
+            "total_count": 12, "read_ok": True}
+    assert run_check("conflicts", json={**base, "incomplete_results": True},
+                     max=5) == 2
+    rows = [{"number": i, "classification": "open", "moved_in_window": True}
+            for i in range(12)]
+    assert run_check("no-languish", json={"items": rows, "total_count": 12,
+                                          "read_ok": True,
+                                          "incomplete_results": True},
+                     exclude=[], require_complete=True) == 2
+
+
+def test_read_ok_strict_for_queue_eta_and_no_languish():
+    eta = {"items": [{"eta_minutes": 10}], "total_count": 1, "read_ok": 1}
+    assert run_check("queue-eta", json=eta, max=120, min_depth=1) == 2
+    rows = [{"number": i, "classification": "open", "moved_in_window": True}
+            for i in range(12)]
+    assert run_check("no-languish", json={"items": rows, "total_count": 12,
+                                          "read_ok": 1},
+                     exclude=[], require_complete=True) == 2
+
+
+def test_reconciliation_near_misses_are_refused():
+    # batch: claimed 2 over [1]
+    assert run_check("batch-size", json={"events": 1, "batch_sizes": [1],
+                                         "max_batch_size": 2, "verified_at": NOW},
+                     min=2, min_depth=1, require_fresh=True) == 2
+    # cycle: median off by one minute
+    runs = [{"duration_minutes": 37, "heavy_leg_conclusion": "success"}
+            for _ in range(5)]
+    assert run_check("cycle", json={"runs": runs, "median_minutes": 36},
+                     max=30, min_depth=5) == 2
+    # gap: 15% off the derived ratio
+    p = _gap_payload(2.0)
+    p["gap"]["value"] = 2.3
+    assert run_check("gap", json=p, max=2) == 2
+
+
+def test_or_artifact_tolerance_is_bounded(tmp_path):
+    text = ARTIFACT.replace("ceiling_prs_per_day: 234", "ceiling_prs_per_day: 280")
+    path = _artifact(tmp_path, text)
+    assert run_check("prs-per-day", json=_ceiling_payload(100), min=200,
+                     or_artifact=f"{path}#ceiling") == 2
+
+
+def test_fast_files_collector_errors_fail_closed(monkeypatch):
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: None)
+    import ci_selection as cs
+    monkeypatch.setattr(cs, "load_manifest",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = mt.collect_fast_files_unclassified()
+    assert out == {}
+    assert run_check("fast-files-unclassified", json=out, max=0) == 2
+
+
+def test_batch_size_empty_window_without_events_is_2():
+    payload = {"events": 0, "batch_sizes": [], "max_batch_size": 1,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, require_fresh=True) == 2
+
+
+def test_collect_conflicts_retains_unprobed_prs(monkeypatch):
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: [
+        {"number": 1, "head": {"sha": "a", "ref": "b1"}},
+        {"number": 2, "head": {}},
+    ])
+    monkeypatch.setattr(mt, "live_main_sha", lambda: "sha")
+    monkeypatch.setattr(mt, "merge_tree_conflict", lambda *a, **k: False)
+    monkeypatch.setattr(mt, "_ensure_object", lambda sha: None)
+    out = mt.collect_conflicts(bound=1)
+    assert out["total_count"] == 2
+    assert out["items"][1]["unknown"] is True
