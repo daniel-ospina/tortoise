@@ -852,9 +852,20 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
     convention.
 
     Scans for definitions of ``metering_cohort_spend`` across the migration
-    files and asserts NONE reads a token column. NOT a claim of exhaustiveness:
-    the scan is opener-driven, so a definition whose opener does not match is
-    skipped — see the enumeration's own comment for what is and is not covered.
+    files and asserts NONE reads a workload counter (a token count, an
+    ops/edge/call counter, or one of the ``nodes_written`` / ``embed_*`` /
+    ``graph_storage_*`` families). NOT a claim of exhaustiveness, and the two
+    limits are stated at the strength the code supports rather than hidden:
+
+    * a counter invented OUTSIDE those families is not recognised;
+    * the scan reads the TEXT OF THE CEILING'S OWN DEFINITION — it does not
+      resolve INDIRECTION. A ceiling that joins a VIEW whose body selects
+      ``capture_tokens_in`` laundered as an innocuous name passes: the guarantee
+      is about what the ceiling itself writes, and each such read is caught in
+      the object that actually names the column if that object is itself a
+      ``metering_cohort_spend`` definition. Measured, not assumed.
+
+    See the enumeration's own comment for what is and is not covered.
     This is deliberately not a
     single-file read: the function is defined in 20260917000001 and
     **DROPPED/replaced** by the LIVE body in 20260918000001, and a guard that
@@ -966,9 +977,9 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
         return None
 
     def _strip_sql_comments(s: str) -> str:
-        """Drop SQL comments so a comment cannot HIDE a definition from the scan.
+        """Drop SQL comments WITHOUT eating a ``--`` that sits inside a literal.
 
-        This is what closes the residual: ``CREATE /* c */ FUNCTION
+        This closes the residual: ``CREATE /* c */ FUNCTION
         public.metering_cohort_spend(...)`` is ACCEPTED by Postgres and resolves
         to the LIVE name, but produced NO opener because the comment sat between
         FUNCTION and the name — so the file hit ``continue`` and was skipped
@@ -977,12 +988,64 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
         match, so that definition is enumerated and the workload check applies
         to it like any other.
 
+        ⛔ QUOTE-AWARE, because a naive ``--`` rule is a FALSE NEGATIVE: the
+        sequence ``'--'`` inside a string literal is not a comment, and a naive
+        strip deletes the rest of that LINE — which was measured to remove a
+        ``capture_tokens_in`` read from the very text the workload scan inspects,
+        while the file deploys it. So the scan walks the text and skips over
+        string literals ('...' with '' escapes), quoted identifiers ("...") and
+        dollar-quoted blocks ($$...$$ / $tag$...$tag$) before it will treat
+        ``--`` or ``/*`` as a comment. Literal CONTENT is preserved, so a read
+        written inside one is still visible to the check.
+
         A mention test was tried instead and REJECTED: it fired on prose in a
         string literal (``COMMENT ON TABLE t IS 'metering_cohort_spend'``) and on
         a longer name (``metering_cohort_spend_archive``, a substring match).
         """
-        s = re.sub(r"/\*.*?\*/", " ", s, flags=re.S)
-        return re.sub(r"--[^\n]*", " ", s)
+        out: list[str] = []
+        i, n = 0, len(s)
+        while i < n:
+            ch = s[i]
+            if ch == "'":
+                j = i + 1
+                while j < n:
+                    if s[j] == "'":
+                        if j + 1 < n and s[j + 1] == "'":
+                            j += 2
+                            continue
+                        j += 1
+                        break
+                    j += 1
+                out.append(s[i:j])
+                i = j
+                continue
+            if ch == '"':
+                j = s.find('"', i + 1)
+                j = n if j < 0 else j + 1
+                out.append(s[i:j])
+                i = j
+                continue
+            if ch == "$":
+                tag = re.match(r"\$[A-Za-z_0-9]*\$", s[i:])   # $$ or $tag$
+                if tag:
+                    j = s.find(tag.group(0), i + len(tag.group(0)))
+                    j = n if j < 0 else j + len(tag.group(0))
+                    out.append(s[i:j])
+                    i = j
+                    continue
+            if s.startswith("--", i):
+                j = s.find("\n", i)
+                out.append(" ")
+                i = n if j < 0 else j
+                continue
+            if s.startswith("/*", i):
+                j = s.find("*/", i + 2)
+                out.append(" ")
+                i = n if j < 0 else j + 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
 
     for f in files:
         text = _strip_sql_comments(f.read_text())
