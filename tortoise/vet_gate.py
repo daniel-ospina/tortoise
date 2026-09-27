@@ -225,25 +225,28 @@ def _norm_variants(text: object) -> set[str]:
     input.
 
     Use this for the **entity-name key sets** (``removed_entity_names``,
-    ``present_entity_names``, ``prior_entity_keys``) AND for the
-    **operator-endpoint surface** (:func:`_operator_endpoint_text`), which is
-    matched against the UNION of those entity keys with the content keys — so it
-    must cover the entity-GUARD ref keys too, not only the resolution keys. Use
-    :func:`_resolution_variants` (``{_norm(x), M(x)}``) for point/event CONTENT:
+    ``present_entity_names``, ``prior_entity_keys``) AND for the **ENTITY half**
+    of the operator-endpoint surface (:func:`_operator_endpoint_key_sets`),
+    which ``apply_vet`` matches against the removed-ENTITY keys alone
+    (``entity_gone``) — so it must cover the entity-GUARD ref keys, not only the
+    resolution keys. Use :func:`_resolution_variants` (``{_norm(x), M(x)}``) for
+    point/event CONTENT and for the CONTENT half of the endpoint surface:
     relative to it, the extra arm here is the entity guard's collapsed-closure
     ``M(_norm(x))``, which a regular point never registers. Carrying it on a
     content SURVIVOR surface lets a surviving long point shield an operator
-    endpoint the mint cannot resolve — and the mint then re-materialises a
-    DISCARDED item as a claim Point (#5069 review, P1).
+    endpoint the mint cannot resolve, and carrying it against a MERGED ``gone``
+    lets it collide with a removed CONTENT key — each re-opening a ``#2552``
+    fabrication or dropping a legitimate edge (#5069 review, P1).
 
-    The two sets are equal only for non-empty ``raw``, and only while the
-    untruncated alias ``_norm(raw)`` is ALREADY one of the guard's two arms; the
-    difference is exactly ``{_norm(raw)}`` otherwise (for empty/whitespace-only
-    input both helpers return the empty set). Do NOT decide that by length:
-    ``.lower()`` can LENGTHEN (``"İ"`` lowercases to two code points), so a raw
-    string at or under the cap can still normalise past it — compare the SETS,
-    not the lengths. ``test_endpoint_key_set_matches_extractor`` pins the
-    containment and the exact difference.
+    For non-empty ``raw`` the two sets are equal exactly while the untruncated
+    alias ``_norm(raw)`` is ALREADY one of the guard's two arms; otherwise the
+    difference is exactly ``{_norm(raw)}``. For empty/whitespace-only input both
+    helpers return the empty set, so the difference is empty too. Do NOT decide
+    equality by length: ``.lower()`` can LENGTHEN (``"İ"`` lowercases to two
+    code points), so a raw string at or under the cap can still normalise past
+    it — compare the SETS, not the lengths.
+    ``test_endpoint_key_set_matches_extractor`` pins the containment and the
+    exact difference.
     """
     raw = str(text or "").strip()
     if not raw:

@@ -992,6 +992,43 @@ def test_content_only_closure_collision_does_not_over_prune():
     assert out["operators"] == el["operators"], (
         "the ref resolves as its own endpoint, not as the discarded content")
     assert not any("pruned" in w for w in warnings), warnings
+    # Close the loop the docstring claims: the survivor really is the minted
+    # ref, and the discarded content was NOT re-materialised.
+    assert [p["content"] for p in out["points"]] == ["K"]   # discard fired
+    payload, _res = _payload_of(out)
+    assert len(payload["operators"]) == 1
+    new_pts = [p["content"] for p in payload["points"]
+               if p["content"] != "K"]
+    assert [v2._norm(p[:v2._MAX_CONTENT]) for p in new_pts] == \
+        [v2._norm(ref[:v2._MAX_CONTENT])], (
+            "the surviving endpoint must be the ref's OWN key")
+    assert not any(v2._norm(p) == v2._norm(content) for p in new_pts), (
+        "the discarded content must not be re-materialised")
+
+
+def test_cross_pass_removed_entity_shielded_by_a_surviving_content():
+    """#5069 re-review (P2): the ENTITY half of the prune subtracts the SURVIVOR
+    surface too. A cross-pass removed entity whose name coincides with a
+    SURVIVING point's content must not prune an operator the mint resolves to
+    that survivor — the only reachable collision where the entity half's
+    ``surviving_texts`` shield is load-bearing.
+    """
+    el = {"entities": [{"name": "foo", "kind": "core:tool"}], "events": [],
+          "points": [{"content": "K", "pointKind": "statement"}],
+          "operators": []}
+    first = vg._item_id("entities", 0, el["entities"][0])
+    pass1, _w1 = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    pool = vg.removal_pool(el, pass1)
+    assert pool["removed_entities"], "fixture must remove the entity"
+    union = {"entities": [],
+             "events": [],
+             "points": [{"content": "foo", "pointKind": "statement"}],
+             "operators": [{"src": "foo", "dst": "K", "op_type": "IMPL"}]}
+    out, warnings = vg.apply_vet(union, {}, prior=pool)
+    assert len(out["operators"]) == 1, (
+        "a surviving point resolves 'foo' — the entity removal must not prune "
+        "its operator")
+    assert not any("pruned" in w for w in warnings), warnings
 
 
 def test_respelled_discarded_entity_in_a_mitigates_target_is_pruned():
