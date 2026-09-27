@@ -1283,6 +1283,14 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
     # connection_across_emits``).
     monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
                         {"key": None, "client": None})
+    # #3944: the heartbeat and the canary counter are process globals too. The
+    # heartbeat must not leak a delivered timestamp into a later absence test
+    # (it would read FRESH), and the counter must not accumulate across the
+    # suite. The canary TASK itself is armed at TestClient lifespan entry and
+    # sleeps first, so with the production 300 s period it never emits during a
+    # test; tests that mean to exercise it patch the period themselves.
+    monkeypatch.setattr(ha, "_ANALYTICS_LAST_DELIVERED_AT", None)
+    monkeypatch.setattr(ha, "_ANALYTICS_CANARY_ATTEMPTS", 0)
     mon.ANALYTICS_OUTCOME_COUNT.clear()
 
 
