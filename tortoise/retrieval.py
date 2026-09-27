@@ -616,6 +616,38 @@ def session_key_of(hit: dict) -> str:
             or f"idx:{hit.get('lme_session_index', -1)}")
 
 
+def ask_session_key(hit: dict) -> str:
+    """The ASK lane's ``dedup_pool`` bucket key (#1987 P2-20, #4155) — the
+    single source ``ask_lane`` passes to :func:`dedup_pool` and
+    :func:`_pkg_session` uses for the packaging slice (they cannot drift).
+
+    Precedence — the identity the point fetch ALREADY populates first:
+
+      1. ``session_id`` — the snake key ``annotate_ask_hits``'s ``:Event``
+         join attaches (the only identity source #4106 may add);
+      2. ``sessionId`` — the camel spelling ``SearchResult.to_dict()``
+         emits, which the point fetch populates from the Point's own
+         ``sessionId`` prop, else the ``:Session`` ``CONTAINS`` edge id.
+         #4155: reading only the snake key sent every captured-transcript
+         chunk with no snake ``session_id`` into the ONE global ``idx:-1``
+         bucket, so ``dedup_pool``'s per-session cap applied GLOBALLY (8
+         chunks over 2 sessions → 3 survivors instead of 3 each);
+      3. ``session_date`` — the annotated Event/session date. A COARSER,
+         DAY-granularity identity: sessions sharing one date still share a
+         bucket. Deliberate — the date is a fallback for a hit the fetch
+         could not name, never a substitute for the name;
+      4. ``idx:{lme_session_index}`` — the eval lane's index bucket; key
+         absent ⇒ the single identity-less bucket ``idx:-1`` (the collapse
+         :func:`session_key_of` documents, whose product-side fix is #3591).
+
+    Distinct IDENTIFIED sessions never share a bucket.
+    """
+    return (hit.get("session_id")
+            or hit.get("sessionId")
+            or hit.get("session_date")
+            or f"idx:{hit.get('lme_session_index', -1)}")
+
+
 def is_raw_chunk(h: dict) -> bool:
     """True for a raw verbatim chunk (pointKind ``session-transcript``).
     Points of every other kind (extracted statements, episodic turn points)
@@ -1528,15 +1560,14 @@ def _pkg_differ_value_critical(a: str, b: str) -> bool:
 
 
 def _pkg_session(h: dict) -> str:
-    """Slice A: a hit's session identity (the same bucket key the ask lane
-    passes ``dedup_pool`` — session_id first, session_date, lme index
-    fallback). Distinct IDENTIFIED sessions never share a bucket; hits
-    carrying NONE of the three keys share the single bucket ``idx:-1``
-    (see :func:`session_key_of`, the retrieval-pool authority; the same
-    collapse is tracked in #3591)."""
-    return (h.get("session_id")
-            or h.get("session_date")
-            or f"idx:{h.get('lme_session_index', -1)}")
+    """Slice A: a hit's session identity — :func:`ask_session_key`, the
+    same bucket key the ask lane passes ``dedup_pool`` (snake
+    ``session_id``, then the camel ``sessionId`` the fetch populates (#4155),
+    then ``session_date``, then the lme index fallback). Distinct IDENTIFIED
+    sessions never share a bucket; hits carrying NONE of the keys share the
+    single bucket ``idx:-1`` (see :func:`session_key_of`, the retrieval-pool
+    authority; the same collapse is tracked in #3591)."""
+    return ask_session_key(h)
 
 
 def _is_turn_point(h: dict) -> bool:
