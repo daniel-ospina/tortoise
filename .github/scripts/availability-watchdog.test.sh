@@ -2990,7 +2990,9 @@ assert_not_contains "$PENDING_NOTE" "A human was paged" "note: …and does NOT c
 # A liveness check that cannot fail is the defect restated, so these pin the
 # EMISSION contract that the independent checker (availability-liveness.sh)
 # reads. They are mutation-sensitive by construction: delete the emit_heartbeat
-# call (or its scheduled-run guard) and every case below goes red.
+# call and every hb* case goes red; delete its scheduled-run guard and hb3 goes
+# red (the others run with the default GITHUB_EVENT_NAME=schedule, so a guard
+# that admits schedule is not observable from them).
 hb_created() { [ -f "$STUB_TMP/heartbeat-created.json" ] && cat "$STUB_TMP/heartbeat-created.json" || echo '{}'; }
 hb_patched() { [ -f "$STUB_TMP/heartbeat-patched.log" ] && jq -r -s 'last.body // ""' "$STUB_TMP/heartbeat-patched.log" || echo ''; }
 

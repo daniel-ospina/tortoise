@@ -116,8 +116,16 @@ else
 fi
 
 now_epoch() {
+  # The clock is an ARITHMETIC operand too, so normalize it the same way: a
+  # leading-zero value would abort `$(( ))` exactly as an epoch would. In
+  # production this is `date -u +%s` (unpadded decimal); the seam is not wired to
+  # any workflow, so this is hardening, not a live path — but "normalize before
+  # any arithmetic" should hold for every operand, not all-but-one.
   if [ -n "$LIVENESS_NOW_EPOCH" ]; then
-    printf '%s' "$LIVENESS_NOW_EPOCH"
+    case "$LIVENESS_NOW_EPOCH" in
+      ''|*[!0-9]*) date -u +%s ;;
+      *) dec_strip_zeros "$LIVENESS_NOW_EPOCH" ;;
+    esac
   else
     date -u +%s
   fi
@@ -198,14 +206,16 @@ normalize_max_age() { # <raw> -> minutes
 urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 
 # ⛔ STRIP LEADING ZEROS before any arithmetic. `00`, `007` … are all-digit and
-# within every length bound, but bash's `[ -gt ]` and `$(( ))` read a
-# LEADING-ZERO operand as OCTAL: `000000000009` errors the compare (a condition
-# reads that as FALSE, so the future-clamp is skipped) and then aborts the
-# arithmetic with "value too great for base", killing the run BEFORE the alert is
-# filed — the record reaches neither the STALE path nor the durable alert. The
-# threshold validator already normalizes this way; the epoch paths must too. An
-# all-zero input collapses to "", which the caller treats as unparseable
-# (epoch 0 is 1970 — stale either way).
+# within every length bound, but bash's `$(( ))` reads a LEADING-ZERO operand as
+# OCTAL: `$(( (NOW - 000000000009) / 60 ))` aborts with "value too great for base",
+# killing the run BEFORE the alert is filed — the record reaches neither the STALE
+# path nor the durable alert. (The single-bracket `[ -gt ]` is NOT the problem: it
+# parses base-10 and returns TRUE for `000000000009` — but relying on that would
+# leave the arithmetic to abort, so the value is normalized at the extraction.
+# The threshold validator already normalizes this way; the epoch paths must too.)
+# An all-zero input collapses to "", which is handled as unparseable by the
+# heartbeat caller (STALE) and as an unreadable feature age by the bootstrap
+# caller (also STALE) — both fail closed.
 dec_strip_zeros() { printf '%s' "${1:-}" | sed 's/^0*//'; }
 
 # Publication-boundary scrub, mirroring the watchdog's redact_text. This script

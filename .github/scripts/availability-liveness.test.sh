@@ -580,10 +580,11 @@ run_checker
 assert_eq "$RC" "1" "34: heartbeat_at=epoch:abc → exit 1 (unparseable, never a coerced 0)"
 assert_contains "$OUT" "heartbeat-record-unparseable" "34: …reason is unparseable"
 
-# 35. LEADING-ZERO epochs are all-digit and within the length bound, but bash
-# reads them as OCTAL: the compare errors (clamp skipped) and $(( )) aborts with
-# "value too great for base" — killing the run BEFORE the alert is filed, so the
-# record reaches neither the STALE path nor the durable alert.
+# 35. LEADING-ZERO epochs are all-digit and within the length bound, but bash's
+# $(( )) reads them as OCTAL and aborts with "value too great for base" — killing
+# the run BEFORE the alert is filed, so the record reaches neither the STALE path
+# nor the durable alert. (The single-bracket compare is base-10 and does NOT
+# error; the arithmetic is what aborts.)
 reset_case
 seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=000000000009\\n"}' "$HEARTBEAT_MARKER_FIXTURE")"
 run_checker
@@ -621,6 +622,51 @@ HB_QUERY="$(grep -m1 'search/issues' "$STUB_TMP/calls.log" 2>/dev/null || true)"
 assert_contains "$HB_QUERY" "is%3Aopen" "38: the heartbeat search is constrained to OPEN issues"
 assert_contains "$HB_QUERY" "in%3Atitle" "38: …searches the TITLE (the marker is a body comment)"
 assert_contains "$HB_QUERY" "author%3Aapp%2Fgithub-actions" "38: …and to the Actions app"
+assert_contains "$HB_QUERY" "repo%3A" "38: …and is scoped to THIS repo (a fleet sibling shares the app author)"
+assert_contains "$HB_QUERY" "is%3Aissue" "38: …and to issues, so a bot PR with the same title is never adopted"
+
+# 39. the jq adoption predicate's EXACT-TITLE select. GitHub's `in:title
+# "<phrase>"` is a phrase match, not equality, so the jq equality is the only
+# exactness guard: a bot issue titled "<title> EXTRA" carries the marker and
+# would otherwise be adopted (and its fresh body read as LIVE).
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=%s\\n"}' "$HEARTBEAT_MARKER_FIXTURE" "$NOW")"
+export STUB_HB_SEARCH_JSON="$(printf '{"items":[{"number":7000,"title":"%s EXTRA","body":"%s","user":{"login":"github-actions[bot]","type":"Bot"}}]}' "$HEARTBEAT_TITLE_FIXTURE" "$HEARTBEAT_MARKER_FIXTURE")"
+export STUB_WF_CREATED_AT="2026-09-13T03:34:06Z"
+run_checker
+assert_eq "$RC" "1" "39: a same-author title that is not EXACT is NOT adopted (treated as no record)"
+assert_contains "$(created_json)" "reason=no-heartbeat-record" "39: …reason is no-heartbeat-record"
+
+# 40. the jq adoption predicate's BODY-MARKER select: a bot issue with the exact
+# title but no marker must not be adopted either.
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"heartbeat_epoch=%s\\n"}' "$NOW")"
+export STUB_HB_SEARCH_JSON="$(printf '{"items":[{"number":7000,"title":"%s","body":"heartbeat_epoch=%s","user":{"login":"github-actions[bot]","type":"Bot"}}]}' "$HEARTBEAT_TITLE_FIXTURE" "$NOW")"
+export STUB_WF_CREATED_AT="2026-09-13T03:34:06Z"
+run_checker
+assert_eq "$RC" "1" "40: a same-author exact-title issue WITHOUT the body marker is NOT adopted"
+assert_contains "$(created_json)" "reason=no-heartbeat-record" "40: …reason is no-heartbeat-record"
+
+# 41. the redaction must be applied AT the publication boundary, not merely
+# available as a function. Drives the real helpers through the lib seam and
+# inspects what the stub actually received.
+reset_case
+LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; create_issue "t https://x?token=SECRET" "b FlyV1 abcDEF123" >/dev/null' _ "$CHECKER"
+assert_not_contains "$(created_json)" "SECRET" "41: create_issue redacts the TITLE at the boundary"
+assert_not_contains "$(created_json)" "FlyV1 abcDEF123" "41: …and the BODY"
+assert_contains "$(created_json)" "<redacted>" "41: …and the scrub is applied"
+LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; update_issue_body 500 "b fm2_abcdefghijklmnopqrstuvwxyz" >/dev/null' _ "$CHECKER"
+assert_not_contains "$(patched_all)" "fm2_abcdefghijklmnopqrstuvwxyz" "41: update_issue_body redacts at the boundary"
+LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; comment_issue 500 "c 123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >/dev/null' _ "$CHECKER"
+assert_not_contains "$(cat "$STUB_TMP/comments.log" 2>/dev/null || echo '')" "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" "41: comment_issue redacts at the boundary"
+
+# 42. the CLOCK is an arithmetic operand too: the seam value is normalized like
+# any epoch, so a leading-zero clock cannot abort the run.
+reset_case
+seed_heartbeat 5
+export LIVENESS_NOW_EPOCH="0$NOW"   # the same instant, leading-zero form
+run_checker
+assert_eq "$RC" "0" "42: a leading-zero clock is normalized (same instant, not an octal abort)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
