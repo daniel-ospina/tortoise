@@ -22,6 +22,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -264,41 +265,41 @@ def test_aggregate_unknown_beats_miss():
 NOW = _iso(0)
 
 
+def _gcheck(name, conclusion, wf="w", **extra):
+    return {"name": name, "status": "completed", "conclusion": conclusion,
+            "details_url": f"x/{name}", "app": {"slug": "g"}, "workflow": wf,
+            **extra}
+
+
+def _gate(runs, required=None, **extra):
+    """A main-gate payload. `total_count` is REQUIRED: partial pagination is 2."""
+    payload = {"check_runs": runs, "total_count": len(runs)}
+    if required is not None:
+        payload["required"] = required
+    payload.update(extra)
+    return payload
+
+
 def test_main_gate_three_way():
-    ok = {"required": ["a", "b"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-        {"name": "b", "status": "completed", "conclusion": "success",
-         "details_url": "x/2", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    ok = _gate([_gcheck("a", "success"), _gcheck("b", "success")], ["a", "b"])
     assert run_check("main-gate", json=ok, strict=True) == 0
-    bad = {"required": ["a", "b"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-        {"name": "b", "status": "completed", "conclusion": "failure",
-         "details_url": "x/2", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    bad = _gate([_gcheck("a", "success"), _gcheck("b", "failure")], ["a", "b"])
     assert run_check("main-gate", json=bad, strict=True) == 1
     assert run_check("main-gate", json={}) == 2
 
 
 def test_main_gate_lax_is_diagnostic_and_pins_its_polarity(capsys):
     """Without --strict the lax allow-list applies (diagnostic only)."""
-    cancelled = {"required": ["a"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "cancelled",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    cancelled = _gate([_gcheck("a", "cancelled")], ["a"])
     assert run_check("main-gate", json=cancelled) == 0
     assert "NON_RED" in capsys.readouterr().out
-    red = {"required": ["a"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "failure",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    red = _gate([_gcheck("a", "failure")], ["a"])
     assert run_check("main-gate", json=red) == 1
 
 
 @pytest.mark.parametrize("status", sorted(mt.IN_FLIGHT_STATUSES))
 def test_every_in_flight_status_is_unknown(status):
-    run = {"name": "a", "status": status, "conclusion": None,
-           "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}
+    run = _gcheck("a", None, status=status)
     assert mt.main_gate([run]) == "UNKNOWN"
     assert mt.verdict_from_check_runs([run]) == "UNKNOWN"
     assert mt.mergify_mergeable([run]) == "UNKNOWN"
@@ -307,48 +308,35 @@ def test_every_in_flight_status_is_unknown(status):
 def test_main_gate_s1_no_main_signal_arithmetic():
     # 1 observed success + NO_MAIN_SIGNAL contexts ⇒ 0 (they are reported and
     # excluded, not a completeness failure).
-    one = {"required": ["a", "b", "c"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    one = _gate([_gcheck("a", "success")], ["a", "b", "c"])
     assert run_check("main-gate", json=one, strict=True, require_fresh=False) == 0
     # all NO_MAIN_SIGNAL ⇒ 2 (the non-vacuity guard)
-    none = {"required": ["a", "b", "c"], "check_runs": []}
+    none = _gate([], ["a", "b", "c"])
     assert run_check("main-gate", json=none, strict=True) == 2
     # a required context present with failure ⇒ 1
-    fail = {"required": ["a"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "failure",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    fail = _gate([_gcheck("a", "failure")], ["a"])
     assert run_check("main-gate", json=fail, strict=True) == 1
 
 
 def test_main_gate_strict_rejects_cancelled_with_token_named(capsys):
-    payload = {"required": ["python-ci-gate"], "check_runs": [
-        {"name": "python-ci-gate", "status": "completed", "conclusion": "cancelled",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    payload = _gate([_gcheck("python-ci-gate", "cancelled")], ["python-ci-gate"])
     assert run_check("main-gate", json=payload, strict=True) == 2
     assert "cancelled" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("conclusion", ["neutral", "skipped"])
 def test_main_gate_strict_rejects_neutral_and_skipped(conclusion):
-    payload = {"required": ["python-ci-gate"], "check_runs": [
-        {"name": "python-ci-gate", "status": "completed", "conclusion": conclusion,
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    payload = _gate([_gcheck("python-ci-gate", conclusion)], ["python-ci-gate"])
     assert run_check("main-gate", json=payload, strict=True) == 2
 
 
 def test_main_gate_strict_scopes_to_required_contexts():
     # A non-required red must not false-red the required gate.
-    payload = {"required": ["python-ci-gate"], "check_runs": [
-        {"name": "python-ci-gate", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-        {"name": "some-other-check", "status": "completed", "conclusion": "failure",
-         "details_url": "x/2", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    payload = _gate(
+        [_gcheck("python-ci-gate", "success"),
+         _gcheck("some-other-check", "failure")],
+        ["python-ci-gate"],
+    )
     assert run_check("main-gate", json=payload, strict=True) == 0
 
 
@@ -574,10 +562,10 @@ def gap_repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _gap_payload(value=1.5, record_verified_at=NOW):
+def _gap_payload(value=2.0, record_verified_at=NOW):
     terms = {
         "ceiling": {"value": 100, "source": "S4"},
-        "observed": {"value": 50, "source": "M1"},
+        "observed": {"value": round(100 / value, 6), "source": "M1"},
         "effective_parallel": {"value": 3, "source": "M3",
                                "record": "docs/ci/measurements.json",
                                "verified_at": record_verified_at},
@@ -592,6 +580,12 @@ def test_gap_three_way(gap_repo):
     assert run_check("gap", json=_gap_payload(1.5), max=2, require_fresh=True) == 0
     assert run_check("gap", json=_gap_payload(3.0), max=2, require_fresh=True) == 1
     assert run_check("gap", json={"gap": {"value": "UNKNOWN"}}) == 2
+
+
+def test_gap_value_must_reconcile_with_ceiling_over_observed(gap_repo):
+    p = _gap_payload(2.0)
+    p["gap"]["value"] = 1.0  # ceiling/observed is 2.0
+    assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
 def test_gap_requires_m3_provenance(gap_repo):
@@ -771,14 +765,12 @@ def test_strict_empty_required_is_2():
 
 
 def test_main_gate_require_fresh_head_binding():
-    run = {"name": "a", "status": "completed", "conclusion": "success",
-           "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}
-    matched = {"required": ["a"], "check_runs": [run],
-               "sha": "abc", "live_main_sha": "abc"}
+    run = _gcheck("a", "success")
+    matched = _gate([run], ["a"], sha="abc", live_main_sha="abc")
     assert run_check("main-gate", json=matched, strict=True, require_fresh=True) == 0
     moved = dict(matched, live_main_sha="def")
     assert run_check("main-gate", json=moved, strict=True, require_fresh=True) == 2
-    missing = {"required": ["a"], "check_runs": [run]}
+    missing = _gate([run], ["a"])
     assert run_check("main-gate", json=missing, strict=True, require_fresh=True) == 2
 
 
@@ -817,9 +809,7 @@ def test_newest_by_id_supersedes_older_red_when_ids_are_present():
 
 
 def test_strict_reports_no_main_signal_contexts(capsys):
-    payload = {"required": ["a", "b"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    payload = _gate([_gcheck("a", "success")], ["a", "b"])
     assert run_check("main-gate", json=payload, strict=True) == 0
     out = capsys.readouterr().out
     assert "NO_MAIN_SIGNAL" in out and "b" in out
@@ -1404,8 +1394,9 @@ def test_gap_fewer_than_six_terms_is_2(gap_repo):
 
 
 def test_gap_unknown_value_with_valid_terms_is_2(gap_repo):
-    assert run_check("gap", json=_gap_payload("UNKNOWN"), max=2,
-                     require_fresh=True) == 2
+    p = _gap_payload(2.0)
+    p["gap"]["value"] = "UNKNOWN"
+    assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
 def test_no_languish_non_boolean_movement_is_2():
@@ -1448,3 +1439,140 @@ def test_or_artifact_plus_signed_integer_is_2(tmp_path):
     path = _artifact(tmp_path, text)
     assert run_check("prs-per-day", json=_ceiling_payload(100), min=200,
                      or_artifact=f"{path}#ceiling") == 2
+
+
+# ---------------------------------------------------------------------------
+# Round-5 hardening: partial populations, per-field isolation, transport.
+# ---------------------------------------------------------------------------
+
+def test_queue_eta_partial_eta_population_is_2():
+    payload = {"items": [{"eta_minutes": 10}, {"eta_minutes": "UNKNOWN"}],
+               "total_count": 2, "read_ok": True, "max_eta_minutes": 10}
+    assert run_check("queue-eta", json=payload, max=120, min_depth=1) == 2
+
+
+def test_queue_eta_failed_or_incomplete_read_is_2():
+    base = {"items": [{"eta_minutes": 10}], "total_count": 1}
+    assert run_check("queue-eta", json={**base, "read_ok": False},
+                     max=120, min_depth=1) == 2
+    assert run_check("queue-eta", json={**base, "incomplete_results": True},
+                     max=120, min_depth=1) == 2
+
+
+def test_batch_size_partial_window_is_2():
+    payload = {"events": 2, "batch_sizes": [2, "UNKNOWN"], "max_batch_size": 2,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, min_depth=1,
+                     require_fresh=True) == 2
+
+
+def test_batch_size_min_depth_floor_is_enforced():
+    payload = {"events": 0, "batch_sizes": [2], "max_batch_size": 2,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, min_depth=5,
+                     require_fresh=True) == 2
+
+
+def test_capacity_negative_field_is_2():
+    payload = {"queued": 1, "in_progress": 1, "oldest_minutes": -100,
+               "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5}
+    assert run_check("capacity", json=payload, max_oldest_minutes=120) == 2
+
+
+@pytest.mark.parametrize("field", [
+    "queued", "in_progress", "oldest_minutes",
+    "capacity_at_first_failure", "configured_max_parallel_checks",
+])
+def test_capacity_each_field_is_individually_required(field):
+    payload = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+               "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5}
+    payload[field] = "UNKNOWN"
+    assert run_check("capacity", json=payload, max_oldest_minutes=120) == 2
+
+
+def test_capacity_fresh_field_set_is_pinned():
+    assert set(mt._CAPACITY_FRESH_FIELDS) == {
+        "queued", "in_progress", "oldest_minutes", "capacity_at_first_failure"}
+
+
+def test_capacity_each_fresh_field_is_individually_required():
+    for field in mt._CAPACITY_FRESH_FIELDS:
+        payload = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+                   "capacity_at_first_failure": 8,
+                   "configured_max_parallel_checks": 5,
+                   "records": {f: {"verified_at": NOW}
+                               for f in mt._CAPACITY_FRESH_FIELDS}}
+        payload["records"][field] = {"verified_at": _iso(30)}
+        assert run_check("capacity", json=payload, min_headroom=1,
+                         require_fresh=True) == 2, field
+
+
+def test_capacity_count_cannot_be_a_boolean():
+    payload = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+               "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+               "items": [{"id": 1}], "total_count": True}
+    assert run_check("capacity", json=payload, require_complete=True) == 2
+
+
+def test_no_languish_mistyped_exclusion_is_2():
+    items = [{"number": i, "classification": "open", "moved_in_window": True}
+             for i in range(11)]
+    items.append({"number": 11, "moved_in_window": False, "draft": "false"})
+    payload = {"items": items, "total_count": 12, "read_ok": True}
+    assert run_check("no-languish", json=payload, exclude=["draft"],
+                     require_complete=True) == 2
+
+
+def test_main_gate_missing_total_count_is_2():
+    payload = {"required": ["a"], "check_runs": [_gcheck("a", "success")]}
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_merge_pages_scalar_passthrough():
+    assert mt._merge_pages("scalar") == "scalar"
+
+
+def test_gh_api_nonzero_exit_with_json_body_is_unknown(monkeypatch):
+    monkeypatch.setattr(
+        mt.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout='{"a": 1}', stderr="x"))
+    assert mt._gh_api("repos/o/r") is mt.UNKNOWN
+
+
+def test_gh_api_retries_then_records_status(monkeypatch, capsys):
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(mt.subprocess, "run", fake_run)
+    assert mt._gh_api("repos/o/r") is mt.UNKNOWN
+    assert calls["n"] == mt.GH_API_ATTEMPTS
+    assert "boom" in capsys.readouterr().err
+
+
+def test_triage_rows_marks_task5_judgements_unknown(monkeypatch):
+    monkeypatch.setattr(mt, "_gh_api",
+                        lambda *a, **k: [{"number": 1, "draft": False}])
+    rows = mt._triage_rows()
+    assert rows and rows[0]["draft"] is False
+    for field in ("hard_stop", "terminal_decision", "superseded_by", "eligible",
+                  "conflict", "owner", "owner_evidence", "owning_issue"):
+        assert rows[0][field] == mt.UNKNOWN, field
+
+
+def test_cli_numeric_flag_cannot_disarm_a_gate(tmp_path):
+    rec = tmp_path / "cap.json"
+    rec.write_text(_json.dumps({
+        "queued": 1, "in_progress": 1, "oldest_minutes": 60,
+        "capacity_at_first_failure": 5, "configured_max_parallel_checks": 5}))
+    out = _run_cli("check", "capacity", "--max-oldest-minutes", "120",
+                   "--min-headroom", "abc", "--input", str(rec))
+    assert out.returncode == 2, out.stdout + out.stderr
+
+
+def test_cli_numeric_flag_error_names_the_flag():
+    out = _run_cli("check", "capacity", "--min-headroom", "abc")
+    assert out.returncode == 2
+    assert "--min-headroom" in out.stderr

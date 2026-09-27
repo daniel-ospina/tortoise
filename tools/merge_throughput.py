@@ -84,6 +84,9 @@ _CAPACITY_FRESH_FIELDS = (
 I1_RECORD_WINDOW_DAYS = 90
 
 GAP_TERM_MIN = 6
+# S13: `.gap.value` is independently measured as ceiling / observed, so the
+# reconciliation can fail. Tolerance stated numerically (±10%).
+GAP_VALUE_TOLERANCE = 0.10
 CEILING_MAX = 200000
 CEILING_TOLERANCE = 0.10  # ±10%, stated numerically
 
@@ -836,8 +839,9 @@ def _check_main_gate(payload: dict, opts: dict) -> int:
     if not isinstance(runs, list) or not runs:
         return 2
     total = payload.get("total_count")
-    if _is_num(total) and len(runs) != total:
-        print(f"2: check-run pagination is partial ({len(runs)} of {total})")
+    if not _is_num(total) or len(runs) != total:
+        print(f"2: check-run enumeration is not reconcilable to a total "
+              f"({len(runs)} of {total!r})")
         return 2
     if opts.get("require_fresh"):
         record_sha = payload.get("sha")
@@ -1067,18 +1071,19 @@ def _check_queue_eta(payload: dict, opts: dict) -> int:
     value = _as_number(payload.get("max_eta_minutes", UNKNOWN))
     observed = None
     if isinstance(items, list) and items:
-        etas = [_as_number(i.get("eta_minutes")) for i in items if isinstance(i, dict)]
-        etas = [e for e in etas if e is not None]
-        if etas:
-            observed = max(etas)
-        elif value is not None:
-            # A non-empty population whose ETAs were never observed cannot be
-            # vouched for by a self-set maximum.
-            print("2: queue-eta items carry no numeric ETA")
+        if any(not isinstance(item, dict) for item in items):
+            print("2: queue-eta items are mis-shaped")
             return 2
-    if value is not None and observed is not None and abs(value - observed) > 1e-9:
-        print(f"2: max_eta_minutes {value} does not reconcile with items ({observed})")
-        return 2
+        etas = [_as_number(item.get("eta_minutes")) for item in items]
+        if any(eta is None or eta < 0 for eta in etas):
+            # A population with ANY unobserved ETA cannot be vouched for by a
+            # self-set maximum: S5's fail direction is an under-reported max.
+            print("2: queue-eta population has non-numeric or negative ETAs")
+            return 2
+        observed = max(etas)
+        if value is not None and abs(value - observed) > 1e-9:
+            print(f"2: max_eta_minutes {value} does not reconcile with items ({observed})")
+            return 2
     if value is None:
         value = observed
     if value is None:
@@ -1104,7 +1109,11 @@ def _check_batch_size(payload: dict, opts: dict) -> int:
         return 2
     value = _as_number(payload.get("max_batch_size", UNKNOWN))
     numeric = [_as_number(s) for s in sizes]
-    numeric = [s for s in numeric if s is not None]
+    if any(n is None or n < 0 for n in numeric):
+        # Every batch event in the window must be observed; a dropped entry
+        # would reconcile the claimed max against a subset.
+        print("2: batch_sizes has non-numeric or negative entries")
+        return 2
     if value is not None and not numeric:
         # Nothing to reconcile against: a self-set max over an empty/opaque
         # batch-event window is not an observation (S6 derives from events).
@@ -1133,6 +1142,7 @@ def _check_cycle(payload: dict, opts: dict) -> int:
         if isinstance(r, dict)
         and r.get("heavy_leg_conclusion") == "success"
         and _is_num(r.get("duration_minutes"))
+        and r.get("duration_minutes") >= 0
     ]
     min_depth = _as_int(opts.get("min_depth"))
     if min_depth is not None and len(qualifying) < min_depth:
@@ -1167,7 +1177,7 @@ def _check_shard_balance(payload: dict, opts: dict) -> int:
             print(f"2: heavy leg {leg_name!r} absent or not success")
             return 2
     value = _as_number(payload.get("shard_imbalance_minutes", UNKNOWN))
-    if value is None:
+    if value is None or value < 0:
         return 2
     threshold = _as_number(opts.get("max"))
     if threshold is None:
@@ -1274,6 +1284,9 @@ def _check_capacity(payload: dict, opts: dict) -> int:
                 "capacity_at_first_failure", "configured_max_parallel_checks"):
         if not _is_num(payload.get(key)):
             print(f"2: capacity field {key!r} is missing or not numeric")
+            return 2
+        if payload.get(key) < 0:
+            print(f"2: capacity field {key!r} is negative")
             return 2
     if opts.get("require_complete"):
         items = payload.get("items")
@@ -1391,6 +1404,24 @@ def _check_gap(payload: dict, opts: dict) -> int:
     value = _as_number(gap.get("value", UNKNOWN))
     if value is None:
         return 2
+    ceiling_term = terms.get("ceiling")
+    observed_term = terms.get("observed")
+    if not (
+        isinstance(ceiling_term, dict)
+        and isinstance(observed_term, dict)
+        and _is_num(ceiling_term.get("value"))
+        and _is_num(observed_term.get("value"))
+    ):
+        print("2: .gap.terms must carry numeric `ceiling` and `observed`")
+        return 2
+    if observed_term["value"] <= 0:
+        print("2: .gap.terms.observed must be positive")
+        return 2
+    derived = ceiling_term["value"] / observed_term["value"]
+    if abs(value - derived) > GAP_VALUE_TOLERANCE * abs(derived):
+        print(f"2: .gap.value {value} does not reconcile with ceiling/observed "
+              f"({derived})")
+        return 2
     threshold = _as_number(opts.get("max"))
     if threshold is None:
         return 2
@@ -1435,6 +1466,15 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
     if any(not isinstance(row, dict) for row in items):
         print("2: no-languish items are mis-shaped")
         return 2
+    for row in items:
+        for key in ("hard_stop", "terminal_decision", "draft"):
+            if key in row and not isinstance(row[key], bool):
+                print(f"2: no-languish row {key!r} is not boolean")
+                return 2
+        superseded = row.get("superseded_by")
+        if superseded is not None and not isinstance(superseded, str):
+            print("2: no-languish superseded_by is mis-shaped")
+            return 2
     excluded = set(excludes)
 
     def _excluded(row: dict) -> bool:
@@ -1563,14 +1603,16 @@ def run_check(name: str, json=None, **opts) -> int:
 # --json report — emit fields, never a judgement.
 # ---------------------------------------------------------------------------
 
-def _fixture_gap(value: float = 1.5):
+def _fixture_gap(value: float = 2.0):
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ceiling = 100
+    observed = round(ceiling / value, 6)
     return {
         "gap": {
             "value": value,
             "terms": {
-                "ceiling": {"value": 100, "source": "S4"},
-                "observed": {"value": 50, "source": "M1"},
+                "ceiling": {"value": ceiling, "source": "S4"},
+                "observed": {"value": observed, "source": "M1"},
                 "effective_parallel": {
                     "value": 3, "source": "M3",
                     "record": "docs/ci/measurements.json", "verified_at": now,
