@@ -31,6 +31,14 @@ class CreatePointRequest(BaseModel):
     kind: str = Field(default="statement")
     tags: list[str] = Field(default_factory=list)
     dedup: bool = Field(default=True)
+    # #4032: parity with hosted_api.CreatePointRequest — the SAME hosted client
+    # (agent-infra scripts/tortoise-memory.mjs, TORTOISE_BASE_URL pointing
+    # here for a self-hosted daemon) sends `confidence` / `authoredBy`, and
+    # pydantic's default `extra='ignore'` DROPPED them at this boundary too —
+    # the write reported ok while neither was stored. `sdk.create_point`
+    # persists both as props, so declare + forward them.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("kind")
     @classmethod
@@ -206,11 +214,19 @@ async def create_point(body: CreatePointRequest):
     """Create a Point in the self-host graph (registry: POST /v1/points)."""
     sdk = _sdk()
     try:
+        # #4032: forward caller confidence/authoredBy as props — only when
+        # supplied (a None would stamp a null property).
+        _author_props: dict = {}
+        if body.confidence is not None:
+            _author_props["confidence"] = body.confidence
+        if body.authoredBy is not None:
+            _author_props["authoredBy"] = body.authoredBy
         result = sdk.create_point(
             content=body.content,
             kind=body.kind,
             tags=body.tags,
             dedup=body.dedup,
+            **_author_props,
         )
     except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost create_point failed")
