@@ -621,6 +621,59 @@ def test_cli_refuses_an_unparseable_as_of(tmp_path):
                   "--as-of", "not-a-timestamp"])
 
 
+def test_cli_refuses_an_empty_as_of(tmp_path):
+    # `--as-of "$TS"` with an unset variable is a MISUSE, not a request for
+    # wall-clock now — truthiness would silently accept it and lose the pin.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    with pytest.raises(SystemExit):
+        obs.main(["--from-json", str(runs), "--as-of", ""])
+
+
+def test_cli_refuses_an_empty_conflicts_json(tmp_path):
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    with pytest.raises(SystemExit):
+        obs.main(["--from-json", str(runs), "--conflicts-json", ""])
+
+
+def test_cli_refuses_from_json_with_live(tmp_path):
+    # `--from-json` wins the read, so `--live` would stamp completeness from a
+    # read the observer did not perform and do network I/O on a hermetic replay.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    with pytest.raises(SystemExit):
+        obs.main(["--from-json", str(runs), "--live"])
+
+
+def test_build_record_tolerates_a_non_string_display_title():
+    # A truthy non-string title used to raise TypeError out of `re.match`, which
+    # exited 1 with a traceback and left a stale `OK` record at `--out`.
+    bad = run("mergify/merge-queue/main", "merge queue: checking #9 on main (abc1234)",
+              minutes_ago=5)
+    bad["display_title"] = 12345
+    record = _build([*_corpus(), bad])  # must not raise
+    assert record["status"] in {"OK", obs.UNKNOWN}
+
+
+def test_window_excludes_runs_created_after_as_of():
+    # A corpus can extend past the pinned `--as-of` (a dump captured later than
+    # the window end); counting such a run would contradict `window.end`.
+    late = run("feature/late", "merge queue: checking #9 on main (abc1234)",
+               minutes_ago=-30)
+    record = _build([*_corpus(), late])
+    assert "feature/late" not in {f["branch"] for f in record["batches"]["formations"]}
+
+
+def test_interval_ends_are_clamped_to_now():
+    # A run that finishes AFTER the window end still holds a runner AT the end.
+    r = run("feature/x", "ci", minutes_ago=10, duration_min=120)
+    assert all(end <= NOW for _, end in obs.running_intervals([r], now=NOW))
+    q = run("feature/y", "ci", minutes_ago=10, wait_min=30)
+    ivs = obs.queue_intervals([q], now=NOW)
+    assert ivs and all(end <= NOW for _, end in ivs)
+
+
 def test_record_carries_the_corpus_read():
     record = _build(_corpus())
     assert record["window"]["corpus_runs"] == len(_corpus())
@@ -783,7 +836,7 @@ def test_committed_records_match_the_doc():
 
     # the window's provenance is recorded, never inferred
     for rec in (short, long_):
-        assert len(rec["window"]["main_sha"]) == 40
+        assert rec["window"]["main_sha"] == "56e2558399e73f9619b817016c92790a97c7b4bc"
         assert rec["window"]["main_sha_source"]
         # the corpus read is recorded, so the provenance row is verifiable from
         # the artifact and not only by re-running the dump

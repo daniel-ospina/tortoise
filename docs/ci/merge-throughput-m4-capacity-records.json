@@ -8,7 +8,7 @@
     "corpus_runs": 39972,
     "corpus_first_run_at": "2026-08-30T23:00:23Z",
     "truncated": null,
-    "main_sha": "ccfa3b270b303c46639ff609dc52805560302328",
+    "main_sha": "56e2558399e73f9619b817016c92790a97c7b4bc",
     "main_sha_source": "resolved origin/main at capture"
   },
   "parallelism": {

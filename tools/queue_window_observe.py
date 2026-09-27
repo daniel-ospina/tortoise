@@ -129,7 +129,7 @@ def parse_batch_title(title):
     part of this batch's size (the cycle-10 draft's "4-PR batches" were this
     misread).
     """
-    text = title or ""
+    text = title if isinstance(title, str) else ""
     head = re.match(r"\s*merge queue:\s*checking (.+?)\s+on main", text)
     if head is None:
         return [], []
@@ -191,7 +191,9 @@ def formations(runs):
 
 
 def _main_sha_from_title(title):
-    m = re.search(r"on main \(([0-9a-f]{7,40})\)", title or "")
+    if not isinstance(title, str):
+        return None
+    m = re.search(r"on main \(([0-9a-f]{7,40})\)", title)
     return m.group(1) if m else None
 
 
@@ -270,7 +272,10 @@ def queue_intervals(runs, now=None):
             # A zero-length wait is a DEGENERATE interval (it never queued).
             # Keeping it would let `sweep_max_concurrency` read 0 — the
             # fail-open this function's guard exists to prevent.
-            out.append((created, started))
+            # Clamp at `now`: a run whose start post-dates the window end was
+            # still queued as of `now`, so closing it later would report a queue
+            # age (and hence an I9 capacity) that had not happened yet.
+            out.append((created, min(started, now)))
         elif started is None and r.get("status") in pending and now >= created:
             # ONLY a run that is still QUEUED. A completed run with no
             # `run_started_at` (`startup_failure`, cancelled-while-queued) never
@@ -297,7 +302,9 @@ def running_intervals(runs, now=None):
             # window and bias concurrency downward.
             out.append((started, now))
         elif updated is not None and updated > started:
-            out.append((started, updated))
+            # Clamp at `now`: a run that finished AFTER the window end was still
+            # holding a runner AT the end, so its interval must stop there.
+            out.append((started, min(updated, now)))
     return out
 
 
@@ -330,7 +337,8 @@ def queue_depth_by_formation(formations_list, queue_runs, now=None):
     somewhere else. A branch counts from the moment it ENTERED THE QUEUE
     (`created_at`) until it finished (or until `now`, if it is still live), so a
     branch waiting for a runner still counts and a branch is counted at its own
-    formation (every formation therefore reads depth >= 1).
+    formation (every formation therefore reads depth >= 1). A run with no
+    `created_at` falls back to `run_started_at`.
     """
     now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9
     intervals = []
@@ -470,10 +478,14 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
 
     def in_window_of(corpus):
         # An unparseable `created_at` is EXCLUDED, never treated as `now` — that
-        # would pull every malformed row into the window.
+        # would pull every malformed row into the window. The window is BOUNDED
+        # ON BOTH SIDES: a run created before `cutoff` is out-of-window, and so
+        # is one created AFTER `now` (a corpus can extend past `--as-of`, e.g. a
+        # dump captured later than the pinned window end) — counting the latter
+        # would contradict the record's own `window.end` provenance.
         return [
             r for r in corpus
-            if (lambda t: t is not None and t >= cutoff)(_ts(r.get("created_at")))
+            if (lambda t: t is not None and cutoff <= t <= now)(_ts(r.get("created_at")))
         ]
 
     in_window = in_window_of(queue_runs)
@@ -913,7 +925,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     truncated = False
-    if args.from_json:
+    if args.from_json is not None and args.live:
+        # `--from-json` wins over `--live` in the read, so allowing both would
+        # stamp `window.truncated` from a read the observer did NOT perform and
+        # do live network I/O on a documented-hermetic replay. Refuse instead.
+        parser.error("--from-json and --live are mutually exclusive")
+    if args.from_json is not None:
+        if not args.from_json:
+            parser.error("--from-json was given an empty path")
         runs = read_jsonl(args.from_json)
     elif args.live:
         runs, truncated = fetch_runs()
@@ -944,11 +963,18 @@ def main(argv=None):
     # wall-clock `now` would make the run reproducible in shape but not in
     # content, which is the exact non-reproducibility the flag exists to stop.
     as_of = None
-    if args.as_of:
+    if args.as_of is not None:
+        # Presence, not truthiness: `--as-of ""` (an unset shell variable) is a
+        # MISUSE, and silently falling back to wall-clock `now` is exactly what
+        # this flag exists to prevent.
+        if not args.as_of:
+            parser.error("--as-of was given an empty value")
         as_of = _ts(args.as_of)
         if as_of is None:
             parser.error(f"--as-of is not a parseable ISO-8601 timestamp: {args.as_of!r}")
-    if args.conflicts_json:
+    if args.conflicts_json is not None:
+        if not args.conflicts_json:
+            parser.error("--conflicts-json was given an empty value")
         try:
             data = jsonlib.loads(Path(args.conflicts_json).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1007,11 +1033,17 @@ def main(argv=None):
     # `--main-sha`, so an offline replay never silently depends on the network —
     # and the test suite's `--from-json` cases perform no network I/O.
     resolved_sha = args.main_sha or (resolve_origin_main() if args.live else None)
-    record = build_record(
-        runs, args.window_hours, confirmed_max_parallel=confirmed,
-        conflicted_set=conflicted, resolved_main_sha=resolved_sha, now=as_of,
-        corpus_truncated=(truncated if args.live else None),
-    )
+    try:
+        record = build_record(
+            runs, args.window_hours, confirmed_max_parallel=confirmed,
+            conflicted_set=conflicted, resolved_main_sha=resolved_sha, now=as_of,
+            corpus_truncated=(truncated if args.live else None),
+        )
+    except Exception as exc:
+        # Fail-closed contract: malformed-but-plausible input is UNKNOWN/exit 2,
+        # never a traceback (exit 1) that leaves a stale `OK` record at `--out`.
+        return emit_unknown(
+            f"record construction failed: {type(exc).__name__}: {exc}")
     if truncated:
         if record.get("status") == "OK":
             record["window"]["truncated"] = True
