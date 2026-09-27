@@ -66,9 +66,13 @@ jobs:
           # job-level env is handed to actions/checkout too.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Optional operator override of the staleness bound. Unset expands to
-          # EMPTY, which is the script's measured default (90 min). The script
-          # normalizes a garbage value back to the default. Raising it trades
-          # detection latency for fewer false alarms; LOWERING it below the
-          # measured tail (p99 ~54 min, max ~64 min) will false-fire.
+          # EMPTY, which is the script's measured default (90 min). It must be a
+          # PLAIN INTEGER; anything else (`2h`, `-1`, `0.5`) is rejected with a
+          # warning and falls back to the default — digit-stripping such a value
+          # would turn `2h` into a 2-minute (always-alerting) bound. Raising the
+          # value trades detection latency for fewer false alarms; LOWERING it
+          # below the measured p95 (~29 min) sits inside GitHub's own scheduling
+          # jitter and WILL false-fire (measured max gap 63.5 min) — the script
+          # warns but honours an explicit choice.
           HEARTBEAT_MAX_AGE_MIN: ${{ vars.HEARTBEAT_MAX_AGE_MIN }}
         run: bash .github/scripts/availability-liveness.sh

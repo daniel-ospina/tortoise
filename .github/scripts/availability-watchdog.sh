@@ -450,11 +450,19 @@ INCIDENT_STATE_MARKER='<!-- availability-watchdog-state -->'
 # (same machine-author + exact-title + marker posture as the incidents).
 HEARTBEAT_MARKER='<!-- availability-watchdog-heartbeat -->'
 HEARTBEAT_TITLE='[OPS] availability-watchdog heartbeat (rolling)'
-# An operator kill switch, mirroring ESCALATE_ENABLED: `0` records nothing. It
-# is NOT a safety valve — the liveness check alarms on a stale/absent record, so
-# turning it off makes that checker red BY DESIGN (a silence is never an
-# all-clear). Default 1 (unset/empty = enabled).
-HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-1}"
+# An operator kill switch, mirroring ESCALATE_ENABLED: ONLY a byte-exact `0`
+# disables recording. It is NOT a safety valve — the liveness check alarms on a
+# stale/absent record, so turning it off makes that checker red BY DESIGN (a
+# silence is never an all-clear). Unset/empty = enabled.
+HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-}"
+# INTERNAL, not an operator knob. A scheduled JOB invokes this script once per
+# PROBE STEP, and exactly ONE step must emit: otherwise the same run writes the
+# record twice seconds apart, and the second write's "update, don't create"
+# depends on GitHub's SEARCH index having caught up (not guaranteed) — a miss
+# files a DUPLICATE rolling heartbeat issue (the #2706 duplicate class, and a
+# duplicate also makes the checker's record selection ambiguous). The workflow
+# sets HEARTBEAT_EMIT=0 on the non-emitting step. Default 1.
+HEARTBEAT_EMIT="${HEARTBEAT_EMIT:-1}"
 
 DOWN_MARKER="[monitor] PROD DOWN"
 DOWN_TITLE="${DOWN_MARKER} — ${PROBE_HOST_LABEL} is not answering the availability probe"
@@ -1162,8 +1170,21 @@ search_heartbeat() {
 # for a silence detector.
 emit_heartbeat() { # <verdict>
   local verdict="$1" event issue body now iso run attempt
-  if [ "$HEARTBEAT_ENABLED" != "1" ]; then
-    log "heartbeat: disabled (HEARTBEAT_ENABLED=${HEARTBEAT_ENABLED}) — the liveness check will alert on a stale record"
+  # Kill switch, ESCALATE_ENABLED semantics: the value AS RECEIVED is the only
+  # predicate. Only a byte-exact `0` disables; `1`/unset/empty enable quietly;
+  # EVERYTHING else (`true`, `yes`, `2`, `00`, `0abc`, a YAML block scalar
+  # yielding `0\n`) resolves to ENABLED and warns — a malformed operator value
+  # must never choose the silent direction on a fail-closed surface.
+  case "$HEARTBEAT_ENABLED" in
+    0)
+      log "heartbeat: disabled (HEARTBEAT_ENABLED=0) — the liveness check will alert on a stale record"
+      return 0 ;;
+    1|"") : ;;
+    *)
+      warn "HEARTBEAT_ENABLED='[${HEARTBEAT_ENABLED}]' is not 0 or 1 — treating it as 1 (fail CLOSED toward recording; a kill switch must be the literal 0)" ;;
+  esac
+  if [ "$HEARTBEAT_EMIT" != "1" ]; then
+    log "heartbeat: skipped (HEARTBEAT_EMIT=${HEARTBEAT_EMIT}; another step in this job is the designated emitter)"
     return 0
   fi
   event="${GITHUB_EVENT_NAME:-schedule}"

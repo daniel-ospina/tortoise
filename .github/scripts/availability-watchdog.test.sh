@@ -462,6 +462,7 @@ reset_case() {
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_HEARTBEAT_SEARCH_JSON STUB_HEARTBEAT_SEARCH_FAIL STUB_HEARTBEAT_CREATE_FAIL \
         STUB_HEARTBEAT_PATCH_FAIL STUB_HEARTBEAT_ISSUE GITHUB_EVENT_NAME HEARTBEAT_ENABLED \
+        HEARTBEAT_EMIT \
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER STUB_LEDGER_SEARCH_FAIL \
         STUB_PROBE_RC STUB_PROBE_STDERR STUB_PROBE_HEADERS \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
@@ -3069,6 +3070,27 @@ export HEARTBEAT_ENABLED=0
 run_watchdog
 assert_eq "$(count_calls 'GH-HEARTBEAT')" "0" "hb7: HEARTBEAT_ENABLED=0 writes nothing"
 assert_contains "$OUT" "heartbeat: disabled" "hb7: …and says so"
+
+# (hb8) the kill switch uses ESCALATE_ENABLED semantics — only a byte-exact 0
+# disables. A truthy string like `true` must NOT silently mute the heartbeat
+# (a malformed operator value choosing the silent direction on a fail-closed
+# surface). It warns and records.
+reset_case
+export STUB_PROBE_CODES="200"
+export HEARTBEAT_ENABLED=true
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb8: HEARTBEAT_ENABLED=true still records (only the literal 0 disables)"
+assert_contains "$OUT" "HEARTBEAT_ENABLED='[true]' is not 0 or 1" "hb8: …and warns"
+
+# (hb9) exactly ONE step per scheduled job emits. The job runs this script
+# twice (API + auth); the second step carries HEARTBEAT_EMIT=0 so the two
+# writes cannot race the search index into a duplicate rolling issue.
+reset_case
+export STUB_PROBE_CODES="200"
+export HEARTBEAT_EMIT=0
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT')" "0" "hb9: HEARTBEAT_EMIT=0 (the second probe step) writes nothing"
+assert_contains "$OUT" "heartbeat: skipped (HEARTBEAT_EMIT=0" "hb9: …and says which step is the emitter"
 
 # ── unit: the gh stub's argument loop ALWAYS makes progress ────────────────
 # `--method` / `--jq` as the LAST argument used to make `shift 2` fail, and a

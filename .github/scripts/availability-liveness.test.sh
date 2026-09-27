@@ -99,7 +99,9 @@ case "$path" in
     # ORDER MATTERS: the ALERT title ends "... no heartbeat", so a `*heartbeat*`
     # test would swallow the alert search. "LIVENESS" is unique to the alert.
     case "$path" in
-      *LIVENESS*) printf '%s' "${STUB_ALERT_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
+      *LIVENESS*)
+        [ "${STUB_ALERT_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: alert search failed" >&2; exit 1; }
+        printf '%s' "${STUB_ALERT_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
       *heartbeat*) printf '%s' "${STUB_HB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
       *) printf '%s' "$DEFAULT_ITEMS_JSON" ;;
     esac ;;
@@ -151,7 +153,7 @@ reset_case() {
   : > "$STUB_TMP/calls.log"
   rm -f "$STUB_TMP/created.json" "$STUB_TMP/patched.log" "$STUB_TMP/comments.log" \
         "$STUB_TMP/heartbeat-issue.json" "$STUB_TMP/alert-issue.json"
-  unset STUB_SEARCH_FAIL STUB_HB_SEARCH_JSON STUB_ALERT_SEARCH_JSON \
+  unset STUB_SEARCH_FAIL STUB_HB_SEARCH_JSON STUB_ALERT_SEARCH_JSON STUB_ALERT_SEARCH_FAIL \
         STUB_ALERT_CREATE_FAIL STUB_NEW_ALERT STUB_ALERT_ISSUE STUB_HB_ISSUE \
         STUB_GET_BODY_FAIL STUB_ALERT_PATCH_FAIL STUB_COMMENT_FAIL \
         STUB_WF_FAIL STUB_WF_CREATED_AT HEARTBEAT_MAX_AGE_MIN 2>/dev/null || true
@@ -264,7 +266,7 @@ export STUB_WF_CREATED_AT="2026-09-13T03:34:06Z"   # ancient relative to NOW
 run_checker
 assert_eq "$RC" "1" "9: no heartbeat + established workflow → exit 1"
 assert_contains "$(created_json)" "reason=no-heartbeat-record" "9: …reason is no-heartbeat-record"
-assert_contains "$(created_json)" "watchdog_workflow_age_min=" "9: …and names the workflow age"
+assert_contains "$(created_json)" "liveness_workflow_age_min=" "9: …and names the liveness feature's age"
 
 # 10. no record + a JUST-CREATED workflow → not yet established, no alarm.
 reset_case
@@ -312,18 +314,16 @@ run_checker
 assert_eq "$RC" "1" "15: heartbeat search failure → exit 1 (cannot assess is loud)"
 assert_eq "$(count_calls 'GH POST')" "0" "15: …but does NOT file a false 'pager dead' alert"
 
-# 16. a failed ALERT search is fail-closed too.
+# 16. a failed ALERT search is fail-closed: no create, no close, exit 1.
+# The alert search is the SECOND search in a stale run; STUB_SEARCH_FAIL is
+# all-or-nothing, so the alert half has its own targeted knob.
 reset_case
 seed_heartbeat 200
-# First search (heartbeat) succeeds, the alert search must fail: the stub's
-# STUB_SEARCH_FAIL is all-or-nothing, so drive it with a targeted knob is not
-# available — assert the all-fail path instead is case 15. Here pin the
-# behaviour we CAN drive: a stale run still files its alert even when it cannot
-# later be searched. Coverage for a failing alert search itself is in case 15's
-# mechanism (the same helper).
+export STUB_ALERT_SEARCH_FAIL=1
 run_checker
-assert_eq "$RC" "1" "16: stale run → exit 1 (alert path exercised)"
-assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "16: …and the alert is filed"
+assert_eq "$RC" "1" "16: a failed alert search → exit 1 (refuses to create or resolve)"
+assert_eq "$(count_calls 'GH POST')" "0" "16: …does NOT duplicate-file the alert on an unreadable search"
+assert_eq "$(count_calls 'GH PATCH')" "0" "16: …and does NOT close anything on a bad read"
 
 # 17. missing GH_TOKEN → fail before any gh call.
 reset_case
@@ -333,13 +333,42 @@ assert_eq "$RC" "1" "17: missing GH_TOKEN → exit 1 (a deaf checker refuses to 
 assert_eq "$(count_calls 'GH ')" "0" "17: …before any GitHub call"
 export GH_TOKEN="test-token"
 
-# 18. a garbage/zero threshold is normalized to the measured default, never 0
-# (a 0-minute bound would alert on every run).
+# 18. the threshold validator: only a plain integer is accepted. Digit-stripping
+# (`2h` -> 2, `-1` -> 1, `0.5` -> 5) would turn a typo into a near-zero bound
+# that alerts on nearly every run — the false-firing pager this issue is about.
 reset_case
 seed_heartbeat 30
 export HEARTBEAT_MAX_AGE_MIN=0
 run_checker
 assert_eq "$RC" "0" "18: HEARTBEAT_MAX_AGE_MIN=0 is normalized to the default (a 30-min heartbeat stays fresh)"
+
+reset_case
+seed_heartbeat 30
+export HEARTBEAT_MAX_AGE_MIN=2h
+run_checker
+assert_eq "$RC" "0" "18b: '2h' is REJECTED to the 90-min default, not digit-stripped to 2 min"
+
+reset_case
+seed_heartbeat 30
+export HEARTBEAT_MAX_AGE_MIN=-1
+run_checker
+assert_eq "$RC" "0" "18c: '-1' is rejected to the default, not read as 1 min"
+
+reset_case
+seed_heartbeat 30
+export HEARTBEAT_MAX_AGE_MIN=1.5h
+run_checker
+assert_eq "$RC" "0" "18d: '1.5h' is rejected to the default, not read as 15 min"
+
+# 18e. a VALID explicit integer is honoured (the fix is validation, not a mute
+# that always returns the default). 60 min > the 30-min heartbeat → fresh; and
+# it must NOT have been silently forced back to 90 (that would also be fresh), so
+# drive the negative: a 70-min heartbeat is STALE under an honoured 60.
+reset_case
+seed_heartbeat 70
+export HEARTBEAT_MAX_AGE_MIN=60
+run_checker
+assert_eq "$RC" "1" "18e: a valid explicit 60 is HONOURED (70-min heartbeat is stale, not defaulted to 90)"
 
 # 19. the alert body names the channel independence (the load-bearing property).
 reset_case

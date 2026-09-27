@@ -1436,8 +1436,25 @@ Re-measured for #4573 over the whole live population (workflow created
 scheduled runs under load, and a pager that cries wolf is the defect restated.
 The default threshold is **`HEARTBEAT_MAX_AGE_MIN=90`** = 3 × the measured
 **p95** (3 × 28.6 = 85.8, rounded up), which clears the observed max with ~40 %
-headroom. Override it with the repository variable `HEARTBEAT_MAX_AGE_MIN`;
-re-measure before lowering it.
+headroom.
+
+The knob is the repository variable `HEARTBEAT_MAX_AGE_MIN` (wired step-level in
+`availability-liveness.yml`). It must be a **plain integer**: anything else
+(`2h`, `-1`, `0.5`) is rejected with a warning and falls back to the measured
+default. (This matters — those values all contain digits, so a naive
+digit-stripping validator would turn `2h` into a 2-minute, always-alerting
+bound.) A valid integer **below the measured p95 (~29 min)** is honoured but
+warned, because it sits inside GitHub's own jitter; re-measure before lowering
+it.
+
+**Operator controls.** Two knobs, both wired step-level in the workflow from a
+repository variable of the same name (so neither needs a workflow edit):
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `HEARTBEAT_ENABLED` | `1` | `0` (byte-exact only) is a **kill switch**: no heartbeat is recorded, which makes the liveness check alert **by design** — a silence is never an all-clear. Any other value (`true`, `yes`, `00`) is treated as `1` and warns, so a malformed value cannot choose the silent direction |
+| `HEARTBEAT_MAX_AGE_MIN` | `90` | The staleness bound above |
+| `HEARTBEAT_EMIT` | `1` | **Internal, not an operator knob.** A scheduled job runs the script once per probe step (API + auth); exactly ONE step emits (`availability-watchdog.yml` sets `HEARTBEAT_EMIT=0` on the auth step), so one job writes exactly one rolling record and cannot race the search index into a duplicate issue |
 
 **Reading the alert.** The alert title is
 `[OPS] availability-watchdog LIVENESS — no heartbeat`; its body carries
@@ -1450,10 +1467,14 @@ availability-watchdog.yml --limit 20` — are scheduled runs arriving?
 but the heartbeat does not, read the last run's `heartbeat:` log lines.
 
 **Bootstrap, and the residual.** Before the monitor has ever run there is no
-record; the checker reads the watchdog workflow's own `created_at` and does not
-alarm while it is younger than the threshold (a fresh deploy has nothing to
-verify). An **unreadable** workflow age is treated as stale (fail closed), and so
-are an unreadable or unparseable heartbeat. The residual this does **not** close:
+record; the checker reads the **liveness workflow's own `created_at`** — the age
+of *this feature*, not of the watchdog workflow (which has existed since
+2026-09-12, so keying on it would alarm from the moment this checker first ships
+until the first heartbeat lands, a false page produced by the rollout meant to
+prevent false pages). It does not alarm while the feature is younger than the
+threshold (a fresh rollout has nothing to verify). An **unreadable** feature age
+is treated as stale (fail closed), and so are an unreadable or unparseable
+heartbeat. The residual this does **not** close:
 an outage of GitHub Actions itself takes both halves out — closing that needs an
 endpoint external to GitHub (Dead Man's Snitch / OneUptime / promlabs'
 end-to-end watchdog pattern), which is an external account and an owner decision,

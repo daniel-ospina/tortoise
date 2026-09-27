@@ -85,12 +85,19 @@ HEARTBEAT_TITLE='[OPS] availability-watchdog heartbeat (rolling)'
 LIVENESS_ALERT_MARKER='<!-- availability-liveness-alert -->'
 LIVENESS_ALERT_TITLE='[OPS] availability-watchdog LIVENESS — no heartbeat'
 
-# The workflow whose schedule the heartbeat proves. Read (metadata only) to
-# distinguish "the monitor has never run (a fresh deploy, nothing to verify
-# yet)" from "the monitor should have run and produced nothing".
-WATCHDOG_WORKFLOW="${WATCHDOG_WORKFLOW:-availability-watchdog.yml}"
+# The "nothing to verify yet" grace is keyed to THIS feature's own rollout, NOT
+# to the watchdog workflow's age. The watchdog workflow has existed since
+# 2026-09-12, so keying the grace on it would alarm from the moment this checker
+# first ships until the first heartbeat lands — a false page produced by the very
+# rollout meant to prevent false pages. The liveness workflow is created in the
+# same change that adds the heartbeat, so ITS age is the feature's age. Metadata
+# only; an unreadable value fails closed.
+LIVENESS_WORKFLOW="${LIVENESS_WORKFLOW:-availability-liveness.yml}"
 # MEASURED threshold (see the header). 90 = 3 x measured p95 (28.6), rounded up.
-HEARTBEAT_MAX_AGE_MIN="${HEARTBEAT_MAX_AGE_MIN:-90}"
+# The env override is UNTRUSTED and validated by normalize_max_age (below); this
+# literal is only the default it falls back to.
+HEARTBEAT_MAX_AGE_MIN_DEFAULT=90
+HEARTBEAT_MAX_AGE_MIN="${HEARTBEAT_MAX_AGE_MIN:-}"
 # Test seam: pin "now" so age arithmetic is deterministic.
 LIVENESS_NOW_EPOCH="${LIVENESS_NOW_EPOCH:-}"
 
@@ -144,20 +151,47 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
   printf '%s' "$e"
 }
 
-# bash arithmetic is decimal-by-surprise ($((08)) is invalid octal). A
-# human-editable env value is normalized before it reaches $(( )).
-to_int() { # <raw> <default>
-  local raw digits
-  raw="$(printf '%s' "${1:-}" | tr -dc '0-9')"
-  [ -n "$raw" ] || { printf '%s' "$2"; return 0; }
-  digits="${#raw}"
-  [ "$digits" -le 12 ] || { printf '%s' "$2"; return 0; }
+# The staleness bound is an operator override from a repository variable, so it
+# is UNTRUSTED. Digit-stripping is NOT validation: `2h` -> 2, `1.5h` -> 15,
+# `-1` -> 1, `0.5` -> 5 — a near-zero bound alerts on nearly every run, i.e. the
+# false-firing pager this whole issue exists to avoid. Accept ONLY a plain
+# integer; anything else warns and falls back to the measured default. A valid
+# integer below the measured p95 is honoured (an explicit operator choice) but
+# warned, because it sits inside GitHub's own scheduling jitter.
+normalize_max_age() { # <raw> -> minutes
+  local raw="${1:-}"
+  if [ -z "$raw" ]; then printf '%s' "$HEARTBEAT_MAX_AGE_MIN_DEFAULT"; return 0; fi
+  case "$raw" in
+    *[!0-9]*)
+      warn "HEARTBEAT_MAX_AGE_MIN='[${raw}]' is not a plain integer — using the measured default ${HEARTBEAT_MAX_AGE_MIN_DEFAULT} min (a near-zero bound would false-fire)"
+      printf '%s' "$HEARTBEAT_MAX_AGE_MIN_DEFAULT"; return 0 ;;
+  esac
   raw="$(printf '%s' "$raw" | sed 's/^0*//')"
-  [ -n "$raw" ] || raw="0"
+  [ -n "$raw" ] || raw=0
+  if [ "$raw" -lt 1 ] || [ "$raw" -gt 100000 ]; then
+    warn "HEARTBEAT_MAX_AGE_MIN=${raw} is outside 1..100000 — using the measured default ${HEARTBEAT_MAX_AGE_MIN_DEFAULT} min"
+    printf '%s' "$HEARTBEAT_MAX_AGE_MIN_DEFAULT"; return 0
+  fi
+  if [ "$raw" -lt 29 ]; then
+    warn "HEARTBEAT_MAX_AGE_MIN=${raw} is below the measured p95 inter-arrival (~29 min) — this WILL false-fire on GitHub's scheduling jitter (measured max 63.5 min); the measured default is ${HEARTBEAT_MAX_AGE_MIN_DEFAULT}"
+  fi
   printf '%s' "$raw"
 }
 
 urlencode() { printf '%s' "$1" | jq -sRr @uri; }
+
+# Publication-boundary scrub, mirroring the watchdog's redact_text. This script
+# holds no probe URL, Fly token or Telegram token, so only the SHAPE pass can
+# matter today — but the boundary is where the watchdog's own invariant lives
+# ("redact at the last point before publication"), so a future caller cannot
+# reintroduce a leak by putting caller-supplied text into an alert.
+redact_text() {
+  printf '%s' "$1" | sed -E \
+    -e 's#([?&](token|key|secret|sig|signature|api_key|apikey|access_token)=)[^&"[:space:]]*#\1<redacted>#g' \
+    -e 's#FlyV1[[:space:]]+[A-Za-z0-9_=+/.,-]+#<redacted>#g' \
+    -e 's#fm2_[A-Za-z0-9_=+/.,-]{20,}#<redacted>#g' \
+    -e 's#[0-9]{6,12}:[A-Za-z0-9_-]{30,}#<redacted>#g'
+}
 
 # ── GitHub issue helpers ────────────────────────────────────────────────────
 # Echoes a positive issue number, "" when none is open, or "__ERR__" when the
@@ -208,7 +242,9 @@ get_issue_body() { # <n> -> the body, or __ERR__ when the read failed
 
 create_issue() { # <title> <body> -> number ("" on failure)
   local payload out n
-  payload="$(jq -n --arg t "$1" --arg b "$2" --arg l "$ALERT_LABEL" \
+  # redact_text AT THE BOUNDARY: the last point before publication, so no
+  # future caller can leak a credential by forgetting to scrub.
+  payload="$(jq -n --arg t "$(redact_text "$1")" --arg b "$(redact_text "$2")" --arg l "$ALERT_LABEL" \
     '{title:$t, body:$b, labels:[$l]}')"
   if ! out="$(printf '%s' "$payload" | gh api "repos/${REPO}/issues" --method POST --input - 2>/dev/null)"; then
     printf ''; return 0
@@ -220,7 +256,7 @@ create_issue() { # <title> <body> -> number ("" on failure)
 
 update_issue_body() { # <n> <body> -> 0 ok / 1 failed
   local payload
-  payload="$(jq -n --arg b "$2" '{body:$b}')"
+  payload="$(jq -n --arg b "$(redact_text "$2")" '{body:$b}')"
   if ! printf '%s' "$payload" | gh api "repos/${REPO}/issues/$1" --method PATCH --input - >/dev/null 2>&1; then
     warn "issue body update failed for #$1"
     return 1
@@ -230,7 +266,7 @@ update_issue_body() { # <n> <body> -> 0 ok / 1 failed
 
 comment_issue() { # <n> <body> -> 0 ok / 1 failed
   local payload
-  payload="$(jq -n --arg b "$2" '{body:$b}')"
+  payload="$(jq -n --arg b "$(redact_text "$2")" '{body:$b}')"
   if ! printf '%s' "$payload" | gh api "repos/${REPO}/issues/$1/comments" --method POST --input - >/dev/null 2>&1; then
     warn "comment failed on #$1"
     return 1
@@ -246,12 +282,13 @@ close_issue() { # <n> -> 0 ok / 1 failed
   return 0
 }
 
-# The watchdog workflow's created_at (ISO) or "" when it cannot be read. Used
-# ONLY to keep a fresh deploy from alerting before the monitor has had a chance
-# to write its first heartbeat; an unreadable value is NOT treated as young.
+# The liveness workflow's own created_at (ISO) or "" when it cannot be read.
+# Used ONLY to keep this checker's own rollout from alerting before the first
+# heartbeat can land (see LIVENESS_WORKFLOW above); an unreadable value is NOT
+# treated as young.
 workflow_created_at() {
   local out
-  if ! out="$(gh api "repos/${REPO}/actions/workflows/${WATCHDOG_WORKFLOW}" 2>/dev/null)"; then
+  if ! out="$(gh api "repos/${REPO}/actions/workflows/${LIVENESS_WORKFLOW}" 2>/dev/null)"; then
     printf ''; return 0
   fi
   printf '%s' "$out" | jq -r '.created_at // ""' 2>/dev/null || printf ''
@@ -310,8 +347,7 @@ main() {
     fail "jq is required"
     exit 1
   fi
-  HEARTBEAT_MAX_AGE_MIN="$(to_int "$HEARTBEAT_MAX_AGE_MIN" 90)"
-  [ "$HEARTBEAT_MAX_AGE_MIN" -ge 1 ] 2>/dev/null || HEARTBEAT_MAX_AGE_MIN=90
+  HEARTBEAT_MAX_AGE_MIN="$(normalize_max_age "$HEARTBEAT_MAX_AGE_MIN")"
   NOW="$(now_epoch)"
 
   log "availability-liveness (#4573) — checker for ${REPO}; threshold=${HEARTBEAT_MAX_AGE_MIN} min"
@@ -369,29 +405,30 @@ heartbeat_age_min=${age_min}"
       fi
     fi
   else
-    # No heartbeat record at all. Distinguish a fresh deploy (nothing to verify
-    # yet) from a monitor that should have written one: read the watchdog
-    # workflow's own created_at. Unreadable => fail closed (assume it should
-    # have run).
+    # No heartbeat record at all. Distinguish a fresh rollout (nothing to
+    # verify yet) from a monitor that should have written one: read the LIVENESS
+    # workflow's own created_at — the feature's age, not the watchdog workflow's
+    # (which predates this feature and would make the first run alarm). An
+    # unreadable value fails closed (assume it should have run).
     wf_created="$(workflow_created_at)"
     wf_epoch="$(iso_to_epoch "$wf_created")"
     if [ -n "$wf_epoch" ] && [ "$wf_epoch" -gt "$NOW" ]; then wf_epoch="$NOW"; fi
     if [ -n "$wf_epoch" ]; then
       wf_age=$(( (NOW - wf_epoch) / 60 ))
       age_clause="heartbeat_issue=none
-watchdog_workflow_age_min=${wf_age}"
+liveness_workflow_age_min=${wf_age}"
       if [ "$wf_age" -le "$HEARTBEAT_MAX_AGE_MIN" ]; then
-        log "no heartbeat record yet and the watchdog workflow is only ${wf_age} min old — not yet established; not alerting"
+        log "no heartbeat record yet and this liveness feature is only ${wf_age} min old — not yet established; not alerting"
         state="fresh"; reason="not-yet-established"
       else
         state="stale"; reason="no-heartbeat-record"
-        warn "no heartbeat record exists and the watchdog workflow is ${wf_age} min old — the pager may never have run"
+        warn "no heartbeat record exists and this liveness feature is ${wf_age} min old — the pager may never have run"
       fi
     else
       state="stale"; reason="no-heartbeat-record"
       age_clause="heartbeat_issue=none
-watchdog_workflow_age_min=unknown"
-      warn "no heartbeat record exists and the watchdog workflow's age could not be read — treating as STALE (fail closed)"
+liveness_workflow_age_min=unknown"
+      warn "no heartbeat record exists and the liveness workflow's age could not be read — treating as STALE (fail closed)"
     fi
   fi
 
