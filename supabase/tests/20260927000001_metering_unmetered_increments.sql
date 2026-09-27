@@ -197,7 +197,7 @@ BEGIN
     -- ...and the VERTICAL TAB. This probe exercises the COMPOSED SET, not the
     -- source text: a pglite parser decodes either spelling to U+000B (`\v` from
     -- PostgreSQL 17 on, `\u000B` always), so it cannot object to `\v` — only the
-    -- source-text contract test in the Python suite holds the spelling.
+    -- source-text contract test in the Python suite rejects that spelling.
     rejected := false;
     BEGIN
         PERFORM public.metering_record_unmetered(

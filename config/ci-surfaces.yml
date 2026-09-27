@@ -2398,7 +2398,7 @@ durations:
   test_lifecycle_guards.py: 4.8
   test_metering_period_window.py: 2.9
   test_metering_window_admission.py: 1.0
-  test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (49 tests, live docker FalkorDB: 42-68s unloaded across the review cycles / 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
+  test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
   test_pi_capture_hooks.py: 10.3
   test_product_rerank.py: 0.1

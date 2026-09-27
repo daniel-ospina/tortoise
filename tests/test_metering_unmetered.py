@@ -643,18 +643,21 @@ def test_the_blank_set_is_pythons_exact_whitespace_set():
     declared parser version and checked to equal EXACTLY Python's whitespace set,
     in both directions, so a hand-edited copy cannot drift.
 
-    The literal is ALSO required to spell U+000B as ``\u000B``, asserted
-    separately below. That second assertion is a POLICY, not a parser
-    disagreement (it corrects an earlier claim in this docstring): PostgreSQL 17,
-    the version ``supabase/config.toml`` declares, implements
+    One SPELLING is ALSO forbidden, asserted separately below: the literal must
+    not write U+000B as ``\v``. That assertion is a POLICY, not a parser
+    disagreement (it corrects an earlier claim in this docstring), and it forbids
+    that ONE spelling only — the documented ``\x0B``, ``\013`` and
+    ``\U0000000B`` all pass it. PostgreSQL 17, the version
+    ``supabase/config.toml`` declares, implements
     ``case 'v': return '\v';`` in
     ``src/backend/parser/scan.l::unescape_single_char`` (commit ae6d06f096), so
     ``E'\v'`` and ``E'\u000B'`` compose the same character on this project's
     parser — no SQL probe on a PG17-or-later engine can object to ``\v``. It is
-    nonetheless held to ``\u000B`` because ``\v`` does not exist in PostgreSQL 16
-    and earlier, and the manual's escape table omits it while stating that any
-    other character after a backslash "is taken literally" — a trap for a reader
-    who consults the documentation.
+    rejected anyway because it does not exist in PostgreSQL 16 and earlier, and
+    because the manual's escape table omits it while stating that any other
+    character after a backslash "is taken literally" — so a reader consulting
+    the documentation reads ``\v`` as the letter ``v``. The migration writes
+    ``\u000B``, for consistency with its neighbours in the set.
 
     Mutation caught: dropping or adding any character in the migration's literal
     (e.g. removing ``\u00A0`` — an NBSP-only key is then written through the RPC
@@ -689,12 +692,13 @@ def test_the_blank_set_is_pythons_exact_whitespace_set():
         f"python-only={sorted(python_set - set(decoded))!r}"
     )
     # POLICY (see the docstring): PostgreSQL 17 decodes `\v` to U+000B, so the
-    # equality check above accepts it — the spelling is held to `\u000B` because
-    # it is undocumented and absent before PostgreSQL 17.
+    # equality check above accepts it. The single spelling rejected here is `\v`,
+    # because it is undocumented and absent before PostgreSQL 17 — `\x0B`, octal
+    # and `\U0000000B` are all accepted.
     assert "\\v" not in m.group(1), (
-        "the vertical tab must be spelled \\u000B, not \\v: PostgreSQL only "
-        "implements the \\v escape from version 17, and the manual omits it "
-        "(any other escape 'is taken literally')"
+        "the vertical tab must not be spelled \\v: PostgreSQL only implements "
+        "the \\v escape from version 17, and the manual omits it (any other "
+        "escape 'is taken literally')"
     )
 
 

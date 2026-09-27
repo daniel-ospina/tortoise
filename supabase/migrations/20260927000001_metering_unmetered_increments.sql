@@ -179,7 +179,7 @@ DECLARE
     -- the documentation reads ``\v`` as the letter ``v``. ``\u000B`` means
     -- U+000B on every parser version and needs no such caveat
     -- (``tests/test_metering_unmetered.py::test_the_blank_set_is_pythons_exact_whitespace_set``
-    -- holds the spelling to that policy).
+    -- rejects the ``\v`` spelling for that reason).
     blank_chars constant text := E' \t\n\u000B\f\r\u001C\u001D\u001E\u001F\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
 BEGIN
     IF p_org_id IS NULL OR btrim(p_org_id, blank_chars) = '' THEN
