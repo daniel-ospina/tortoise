@@ -34,7 +34,10 @@ classes so an operator can tell them apart:
     not prove the increment was not written, so the class carries an upper bound
     rather than a false claim made durable.
 
-Every test NAMES the mutation that must make it RED.
+Most tests NAME the mutation that must make them RED, and each of those was
+verified by reverting the fix in a scratch worktree. A few pin an OUTCOME or a
+layered refusal and SAY SO in place of a mutation clause — where that is the
+case, the layer that owns the mutation is named too.
 """
 from __future__ import annotations
 
@@ -166,10 +169,14 @@ def test_a_dropped_increment_is_distinguishable_from_a_zero_increment(
 def test_every_swallow_lane_carries_the_representation(reg, registry_lane):
     """Leg 2 rides EVERY leg-3 lane — six sites, six rows (one per lane+class).
 
-    Mutation caught: wiring the representation into only one of the swallow
-    helpers (e.g. ``hosted_api``'s but not ``mcp_server``'s fallback), which
-    would leave a dropped increment on that lane still indistinguishable from
-    zero.
+    Mutation caught: making the representation LANE-CONDITIONAL inside
+    ``report_unmetered_increment`` (e.g. writing rows for five of the six
+    tokens), which would leave a dropped increment on that lane still
+    indistinguishable from zero. The complement — wiring the CALL does not
+    happen at all for one swallow helper (``mcp_server``'s fallback, say) — is
+    pinned by ``tests/test_metering_window_admission.py``, which drives the real
+    helpers; this test feeds the lane tokens to the shared reporter, so it cannot
+    see a missing call site.
     """
     _sdk, tid = reg
     for lane in SIX_LANES:
