@@ -101,8 +101,8 @@ any allowance is configured. That ordering is a constraint on the work, not a st
 
 > **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the
 > customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node
-> accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) never shrinks on its
-> own while the number it counts does, and (c) is a unit customers cannot reason about.
+> accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) makes the cap permanent
+> while the number it counts never shrinks **on its own**, and (c) is a unit customers cannot reason about.
 
 ---
 
