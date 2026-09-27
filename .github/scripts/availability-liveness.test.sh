@@ -43,6 +43,13 @@
 #   Fail-closed side effects
 #     21. a stale alert that CANNOT be filed    → exit 1 (the run is the alert)
 #     22. a recovery comment that fails          → exit 1 (not silent)
+#     23. a stale alert body that cannot PATCH   → exit 1 (not silent)
+#   Validation branches
+#     24. a value above the 1..100000 bound      → rejected to the default
+#     25. a value below the p95 (1..28)          → honoured, but WARNED
+#     26. heartbeat_at=epoch:<valid>             → accepted (the writer's form)
+#     27. a FUTURE workflow created_at           → clamped (bootstrap path)
+#     28. jq absent                              → exit 1 (cannot parse = refuse)
 #   Parity
 #     20. the heartbeat TITLE + MARKER match the watchdog's byte-for-byte
 #         (a rename on one side would otherwise alarm forever)
@@ -449,6 +456,59 @@ run_checker
 assert_eq "$RC" "1" "22: recovered and closed, but the Recovered comment failed → exit 1 (not silent)"
 assert_contains "$(patched_all)" "CLOSE 500" "22: …the close itself succeeded; only the comment failed"
 assert_contains "$OUT" "Recovered' comment failed" "22: …and NAMES the failed recovery comment"
+
+# 23. stale + an open alert whose BODY PATCH fails → exit 1 (the sibling of the
+# close-fail arm in 13 and the comment-fail arm in 22).
+reset_case
+seed_heartbeat 200
+seed_open_alert 500
+export STUB_ALERT_PATCH_FAIL=1
+run_checker
+assert_eq "$RC" "1" "23: stale but the alert body cannot be refreshed → exit 1 (the run is the alert)"
+assert_contains "$OUT" "could not be updated" "23: …and NAMES the un-updatable alert body"
+
+# 24. the UPPER half of the magnitude guard: a 6-digit value above the bound is
+# rejected to the default (otherwise ~694 days would be honoured and mute the
+# compare — the fail-open direction).
+reset_case
+seed_heartbeat 200
+export HEARTBEAT_MAX_AGE_MIN=100001
+run_checker
+assert_eq "$RC" "1" "24: 100001 (above the 1..100000 bound) is rejected to the default → 200-min heartbeat is STALE"
+assert_contains "$OUT" "threshold=90 min" "24: …the ACTIVE threshold is the measured default 90"
+
+# 25. the below-p95 WARN fires but the value is still HONOURED (an explicit
+# operator choice inside the scheduling jitter).
+reset_case
+seed_heartbeat 5
+export HEARTBEAT_MAX_AGE_MIN=10
+run_checker
+assert_eq "$RC" "0" "25: a valid 10-min bound is honoured (5-min heartbeat is fresh)"
+assert_contains "$OUT" "below the measured p95" "25: …but it WARNS that it sits inside the scheduling jitter"
+
+# 26. the iso_to_epoch `epoch:<n>` ACCEPTANCE path (18h covers only rejection):
+# the watchdog's fmt_iso fallback writes this exact form.
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_at=epoch:%s\\n"}' "$HEARTBEAT_MARKER_FIXTURE" "$((NOW - 1200))")"
+run_checker
+assert_eq "$RC" "0" "26: heartbeat_at=epoch:<valid> is PARSED (20-min heartbeat is fresh)"
+assert_contains "$OUT" "heartbeat is 20 min old" "26: …the age is read from the epoch field"
+
+# 27. the BOOTSTRAP path's own future clamp (a created_at ahead of now must not
+# yield a negative feature age).
+reset_case
+WF_FUTURE="$(date -u -d "@$((NOW + 3600))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$((NOW + 3600))" +%Y-%m-%dT%H:%M:%SZ)"
+export STUB_WF_CREATED_AT="$WF_FUTURE"
+run_checker
+assert_eq "$RC" "0" "27: a future liveness-workflow created_at → clamped, not yet established, exit 0"
+assert_contains "$OUT" "is only 0 min old" "27: …the feature age is CLAMPED to 0 (not negative)"
+
+# 28. a checker without jq refuses to run (fail closed).
+reset_case
+export PATH="$BIN:/bin"
+run_checker
+assert_eq "$RC" "1" "28: jq absent → exit 1 (a checker that cannot parse refuses to run)"
+assert_contains "$OUT" "jq is required" "28: …and says why"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
