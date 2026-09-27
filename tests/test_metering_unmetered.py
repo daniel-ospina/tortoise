@@ -343,6 +343,32 @@ def test_readers_fail_closed_rather_than_reading_as_zero(reg, registry_lane, mon
         get_unmetered_increment_total(["org-4779"])
 
 
+def test_the_supabase_lane_readers_fail_closed_too(sb, monkeypatch):
+    """The FAIL-CLOSED readers are fail-closed on BOTH deployments.
+
+    The embedded half is pinned by
+    ``test_readers_fail_closed_rather_than_reading_as_zero``. The Supabase half
+    is a DIFFERENT code path (``get_control_plane()`` + a
+    ``metering_unmetered_for_org`` / ``metering_unmetered_total`` RPC), and
+    returning ``[]``/``0`` there would manufacture the false zero just as
+    effectively — an unreadable cohort would read as "no drops".
+
+    Mutation caught: wrapping the Supabase branch in
+    ``except Exception: return []`` / ``return 0`` (the never-500 reflex, which
+    on this surface is worse than a 500).
+    """
+    class _BrokenCP:
+        def rpc_value(self, fn, params=None):
+            raise RuntimeError(f"control plane down: {fn}")
+
+    monkeypatch.setattr(sb, "get_control_plane", lambda: _BrokenCP())
+
+    with pytest.raises(RuntimeError, match="control plane down"):
+        get_unmetered_increments("org-4779")
+    with pytest.raises(RuntimeError, match="control plane down"):
+        get_unmetered_increment_total(["org-4779"])
+
+
 def test_an_empty_cohort_reads_zero(reg, registry_lane):
     """No orgs is a legitimate 0 — distinct from an unreadable cohort."""
     assert get_unmetered_increment_total([]) == 0
