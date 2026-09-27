@@ -6612,7 +6612,10 @@ class TortoiseSDK:
         (``ValueError``, before any mutation — an inverted window is satisfiable
         by no query instant, so the old fact would be silently unreachable from
         every read surface; #4021). Equality (a zero-length predecessor window)
-        is legal.
+        is legal. The comparison needs an INSTANT on both sides: a resolved
+        start that is itself unparseable is not compared (it names no instant,
+        so a refusal would rest on a lexicographic accident rather than a
+        comparison) — that open orderability residual is #5360's.
 
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable

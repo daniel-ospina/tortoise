@@ -871,7 +871,7 @@ def test_window_end_numeric_kwarg_resolved_before_measure():
     ``_created_sort_key`` parses a date-only string on a NAIVE datetime, so
     ``'2026-06-10'`` keys as LOCAL midnight (+/- 14 h across real timezones).
     The raw epoch is therefore asserted to precede it, rather than assumed."""
-    raw = 1780000000.0  # 2026-05-29T01:46:40Z — comfortably before old_vf
+    raw = 1780000000.0  # a fixed epoch comfortably before old_vf's instant
     assert _created_sort_key(raw) < _created_sort_key("2026-06-10"), (
         "the raw-vs-resolved discriminator needs a raw epoch strictly before "
         "the predecessor's (host-local) start"

@@ -540,8 +540,8 @@ def test_ingest_retroactive_supersession_warns_and_skips(sdk_factory):
     previously *succeeded* (while corrupting the predecessor's window into an
     unresolvable one) into a warned skip: the old point stays live with no
     CORRECTS edge.  That is a deliberate, disclosed posture change on an
-    input class the ingest path could not previously reach, and it is pinned
-    here so it cannot change silently.
+    input class the ingest path previously ACCEPTED (and corrupted), and it is
+    pinned here so it cannot change silently.
 
     The alternative — propagating the refusal — would abort a whole commit for
     one bad record; #5365 owns that decision, not this fix.
