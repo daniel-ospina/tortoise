@@ -2463,23 +2463,111 @@ class TestToolCallAdmissionBoundary:
         # `application/jsonx` must stay the transport's 415 -- an exact part
         # match, not a substring (`_check_content_type`).
         ({"Content-Type": "application/jsonx"}, 415),
+        # ... while a value that does not START with application/json is the
+        # security middleware's 400 (`_validate_content_type`) -- a stricter,
+        # earlier gate that an exact-part check alone would sail past.
+        ({"Content-Type": "text/plain, application/json"}, 400),
         # SSE mode requires BOTH media types in Accept
         # (`_validate_accept_header` -> `_check_accept_headers`).
         ({"Accept": "application/json"}, 406),
+        # An unsupported protocol version is `_validate_protocol_version`'s 400.
+        ({"MCP-Protocol-Version": "1999-01-01"}, 400),
+        # A declared body over the SDK's own limit is its 413 -- the guard must
+        # not buffer it and answer for it instead.
+        ({"Content-Length": str(8 * 1024 * 1024)}, 413),
     ])
-    def test_header_gates_are_left_to_the_transport(self, tmp_path, monkeypatch,
-                                                     headers, expected_status):
-        """A request the transport would refuse for its HEADERS must reach it and
-        keep the transport's own status -- the guard speaks only about a request
-        the SDK actually parsed."""
+    def test_gates_the_transport_owns_are_not_pre_empted(self, tmp_path,
+                                                         monkeypatch, headers,
+                                                         expected_status):
+        """A request the transport would refuse for its own reasons must reach it
+        and keep the transport's status -- the guard speaks only about a request
+        the SDK actually parsed and dispatched.
+
+        Each case here was a real divergence: the guard answered ``200`` with a
+        named ``-32602`` where the transport answers 400/406/413/415.
+        """
         tc = self._client(tmp_path, monkeypatch,
-                          name=f"hdr-{expected_status}")
+                          name=f"gate-{expected_status}")
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"arguments": {}}})
         with tc:
-            # An envelope that WOULD be named if the header gates allowed it.
-            r = tc.post("/mcp", content=json.dumps({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"arguments": {}}}), headers=headers)
+            r = tc.post("/mcp", content=payload, headers=headers)
             assert r.status_code == expected_status, r.text
+            assert "params.name" not in r.text, r.text
+
+    def test_a_path_the_transport_does_not_route_stays_a_404(self, tmp_path,
+                                                             monkeypatch):
+        """The guard wraps the ROUTER, so without a route check it answers
+        ``200 -32602`` for a POST no endpoint ever saw -- replacing the 404."""
+        tc = self._client(tmp_path, monkeypatch, name="route")
+        with tc:
+            r = tc.post("/mcp/bogus", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}})
+            assert r.status_code == 404, r.text
+            assert "params.name" not in r.text, r.text
+
+    @pytest.mark.parametrize("headers,expected_status", [
+        ({"Origin": "https://evil.example"}, 403),
+        ({"Host": "evil.example"}, 421),
+    ])
+    def test_origin_and_host_refusals_still_precede_the_guard(
+            self, tmp_path, monkeypatch, headers, expected_status):
+        """DNS-rebinding protection runs OUTSIDE this middleware, so a refused
+        Origin/Host must still be refused -- the guard must not answer 200 for a
+        request the outer guard rejected.
+
+        Measured for the same reason as the header gates: the transport ALSO
+        runs its own host/origin check inside, so a divergence here would mean
+        the outer check is the only one that fires and the guard sits in front
+        of its answer. Posted to ``/mcp/`` (the mount root, trailing slash):
+        from ``/mcp`` Starlette redirects, and httpx drops ``Authorization`` on
+        a redirect to a different Host -- which would make this measure the test
+        client, not the guard.
+        """
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / "origin.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create("originteam")
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              allowed_hosts=["mcp.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        with tc:
+            r = tc.post("/mcp/", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}},
+                headers={"Authorization": f"Bearer {key}",
+                         "Accept": "application/json, text/event-stream",
+                         "Content-Type": "application/json", **headers})
+            assert r.status_code == expected_status, r.text
+            assert "params.name" not in r.text, r.text
+
+    def test_a_chunked_body_is_left_to_the_sdk_byte_counting_limiter(
+            self, tmp_path, monkeypatch):
+        """A chunked POST declares no length, so the guard passes it through
+        rather than buffering an unbounded body ahead of the SDK's streaming
+        4 MiB check (the 413 must stay the limiter's, and the buffer bounded)."""
+        tc = self._client(tmp_path, monkeypatch, name="chunked")
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"arguments": {}}}).encode()
+
+        def stream():
+            # 5 MiB, in chunks, with no Content-Length.
+            yield body
+            for _ in range(5):
+                yield b"x" * (1024 * 1024)
+
+        with tc:
+            r = tc.post("/mcp", content=stream(), headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json"})
+            assert r.status_code == 413, r.text
             assert "params.name" not in r.text, r.text
 
     def test_other_methods_are_not_intercepted(self, tmp_path, monkeypatch):

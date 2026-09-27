@@ -4056,37 +4056,101 @@ def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
     return None
 
 
-def _transport_would_admit_jsonrpc_post(headers: Any) -> bool:
-    """True when the SDK's own header gates would let this POST reach the body.
+def _routed_path(request: Any) -> str:
+    """The request path AS THE ROUTER SEES IT.
 
-    Mirrors ``StreamableHTTPServerTransport._check_content_type`` and
-    ``_check_accept_headers`` -- an EXACT media-type part match (not a prefix or
-    substring: ``application/jsonx`` must stay the transport's 415) -- and
-    requires BOTH media types, because this app is built with
-    ``json_response=False`` (SSE responses).
+    A middleware inside a MOUNTED app receives the full path with the mount
+    prefix still on it, plus ``root_path``: a POST to ``/mcp`` arrives as
+    ``path='/mcp/'`` with ``root_path='/mcp'`` (measured — Starlette's ``Mount``
+    leaves the prefix in place and the router strips it while matching). So a
+    check against the transport's own endpoint has to strip it too, or the guard
+    would never fire in production (mounted at ``/mcp``) while firing in a test
+    that mounts at the root.
+    """
+    root = request.scope.get("root_path") or ""
+    path = request.url.path
+    if root and path.startswith(root):
+        return path[len(root):] or "/"
+    return path
+
+
+def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
+                                          headers: Any) -> bool:
+    """True when the SDK's transport would DISPATCH this POST to the session.
+
+    Every gate the transport applies BEFORE the session parses the body is
+    reproduced here, in order, because the guard's whole claim is that it speaks
+    only where the SDK speaks. The middleware wraps the ROUTER, so without this
+    predicate it can answer ``200 -32602`` for a request no part of the SDK ever
+    saw. Each clause below closes a MEASURED divergence of that kind:
+
+    * ``endpoint`` -- the route. A POST to a path this app does not route is a
+      404; the caller passes the same string it gives ``mcp.http_app(path=...)``
+      and the request's path as the router sees it (``_routed_path``), so the
+      guard's idea of "the endpoint" cannot drift from the route table.
+    * ``TransportSecurityMiddleware._validate_content_type`` -- the raw header
+      must START WITH ``application/json`` (its 400). This is a different and
+      STRICTER gate than the transport's own part match below: ``text/plain,
+      application/json`` is a 400, not a 415.
+    * ``StreamableHTTPServerTransport._check_content_type`` -- an EXACT
+      ``application/json`` part in the ``;``/``,``-split (its 415), so
+      ``application/jsonx`` keeps the 415 that the prefix gate above let
+      through.
+    * ``_check_accept_headers`` -- both media types, because this app is built
+      with ``json_response=False`` (SSE responses); otherwise the transport
+      answers 406.
+    * ``_validate_protocol_version`` -- absent means the negotiated default, an
+      unsupported value is the transport's 400 ``-32600``.
+    * ``RequestBodyLimitMiddleware`` -- a DECLARED length within
+      ``DEFAULT_MAX_REQUEST_BODY_SIZE``. The transport counts bytes while
+      streaming and answers 413; this guard runs outside it, so without the
+      bound it would buffer an unbounded body in memory and then replace the
+      413. A chunked POST declares no length, so it is passed straight through
+      to the limiter that actually counts.
 
     The guard must only speak about a request the SDK actually parsed and
-    dispatched; a request the transport would refuse for its headers has to
-    reach the transport so it keeps its own status (415 / 406).
+    dispatched; anything the transport would refuse has to reach the transport
+    so it keeps its own status.
 
     Being STRICTER than the transport is always safe here: the request simply
-    passes through and the SDK answers. So if the response mode is ever flipped
-    to ``json_response=True`` the guard stops intercepting rather than
-    mislabelling a 406 -- and an import failure returns False for the same
-    reason (never pre-empt on a broken assumption).
+    passes through and the SDK answers, so a future change to the response mode
+    or the limits makes the guard stop intercepting rather than mislabel -- and
+    an import failure returns False for the same reason (never pre-empt on a
+    broken assumption).
     """
     try:
         from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
+        from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
+        from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+        from mcp.types import DEFAULT_NEGOTIATED_VERSION
     except Exception:  # pragma: no cover - never pre-empt on an import failure
         return False
+    if path != endpoint:  # ── the route: anything else is the router's 404
+        return False
+    # ── the transport's own gates, in its own order ──
     content_type = headers.get("content-type", "")
+    if not content_type.lower().startswith(CONTENT_TYPE_JSON):
+        return False  # TransportSecurityMiddleware: 400
     parts = [p.strip() for p in content_type.split(";")[0].split(",")]
     if not any(p == CONTENT_TYPE_JSON for p in parts):
-        return False
+        return False  # _check_content_type: 415
     accepted = [m.strip() for m in headers.get("accept", "").split(",")]
     has_json = any(m.startswith(CONTENT_TYPE_JSON) for m in accepted)
     has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
-    return has_json and has_sse
+    if not (has_json and has_sse):
+        return False  # _validate_accept_header: 406
+    version = headers.get("mcp-protocol-version") or DEFAULT_NEGOTIATED_VERSION
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return False  # _validate_protocol_version: 400 -32600
+    declared = headers.get("content-length")
+    if declared is None:
+        return False  # chunked: RequestBodyLimitMiddleware counts the bytes
+    try:
+        if int(declared) > DEFAULT_MAX_REQUEST_BODY_SIZE:
+            return False  # RequestBodyLimitMiddleware: 413
+    except ValueError:  # pragma: no cover - a malformed length is not ours
+        return False
+    return True
 
 
 def _tools_call_rejection_message(errors: list[dict[str, Any]]) -> str:
@@ -4146,6 +4210,11 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # The transport's endpoint INSIDE this sub-app. One value, used both to
+    # build the route and to gate the #3656 admission guard -- so the guard can
+    # never intercept a path the route table does not serve (its 404).
+    mcp_path = "/"
 
     # auth_mode middleware selection. OrgResolutionMiddleware (tenant mode) is
     # imported here but only ever INSTANTIATED in the tenant branch — static/none
@@ -4219,11 +4288,12 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         narrow, and each narrowing is a case where the SDK does NOT emit the
         opaque signature:
 
-        * ``POST`` only.
-        * The SDK's own header gates (exact ``application/json`` content type,
-          ``Accept`` carrying both JSON and SSE) -- see
-          ``_transport_would_admit_jsonrpc_post``. Anything the transport would
-          answer 415/406 stays the transport's answer.
+        * ``POST`` only, and only to the transport's own endpoint
+          (``mcp_path``), and only when the SDK's own gates would let the body
+          through -- see ``_transport_would_dispatch_jsonrpc_post`` and
+          ``_routed_path``. Everything the transport would answer itself (404
+          for another path, 400/403/406/413/415 for its own refusals) stays the
+          transport's answer.
         * ``jsonrpc == "2.0"`` and an ``id`` present -- so a
           ``tools/call`` NOTIFICATION passes through (the SDK only logs those)
           and a body missing ``jsonrpc`` passes through (the transport rejects
@@ -4243,7 +4313,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         async def dispatch(self, request, call_next):
             if request.method != "POST":
                 return await call_next(request)
-            if not _transport_would_admit_jsonrpc_post(request.headers):
+            if not _transport_would_dispatch_jsonrpc_post(
+                    _routed_path(request), mcp_path, request.headers):
                 return await call_next(request)
             try:
                 raw = json.loads(await request.body())
@@ -4331,7 +4402,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         allowed_hosts=allowed_hosts or [],
-        path="/",
+        path=mcp_path,
         middleware=middleware,
     )
 
