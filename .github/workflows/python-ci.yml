@@ -1225,7 +1225,12 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-${{ github.job }}
+          # The half suffix is load-bearing: both slow matrix legs ran under
+          # `pytest-log-test-slow`, so `gh run download -n` resolved the name
+          # collision non-deterministically and a full slow-pool sweep was
+          # impossible — partial artifact sets silently lowered slow rows
+          # (#5050). Same shape as the fast job's upload above.
+          name: pytest-log-${{ github.job }}-${{ matrix.half }}
           path: |
             /tmp/pytest.log
             /tmp/junit.xml

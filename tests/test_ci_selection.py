@@ -497,12 +497,45 @@ def test_tools_longmem_change_selects_eval_not_tier1():
 
 
 def test_unrelated_tools_change_still_tier1():
-    # tools/kappa.py is NOT in TOOL_CARVEOUTS — it keeps the old behavior
-    # (filtered as non-python-relevant → tier-1 smoke; never eval/full)
-    r = _sel(["tools/kappa.py"])
+    # A tools/ path with NO registered guard and no SOURCE_PATTERNS entry keeps
+    # the old behavior (filtered as non-python-relevant → tier-1 smoke).
+    # #5050: `tools/kappa.py` USED to be the example here, but it owns
+    # `tests/test_kappa.py`, so the derived tool→guard rule now selects that
+    # guard's surface — the correct behavior, and the reason this fixture moved
+    # to a tool that genuinely has no guard.
+    r = _sel(["tools/purge_test_residue.py"])
     assert r["full"] is False
     assert r["surfaces"] == []
     assert set(r["test_files"]) == _tier1()
+
+
+def test_tool_with_a_registered_guard_selects_its_surface():
+    # #5050 / #3362/#4115: a tool that a registered `test_<stem>.py` guards must
+    # be selectable — the guard exists to run on the PR that edits the tool.
+    # Derived from the manifest, so a NEW tool whose guard is registered is
+    # covered with no per-row entry. `tools/surface_manifest.py` is the
+    # canonical instance (its guard test_surface_manifest.py is registered under
+    # `core` and used to never run on a tool-only PR).
+    for tool, guard in (("tools/surface_manifest.py", "test_surface_manifest.py"),
+                        ("tools/kappa.py", "test_kappa.py"),
+                        ("tools/cmux_dispatch.py", "test_cmux_dispatch.py")):
+        r = _sel([tool])
+        assert r["full"] is False, r
+        assert r["surfaces"], f"{tool} selected no surface"
+        assert guard in r["test_files"], f"{guard} not selected for {tool}"
+
+
+def test_tool_guard_rule_preserves_the_selector_fail_closed_weight():
+    # #5050: the derived rule must NOT narrow a TOOL_CARVEOUTS path. The
+    # selector itself (#2159 P2-3) and the collision preflight (#3261) are
+    # deliberately fail-closed to the FULL matrix — a narrow core selection
+    # would be a coverage DOWNGRADE. `tools/ci_selection.py` owns
+    # tests/test_ci_selection.py (core-registered), so a naive derivation would
+    # match it; the rule must skip TOOL_CARVEOUTS paths.
+    for tool in ("tools/ci_selection.py", "tools/collision_preflight.py"):
+        r = _sel([tool])
+        assert r["full"] is True, f"{tool} lost its fail-closed FULL weight"
+        assert len(r["surfaces"]) > 1, r
 
 
 def test_activation_cohort_change_does_not_drop_to_tier1():

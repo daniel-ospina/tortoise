@@ -372,7 +372,18 @@ SOURCE_PATTERNS = {
                    # the checker) must select this surface, or the ratchet that
                    # classifies the new entry never runs on the PR that owns it.
                    "tools/check_pages_upload_root.py",
-                   "config/pages-upload-classification.txt"),
+                   "config/pages-upload-classification.txt",
+                   # #4658/#4186: the two architecture docs
+                   # `test_no_legacy_token_path.py` guards by exact path
+                   # (ARCH_DOCS). A docs-only PR editing either one selected
+                   # `surfaces=[]` (tier-1 smoke), so the guard could not fail
+                   # on the very file it exists to protect — a doc that a gate
+                   # reads is not "just docs". Listed here AND declared in
+                   # `guard_inputs`, which `tools/ci_manifest.py check`
+                   # validates in the reverse direction (the doc must select
+                   # the surface that owns its guard).
+                   "website/website_architecture.md",
+                   "docs/auth-architecture.md"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -733,6 +744,33 @@ def _normalize_surfaces(manifest: dict) -> dict:
     return manifest
 
 
+def _tool_guard_surface(path: str, manifest: dict) -> list[str]:
+    """Surfaces owning the registered guard for a ``tools/`` script.
+
+    #3362/#4115: a tool that a test guards must be selectable — the guard
+    exists to run on the PR that edits the tool. Derived from the manifest
+    (``tools/X.py`` -> the surfaces whose members include ``test_X.py``), not
+    listed, so a new tool whose guard is registered is covered with no new
+    entry — the per-row allow-list is what rotted in the first place. A tool
+    with NO registered guard falls through to the documented fail-closed
+    branches, unchanged.
+
+    TOOL_CARVEOUTS paths are excluded deliberately: their recorded weight is
+    the fail-closed FULL matrix (e.g. the selector itself, #2159 P2-3), and a
+    narrow core selection would be a coverage DOWNGRADE for them.
+    """
+    if not path.startswith("tools/") or path.endswith("/"):
+        return []
+    if any(path.startswith(p) for p in TOOL_CARVEOUTS):
+        return []
+    guard = "test_" + Path(path).stem + ".py"
+    owners = []
+    for surface, files in manifest["surfaces"].items():
+        if any(f.rsplit("/", 1)[-1] == guard for f in _surface_members(files)):
+            owners.append(surface)
+    return owners
+
+
 def load_manifest() -> dict:
     import yaml  # local import (uv provides pyyaml via the dev group)
     return _normalize_surfaces(yaml.safe_load(MANIFEST.read_text()))
@@ -832,7 +870,7 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             for surface, pats in SOURCE_PATTERNS.items()
             if surface != "core"
             for p in pats
-        ) or path.startswith(CORE_ALSO)
+        ) or path.startswith(CORE_ALSO) or bool(_tool_guard_surface(path, manifest))
 
     changed = [c for c in changed_files
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
@@ -866,6 +904,11 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         # pinners silently drop out of the selection.
         if any(c.startswith(p) for p in CORE_ALSO):
             matched.add("core")
+            found = True
+        # #3362/#4115: a tool with a registered guard selects the guard's
+        # surface (derived — see _tool_guard_surface).
+        for guard_surface in _tool_guard_surface(c, manifest):
+            matched.add(guard_surface)
             found = True
         if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
@@ -1069,6 +1112,18 @@ def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
     import yaml
     manifest = _normalize_surfaces(yaml.safe_load(manifest_path.read_text()))
     return register_tests(manifest_path, tests_dir, surface, manifest)
+
+
+def _register_provisional(names: list[str]) -> list[str]:
+    """Give newly registered files their explicit `unmeasured` duration row.
+
+    Delegated to ``tools/ci_manifest.py`` (the record is the single author of a
+    weight); returns the files that got a provisional row. An ImportError here
+    PROPAGATES: silently skipping the row would leave the next ``--integrity``
+    to red on a strict-presence failure with no explanation of why the atomic
+    registration did not happen (#5050).
+    """
+    return _ci_manifest_module().register_provisional(names)
 
 
 # #1472: files excluded from the fast push legs by construction (they cannot
@@ -1338,6 +1393,12 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
         fast.update(fs)
     fast -= slow
     fast -= carve_out
+    # #4835: subtract the env-broken set too, matching fast_pool(). The two
+    # functions disagreed about what the fast pool is, so this check reported a
+    # permanent FALSE coverage hole for test_agent_signup.py (which rides its
+    # own `env_broken` leg by construction) — the one warning whose job is to
+    # surface a REAL hole, diluted by a constant false positive.
+    fast -= ENV_BROKEN_FILES
     halfset = {f for fs in halves.values() for f in fs}
     return sorted(f for f in fast if f[:-3] not in halfset)
 
@@ -2194,6 +2255,47 @@ def render_surface_audit(report: dict) -> str:
     return NL.join(lines)
 
 
+def _ci_manifest_module():
+    """The ``tools.ci_manifest`` module, reusing an already-loaded copy.
+
+    ``ci_manifest`` imports this module back for the manifest helpers, so the
+    import is lazy and must not create a second copy under a different name
+    (which would split module state under pytest).
+    """
+    import sys as _sys
+    for name in ("tools.ci_manifest", "ci_manifest"):
+        mod = _sys.modules.get(name)
+        if mod is not None and hasattr(mod, "check"):
+            return mod
+    for path in (str(REPO), str(REPO / "tools")):
+        if path not in _sys.path:
+            _sys.path.insert(0, path)
+    try:
+        from tools import ci_manifest as mod
+    except ImportError:  # pragma: no cover - module shipped with the repo
+        import ci_manifest as mod
+    return mod
+
+
+def _manifest_contract_issues(manifest: dict) -> list[str]:
+    """#5050: the generated-manifest contract (value + partition + reachability).
+
+    Delegated to ``tools/ci_manifest.py`` so there is ONE contract and no
+    parallel gate: ``--integrity`` is the only entry point. An ImportError is
+    reported as an issue, never swallowed: returning ``[]`` would leave
+    ``--integrity`` GREEN with none of the #5050 checks having run — the exact
+    "silent omission with every gate green" class this contract exists to kill.
+    """
+    try:
+        return _ci_manifest_module().check(manifest)
+    except ImportError as exc:  # pragma: no cover - module shipped with the repo
+        return [
+            "the #5050 manifest contract module (tools/ci_manifest.py) could "
+            f"not be imported — value/partition/reachability checks DID NOT "
+            f"RUN: {exc}"
+        ]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -2227,7 +2329,8 @@ def main() -> int:
         # raise at all.)
         problems = missing + slow_file_issues(manifest) \
             + duration_issues(manifest) + leg_coverage_issues(manifest) \
-            + duration_coverage_issues(manifest)
+            + duration_coverage_issues(manifest) \
+            + _manifest_contract_issues(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (space-joined matrix_* outputs) — when they do, the #1266
         # halves-parse tie check is
@@ -2277,6 +2380,15 @@ def main() -> int:
         added = register(MANIFEST, TESTS_DIR, args.surface)
         if added:
             print(f"✅ registered {len(added)} test file(s) under {args.surface}: {added}")
+            # #4348/#4364/#4817: registration is ATOMIC — the newly registered
+            # file also gets an explicit `unmeasured` duration row, so the
+            # strict presence check stays green and the file cannot pack at a
+            # silent flat default while it waits for its first CI measurement.
+            provisional = _register_provisional(added)
+            if provisional:
+                print(f"   provisional durations recorded (unmeasured): {provisional}")
+                print("   the next `tools/ci_manifest.py sweep` replaces them with "
+                      "measured values and clears the marker.")
             print("   review: config/ci-surfaces.yml — move a file to another surface if the default is wrong.")
         else:
             print("✅ manifest already covers all test files")
