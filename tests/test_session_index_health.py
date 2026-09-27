@@ -344,8 +344,8 @@ def test_doctor_session_indexing_check_unavailable_is_a_warning(
 
 def test_doctor_session_indexing_configured_target_names_config_surface(
         env, capsys, monkeypatch, tmp_path):
-    """PIN: the configured-missing arm names the target's config surface, and
-    does NOT offer the first-run remediation.
+    """PIN: BOTH variants of the configured-missing arm name the target's own
+    configuration surface, and NEITHER offers the first-run remediation.
 
     A `--db` target cannot be handed to `tortoise init` (it takes `--path`, not
     `--db`), so offering `tortoise init` here would either fail or target the
@@ -355,17 +355,25 @@ def test_doctor_session_indexing_configured_target_names_config_surface(
     from tortoise.__main__ import main
 
     _isolate_uninitialized(monkeypatch, tmp_path)
+    missing = str(tmp_path / "nope" / "tortoise.db")
+
+    rc_empty = main(["doctor", "--db", missing])  # empty-corpus variant
+    empty_row = next(line for line in capsys.readouterr().out.splitlines()
+                     if "Session indexing" in line)
+
     _write_session(env, "sess-a")
+    rc_full = main(["doctor", "--db", missing])  # populated-corpus variant
+    full_out = capsys.readouterr().out
+    full_row = next(line for line in full_out.splitlines()
+                    if "Session indexing" in line)
 
-    rc = main(["doctor", "--db", str(tmp_path / "nope" / "tortoise.db")])
-    out = capsys.readouterr().out
-    row = next(line for line in out.splitlines() if "Session indexing" in line)
-
-    assert "configured target" in row, row
-    assert "tortoise init" not in row, row
-    assert "⚠️" in row and "❌" not in row, row
-    assert out.count("Session indexing") == 1, out
-    assert rc == 1
+    for row in (empty_row, full_row):
+        assert "configured target" in row, row
+        assert "TORTOISE_DB_URI" in row and "--db" in row, row
+        assert "tortoise init" not in row, row
+        assert "⚠️" in row and "❌" not in row, row
+    assert full_out.count("Session indexing") == 1, full_out
+    assert rc_empty == 1 and rc_full == 1
 
 
 def test_doctor_session_indexing_renders_when_target_unresolved(

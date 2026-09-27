@@ -6482,6 +6482,13 @@ _SESSION_INDEX_EMPTY_DETAIL = (
     "corpus empty — nothing indexed (expected for new setups)"
 )
 
+#: The remediation for a target that was explicitly configured but has no DB
+#: file: name the configuration surface the user actually set. Shared by BOTH
+#: variants (empty and populated corpus) so the arm cannot answer a config
+#: error with a first-run remedy in one variant and nothing in the other.
+_SESSION_INDEX_CONFIGURED_FIX = ("fix the configured target: "
+                                 "TORTOISE_DB_URI / TORTOISE_DB_PATH / --db")
+
 
 def _session_index_rows_without_graph(
         reason: str = "graph-unavailable") -> list[tuple[str, str, str]]:
@@ -6535,12 +6542,11 @@ def _session_index_rows_without_graph(
     if reason == "pre-init-configured":
         if n == 0:
             return [("Session indexing", "⚠️",
-                     "corpus empty — nothing indexed "
-                     "(no graph at the configured target)")]
+                     "corpus empty — nothing indexed (no graph at the "
+                     f"configured target; {_SESSION_INDEX_CONFIGURED_FIX})")]
         return [("Session indexing", "⚠️",
                  f"{n} corpus file{plural}, none indexed — no graph at the "
-                 "configured target (fix the configured target: "
-                 "TORTOISE_DB_URI / TORTOISE_DB_PATH / --db)")]
+                 f"configured target ({_SESSION_INDEX_CONFIGURED_FIX})")]
     if n == 0:
         return [("Session indexing", "⚠️",
                  "corpus empty — nothing indexed (graph unavailable)")]
