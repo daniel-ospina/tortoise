@@ -193,7 +193,7 @@ print({h: round(sum(c._duration_weight(d.get(f if f.endswith('.py') else f+'.py'
 | resolved `origin/main` | `56e2558399e73f9619b817016c92790a97c7b4bc` — passed as `--main-sha` and recorded per record as `window.main_sha` with `main_sha_source` |
 | window (M3/M5/M6) | 8 h |
 | window (M4) | 14 d |
-| corpus | 39 972 unique workflow runs (`2026-08-30T23:00Z` → `2026-09-27T19:35Z`, 27.9 d) via `gh api /actions/runs`; 8 h window: 501 queue runs / 43 queue branches; 14 d window: 1 917 queue runs / 165 queue branches. The Actions endpoint caps pagination at **400 pages / 40 000 runs** (pages past it return HTTP 422), so the dump is **deduped by run `id`** and non-run error payloads dropped before replay. |
+| corpus | 39 972 unique workflow runs (`2026-08-30T23:00:23Z` → `2026-09-27T19:35:39Z`, 27.9 d) via `gh api /actions/runs`; 8 h window: 501 queue runs / 43 queue branches; 14 d window: 1 917 queue runs / 165 queue branches. The Actions endpoint caps pagination at **400 pages / 40 000 runs** (pages past it return HTTP 422), so the dump is **deduped by run `id`** and non-run error payloads dropped before replay. Both records carry the corpus read itself (`window.corpus_runs`, `window.corpus_first_run_at`, `window.truncated`), so this row is verifiable from the committed artifacts. |
 | instrument | `tools/merge_throughput.py` @ #5705 (`74f9f1eaa`) — **owns every exit code**; this lane supplies **records**, it does not judge |
 | observer | `tools/queue_window_observe.py` (added by this lane; read-only, stdlib-only) |
 | committed records | `docs/ci/merge-throughput-m3-m6-records.json` (8 h), `docs/ci/merge-throughput-m4-capacity-records.json` (14 d) |
@@ -327,7 +327,7 @@ verdict flips on normalisation. The record carries `capacity_at_first_failure`,
 
 ## M5 — why batches are size 1
 
-**In the fresh window they are not. The premise holds only for a 9 % historical residue.**
+**In the fresh window they are not. The premise holds only for a 6.1 % historical residue.**
 
 | evidence | 8 h | 14 d |
 |---|---|---|

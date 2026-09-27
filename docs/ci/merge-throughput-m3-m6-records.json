@@ -5,6 +5,9 @@
     "end": "2026-09-27T19:35:39Z",
     "queue_runs_in_window": 501,
     "queue_branches_in_window": 43,
+    "corpus_runs": 39972,
+    "corpus_first_run_at": "2026-08-30T23:00:23Z",
+    "truncated": false,
     "main_sha": "56e2558399e73f9619b817016c92790a97c7b4bc",
     "main_sha_source": "resolved origin/main at capture"
   },
@@ -62,7 +65,7 @@
       "8": 1
     },
     "max_observed_batches": 8,
-    "live_queue_refs_at_observation": 5,
+    "live_queue_refs_at_observation": 2,
     "live_queue_refs_note": "a momentary count, recorded as CORROBORATION only: a queue branch is short-lived, so this number is not the effective value",
     "formation_size_distribution": {
       "2": 43

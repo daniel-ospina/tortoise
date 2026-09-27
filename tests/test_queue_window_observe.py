@@ -585,6 +585,79 @@ def test_cli_truncated_unknown_is_exit_2_not_a_crash(tmp_path, monkeypatch):
     assert body["truncated"] is True
 
 
+def test_cli_exits_2_on_a_failed_conflicts_read(tmp_path):
+    # A well-formed but FAILED conflicts read is still UNKNOWN: `{read_ok: false,
+    # items: []}` must not read as "checked, none found".
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bad = tmp_path / "conflicts.json"
+    bad.write_text(json.dumps({"read_ok": False, "items": [], "total_count": 0}))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
+
+
+def test_cli_exits_2_on_a_partial_conflicts_read(tmp_path):
+    # A PARTIAL enumeration must not be recorded as the whole population.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bad = tmp_path / "conflicts.json"
+    bad.write_text(json.dumps({"read_ok": True, "items": [{"conflicting": False}],
+                               "total_count": 177}))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
+
+
+def test_cli_refuses_an_unparseable_as_of(tmp_path):
+    # Silently falling back to wall-clock now would make the run reproducible in
+    # shape but not in content — the flag's whole purpose.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    with pytest.raises(SystemExit):
+        obs.main(["--from-json", str(runs), "--window-hours", "24",
+                  "--as-of", "not-a-timestamp"])
+
+
+def test_record_carries_the_corpus_read():
+    record = _build(_corpus())
+    assert record["window"]["corpus_runs"] == len(_corpus())
+    assert record["window"]["corpus_first_run_at"]
+    assert record["window"]["truncated"] is False
+
+
+def test_queue_depth_counts_a_branch_still_waiting_for_a_runner():
+    # DISCRIMINATING: a branch waiting in the queue is IN the queue, so it must
+    # count at its own formation. Starting the interval at `run_started_at`
+    # excluded the whole waiting window and read depth 0 ("the queue was empty").
+    runs = [
+        run("mergify/merge-queue/a",
+            "merge queue: checking #1 + #2 together on main (abc)",
+            minutes_ago=100, wait_min=30, conclusion="failure"),
+        run("mergify/merge-queue/b",
+            "merge queue: checking #3 + #4 together on main (abc)",
+            minutes_ago=99, wait_min=30, conclusion="failure"),
+    ]
+    depths = obs.queue_depth_by_formation(obs.formations(runs), runs, now=NOW)
+    assert depths and all(d >= 1 for d in depths), depths
+
+
+def test_queue_depth_counts_a_still_running_branch():
+    # A branch with `status: in_progress` whose `updated_at` is old is still
+    # running; closing it at `updated_at` would drop it from a later formation.
+    running = run("mergify/merge-queue/a",
+                  "merge queue: checking #1 + #2 together on main (abc)",
+                  minutes_ago=100, wait_min=0, status="in_progress")
+    later = run("mergify/merge-queue/b",
+                "merge queue: checking #3 + #4 together on main (abc)",
+                minutes_ago=10, wait_min=0, conclusion="failure")
+    depths = obs.queue_depth_by_formation(
+        obs.formations([running, later]), [running, later], now=NOW)
+    assert depths[-1] >= 2, depths
+
+
 def test_queue_intervals_exclude_a_completed_run_with_no_start():
     # `startup_failure` is completed with no `run_started_at` but NEVER queued.
     # Counting it as "queued until now" inflates queued/oldest/capacity (fail-OPEN).
@@ -664,3 +737,10 @@ def test_committed_records_match_the_doc():
     for rec in (short, long_):
         assert len(rec["window"]["main_sha"]) == 40
         assert rec["window"]["main_sha_source"]
+        # the corpus read is recorded, so the provenance row is verifiable from
+        # the artifact and not only by re-running the dump
+        assert rec["window"]["corpus_runs"] == 39972
+        assert rec["window"]["corpus_first_run_at"] == "2026-08-30T23:00:23Z"
+        assert rec["window"]["truncated"] is False
+    assert short["batches"]["max_queue_depth_at_formation"] == 10
+    assert long_["batches"]["max_queue_depth_at_formation"] == 15

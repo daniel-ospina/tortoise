@@ -337,11 +337,23 @@ def queue_depth_by_formation(formations_list, queue_runs, now=None):
         branch = r.get("head_branch")
         if not branch:
             continue
-        start = _ts(r.get("run_started_at")) or _ts(r.get("created_at"))
-        end = _ts(r.get("updated_at"))
-        if end is None and r.get("status") in {"in_progress", "queued"}:
+        # Start at the QUEUE ENTRY (`created_at`), not at `run_started_at`: a
+        # branch waiting for a runner IS in the queue, so it must count at a
+        # formation that happens while it waits. Starting at `run_started_at`
+        # excluded exactly that window and could report depth 0 — "the queue was
+        # empty" — at a formation that was queued.
+        start = _ts(r.get("created_at")) or _ts(r.get("run_started_at"))
+        if start is None:
+            continue
+        status = r.get("status")
+        if status in {"in_progress", "queued", "pending", "requested", "waiting"}:
+            # A live branch holds its slot until NOW; `updated_at` only advances
+            # on a status transition, so using it would truncate the interval —
+            # the same bias `running_intervals` guards against.
             end = now
-        if start is not None and end is not None and end >= start:
+        else:
+            end = _ts(r.get("updated_at"))
+        if end is not None and end >= start:
             intervals.append((branch, start, end))
     return [
         len({b for b, s, e in intervals if s <= f["at"] <= e})
@@ -446,6 +458,8 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
     """Assemble the observation record from a list of workflow-run dicts."""
     now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9 (see header)
     all_runs = [r for r in runs if isinstance(r, dict)]
+    corpus_times = [t for t in (_ts(r.get("created_at")) for r in all_runs) if t is not None]
+    corpus_first = min(corpus_times) if corpus_times else None
     queue_runs = queue_branch_runs(all_runs)
     if not queue_runs:
         return {"status": UNKNOWN, "reason": "no merge-queue runs enumerated"}
@@ -686,6 +700,11 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
             "end": verified_at,
             "queue_runs_in_window": len(in_window),
             "queue_branches_in_window": len(formed),
+            # The corpus read itself, so the provenance claim is verifiable from
+            # the committed record and not only from a re-run of the dump.
+            "corpus_runs": len(all_runs),
+            "corpus_first_run_at": _iso(corpus_first),
+            "truncated": False,
             "main_sha": resolved_main_sha or max(
                 (f["main_sha"] for f in forms if f["main_sha"]), default=None
             ),
@@ -896,8 +915,13 @@ def main(argv=None):
     else:
         parser.error("one of --from-json / --live is required")
 
-    def emit_unknown(reason):
+    def emit_unknown(reason, truncated=truncated):
+        # Carry the READ-COMPLETENESS provenance on every emitted record, not only
+        # on the post-`build_record` path: a truncated `--live` read that then hits
+        # an unreadable conflicts input would otherwise lose it.
         body = {"status": UNKNOWN, "reason": reason}
+        if truncated:
+            body["truncated"] = True
         if args.out:
             # Always write: a stale record left on disk is read as current.
             Path(args.out).write_text(jsonlib.dumps(body, indent=2) + "\n",
@@ -911,7 +935,14 @@ def main(argv=None):
         return emit_unknown("empty run enumeration")
 
     conflicted = None
-    as_of = _ts(args.as_of) if args.as_of else None
+    # `--as-of` must be a REAL timestamp or refuse: silently falling back to
+    # wall-clock `now` would make the run reproducible in shape but not in
+    # content, which is the exact non-reproducibility the flag exists to stop.
+    as_of = None
+    if args.as_of:
+        as_of = _ts(args.as_of)
+        if as_of is None:
+            parser.error(f"--as-of is not a parseable ISO-8601 timestamp: {args.as_of!r}")
     if args.conflicts_json:
         try:
             data = jsonlib.loads(Path(args.conflicts_json).read_text(encoding="utf-8"))
@@ -922,11 +953,25 @@ def main(argv=None):
             return emit_unknown("conflicts input unreadable or malformed")
         if not (isinstance(data, dict) and isinstance(data.get("items"), list)):
             return emit_unknown("conflicts input carries no `items` list")
+        # Mirror the instrument's own completeness guard (`_failed_read` +
+        # enumeration reconciliation): a well-formed but FAILED or PARTIAL read is
+        # still UNKNOWN, never a smaller population silently recorded as the whole
+        # (the earlier fix only rejected an unPARSEABLE file).
+        if data.get("read_ok", True) is not True:
+            return emit_unknown("conflicts input reports a failed read (read_ok != true)")
+        if data.get("incomplete_results") not in (None, False):
+            return emit_unknown("conflicts input is incomplete (incomplete_results)")
+        total = data.get("total", data.get("total_count"))
+        if not isinstance(total, int) or len(data["items"]) != total:
+            return emit_unknown(
+                "conflicts enumeration did not reconcile to its total: "
+                f"{len(data['items'])} items vs {total!r}"
+            )
         # The conflicts read is a POINT-IN-TIME snapshot of currently open PRs:
         # the API keeps no historical conflict state, so it cannot be scoped to
         # the run window. It is stamped so a reader cannot mistake it for one.
         conflicted = {
-            "total": data.get("total", data.get("total_count")),
+            "total": total,
             "conflicting": sum(
                 1 for i in data["items"]
                 if isinstance(i, dict) and i.get("conflicting")

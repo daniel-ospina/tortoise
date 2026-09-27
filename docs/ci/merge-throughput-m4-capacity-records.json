@@ -5,6 +5,9 @@
     "end": "2026-09-27T19:35:39Z",
     "queue_runs_in_window": 1917,
     "queue_branches_in_window": 165,
+    "corpus_runs": 39972,
+    "corpus_first_run_at": "2026-08-30T23:00:23Z",
+    "truncated": false,
     "main_sha": "56e2558399e73f9619b817016c92790a97c7b4bc",
     "main_sha_source": "resolved origin/main at capture"
   },
