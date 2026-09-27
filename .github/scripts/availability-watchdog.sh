@@ -1090,9 +1090,10 @@ create_issue() { # <title> <body> -> number ("" on failure)
 # AUTHORITATIVE: a failed update returns 1 and the caller decides (the restart
 # path aborts rather than restarting without a durable cooldown/cap record).
 # INVARIANT (security): the target number must have come from search_open_alert
-# (machine-author verified) or create_issue (authored by our own token, i.e.
-# the Actions app) — a PATCH here writes machine state into the issue, so it
-# must NEVER be pointed at a human/attacker-authored look-alike.
+# or search_heartbeat (both machine-author verified) or create_issue (authored
+# by our own token, i.e. the Actions app) — a PATCH here writes machine state
+# into the issue, so it must NEVER be pointed at a human/attacker-authored
+# look-alike.
 update_issue_body() { # <n> <body> -> 0 ok / 1 failed
   local payload
   payload="$(jq -n --arg b "$(redact_text "$2")" '{body:$b}')"

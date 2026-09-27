@@ -191,6 +191,13 @@ seed_open_alert() { # [number]
   export STUB_ALERT_SEARCH_JSON
 }
 
+# Seed an arbitrary heartbeat body (for adversarial/edge field values).
+seed_heartbeat_raw() { # <body-json>
+  printf '%s' "$1" > "$STUB_TMP/heartbeat-issue.json"
+  STUB_HB_SEARCH_JSON="$(printf '{"items":[{"number":7000,"title":"%s","body":"%s","user":{"login":"github-actions[bot]","type":"Bot"}}]}' "$HEARTBEAT_TITLE_FIXTURE" "$HEARTBEAT_MARKER_FIXTURE")"
+  export STUB_HB_SEARCH_JSON
+}
+
 count_calls() { grep -c -- "$1" "$STUB_TMP/calls.log" 2>/dev/null || true; }
 created_json() { [ -f "$STUB_TMP/created.json" ] && cat "$STUB_TMP/created.json" || echo '{}'; }
 patched_all() { [ -f "$STUB_TMP/patched.log" ] && cat "$STUB_TMP/patched.log" || echo ''; }
@@ -369,6 +376,24 @@ seed_heartbeat 70
 export HEARTBEAT_MAX_AGE_MIN=60
 run_checker
 assert_eq "$RC" "1" "18e: a valid explicit 60 is HONOURED (70-min heartbeat is stale, not defaulted to 90)"
+
+# 18f. an OVER-INTMAX threshold must not silently mute the comparison. bash's
+# `[ -gt ]` errors (exit 2) on an int64 overflow and a CONDITION reads that as
+# FALSE, so before the digit-count bound the oversized value was returned and
+# every heartbeat read LIVE. 20 digits must fall back to the default.
+reset_case
+seed_heartbeat 200
+export HEARTBEAT_MAX_AGE_MIN=99999999999999999999
+run_checker
+assert_eq "$RC" "1" "18f: a 20-digit threshold falls back to the default (200-min heartbeat is still STALE, not muted)"
+
+# 18g. an OVER-INTMAX heartbeat_epoch must not wrap to a negative age. Without a
+# bounded digit run the future-clamp errors (false) and $(( )) wraps, so the age
+# goes negative and the record reads as fresh.
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=99999999999999999999\\n"}' "$HEARTBEAT_MARKER_FIXTURE")"
+run_checker
+assert_eq "$RC" "1" "18g: an unbounded heartbeat_epoch is unparseable → STALE (an int-wrap must not read as LIVE)"
 
 # 19. the alert body names the channel independence (the load-bearing property).
 reset_case

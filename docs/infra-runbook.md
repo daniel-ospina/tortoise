@@ -1453,7 +1453,7 @@ repository variable of the same name (so neither needs a workflow edit):
 | Knob | Default | Meaning |
 |---|---|---|
 | `HEARTBEAT_ENABLED` | `1` | `0` (byte-exact only) is a **kill switch**: no heartbeat is recorded, which makes the liveness check alert **by design** — a silence is never an all-clear. Any other value (`true`, `yes`, `00`) is treated as `1` and warns, so a malformed value cannot choose the silent direction |
-| `HEARTBEAT_MAX_AGE_MIN` | `90` | The staleness bound above |
+| `HEARTBEAT_MAX_AGE_MIN` | `90` | The staleness bound above. Validated strictly: only a plain integer of at most 6 digits inside `1..100000` is honoured — anything else (a unit like `2h`, a negative, a fraction, or a value beyond bash's integer range) warns and falls back to the measured default. The digit bound matters: an int-overflowing value makes bash's `[ -gt ]` error, which a condition reads as *false*, and the checker would then never alert |
 | `HEARTBEAT_EMIT` | `1` | **Internal, not an operator knob.** A scheduled job runs the script once per probe step (API + auth); exactly ONE step emits (`availability-watchdog.yml` sets `HEARTBEAT_EMIT=0` on the auth step), so one job writes exactly one rolling record and cannot race the search index into a duplicate issue |
 
 **Reading the alert.** The alert title is
@@ -1475,10 +1475,11 @@ prevent false pages). It does not alarm while the feature is younger than the
 threshold (a fresh rollout has nothing to verify). An **unreadable** feature age
 is treated as stale (fail closed), and so are an unreadable or unparseable
 heartbeat. The residual this does **not** close:
-an outage of GitHub Actions itself takes both halves out — closing that needs an
-endpoint external to GitHub (Dead Man's Snitch / OneUptime / promlabs'
-end-to-end watchdog pattern), which is an external account and an owner decision,
-deliberately out of this scope.
+an outage of GitHub Actions itself takes both halves out (the emitter and the
+checker both run on Actions) — closing that needs an endpoint external to GitHub
+(Dead Man's Snitch / OneUptime / promlabs' end-to-end watchdog pattern), which is
+an external account and an owner decision, deliberately out of this scope and
+tracked as **#5798**.
 
 ### 7.8 Known limits
 

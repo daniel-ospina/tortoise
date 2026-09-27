@@ -136,8 +136,13 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
   [ -n "$iso" ] || { printf ''; return 0; }
   case "$iso" in
     epoch:*)
+      # A bounded digit run only: bash's `[ -gt ]`/`$(( ))` on an over-intmax
+      # value errors (condition reads FALSE) and then WRAPS, which would defeat
+      # the future-clamp and let a negative age read as fresh. An unbounded run
+      # is therefore unusable, not trusted.
       e="${iso#epoch:}"
       case "$e" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+      [ "${#e}" -le 12 ] || { printf ''; return 0; }
       printf '%s' "$e"; return 0 ;;
   esac
   e="$(date -u -d "$iso" +%s 2>/dev/null || true)"
@@ -166,6 +171,16 @@ normalize_max_age() { # <raw> -> minutes
       warn "HEARTBEAT_MAX_AGE_MIN='[${raw}]' is not a plain integer — using the measured default ${HEARTBEAT_MAX_AGE_MIN_DEFAULT} min (a near-zero bound would false-fire)"
       printf '%s' "$HEARTBEAT_MAX_AGE_MIN_DEFAULT"; return 0 ;;
   esac
+  # ⛔ BOUND THE MAGNITUDE BEFORE ANY ARITHMETIC. bash's `[ -gt ]` on an integer
+  # beyond int64 prints "integer expression expected" and exits 2, which a
+  # CONDITION reads as FALSE — so an over-intmax value would slip past the
+  # 1..100000 range guard (and past the p95 warn below, and past the staleness
+  # compare in main) and silently MUTE the checker: every heartbeat reads LIVE.
+  # Reject on DIGIT COUNT, not on a numeric compare.
+  if [ "${#raw}" -gt 6 ]; then
+    warn "HEARTBEAT_MAX_AGE_MIN='[${raw}]' has more than 6 digits — using the measured default ${HEARTBEAT_MAX_AGE_MIN_DEFAULT} min (an int-overflowing value must not disable the comparison)"
+    printf '%s' "$HEARTBEAT_MAX_AGE_MIN_DEFAULT"; return 0
+  fi
   raw="$(printf '%s' "$raw" | sed 's/^0*//')"
   [ -n "$raw" ] || raw=0
   if [ "$raw" -lt 1 ] || [ "$raw" -gt 100000 ]; then
@@ -374,8 +389,11 @@ heartbeat_age_min=unknown"
     else
       hb_epoch=""
       # Prefer the epoch field (no date parsing), fall back to the ISO field.
+      # The digit run is BOUNDED: an over-intmax epoch would error the future
+      # clamp (condition false) and then wrap in $(( )) to a negative age, which
+      # reads as fresh — a fail-open on the fail-closed surface this check is.
       local ep_raw
-      ep_raw="$(printf '%s' "$body" | sed -n 's/^heartbeat_epoch=\([0-9][0-9]*\)$/\1/p' | head -n1)"
+      ep_raw="$(printf '%s' "$body" | sed -n 's/^heartbeat_epoch=\([0-9]\{1,12\}\)$/\1/p' | head -n1)"
       if [ -n "$ep_raw" ]; then
         hb_epoch="$ep_raw"
       else
