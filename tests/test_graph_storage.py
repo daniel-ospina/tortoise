@@ -595,6 +595,40 @@ def test_writer_clamps_an_out_of_range_count_like_the_reader(org):
     assert row["graph_storage_samples"] == SAMPLES_MAX, row
 
 
+def test_writer_drops_an_overflowing_derived_spread(supabase_lane, org):
+    """GUARD (review finding): the DERIVED spread needs its own finiteness check.
+
+    ``min_mb`` and ``max_mb`` are each checked for finiteness, so subtracting
+    them LOOKS safe — but ``1e308 - (-1e308)`` is ``inf``. The Supabase lane
+    stores it verbatim (the embedded lane rejects ``spread=inf`` at the Cypher
+    layer, so it is "accidentally" safe there — the two substrates disagreed on
+    the same input), and a strict JSON encoder then rejects the row. The source
+    fails the reading in this case, so the boundary drops the write, preserving
+    the last good reading exactly as it does for a non-finite total.
+
+    ⛔ Driven through the SUPABASE lane: in the embedded lane this test would
+    pass with or without the guard (the Cypher write refuses an inf spread), and
+    a guard test that passes for the wrong reason is not a test.
+    """
+    metering_mod, fake = supabase_lane
+    metering_mod.record_graph_storage_reading("org_s", total_mb=143.0)
+    assert metering_mod.record_graph_storage_reading(
+        "org_s", total_mb=5.0, min_mb=-1e308, max_mb=1e308, samples=10,
+        repeats=1) is None
+    row = fake.tables["metering_records"][0]
+    assert math.isfinite(row["graph_storage_spread_mb"]), row
+    assert row["graph_storage_mb"] == 143.0, row
+    import json
+    json.dumps(row, allow_nan=False)  # the failure the guard exists to prevent
+
+
+def test_writer_drops_a_non_finite_total_embedded(org):
+    """CONTROL: the embedded lane's own non-finite guard still holds."""
+    from tortoise import metering
+    assert metering.record_graph_storage_reading(
+        org, total_mb=float("inf")) is None
+
+
 def test_writer_enforces_its_own_relational_invariants(org):
     """GUARD (review finding): the stored row must not contradict itself.
 
