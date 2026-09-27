@@ -1489,6 +1489,11 @@ surfaces:
   # (hermetic unit/contract layer — no DB/network/LLM; the real judged run is
   # opt-in via `runner run --judge semantic`).
   - eval/write_path/test_write_path_semantic_judge.py
+  # #5106: the deterministic first-stage pre-screen — seam + lexical/NLI
+  # stages + the offline `prescreen-audit` measurement (hermetic: no
+  # DB/network/LLM and NO model download — the NLI stage is always an injected
+  # fake, and the module import is asserted not to pull torch).
+  - eval/write_path/test_write_path_prescreen.py
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
   - mini_beir/test_mini_beir.py
