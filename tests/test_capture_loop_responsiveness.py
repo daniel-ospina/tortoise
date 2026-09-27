@@ -1664,8 +1664,11 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
 
     The probe corpus and the pinned literal set are GENERATED, not
     hand-listed, and both come from `_get_proj`'s own AST rather than from a
-    literal SPELLING: every string constant under a boolean TEST is a probe
-    AND must equal the pinned set, whatever shape carries it — a comparison
+    literal SPELLING: every string constant under a CONDITION read by the
+    collector — an `if` / `elif` / `while` / conditional-expression test, a
+    `match` arm's `case "literal":` pattern or `case other if ...` guard, a
+    comprehension's `if` clause, or an `assert` test — is a probe AND must
+    equal the pinned set, whatever shape carries it — a comparison
     (`==` / `!=` / `in` / `not in` / `>`, `>=`, …), a `startswith` /
     `endswith` / `__contains__` argument, or a string passed to any other
     call such as `ns.count("zzz")`. A five-literal spot-check was GREEN
@@ -1711,23 +1714,36 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
         return seen[-1]
 
     # ── probe corpus ──────────────────────────────────────────────────────
-    # (a) PREDICATE-DERIVED: every STRING CONSTANT under a boolean TEST in
-    #     `_get_proj`'s OWN source becomes a probe, so a new literal-bearing
-    #     branch is exercised — a mirror that does not restate it then fails
-    #     the parity loop below. Extraction is AST-based, not a spelling
-    #     regex, and scoped to the TEST expression: a constant is collected
-    #     however the predicate is spelled — `== "..."`, a single-quoted
-    #     literal, an `in` / `not in` test, a tuple/list of literals, an
-    #     `endswith`, or a string handed to any other call such as
-    #     `ns.count("zzz")`. Scoping to the test is what keeps a string
-    #     constant that is NOT a predicate (the URI parse's `lstrip('/')`)
-    #     out of the pinned set. (Round 1's regexes saw only double-quoted
-    #     `==`/`!=` and `startswith`; round 2, an AST filter over
-    #     Eq/NotEq/In/NotIn and startswith/endswith/__contains__, saw
-    #     `"zzz" in ns`, `ns.endswith("zzz")` and `ns == 'zzz'` — but
-    #     `ns.count("zzz") > 0` / `ns.find("zzz") >= 0` matched NEITHER
-    #     branch, adding no probe and no pinned literal, so the guard stayed
-    #     green while `_get_proj` and the mirror split.)
+    # (a) PREDICATE-DERIVED: every STRING CONSTANT under the CONDITION of
+    #     any conditional construct in `_get_proj`'s OWN source becomes a
+    #     probe, so a new literal-bearing branch is exercised — a mirror that
+    #     does not restate it then fails the parity loop below. Extraction is
+    #     AST-based, not a spelling regex: a constant is collected however
+    #     the predicate is spelled — `== "..."`, a single-quoted literal, an
+    #     `in` / `not in` test, a tuple/list of literals, an `endswith`, or a
+    #     string handed to any other call such as `ns.count("zzz")`.
+    #     Scoping to the CONDITION (not the whole construct) is what keeps a
+    #     string constant that is NOT a predicate (the URI parse's
+    #     `lstrip('/')`) out of the pinned set.
+    #     The set of constructs is the LANGUAGE's, not a list of spellings
+    #     (rounds 1–3 each closed one more missed spelling: regex `==` /
+    #     `startswith`; then an AST operator filter, which still missed
+    #     `ns.count("zzz") > 0` / `ns.find("zzz") >= 0`; round 4 found the
+    #     `match`/`case` escape below). Every construct that carries a
+    #     condition is covered — this is the closed set:
+    #       * `if` / `elif` / `while` / `... if ... else ...`
+    #         (`ast.If` — `elif` IS a nested `ast.If` — `ast.While`,
+    #         `ast.IfExp`) → `.test`
+    #       * `match` → each `case`'s PATTERN and its `if` GUARD
+    #         (`case "zzz":` is a `MatchValue`, a guard is
+    #         `match_case.guard`; NEITHER is an `ast.If`, so both escaped
+    #         the round-3 filter: a novel literal in a `match` arm was
+    #         invisible to BOTH the probe corpus and the pinned set)
+    #       * a comprehension's `if` clauses → `ast.comprehension.ifs`
+    #       * `assert` → `.test`
+    #     The only conditional construct NOT collected is `except`, whose
+    #     "condition" is an exception TYPE — never a string-literal namespace
+    #     predicate — so it can carry no literal this guard should pin.
     src = inspect.getsource(sdk_mod.TortoiseSDK._get_proj)
 
     def _string_consts(node: ast.AST) -> set[str]:
@@ -1735,10 +1751,30 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
                 if isinstance(n, ast.Constant)
                 and isinstance(n.value, str)}
 
+    def _condition_tests(node: ast.AST) -> tuple[ast.AST, ...]:
+        """The CONDITION subtrees of a conditional construct; () otherwise.
+
+        One entry per condition the construct evaluates: an `if` / `while` /
+        conditional-expression test, every `case` PATTERN + GUARD of a
+        `match`, every `if` clause of a comprehension, and an `assert` test.
+        """
+        if isinstance(node, (ast.If, ast.While, ast.IfExp, ast.Assert)):
+            return (node.test,)
+        if isinstance(node, ast.comprehension):
+            return tuple(node.ifs)
+        if isinstance(node, ast.Match):
+            _conds: list[ast.AST] = []
+            for _case in node.cases:
+                _conds.append(_case.pattern)
+                if _case.guard is not None:
+                    _conds.append(_case.guard)
+            return tuple(_conds)
+        return ()
+
     predicate_lits: set[str] = set()
     for _node in ast.walk(ast.parse(textwrap.dedent(src))):
-        if isinstance(_node, (ast.If, ast.While, ast.IfExp)):
-            predicate_lits |= _string_consts(_node.test)
+        for _cond in _condition_tests(_node):
+            predicate_lits |= _string_consts(_cond)
     # (b) REAL-CREDENTIAL SHAPES: a production `org_id` is a ULID
     #     ("01"-prefixed Crockford base32) — the shape the old spot-check
     #     lacked — plus the named shapes it carried and a seeded fuzz over the
@@ -1783,14 +1819,21 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     # (`endswith("test_")`) adds no new literal, so the pinned set alone is
     # blind to it; the suffix/infix probes in the corpus exercise that
     # position and red parity instead.
-    # (Residual, stated precisely: a TEST carrying NO string constant of its
-    # own is not observable from the AST — a literal-free predicate such as
-    # `len(ns) == 7`, or one delegating the test to a helper or module-level
-    # constant such as `_is_ulid(ns)`. Such a branch contributes nothing to
-    # pin; if it changes the mapping, only the parity loop over the seeded
-    # fuzz can catch it, and only when the fuzz names a matching shape. It
-    # cannot however move a pinned literal out of the tests unnoticed: the
-    # pinned set SHRINKS, and this assertion reds.)
+    # (Residual, stated precisely — the ONE blind spot left, and it is NOT a
+    # spelling. `inspect.getsource` returns `_get_proj` alone, so a condition
+    # whose literal lives OUTSIDE that method cannot be seen: a predicate
+    # delegating to a helper (`_is_ulid(ns)`) or comparing against a
+    # module-level constant (`ns == _TEST_PREFIX`) contributes no string
+    # constant here, and a literal-free predicate (`len(ns) == 7`) is the
+    # degenerate case of the same thing. Such a branch adds nothing to pin;
+    # if it changes the mapping, only the parity loop over the seeded fuzz
+    # can catch it, and only when the fuzz names a matching shape. It cannot
+    # however move a pinned literal out of `_get_proj` unnoticed: the pinned
+    # set SHRINKS, and this assertion reds. The collector reads each
+    # construct's CONDITION — `if` / `while` / conditional-expression tests,
+    # `match` patterns and guards, comprehension `if` clauses, `assert` tests
+    # (see the corpus notes above) — so this is a blind spot of REACHABILITY
+    # from `_get_proj`'s AST, not an uncollected spelling.)
     assert predicate_lits == {"registry", "test_", "tortoise_test", "test-"}, (
         "_get_proj's namespace predicates changed (literals="
         f"{sorted(predicate_lits)}): re-verify _graph_name_for_namespace and "
