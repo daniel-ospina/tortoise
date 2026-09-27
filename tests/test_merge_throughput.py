@@ -1040,9 +1040,16 @@ def test_or_artifact_missing_source_is_2(tmp_path):
 
 
 def test_or_artifact_measured_exceeds_ceiling_is_1(tmp_path):
-    path = _artifact(tmp_path, ARTIFACT)
-    assert run_check("prs-per-day", json=_ceiling_payload(300), min=200,
-                     or_artifact=f"{path}#ceiling") == 1
+    # Below `--min`, so the ceiling branch decides; a derived ceiling of 1 is
+    # exceeded by the measurement.
+    text = ("## ceiling\nceiling_prs_per_day: 1\n"
+            "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n")
+    payload = {"prs_per_day": 150, "gap": {"terms": {
+        "effective_parallel": {"value": 1, "source": "M3"},
+        "effective_batch": {"value": 1, "source": "M5"},
+        "cycle_minutes": {"value": 1440, "source": "M2"}}}}
+    assert run_check("prs-per-day", json=payload, min=200,
+                     or_artifact=f"{_artifact(tmp_path, text)}#ceiling") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2030,3 +2037,61 @@ def test_report_does_not_launder_a_failed_collector(monkeypatch):
     report = mt.build_report(fixture=None)
     assert report["fast_files_unclassified"] is mt.UNKNOWN
     assert report["durations_map"]["sampled_keys"] is mt.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Round-9: S4's disjunction, its freshness clause, Task 5's `bucket` schema.
+# ---------------------------------------------------------------------------
+
+def test_prs_per_day_threshold_is_a_real_disjunct(tmp_path):
+    # S4: "passes on the threshold OR a typed INTEGER ceiling". With the
+    # threshold met the artifact is not required, and an unreadable one must not
+    # turn a met outcome into a miss.
+    assert run_check("prs-per-day", json={"prs_per_day": 300}, min=200,
+                     or_artifact=f"{tmp_path / 'nope.md'}#ceiling") == 0
+    assert run_check("prs-per-day", json={"prs_per_day": 150}, min=200,
+                     or_artifact=f"{tmp_path / 'nope.md'}#ceiling") == 2
+
+
+def test_prs_per_day_requires_a_fresh_snapshot(tmp_path):
+    path = _artifact(tmp_path, ARTIFACT)
+    assert run_check("prs-per-day", json={"prs_per_day": 250}, min=200,
+                     require_fresh=True) == 2
+    assert run_check("prs-per-day",
+                     json={"prs_per_day": 250, "verified_at": NOW}, min=200,
+                     require_fresh=True) == 0
+    assert run_check("prs-per-day",
+                     json={"prs_per_day": 250, "verified_at": _iso(30)}, min=200,
+                     require_fresh=True) == 2
+    # Below the threshold the ceiling branch decides, and its stamp must be fresh.
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
+                     or_artifact=f"{path}#ceiling", require_fresh=True) == 2
+
+
+def test_no_languish_excludes_task_5_buckets():
+    rows = [{"number": i, "bucket": "hard_stop", "superseded_by": None,
+             "moved_in_window": False} for i in range(12)]
+    assert run_check("no-languish", json={"items": rows, "total_count": 12,
+                                          "read_ok": True},
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"],
+                     require_complete=True) == 2
+    rows = [{"number": i, "bucket": "eligible", "moved_in_window": True}
+            for i in range(12)]
+    assert run_check("no-languish", json={"items": rows, "total_count": 12,
+                                          "read_ok": True},
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"],
+                     require_complete=True) == 0
+    bad = [{"number": i, "bucket": 3, "moved_in_window": True} for i in range(12)]
+    assert run_check("no-languish", json={"items": bad, "total_count": 12,
+                                          "read_ok": True},
+                     exclude=[], require_complete=True) == 2
+
+
+def test_queue_entry_unknown_trigger_is_unknown_not_a_miss():
+    base = {"pr": 5, "entered_queue": True, "verified_at": NOW}
+    assert run_check("queue-entry", json={**base, "trigger": mt.UNKNOWN},
+                     pr=5) == 2
+    assert run_check("queue-entry", json={**base, "trigger": "manual"},
+                     pr=5) == 1
