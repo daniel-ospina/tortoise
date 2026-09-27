@@ -91,7 +91,14 @@ def test_null_details_url_is_not_green():
         {"app": {"slug": "github-actions"}, "name": "changes", "status": "completed",
          "conclusion": "success", "id": 3, "details_url": None},
     ]
-    assert mt.verdict_from_check_runs(runs) in ("RED", "UNKNOWN")  # never GREEN
+    assert mt.verdict_from_check_runs(runs) == "UNKNOWN"  # never GREEN
+
+
+def test_unresolvable_singleton_success_is_not_green():
+    runs = [{"name": "changes", "status": "completed", "conclusion": "success"}]
+    assert mt.verdict_from_check_runs(runs) == "UNKNOWN"
+    assert mt.main_gate(runs) == "UNKNOWN"
+    assert mt.mergify_mergeable(runs) == "UNKNOWN"
 
 
 def test_conjunct_aggregate_any_miss_is_nonzero():
@@ -302,6 +309,26 @@ def test_main_gate_strict_rejects_cancelled_with_token_named(capsys):
     assert "cancelled" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("conclusion", ["neutral", "skipped"])
+def test_main_gate_strict_rejects_neutral_and_skipped(conclusion):
+    payload = {"required": ["python-ci-gate"], "check_runs": [
+        {"name": "python-ci-gate", "status": "completed", "conclusion": conclusion,
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
+    ]}
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_main_gate_strict_scopes_to_required_contexts():
+    # A non-required red must not false-red the required gate.
+    payload = {"required": ["python-ci-gate"], "check_runs": [
+        {"name": "python-ci-gate", "status": "completed", "conclusion": "success",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
+        {"name": "some-other-check", "status": "completed", "conclusion": "failure",
+         "details_url": "x/2", "app": {"slug": "g"}, "workflow": "w"},
+    ]}
+    assert run_check("main-gate", json=payload, strict=True) == 0
+
+
 def test_drain_rate_three_way():
     assert run_check("drain-rate", json={
         "merges_per_hour": 15.0, "merges": 300, "window_hours": 24}, min=12) == 0
@@ -311,6 +338,12 @@ def test_drain_rate_three_way():
         "merges_per_hour": 20.0, "merges": 3, "window_hours": 24}, min=12) == 2
     assert run_check("drain-rate", json={
         "merges_per_hour": 20.0, "merges": 300, "window_hours": 6}, min=12) == 2
+
+
+def test_drain_rate_stale_record_is_2():
+    payload = {"merges_per_hour": 15.0, "merges": 300, "window_hours": 24,
+               "verified_at": _iso(30)}
+    assert run_check("drain-rate", json=payload, min=12, require_fresh=True) == 2
 
 
 def test_prs_per_day_three_way():
@@ -332,6 +365,13 @@ def test_queue_entry_stale_head_is_2():
     moved = {"pr": 5, "entered_queue": True, "trigger": "auto_merge_conditions",
              "head_sha": "new", "run_sha": "old", "verified_at": NOW}
     assert run_check("queue-entry", json=moved, pr=5, require_fresh=True) == 2
+
+
+def test_queue_entry_pr_scoping():
+    # Evidence for PR 9 must not satisfy a criterion scoped to PR 5.
+    evidence = {"pr": 9, "entered_queue": True, "trigger": "auto_merge_conditions",
+                "head_sha": "abc", "run_sha": "abc", "verified_at": NOW}
+    assert run_check("queue-entry", json=evidence, pr=5, require_fresh=True) == 2
 
 
 def test_queue_entry_out_of_window_is_2():
@@ -421,6 +461,13 @@ def test_attribution_three_way():
                      pr=5, max=5) == 2
 
 
+def test_attribution_pr_scoping():
+    ok = {"pr": 9, "main_red": True, "verified_at": NOW,
+          "red_first_observed": "2026-09-26T10:00:00Z",
+          "attribution_recorded": "2026-09-26T10:03:00Z"}
+    assert run_check("attribution", json=ok, pr=5, max=5, require_fresh=True) == 2
+
+
 def test_capacity_three_way():
     ok = {"queued": 10, "in_progress": 3, "oldest_minutes": 60,
           "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
@@ -441,6 +488,13 @@ def test_capacity_headroom_unknown_is_2():
                "capacity_at_first_failure": "UNKNOWN",
                "configured_max_parallel_checks": 5, "verified_at": NOW}
     assert run_check("capacity", json=payload, min_headroom=1, require_fresh=True) == 2
+
+
+def test_capacity_unknown_placeholders_are_2():
+    payload = {"queued": "UNKNOWN", "in_progress": "UNKNOWN", "oldest_minutes": 0,
+               "capacity_at_first_failure": "UNKNOWN",
+               "configured_max_parallel_checks": "UNKNOWN"}
+    assert run_check("capacity", json=payload, max_oldest_minutes=120) == 2
 
 
 def test_capacity_stale_record_with_require_fresh_is_2():
@@ -500,6 +554,13 @@ def test_gap_stale_effective_parallel_record_is_2():
     assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
+def test_gap_missing_record_on_disk_is_2():
+    p = _gap_payload()
+    p.pop("records")
+    p["gap"]["terms"]["effective_parallel"]["record"] = "docs/ci/does-not-exist.json"
+    assert run_check("gap", json=p, max=2, require_fresh=True) == 2
+
+
 def _languish_payload(languishing=0):
     items = [{"number": i, "state": "open", "moved_in_window": True,
               "classification": "open"} for i in range(12)]
@@ -534,6 +595,23 @@ def test_no_languish_structural_population_floor():
                      require_complete=True) == 2
 
 
+def test_no_languish_stale_snapshot_is_2():
+    payload = _languish_payload(0)
+    payload["verified_at"] = _iso(30)
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft", "superseded_by"],
+                     require_complete=True, require_fresh=True) == 2
+
+
+def test_no_languish_task5_schema_is_excluded():
+    items = [{"number": i, "bucket": "draft", "draft": True,
+              "superseded_by": None, "moved_in_window": False} for i in range(12)]
+    payload = {"items": items, "total_count": 12, "read_ok": True}
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft", "superseded_by"],
+                     require_complete=True) == 2
+
+
 def test_exclude_unknown_key_is_2():
     assert run_check("no-languish", json=_languish_payload(0), exclude=["not_a_key"],
                      require_complete=True) == 2
@@ -546,6 +624,11 @@ def test_baseline_fresh_three_way():
     assert run_check("baseline-fresh", json={}) == 2
 
 
+def test_future_verified_at_is_not_fresh():
+    assert run_check("baseline-fresh", json={"verified_at": "2099-01-01T00:00:00Z"},
+                     max_age_days=7) == 2
+
+
 def test_assert_queue_head_checks_three_way():
     ok = {"queue_head": "sha1", "names": ["python-ci-gate"],
           "required": ["python-ci-gate"]}
@@ -553,6 +636,11 @@ def test_assert_queue_head_checks_three_way():
     missing = {"queue_head": "sha1", "names": [], "required": ["python-ci-gate"]}
     assert run_check("assert-queue-head-checks", json=missing) == 1
     assert run_check("assert-queue-head-checks", json={"queue_head": None}) == 2
+
+
+def test_assert_queue_head_empty_required_is_2():
+    assert run_check("assert-queue-head-checks",
+                     json={"queue_head": "sha1", "required": [], "names": []}) == 2
 
 
 def test_durations_map_three_way():
@@ -605,78 +693,117 @@ def _artifact(tmp_path, text: str) -> str:
     return str(p)
 
 
+def test_read_ok_zero_is_a_failed_read():
+    payload = {"items": [{"number": i} for i in range(12)],
+               "total_count": 12, "read_ok": 0}
+    assert run_check("conflicts", json=payload, max=5) == 2
+
+
+def test_conflicts_unprobed_branch_is_2():
+    items = [{"number": i} for i in range(12)]
+    items[0] = {"number": 0, "unknown": True}
+    assert run_check("conflicts",
+                     json={"items": items, "total_count": 12, "read_ok": True},
+                     max=5) == 2
+
+
+def test_conflicts_main_moved_is_2():
+    payload = {"items": [], "total_count": 0, "read_ok": True, "main_moved": True}
+    assert run_check("conflicts", json=payload, max=5) == 2
+
+
+def _ceiling_payload(measured):
+    terms = {
+        "effective_parallel": {"value": 3, "source": "M3"},
+        "effective_batch": {"value": 2, "source": "M5"},
+        "cycle_minutes": {"value": 37, "source": "M2"},
+    }
+    return {"prs_per_day": measured, "gap": {"terms": terms}}
+
+
 def test_or_artifact_accepts_typed_integer_ceiling(tmp_path):
     path = _artifact(tmp_path, ARTIFACT)
-    assert run_check("prs-per-day", json={"prs_per_day": 100}, min=200,
+    assert run_check("prs-per-day", json=_ceiling_payload(100), min=200,
                      or_artifact=f"{path}#ceiling") == 0
+
+
+def test_or_artifact_without_emitted_terms_is_2(tmp_path):
+    # A self-set integer is not a derived ceiling.
+    path = _artifact(tmp_path, ARTIFACT)
+    assert run_check("prs-per-day", json={"prs_per_day": 100}, min=200,
+                     or_artifact=f"{path}#ceiling") == 2
+
+
+def test_or_artifact_unmeasured_is_2(tmp_path):
+    path = _artifact(tmp_path, ARTIFACT)
+    assert run_check("prs-per-day", json={}, min=200,
+                     or_artifact=f"{path}#ceiling") == 2
 
 
 def test_or_artifact_rejects_float(tmp_path):
     path = _artifact(tmp_path, ARTIFACT.replace("ceiling_prs_per_day: 234",
                                                 "ceiling_prs_per_day: 234.5"))
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 2
 
 
 def test_or_artifact_rejects_duplicate_key(tmp_path):
-    path = _artifact(tmp_path, "## ceiling\nceiling_prs_per_day: 250\n"
-                               "ceiling_prs_per_day: 251\n"
-                               "ceiling_source: a,b,c\n")
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+    path = _artifact(tmp_path, "## ceiling\nceiling_prs_per_day: 234\n"
+                               "ceiling_prs_per_day: 235\n"
+                               "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n")
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 2
 
 
 def test_or_artifact_rejects_key_outside_anchored_section(tmp_path):
     # The `## ceiling` section is empty; the key lives in another section.
-    path = _artifact(tmp_path, "## ceiling\n\n## other\nceiling_prs_per_day: 250\n")
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+    path = _artifact(tmp_path, "## ceiling\n\n## other\nceiling_prs_per_day: 234\n")
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 2
 
 
-def test_or_artifact_rejects_date_and_issue_number_and_bare_digit(tmp_path):
-    for value in ("2026-10-01", "#5215", "250"):
+def test_or_artifact_rejects_date_and_issue_number(tmp_path):
+    for value in ("2026-10-01", "#5215"):
         text = f"## ceiling\nceiling_prs_per_day: {value}\n"
         path = _artifact(tmp_path, text)
-        assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+        assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                          or_artifact=f"{path}#ceiling") == 2, value
 
 
 def test_or_artifact_out_of_range_is_2(tmp_path):
     path = _artifact(tmp_path, "## ceiling\nceiling_prs_per_day: 200001\n"
-                               "ceiling_source: a,b,c\n")
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+                               "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n")
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 2
 
 
 def test_or_artifact_ceiling_must_be_derived(tmp_path):
     # ceiling != round(parallel * batch * 1440 / cycle_minutes) => 2
     text = ("## ceiling\nceiling_prs_per_day: 500\n"
-            "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n"
-            "effective_parallel: 3\neffective_batch: 2\ncycle_minutes: 37\n")
+            "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n")
     path = _artifact(tmp_path, text)
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 2
 
 
 def test_or_artifact_derived_ceiling_reconciles(tmp_path):
     # round(3 * 2 * 1440 / 37) = 234
     text = ("## ceiling\nceiling_prs_per_day: 234\n"
-            "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n"
-            "effective_parallel: 3\neffective_batch: 2\ncycle_minutes: 37\n")
+            "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n")
     path = _artifact(tmp_path, text)
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 0
 
 
 def test_or_artifact_missing_source_is_2(tmp_path):
     path = _artifact(tmp_path, "## ceiling\nceiling_prs_per_day: 234\n")
-    assert run_check("prs-per-day", json={"prs_per_day": 10}, min=200,
+    assert run_check("prs-per-day", json=_ceiling_payload(10), min=200,
                      or_artifact=f"{path}#ceiling") == 2
 
 
 def test_or_artifact_measured_exceeds_ceiling_is_1(tmp_path):
     path = _artifact(tmp_path, ARTIFACT)
-    assert run_check("prs-per-day", json={"prs_per_day": 300}, min=200,
+    assert run_check("prs-per-day", json=_ceiling_payload(300), min=200,
                      or_artifact=f"{path}#ceiling") == 1
 
 
@@ -818,6 +945,7 @@ def test_non_red_token_set_matches_the_rail():
     if env:
         candidates.append(Path(env) / "scripts" / "admin-merge.sh")
     candidates.append(ROOT / "scripts" / "admin-merge.sh")
+    read_any = False
     for path in candidates:
         try:
             if not path.is_file():
@@ -825,12 +953,15 @@ def test_non_red_token_set_matches_the_rail():
             body = path.read_text(errors="replace")
         except OSError:
             continue
+        read_any = True
         m = re.search(r"^NON_RED_CONC\s*=\s*\{([^}]*)\}", body, re.M)
         if not m:
             continue
         tokens = set(re.findall(r'"([^"]+)"', m.group(1)))
         assert tokens == set(mt.NON_RED_CONCLUSIONS)
         return
+    if read_any:
+        pytest.fail("rail readable but NON_RED_CONC not found — parity unverifiable")
     pytest.skip("agent-infra rail not resolvable on this host (operational check)")
 
 
@@ -857,13 +988,31 @@ def test_cli_check_unknown_input_exits_2():
     assert out.returncode == 2, out.stdout + out.stderr
 
 
-def test_cli_conjunct_aggregate():
+def test_cli_conjunct_mixed_miss_is_1():
     out = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "check", "gap", "--max", "2", "--fixture", "gap_ok",
-         "--and", "fast-files-unclassified", "--max", "0", "--fixture", "gap_ok"],
+         "check", "gap", "--max", "2", "--fixture", "conjunct_mixed",
+         "--and", "fast-files-unclassified", "--max", "0"],
         capture_output=True, text=True, cwd=str(ROOT))
-    assert out.returncode in (0, 1, 2)
+    assert out.returncode == 1, out.stdout + out.stderr
+
+
+def test_cli_conjunct_unknown_beats_miss():
+    out = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
+         "check", "gap", "--max", "2", "--fixture", "conjunct_unknown",
+         "--and", "fast-files-unclassified", "--max", "0"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert out.returncode == 2, out.stdout + out.stderr
+
+
+def test_cli_json_check_name_maps_to_field():
+    out = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
+         "--json", "main-gate", "--fixture", "empty"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert out.returncode == 0, out.stderr
+    assert _json.loads(out.stdout) == mt.UNKNOWN
 
 
 def test_cli_exclude_unknown_key_is_2():
