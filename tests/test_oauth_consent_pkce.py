@@ -400,6 +400,39 @@ def test_inv6_unavailable_store_refuses_locally() -> None:
         assert r["auxVerifierKeys"] == [], r
 
 
+def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
+    """Invariant 13 (A5, the WRITER half): the pre-flight probe writes its OWN key
+    with a 160-byte payload, so it cannot prove that the store which will RECEIVE
+    the real verifier can also remove it. The writer therefore proves the invariant
+    per store, for the real key and the real value — write, read back, remove, read
+    back null, then write again — and skips a store that fails.
+
+    This pins the divergence that survived the round-2 guard fix: a first store
+    whose accepted-size band sits BETWEEN the probe (rejected) and the real value
+    (accepted) and which refuses removal passed the guard on the second store while
+    `writeAux` wrote the credential to the first. Measured before the writer fix:
+    `sessionVerifierKeys == [sb-tortoise-auth-token-code-verifier]` with
+    `localVerifierKeys == []` — a credential in an un-cleanable store."""
+    r = _run("click", search="", sessionMode="throw-remove", sessionQuota=130)
+    assert r["navs"], f"the flow did not proceed although localStorage is usable: {r}"
+    assert r["errorVisible"] is False, r
+    assert r["cookieVerifierKeys"] == [], r
+    assert r["sessionVerifierKeys"] == [], (
+        f"a verifier was written to a store that refuses removal: {r}"
+    )
+    assert r["localVerifierKeys"], (
+        f"the verifier reached no store at all — the write was refused, not relocated: {r}"
+    )
+
+    # Control: when NO store can be cleaned, the guard must still refuse locally
+    # (this is inv 6's contract, repeated here so the writer's relocation cannot be
+    # mistaken for permission to write anywhere).
+    both = _run("click", search="", sessionMode="throw-remove",
+                localMode="throw-remove", sessionQuota=130)
+    assert both["navs"] == [], f"navigated although no store can be cleaned: {both}"
+    assert both["auxVerifierKeys"] == [], both
+
+
 def test_inv7_item6_write_path_parity() -> None:
     """Invariant 7: ≤SIZE_GUARD is written byte-identically; over SIZE_GUARD is
     stripped; over SIZE_CAP is refused (no write) AND reported on the page."""
@@ -507,7 +540,7 @@ function mkEl(id) {
   };
 }
 
-function makeStore(mode) {
+function makeStore(mode, quota) {
   const map = new Map();
   return {
     _map: map,
@@ -520,13 +553,15 @@ function makeStore(mode) {
     setItem: function (k, v) {
       if (mode === 'throw-method') throw new Error('storage disabled');
       v = String(v);
-      if (opts.storeQuota && v.length > opts.storeQuota) {
+      const cap = quota || opts.storeQuota;
+      if (cap && v.length > cap) {
         const e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e;
       }
       map.set(String(k), v);
     },
     removeItem: function (k) {
       if (mode === 'throw-method' || mode === 'throw-remove') throw new Error('storage disabled');
+      if (mode === 'silent-remove') return;   // accepted, but nothing happens
       map.delete(String(k));
     },
     clear: function () { map.clear(); },
@@ -589,8 +624,8 @@ documentObj.body = mkEl('body');
 // Seed state BEFORE the page script runs (the library reads the cookie in
 // createClient()'s _initialize).
 if (opts.seedSession) { cookies.set(COOKIE_NAME, opts.seedSession); }
-const sessionStorage = makeStore(opts.sessionMode || 'ok');
-const localStorage = makeStore(opts.localMode || 'ok');
+const sessionStorage = makeStore(opts.sessionMode || 'ok', opts.sessionQuota);
+const localStorage = makeStore(opts.localMode || 'ok', opts.localQuota);
 if (opts.seedVerifier) {
   const target = (opts.seedVerifierStore === 'local') ? localStorage : sessionStorage;
   target.setItem(COOKIE_NAME + '-code-verifier', JSON.stringify(opts.seedVerifier));
@@ -716,6 +751,13 @@ function innerTarget(assignUrl) {
       .map(function (w) { return w.name; });
     out.auxVerifierKeys = Array.from(sessionStorage._map.keys())
       .concat(Array.from(localStorage._map.keys()))
+      .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
+    // Per-store, so a credential can be located in the store that will KEEP it:
+    // "is there no verifier" is not the same claim as "is the credential in a
+    // store that can remove it".
+    out.sessionVerifierKeys = Array.from(sessionStorage._map.keys())
+      .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
+    out.localVerifierKeys = Array.from(localStorage._map.keys())
       .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
     if (navs.length) {
       const inner = innerTarget(navs[navs.length - 1]);

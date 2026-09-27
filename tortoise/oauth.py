@@ -1950,12 +1950,30 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     }
     return null;
   };
+  // #3496 A5: the write is proven CLEANABLE in the same store, for the real value
+  // SIZE, before the credential is accepted. The pre-flight probe cannot guarantee
+  // that on its own — it writes a 160-byte payload under its own key, so a store
+  // whose accepted-size band sits between the probe and the real value (or which
+  // refuses removal only once it holds something) would pass the probe and then
+  // orphan the credential. This re-verifies per store, at write time, with a
+  // payload of the REAL length under a THROWAWAY key — so a store that cannot be
+  // cleaned never receives the credential itself (only its own probe entry).
   const writeAux = (key, value) => {
+    const v = String(value);
+    const probeKey = "__tt_wprobe-" + Math.random().toString(16).slice(2).padEnd(32, "0");
     for (const s of auxStores()) {
       try {
-        s.setItem(key, value);
-        if (s.getItem(key) === value) return true;
-      } catch (e) { /* next store */ }
+        s.setItem(probeKey, v);
+        if (s.getItem(probeKey) !== v) throw 0;
+        s.removeItem(probeKey);
+        if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
+        s.setItem(key, v);
+        if (s.getItem(key) !== v) throw 0;
+        return true;
+      } catch (e) {
+        // Best effort: leave no probe entry behind if the store will let us.
+        try { s.removeItem(probeKey); } catch (e2) { /* ignore */ }
+      }
     }
     return false;   // refuse — never fall through to the cookie jar
   };
