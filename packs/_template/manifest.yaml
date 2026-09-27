@@ -228,10 +228,11 @@ extraction:
 #                      extractor_v2 renders it into the S1 prompt. Note
 #                      value_gate.py itself reads NO pack manifest — it is a
 #                      stdlib-only leaf whose identifier rules keep their policy
-#                      provenance declared in the dev pack's memory_granularity
-#                      (pinned by test_value_gate_4899). Nothing reads `valueGate`
-#                      yet, so declaring this block ALONE changes nothing — set
-#                      memory_granularity as well.
+#                      provenance declared elsewhere: issue/PR numbers and commit
+#                      hashes by the dev pack's memory_granularity, paths and ids
+#                      by extractor_v2's landed #2453 clause. Nothing reads
+#                      `valueGate` yet, so declaring this block ALONE changes
+#                      nothing — set memory_granularity as well.
 #   promptFragments:   ["..."] — pack-authored instruction snippets DECLARED
 #                      for the value brief. NOTE: no consumer reads the v3.1
 #                      slots yet — they validate and normalize, nothing more.
