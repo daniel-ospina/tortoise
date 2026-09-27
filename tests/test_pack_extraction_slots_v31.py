@@ -181,11 +181,36 @@ class TestRelationTemplates:
 
     def test_an_undeclared_template_kind_is_left_to_the_cross_pack_pass(self):
         assert _extraction_errors(
-            relationTemplates=[{"fromKind": "ghost"}]) == []
+            relationTemplates=[{"predicate": "x", "fromKind": "ghost",
+                                "toKind": "Object"}]) == []
 
     def test_relation_templates_must_be_a_list_of_maps(self):
         assert _extraction_errors(relationTemplates={"predicate": "x"})
         assert _extraction_errors(relationTemplates=["a string"])
+
+    def test_a_template_without_a_predicate_is_rejected(self):
+        """This field was checked by NEITHER `_validate` (key allow-list only)
+        nor the cross-pack pass, so `{}` — a template that describes nothing —
+        validated clean (review of PR #5647)."""
+        errors = _extraction_errors(relationTemplates=[{}])
+        assert any("predicate must be a non-empty string" in e
+                   for e in errors), errors
+
+    def test_a_non_string_predicate_is_rejected(self):
+        errors = _extraction_errors(
+            relationTemplates=[{"predicate": 123, "mechanism": "IMPL"}])
+        assert any("predicate must be a non-empty string" in e
+                   for e in errors), errors
+
+    def test_an_uppercase_predicate_is_rejected(self):
+        """Matches `ontology.relations`, where the same rule already exists."""
+        errors = _extraction_errors(relationTemplates=[{"predicate": "Addresses"}])
+        assert any("must be camelCase" in e for e in errors), errors
+
+    def test_a_half_declared_shape_is_rejected(self):
+        errors = _extraction_errors(
+            relationTemplates=[{"predicate": "addresses", "fromKind": "Object"}])
+        assert any("both fromKind and toKind" in e for e in errors), errors
 
 
 class TestValueGate:
@@ -302,6 +327,16 @@ class TestCrossPackResolution:
     def test_a_bare_name_from_exactly_one_other_pack_resolves(self, tmp_path):
         assert self._load(tmp_path, cues={"thingA": ["a cue"]}) == []
 
+    def test_the_core_prefix_spelling_resolves(self, tmp_path):
+        """`compile_value_brief` emits core kinds as `core:<kind>`, which is the
+        form an author is most likely to paste into `entityCues`. It used to
+        fail as 'does not resolve' (review of PR #5647)."""
+        assert self._load(tmp_path, cues={"core:Object": ["a cue"]}) == []
+
+    def test_a_bogus_core_prefixed_kind_is_still_reported(self, tmp_path):
+        errors = self._load(tmp_path, cues={"core:NotAKind": ["a cue"]})
+        assert any("does not resolve" in e for e in errors), errors
+
     def test_a_dangling_bare_name_is_reported(self, tmp_path):
         errors = self._load(tmp_path, cues={"ghost": ["a cue"]})
         assert any("does not resolve" in e for e in errors), errors
@@ -313,7 +348,7 @@ class TestCrossPackResolution:
     def test_a_dangling_template_kind_is_reported(self, tmp_path):
         errors = self._load(tmp_path, templates=[
             {"predicate": "x", "mechanism": "IMPL",
-             "fromKind": "ghost:thing"}])
+             "fromKind": "ghost:thing", "toKind": "thingB"}])
         assert any("relationTemplates[0].fromKind" in e
                    and "does not resolve" in e for e in errors), errors
 

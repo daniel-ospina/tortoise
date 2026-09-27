@@ -197,6 +197,10 @@ extraction:
 #                      core kind, a kind declared by exactly ONE other pack
 #                      (bare), or `namespace:kind` of a loaded pack. That is
 #                      what makes the slot declarative rather than a filter.
+#                      A core kind is written BARE (`Project`) — that is the
+#                      manifest convention. `core:Project`, the internal
+#                      spelling the compiled brief emits, is accepted too, but
+#                      prefer the bare form.
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
 #                      the domain's IMPL/NAND/MITIGATES phrasings.
 #                        predicate:        the domain verb
@@ -204,8 +208,16 @@ extraction:
 #                        fromKind/toKind:  kind references, resolved as above
 #                        description:      one line of what the shape captures
 #   valueGate:         {keep: [...], drop: [...]} — what a VALUABLE utterance
-#                      looks like in this domain. Hints for the value brief: it
-#                      judges utterances and never removes an artefact.
+#                      looks like in this domain. It judges utterances and never
+#                      removes an artefact.
+#                      ⚠️ This is the STRUCTURED form of a decision the pack may
+#                      already declare as `ontology.memory_granularity` — and
+#                      **memory_granularity is the one the live value gate
+#                      reads**: value_gate.py's mechanical rules are pinned to
+#                      it and extractor_v2 renders it into the S1 prompt.
+#                      Nothing reads `valueGate` yet. Until a consumer migrates,
+#                      declaring this block ALONE changes nothing — set
+#                      memory_granularity as well.
 #   promptFragments:   ["..."] — pack-authored instruction snippets DECLARED
 #                      for the value brief. NOTE: no consumer reads the v3.1
 #                      slots yet — they validate and normalize, nothing more.

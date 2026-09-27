@@ -1113,6 +1113,31 @@ class PackRegistry:
                             f"toKind, description)"
                         )
                 mechanism = tpl.get("mechanism")
+                # `predicate` is the one REFERENCE among these slots. The
+                # sibling `ontology.relations` requires a non-empty camelCase
+                # predicate and both kind sides, and a template naming none of
+                # them describes nothing — but this field was checked by
+                # NEITHER pass, so `{"predicate": 123}` and `{}` both
+                # validated clean (review of PR #5647, found independently by
+                # the architecture and security agents).
+                template_pred = tpl.get("predicate")
+                if not isinstance(template_pred, str) or not template_pred:
+                    errors.append(
+                        f"extraction.relationTemplates[{i}].predicate must be "
+                        f"a non-empty string"
+                    )
+                elif not template_pred[0].islower():
+                    errors.append(
+                        f"extraction.relationTemplates[{i}].predicate "
+                        f"'{template_pred}' must be camelCase"
+                    )
+                if "fromKind" in tpl or "toKind" in tpl:
+                    if "fromKind" not in tpl or "toKind" not in tpl:
+                        errors.append(
+                            f"extraction.relationTemplates[{i}]: both fromKind "
+                            f"and toKind are required when either is given "
+                            f"(a half-declared shape cannot be matched)"
+                        )
                 if mechanism is not None and mechanism not in CORE_PREDICATES:
                     errors.append(
                         f"extraction.relationTemplates[{i}].mechanism must be one "
@@ -1442,6 +1467,14 @@ class PackRegistry:
         other pack (single-namespace); more than one match → ambiguous.
         """
         if ":" in ref:
+            if ref.startswith("core:"):
+                # `compile_value_brief` emits core kinds as `core:<kind>`
+                # (`core:Project`), and a pack author is most likely to paste a
+                # kind straight out of it. Accept the engine's OWN spelling by
+                # normalizing to the bare kind, rather than reporting an
+                # unresolvable ref for it. WIDENING only: this form was an
+                # error before, so no existing valid ref changes meaning.
+                return "ok" if ref[len("core:"):] in CORE_KINDS else "unknown"
             return "ok" if ref in all_known else "unknown"
         if ref in pack_kinds or ref in CORE_KINDS:
             return "ok"
