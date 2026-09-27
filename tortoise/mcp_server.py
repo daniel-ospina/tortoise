@@ -4481,7 +4481,11 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
     ).result_set
     if win_rows:
         _supersede_window_end(
-            old_id=old_id, new_id=new_id, old_vf=win_rows[0][0],
+            old_id=old_id, new_id=new_id,
+            # EVERY node carrying the id — the writer stamps them all, so a
+            # first-row-only read would preview success on a write the
+            # writer refuses (the fail-open direction of this same defect).
+            old_vfs=[r[0] for r in win_rows],
             valid_from=None,  # the MCP surface exposes no valid_from kwarg
             stored_vf=win_rows[0][1],
             successor_created_at=win_rows[0][2],

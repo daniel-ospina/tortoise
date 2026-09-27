@@ -720,7 +720,7 @@ def _window_end(old_vf, *, valid_from=None, stored_vf=None,
                 successor_created_at=None, now="2030-01-01T00:00:00+00:00"):
     """Call the helper the way ``supersede_point`` does (keyword-only)."""
     return _supersede_window_end(
-        old_id="pt_old", new_id="pt_new", old_vf=old_vf,
+        old_id="pt_old", new_id="pt_new", old_vfs=[old_vf],
         valid_from=valid_from, stored_vf=stored_vf,
         successor_created_at=successor_created_at, now=now)
 
@@ -789,6 +789,60 @@ def test_window_end_falsey_or_unparseable_start_refused():
         _window_end(0, stored_vf="1969-12-31T00:00:00+00:00")
     # control: epoch-0 is a real instant, so a POST-epoch end is not inverted
     assert _window_end(0, stored_vf="2026-06-01") == "2026-06-01"
+
+
+def test_window_end_checks_EVERY_predecessor_start_not_just_the_first():
+    """A point id is not UNIQUE, and the stamp block MATCHes and stamps
+    EVERY node carrying it — so reading only the first row's start would pass
+    the guard and still persist an inverted window on a sibling node.
+
+    Value that makes it fail: starts on BOTH sides of the successor's start.
+    The fixture reaches it — the sequence carries ``'2026-06-01'`` (before)
+    and ``'2026-06-20'`` (after) against a successor start of
+    ``'2026-06-10'``. A first-row-only read sees the first entry and accepts;
+    the verdict would also flip with the row order the server happens to
+    return, which is what makes it a correctness bug and not a nicety.
+    """
+    with pytest.raises(ValueError, match="inverted window"):
+        _supersede_window_end(
+            old_id="pt_old", new_id="pt_new",
+            old_vfs=["2026-06-01", "2026-06-20"],
+            valid_from=None, stored_vf="2026-06-10",
+            successor_created_at=None, now="2030-01-01T00:00:00+00:00")
+    # Order must not change the verdict: the same two starts, reversed.
+    with pytest.raises(ValueError, match="inverted window"):
+        _supersede_window_end(
+            old_id="pt_old", new_id="pt_new",
+            old_vfs=["2026-06-20", "2026-06-01"],
+            valid_from=None, stored_vf="2026-06-10",
+            successor_created_at=None, now="2030-01-01T00:00:00+00:00")
+    # Control: no sibling start is after the successor, so it is accepted.
+    assert _supersede_window_end(
+        old_id="pt_old", new_id="pt_new",
+        old_vfs=["2026-06-01", None],
+        valid_from=None, stored_vf="2026-06-10",
+        successor_created_at=None, now="2030-01-01T00:00:00+00:00"
+    ) == "2026-06-10"
+
+
+def test_window_end_unparseable_predecessor_start_names_the_real_problem():
+    """An UNPARSEABLE predecessor start gets its own message, not the
+    inversion one.
+
+    Value that makes it fail: the message text. ``''`` buckets LAST as
+    ``(1, '')``, so it sorts after EVERY parseable instant and the inversion
+    predicate fires for any successor — an ordering-fallback artefact, not a
+    comparison. Claiming the successor "precedes" a value nothing precedes,
+    and advising a start "on-or-after ''", sends the caller somewhere it
+    cannot go. The fixture reaches it — ``''`` is written as the stored start.
+    """
+    with pytest.raises(ValueError) as ei:
+        _window_end("", stored_vf="2026-06-01")
+    msg = str(ei.value)
+    assert "not an orderable instant" in msg, msg
+    assert "on-or-after" not in msg, (
+        "the unsatisfiable remedy is still being offered",
+    )
 
 
 def test_window_end_numeric_stored_value_stays_raw():
@@ -871,6 +925,41 @@ def test_supersede_retroactive_successor_agreeing_kwarg_refused(sdk):
 
     assert "validTo" not in _props(sdk, old["id"])
     assert _corrects_out(sdk, new["id"]) == 0
+
+
+def test_supersede_refuses_when_a_DUPLICATE_predecessor_node_is_late(sdk):
+    """The end-to-end form of the fan-out gap: a duplicated predecessor id
+    with starts on BOTH sides of the successor's start.
+
+    Value that makes it fail: the LATE sibling node's window. The fixture
+    reaches it — two nodes share one id (``create_point(id=...)`` allows it),
+    carrying starts ``'2026-06-01'`` and ``'2026-06-20'`` against a successor
+    start of ``'2026-06-10'``. The writer's stamp is a bare
+    ``MATCH (n:Point {id:$id}) SET n.validTo = ...``, so it stamps EVERY node
+    with that id: reading only the first start accepts and leaves the
+    ``'2026-06-20'`` node with ``validFrom > validTo`` — the exact #4021
+    corruption, silently, and with the verdict depending on server row order.
+    """
+    dup = "pt_dup_4021"
+    sdk.create_point("statement", "claim v1 early", id=dup,
+                     validFrom="2026-06-01")
+    sdk.create_point("statement", "claim v1 late", id=dup,
+                     validFrom="2026-06-20")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(dup, new["id"])
+
+    # Fail-closed: NEITHER node was stamped, and no CORRECTS edge landed.
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
+        params={"id": dup}).result_set
+    assert len(rows) == 2, rows
+    for vf, vt in rows:
+        assert vt is None, f"a node was stamped despite the refusal: {rows}"
+        _ = vf
+    assert _corrects_out(sdk, new["id"]) == 0
+
 
 
 def test_supersede_equal_start_allowed(sdk):

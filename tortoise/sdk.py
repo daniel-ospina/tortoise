@@ -2614,7 +2614,7 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
-def _supersede_window_end(*, old_id, new_id, old_vf, valid_from,
+def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                           stored_vf, successor_created_at, now):
     """Resolve the predecessor's window END and refuse an inverted window (#4021).
 
@@ -2637,11 +2637,27 @@ def _supersede_window_end(*, old_id, new_id, old_vf, valid_from,
     ``(1, text)`` and REINTRODUCES the unbounded predecessor window the
     ``valid_from``-agreement guard exists to prevent.
 
-    Refuses when ``old_vf is not None`` and
-    ``_created_sort_key(succ_vf) < _created_sort_key(old_vf)`` — the same
-    measure and the same ``is not None`` presence predicate ``_covers``
-    uses, so the guard's boundary IS the read path's.  Strictly-before only:
-    equality (a zero-length predecessor window) is well-formed and accepted.
+    Refuses when ANY of the predecessor's own starts is present and the
+    successor's resolved start sorts STRICTLY BEFORE it — the same measure and
+    the same ``is not None`` presence predicate ``_covers`` uses, so the
+    guard's boundary IS the read path's.  Strictly-before only: equality (a
+    zero-length predecessor window) is well-formed and accepted.  ``old_vfs``
+    is a SEQUENCE, not a scalar: a point id is not unique (the duplicate
+    fan-out is a tested shape), and the stamp block below MATCHes and stamps
+    EVERY node carrying the id, so reading only the first row would pass the
+    guard and still leave an inverted window on a sibling node — and the
+    verdict would then depend on server row order.  ``_assert_window_start_
+    not_inverted`` (the #5358 sibling) documents and loops over the same
+    fan-out; this mirrors it.
+
+    The refusal fires only when the successor's resolved start is itself
+    parseable — an unparseable resolved END is #5360's residual, not this
+    guard's.  An unparseable predecessor start is refused too, but with its
+    OWN message: it buckets LAST as ``(1, text)``, so the inversion
+    predicate fires for ANY successor, which is an ordering-fallback
+    artefact rather than a comparison — claiming the successor "precedes" a
+    value nothing precedes, and offering an advice string no caller could
+    satisfy, is worse than saying what is actually wrong.
 
     Raises ``ValueError`` BEFORE any mutation at either call site, so no
     event is journaled and no half-write survives a refusal.
@@ -2664,20 +2680,52 @@ def _supersede_window_end(*, old_id, new_id, old_vf, valid_from,
         succ_vf = successor_created_at
     else:
         succ_vf = now  # monotone fallback — never a gap
-    if old_vf is not None and _created_sort_key(succ_vf) < _created_sort_key(old_vf):
-        # Wording is pinned by two tests: the literal substring "inverted
-        # window", and scrub-stability under mcp_server._scrub_error, whose
-        # `(host=|at |to )[\w.-]+` rule rewrites any word ending in at/to
-        # followed by a space — a scrubbed hint reaches the caller as `***`.
-        raise ValueError(
-            f"supersede_point: refusing supersede {old_id!r} - {new_id!r} - "
-            f"the successor's window start {succ_vf!r} precedes the "
-            f"predecessor's validFrom {old_vf!r}; persisting it would leave "
-            f"an inverted window (validTo < validFrom), which no query "
-            f"instant resolves. Give the successor a validFrom on-or-after "
-            f"{old_vf!r}, or use `retract_point()` (window-agnostic) for "
-            f"withdrawal of the predecessor"
-        )
+    if old_vfs:
+        k_succ = _created_sort_key(succ_vf)
+        # An unparseable successor start has no instant to compare against;
+        # that is #5360's residual, not this guard's.
+        if k_succ[0] == 0:
+            for old_vf in old_vfs:
+                if old_vf is None:
+                    continue
+                k_old = _created_sort_key(old_vf)
+                if k_old[0] != 0:
+                    # An UNPARSEABLE predecessor start buckets LAST as
+                    # ``(1, text)``, so it sorts after every parseable
+                    # instant and the inversion predicate fires for ANY
+                    # successor. That is an ordering-fallback artefact, not
+                    # a comparison — so it gets its OWN message rather than
+                    # claiming the successor "precedes" a value nothing
+                    # precedes, and an advice string a caller could never
+                    # satisfy. The refusal itself is kept: the resulting
+                    # window is one no query instant can order.
+                    raise ValueError(
+                        f"supersede_point: refusing supersede {old_id!r} - "
+                        f"{new_id!r} - the predecessor's stored validFrom "
+                        f"{old_vf!r} is not an orderable instant, so the "
+                        f"successor's start {succ_vf!r} cannot be compared "
+                        f"against it; persisting it would leave an inverted "
+                        f"window no query instant resolves. Repair the "
+                        f"predecessor's window first with `update_point()` "
+                        f"to give it a parseable validFrom, or withdraw it "
+                        f"with `retract_point()` (window-agnostic)."
+                    )
+                if k_succ[1] < k_old[1]:
+                    # Wording is pinned by two tests: the literal substring
+                    # "inverted window", and scrub-stability under
+                    # mcp_server._scrub_error, whose `(host=|at |to )[\w.-]+`
+                    # rule rewrites any word ending in at/to followed by a
+                    # space — a scrubbed hint reaches the caller as `***`.
+                    raise ValueError(
+                        f"supersede_point: refusing supersede {old_id!r} - "
+                        f"{new_id!r} - the successor's window start "
+                        f"{succ_vf!r} precedes the predecessor's validFrom "
+                        f"{old_vf!r}; persisting it would leave an inverted "
+                        f"window (validTo < validFrom), which no query "
+                        f"instant resolves. Give the successor a validFrom "
+                        f"on-or-after {old_vf!r}, or use `retract_point()` "
+                        f"(window-agnostic) for withdrawal of the predecessor"
+                    )
     return succ_vf
 
 
@@ -6716,9 +6764,12 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id}) RETURN n.validFrom",
             params={"id": old_id},
         ).result_set
-        old_vf = old_vf_rows[0][0] if old_vf_rows else None
+        # EVERY node carrying the id, not just the first: the stamp below
+        # MATCHes and stamps them all, and row order is server-dependent
+        # (the #5358 sibling loops over the same fan-out for this reason).
+        old_vfs = [r[0] for r in old_vf_rows]
         succ_vf = _supersede_window_end(
-            old_id=old_id, new_id=new_id, old_vf=old_vf,
+            old_id=old_id, new_id=new_id, old_vfs=old_vfs,
             valid_from=valid_from, stored_vf=stored_vf,
             successor_created_at=(vf_rows[0][1] if vf_rows else None),
             now=now,
