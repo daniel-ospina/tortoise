@@ -264,26 +264,45 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // a second, widened variable). Every wizard heading must pass the BARE
   // identifier (round 4, P1).
   //
-  // Checked per LINE and phrased as "no wizard line is missing the bare
-  // identifier" rather than as an exact total. An exact total could never see a
+  // Checked per CALL, not as an exact total. An exact total could never see a
   // NEWLY ADDED widened site — widening one of them leaves the bare count
   // unchanged, so a count of 3 stays green while a fourth, widened heading ships.
-  // The floor below keeps the scan from passing vacuously.
+  //
+  // Checking the LINE alone is not enough either: a widened wizard call can borrow
+  // a bare `connected:` from a second call, an unrelated object literal, or even a
+  // string on the same line. So both the call count and the `connected:` count are
+  // pinned to exactly one before the argument is judged. That also means a call
+  // reformatted across several lines fails LOUDLY, with a message saying to keep it
+  // on one line, rather than being misread as a widening.
   //
   // The old expectation of 2 was simply behind the source: #5496 added
   // `wizardStepSub`'s call site BEFORE #5413 wrote this assertion, so it was born
   // red on a tree that already had three — and stayed invisible for days because
   // ci.yml is pull_request-only, so nothing grades main on this surface.
+  //
+  // The floor below is a sanity check on the SCAN, not a pin on the source: it
+  // exists so a predicate that stops matching cannot pass vacuously. It is
+  // deliberately NOT an exact equality — that exactness is what let the count sit
+  // one behind the source for days — so a genuine removal lowers it on purpose.
   const wizardRenderLines = code
     .split('\n')
     .filter((line) => /wizard(?:StageLabel|StepSub)\(/.test(line))
   assert.ok(wizardRenderLines.length >= 3,
-    `expected at least three wizard render sites, found ${wizardRenderLines.length} — the scan is broken`)
-  assert.deepEqual(
-    wizardRenderLines.filter((line) => !/connected:\s*serverHarnessConnected\s*[,}]/.test(line)),
-    [],
-    'every wizard render site must pass the bare serverHarnessConnected as `connected` — '
-      + 'no inline widening at the render site')
+    `expected at least three wizard render sites, found ${wizardRenderLines.length} — either the scan ` +
+      'is broken, or a render site was removed: if the removal is intended, lower this floor')
+  for (const line of wizardRenderLines) {
+    assert.equal((line.match(/wizard(?:StageLabel|StepSub)\(/g) ?? []).length, 1,
+      'expected exactly one wizard render call on this line — a second call here lets a widened one '
+      + 'borrow the bare argument, and a call split across lines cannot be judged at all. Keep each '
+      + `call, with its \`connected:\`, on one line: ${line.trim()}`)
+    assert.equal((line.match(/connected:\s*/g) ?? []).length, 1,
+      'expected exactly one `connected:` on this wizard call\'s line — a second one here can satisfy '
+      + 'this check for a widened heading, and a call split across lines cannot be judged at all. '
+      + `Keep one full call per line: ${line.trim()}`)
+    assert.match(line, /connected:\s*serverHarnessConnected\s*[,}]/,
+      'every wizard render site must pass the bare serverHarnessConnected as `connected` — '
+        + 'no inline widening at the render site')
+  }
   // ... and then that the import resolves to the shared module's own export.
   const mod = await import('./connectionObservation.js')
   assert.equal(typeof mod.harnessConnectionObserved, 'function')
