@@ -2217,20 +2217,33 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // a writable origin-scoped aux store. Fail CLOSED before the provider
   // redirect: the library would otherwise navigate and lose the verifier,
   // costing a full round trip. The probe key is randomised (localStorage is
-  // cross-tab) and sized to the longest real verifier key so an item-size cap
-  // cannot slip through.
+  // cross-tab) and LONGER than the longest real verifier key so an item-size cap
+  // cannot slip through. It deliberately does NOT carry the `-code-verifier`
+  // suffix: a store that refuses removal cannot be cleaned, and the one entry it
+  // leaks must not be mistakable for a credential.
   function pkceIncapable() {
     if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
     const payload = "v".repeat(160);
-    for (const name of ["sessionStorage", "localStorage"]) {
+    const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(89, "0");
+    // The guard must accept the SAME store the writer will use. `writeAux`
+    // takes the FIRST store that accepts a write, so once a store accepts one,
+    // a store that then cannot REMOVE is where the verifier would live — and
+    // where `removeAux` would leave it orphaned. Test that store end to end and
+    // refuse if it fails, rather than falling through to a store the verifier
+    // will never reach. (Verifier orphaning — A5.)
+    for (const store of auxStores()) {
+      let wrote = false;
       try {
-        const store = window[name];
-        const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(49, "0") + "-code-verifier";
         store.setItem(sentinel, payload);
         if (store.getItem(sentinel) !== payload) throw 0;
+        wrote = true;
         store.removeItem(sentinel);
+        if (store.getItem(sentinel) !== null) throw 0;
         return null;
-      } catch (e) { /* try the next store */ }
+      } catch (e) {
+        if (wrote) return "no-store";
+        try { store.removeItem(sentinel); } catch (e2) { /* best effort */ }
+      }
     }
     return "no-store";
   }
@@ -2337,11 +2350,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const loadParams = () => {
     const out = new URLSearchParams(window.location.search);
     if (window.location.hash.length > 1) {
-      try {
-        new URLSearchParams(window.location.hash.slice(1)).forEach((v, k) => {
-          if (!out.has(k)) out.set(k, v);
-        });
-      } catch (e) { /* malformed fragment — ignore it (the library will too) */ }
+      // No try/catch: `new URLSearchParams(<string>)` cannot throw (the string
+      // branch is a straight form-urlencoded parse), so a guard here would be
+      // dead code describing a state that does not exist.
+      new URLSearchParams(window.location.hash.slice(1)).forEach((v, k) => {
+        if (!out.has(k)) out.set(k, v);
+      });
     }
     return out;
   };
@@ -2365,9 +2379,19 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
       if (u.hash.length > 1) {
         const h = new URLSearchParams(u.hash.slice(1));
-        STRIP_PARAMS.forEach((k) => h.delete(k));
-        const rest = h.toString();
-        u.hash = rest ? "#" + rest : "";
+        // Touch the fragment ONLY when it is a pure param list — i.e. when
+        // re-serialising it round-trips byte-identically. `#section-2` and
+        // `#/route/x` are not param lists (they re-serialise to `section-2=` /
+        // `%2Froute%2Fx=`), and re-serialising one mangles an unrelated part of
+        // the URL this function does not own. A fragment that is not a pure
+        // param list is therefore left alone, transient included: that is
+        // cosmetic URL-bar residue, not page state (the page derives its own
+        // transient from `LOAD_QUERY`, which is captured before this runs).
+        if (h.toString() === u.hash.slice(1)) {
+          STRIP_PARAMS.forEach((k) => h.delete(k));
+          const rest = h.toString();
+          u.hash = rest ? "#" + rest : "";
+        }
       }
       history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
     } catch (e) { /* leave the URL alone */ }

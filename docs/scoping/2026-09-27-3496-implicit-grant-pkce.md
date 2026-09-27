@@ -411,7 +411,7 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
    `"visible"` with the message, for both `?error=access_denied` and a failing `?code=`; (negative) a
    **clean** load (no `code`, no `error`, null session) renders `#view-signin` visible with the error
    element's `classList` **not** containing `"visible"`. **Message bounds are asserted:** the
-   `boundedText(s)` spec is `[ -\u001F\u007F-\u009F\u2028\u2029]` stripped and truncation to
+   `boundedText(s)` spec is `[\u0000-\u001F\u007F-\u009F\u2028\u2029]` stripped and truncation to
    **300 chars** (appending `\u2026` when truncated; the bound is **inclusive** of the ellipsis, so
    the natural `slice(0, 300) + "..."` is a false red — use 299 + `\u2026`, and assert `≤ 300`).
    **The control characters sit INSIDE the 299-char window** (at the tail, the bound alone removes
@@ -469,13 +469,19 @@ on an identical final jar; the clean-load control; the **stateful `classList`** 
 timeout; the guard-removed `plain` control; the **probe payload sized to the verifier** so a
 quota-truncated store cannot pass the pre-flight; the **probe key sized to the longest real verifier
 key**; the **navigate-URL assertion** (not a presence grep) for A2/A4; the **aux-store assertion**
-for A5; the **specified `boundedText`** with a control-char/10 kB payload for A3.
+for A5; the **specified `boundedText`** with a control-char/10 kB payload for A3; the **mixed
+query-transient + non-param-fragment control** so the fragment branch cannot mangle a fragment it
+does not own; the **`throw-remove` store mode** so a pre-flight that accepts an uncleanable store
+cannot pass.
 
 **Mutation check:** each must go red when the production change is reverted (revert `flowType` →
 #1; suffix router → #3; aux-leg-reaching `removeItem` → #4; drop the transient discriminator → #5;
 remove the pre-flight guard → #6 and #9; restore the aux cookie leg → #10; bump the vendored file
 without the specifier → #8; empty the strip list / stop calling `authorizeReturnTo` → #11; an aux
-`removeItem` that skips a store → #12).
+`removeItem` that skips a store → #12; a pre-flight that falls through to a cleaner store instead
+of refusing → #6 with the `throw-remove` store; a fragment branch without the pure-param-list guard
+→ #5's mixed case; a sentinel that regains the `-code-verifier` suffix → #6, since the un-cleanable
+store's one leaked probe entry then reads as a credential).
 
 ### Acceptance criteria
 1. The consent page's provider initiation produces a `code_challenge_method=s256` authorize URL and
@@ -492,12 +498,15 @@ without the specifier → #8; empty the strip list / stop calling `authorizeRetu
 6. All **12** test invariants have a mutation that reddens them (inv 11: an emptied strip list → the
    navigate URL carries the stale `code`; inv 12: an aux `removeItem` that skips one store → the
    aux-store assertion; inv 5: an unbounded message **and** a strip-removed message → the bounds
-   assertion). **Verified by execution, 16/16 KILL.** The first round of this plan listed two rows
+   assertion). **Verified by execution, 20/20 KILL.** The first round of this plan listed two rows
    that could not fail — inv 3's denylist row (the cookie log was filtered by name substring and the
    non-verifier keys were never written, so the assertion was empty) and inv 2's single-origin row
    (the driver echoed the shim's own `location.origin` back). Both are corrected above and re-verified
    by mutation; the rows are kept in this record because the *claim* was false, and a claim about a
-   test's strength is only checkable against the test.
+   test's strength is only checkable against the test. The second review round added four rows for
+   behaviours that were still unpinned (the refusal store that cannot be cleaned, `removeAux`
+   skipping the SECOND store, the fragment branch without its pure-param-list guard, and the
+   sentinel's suffix).
 
 ---
 
@@ -592,6 +601,27 @@ long `error_description` truncated the RESULT line and produced a JSON error poi
 field. The parse is now an anchored regex. The fixed `sleep()` settle windows were replaced with
 condition polling after one flaky failure of inv 11 under host load (1/49 runs).
 
+### diff-time code review ROUND 2 (re-review of the fix commit `8c7df476d`)
+A P1 in round 1 forces a fresh re-review. Two reviewers were dispatched against the fix commit — a
+bug scan (two ordered passes) and a fresh adversarial-coverage reviewer, the latter required because
+the doc declares an `### Adversarial Threat Surface`. Together they returned **5 findings, all P2,
+and one reproduced in-scope gap in a declared class (A5)**. Note that round 2 found defects that
+round 1's nine fixes had introduced or left:
+
+| # | Finding | Fix |
+|---|---|---|
+| 10 | the new fragment branch of `sanitiseUrl()` rewrote the hash whenever it was non-empty, so a mixed URL (`?error=…#section-2`) had its benign fragment re-serialised to `#section-2=` | the branch now fires only when the fragment is a pure param list (`h.toString() === u.hash.slice(1)`); a mixed-case control asserts the fragment survives byte-identically (mutation-verified: removing the guard reproduces `['/oauth/authorize#section-2=']`) |
+| 11 | A5 was genuinely unpinned: a store that accepts a write but refuses removal passed the pre-flight guard (it fell through to the *next* store), while `writeAux` wrote the real verifier to the un-cleanable one — so `removeAux` orphaned a **credential**, contradicting the A5 row and R3's "(not a credential)" wording | `pkceIncapable()` now refuses when the FIRST writable store cannot be cleaned end-to-end; a `throw-remove` store mode pins it (inv 6), inv 4 seeds the verifier into `localStorage` to pin the second store, and the probe sentinel no longer carries a `-code-verifier` suffix; R3/R20 reworded |
+| 12 | the doc's `boundedText` spec carried a literal **NUL byte** (the `\u0000` in the strip class had been written as an actual control character), so the file was binary to `file(1)`/`grep` | replaced with the literal six characters |
+| 13 | `tests/test_oauth_mcp.py`'s corrected comment **re-staled into the same overclaim** — it asserted a static "backstop" for behaviours (`authorizeReturnTo`, `boundedText`, `showTerminalFallback`) with no static pin anywhere | the backstop sentence is **deleted**, not reworded; the comment now states only the four shape pins that actually exist in the file and names the #1701 behaviours as static-only (`AGENTS.md` §B2c) |
+| 14 | the `try`/`catch` added around the fragment parse is dead code — `new URLSearchParams(<string>)` cannot throw — and its comment named an unreachable failure mode | removed, with the reason stated inline |
+
+The round-2 reviewer also reproduced and explicitly judged **out of scope** (recorded, not fixed):
+`?type=foo` / `?sb_flow_id=x` satisfy the map's clean-load definition yet show the terminal message
+(the discriminator reuses `STRIP_PARAMS`); an entirely-control-character `error_description` renders
+as whitespace; and a store whose `getItem` lies is caught by `writeAux`'s verify step. VGATE re-ran
+four of the round-1 mutations independently against the fix commit and confirmed each kill.
+
 ---
 
 **problem-verify** (2 problems-diverge / 2 problems-converge / 4 cycles × 2 verifiers):
@@ -629,8 +659,8 @@ recorded here rather than the gates being silently skipped.
 | **A2** spent-`code` re-forwarding | a stale `?code=` on the return URL | the returned target carries no transient | **inv 11** (+ Step 10(a) textual as secondary) |
 | **A3** reflected-content injection | `?error_description=<script>…` / a 10 kB payload with controls inside the bound window | rendered via `textContent`, bounded to 300 chars, stripped | **inv 5** (both mutations killed: unbounded, strip-removed) |
 | **A4** open redirect | a hostile `redirect_uri`/`next`/return target | origin+path are constants; strip only reduces | **inv 11** + **inv 2** (the built return target, with a foreign-host control) |
-| **A5** verifier orphaning | a store that fails mid-flow; an abandoned/failed exchange | no verifier copy in `document.cookie`; removed keys cleared from both aux stores | **inv 3, 4, 10, 12** + R19 (library-owned copies) |
-| **A6** silent dead-end | a failed/declined/refused flow, in the **query OR the fragment** | visible sign-in view + message; no spurious error | inv 5 (both channels), 6, 9 |
+| **A5** verifier orphaning | a store that fails mid-flow (including one that accepts a WRITE but refuses REMOVAL); an abandoned/failed exchange | no verifier copy in `document.cookie`; removed keys cleared from both aux stores | **inv 3, 4, 10, 12** + R19 (library-owned copies); inv 6's `throw-remove` mode (the guard refuses a store the writer would pick but `removeAux` could not clean) and inv 4's second half (the verifier seeded into `localStorage`, must be cleared THERE) |
+| **A6** silent dead-end | a failed/declined/refused flow, in the **query OR the fragment**; a benign fragment; a mixed query-transient + non-param fragment | visible sign-in view + message; no spurious error; the benign fragment is not read as a transient and not mangled | inv 5 (both channels + the benign and mixed controls), 6, 9 |
 | **A7** weak-challenge downgrade | no `crypto.subtle` | refuse to initiate; never `plain` | inv 9 |
 
 **Explicitly OUT of scope (named, not silently dropped).** These are deferred with owners in the
@@ -689,8 +719,10 @@ implicit**. R2 cross-context verifier loss (mobile/in-app hand-off) — lands on
 R3 **no aux store** (including the access-time-throw and quota classes the sized probe covers) **or no
 WebCrypto ⇒ the pre-flight guard refuses locally and sign-in cannot complete**; a mid-flow write
 failure after the probe passed (a race) costs a round trip ending in the generic terminal state; a
-store that truncates the write or refuses removal leaks one harmless `__tt_probe-*` entry per
-attempt (not a credential). R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
+store that TRUNCATES the write leaks one `__tt_probe-*` entry per attempt (harmless: the probe key
+deliberately carries no `-code-verifier` suffix, so it cannot be mistaken for a credential, and the
+real verifier is never written there because `writeAux` verifies the read-back); a store that refuses
+REMOVAL is refused by the guard, so no credential is written to it at all. R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
 the verdict is an open PR on #3524 deleting the inline client. R6 version drift — test-enforced in
 both directions. R7 item 6 changes the shared cookie's write semantics — gated, so normal sessions
 are byte-identical. R8 the parity suite may trip on the refactor — the Step-3 constraint keeps it
@@ -710,9 +742,10 @@ line/heading/table row. R19 **library-owned verifier copies** — a failed or ab
 leave older `${KEY}-flow-<id>-code-verifier` copies (or all of them when the return carries no
 `sb_flow_id`), plus `${KEY}-flows-code-verifier`; these are single-use, tab-scoped, and unusable
 without the code, and are supabase-js's behaviour, not this page's (invariant 12 asserts the page's
-half). R20 the probe's sentinel is sized to the longest real verifier key so an item-size cap cannot
-slip through; a store that truncates or refuses removal still leaks one harmless `__tt_probe-*`
-entry per attempt (no credential).
+half). R20 the probe's sentinel is LONGER than the longest real verifier key and deliberately carries
+no `-code-verifier` suffix, so an item-size cap cannot slip through while the one entry an
+un-cleanable store leaks cannot be mistaken for a credential; a store that refuses removal is
+refused by the guard (inv 6's `throw-remove` mode), so the verifier is never written there.
 
 ---
 
@@ -735,10 +768,13 @@ Landed files and what each carries. Evidence is stated as a command → observed
 - `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q` → **341 passed, 2 xfailed**.
 - `… pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py test_attribution_actor.py test_control_plane_offload_3498.py test_oauth_redemption_state.py test_user_identity_authority.py -q` → **413 passed**; the 4 reds in that batch (`test_mcp_route_challenge::test_unknown_credential_carries_challenge[tt_deadbeef]`, three in `test_cursor_mcp_exit_evidence.py`) are **reproduced on a clean `origin/main` worktree** — they are the embedded FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), not this diff. Separate failures, different identities on re-run, so not deterministic under this change.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
-- Mutation evidence: **16/16 KILL, 0 survived** (the table is in the PR body). The set now includes
+- Mutation evidence: **20/20 KILL, 0 survived** (the table is in the PR body). The set now includes
   the two invariants the first round could not redden (inv 3's denylist row, inv 2's single-origin
-  row), the `boundedText` bound and strip separately, the fragment channel, and the #1225
-  provider-token strip; the strip mutation is what surfaced that `strippedWrites` had to be asserted
-  before `strippedHasToken` (without it, removing the strip fell through to the refusal and the
-  assertion was vacuous).
+  row), the `boundedText` bound and strip separately, the fragment channel, the #1225
+  provider-token strip, and four rows added by the second review round: the pre-flight falling
+  through to a cleaner store instead of refusing (inv 6, `throw-remove`), `removeAux` skipping the
+  SECOND store (inv 4's `localStorage` half), the fragment branch without its pure-param-list guard
+  (inv 5's mixed control) and the sentinel regaining its `-code-verifier` suffix (inv 6). The strip
+  mutation is what surfaced that `strippedWrites` had to be asserted before `strippedHasToken`
+  (without it, removing the strip fell through to the refusal and the assertion was vacuous).
 - Wiring: `select(["website/apps/dashboard/public/vendor/supabase-2.112.2.min.js"], "pull_request", manifest)` → `surfaces == ["api"]` (was tier-1 smoke before the entry).

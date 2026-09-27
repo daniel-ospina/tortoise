@@ -283,6 +283,18 @@ def test_inv4_removal_path_writes_only_the_session_key() -> None:
         f"an aux-store verifier survived the removal path: {r['auxVerifierKeys']}"
     )
 
+    # The SECOND store too: with sessionStorage unwilling to take a write, the
+    # verifier lives in localStorage and the removal path must clear it THERE.
+    # Without this half, "removed from both aux stores" was only ever exercised
+    # on the first store. (The library's getItemAsync JSON-parses what it reads,
+    # so the seed uses the shape its own writer produces.)
+    second = _run("removal", seedSession='{"access_token":"a"}',
+                  seedVerifier="verifier-abc", sessionMode="throw-method",
+                  seedVerifierStore="local")
+    assert second["auxVerifierKeys"] == [], (
+        f"a localStorage verifier survived the removal path: {second['auxVerifierKeys']}"
+    )
+
 
 def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     """Invariant 5: `?error=access_denied` ends on a VISIBLE sign-in view with the
@@ -349,15 +361,40 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
         f"a benign fragment was rewritten: {benign['replaceStates']}"
     )
 
+    # Mixed case: a transient in the QUERY and a NON-param fragment. The
+    # fragment is not a param list, so stripping must leave it byte-identical
+    # (`#section-2` re-serialises to `section-2=`, which is not the same URL
+    # fragment). Without this control the fragment branch rewrote it to
+    # `#section-2=` — a regression the query-only and fragment-only cases both
+    # miss.
+    mixed = _run("load", search="?error=access_denied&error_description=boom",
+                 hash="#section-2")
+    assert mixed["errorVisible"] is True, mixed
+    assert all("section-2=" not in u for u in mixed["replaceStates"]), (
+        f"the fragment branch mangled a non-param fragment: {mixed['replaceStates']}"
+    )
+    assert any(u.endswith("#section-2") for u in mixed["replaceStates"]), (
+        f"the benign fragment was not preserved: {mixed['replaceStates']}"
+    )
+
 
 def test_inv6_unavailable_store_refuses_locally() -> None:
     """Invariant 6: with both aux stores unavailable — by method throw AND by
     access-time throw — a provider click must NOT navigate and must report the
-    refusal; no verifier may be written anywhere."""
+    refusal; no verifier may be written anywhere.
+
+    The `throw-remove` mode pins the A5 contract directly: a store that accepts
+    a WRITE but refuses REMOVAL is the store `writeAux` would pick, and
+    `removeAux` would then orphan the verifier there. The guard must therefore
+    refuse rather than fall through to a store the verifier will never reach.
+    (Before the fix the guard fell through and the flow proceeded with the
+    verifier written to the un-cleanable store.)"""
     for mode in ({"sessionMode": "throw-method", "localMode": "throw-method"},
-                 {"accessThrow": True}):
+                 {"accessThrow": True},
+                 # session accepts writes but cannot remove; local is fully OK.
+                 {"sessionMode": "throw-remove"}):
         r = _run("click", search="", **mode)
-        assert r["navs"] == [], f"navigated despite an unavailable store: {r} ({mode})"
+        assert r["navs"] == [], f"navigated despite an unusable store: {r} ({mode})"
         assert r["errorVisible"] is True, f"no refusal reported: {r} ({mode})"
         assert r["cookieVerifierKeys"] == [], r
         assert r["auxVerifierKeys"] == [], r
@@ -489,7 +526,7 @@ function makeStore(mode) {
       map.set(String(k), v);
     },
     removeItem: function (k) {
-      if (mode === 'throw-method') throw new Error('storage disabled');
+      if (mode === 'throw-method' || mode === 'throw-remove') throw new Error('storage disabled');
       map.delete(String(k));
     },
     clear: function () { map.clear(); },
@@ -555,10 +592,8 @@ if (opts.seedSession) { cookies.set(COOKIE_NAME, opts.seedSession); }
 const sessionStorage = makeStore(opts.sessionMode || 'ok');
 const localStorage = makeStore(opts.localMode || 'ok');
 if (opts.seedVerifier) {
-  // The library's getItemAsync JSON-parses what it reads (`U` in the bundle),
-  // so a raw string here is invisible to _isPKCECallback and the callback is
-  // never recognised. Seed the same shape the library's own writer produces.
-  sessionStorage.setItem(COOKIE_NAME + '-code-verifier', JSON.stringify(opts.seedVerifier));
+  const target = (opts.seedVerifierStore === 'local') ? localStorage : sessionStorage;
+  target.setItem(COOKIE_NAME + '-code-verifier', JSON.stringify(opts.seedVerifier));
 }
 
 function jsonResponse(obj, status) {
