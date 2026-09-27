@@ -280,6 +280,7 @@ surfaces:
   - test_mcp_server_auth_modes.py
   - test_mcp_telemetry.py
   - test_metering.py
+  - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
   - test_oauth_mcp.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
   - test_oauth_redemption_state.py  # #3027: durable redemption state machine + reconciler (fake CP, no live DB)
@@ -1917,6 +1918,7 @@ durations:
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 5.9
   test_oauth_mcp.py: 16.1
+  test_oauth_consent_pkce.py: 8.0
   test_mcp_server.py: 4.4
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7

@@ -115,6 +115,23 @@ BRIDGE_SCRIPT = 'src="/assets/supabase-session.js"'
 # so the emptiness is not vacuous. See #3559 for the backlog.
 PAGES: list[Path] = []
 
+# ── #3496: key-identity routing (allowlist of ONE key) ────────────────────
+# The router lives in the write/remove paths of each session adapter: exactly
+# one key-left comparison, against that file's session-key constant. The
+# operator polarity differs because the two adapters route the OTHER direction:
+# oauth.py sends a non-session key to the aux stores and never to the cookie
+# (so `!==` on both methods); blog-admin always clears its local copy first and
+# clears the cookie only when the key IS the session key (so `===` on remove).
+_ROUTER_KEY_CMP = re.compile(r"\bkey\s*(===|!==)\s*([A-Za-z_$][\w$]*)")
+_ROUTER_SHAPE_PREDICATE = re.compile(
+    r"\.endsWith\(|\.startsWith\(|\.slice\(|\.charAt\(|\.includes\("
+    r"|RegExp|\.test\(\s*key\b|\.match\(|typeof\s+key\b|\bkey\s*\["
+)
+_ROUTER_CASES = [
+    (OAUTH, "COOKIE_NAME", {"setItem": "!==", "removeItem": "!=="}),
+    (BLOG_ADMIN, "STORAGE_KEY", {"setItem": "!==", "removeItem": "==="}),
+]
+
 
 def _read(path: Path) -> str:
     assert path.exists(), f"missing file: {path}"
@@ -158,13 +175,22 @@ def _extract_helper(text: str, name: str) -> str:
 
 
 def _extract_fn_body(text: str, name: str) -> str:
-    """Extract a named function/method body (any style: `name(key, value) {`,
-    `name: function (key, value) {`, `function name() {`, or
-    `var name = function (...) {`) up to the matching close brace, including
-    the signature line. Does NOT match call sites (`name(...);` — no `{`)."""
+    r"""Extract a named function/method body (any style: `name(key, value) {`,
+    `name: function (key, value) {`, `function name() {`,
+    `var name = function (...) {`, or the TS object-property form
+    `name: (key: string) => {`) up to the matching close brace, including the
+    signature line. Does NOT match call sites (`name(...);` — no `{`).
+
+    #3496: the sigil group was `(?:\:\s*function\s*|\=)` — it required the word
+    `function` after a colon, so the blog-admin adapter's typed arrow form
+    (`setItem: (key: string, value: string) => {`) matched nothing. The group is
+    now `(?::|=)\s*(?:function\s*)?`, a strict SUPERSET of the old one, so every
+    previously supported style still resolves to the same body. Extended in
+    place rather than forked: a second extractor is a second place for the
+    brace-matching to be wrong."""
     m = re.search(
         rf"(?:var\s+|function\s+)?{re.escape(name)}\s*"
-        rf"(?:(?:\:\s*function\s*|\=)\s*(?:function\s*)?)?\([^)]*\)\s*(?:=>\s*)?{{",
+        rf"(?:(?::|=)\s*(?:function\s*)?)?\([^)]*\)\s*(?:=>\s*)?{{",
         text,
     )
     assert m, f"missing function: {name}"
@@ -616,10 +642,73 @@ def test_adapters_share_size_guard_and_localhost_handling() -> None:
         assert "SIZE_GUARD + 100" in text, (
             f"{path}: must warn only when still over SIZE_GUARD + 100"
         )
+        # #3496: the refusal threshold must be DERIVED from the browser rule,
+        # not a literal that merely equals it today (#3503 P3). Both session
+        # adapters must use the SAME derivation — a second, independently
+        # chosen cap is exactly how one copy drifts from the other, and the
+        # shared bridge's own harness (test_session_bridge_fragment_retention.py)
+        # only pins the shared COPY.
+        assert re.search(r"COOKIE_LIMIT\s*=\s*4096", text), (
+            f"{path}: COOKIE_LIMIT must be the browser rule (4096 bytes of "
+            "`name` + '=' + `value`)"
+        )
+        assert re.search(
+            r"SIZE_CAP\s*=\s*COOKIE_LIMIT\s*-\s*COOKIE_NAME\.length\s*-\s*1", text
+        ), (
+            f"{path}: SIZE_CAP must be DERIVED from COOKIE_LIMIT and the cookie "
+            "name length; a literal equal to today's value re-opens the #3503 P3 "
+            "drift"
+        )
     # main.jsx keeps the host-conditional helpers for the marker, so it must
     # still recognise the local origins.
     dash = _read(DASHBOARD)
     assert "localhost" in dash and "127.0.0.1" in dash
+
+
+def test_key_identity_router_allows_only_the_session_key() -> None:
+    """#3496: the write/remove paths route by key IDENTITY, allowlisting ONE
+    key (the session key). The PKCE code_verifier must never reach the
+    JS-readable parent-domain jar, and the rule that keeps it out must not be a
+    denylist of verifier-shaped names.
+
+    Why identity and not shape: a denylist (`.endsWith("-code-verifier")`, a
+    regex on the key) is an OPEN set whose default is the credential jar — every
+    name it has not yet heard of is written to the cookie. supabase-js alone has
+    three verifier key shapes (`<key>-code-verifier`,
+    `<key>-flow-<id>-code-verifier`, `<key>-flows-code-verifier`), and it owns
+    the writer, so the next one arrives without a change here. Routing by
+    `key !== SESSION_KEY` (oauth) / `key === SESSION_KEY` (blog-admin) is
+    closed by construction.
+
+    Both halves are asserted, so neither can pass vacuously: (1) EXACTLY ONE
+    key-left comparison per method, and it must name that file's session-key
+    constant; (2) NO string-shape predicate on `key` in those bodies. The
+    behavioural counterpart — the cookie jar actually observed receiving no
+    verifier write — is tests/test_oauth_consent_pkce.py invariants 3 and 12.
+
+    `getItem` is EXCLUDED deliberately: it parses the cookie header with
+    `p.slice(0, eq) === key`, which is reading, not routing, and the write/remove
+    paths are where a credential can land in the jar.
+    """
+    for path, session_key, methods in _ROUTER_CASES:
+        text = _read(path)
+        for name, operator in methods.items():
+            body = _extract_fn_body(text, name)
+            found = _ROUTER_KEY_CMP.findall(body)
+            assert found == [(operator, session_key)], (
+                f"{path.name}:{name}: expected exactly one key comparison "
+                f"`key {operator} {session_key}`, found {found} — the router is "
+                "an allowlist of ONE; a second comparison, a different "
+                "identifier, or a different polarity is a second routing rule "
+                "(#3496)"
+            )
+            shape = _ROUTER_SHAPE_PREDICATE.findall(body)
+            assert shape == [], (
+                f"{path.name}:{name}: string-shape predicate(s) on `key`: "
+                f"{shape} — a denylist of verifier-shaped names defaults INTO "
+                "the credential jar for every name it has not heard of; route by "
+                "key identity instead (#3496)"
+            )
 
 
 def test_no_page_is_left_on_the_legacy_bridge() -> None:

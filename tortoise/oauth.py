@@ -1880,7 +1880,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   <div class="error" id="error"></div>
   <div class="spinner" id="spinner" style="display:none">Verifying session…</div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.2/dist/umd/supabase.min.js"
         nonce="__NONCE__"
         onerror="showError('Auth script blocked — please retry.')"></script>
 <script nonce="__NONCE__">
@@ -1914,6 +1914,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const COOKIE_PATH = "/";
   const COOKIE_DOMAIN = ".premiselabs.co";
   const SIZE_GUARD = 3800;
+  // #3496 item 6: the write-path cap, DERIVED from the rule (never hardcoded —
+  // a literal previously disagreed with the rule by 4 bytes, leaving an untested
+  // band where the code wrote and the browser dropped). Mirrors
+  // website/assets/supabase-session.js:46-47.
+  const COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
+  const SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
   const isLocal = () => {
     const h = window.location.hostname;
     if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
@@ -1926,8 +1932,41 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   };
   const domainAttr = () => (isPremiselabsHost() && !isLocal() ? "; Domain=" + COOKIE_DOMAIN : "");
   const secureAttr = () => (isLocal() ? "" : "; Secure");
+  // #3496: the PKCE code_verifier must NEVER reach the JS-readable
+  // parent-domain jar. Key-identity routing, ported from the blog-admin
+  // console's authStorage contract (website/apps/blog-admin/src/lib/supabase.ts):
+  // ONLY the session key may reach document.cookie; every other key is an
+  // origin-scoped aux credential. The aux chain has NO cookie leg, so the
+  // allowlist is fail-closed by construction.
+  const auxStores = () => {
+    const out = [];
+    try { if (window.sessionStorage) out.push(window.sessionStorage); } catch (e) { /* unavailable */ }
+    try { if (window.localStorage) out.push(window.localStorage); } catch (e) { /* unavailable */ }
+    return out;
+  };
+  const readAux = (key) => {
+    for (const s of auxStores()) {
+      try { const v = s.getItem(key); if (v !== null) return v; } catch (e) { /* next store */ }
+    }
+    return null;
+  };
+  const writeAux = (key, value) => {
+    for (const s of auxStores()) {
+      try {
+        s.setItem(key, value);
+        if (s.getItem(key) === value) return true;
+      } catch (e) { /* next store */ }
+    }
+    return false;   // refuse — never fall through to the cookie jar
+  };
+  const removeAux = (key) => {
+    for (const s of auxStores()) {
+      try { s.removeItem(key); } catch (e) { /* next store */ }
+    }
+  };
   const cookieStorage = {
     getItem(key) {
+      if (key !== COOKIE_NAME) return readAux(key);
       try {
         const parts = document.cookie.split("; ");
         for (const p of parts) {
@@ -1938,6 +1977,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       } catch (e) { return null; }
     },
     setItem(key, value) {
+      if (key !== COOKIE_NAME) { writeAux(key, value); return; }
       if (!value) { this.removeItem(key); return; }
       let encoded = encodeURIComponent(value);
       // Size guard (#1225): a GitHub OAuth session (user_metadata +
@@ -1948,10 +1988,34 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           const obj = JSON.parse(value);
           delete obj.provider_token;
           delete obj.provider_refresh_token;
+          // #3496 item 6: port the shared bridge's non-essential-claim
+          // narrowing (website/assets/supabase-session.js:111-135).
+          if (obj.user) {
+            delete obj.user.identities;
+            if (obj.user.user_metadata) {
+              const md = obj.user.user_metadata;
+              const keep = {};
+              if (md.display_name) keep.display_name = md.display_name;
+              if (md.avatar_url) keep.avatar_url = md.avatar_url;
+              if (md.full_name) keep.full_name = md.full_name;
+              if (md.name) keep.name = md.name;
+              obj.user.user_metadata = keep;
+            }
+          }
           encoded = encodeURIComponent(JSON.stringify(obj));
         } catch (e) { /* not JSON — leave as-is */ }
         if (encoded.length > SIZE_GUARD + 100) {
           console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
+        }
+        if (encoded.length > SIZE_CAP) {
+          // A write past the browser's limit is a silent no-op there, so the
+          // caller would believe the session landed. Refuse and REPORT: this
+          // page has no read-back caller, so a console-only refusal is
+          // invisible by construction (#3503/#3496 item 6).
+          console.warn('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write');
+          showSignin();
+          showError("Your sign-in session is too large to store securely here — try again.");
+          return;
         }
       }
       const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
@@ -1959,6 +2023,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
         "; SameSite=Lax" + secureAttr() + "; Expires=" + expires;
     },
     removeItem(key) {
+      if (key !== COOKIE_NAME) { removeAux(key); return; }
       document.cookie = key + "=;" + domainAttr() + "; Path=" + COOKIE_PATH +
         "; SameSite=Lax" + secureAttr() + "; Max-Age=0";
     },
@@ -1973,6 +2038,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           persistSession: true,   // required for the custom storage to be used
           autoRefreshToken: false,
           detectSessionInUrl: true,  // OAuth fallback ingests the hash
+          // #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
+          // browser-based client. Explicit PKCE; the code_verifier is routed to
+          // the origin-scoped aux chain by the adapter above, never the cookie.
+          flowType: "pkce",
         },
       });
     } else {
@@ -2128,10 +2197,55 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     document.getElementById("view-signin").style.display = "block";
   }
 
+  // #3496: the transient params a provider round-trip may leave on the URL.
+  // Stripped with URLSearchParams.delete (not a string replace, so an encoded
+  // `%63ode=` is removed too).
+  const STRIP_PARAMS = ["code", "error", "error_code", "error_description",
+                        "error_uri", "sb_flow_id", "flow_id", "type"];
+  // #3496: defence-in-depth — the return target is rebuilt from the sanitised
+  // query so a transient is never echoed back to the provider. (GoTrue's
+  // `url.Values.Set` makes the "permanent stale-code loop" premise false; this
+  // is canonicalisation, not a loop fix.)
+  function authorizeReturnTo() {
+    const u = new URL(window.location.href);
+    STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+    return window.location.origin + AUTHORIZE_PATH + (u.search || "");
+  }
+  // #3496: PKCE cannot be done correctly without WebCrypto (the bundle silently
+  // downgrades to `plain` when crypto.subtle is absent — reachable because this
+  // page deliberately supports LAN-http origins) and cannot be completed without
+  // a writable origin-scoped aux store. Fail CLOSED before the provider
+  // redirect: the library would otherwise navigate and lose the verifier,
+  // costing a full round trip. The probe key is randomised (localStorage is
+  // cross-tab) and sized to the longest real verifier key so an item-size cap
+  // cannot slip through.
+  function pkceIncapable() {
+    if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
+    const payload = "v".repeat(160);
+    for (const name of ["sessionStorage", "localStorage"]) {
+      try {
+        const store = window[name];
+        const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(49, "0") + "-code-verifier";
+        store.setItem(sentinel, payload);
+        if (store.getItem(sentinel) !== payload) throw 0;
+        store.removeItem(sentinel);
+        return null;
+      } catch (e) { /* try the next store */ }
+    }
+    return "no-store";
+  }
   async function signInWithProvider(provider) {
+    const incap = pkceIncapable();
+    if (incap) {
+      showSignin();
+      showError(incap === "no-webcrypto"
+        ? "This browser cannot complete a secure sign-in here (no WebCrypto). Open this page over HTTPS."
+        : "This browser is blocking site storage, so sign-in cannot be completed securely. Enable storage (or leave private browsing) and retry.");
+      return;
+    }
     const { error } = await supabaseClient.auth.signInWithOAuth({
       provider: provider,
-      options: { redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search },
+      options: { redirectTo: authorizeReturnTo() },
     });
     if (error) showError(error.message);
   }
@@ -2208,9 +2322,41 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // #1701 R1: auto-advance when a session lands after an initial null
   // (provider redirect hash ingestion / cookie session). runConsentFlow is
   // in-flight guarded, so a double fire never runs two overlapping previews.
+  // #3496: one terminal state for a failed/declined/refused sign-in. Capture
+  // the load-time transient ONCE, read-only — the library has already consumed
+  // `?code` synchronously inside createClient(), so never rewrite the URL before
+  // it has attempted the code.
+  const LOAD_QUERY = new URLSearchParams(window.location.search);
+  const LOAD_TRANSIENT = {
+    present: STRIP_PARAMS.some((k) => LOAD_QUERY.has(k)),
+    error_description: LOAD_QUERY.get("error_description"),
+  };
+  function boundedText(s) {
+    if (!s) return "";
+    const t = String(s).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ");
+    return t.length > 299 ? t.slice(0, 299) + "\u2026" : t;
+  }
+  function showTerminalFallback() {
+    showSignin();
+    showError(boundedText(LOAD_TRANSIENT.error_description) || "Sign-in failed — please start again.");
+  }
+  function sanitiseUrl() {
+    try {
+      const u = new URL(window.location.href);
+      STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    } catch (e) { /* leave the URL alone */ }
+  }
+
   if (supabaseClient) {
-    supabaseClient.auth.onAuthStateChange((event) => {
-      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") runConsentFlow();
+    supabaseClient.auth.onAuthStateChange(async (event) => {
+      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") {
+        if (LOAD_TRANSIENT.present) {
+          const { data } = await supabaseClient.auth.getSession();
+          if (!data || !data.session) { showTerminalFallback(); sanitiseUrl(); return; }
+        }
+        runConsentFlow();
+      }
     });
     runConsentFlow();
   } else spinner(false);

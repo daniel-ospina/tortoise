@@ -96,6 +96,21 @@ the token regardless of which subdomain presented it.
   auth-topology decision on **#3501 / #4054**; the full rationale lives in the private `premise-labs`
   repo (`engineering/auth/SCOPE.md` §3, §4 W6, §13), which this repo's Functions also cite — named
   here because it is outside this repository and cannot be opened from it.
+  **For the consent page's storage adapter specifically** (`tortoise/oauth.py`, the inline
+  `cookieStorage`): its write and remove paths allowlist **one** key — only the session-key
+  constant declared on that page (`COOKIE_NAME`) may reach `document.cookie` — and route every
+  other key, in whatever shape, to an origin-scoped aux chain (`sessionStorage` first,
+  `localStorage` second, and a fail-closed refusal if neither accepts the write). The PKCE
+  `code_verifier` is one of those other keys, so it never enters the legacy JS-readable jar. That
+  routing contract is deliberately SHARED with the blog-admin console's adapter
+  (`website/apps/blog-admin/src/lib/supabase.ts`, `authStorage`), which routes on
+  `key === STORAGE_KEY`. The **destination** deliberately differs — the console uses
+  `localStorage` only; the consent page prefers `sessionStorage` — because a verifier is a
+  single-use credential that must not outlive the tab that began the flow (RFC 10017 §8.5). That
+  is a recorded `keep separate` on the destination, while the routing itself is
+  `unify-contract-keep-drivers`. What this overrides is the browser-auth norm of letting the
+  verifier ride in the same origin-persistent storage as the session: on this page that storage is
+  the legacy jar described below, so the verifier is routed away from it instead.
 - **Legacy cohort — a SECOND, LIVE session credential (the ruling above is VIOLATED here).**
   The legacy JS-readable parent-domain cookie
   `sb-tortoise-auth-token` is **not** the session backbone (the canonical session is the HttpOnly
@@ -106,14 +121,13 @@ the token regardless of which subdomain presented it.
   - **Issued by — the legacy writer, and the UNFIXED EXCEPTION to the ruling above** (tracked, not
     accepted): the MCP consent page in `tortoise/oauth.py`, served live at `/oauth/authorize`
     (`tortoise/hosted_api.py:27035`) — that legacy cookie's production origin is `api.premiselabs.co`.
-    Its inline client uses the same name — `COOKIE_NAME = "sb-tortoise-auth-token"` (`:1445`) — and
-    writes that **legacy** cookie with `document.cookie` plus a `Domain=.premiselabs.co` attribute
-    (`:1498`), i.e. **parent-domain and JS-readable**, after `signInWithPassword` /
+    Its inline client uses the same name — `COOKIE_NAME = "sb-tortoise-auth-token"` — and
+    writes that **legacy** cookie with `document.cookie` plus a `Domain=.premiselabs.co` attribute,
+    i.e. **parent-domain and JS-readable**, after `signInWithPassword` /
     `signInWithOAuth` / `refreshSession`.
     Removing it is **#3524** (`SCOPE.md` §4 W3); `SCOPE.md` §7's ordering guard defers deleting
-    this writer until #3524 ships (`_CONSENT_HTML` — `oauth.py:1445` / `:1467` / `:1498`; §7 cites
-    the range `1335-1360`, the head of the `_CONSENT_HTML` block that encloses these lines) — so it
-    is still issuing today.
+    this writer until #3524 ships (the `_CONSENT_HTML` template in `tortoise/oauth.py`) — so it is
+    still issuing today.
   - **Accepted by** two live surfaces:
     1. the blog-admin console's **data layer** — `website/apps/blog-admin/src/lib/supabase.ts`
        (`STORAGE_KEY`, adapter `authStorage`) is the supabase-js storage adapter, and with `persistSession: true`

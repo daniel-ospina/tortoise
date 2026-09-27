@@ -478,6 +478,17 @@ SOURCE_PATTERNS = {
             # token-flow fix must change. Paired with CORE_ALSO so the
             # core-registered half is not dropped by the named-surface match.
             "tortoise/oauth.py",
+            # #3496: the consent page pins its browser auth client to a CDN
+            # specifier whose version must equal the VENDORED bundle the
+            # behavioural harness executes (test_oauth_consent_pkce.py, api).
+            # `website/` is in NON_PYTHON_PREFIXES, so a vendor-only bump matched
+            # no pattern and fell through to tier-1 smoke — the version pin
+            # would never run on the PR that can break it, and neither would the
+            # harness that executes the very file being bumped (the
+            # #1349/#3332/#4171 silent-drop class). `_selection_relevant()` lets
+            # a SOURCE_PATTERNS match beat the prefix filter, so this entry is
+            # what makes the bump select `api`.
+            "website/apps/dashboard/public/vendor/",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
             # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
