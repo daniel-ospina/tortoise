@@ -415,18 +415,119 @@ def _capture_session_release(session_key: str | None) -> None:
         _CAPTURE_SESSIONS.pop(session_key, None)
 
 
+def _graph_name_for_namespace(namespace: str | None, *,
+                              graph_name: str | None = None,
+                              uri_graph: str | None = None) -> str:
+    """Namespace → FalkorDB graph name — a mirror of ``TortoiseSDK._get_proj``.
+
+    ``tortoise/sdk.py`` owns this mapping; this is its only restatement, kept
+    here because `_data_graph_name` must name the graph a request opens WITHOUT
+    opening a projection (admission is I/O-free — #3718/#4625), and because an
+    edit to ``sdk.py`` shifts every ``sdk.py:N`` citation in
+    ``docs/product/sdk-rename-table.md`` (MEMORY.md: the sdk_rename_table trap —
+    `tests/test_sdk_rename_table.py` reds on any added/removed sdk.py line).
+    `tests/test_capture_loop_responsiveness.py::`
+    `test_capture_graph_name_mirrors_the_sdk_mapping` drives the REAL
+    ``_get_proj`` against this function through the NAMESPACE-FAMILY branches
+    (``registry`` / explicit ``graph_name`` / ``test_`` / ``test-`` / ``org_``).
+    The URI fallback is NOT covered by that guard and is not reachable from
+    `_data_graph_name` (which never passes ``uri_graph``), so a drift in
+    ``_get_proj``'s URI parsing cannot split the gate from the opened graph for
+    any real credential — see `_data_graph_name`.
+
+    Branch order and truthiness mirror ``_get_proj`` EXACTLY: ``registry``
+    first; ``graph_name is not None`` (not truthiness); the ``test_`` /
+    ``tortoise_test`` family; the hyphenated ``test-`` family; then
+    ``org_{namespace}``; a falsy namespace falls back to the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        return "registry_tortoise"
+    if graph_name is not None:
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            return f"{namespace.replace('-', '_')}_tortoise"
+        return f"org_{namespace}"
+    return uri_graph or "tortoise"
+
+
+def _data_graph_name(org: dict) -> str | None:
+    """The FULL DB graph name this request's data path will open — #3365.
+
+    It is the single value the ADMISSION GATE and the opener share. For a
+    graph-bound key `_data_sdk` passes it straight through as ``graph_name=``;
+    for an org-wide key the name is decided by ``TortoiseSDK._get_proj`` from
+    ``namespace=org_id``, and this function mirrors that derivation — so the two
+    agree by construction on both branches. `_capture_session_key` keys the
+    in-flight registry on the SAME value, so two credentials that route to the
+    same physical graph share one bucket whatever ``graph_id`` shape they carry.
+    `tests/test_capture_loop_responsiveness.py::`
+    `test_data_sdk_opens_the_graph_the_gate_keys_on` pins the CALL FORM the
+    opener uses for each branch (and the name it yields) against this value, and
+    `test_capture_graph_name_mirrors_the_sdk_mapping` pins this value's
+    namespace-family derivation against the real ``_get_proj``.
+
+    A falsy ``org_id`` therefore keys on the literal ``tortoise``, while
+    ``_get_proj`` would open the URI's own graph. That divergence is
+    unreachable in practice (``org_id`` is a DB key and always truthy) and
+    benign if reached (every falsy-id request resolves to the same one graph).
+
+    ``None`` = the binding's namespace did not resolve. `_data_sdk` refuses that
+    request (403 GRAPH_NOT_FOUND) BEFORE any write, so callers must keep it OUT
+    of every real graph's bucket — fail closed, never widen.
+    """
+    if org.get("graph_id"):
+        return org.get("graph_namespace") or None
+    # Org-wide key / session auth: `_data_sdk` opens `namespace=org_id`, whose
+    # resolved name is the SDK derivation. Deliberately NOT the dict's
+    # `graph_namespace`: that is `teams.graph_name`/`t.graph_name`, which
+    # `_data_sdk` ignores on purpose (the selfhost `org_{name}` lane diverges —
+    # #2023), so keying on it would bucket the request by a graph it never opens.
+    return _graph_name_for_namespace(org.get("org_id"))
+
+
 def _capture_session_key(org: dict, session_id: str | None) -> str | None:
-    """Scope an in-flight session key to its tenant (and graph) — #3129.
+    """Scope an in-flight session key to its tenant AND its graph — #3129/#3365.
 
     Session ids are CLIENT-chosen (often a generic harness name), so a bare
     session_id would let one tenant's in-flight capture refuse another tenant's
     unrelated capture of the same name (reviewer-measured 409). The admission
     COUNTER stays global (it bounds a server resource); only this key is scoped.
+
+    #3365: the graph component is the graph the capture will ACTUALLY write to
+    (`_data_graph_name`), not the credential's ``graph_id`` binding. A
+    legacy/pre-guard key bound to the org's DEFAULT graph carries that node's
+    real ``g_<hex>`` id while writing to the same physical graph an org-wide key
+    writes to; keying on the binding id split them into two buckets, so both
+    passed admission and a second same-session capture was served a 0-extract
+    replay — the #3129 silent-loss window, reopened.
+
+    Deliberately NOT normalized by the binding's ``kind`` (the shape
+    `backup_sweep.enumerate_org_graphs` uses for its PERSISTENT object keys —
+    Q4 #2313 / #2376). Those two are different artifacts with different jobs:
+    in the registry/selfhost lane an org-wide key opens ``org_{org_id}`` while a
+    default-kind binding opens ``org_{name}`` — two DIFFERENT graphs — so
+    kind-folding would refuse a legitimate capture with a false 409. This key is
+    ephemeral and process-local (`_CAPTURE_SESSIONS`), so what it must equal is
+    the physical graph, and the value is derived only from server-resolved auth
+    fields (never client input); `_data_sdk` still runs the ownership check
+    before any write.
     """
     if not session_id:
         return None
-    return (f"{org.get('org_id')}:"
-            f"{org.get('graph_id') or 'default'}:{session_id}")
+    graph = _data_graph_name(org)
+    if graph is None:
+        # Fail closed: a bound key whose namespace did not resolve opens NO
+        # graph (403 in `_data_sdk`), so it gets its own bucket — never
+        # another graph's, and never the org default's. The `::` separator is
+        # not produced by any graph-name producer (`org_…`, `test_…_tortoise`,
+        # `registry_tortoise`, `tortoise`), so the sentinel cannot collide with
+        # a real graph's bucket even if one were named `unresolved…`.
+        graph = f"unresolved::{org.get('graph_id')}"
+    return f"{org.get('org_id')}:{graph}:{session_id}"
 
 
 def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
@@ -4346,7 +4447,11 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     org_id = org["org_id"]
     gid = org.get("graph_id")
     if gid:
-        ns = org.get("graph_namespace")
+        # The graph-bound branch of `_data_graph_name` — the ONE owner of the
+        # name this request opens. The #3129/#3365 admission gate keys on the
+        # same function, so the graph it reserves and the graph opened here
+        # cannot drift apart.
+        ns = _data_graph_name(org)
         if not ns:
             raise HTTPException(
                 status_code=403,

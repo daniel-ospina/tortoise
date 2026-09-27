@@ -49,6 +49,7 @@ import pytest
 # also installs the module-level env (pepper/encryption key) on import.
 from tests.test_hosted_api import (
     TEST_ORG_ID,
+    TEST_TEAM,
 )
 from tests.test_hosted_api import (
     client as client,
@@ -1028,7 +1029,7 @@ def test_same_session_retry_during_an_in_flight_capture_is_refused(
             # tenant's in-flight capture refuses another tenant's unrelated
             # capture that happens to use the same generic harness name.
             in_flight_keys = list(ha_mod._CAPTURE_SESSIONS)
-            assert in_flight_keys == [f"team-001:default:{payload['session_id']}"], (
+            assert in_flight_keys == [f"team-001:org_team-001:{payload['session_id']}"], (
                 f"the in-flight session registry is not tenant-scoped: "
                 f"{in_flight_keys} (#3129)")
             try:
@@ -1262,7 +1263,7 @@ def test_session_key_is_held_until_the_marker_write_lands(client, monkeypatch):
     monkeypatch.setattr(ha_mod, "_capture_abandoned_marker", _slow_marker)
     payload = {"conversation": _CONV, "session_id": "s-marker-hold-3129",
                "harness": _HARNESS}
-    key = "team-001:default:s-marker-hold-3129"
+    key = "team-001:org_team-001:s-marker-hold-3129"
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1383,7 +1384,7 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
     monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
     payload = {"conversation": _CONV, "session_id": "s-cancel-3129",
                "harness": _HARNESS}
-    key = "team-001:default:s-cancel-3129"
+    key = "team-001:org_team-001:s-cancel-3129"
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1472,7 +1473,7 @@ def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
     monkeypatch.setattr(TortoiseSDK, "_extract_session_llm", _stalled_m2)
     payload = {"conversation": _CONV, "session_id": "s-m2-cancel-3129",
                "harness": _HARNESS}
-    key = "team-001:default:s-m2-cancel-3129"
+    key = "team-001:org_team-001:s-m2-cancel-3129"
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -1546,6 +1547,308 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
         slot_a.release()
     assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
     assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
+# ── #3365: the admission key's graph component is the graph OPENED ─────────
+#
+# `_capture_session_key` keyed on the CREDENTIAL's `graph_id` binding. A
+# legacy/pre-guard API key bound to the team's DEFAULT graph carries that
+# node's real `g_<hex>` id (`sdk._graph_create`; supabase
+# `set_graph_recording`/`set_graph_name` mint the same shape) while writing to
+# the SAME physical graph a team-wide key writes to — so the two shapes landed
+# in different buckets, both passed admission, and the second request read
+# `capture_ok = NULL` / was served 200 + `extraction_mode=replayed` + 0
+# extracted while the first attempt then FAILED: the #3129 silent-loss window,
+# reopened. These tests pin the fix (the key names the graph the data path will
+# open), the NEGATIVE case (genuinely different graphs must stay distinct —
+# the registry/selfhost `org_{name}` lane), and the drift guards tying the
+# gate's resolution to the opener (`_data_sdk`) and to the SDK's own
+# namespace→graph-name mapping (`TortoiseSDK._get_proj`).
+
+# The kind='default' Graph node's real gid — the legacy binding's value.
+_LEGACY_DEFAULT_GID = "g_legacy_default_3365"
+
+
+def test_default_bound_and_org_wide_keys_share_one_bucket():
+    """#3365: two credentials writing ONE physical graph share ONE bucket.
+
+    The hosted (supabase/production) shape: the default graph's real name is
+    `teams.graph_name` = `org_{org_id}` (the `hosted_api.py` writers store
+    `f"org_{org_id}"` — parity with the data-plane namespace, #1903 — and
+    `_data_sdk` reads the dict's `graph_namespace` as
+    `t_graph_name or f"org_{org_id}"`), while an org-wide key opens
+    `_make_sdk(namespace=org_id)`, whose `_get_proj` derivation is also
+    `org_{org_id}` — the SAME graph. A legacy bound-default key resolving to it
+    must therefore REFUSE a concurrent capture of the same session_id instead of
+    running beside it. (The registry/selfhost lane mints its default node as
+    `org_{name}` via `sdk.org_create` — a DIFFERENT graph from an org-wide
+    key's `org_{org_id}`; that lane is the negative case in the next test.)
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import _capture_session_key, _reserve_capture_slot
+
+    org_wide = {"org_id": "team-a"}
+    bound_default = {"org_id": "team-a", "graph_id": _LEGACY_DEFAULT_GID,
+                     "graph_namespace": "org_team-a"}
+    assert _capture_session_key(bound_default, "s") \
+        == _capture_session_key(org_wide, "s"), (
+            "a legacy default-bound key and an org-wide key over the SAME "
+            "physical graph produced different admission buckets — the "
+            "#3129 race is reachable for that pair (#3365)")
+
+    baseline = ha_mod._CAPTURE_IN_FLIGHT
+    slot = _reserve_capture_slot(_capture_session_key(org_wide, "s"))
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _reserve_capture_slot(_capture_session_key(bound_default, "s"))
+        assert excinfo.value.status_code == 409, excinfo.value
+    finally:
+        slot.release()
+    assert baseline == ha_mod._CAPTURE_IN_FLIGHT, ha_mod._CAPTURE_IN_FLIGHT
+    assert ha_mod._CAPTURE_SESSIONS == {}, ha_mod._CAPTURE_SESSIONS
+
+
+def test_genuinely_distinct_graphs_keep_distinct_buckets():
+    """#3365 NEGATIVE case: the key must still separate DIFFERENT graphs.
+
+    The fix is not "fold every bound key onto the default". In the
+    registry/selfhost lane (`sdk.org_create`) the default node's namespace is
+    `org_{name}` while an org-wide key opens `org_{org_id}` — TWO different
+    physical graphs (`_data_sdk` documents the #2023 divergence) — so folding
+    by the binding's `kind` (the `backup_sweep.enumerate_org_graphs` rule for
+    its persistent object keys) would refuse a legitimate capture with a false
+    409. A ghost binding, a custom graph, and another tenant stay separate too.
+    """
+    from tortoise.hosted_api import _capture_session_key
+
+    org_wide = _capture_session_key({"org_id": "01ULID"}, "s")
+    # registry/selfhost default node: a DIFFERENT physical graph
+    registry_default = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_def",
+         "graph_namespace": "org_acme"}, "s")
+    custom_a = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_a",
+         "graph_namespace": "org_01ULID_g_a"}, "s")
+    custom_b = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_b",
+         "graph_namespace": "org_01ULID_g_b"}, "s")
+    # ghost bindings: namespace unresolved → `_data_sdk` 403s before any
+    # write, so they must never share a real graph's bucket — NOR each other's
+    ghost = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_ghost"}, "s")
+    ghost_b = _capture_session_key(
+        {"org_id": "01ULID", "graph_id": "g_ghost_b"}, "s")
+    other_tenant = _capture_session_key({"org_id": "02OTHER"}, "s")
+
+    keys = {org_wide, registry_default, custom_a, custom_b, ghost, ghost_b,
+            other_tenant}
+    assert len(keys) == 7, sorted(keys)
+    # `graph_id=""` is FALSY for `_data_sdk` (`if gid:`) → the org-wide path.
+    assert _capture_session_key(
+        {"org_id": "01ULID", "graph_id": ""}, "s") == org_wide
+
+
+def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
+    """#3365 DRIFT GUARD: the gate's restatement must equal `_get_proj`.
+
+    `_graph_name_for_namespace` restates the SDK's namespace→graph-name rule.
+    It is deliberately NOT defined in `tortoise/sdk.py`: any added/removed line
+    there shifts every `sdk.py:N` citation in
+    `docs/product/sdk-rename-table.md` and reds
+    `tests/test_sdk_rename_table.py` (MEMORY.md's sdk_rename_table trap). The
+    copy is therefore pinned against the REAL `_get_proj` here — driven with a
+    recording projection stub, so this does NO graph I/O and cannot depend on
+    the test-redirect/lane in which the file runs.
+    """
+    import tortoise.hosted_api as ha_mod
+    import tortoise.sdk as sdk_mod
+
+    seen: list[str | None] = []
+
+    class _RecordingProj:
+        def __init__(self, path=None, graph_name=None, **kw):
+            seen.append(graph_name)
+            self.graph_name = graph_name
+
+    monkeypatch.setattr(sdk_mod, "FalkorProjection", _RecordingProj)
+
+    def _opened(namespace=None, graph_name=None):
+        sdk = sdk_mod.TortoiseSDK.__new__(sdk_mod.TortoiseSDK)
+        sdk._proj = None
+        sdk._db_uri = None
+        sdk._db_path = ":memory:"
+        sdk._namespace = namespace
+        sdk._graph_name = graph_name
+        seen.clear()
+        sdk._get_proj()
+        return seen[-1]
+
+    for ns in ("team-001", "test_x", "tortoise_testing", "test-x",
+               "registry"):
+        assert _opened(namespace=ns) == ha_mod._graph_name_for_namespace(ns), ns
+    # explicit graph_name: verbatim, and it wins over the namespace family
+    assert _opened(namespace="team-001", graph_name="org_x_g_1") \
+        == ha_mod._graph_name_for_namespace("team-001", graph_name="org_x_g_1") \
+        == "org_x_g_1"
+    # a falsy namespace falls back to the URI's own graph, else "tortoise"
+    assert ha_mod._graph_name_for_namespace(None) == "tortoise"
+    assert ha_mod._graph_name_for_namespace(None, uri_graph="uri_graph") \
+        == "uri_graph"
+    # `_data_graph_name` never passes `uri_graph`, so a falsy org_id keys on the
+    # literal "tortoise" while `_get_proj` would open the URI's graph — the
+    # divergence documented on `_data_graph_name` as unreachable (org_id is a DB
+    # key) and benign (all falsy-id requests resolve to one graph).
+    assert ha_mod._data_graph_name({"org_id": None}) == "tortoise"
+
+
+def test_data_sdk_opens_the_graph_the_gate_keys_on(monkeypatch):
+    """#3365 DRIFT GUARD 2: the opener and the admission key agree.
+
+    `_data_sdk` is the only authority on which graph a request opens. For BOTH
+    credential branches the gate must bucket by the SAME graph name — and the
+    org-wide branch must IGNORE the dict's `graph_namespace`, exactly as
+    `_data_sdk` does (the selfhost `org_{name}` divergence it refuses to
+    honour), or the gate would key on a graph the request never opens.
+    """
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha_mod
+
+    opened: list[dict] = []
+    monkeypatch.setattr(ha_mod, "_make_sdk",
+                        lambda **kw: opened.append(kw) or kw)
+    monkeypatch.setattr(ha_mod, "_assert_graph_owned", lambda *a, **k: None)
+
+    def _opened_kwargs(org):
+        opened.clear()
+        ha_mod._data_sdk(org)
+        return opened[-1]
+
+    def _opened_name(org):
+        """The name the opener will open.
+
+        Load split, stated plainly: for a graph-BOUND org dict this reads the
+        verbatim `graph_name=` the opener hands the SDK, so
+        `_opened_name(org) == _data_graph_name(org)` is a real cross-check. For
+        an ORG-WIDE dict the name is resolved through the same mirror
+        `_data_graph_name` calls, so that leg is a CALL-FORM assertion — the
+        kwargs checks below carry it — not an independent derivation; the
+        value's equality to the real `TortoiseSDK._get_proj` is pinned by
+        `test_capture_graph_name_mirrors_the_sdk_mapping`.
+        """
+        kw = _opened_kwargs(org)
+        return (kw["graph_name"] if "graph_name" in kw
+                else ha_mod._graph_name_for_namespace(kw["namespace"]))
+
+    # The CALL FORM, asserted non-tautologically: a bound key opens its resolved
+    # namespace VERBATIM (`graph_name=`, no namespace resolution), and an
+    # org-wide key hands the SDK only `namespace=org_id` — never the dict's
+    # `graph_namespace`, which `_data_sdk` deliberately ignores.
+    assert _opened_kwargs({"org_id": "team-a", "graph_id": _LEGACY_DEFAULT_GID,
+                           "graph_namespace": "org_team-a"}) \
+        == {"graph_name": "org_team-a"}
+    assert _opened_kwargs({"org_id": "team-a"}) == {"namespace": "team-a"}
+    assert _opened_kwargs({"org_id": "01ULID", "graph_namespace": "org_acme"}) \
+        == {"namespace": "01ULID"}
+
+    for org in ({"org_id": "team-a"},
+                {"org_id": "team-a", "graph_id": _LEGACY_DEFAULT_GID,
+                 "graph_namespace": "org_team-a"},
+                {"org_id": "team-a", "graph_id": "g_c",
+                 "graph_namespace": "org_team-a_g_c"}):
+        assert _opened_name(org) == ha_mod._data_graph_name(org), org
+
+    divergent = {"org_id": "01ULID", "graph_namespace": "org_acme"}
+    assert ha_mod._data_graph_name(divergent) == "org_01ULID"
+    assert _opened_name(divergent) == "org_01ULID"
+
+    # A ghost binding fails closed in BOTH: the opener raises before any write,
+    # and the gate keeps it out of every real graph's bucket.
+    ghost = {"org_id": "team-a", "graph_id": "g_ghost"}
+    with pytest.raises(HTTPException):
+        ha_mod._data_sdk(ghost)
+    assert ha_mod._data_graph_name(ghost) is None
+
+
+def test_capture_under_a_legacy_default_bound_key_is_refused(client,
+                                                             monkeypatch):
+    """#3365 end-to-end: the legacy shape is refused, not served a replay.
+
+    An org-wide capture is in flight when a request carrying a LEGACY key bound
+    to the SAME default graph (`graph_id` = that `kind='default'` node's real
+    gid, namespace = the org graph name — the production supabase shape) posts
+    the same session_id. Before the fix the second request was ADMITTED, read
+    `capture_ok = NULL` and was answered 200 + `extraction_mode=replayed` +
+    0 extracted while the first attempt then failed — a false success receipt
+    (the measured #3129 loss).
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    # The default node as `sdk.org_create` mints it and as supabase
+    # `set_graph_recording` upserts it: a real gid whose namespace IS the org
+    # graph name. Raw registry write so the seed is mode-independent.
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:'default', "
+        "kind:'default', namespace:$ns, status:'active'})",
+        params={"gid": _LEGACY_DEFAULT_GID, "tid": TEST_ORG_ID,
+                "ns": "org_team-001"})
+
+    release = threading.Event()
+
+    def _stalled(_self, windowed, session_id, now, **kw):
+        release.wait(timeout=30)
+        return [], {}
+
+    monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled)
+    payload = {"conversation": _CONV, "session_id": "s-legacy-shape-3365",
+               "harness": _HARNESS}
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            first = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            # Wait for ADMISSION — the handler's FIRST gate, before any SDK /
+            # projection / embedding work — not for the extraction. (Waiting on
+            # the extraction entry is cold-start fragile in this file's
+            # URI-less lane: pre-extraction warm-up can outlast the transport's
+            # wait budget and answer a 504, which is orthogonal to #3365.)
+            for _ in range(600):
+                if ha_mod._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.05)
+            keys = list(ha_mod._CAPTURE_SESSIONS)
+            assert keys, "the first capture never reached admission"
+            assert keys == [f"{TEST_ORG_ID}:org_team-001:{payload['session_id']}"], (
+                f"the admission bucket is not the graph the capture opens: "
+                f"{keys} (#3365)")
+            # Same GRAPH, different credential SHAPE — the #3365 key pair.
+            app.dependency_overrides[get_current_org] = lambda: dict(
+                TEST_TEAM, graph_id=_LEGACY_DEFAULT_GID,
+                graph_namespace="org_team-001")
+            try:
+                # The refusal is at admission, so it cannot wait on the first
+                # request's (possibly slow) extraction.
+                second = await asyncio.wait_for(
+                    ac.post("/v1/sessions", json=payload), timeout=30.0)
+            finally:
+                release.set()
+            with suppress(Exception):
+                await asyncio.wait_for(first, timeout=30.0)
+            return keys, second
+
+    _, second = asyncio.run(_run())
+
+    assert second.status_code == 409, (
+        f"a capture under a LEGACY default-bound key returned "
+        f"{second.status_code} ({second.text[:200]}) while an org-wide capture "
+        f"of the SAME physical graph and session_id was in flight (#3365) — a "
+        f"2xx here is the #3129 false receipt with 0 turns extracted")
+    assert "Retry-After" in second.headers, second.headers
+
 
 # ── #3086: the capture WRITE path must not block the loop either ───────────
 #

@@ -55,6 +55,14 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py (and
   # tortoise/monitoring.py), which selects the `api` surface.
   - test_control_plane_offload_3498.py
+  # #3365: the session-capture ADMISSION key must name the graph the data path
+  # actually OPENS — a legacy key bound to the org's default graph (a real
+  # `g_<hex>` id routing to the same physical graph as an org-wide key) must
+  # share that graph's in-flight bucket, or a second capture is served a
+  # 0-extract replay while the first fails (#3129 loss, reopened). Same dual
+  # registration as the guards above, for the same reason: the file it guards
+  # is tortoise/hosted_api.py, which selects the `api` surface.
+  - test_capture_loop_responsiveness.py
   # #4015: the analytics emit's off-loop + fail-soft contract (the Stripe
   # webhook's failure path included). Same dual registration as the loop-
   # responsiveness guards above: the file it guards is tortoise/hosted_api.py
@@ -670,7 +678,7 @@ surfaces:
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
-  - test_capture_loop_responsiveness.py
+  - test_capture_loop_responsiveness.py  # #3365: capture ADMISSION key vs the graph the data path opens (dual: api)
   - test_capture_session.py
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
