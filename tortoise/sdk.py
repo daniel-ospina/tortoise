@@ -787,6 +787,44 @@ def _capture_truncation_marker(total: int) -> str:
     return f" {_CAPTURE_TRUNCATION_SENTINEL} original length {total} chars]"
 
 
+#: The FULL truncation marker, anchored at the tail (``_split_truncation_marker``
+#: also accepts the bare-sentinel fallback that ``cap`` too small to carry the
+#: message falls back to). Kept strict so a marker is only recognised when it is
+#: the one this module wrote — never a user's lookalike prose.
+_TRUNCATION_MARKER_FULL_RE = re.compile(
+    re.escape(_CAPTURE_TRUNCATION_SENTINEL) + r" original length \d+ chars\]")
+
+
+def _split_truncation_marker(content: str) -> tuple[str, str]:
+    """Split a turn's TRAILING truncation marker off its body (#4897).
+
+    Returns ``(body, marker)`` with ``body + marker == content``. ``marker`` is
+    the exact string :func:`_clip_capture_turn_content` appended — the full
+    `` …[truncated: original length N chars]``, or the bare-sentinel fallback —
+    or ``""`` when the turn was not cut.
+
+    ⛔ WHY SPLIT AT ALL: the marker must NEVER be part of the text handed to
+    :func:`security.redact_secrets`. The ``private_key`` rule's fail-closed
+    branch matches to ``\\Z``, so a dangling PEM header consumes everything after
+    it — the marker included — and a cut turn is then stored UNMARKED (the
+    round-2 P2: 5,000-char window, 4,823-char stored body, no sentinel). Keeping
+    the marker out of the scan makes its survival STRUCTURAL for EVERY rule
+    instead of a property each rule must separately be proved not to violate,
+    and it preserves a prior cut's TRUE ``total`` verbatim when the body is
+    re-scanned — an expanding #4911 replacement can push the body past ``cap``,
+    and re-clipping that would re-derive a FALSE total from the scrubbed length
+    (the round-1 P1 this whole file is about).
+    """
+    idx = content.rfind(_CAPTURE_TRUNCATION_SENTINEL)
+    if idx < 0:
+        return content, ""
+    tail = content[idx:]
+    if tail == _CAPTURE_TRUNCATION_SENTINEL \
+            or _TRUNCATION_MARKER_FULL_RE.fullmatch(tail):
+        return content[:idx], tail
+    return content, ""
+
+
 def _clip_capture_turn_content(
     content: str, cap: int = _CAPTURE_TURN_CAP) -> str:
     """``content`` unchanged when it fits ``cap``; otherwise cut AND marked.
@@ -998,9 +1036,9 @@ def _redact_turn_contents(
     overage is redaction markup, bounded by the credentials present in the
     window, not un-scanned conversation.
 
-    Idempotent: no rule's ANCHOR GROUP can be satisfied inside a
-    ``[REDACTED:<kind>]`` marker, so re-running over already-redacted text
-    changes nothing and adds no counts — which is what lets the turn store, the
+    Idempotent in BOTH senses that matter. (1) No rule's ANCHOR GROUP can be
+    satisfied inside a ``[REDACTED:<kind>]`` marker, so re-running the scrub
+    adds no counts and changes no span — which is what lets the turn store, the
     Source and the extractor each apply it without multi-counting the same
     span. The reason is the ANCHOR, not the marker's character classes: the
     ``private_key`` body matches everything (including ``[``/``:``/``]``), and
@@ -1008,6 +1046,15 @@ def _redact_turn_contents(
     separator or whitespace that keyword's anchor group requires. (An earlier
     revision of this docstring gave the character-class reason, which is
     false; ``security.redact_secrets`` carries the corrected proof.)
+
+    (2) The truncation marker is split OFF before the scan and re-attached
+    VERBATIM, so re-applying to a body an expanding redaction has already pushed
+    past ``cap`` does NOT re-clip it and re-derive a false ``total`` from the
+    scrubbed length (the #4897 P1). Re-application is therefore exact even
+    though the returned body may exceed ``cap`` by the redaction markup — a
+    blanket "idempotent" claim that ignored this is exactly what would invite
+    the P1 back (a 6,927-char turn became ``original length 5,008`` on the
+    second pass).
     """
     out: list[dict] = []
     totals: dict[str, int] = {}
@@ -1020,10 +1067,18 @@ def _redact_turn_contents(
         # turn — a cap that does not cap.
         had_content = bool(content)
         cut = False
-        if cap is not None and len(content) > cap:
+        # #4897: split the truncation marker (if any) OFF the text that gets
+        # SCANNED — a fail-closed redaction (``private_key``'s ``\Z`` branch)
+        # would otherwise consume the marker and store a cut turn unmarked.
+        # An ALREADY-marked body is left alone here (never re-clipped): its
+        # marker carries the TRUE total, so re-deriving one from the scrubbed
+        # length would be the round-1 P1 all over again.
+        body, marker = _split_truncation_marker(content)
+        if not marker and cap is not None and len(content) > cap:
             # #4897: clip WITH the marker — a capped scan that returned a
             # silently-shortened string is the same defect one layer down.
-            content = _clip_capture_turn_content(content, cap)
+            body, marker = _split_truncation_marker(
+                _clip_capture_turn_content(content, cap))
             cut = True
         # #5445: the role is caller-controlled and persisted as text by three
         # sinks, so it is coerced and scrubbed through this same chokepoint. The
@@ -1034,6 +1089,11 @@ def _redact_turn_contents(
         if cap is not None and len(role) > cap:
             role = role[:cap]
         scrubbed_role, role_counts = redact_secrets(role)
+        # #5472 emptiness is judged on the PRE-cut content (``had_content``,
+        # above): a ``cap`` that cuts the turn to nothing must still emit the
+        # CUT turn, not forward the original. A marker-only turn is not empty —
+        # its marker is why it is stored at all — and ``had_content`` already
+        # says so, so no separate body/marker test is needed here.
         if not had_content:
             # Genuinely-empty content: nothing in the body to scan. The role is
             # still caller-controlled, so it is scrubbed here too; the turn is
@@ -1045,7 +1105,8 @@ def _redact_turn_contents(
             else:
                 out.append(turn)
             continue
-        scrubbed, counts = redact_secrets(content)
+            continue
+        scrubbed, counts = redact_secrets(body)
         if role_counts:
             counts = {**counts}
             for kind, n in role_counts.items():
@@ -1061,12 +1122,16 @@ def _redact_turn_contents(
         # The clip above ran BEFORE the scrub, so ``counts`` here means "matched
         # inside the returned window"; the result may exceed ``cap`` by the
         # redaction markup and MUST NOT be re-clipped (see the docstring).
+        # #4897: re-attach the marker AFTER the scrub — no rule could have
+        # consumed it, because it was never in the scanned text. ``marker`` is
+        # the pre-scan string itself, so a prior cut's true ``total`` survives
+        # a re-application exactly.
         if counts or cut:
             if role_counts:
-                out.append({**turn, "content": scrubbed,
+                out.append({**turn, "content": scrubbed + marker,
                             "role": scrubbed_role})
             else:
-                out.append({**turn, "content": scrubbed})
+                out.append({**turn, "content": scrubbed + marker})
         else:
             out.append(turn)
     return out, totals
@@ -6470,6 +6535,16 @@ class TortoiseSDK:
             raise ValueError(
                 "_extract_session_llm requires an LLM provider key or "
                 "TORTOISE_SESSION_LLM_MOCK=1 — no extractor available (#822)")
+        # #4897 round-2 P3: WINDOW the input first. The transcript contract
+        # above requires the WINDOWED conversation, and this is the one capture
+        # path that can receive a RAW one (``capture_session`` already passes
+        # ``windowed``, so this is a no-op there). Without it a direct caller
+        # would feed the extractor AND the blank-gate an unclipped multi-MB
+        # body — the unbounded cost the contract exists to prevent, and exactly
+        # what ``_session_extraction_estimate`` already compensates for by
+        # windowing its own input. It also restores the pre-#4897 behaviour for
+        # a raw caller, when ``_session_llm_transcript`` clipped internally.
+        conversation = _capture_turn_window(conversation)
         # #4911: the model must not receive the credential either. Two reasons,
         # and the second is the one that matters: (1) it would transmit the
         # secret to a third-party provider, and (2) a model that ECHOES the

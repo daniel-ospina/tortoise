@@ -4334,6 +4334,87 @@ def test_extraction_estimate_legacy_alias(sdk, monkeypatch):
         _session_extraction_estimate(conv)
 
 
+def test_extraction_estimate_is_taken_over_the_stored_window(sdk):
+    """M5 (#4897 round 2): the estimate must window its OWN input.
+
+    ``_session_llm_transcript`` no longer clips (the true total is decided once,
+    on pre-redaction text), so ``_session_extraction_estimate`` windows before
+    calling it. Without that compensating window a raw caller's estimate counts
+    sentences the extractor never receives — this fixture makes the raw and
+    windowed sentence counts differ, so removing the window reds it.
+    """
+    from tortoise.sdk import (
+        _capture_turn_window,
+        _session_extraction_estimate,
+        _session_llm_transcript,
+    )
+    content = "one. " + "x" * 4900 + " extra." * 120
+    raw = [{"role": "user", "content": content}]
+    assert len(content) > 5000
+    windowed = _capture_turn_window(raw)
+    assert _session_llm_transcript(windowed)[1] < _session_llm_transcript(raw)[1], (
+        "this fixture must discriminate: the tail sentences are past the cut")
+    assert _session_extraction_estimate(raw) == \
+        _session_extraction_estimate(windowed), (
+        "the raw estimate counted sentences the stored window never receives")
+
+
+def test_capture_turn_texts_bounds_a_raw_over_cap_conversation():
+    """M4 (#4897 round 2): the stored-text path applies the pre-scan cap itself.
+
+    ``_capture_turn_texts_with_redactions`` names its parameter ``windowed`` but
+    does not rely on the caller — it passes ``cap=_CAPTURE_TURN_CAP`` to
+    ``_redact_turn_contents`` so a RAW over-cap conversation is still bounded,
+    MARKED and scrubbed. Without that cap a raw >cap turn is stored whole and
+    unmarked (a silent cut and an unbounded Scan).
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts_with_redactions,
+    )
+    content = "x" * (_CAPTURE_TURN_CAP + 1000)
+    texts, _counts = _capture_turn_texts_with_redactions(
+        [{"role": "user", "content": content}])
+    body = texts[0][len("[user] "):]
+    assert len(body) <= _CAPTURE_TURN_CAP, (
+        "the stored-text path returned an unbounded body for a raw caller")
+    assert _CAPTURE_TRUNCATION_SENTINEL in body, (
+        "a raw over-cap turn was stored with NO marker")
+    assert f"original length {len(content)} chars]" in body
+
+
+def test_extract_session_llm_windows_a_raw_over_cap_conversation(
+        sdk, monkeypatch):
+    """#4897 round-2 P3: the M2 seam windows its own input.
+
+    The transcript contract now requires the WINDOWED conversation; a direct
+    caller must not feed the extractor and the blank-gate an unclipped body.
+    Production already passes ``windowed`` (a no-op), so this pins the raw
+    caller's path.
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
+    monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                        lambda: _EmptyOutputExtractor())
+    seen: list = []
+    real = sdk_mod._session_llm_transcript
+
+    def spy(conversation):
+        seen.append([t["content"] for t in conversation])
+        return real(conversation)
+
+    monkeypatch.setattr(sdk_mod, "_session_llm_transcript", spy)
+    content = "x" * (_CAPTURE_TURN_CAP + 3000)
+    sdk._extract_session_llm(
+        [{"role": "user", "content": content}], "sess_p3_win",
+        "2026-08-20T00:00:00+00:00")
+    assert seen, "the transcript builder was never called"
+    assert all(len(c) <= _CAPTURE_TURN_CAP for c in seen[0]), (
+        "the M2 extractor received an unclipped body from a raw caller")
+    assert _CAPTURE_TRUNCATION_SENTINEL in seen[0][0]
+
+
 def test_capture_writes_mitigates_artifact(sdk, monkeypatch):
     """#1532 D3: capture applies v2 payload MITIGATES -> mitigation artifact
     identical to the commit path (mitigation Point + IMPL + mitigated_by),
