@@ -203,15 +203,24 @@ def test_reconcile_converges_on_crlf_files(env, sdk):
 def test_doctor_includes_session_indexing(env, capsys, monkeypatch, tmp_path):
     """doctor surfaces the session-indexing check (corpus empty → warn).
 
-    Hermetic on the GRAPH-AWARE branch (#5815): TORTOISE_DB_PATH pins a seeded
-    embedded target so the row is rendered from the live projection regardless
-    of the host. The test previously read the ambient DB — it passed on a
-    developer host that owned one and failed on CI, which is why the row's
-    absence looked like a flake.
+    Hermetic on the GRAPH-AWARE branch (#5815): the DB env vars are scrubbed and
+    TORTOISE_DB_PATH pins a seeded embedded target, so the row is rendered from
+    the live projection regardless of the host. The test previously read the
+    ambient DB — it passed on a developer host that owned one and failed on CI,
+    which is why the row's absence looked like a flake.
+
+    The assertions are POSITIVE: `0 Points` can only come from the live graph
+    block, so the corpus-only fallback cannot satisfy this test on its behalf.
     """
     from tortoise.__main__ import main
     from tortoise.sdk import TortoiseSDK
 
+    # TORTOISE_DB_URI and the legacy FALKORDB_* trio OUTRANK TORTOISE_DB_PATH
+    # (#705/#715 precedence) and the docker CI legs set a URI — without this
+    # scrub the seeded DB is ignored and the test opens the ambient graph.
+    for var in ("TORTOISE_DB_URI", "FALKORDB_HOST", "FALKORDB_PORT",
+                "FALKORDB_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
     db_path = tmp_path / "doctor_indexing.db"
     # `_get_proj()` is enough to create the DB FILE the #2204 guard tests for,
     # and costs ~1s — `create_point` costs ~60s here (it loads embedding
@@ -225,8 +234,10 @@ def test_doctor_includes_session_indexing(env, capsys, monkeypatch, tmp_path):
     rc = main(["doctor"])
     out = capsys.readouterr().out
 
-    assert "not set up yet" not in out  # the GRAPH-AWARE branch really ran
-    assert "Session indexing" in out
+    assert "0 Points" in out, out            # the GRAPH-AWARE branch really ran
+    assert "graph unavailable" not in out, out
+    assert "not set up yet" not in out
+    assert out.count("Session indexing") == 1, out  # exactly once, never twice
     assert "corpus empty" in out
     assert rc in (0, 1)
 
@@ -267,6 +278,7 @@ def test_doctor_surfaces_session_indexing_before_init(
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
+    assert out.count("Session indexing") == 1, out  # exactly once, never twice
     assert "corpus empty" in out, out
     assert "not set up yet" in out  # the pre-init branch really was taken
     assert rc == 0  # #2204: a missing DEFAULT target is the expected first run
@@ -299,6 +311,7 @@ def test_doctor_session_indexing_before_init_reports_unindexed_corpus(
     out = capsys.readouterr().out
     row = next(line for line in out.splitlines() if "Session indexing" in line)
 
+    assert out.count("Session indexing") == 1, out  # exactly once, never twice
     assert "1 corpus file," in row, row  # singular, not "1 corpus files"
     assert "none indexed" in row, row
     assert "⚠️" in row and "❌" not in row, row
@@ -346,6 +359,7 @@ def test_doctor_session_indexing_renders_when_target_unresolved(
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
+    assert out.count("Session indexing") == 1, out  # exactly once, never twice
     assert "graph unavailable" in out, out
     assert "sup3rsekrit" not in out  # credentials still never reach stdout
     assert rc == 1  # the unresolved target is the config error, not this row
@@ -367,6 +381,7 @@ def test_doctor_session_indexing_renders_when_graph_unreachable(
     out = capsys.readouterr().out
 
     assert "Session indexing" in out, out
+    assert out.count("Session indexing") == 1, out  # exactly once, never twice
     assert "graph unavailable" in out, out
     assert rc == 1
 

@@ -492,15 +492,15 @@ def session_corpus_dir() -> Path:
 
 
 def corpus_files(directory: str | Path | None = None) -> list[Path]:
-    """Canonical session-corpus ``*.md`` listing (#5815).
+    """Canonical session-corpus ``*.md`` listing — the SHARED enumeration for
+    the session-index health surfaces (#5815).
 
-    ONE definition of "what the session corpus is". The enumeration used to be
-    duplicated — ``TortoiseSDK.session_index_health`` and `doctor`'s
-    corpus-only fallback row each did their own ``session_corpus_dir()`` +
-    ``rglob("*.md")`` — and two owners of this definition is the drift class
-    PR #793 spent six review rounds killing (a new filter, subtree exclusion,
-    or corpus env var would make the two counts disagree with no test able to
-    catch it). Both callers now share this function.
+    `TortoiseSDK.session_index_health` and `doctor`'s corpus-only fallback row
+    each used to run their own ``session_corpus_dir()`` + ``rglob("*.md")``,
+    i.e. two owners of the same definition for one verdict; both now call this
+    function. Other consumers (``ingest_corpus``, the IDF builder) keep their
+    own listings — this change deliberately unifies the health/doctor pair and
+    claims nothing about those.
 
     Returns the sorted listing, or an empty list when the directory does not
     exist (a missing corpus is an empty corpus, never an error).

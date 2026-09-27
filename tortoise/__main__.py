@@ -6475,20 +6475,14 @@ def _cmd_index_github(args):
         indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
-#: #280 check 4 — the empty-corpus detail. Rendered from this ONE literal by
-#: both the graph-aware branch and the corpus-only fallback (#5815), so the
-#: empty-corpus verdict cannot drift between them. The corpus ENUMERATION is
-#: shared the same way, via `session_indexer.corpus_files`. Only the non-empty
-#: verdicts differ, deliberately: a corpus-only row cannot grade an index that
-#: does not exist yet, so it warns while the graph-aware row may fail.
+#: #280 check 4 — the empty-corpus detail for a target that has no graph yet.
+#: Used by the graph-aware branch and by the `pre-init-default` fallback, so the
+#: expected-first-run verdict reads identically in both. The other fallback
+#: reasons deliberately carry their own empty-corpus wording (a configured-missing
+#: target and an unreadable graph are not "expected for new setups").
 _SESSION_INDEX_EMPTY_DETAIL = (
     "corpus empty — nothing indexed (expected for new setups)"
 )
-
-#: Why the graph-aware session-index verdict is unavailable, when it is. Set
-#: by `_cmd_doctor` and consumed by `_session_index_rows_without_graph`.
-_SESSION_INDEX_REASONS = ("pre-init-default", "pre-init-configured",
-                          "graph-unavailable")
 
 
 def _session_index_rows_without_graph(
@@ -6545,10 +6539,14 @@ def _session_index_rows_without_graph(
             return [("Session indexing", "⚠️",
                      "corpus empty — nothing indexed "
                      "(no graph at the configured target)")]
+        # No `tortoise init` advice here: the target came from a flag or env
+        # var, and `init` takes no `--db`, so naming it would either fail or
+        # create the canonical default instead of the target the user aimed
+        # at — masking the config error this split exists to surface.
         return [("Session indexing", "⚠️",
                  f"{n} corpus file{plural}, none indexed — no graph at the "
-                 "configured target (fix the configured target, or run "
-                 "`tortoise init`)")]
+                 "configured target (fix the configured target: "
+                 "TORTOISE_DB_URI / TORTOISE_DB_PATH / --db)")]
     if n == 0:
         return [("Session indexing", "⚠️",
                  "corpus empty — nothing indexed (graph unavailable)")]
