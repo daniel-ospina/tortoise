@@ -45,6 +45,7 @@ from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
+from .backup_ledger import BACKUP_OBJECT_SUFFIXES
 from .hosted_backup import (
     _is_supabase_source,
     create_backup,
@@ -559,8 +560,13 @@ def read_graph_state(storage, org_id: str, graph_id: str) -> dict[str, Any]:
 
 
 def _delete_uploaded(storage, org_id: str, backup_id: str) -> None:
-    """Best-effort removal of a just-uploaded (guard-rejected) backup."""
-    for suffix in ("dump.enc", "manifest.json"):
+    """Best-effort removal of a just-uploaded (guard-rejected) backup.
+
+    Iterates :data:`BACKUP_OBJECT_SUFFIXES` — the ONE home for a backup's object
+    set (#5062) — so a guard-rejected backup can never leave an orphan
+    ``ledger.json`` that a later sweep would read as coverage.
+    """
+    for suffix in BACKUP_OBJECT_SUFFIXES:
         try:
             storage.delete(f"backups/{backup_id}/{suffix}")
         except Exception as e:
@@ -853,6 +859,10 @@ def _backup_graph(
         "node_count": node_count,
         "pruned": len(deleted),
         "mirror": mirror_result,
+        # #5062: the destination's read-back coverage. `backed_up` is reachable
+        # only through a create_backup whose ledger was read back verified, so
+        # this is evidence, not a restatement of the writer's counters.
+        "coverage": manifest.get("coverage"),
     }
 
 

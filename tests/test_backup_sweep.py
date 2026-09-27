@@ -33,6 +33,7 @@ from tortoise.backup_sweep import (
     run_graph_purge,
     org_graph_name,
 )
+from tortoise.backup_ledger import BACKUP_OBJECT_SUFFIXES
 from tortoise.hosted_backup import MemoryStorage, list_backups, source_dialect
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
@@ -2460,7 +2461,7 @@ def test_sweep_mirrors_accepted_archive_when_configured(shared_proj):
 
         prim_keys = sorted(store.list("backups/team_x/"))
         mir_keys = sorted(mirror.list("backups/team_x/"))
-        assert len(prim_keys) == 2  # dump.enc + manifest.json
+        assert len(prim_keys) == len(BACKUP_OBJECT_SUFFIXES)  # dump.enc + manifest.json + ledger.json
         assert mir_keys == prim_keys  # keys preserved byte-for-byte
         # read-back integrity: mirrored ciphertext matches the primary
         for k in prim_keys:
@@ -2512,7 +2513,7 @@ def test_sweep_mirror_failure_is_loud_and_primary_survives(shared_proj):
         assert "mirror failed" in default_res["error"]
         # the primary archive is intact (durable regardless of the mirror)
         prim_keys = sorted(store.list("backups/team_x/"))
-        assert len(prim_keys) == 2
+        assert len(prim_keys) == len(BACKUP_OBJECT_SUFFIXES)
         assert [k for k in prim_keys if k.endswith("dump.enc")]
         # and the streak is recorded so /status surfaces the breach
         assert res["graph_error_streaks"].get("team_x:default") == 1

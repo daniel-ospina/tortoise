@@ -60,6 +60,15 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
 
+from tortoise.backup_ledger import (
+    BACKUP_OBJECT_SUFFIXES,
+    LEDGER_SUFFIX,
+    BackupVerificationError,
+    LedgerObject,
+    build_ledger,
+    serialize_ledger,
+    verify_ledger,
+)
 from tortoise.fork_slot import (
     ForkSlotRecovery,
     ForkSlotWedgedError,
@@ -254,6 +263,70 @@ def _dump_node(internal_id, labels, props) -> dict:
     }
 
 
+# ── #5062: dump reads are TOTAL OR FAIL ─────────────────────────────────────
+# The node/edge reads used to be single unpaged queries, so a graph larger than
+# FalkorDB's server-global RESULTSET_SIZE (default 10000) exported a silently
+# truncated artifact whose node_count was the writer's own len(nodes) (#4515).
+# They are now keyset-paged, and the paged read is cross-checked against the
+# store's OWN aggregate count — a page boundary alone cannot prove totality when
+# a server is tuned BELOW the page size.
+
+#: Keyset page size. Must sit well UNDER RESULTSET_SIZE so a page is never
+#: truncated; the independent aggregate count below is the load-bearing guard.
+_DUMP_PAGE_SIZE = 1000
+
+_DUMP_NODE_PAGE_QUERY = (
+    "MATCH (n) WHERE id(n) > $cursor "
+    "RETURN id(n), labels(n), properties(n) ORDER BY id(n) LIMIT $batch"
+)
+_DUMP_EDGE_PAGE_QUERY = (
+    "MATCH (a)-[r]->(b) WHERE id(r) > $cursor "
+    "RETURN id(a), id(b), type(r), properties(r), id(r) "
+    "ORDER BY id(r) LIMIT $batch"
+)
+#: One row (an aggregate) — RESULTSET_SIZE cannot truncate it (#4233).
+_COUNT_ALL_EDGES_QUERY = "MATCH ()-[r]->() RETURN count(r)"
+
+
+def _paged_rows(g, query: str, key_index: int, *, batch: int = _DUMP_PAGE_SIZE):
+    """Yield every row of ``query``, keyset-paged on the ``id()`` ordering key.
+
+    ``query`` must select that key as column ``key_index`` and take ``$cursor`` /
+    ``$batch``. An increasing-id cursor is stable against concurrent inserts and
+    deletes — unlike SKIP, which re-counts a moving set.
+    """
+    cursor = -1
+    while True:
+        rows = g.query(
+            query, params={"cursor": cursor, "batch": batch}
+        ).result_set
+        if not rows:
+            return
+        yield from rows
+        cursor = int(rows[-1][key_index])
+        if len(rows) < batch:
+            return
+
+
+def _independent_counts(g) -> tuple[int, int]:
+    """The STORE's own data-node and edge counts — server-side aggregates (one
+    row each), so they are immune to RESULTSET_SIZE. This is the reference a dump
+    must not fall short of; the dump's own ``len(nodes)`` never is (#4515)."""
+    from tortoise.hosted_api import (
+        _EXPORT_SKIP_LABELS,
+        _EXPORT_SKIP_META_KEYS,
+    )
+    nodes = int(g.query(
+        _COUNT_DATA_NODES_QUERY,
+        params={
+            "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+            "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+        },
+    ).result_set[0][0])
+    edges = int(g.query(_COUNT_ALL_EDGES_QUERY).result_set[0][0])
+    return nodes, edges
+
+
 def dump_graph(g, graph_name: str | None = None) -> dict:
     """Export the complete graph (nodes + edges + props) as a JSON-safe dict.
 
@@ -327,14 +400,17 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
         nodes.append(node)
         nodes_by_id[nid] = node
 
-    rows = g.query("MATCH (n) RETURN id(n), labels(n), properties(n)").result_set
-    for internal_id, labels, props in rows:
+    # #5062: the store's independent counts, read BEFORE the content pages —
+    # the floor this read must meet. Re-read after, and use the looser bound so
+    # concurrent deletes do not turn a faithful dump into a false failure.
+    source_count_start = _independent_counts(g)
+
+    for internal_id, labels, props in _paged_rows(g, _DUMP_NODE_PAGE_QUERY, 0):
         _collect(internal_id, labels, props)
 
     raw_edges: list[tuple[int, int, str, dict]] = []
     pending: set[int] = set()
-    rows = g.query("MATCH (a)-[r]->(b) RETURN id(a), id(b), type(r), properties(r)").result_set
-    for src, dst, rtype, props in rows:
+    for src, dst, rtype, props, _rid in _paged_rows(g, _DUMP_EDGE_PAGE_QUERY, 4):
         s, d = int(src), int(dst)
         raw_edges.append((s, d, str(rtype), dict(props or {})))
         for endpoint in (s, d):
@@ -407,6 +483,27 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
             graph_name, dropped_skipped, dropped_stale,
             len(nodes), len(edges),
         )
+    # ── #5062 totality: the read is complete or it FAILS. Comparing the paged
+    # read against the store's own aggregate count is what makes an unpaged
+    # read's silent truncation impossible rather than merely fixed at one call
+    # site — a short page below the server's cap is indistinguishable from the
+    # end of the data, and only an independent count can tell.
+    source_count_end = _independent_counts(g)
+    source_node_count = min(source_count_start[0], source_count_end[0])
+    source_edge_count = min(source_count_start[1], source_count_end[1])
+    if len(nodes) < source_node_count:
+        raise ValueError(
+            f"dump_graph({graph_name}): exported {len(nodes)} data nodes but the "
+            f"graph holds {source_node_count} — the read was TRUNCATED "
+            "(RESULTSET_SIZE) or torn. Refusing to write a silently partial dump."
+        )
+    if len(raw_edges) < source_edge_count:
+        raise ValueError(
+            f"dump_graph({graph_name}): exported {len(raw_edges)} edges but the "
+            f"graph holds {source_edge_count} — the read was TRUNCATED or torn. "
+            "Refusing to write a silently partial dump."
+        )
+
     # #3902: read the counter LAST, after the content snapshot — a concurrent
     # append after the event read bumps last_seq ahead of the dumped events
     # (a gap, never a collision); reading it first could carry a counter
@@ -425,6 +522,15 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
         # edge has both endpoints in ``nodes`` (#3895).
         "node_count": len(nodes),
         "edge_count": len(edges),
+        # #5062: the STORE's own counts for the same read, so the ledger can
+        # prove the artifact is not short of the source. The dump's own counts
+        # above are never the reference for whether the dump is complete.
+        "source_node_count": source_node_count,
+        "source_edge_count": source_edge_count,
+        # The RAW edge rows read (before the #3895 export-skip filter). The
+        # manifest's edge_count is the RESTORABLE edge count, legitimately
+        # below this when skip-node-incident edges are dropped and counted.
+        "read_edge_count": len(raw_edges),
         # Audit trail for the exclusions (never silent).
         "excluded_node_count": len(skipped_ids),
         "skipped_edge_count": dropped_skipped,
@@ -1031,18 +1137,22 @@ def _is_locked_delete_error(e: Exception) -> bool:
 
 
 def _delete_backup_objects(storage, backup_id: str) -> bool:
-    """Best-effort delete of a backup's dump.enc + manifest.json pair.
+    """Best-effort delete of a backup's ENTIRE object set (#5062).
 
-    Returns True when BOTH objects were deleted. A locked (or otherwise
-    failed) delete is logged and returns False — never raises — so the prune
-    keeps pruning the rest of the pool (#2319: bucket locks block deletion
-    inside the window; the object is retried on a later run once the
-    retention expires). A partial delete (dump gone, manifest delete failed)
-    converges on the next run: the manifest is re-listed and the missing dump
-    delete is a no-op success.
+    Iterates :data:`BACKUP_OBJECT_SUFFIXES` — the ONE home for the object set —
+    so a rollback or prune can never leave an orphan ``ledger.json`` that a later
+    sweep could read as coverage.
+
+    Returns True when every object was deleted. A locked (or otherwise failed)
+    delete is logged and returns False — never raises — so the prune keeps
+    pruning the rest of the pool (#2319: bucket locks block deletion inside the
+    window; the object is retried on a later run once the retention expires). A
+    partial delete (dump gone, manifest delete failed) converges on the next
+    run: the manifest is re-listed and the missing dump delete is a no-op
+    success.
     """
     ok = True
-    for suffix in ("dump.enc", "manifest.json"):
+    for suffix in BACKUP_OBJECT_SUFFIXES:
         key = f"backups/{backup_id}/{suffix}"
         try:
             storage.delete(key)
@@ -1201,10 +1311,15 @@ def verify_bucket_lock(
 
 
 def mirror_backup(storage, mirror, backup_id: str) -> dict:
-    """Copy one ACCEPTED backup (dump.enc + manifest.json) from ``storage``
-    to the second-region ``mirror`` store and read-back verify the ciphertext
-    against the manifest sha256 (#2319 geo decision c). Keys are preserved
-    byte-for-byte so the mirror holds the same restore paths.
+    """Copy one ACCEPTED backup from ``storage`` to the second-region ``mirror``
+    store and read-back verify the ciphertext against the manifest sha256
+    (#2319 geo decision c). Keys are preserved byte-for-byte so the mirror
+    holds the same restore paths.
+
+    #5062: the mirror carries the WHOLE backup object set — ``dump.enc`` +
+    ``manifest.json`` and, when present, ``ledger.json`` (the per-object ledger
+    is part of the artifact, so the mirror must not be a coverage-blind copy).
+    A pre-ledger artifact simply has no ledger and still mirrors.
 
     Returns {"backup_id", "mirrored": [keys], "verified": true}. Raises
     RuntimeError on copy or verification failure — callers surface it as a
@@ -1213,6 +1328,7 @@ def mirror_backup(storage, mirror, backup_id: str) -> dict:
     """
     dump_key = f"backups/{backup_id}/dump.enc"
     manifest_key = f"backups/{backup_id}/manifest.json"
+    ledger_key = f"backups/{backup_id}/{LEDGER_SUFFIX}"
     blob = storage.download(dump_key)
     manifest_raw = storage.download(manifest_key)
     try:
@@ -1221,6 +1337,19 @@ def mirror_backup(storage, mirror, backup_id: str) -> dict:
         sha = ""
     mirror.upload(dump_key, blob)
     mirror.upload(manifest_key, manifest_raw, content_type="application/json")
+    mirrored = [dump_key, manifest_key]
+    try:
+        ledger_raw = storage.download(ledger_key)
+    except KeyError:
+        ledger_raw = None  # pre-#5062 artifact — no ledger to mirror
+    if ledger_raw is not None:
+        mirror.upload(ledger_key, ledger_raw, content_type="application/json")
+        if mirror.download(ledger_key) != ledger_raw:
+            raise RuntimeError(
+                f"mirror verification failed for {backup_id}: mirrored "
+                f"{LEDGER_SUFFIX} differs from the primary"
+            )
+        mirrored.append(ledger_key)
     if not sha:
         raise RuntimeError(
             f"mirror verify impossible for {backup_id}: manifest sha256 missing"
@@ -1232,7 +1361,7 @@ def mirror_backup(storage, mirror, backup_id: str) -> dict:
         )
     return {
         "backup_id": backup_id,
-        "mirrored": [dump_key, manifest_key],
+        "mirrored": mirrored,
         "verified": True,
     }
 
@@ -1423,26 +1552,87 @@ def create_backup(
     }
     if graph_id is not None:
         manifest["graph_id"] = graph_id
-    storage.upload(f"backups/{backup_id}/dump.enc", blob)
+    manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+    dump_key = f"backups/{backup_id}/{BACKUP_OBJECT_SUFFIXES[0]}"
+    manifest_key = f"backups/{backup_id}/manifest.json"
+    ledger_key = f"backups/{backup_id}/{LEDGER_SUFFIX}"
+
+    storage.upload(dump_key, blob)
     try:
-        storage.upload(
-            f"backups/{backup_id}/manifest.json",
-            json.dumps(manifest, indent=2).encode("utf-8"),
-            content_type="application/json",
-        )
+        storage.upload(manifest_key, manifest_bytes, content_type="application/json")
     except Exception:
         # Partial-upload orphan: the blob is already durable but has no manifest
-        # (never listed, never pruned, unrestorable). Roll it back so a failed
-        # backup leaves no garbage.
-        try:  # noqa: SIM105
-            storage.delete(f"backups/{backup_id}/dump.enc")
-        except Exception:
-            pass
+        # (never listed, never pruned, unrestorable). Roll the WHOLE object set
+        # back — the ledger suffix included (#5062) — so a failed backup leaves
+        # no object a later sweep could read as coverage.
+        _delete_backup_objects(storage, backup_id)
         raise
+
+    # ── #5062: the per-object ledger, then the READ-BACK. Coverage is the
+    # destination's answer, never the writer's counters. `source_*` are the
+    # store's own aggregate counts (cap-immune, #4515); `dump_*` are the
+    # artifact's — recorded side by side so the read-back can prove the artifact
+    # is not SHORT of the store.
+    written_at = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    ledger = build_ledger(
+        backup_id=backup_id,
+        org_id=org_id,
+        graph_name=graph_name,
+        self_key=ledger_key,
+        created_at=dump["dumped_at"],
+        written_at=written_at,
+        objects=[
+            LedgerObject(
+                key=dump_key,
+                bytes=len(blob),
+                sha256=hashlib.sha256(blob).hexdigest(),
+                written_at=written_at,
+            ),
+            LedgerObject(
+                key=manifest_key,
+                bytes=len(manifest_bytes),
+                sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+                written_at=written_at,
+            ),
+        ],
+        source_node_count=dump.get("source_node_count"),
+        source_edge_count=dump.get("source_edge_count"),
+        dump_node_count=dump["node_count"],
+        dump_edge_count=dump["edge_count"],
+        read_edge_count=dump.get("read_edge_count"),
+    )
+    try:
+        storage.upload(
+            ledger_key, serialize_ledger(ledger), content_type="application/json"
+        )
+    except Exception:
+        # A backup whose ledger never landed has NO read-back coverage — the
+        # exact self-reported trap this ledger exists to close. Roll the whole
+        # object set back rather than leave a restorable artifact with no proof.
+        _delete_backup_objects(storage, backup_id)
+        raise
+    try:
+        coverage = verify_ledger(storage, ledger)
+    except Exception as e:
+        _delete_backup_objects(storage, backup_id)
+        raise BackupVerificationError(
+            f"backup {backup_id}: read-back verification could not complete "
+            f"({type(e).__name__}: {e}) — refusing to report a backup whose "
+            "coverage was never read back"
+        ) from e
+    if not coverage.ok:
+        _delete_backup_objects(storage, backup_id)
+        raise BackupVerificationError(
+            f"backup {backup_id}: destination contradicts the ledger — "
+            f"{coverage.summary()}. Uploaded objects rolled back."
+        )
     try:
         _stamp_backup_latest(registry, org_id, dump["dumped_at"])
     except Exception as e:  # backup already durable; the stamp is best-effort (#669 P3)
         logger.warning("backup uploaded but stamp failed for %s: %s", org_id, e)
+    # Returned to the caller, never written into the uploaded manifest (whose
+    # bytes the ledger already hashed): the read-back proof travels with the run.
+    manifest["coverage"] = coverage.as_dict()
     return manifest
 
 
