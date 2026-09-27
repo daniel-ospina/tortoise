@@ -587,9 +587,12 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
-        raw_role = turn.get("role")
-        role = raw_role if isinstance(raw_role, str) else (
-            "unknown" if raw_role is None else str(raw_role))
+        # The ONE role-normalization funnel (#5445): a second, inline copy here
+        # was the session-`:Source` sink's bypass of it. On the capture path the
+        # conversation handed in is already role-scrubbed
+        # (``_materialize_session_source`` passes ``_redact_turn_contents``'s
+        # output), so this consumes the redacted role rather than re-scrubbing.
+        role = _normalize_turn_role(turn.get("role"))
         speaker = role.title()
         if not re.match(r"^[A-Z][\w .'-]{0,40}$", speaker):
             # non-word roles (123, dict str, weird casing) still extract under
@@ -650,8 +653,9 @@ def _redact_turn_contents(
     """The ONE place capture text is scrubbed of credentials (#4911).
 
     Returns a copy of ``conversation`` whose turns carry a scrubbed
-    ``content``, plus the per-kind counts. Every capture consumer derives its
-    text from this — the stored turn text (``_capture_turn_texts``), the session
+    ``content`` AND a scrubbed ``role``, plus the per-kind counts. Every capture
+    consumer derives its text from this — the stored turn text
+    (``_capture_turn_texts``), the session
     ``:Source`` metadata (``_materialize_session_source``) and the extraction
     transcript (``_extract_session_llm`` / ``_extract_session_v2``) — so the
     control sits at the single point where a message becomes persisted or
@@ -672,6 +676,20 @@ def _redact_turn_contents(
     be stringified by a downstream consumer (the session ``:Source`` does exactly
     that with ``str()``). A turn with no match is returned as the SAME object, so
     nothing else about a stored shape moves.
+
+    ⛔ The sibling ``role`` is scrubbed HERE too (#5445). It is caller-controlled
+    (the hosted model takes ``conversation: list[dict]`` with no role validation)
+    and the capture path persists it as TEXT through three sinks — the
+    ``f"[{role}] {content}"`` stored turn, ``:Point.speaker`` and the session
+    ``:Source`` transcript (``_session_llm_transcript`` uses the role as the
+    speaker label). A credential placed in ``role`` therefore reached the graph
+    while the receipt reported zero. The role is scrubbed, not replaced with a
+    placeholder, because there is no canonical role enum in the capture contract
+    — the codebase and its own tests use ``developer``, ``toolResult``,
+    ``robot`` and ``agent`` — so a whitelist would silently rewrite legitimate
+    labels, i.e. over-redact ordinary text. The role scrub runs through this same
+    chokepoint (one ``redact_secrets`` owner, per the #4911 control-site rule)
+    and its counts join the same total.
 
     ``cap`` bounds the text scanned per turn. The turn store already caps, so
     callers there pass nothing; the session-``:Source``/extractor consumers get
@@ -699,14 +717,35 @@ def _redact_turn_contents(
     for turn in conversation:
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        # #5472: emptiness is judged on the PRE-cut content. Judging it after
+        # the cut made ``cap=0`` (which cuts any non-empty string to "") take
+        # the genuinely-empty branch below and append the ORIGINAL, untruncated
+        # turn — a cap that does not cap.
+        had_content = bool(content)
         cut = False
         if cap is not None and len(content) > cap:
             content = content[:cap]
             cut = True
-        if not content:
-            out.append(turn)
+        # #5445: the role is caller-controlled and persisted as text by three
+        # sinks, so it is coerced and scrubbed through this same chokepoint.
+        role = _normalize_turn_role(turn.get("role"))
+        scrubbed_role, role_counts = redact_secrets(role)
+        if not had_content:
+            # Genuinely-empty content: nothing in the body to scan. The role is
+            # still caller-controlled, so it is scrubbed here too; the turn is
+            # copied only when that changed.
+            for kind, n in role_counts.items():
+                totals[kind] = totals.get(kind, 0) + n
+            if role_counts:
+                out.append({**turn, "role": scrubbed_role})
+            else:
+                out.append(turn)
             continue
         scrubbed, counts = redact_secrets(content)
+        if role_counts:
+            counts = {**counts}
+            for kind, n in role_counts.items():
+                counts[kind] = counts.get(kind, 0) + n
         for kind, n in counts.items():
             totals[kind] = totals.get(kind, 0) + n
         # ⛔ TWO and only two reasons to emit a new object, and the second one is
@@ -716,7 +755,11 @@ def _redact_turn_contents(
         # the ``_commit_session_v2`` call site meant a credential past the cap
         # was rendered into the extractor prompt and sent to the provider.
         if counts or cut:
-            out.append({**turn, "content": scrubbed})
+            if role_counts:
+                out.append({**turn, "content": scrubbed,
+                            "role": scrubbed_role})
+            else:
+                out.append({**turn, "content": scrubbed})
         else:
             out.append(turn)
     return out, totals
@@ -743,12 +786,22 @@ def _redact_summary_strings(obj, _depth: int = 0):
     ``commit_session``, where a cyclic or very deep ``summary=`` previously
     reached ``construct_graph``, whose ``json.dumps`` raised ``ValueError`` and
     was swallowed (degraded, no crash). Unbounded recursion turned that into an
-    unhandled ``RecursionError`` on a public method. Past the guard the object
-    is returned as-is — the deepest shapes are not commit summaries, and the
-    caller's own credential is the only thing that could be hiding there.
+    unhandled ``RecursionError`` on a public method.
+
+    ⛔ ...and it must FAIL CLOSED (#5446). The original guard returned the
+    subtree VERBATIM past depth 64, so a credential nested deeper than 64 levels
+    was rendered into the commit prompt (``json.dumps``) and POSTed unbounded.
+    Past the bound a ``str`` leaf is still scrubbed (cheap at any depth) and a
+    container is replaced by a visible marker. The trade-off is deliberate:
+    a pathological deep summary is not a commit shape, so beyond the bound the
+    subtree is COLLAPSED (legible, ``[REDACTED:depth]``) rather than silently
+    omitted or returned raw. The recursion never passes depth 65, so the
+    no-crash property the guard exists for still holds.
     """
     if _depth > 64:
-        return obj
+        if isinstance(obj, str):
+            return redact_secrets(obj)[0]
+        return "[REDACTED:depth]"
     if isinstance(obj, str):
         return redact_secrets(obj)[0]
     if isinstance(obj, dict):
@@ -1134,7 +1187,7 @@ def _write_capture_turns(
         turn_embs = [None] * len(turn_texts)
     turn_rows: list[dict] = []
     turn_hashes: list[str] = []
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
@@ -1142,11 +1195,13 @@ def _write_capture_turns(
             "id": f"{session_id}_t{i}",
             "c": text,
             "k": "event",
-            # `_normalize_turn_role` is the isinstance-first pattern (#721):
-            # None -> "unknown", truthy non-strings -> str() — a raw
-            # non-string stored as `speaker` contradicts the ontology row and
-            # a dict role could fail the write mid-batch.
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: derived from the SCRUBBED stored text, not from the raw
+            # ``turn["role"]`` — the role is caller-controlled and the `role`
+            # sink must inherit `_redact_turn_contents`'s scrub. Going through
+            # the reader's own inverse (`_capture_turn_role_text`) also makes
+            # the stored `speaker` agree with what `get_session_detail` serves
+            # for the same row (#4675 parity).
+            "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
             "emb": turn_embs[i],
@@ -1207,7 +1262,7 @@ def _write_capture_turns(
         # fold tombstones (the wrong meaning for a removal).
         sdk._emit_event("PointRetracted", {"id": tid})
         sdk._journal_entity_mutation("Point", tid, "delete")
-    for i, turn in enumerate(windowed):
+    for i, _turn in enumerate(windowed):
         turn_id = f"{session_id}_t{i}"
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
         # #5004: the turn's vector WAS stored live (`turn_embs[i]` is the `emb`
@@ -1227,7 +1282,8 @@ def _write_capture_turns(
             "id": turn_id,
             "content": turn_texts[i],
             "pointKind": "event",
-            "speaker": _normalize_turn_role(turn.get("role")),
+            # #5445: the redacted role (see the turn_rows write above).
+            "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
             "status": status if status is not None else "draft",
             "createdAt": created_at if created_at is not None else now,

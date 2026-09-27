@@ -651,7 +651,14 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
     batch and once at the write — the same bytes must come out both times
     (#4194).
     """
-    if not isinstance(text, str) or not text:
+    if not isinstance(text, str):
+        # #5472: the contract is ``tuple[str, dict]``, so the first element is
+        # ALWAYS a ``str`` — a non-str argument used to be returned unchanged
+        # against the annotation, with no error. Coerce and fall through to the
+        # scan below: never ``str()``-and-return unscanned (a container's repr
+        # can itself carry a credential).
+        text = "" if text is None else str(text)
+    if not text:
         return text, {}
     counts: dict[str, int] = {}
     out = text

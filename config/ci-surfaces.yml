@@ -1200,6 +1200,7 @@ surfaces:
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
+  - test_capture_redaction_sinks_5445.py  # #5445/#5446/#5472: the #4911 capture control's role sink, summary depth-guard and helper contract holes (guards tortoise/security.py + sdk.py helpers; `core` is security.py's surface and `sdk` is a SHARED_MODULE so it runs on the full matrix)
   - test_capture_secret_redaction_4911.py  # #4911: the capture write path redacts credential-shaped spans before persistence (guards tortoise/security.py's scrubber + sdk._capture_turn_texts; `core` is security.py's surface and `sdk` is a SHARED_MODULE so this runs on the full matrix — DUAL-REGISTERED under `api` for a hosted_api.py-only PR, see the entry there)
   - test_security.py
   - test_semantic_extractor.py
