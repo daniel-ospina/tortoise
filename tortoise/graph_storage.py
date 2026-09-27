@@ -422,13 +422,16 @@ def record_graph_storage(org_id: str | None, reading: GraphStorageReading | None
     on the ledger as a zero-byte graph (the zero would be a lie, not a
     measurement).
 
-    The failure is reported to the operator only through the logger; the ledger
-    write itself is best-effort (mirrors every other metering lane).
+    The failure is reported to the operator through the LOGGER at WARNING — a
+    dropped ledger write is operator-relevant (a graph that stops being billed
+    looks identical to a quiet one), so a level dropped at production settings
+    would make this claim false. The ledger write itself is best-effort
+    (mirrors every other metering lane).
     """
     if not org_id or reading is None:
         return None
     if not reading.ok:
-        _logger.debug(
+        _logger.warning(
             "graph storage reading for %s failed (%s) — not writing a zero to "
             "the ledger", org_id, reading.error)
         return None
@@ -447,7 +450,7 @@ def record_graph_storage(org_id: str | None, reading: GraphStorageReading | None
             _selfhost_transport=_selfhost_transport,
         )
     except Exception:
-        _logger.debug(
+        _logger.warning(
             "graph storage ledger write failed for %s (non-fatal)", org_id,
             exc_info=True)
         return None
@@ -462,7 +465,9 @@ def measure_and_record_graph_storage(
 
     The end-to-end entry point: one call produces the reading AND puts it on
     the per-org ledger. Returns the reading in every case, so the caller can
-    inspect what was measured even when the ledger write was dropped.
+    inspect what was measured. The return value does NOT report the ledger
+    write: a dropped write is signalled to the operator by ``record_graph_storage``
+    logging at WARNING, not by a changed return value.
     """
     reading = measure_projection_storage(
         proj, samples=samples, repeats=repeats)

@@ -520,6 +520,51 @@ def test_record_graph_storage_is_fail_soft_when_metering_raises(org, monkeypatch
     assert graph_storage.record_graph_storage(org, reading) is None
 
 
+def test_a_dropped_ledger_write_reaches_the_operator(org, monkeypatch, caplog):
+    """GUARD (review finding): the swallowed failure must be OPERATOR-VISIBLE.
+
+    The docstring promised the failure "is reported to the operator through the
+    logger", but both swallow sites logged at DEBUG, which production log levels
+    drop — so a graph that silently stopped being billed looked exactly like a
+    quiet one, and the claim was false. WARNING is the level the surrounding
+    metering lane uses for its own swallowed failures.
+
+    REDs on: either site dropping back to ``_logger.debug``.
+    """
+    import logging
+
+    from tortoise import metering
+    monkeypatch.setattr(
+        metering, "record_graph_storage_reading",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger down")))
+    reading = measure_graph_storage(_FakeClient([_reply(7)]), "org_x")
+    with caplog.at_level(logging.WARNING):
+        assert graph_storage.record_graph_storage(org, reading) is None
+    assert any(
+        r.levelno >= logging.WARNING and "ledger write failed" in r.getMessage()
+        for r in caplog.records
+    ), f"a dropped ledger write must be reported at WARNING: {caplog.records!r}"
+
+
+def test_a_refused_failed_reading_reaches_the_operator(org, caplog):
+    """GUARD: the OTHER swallow site — a failed reading not written as zero.
+
+    Same class as above: refusing to write a zero is correct, but doing it
+    silently leaves no trace that the org stopped being metered.
+
+    REDs on: this site dropping back to ``_logger.debug``.
+    """
+    import logging
+
+    failed = graph_storage._failed_reading("org_x", 100, 1, "now", "dead")
+    with caplog.at_level(logging.WARNING):
+        assert graph_storage.record_graph_storage(org, failed) is None
+    assert any(
+        r.levelno >= logging.WARNING and "not writing a zero" in r.getMessage()
+        for r in caplog.records
+    ), f"a refused failed reading must be reported at WARNING: {caplog.records!r}"
+
+
 def test_measure_and_record_writes_on_success(org):
     from tortoise import metering
     proj = _FakeProj(_FakeClient([_reply(8)]), "org_abc")
