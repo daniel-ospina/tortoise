@@ -927,25 +927,68 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
     )
     _ANY_DEF = r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
     _BODY = r"\bAS\s+\$(\$|[A-Za-z_][A-Za-z_0-9]*\$)(.*?)\$\1;"
-    # ⛔ The workload DENYLIST. This is a denylist, not an allowlist, and the
-    # limit is stated rather than hidden: it catches every workload counter this
-    # schema has or is credibly about to grow — the token family under ANY name
-    # spelling (``capture_tokens_in``, ``capture_tok_in``, ``tok_out``), the
-    # write/edge/call counters — but a counter invented under an unrelated name
-    # would still pass. The ceiling must see ONLY the cost lanes; a token count
-    # is extraction workload and is explicitly not the resource the ceiling
-    # meters.
-    _FORBIDDEN_WORKLOAD = re.compile(
-        r"\b[a-z_]*tok[a-z_]*\b"
-        r"|\b[a-z_]*ops[a-z_]*\b"
-        r"|\b[a-z_]*edges?[a-z_]*\b"
-        r"|\b[a-z_]*calls?[a-z_]*\b",
-        _RE_I,
+    # ⛔ The workload DENYLIST — over IDENTIFIERS, not raw substrings. A
+    # substring scan is both too loose and too tight: it flagged the word
+    # ``ledger`` (which CONTAINS ``edge``) and it missed ``capture_tokens_in_v2``
+    # (a trailing ``\b`` cannot close before a digit). So each identifier in the
+    # text is extracted and tested against anchored family rules. The limit is
+    # stated at the strength the code supports: these are the workload families
+    # this schema has or is about to grow — the token counters, the ops/edge/call
+    # counters, and the ones already on main or named by this lane:
+    # ``nodes_written`` (20260813000002), the ``embed_*`` family (the incident
+    # that motivated this guard), and ``graph_storage_*`` (the #5331 sibling). A
+    # counter invented OUTSIDE these families still passes; that is the disclosed
+    # residual, and it is why the embedded twin below shares this ONE predicate
+    # rather than keeping a weaker one of its own. The ceiling must see ONLY the
+    # cost lanes: a token count is extraction workload, and explicitly not the
+    # resource the ceiling meters.
+    _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+    _WORKLOAD_FAMILIES = (
+        re.compile(r"tok(?:en)?s?(_|$)", re.I),
+        re.compile(r"(^|_)ops?(_|$)", re.I),
+        re.compile(r"(^|_)edge(?:s)?(_|$)", re.I),
+        re.compile(r"(^|_)call(?:s)?(_|$)", re.I),
+        re.compile(r"(^|_)nodes_written(_|$)", re.I),
+        re.compile(r"(^|_)embed(_|$)", re.I),
+        re.compile(r"(^|_)graph_storage(_|$)", re.I),
     )
+
+    def _workload_hit(where: str) -> str | None:
+        """The first workload identifier in *where*, or None.
+
+        Identifier-anchored: families match a whole identifier (or an
+        underscore-delimited part of one), so ``ledger`` is not an ``edge`` and
+        ``capture_tokens_in_v2`` IS a token counter.
+        """
+        for ident in _IDENT_RE.findall(where):
+            if any(fam.search(ident) for fam in _WORKLOAD_FAMILIES):
+                return ident
+        return None
+
+    def _strip_sql_comments(s: str) -> str:
+        """Drop SQL comments so a comment cannot HIDE a definition from the scan.
+
+        This is what closes the residual: ``CREATE /* c */ FUNCTION
+        public.metering_cohort_spend(...)`` is ACCEPTED by Postgres and resolves
+        to the LIVE name, but produced NO opener because the comment sat between
+        FUNCTION and the name — so the file hit ``continue`` and was skipped
+        silently, with neither the ``len(defs) > 1`` floor nor the LIVE-file
+        assertion able to alarm. Stripping comments first makes the opener
+        match, so that definition is enumerated and the workload check applies
+        to it like any other.
+
+        A mention test was tried instead and REJECTED: it fired on prose in a
+        string literal (``COMMENT ON TABLE t IS 'metering_cohort_spend'``) and on
+        a longer name (``metering_cohort_spend_archive``, a substring match).
+        """
+        s = re.sub(r"/\*.*?\*/", " ", s, flags=re.S)
+        return re.sub(r"--[^\n]*", " ", s)
+
     for f in files:
-        text = f.read_text()
+        text = _strip_sql_comments(f.read_text())
         # Count OPENERS, not mere mentions: a migration that only names the
-        # function in a comment defines nothing and must not trip this.
+        # function in a comment or a string defines nothing and must not trip
+        # this.
         starts = [m.start() for m in re.finditer(_OPENER, text, _RE_I)]
         if not starts:
             continue
@@ -976,20 +1019,47 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
         assert "ask_cost_usd" in body and "capture_cost_usd" in body, (
             f"metering_cohort_spend in {name} no longer sums the cost lanes: "
             f"{body}")
-        offender = _FORBIDDEN_WORKLOAD.search(body)
+        offender = _workload_hit(body)
         assert offender is None, (
             f"metering_cohort_spend in {name} reads the workload counter "
-            f"{offender.group(0)!r} — the spend ceiling must never see "
+            f"{offender!r} — the spend ceiling must never see "
             f"extraction workload: {body}")
 
-    # The embedded twin. Read the LIVE Cypher between the reader's def and the
-    # next section banner, so this cannot pass on a comment elsewhere.
+    # The embedded twin. Read the LIVE Cypher — the string CONSTANTS of
+    # ``get_cohort_spend_usd``, with its docstring excluded — rather than a text
+    # slice, which included the docstring's PROSE and flagged the English word
+    # "edge" ("a cohort row straddling an edge") as an edge counter.
+    # ⛔ It shares the SQL half's predicate. Keeping its own "token" substring
+    # here left the WORSE half unguarded: the embedded SUM could fold in
+    # ``nodes_written`` or an ``embed_*`` counter with the guard still green,
+    # while the SQL half caught the same edit — one substrate hardened, the
+    # other not.
+    import ast
+
     import tortoise.metering as _m
     src = Path(_m.__file__).read_text()
-    embedded = src.split("def get_cohort_spend_usd")[1].split("# ── Usage query")[0]
-    assert "ask_cost_usd" in embedded and "capture_cost_usd" in embedded
-    assert "token" not in embedded.lower(), (
-        "get_cohort_spend_usd must not read a token column")
+    _tree = ast.parse(src)
+    _fn = next(
+        n for n in ast.walk(_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "get_cohort_spend_usd")
+    _body = _fn.body
+    if (_body and isinstance(_body[0], ast.Expr)
+            and isinstance(_body[0].value, ast.Constant)
+            and isinstance(_body[0].value.value, str)):
+        _body = _body[1:]  # drop the docstring: it is prose, not Cypher
+    embedded = "\n".join(
+        n.value for st in _body for n in ast.walk(st)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    assert "ask_cost_usd" in embedded and "capture_cost_usd" in embedded, (
+        "get_cohort_spend_usd's Cypher must sum both cost lanes — if this "
+        "fails the extraction above stopped finding the query, and every "
+        "assertion on it became evidence about nothing: "
+        f"{embedded!r}")
+    offender = _workload_hit(embedded)
+    assert offender is None, (
+        f"get_cohort_spend_usd reads the workload counter "
+        f"{offender!r} — the spend ceiling must never see extraction "
+        f"workload: {embedded}")
 
 
 
