@@ -636,9 +636,21 @@ class Identity:
     claim. This is an INPUT: nothing about a branch name is inspected to decide
     "is this mine?".
 
-    Failing to populate them is fail-CLOSED (it can only add hits), so detection
-    is a convenience, never a gate: `--self-branch`/`--self-worktree` are the
-    authoritative source and the current branch/worktree are added best-effort."""
+    ⛔ THE FLAGS AND THE AUTO-DETECTION PULL IN OPPOSITE DIRECTIONS, and the
+    earlier wording of this docstring ran the two together:
+
+      * OMITTING `--self-branch`/`--self-worktree` is fail-CLOSED. Adding a ref to
+        this set REMOVES hits, so a missing declaration can only leave MORE refs
+        blocking (`test_own_branch_declared_is_not_a_claim_but_undeclared_still_
+        blocks` pins exactly that: undeclared => COLLISION).
+      * The AUTO-DETECTION in `main()` is the FAIL-OPEN half: it declares the
+        target checkout's own branch and root without being asked, so a WRONG
+        auto-declaration is what suppresses a real finding.
+
+    That asymmetry is why the repository DEFAULT branch is excluded from
+    auto-declaration, and why an explicit `--self-branch` is never
+    second-guessed. The flags are the authoritative input; the auto-detection is
+    a convenience."""
 
     login: str | None = None
     self_branches: frozenset[str] = frozenset()
@@ -826,14 +838,21 @@ def _one_line(text: str, limit: int = 200) -> str:
 class ClaimVerdict:
     """The label for ONE pre-filtered comment. `label` is the branch key
     ("collision" / "clean" / "uncertain" / "untrusted"); `probability` is the
-    calibrated JEV value, None when no usable value was returned; `origin`
-    records where the label came from ("jev" / "cache" / "fallback" / "rule")
-    so the report can say whether the model was consulted. "untrusted" (origin
-    "rule") is a non-fleet author: a hit by rule, with no model call."""
+    calibrated JEV value, None when no usable value was returned. "untrusted" is
+    a non-fleet author: a hit by rule, with no model call.
+
+    NO `origin` FIELD. One used to record where each label came from ("jev" /
+    "cache" / "fallback" / "rule") "so the report can say whether the model was
+    consulted" — but the report answers that from the classifier's own `calls`
+    and `from_cache` counters, so the field was ASSIGNED at every construction
+    site and READ nowhere. A write-only field whose docstring promises a reader
+    that does not exist is an invitation to trust a signal nothing consumes, so
+    it was deleted rather than kept "for later" (the same call as
+    `RepoTarget.named_by_caller`). A per-hit provenance record, if it is ever
+    genuinely wanted, should be added WITH its reader."""
 
     label: str          # "collision" | "clean" | "uncertain" | "untrusted"
     probability: float | None
-    origin: str         # "jev" | "cache" | "fallback" | "rule"
     reason: str = ""
 
     @property
@@ -912,7 +931,7 @@ def _cache_verdict(entry) -> ClaimVerdict | None:
     label = claim_label_for_probability(probability)
     if entry.get("label") != label:
         return None
-    return ClaimVerdict(label, probability, "cache")
+    return ClaimVerdict(label, probability)
 
 
 def _dotenv_value(path: Path, key: str) -> str | None:
@@ -1126,7 +1145,7 @@ class ClaimClassifier:
             if probabilities is None:
                 for index in missing:
                     verdicts[index] = ClaimVerdict(
-                        "collision", None, "fallback",
+                        "collision", None,
                         "JEV unavailable — origin/main's _CLAIM_RE (fail-closed)",
                     )
             else:
@@ -1138,12 +1157,12 @@ class ClaimClassifier:
                     if probability is None:
                         # No usable value for THIS body: ambiguous is a hit.
                         verdicts[index] = ClaimVerdict(
-                            "uncertain", None, "jev",
+                            "uncertain", None,
                             "JEV returned no usable probability for this comment",
                         )
                         continue
                     label = claim_label_for_probability(probability)
-                    verdicts[index] = ClaimVerdict(label, probability, "jev")
+                    verdicts[index] = ClaimVerdict(label, probability)
                     cache[hashes[index]] = {
                         "v": JEV_PROMPT_VERSION,
                         "p": probability,
@@ -1158,7 +1177,7 @@ class ClaimClassifier:
         # could hand a CLEAN verdict to the wrong comment.
         return [
             verdict if verdict is not None
-            else ClaimVerdict("collision", None, "fallback", "no verdict produced")
+            else ClaimVerdict("collision", None, "no verdict produced")
             for verdict in verdicts
         ]
 
@@ -1431,6 +1450,47 @@ def _git_refs(
     return refs
 
 
+def _first_parent_shas(
+    git_bin: str, repo: str, timeout: float,
+) -> set[str] | None:
+    """Every commit on `origin/main`'s FIRST-PARENT chain, or None if unreadable.
+
+    ⛔ THIS IS THE DISCRIMINATOR THAT MAKES PREDICATE 2 SOUND, and without it the
+    ancestor arm was only ONE COMMIT DEEP. `sha != main_tip` refuses to call a
+    branch terminal when its tip is exactly main's tip — but the moment main
+    advances a single commit, a branch with NO COMMITS OF ITS OWN is a STRICT
+    ancestor of main and predicate 2 demoted it. That is not an exotic state, it
+    is the ordinary fleet flow: `git worktree add -b fix/N-slug` (branch at main's
+    tip, nothing committed yet), some other PR merges, and any lane running the
+    pre-flight for N before that first commit gets CLEAN — on a lane that has
+    already claimed the issue by creating the branch. The remote surface cannot
+    mask it, because the branch has not been pushed.
+
+    Membership of main's OWN linear history separates the two states that
+    ancestry alone cannot:
+
+      * "just created" — the tip IS one of main's first-parent commits, because
+        that is exactly what a fresh branch points at. REFUSE to demote.
+      * "absorbed branch head" — the tip entered main as a SECOND parent through
+        a merge, so it is NOT on the first-parent chain. Demote.
+
+    A fast-forward landing puts the branch's own commits on the first-parent
+    chain, so it is NOT demoted — the same fail-closed direction as before, and
+    this repo squash-merges anyway.
+
+    One local call, no API cost (D4 constrains REST calls, not local git). A
+    failure returns None, and the caller treats that as "do not apply predicate
+    2" rather than as "nothing is merged" — an unreadable witness must never
+    become a downgrade.
+    """
+    rc, out, _err, _to = _run(
+        [git_bin, "rev-list", "--first-parent", "origin/main"], repo, timeout,
+    )
+    if rc != 0:
+        return None
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
 def _ancestor_merged_refs(
     git_bin: str, repo: str, namespace: str, timeout: float,
 ) -> set[str] | None:
@@ -1459,6 +1519,7 @@ def _ancestor_merged_refs(
 def _branch_terminal_state(
     ref: str, sha: str | None, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
+    first_parent: set[str] | None,
 ) -> str | None:
     """Why this branch ref CANNOT be in flight, or None when it might be.
 
@@ -1479,19 +1540,23 @@ def _branch_terminal_state(
          squash-merge older than the window is simply NOT detected, and the
          branch keeps blocking (fail-closed — the safe direction, but the doc
          must not imply full coverage).
-      2. The tip is a STRICT ancestor of origin/main — a merge or rebase that
-         kept history. One `for-each-ref --merged` per namespace.
+      2. The tip is an ancestor of origin/main AND is NOT one of main's own
+         first-parent commits — i.e. it entered main as a MERGE parent, which is
+         the shape of an absorbed branch head. One `for-each-ref --merged` walk
+         per namespace, plus one `rev-list --first-parent` for the whole run.
 
-         ⛔ STRICT, because plain ancestry is AMBIGUOUS and the ambiguity is
-         fail-open. A branch created at main's tip that has NO COMMITS OF ITS OWN
-         YET is trivially "an ancestor of main" — the ordinary state of a lane
-         between `git worktree add` and its first commit, which is PRECISELY when
-         another lane may dispatch the same issue. Demoting it reported CLEAN on
-         a lane that had already claimed the issue by creating the branch. The
-         tip-equals-main-tip exclusion separates "just created" from "landed
-         behind main". The cost is that a FAST-FORWARD landing (branch tip ==
-         main tip) is no longer detected and keeps blocking — the fail-closed
-         direction, and this repo squash-merges anyway.
+         ⛔ PLAIN ANCESTRY IS NOT ENOUGH, and the failure is fail-open in BOTH
+         directions from the exact tip. A branch created at main's tip with NO
+         COMMITS OF ITS OWN YET is trivially "an ancestor of main" — the ordinary
+         state of a lane between `git worktree add` and its first commit, which is
+         PRECISELY when another lane may dispatch the same issue. An earlier
+         revision excluded only the tip EQUAL to main's tip, which closed the
+         window only until main advanced ONE commit; from then on the fresh branch
+         was strictly behind and demoted. The first-parent exclusion closes the
+         whole window, because a fresh branch's tip IS a main-line commit at any
+         distance. The cost is that a FAST-FORWARD landing is not detected and
+         keeps blocking — the fail-closed direction, and this repo squash-merges
+         anyway.
 
          ⛔ THE SAME EXCLUSION IS ON PREDICATE 1, and it has to be. Predicate 1
          matches the tip against the head SHAs of merged PRs, and a fresh branch
@@ -1523,6 +1588,10 @@ def _branch_terminal_state(
          job (D1) — not a third guess here.
 
     ⛔ `main_tip` HAS NO DEFAULT, AND `None` MEANS "DO NOT APPLY PREDICATE 2".
+    (`main_tip` and `first_parent` are resolved by separate git calls, so
+    `first_parent` can be readable while `main_tip` is not — a stub that fails
+    only `rev-parse` reproduces exactly that — and this guard is what keeps the
+    arm off in that case.)
     Both halves are load-bearing:
 
       * No default, because a defaulted `main_tip=None` made strictness OPT-IN:
@@ -1535,12 +1604,12 @@ def _branch_terminal_state(
         `origin/main`, no local checkout) therefore costs a false COLLISION at
         worst, never a false CLEAN.
 
-    The residual ambiguity is stated rather than hidden: a ref whose tip is
-    strictly behind main is read as terminal even if its own work never landed,
-    and a fast-forward landing is missed entirely. Predicate 1 is the EXACT one
-    (a merged PR record names the branch's head); this arm is the secondary,
-    approximate one, and the durable fix for what it cannot resolve is the
-    stage-1 registry (decision D1).
+    Predicate 1 is the EXACT one (a merged PR record names the branch's head);
+    predicate 2 is the secondary, approximate one. Its remaining imprecision is
+    stated rather than hidden: a branch whose tip entered main as a merge parent
+    while its own work did NOT land is still read as terminal, and a fast-forward
+    landing and rebase residue are both missed. The durable fix for that residue
+    is the stage-1 registry (decision D1), not another guess here.
 
     BOTH apply to LOCAL branches only. A remote-tracking ref is a local CACHE of
     the last fetch, not the remote's state: a branch that was squash-merged and
@@ -1579,14 +1648,26 @@ def _branch_terminal_state(
         return ("squash-merged — its tip SHA is a merged PR's head, so its content "
                 "already landed even though its commits are not ancestors of main")
     if (
-        # `main_tip is not None` FIRST: this predicate DOWNGRADES, so an
-        # unresolvable tip must leave the ref blocking (see the docstring).
+        # Every condition guards a DOWNGRADE, so an unreadable witness leaves the
+        # ref BLOCKING. `first_parent is not None` is the load-bearing one: once
+        # main advances, ancestry alone cannot tell a fresh branch from an
+        # absorbed branch head, and `sha != main_tip` only covers the exact-tip
+        # case.
         main_tip is not None
+        and first_parent is not None
         and ancestor_merged is not None
         and ref in ancestor_merged
-        and sha != main_tip
+        # ⛔ THIS SUPERSEDES THE OLDER `sha != main_tip` GUARD, which was
+        # REMOVED rather than kept alongside it. `rev-list --first-parent
+        # origin/main` always contains main's own tip, so `sha not in first_parent`
+        # already implies `sha != main_tip` — the exact-tip guard was strictly
+        # redundant, and a mutation test is what proved it: deleting `sha !=
+        # main_tip` changed no behaviour and broke no test. Two conditions that
+        # look like independent protection but are not is worse than one, because
+        # the next reader cannot tell which is load-bearing.
+        and sha not in first_parent
     ):
-        return "merged into origin/main (its tip is an ancestor of main)"
+        return "merged into origin/main (its tip is a branch head main absorbed)"
     return None
 
 
@@ -1594,6 +1675,7 @@ def scan_branch_surface(
     surface: Surface, refs: list[tuple[str, str]], issue: int,
     identity: Identity, merged_head_shas: set[str],
     ancestor_merged: set[str] | None, main_tip: str | None,
+    first_parent: set[str] | None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
 
@@ -1622,7 +1704,7 @@ def scan_branch_surface(
             )
             continue
         terminal = _branch_terminal_state(
-            ref, sha, merged_head_shas, ancestor_merged, main_tip,
+            ref, sha, merged_head_shas, ancestor_merged, main_tip, first_parent,
         )
         if terminal is not None:
             surface.add(
@@ -1664,7 +1746,7 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
 def scan_worktree_surface(
     surface: Surface, blocks: list[dict], issue: int, identity: Identity,
     merged_head_shas: set[str], ancestor_merged: set[str] | None,
-    main_tip: str | None,
+    main_tip: str | None, first_parent: set[str] | None,
 ) -> None:
     """Untruncated worktree scan — NUMBER match on the full path and branch.
 
@@ -1689,7 +1771,8 @@ def scan_worktree_surface(
             )
             continue
         terminal = _branch_terminal_state(
-            branch, block.get("head"), merged_head_shas, ancestor_merged, main_tip,
+            branch, block.get("head"), merged_head_shas, ancestor_merged,
+            main_tip, first_parent,
         )
         if terminal is not None:
             surface.add(
@@ -1703,6 +1786,28 @@ def scan_worktree_surface(
 
 
 # ── GitHub surfaces ──────────────────────────────────────────────────────────
+
+def _require_pr_dicts(prs: list, where: str) -> None:
+    """Every element of a PR list must be a JSON object.
+
+    ⛔ THE CONTAINER WAS TYPE-CHECKED AND ITS ELEMENTS WERE NOT. A list holding a
+    non-object (`[null]` — a proxy or stub, a truncated write, a future API
+    shape) reached `pr.get("title")` and raised `AttributeError`. That is neither
+    `SurfaceError` nor `RuntimeError`, so it escaped as a TRACEBACK with NO
+    `VERDICT` line and exit 1 — the code this module documents as COLLISION. The
+    direction is fail-closed, but exit 1 is read by callers as "another lane is
+    on it", so the run would be mistaken for contention and the lane waited for
+    would never appear. Raise `SurfaceError` instead: the surrounding handler
+    turns it into a named INCOMPLETE on the surface that failed.
+    """
+    for index, pr in enumerate(prs):
+        if not isinstance(pr, dict):
+            raise SurfaceError(
+                f"{where} returned a non-object element at index {index} "
+                f"({type(pr).__name__}) — refusing to read a malformed PR list "
+                "as if it were empty (NOT clean)"
+            )
+
 
 def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
     rc, out, err, timed_out = _run([gh_bin, *args], repo, timeout)
@@ -2149,7 +2254,7 @@ def scan_issue_surface(
     candidates = decidable + untrusted
     if candidates:
         if classifier is None:
-            verdicts = [ClaimVerdict("collision", None, "fallback")] * len(candidates)
+            verdicts = [ClaimVerdict("collision", None)] * len(candidates)
         else:
             decided = classifier.classify(
                 [body for _comment, body in decidable], issue_context,
@@ -2159,13 +2264,13 @@ def scan_issue_surface(
                 # Defensive: a short verdict list must never silently DROP a
                 # candidate — pad with a fail-closed COLLISION.
                 decided = list(decided) + [
-                    ClaimVerdict("collision", None, "fallback")
+                    ClaimVerdict("collision", None)
                 ] * (len(decidable) - len(decided))
             # Non-fleet candidates are hits BY RULE — never model-decided, so an
             # untrusted body can neither be cleared nor steer a trusted one.
             verdicts = list(decided) + [
                 ClaimVerdict(
-                    "untrusted", None, "rule",
+                    "untrusted", None,
                     "fleet identity unresolved" if identity_unresolved
                     else "author is not the fleet account",
                 )
@@ -2177,7 +2282,7 @@ def scan_issue_surface(
             # candidate) must be a HIT, never a silent drop. A `zip` would
             # truncate to the shorter list and DROP the tail.
             verdict = verdicts[index] if index < len(verdicts) else ClaimVerdict(
-                "collision", None, "fallback", "no verdict produced",
+                "collision", None, "no verdict produced",
             )
             if not verdict.is_hit:
                 cleaned += 1
@@ -2506,6 +2611,9 @@ def run_preflight(
                 prs, approx_total, partial = _closed_pr_sample(
                     gh_bin, slug, cwd, closed_pr_timeout, limit,
                 )
+                # Before the harvest AND the scan, so a malformed element cannot
+                # reach `.get()` on either path.
+                _require_pr_dicts(prs, f"the closed-PR sample for {slug}")
                 for _pr in prs:
                     if _pr.get("merged_at") or _pr.get("mergedAt"):
                         # `headSha` is the PROJECTED key this sample actually
@@ -2553,6 +2661,7 @@ def run_preflight(
             prs = _gh_json(gh_bin, args, cwd, timeout)
             if not isinstance(prs, list):
                 raise SurfaceError(f"gh {state}-PR enumeration returned non-list JSON")
+            _require_pr_dicts(prs, f"the {state}-PR enumeration for {slug}")
             if len(prs) > limit:
                 surface.mark_truncated(
                     f"truncated at the {limit} cap — more than {limit} {state} "
@@ -2605,6 +2714,12 @@ def run_preflight(
         )
         if _rc == 0 and _out.strip():
             main_tip = _out.strip()
+    # ⛔ The witness predicate 2 actually needs (see `_first_parent_shas`).
+    # Without it, `sha != main_tip` protects a fresh branch only until main
+    # advances one commit, after which plain ancestry reads it as landed.
+    first_parent: set[str] | None = None
+    if target.path is not None:
+        first_parent = _first_parent_shas(git_bin, cwd, timeout)
     for surface_name, namespace in (
         (SURFACE_LOCAL_BRANCHES, "refs/heads"),
         (SURFACE_REMOTE_BRANCHES, "refs/remotes"),
@@ -2640,7 +2755,7 @@ def run_preflight(
                 ancestor_merged = None
             scan_branch_surface(
                 surface, refs, issue, identity, merged_head_shas,
-                ancestor_merged, main_tip,
+                ancestor_merged, main_tip, first_parent,
             )
             surface.note = f"{len(refs)} ref(s) enumerated"
             if namespace != "refs/heads":
@@ -2691,7 +2806,7 @@ def run_preflight(
             _wt_ancestor = ancestor_merged_local
             scan_worktree_surface(
                 surface, blocks, issue, identity, merged_head_shas,
-                _wt_ancestor, main_tip,
+                _wt_ancestor, main_tip, first_parent,
             )
             surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
             if _wt_ancestor is None:
@@ -3177,9 +3292,11 @@ def main(argv: list[str] | None = None) -> int:
     # how a hit on the caller's OWN artifacts stops being read as a competing
     # claim — the fix that a text heuristic could not make, because "is this
     # mine?" is not a property of the string. Repeatable: a lane may own several
-    # refs. The current branch/worktree of the target checkout are added
-    # automatically below; omitting these flags is fail-CLOSED (it can only add
-    # hits), so this is a convenience, never a gate.
+    # refs. Omitting these flags is fail-CLOSED — adding a ref to the self set
+    # REMOVES hits, so a missing declaration can only leave more refs blocking.
+    # The AUTO-DETECTION below is the opposite: it is fail-OPEN, because it
+    # declares the target checkout's own branch and root unbidden. The flags are
+    # the authoritative input; the auto-detection is the convenience.
     parser.add_argument(
         "--self-branch", action="append", default=[], metavar="REF",
         help="a branch this session OWNS (repeatable). A hit on it is reported "

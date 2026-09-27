@@ -689,8 +689,43 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("#3061", out)
                 self.assertIn("closing", out)
 
+    def test_malformed_open_pr_element_is_incomplete_not_a_traceback(self):
+        # ⛔ A list holding a non-object used to CRASH with no VERDICT line and
+        # exit 1 — the code this tool documents as COLLISION. A caller reads exit
+        # 1 as "another lane is on it" and waits for a lane that does not exist,
+        # so a malformed payload was indistinguishable from real contention. The
+        # container was type-checked and its ELEMENTS were not.
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([None]))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("non-object element at index 0", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_malformed_closed_pr_element_is_named_not_a_traceback(self):
+        # The closed surface is ADVISORY, so a malformed element cannot make the
+        # run INCOMPLETE — but it must still be NAMED and must not traceback.
+        # (Before the fix, the harvest loop hit `.get` on `None` and the process
+        # died with exit 1 and no verdict.)
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([None]))
+        self.gh_fixtures(open_prs=[])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("non-object element at index 0", out)
+        self.assertNotIn("Traceback", out)
+
     def test_closed_pr_prose_without_closing_keyword_is_not_a_hit(self):
-        # "fixed in #3061" / "see #3061" are prose, not closing keywords.
+        # "fixed in #3061" / "see #3061" are prose, not closing keywords: the
+        # fallback regex requires the keyword IMMEDIATELY before `#N`.
+        #
+        # ⛔ IT USED TO ASSERT NOTHING ITS NAME CLAIMED, and a verifier proved it
+        # by loosening the regex (`closing_reference` -> `number_present`) and
+        # watching the test still pass. `rc == 0` is vacuous on this surface now
+        # that it is ADVISORY — an advisory surface can never set exit 1 — and
+        # "do NOT dispatch" only ever appears on the COLLISION verdict line, so
+        # neither assertion could observe a hit at all. Assert the PROPERTY, plus
+        # the positive half so the test cannot pass by the surface not running.
         for body in ("fixed in #3061", "see #3061 for context", "restored in #3061"):
             self.gh_fixtures(closed_prs=[{
                 "number": 9996, "title": "unrelated title",
@@ -700,6 +735,10 @@ class CollisionPreflightTest(unittest.TestCase):
             rc, out = self.run_tool()
             self.assertEqual(rc, 0, f"body={body!r}\n{out}")
             self.assertNotIn("do NOT dispatch", out)
+            # The property: no CLOSING-REFERENCE hit was derived from prose...
+            self.assertNotIn("closing reference to #3061", out)
+            # ...while the body WAS read and reported as a weak prose mention.
+            self.assertIn("prose mention of #3061", out)
 
     def test_number_inside_a_hex_digest_is_not_a_reference(self):
         # #4935 / #3611: a review-signature value is hex, so every 4-digit
@@ -1609,16 +1648,24 @@ class CollisionPreflightTest(unittest.TestCase):
         #
         # ⛔ THE ASSERTION IS ON THE `local worktrees` ROW, NOT THE VERDICT, and
         # that is the whole point. `add_worktree` creates a BRANCH as well as a
-        # worktree, so the local-branches surface raises the same hit and the
-        # verdict stays COLLISION even if the worktree surface is broken
-        # entirely — a VERIFIER PROVED IT by disabling `scan_worktree_surface`
-        # and watching this test still pass. An assertion the wrong code path can
+        # worktree, so the local-branches surface raises the same hit, and the
+        # verdict stays COLLISION even with the worktree surface broken entirely
+        # — a verifier PROVED it against the PREVIOUS revision of this test,
+        # which asserted only `VERDICT: COLLISION` and still passed with
+        # `scan_worktree_surface` disabled. An assertion the wrong code path can
         # satisfy is the own-masking failure this file has already produced once
-        # (a worktree check masked by a branch check). It is therefore not
-        # claimed to prove the `main_tip` WIRING: feeding the scanner `None`
-        # disables predicate 2 and can only leave the row BLOCKING (fail-closed),
-        # and omitting the argument at all is a `TypeError` now that the
-        # parameter is required. What this pins is the row's own verdict.
+        # (a worktree check masked by a branch check).
+        #
+        # What each assertion pins, stated exactly, because a later verifier
+        # checked this paragraph and found the stronger reading unsupported:
+        #   * the ROW assertion catches a DISABLED worktree surface, which the
+        #     verdict alone cannot (mutation-verified);
+        #   * the VERDICT assertion catches a broken terminal predicate, which
+        #     demotes BOTH surfaces and so needs no row-level assertion;
+        #   * NOTHING here proves the `main_tip` argument is threaded, and that is
+        #     not claimed: feeding the scanner `None` disables predicate 2 and can
+        #     only leave the row BLOCKING (fail-closed), and OMITTING the argument
+        #     is a `TypeError` now that the parameter is required.
         _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         self.add_worktree("fresh", f"fix/{ISSUE}-fresh-wt")
         self.gh_fixtures(closed_prs=[])
@@ -1662,6 +1709,53 @@ class CollisionPreflightTest(unittest.TestCase):
                                 env_extra={"REAL_GIT": shutil.which("git")})
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
+
+    def test_fresh_branch_left_behind_by_main_still_blocks(self):
+        # ⛔ THE CYCLE-5 P0 GUARD, and the defect it closes was the WIDE window,
+        # not an exotic edge. `sha != main_tip` protected a fresh branch only
+        # until `origin/main` advanced ONE commit; after that the branch was a
+        # STRICT ancestor of main and plain ancestry called it landed. The
+        # ordinary fleet flow hits this every time: `git worktree add -b
+        # fix/N-slug` (nothing committed yet), then some OTHER PR merges — and any
+        # lane running the pre-flight for N in that window got CLEAN on an issue
+        # another lane had already claimed by creating the branch. Not maskable by
+        # the remote surface, because the branch has not been pushed.
+        #
+        # The discriminator is membership of main's FIRST-PARENT chain: a fresh
+        # branch's tip IS a main-line commit however far main has moved, whereas
+        # an absorbed branch head entered main as a MERGE parent.
+        #
+        # BOTH surfaces are asserted as ROWS: `add_worktree` also creates a
+        # branch, so the branch surface would supply the verdict on its own and a
+        # verdict-level assertion could not tell whether the worktree path (and
+        # its `first_parent` threading) works at all.
+        branch = f"fix/{ISSUE}-fresh-behind"
+        self.add_worktree("behind", branch)
+        (self.repo / "later.txt").write_text("later\n")
+        _git(self.repo, "add", "later.txt")
+        _git(self.repo, "commit", "-qm", "another lane lands")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # Preconditions, so this test cannot pass for the wrong reason:
+        # the ref IS an ancestor of main (the state plain ancestry misreads)...
+        tip = self._git_out("rev-parse", branch)
+        merged = self._git_out("for-each-ref", "--format=%(refname)",
+                               "--merged=origin/main", "refs/heads")
+        self.assertIn(f"refs/heads/{branch}", merged)
+        # ...and its tip IS on main's first-parent chain (the state that must
+        # make the exclusion fire, rather than the branch merely being unmerged).
+        self.assertIn(tip, self._git_out(
+            "rev-list", "--first-parent", "origin/main").splitlines())
+
+        self.gh_fixtures(closed_prs=[])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        for row_prefix in ("local branches", "local worktrees"):
+            row = [ln for ln in out.splitlines()
+                   if ln.startswith(row_prefix)][0]
+            self.assertIn("HIT", row, row)
         self.assertNotIn("merged into origin/main", out)
 
     def test_branch_created_at_main_tip_with_no_commits_still_blocks(self):
