@@ -9,8 +9,12 @@ real Source); no phantom Sources; Source nodes (including the D10 document
 Source) and Event nodes survive replay;
 a re-index run restores the dropped session/meeting edges (repair carve-out →
 ``updated``). The wipe-after-parse + line-tolerance ordering pins: parse ALL
-.jsonl into memory (torn TRAILING line skipped+warned, never raised) BEFORE
-the wipe — a torn tail rebuilds to the crash-free structural state. Restore
+.jsonl into memory (torn TRAILING line skipped+warned, never raised — and,
+since #3316, that READ tolerance is qualified: a tear whose loss would REVIVE
+state is still skipped by ``read_all``, but the REPLAY refuses it before the
+wipe, so a torn removal record can no longer rebuild) BEFORE the wipe — a torn
+tail whose loss is the data-LOSS direction rebuilds to the crash-free
+structural state. Restore
 drill: backup (corpus + events dir + db) → wipe → rebuild_all (line-tolerant)
 → re-index → the full Source count (provenance Sources + D10 document
 Sources), zero duplicate urls. Forward-only

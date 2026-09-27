@@ -233,12 +233,18 @@ class EventLog:
         LINE-TOLERANCE (epic #900 S15/T12, cycle-21): a malformed TRAILING
         line (a torn tail from a SIGKILL mid-append — ``append`` is a bare
         ``f.write`` with no fsync) is skipped with a warning + count
-        (``self.torn_trailing_count``), never raised — a raised parse would
-        kill the very recovery tool (``rebuild_all`` / ``_auto_health_recover``).
+        (``self.torn_trailing_count``) and this READ never raises — a raised
+        parse would kill the very recovery tool (``rebuild_all`` /
+        ``_auto_health_recover``). The tolerance is for the data-LOSS
+        direction and is qualified by #3316: a torn tail whose loss could
+        REVIVE state is still skipped here (the file is not rejected and not
+        modified) but is REFUSED by the REPLAY, which consults
+        :attr:`torn_trailing_raw` through
+        :func:`torn_record_may_revive_state` BEFORE any wipe or fold.
         A malformed MID-FILE line is a separate corruption class (not a torn
         append) and raises an actionable error naming the file and line.
 
-        The raw text of every skipped trailing line is kept in
+        The raw text of every skipped trailing line is kept, UNCAPPED, in
         :attr:`torn_trailing_raw` so a replay engine can tell a harmful tear
         from a harmless one (:func:`torn_record_may_revive_state`);
         :attr:`torn_trailing_count` remains the count. Both are reset on EVERY
@@ -275,12 +281,13 @@ class EventLog:
             except ValueError:
                 if idx == len(lines) - 1:
                     self.torn_trailing_count += 1
-                    # Capped for the retained copy / operator message: a file
-                    # with no newline is one "line". The cap is FAIL-CLOSED for
-                    # classification — a ``type`` that did not survive it reads
-                    # as an unreadable type, which is refused, never assumed
-                    # harmless.
-                    self.torn_trailing_raw.append(line[:4096])
+                    # The FULL line, UNCAPPED. Classification is conservative
+                    # over EVERY legible type, so a cap would let a
+                    # non-allowlisted type hiding BEYOND it ride an allowlisted
+                    # one before it — fail OPEN, the exact shape the allowlist
+                    # polarity exists to prevent. ``line`` already exists here,
+                    # so retaining it costs no extra allocation.
+                    self.torn_trailing_raw.append(line)
                     logging.getLogger(__name__).warning(
                         "EventLog %s: skipping torn trailing line %d "
                         "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",

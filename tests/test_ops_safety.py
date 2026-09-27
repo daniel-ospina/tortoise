@@ -745,6 +745,66 @@ def test_rebuild_cli_inmemory_fallback_refuses_a_torn_tail(capsys, monkeypatch):
     assert "Done:" not in captured.out, captured.out
 
 
+def test_recover_from_log_pending_snapshot_route_refuses_a_torn_tail():
+    """The pending pre-wipe snapshot route must refuse too (#3316).
+
+    ``recover_from_log`` has a second, destructive route: a leftover #2943
+    pre-wipe sidecar sends it through ``rebuild_all`` (inside a broad
+    ``except Exception``). The refusal must still happen there — the sidecar's
+    graph-only record would otherwise be replayed over a journal that dropped
+    a removal — and the typed refusal must not be reported as success.
+    """
+    from tortoise.projection import (
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
+
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "pending.db")
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    # A complete PointAdded + a torn hard delete: replaying without the delete
+    # would revive gone-1.
+    _write_journal(os.path.join(log_dir, "events.jsonl"),
+                   _point_added("gone-1"), full[:full.index('"op"')],
+                   torn_last=True)
+    # A PENDING #2943 sidecar beside it, holding a graph-only episodic Point.
+    _write_prewipe_snapshot(prewipe_snapshot_path(log_dir), {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-only-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")   # the 0-node "lost DB" case
+        result = recover_from_log(log_dir, proj)
+        assert result["recovered"] is False, result
+        assert "refusing to replay" in result["reason"], result
+        # The sidecar Point would have been materialized had the route
+        # replayed; its absence proves the refusal preceded the wipe+replay.
+        live = proj.g.query(
+            "MATCH (n:Point {id:'sidecar-only-1'}) RETURN count(n)"
+        ).result_set[0][0]
+        assert live == 0, "the pending-snapshot route replayed over the tear"
+    finally:
+        proj.close()
+
+
 def test_rebuild_cli_inmemory_fallback_keeps_a_harmless_tear(capsys, monkeypatch):
     """No over-correction: the fallback still reports its in-memory rebuild for
     a torn record whose loss is the data-LOSS direction."""

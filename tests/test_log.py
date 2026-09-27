@@ -373,54 +373,77 @@ def test_a_torn_event_recorded_is_refused_however_it_was_cut():
 
 
 def test_torn_tail_allowlist_holds_no_destructive_type():
-    """The allowlist IS the fail-open/fail-closed switch, so pin its polarity.
+    """The allowlist IS the fail-open/fail-closed switch, so pin its POLARITY
+    and its CONTENT.
 
-    Behavioural tests cover a handful of members; an edit that typos a name
-    into the set, or moves a removal/terminal type in — including a new one —
-    would otherwise be silent and simply stop the refusal firing.
+    Behavioural tests cover a handful of members; without an exact pin an edit
+    that typos a member name (silently dropping the tolerance for the intended
+    type), drops an audit member, or moves a removal/terminal type in —
+    including a new one — would pass unnoticed. The full-equality assertion
+    makes ANY edit to the set a deliberate, visible test change.
     """
+    # Exact membership: any addition, removal or typo must update this literal.
+    assert frozenset({
+        # point / operator lifecycle additions and updates (MERGE + SET)
+        "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
+        "PointPromoted", "OperatorPromoted",
+        # object / subject / session lane additions (+ a derived-embedding clear)
+        "ObjectRegistered", "SubjectAdded", "SessionRecorded",
+        # source lane addition
+        "SourceCreated",
+        # additive edge write
+        "EntityLinked",
+        # `_NO_PROJECTION_FOLD` audit records: NO fold in any dispatcher
+        "BatchIdStamped", "IngestStarted", "CalibrationRecorded",
+        "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
+        "DirectEdgeCreated",
+    }) == TORN_TAIL_HARMLESS_EVENT_TYPES
     # Named terminal / removal types that would resurrect state if tolerated.
+    # PointInvalidated / PointSuperseded are EP-terminal (a dropped one lets a
+    # withdrawn claim vote); EntityMutated op=delete and PointsMerged hard-delete.
     destructive = {
-        "PointRetracted", "PointsMerged", "EntityMutated",
-        "ObjectSuperseded", "ConfidenceChanged", "DocumentCreated",
-        "DirectEdgeRepoint", "EventRecorded",
+        "PointRetracted", "PointSuperseded", "PointInvalidated",
+        "PointsMerged", "EntityMutated", "ObjectSuperseded",
+        "ConfidenceChanged", "DocumentCreated", "DirectEdgeRepoint",
+        "EventRecorded",
     }
     offenders = sorted(destructive & TORN_TAIL_HARMLESS_EVENT_TYPES)
     assert not offenders, f"destructive types in the allowlist: {offenders}"
-    assert TORN_TAIL_HARMLESS_EVENT_TYPES
     assert all(isinstance(t, str) and t for t in TORN_TAIL_HARMLESS_EVENT_TYPES)
-    # Every member must be a real record type. A typo would silently drop the
-    # tolerance for the intended type and never refuse anything new.
-    assert "PointAdded" in TORN_TAIL_HARMLESS_EVENT_TYPES
     print("PASS test_torn_tail_allowlist_holds_no_destructive_type")
 
 
-def test_read_all_cap_does_not_turn_a_huge_torn_tail_harmless():
-    """``torn_trailing_raw`` is capped at 4096 bytes; the cap must stay
-    FAIL-CLOSED. A huge torn record whose type is beyond the cap reads as
-    unreadable and is refused, and a huge torn ``EventRecorded`` is refused on
-    its type regardless of where the cap cut.
+def test_a_destructive_type_anywhere_in_a_torn_tail_is_refused():
+    """Classification reads the WHOLE torn line, uncapped.
+
+    ``read_all`` retains the full line, because a cap would let a
+    non-allowlisted type hiding beyond it ride an allowlisted envelope type
+    before it — fail open. This pins both directions: a destructive type deep
+    in a large record is found, and an allowlisted envelope type alone is not
+    allowed to mask it.
     """
     p = _tmp("events.jsonl")
     with open(p, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"type": "PointAdded",
                              "point": {"id": "a"}}) + "\n")
-        fh.write('{"pad": "' + "x" * 9000)  # type beyond the cap, malformed
+        # An allowlisted envelope type, ~5000 filler bytes, then a REMOVAL type
+        # that a 4096-byte cap would have chopped off.
+        fh.write('{"type": "PointAdded", "point": {"id": "b", "pad": "'
+                 + "x" * 5000 + '", "type": "EntityMutated", "op": "del')
     log = EventLog(p)
     assert len(log.read_all()) == 1
     assert log.torn_trailing_count == 1
-    assert len(log.torn_trailing_raw[0]) == 4096
-    # Unreadable type after the cap → refused, never assumed harmless.
+    assert len(log.torn_trailing_raw[0]) > 4096, "the torn line must be retained whole"
     assert len(log.torn_tail_revival_records()) == 1
 
+    # A huge torn record whose type did not survive at all is also refused.
     p2 = _tmp("events.jsonl")
     with open(p2, "w", encoding="utf-8") as fh:
-        fh.write('{"type": "EventRecorded", "body": "' + "x" * 9000
-                 + '", "sourceUrl": "https://x')
+        fh.write('{"pad": "' + "x" * 9000)  # malformed, no type
     log2 = EventLog(p2)
-    log2.read_all()
+    assert log2.read_all() == []
     assert len(log2.torn_tail_revival_records()) == 1
-    print("PASS test_read_all_cap_does_not_turn_a_huge_torn_tail_harmless")
+    print("PASS test_a_destructive_type_anywhere_in_a_torn_tail_is_refused")
 
 
 def test_read_all_resets_torn_state_across_calls():
