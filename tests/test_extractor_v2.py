@@ -2248,7 +2248,7 @@ class TestParticipantSlots:
         assert "agent" in warns
 
     def test_slot_minted_kind_repaired(self):
-        # P2-1 review fix: slot kinds gate against the same master_kind_forms
+        # P2-1 review fix: slot kinds gate against the same _object_kind_forms
         # vocabulary S5 applies to entities — a near-miss kind is repaired
         # (never silently divergent), and the repaired (name, kind) then
         # resolves against the emitted entity

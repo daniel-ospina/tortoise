@@ -57,8 +57,9 @@ ontology:
   #   - description:  one line of what the kind IS (this is prompt material)
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
-  #   - nearMisses:   confusable kinds (own pack, `ns:kind`, or core) — prompt
-  #                   guidance + retry trigger
+  #   - nearMisses:   confusable kinds (own pack, `ns:kind`, or core) — the
+  #                   post-extraction kind classifier's rerank input, NOT
+  #                   extraction-prompt guidance
   #   - extractable:  bool, default true — false = registered but never minted
   #                   by extraction
   #   - storeAs:      claim|decision|entity|tag|event — default inferred from

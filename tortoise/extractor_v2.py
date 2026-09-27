@@ -2655,9 +2655,9 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
     Deterministic and CARRY-ONLY — this never binds (threshold gating is
     the #1370 write path's job): non-dict entries dropped, blank names/
     kinds dropped, minted kinds repaired to the family fallback (the same
-    master_kind_forms gate S5 applies to entities/events — subject/object
-    kinds gate against the entity vocabulary, event kinds against the event
-    vocabulary), confidence coerced to float and clamped to [0,1]
+    _object_kind_forms/_event_kind_forms gate S5 applies to entities/events —
+    subject/object kinds gate against the entity vocabulary, event kinds
+    against the event vocabulary), confidence coerced to float and clamped to [0,1]
     (non-numeric → 0.0), unknown role keys and non-list role values dropped
     with a warning. The classify-later ``unclassified`` sentinel is carried
     WITHOUT the minted-kind repair warning (FIX G — it is a terminal, not a
