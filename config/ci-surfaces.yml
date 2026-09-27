@@ -1134,6 +1134,13 @@ surfaces:
   # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
   # sibling `test_vet_gate_5005.py` because it guards the same seam.
   - test_value_gate_4899.py
+  # #5059 / G5 (the existing half): the report-only definite-description
+  # backfill planner (`tortoise/definite_description_backfill.py`). Hermetic
+  # (no DB, no network): the census is injected and the plan is a pure
+  # function of it. `tortoise/` matches no named SOURCE_PATTERNS entry, so a
+  # change to the module selects `core` — this entry is what makes the guard
+  # run on that change rather than only on a tests/ change.
+  - test_definite_description_backfill_5059.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
