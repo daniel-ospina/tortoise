@@ -785,6 +785,34 @@ def test_analytics_http_reset_closes_and_drops_the_cached_client(monkeypatch):
     assert second is not first, "reset did not drop the cached client (#4462)"
 
 
+def test_pooled_client_rebuilds_on_key_change_without_closing_the_superseded(
+        monkeypatch):
+    """A changed sink key builds a FRESH client, and the superseded one is
+    DROPPED, never closed — an in-flight emitter may still hold it, and closing
+    a pool under a live request is the #4608 class.
+
+    Mutation A: return the cached client regardless of key → one construction
+    instead of two (a pool warmed for the old configuration serves the new).
+    Mutation B: close the superseded client → ``closes`` is 1.
+    """
+    _prod_env(monkeypatch)
+    rec = _record_pooled_client(monkeypatch)
+
+    first = ha._analytics_http_client("https://a4462.supabase.co", "k")
+    same = ha._analytics_http_client("https://a4462.supabase.co", "k")
+    other = ha._analytics_http_client("https://b4462.supabase.co", "k")
+
+    assert same is first, "an unchanged key must reuse the cached client"
+    assert len(rec.instances) == 2, (
+        f"a changed key built {len(rec.instances)} clients — it must rebuild "
+        "exactly once")
+    assert other is not first, other
+    assert rec.closes == 0, (
+        "the superseded client was CLOSED while an in-flight emitter may "
+        "still hold it — the #4608 class, not re-derived here (#4462)"
+    )
+
+
 def test_pooled_client_reuses_one_tcp_connection_across_emits(monkeypatch):
     """#4462 MEASURED: five sequential emits open ONE real TCP connection.
 

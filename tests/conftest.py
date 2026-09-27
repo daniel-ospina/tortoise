@@ -1226,6 +1226,15 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
                         {"key": None, "client": None})
     mon.ANALYTICS_OUTCOME_COUNT.clear()
+    yield
+    # #4462: close whatever pooled client this test built before the swapped
+    # dict is restored. Without this, a test that exercises the CONSTRUCTED leg
+    # (``test_analytics_write_path_resolution``, or the real-loopback pool test)
+    # leaks a live connection pool for the rest of the session. Finalizers run
+    # LIFO and ``monkeypatch`` was requested first, so it is restored AFTER this
+    # — the swapped dict is still installed here, and this closes its client. It
+    # also runs after the test body, so no emit is in flight.
+    ha._analytics_http_reset()
 
 
 @pytest.fixture

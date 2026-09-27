@@ -1129,6 +1129,9 @@ async def _lifespan(app):
     _READY_PROBE.reset()
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
+    # ── #4462: likewise drop any pooled analytics client left by a previous
+    # app instance. This runs before uvicorn binds, so nothing is in flight.
+    _analytics_http_reset()
 
     # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
     # task, the dedicated /healthz listener and the stall watchdog are all
@@ -22935,7 +22938,7 @@ _ANALYTICS_POST_TIMEOUT_S = 5
 # ONE process-wide client, built lazily on the first CONFIGURED emit.
 #
 # The shape is the repo's existing "lazy + env-keyed + locked + resettable
-# process-wide handle" idiom (``_PROBE_SDK_CACHE`` / ``_probe_sdk`` below): the
+# process-wide handle" idiom (``_PROBE_SDK_CACHE`` / ``_probe_sdk`` ABOVE): the
 # cache is a dict so tests/ops can drop it by reference, the lock guards the
 # CACHE only (never the network call), and a changed key rebuilds.
 #
@@ -22948,49 +22951,62 @@ _ANALYTICS_POST_TIMEOUT_S = 5
 # reuse safe, and why a pooled ``AsyncClient`` was not used.
 #
 # LIFETIME: process-lifetime by design, and deliberately NOT closed at shutdown
-# — mirroring ``SupabaseControlPlane._http`` (never closed) and
-# ``_probe_sdk_reset()`` (called at startup + tests, not teardown). A shutdown
-# close would race an in-flight telemetry worker — the seam abandons the AWAIT
-# on a wait-bound miss but never the daemon thread (CPython #87185) — and turn a
+# — mirroring ``SupabaseControlPlane._http`` (never closed). A shutdown close
+# would race an in-flight telemetry worker — the seam abandons the AWAIT on a
+# wait-bound miss but never the daemon thread (CPython #87185) — and turn a
 # delivered event into a spurious JSONL fallback/degradation. That
 # close-in-flight contract is #4608's subject and is not re-derived here; the
 # process exit reclaims the sockets. ``_analytics_http_reset()`` is the
-# test/ops seam.
+# test/ops seam, also called from the ``_lifespan`` startup reset block (beside
+# ``_probe_sdk_reset()``) so no handle from a previous app instance survives.
 _ANALYTICS_HTTP_CACHE: dict = {"key": None, "client": None}
 _ANALYTICS_HTTP_LOCK = threading.Lock()
-# Connection ceiling — pinned explicitly so it is auditable rather than an
-# implicit default. It is NOT a concurrency limit on the emit path: 100 is
-# several times the most emitters this process can run at once (the telemetry
-# pool's 4 workers plus the shared default executor plus the MCP lane), so a
-# slow telemetry call can never make another wait for a connection. Every lane
-# is off-loop, so even a saturated pool could never stall the event loop.
+# Connection ceiling, pinned explicitly so it is auditable. This is an UPPER
+# BOUND, not a concurrency limiter: it sits far above the most emitters this
+# process can run at once — the telemetry pool's 4 workers plus the loop's
+# shared default executor (``min(32, cpu+4)``) plus the MCP lane — so no emit
+# waits on a pool slot in practice. Every lane is off-loop, so even a saturated
+# pool could never stall the event loop. If emitter concurrency ever did exceed
+# it, httpcore would queue and the pool phase would expire into the never-raise
+# arm as a ``fallback`` — a documented residual, not a stall.
 _ANALYTICS_HTTP_MAX_CONNECTIONS = 100
 _ANALYTICS_HTTP_MAX_KEEPALIVE = 20
-# Deliberately httpx's own default. This is the window over which an idle
-# pooled connection is reused, so it BOUNDS the benefit: emits arriving within
-# it share the handshake (a burst), while sparser emits still pay one. A longer
-# window would hold sockets the server may already have closed, and with
-# ``retries=0`` that is a LOST event under the never-raise contract — a trade
-# that needs the pool measurement tracked by #5840, so it is not made blind.
+# httpx's own default, kept deliberately. This is the window over which an idle
+# pooled connection is reused, so it BOUNDS the benefit: emits within it share
+# the handshake (the burst case), while sparser emits still pay one. It is not
+# extended because a longer window holds sockets the peer may already have
+# closed; httpcore discards an idle connection whose peer FIN has arrived, so
+# the residual is a narrow post-check race whose consequence — under the
+# never-raise guard — is a spurious JSONL ``fallback``/degradation, never an
+# ESCAPED error and never a silent loss. Observing the sink's reuse /
+# transport-failure rate is tracked with its other missing instrumentation (#5840).
 _ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S = 5.0
 
 
 def _analytics_http_key(url: str, key: str) -> tuple:
-    """Identity of the sink the cached client is bound to.
+    """Identity of the cached client.
 
-    A changed ``SUPABASE_URL`` / service key / ``_ANALYTICS_POST_TIMEOUT_S``
-    must rebuild rather than POST through a client configured for the old sink.
-    Production is a stable key, so the client is built once.
+    The client itself is SINK-AGNOSTIC — it carries no base URL and no
+    credentials (the URL and the service-key headers are built per request in
+    ``_track_analytics_event``), so ``url``/``key`` do not parameterize the
+    instance. They are part of the key anyway, as the conservative choice: a
+    change to the configured sink forces a fresh pool rather than reusing one
+    warmed against the old configuration. Production is a stable key, so the
+    client is built once.
     """
     return (url, key, _ANALYTICS_POST_TIMEOUT_S)
 
 
 def _analytics_http_reset() -> None:
-    """Close + drop the cached analytics client (tests / ops).
+    """Close + drop the cached analytics client (tests / ops; lifespan startup).
 
-    The ``close()`` is individually guarded: this runs in teardown and must
-    never raise, and test doubles standing in for ``httpx.Client`` do not all
-    define ``close()``.
+    NOT safe to call concurrently with a live emit: httpx raises on a closed
+    client, which the never-raise guard turns into a JSONL ``fallback``. The
+    ``_lifespan`` startup call runs before uvicorn binds (nothing in flight),
+    and the tests call it after their body.
+
+    The ``close()`` is individually guarded: this must never raise, and test
+    doubles standing in for ``httpx.Client`` do not all define ``close()``.
     """
     with _ANALYTICS_HTTP_LOCK:
         client = _ANALYTICS_HTTP_CACHE.get("client")
@@ -23010,17 +23026,23 @@ def _analytics_http_client(url: str, key: str):
     unconfigured or half-configured env must never build (nor have to close) a
     client; it still degrades to the JSONL (#3677/#3820).
 
-    The lock is held across cache lookup and construction, NEVER across the
-    POST, so no slow emit can block another. A superseded client (the env or
-    the timeout changed) is closed OUTSIDE the lock — the same accepted window
-    ``_probe_sdk`` documents.
+    ``import httpx`` is hoisted above the lock so the first configured emit
+    does not serialize every other emitter behind a cold module import. The
+    lock is held across cache lookup and construction, NEVER across the POST,
+    so no slow emit can block another.
+
+    A SUPERSEDED client is dropped, NOT closed: an in-flight emitter may still
+    hold it, and closing a pool under a live request is the #4608 class — a
+    delivered event recorded as a spurious ``fallback``/degradation. The
+    supersede path is reachable only on a runtime sink/timeout change, which
+    production never performs, so the dropped pool is reclaimed at process exit.
     """
     cache_key = _analytics_http_key(url, key)
+    import httpx
     with _ANALYTICS_HTTP_LOCK:
-        old = _ANALYTICS_HTTP_CACHE.get("client")
-        if old is not None and _ANALYTICS_HTTP_CACHE.get("key") == cache_key:
-            return old
-        import httpx
+        cached = _ANALYTICS_HTTP_CACHE.get("client")
+        if cached is not None and _ANALYTICS_HTTP_CACHE.get("key") == cache_key:
+            return cached
         client = httpx.Client(
             timeout=_ANALYTICS_POST_TIMEOUT_S,
             limits=httpx.Limits(
@@ -23031,11 +23053,6 @@ def _analytics_http_client(url: str, key: str):
         )
         _ANALYTICS_HTTP_CACHE["client"] = client
         _ANALYTICS_HTTP_CACHE["key"] = cache_key
-    if old is not None:
-        try:  # noqa: SIM105 — a double without close() must not fail the emit
-            old.close()
-        except Exception:
-            pass
     return client
 
 
