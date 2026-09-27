@@ -218,19 +218,23 @@ def _norm_variants(text: object) -> set[str]:
     raw string and to its whitespace-collapsed form — ``_endpoint_keys(x) = {M(x),
     M(_norm(x))}``, the entity guard's own set ("the two SPELLINGS, not every
     truncation") — PLUS the untruncated ``_norm(x)`` alias the mint registers for
-    a minted endpoint (``_full``; ``_resolve`` probes that spelling). So
-    ``_norm_variants(x) == _endpoint_keys(x) | {_norm(x)}``: a strict SUPERSET,
-    whose difference is exactly ``{_norm(x)}`` whenever that key is not already
-    one of the two guard arms.
+    a minted endpoint (``_full``; ``_resolve`` probes that spelling). So for
+    non-empty ``x``, ``_norm_variants(x) == _endpoint_keys(x) | {_norm(x)}`` — a
+    SUPERSET that is STRICT exactly when ``_norm(x)`` is not already one of the
+    guard's two arms; both helpers return the empty set for empty/whitespace-only
+    input.
 
-    Use this for **entity-name key sets only** (``removed_entity_names``,
-    ``present_entity_names``, ``prior_entity_keys``). Point/event/operator
-    CONTENT is keyed with :func:`_resolution_variants` (``{_norm(x), M(x)}``)
-    instead: relative to IT, the extra arm here is the ENTITY guard's
-    collapsed-closure ``M(_norm(x))``, which a regular point/event never
-    registers. Carrying it on a content SURVIVOR surface lets a surviving long
-    point shield an operator endpoint the mint cannot resolve — and the mint
-    then re-materialises a DISCARDED item as a claim Point (#5069 review, P1).
+    Use this for the **entity-name key sets** (``removed_entity_names``,
+    ``present_entity_names``, ``prior_entity_keys``) AND for the
+    **operator-endpoint surface** (:func:`_operator_endpoint_text`), which is
+    matched against the UNION of those entity keys with the content keys — so it
+    must cover the entity-GUARD ref keys too, not only the resolution keys. Use
+    :func:`_resolution_variants` (``{_norm(x), M(x)}``) for point/event CONTENT:
+    relative to it, the extra arm here is the entity guard's collapsed-closure
+    ``M(_norm(x))``, which a regular point never registers. Carrying it on a
+    content SURVIVOR surface lets a surviving long point shield an operator
+    endpoint the mint cannot resolve — and the mint then re-materialises a
+    DISCARDED item as a claim Point (#5069 review, P1).
 
     The two sets are equal only while the untruncated alias ``_norm(raw)`` is
     ALREADY one of the guard's two arms; the difference is exactly
@@ -653,9 +657,19 @@ def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
 def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     """Normalized texts an operator endpoint names.
 
-    Mirrors ``execute_embed``'s resolution surface: ``src``/``dst`` whichever
-    ``op_type`` an operator carries (the embedder reads them unconditionally),
-    and the target — read as
+    Keyed with :func:`_norm_variants` — the UNION of the mint's RESOLUTION keys
+    (``_resolution_variants``) and its ENTITY-GUARD ref keys — because the prune
+    compares this set against ``gone``, which itself unions the CONTENT keys
+    (2-arm) with the ENTITY-name keys (3-arm). Keying only the resolution arms
+    drops the entity guard's collapsed-closure ``M(_norm(x))``, so a ref naming a
+    DISCARDED >cap entity through that arm alone escapes the prune — and a
+    discarded entity is in neither ``emitted_entity_names`` nor the S3 index, so
+    the prune is the only control and the mint fabricates a claim Point from the
+    participant name (#5069 re-review, P1).
+
+    Otherwise mirrors ``execute_embed``'s resolution surface: ``src``/``dst``
+    whichever ``op_type`` an operator carries (the embedder reads them
+    unconditionally), and the target — read as
     ``op.get("target") or op.get("target_edge")``, the **first present, not a
     union** — **only for a MITIGATES**, which is the only ``op_type`` the
     embedder reads a target for (``if _op_type == "MITIGATES"``). Reading it for
@@ -670,14 +684,14 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     for key in ("src", "dst"):
         v = op.get(key)
         if v and str(v).strip():
-            out |= _resolution_variants(v)
+            out |= _norm_variants(v)
     if str(op.get("op_type", "")).upper() == "MITIGATES":
         target = op.get("target") or op.get("target_edge")
         if isinstance(target, dict):
             for key in ("src", "dst"):
                 v = target.get(key)
                 if v and str(v).strip():
-                    out |= _resolution_variants(v)
+                    out |= _norm_variants(v)
     return out
 
 

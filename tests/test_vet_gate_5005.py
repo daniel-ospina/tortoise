@@ -900,6 +900,74 @@ def test_cross_pass_discarded_entity_name_is_still_pruned():
         assert payload["operators"] == []
 
 
+def test_respelled_discarded_entity_matched_only_by_the_closure_arm_is_pruned():
+    """#5069 re-review (P1): the operator-endpoint surface must cover the mint's
+    ENTITY-GUARD ref keys, not only its resolution keys. ``gone`` unions CONTENT
+    keys (2-arm) with ENTITY-name keys (3-arm); keying the endpoint side on the
+    2-arm content set drops the entity guard's collapsed-closure
+    ``M(_norm(x))``, so a ref naming a DISCARDED entity through that arm ALONE
+    escapes the prune — and a discarded entity is in neither
+    ``emitted_entity_names`` nor the S3 index, so the prune is the only control
+    and the mint mints a claim Point from the participant name. Driven on BOTH
+    the same-pass and the cross-pass leg.
+    """
+    from tortoise import extractor_v2 as v2
+    name = "a" * 500 + " " * 900 + "b" * 600         # raw 2000, collapsed 1101
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"  # raw 1055
+    closure = v2._norm(name)[:v2._MAX_CONTENT]
+    # the ref is a spelling of the name only through its OWN closure arm ...
+    assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == closure
+    # ... which the entity name's closure arm carries, but neither of the ref's
+    # RESOLUTION arms does — so a 2-arm endpoint set misses it entirely.
+    assert closure in vg._norm_variants(name)
+    assert v2._norm(ref) not in vg._norm_variants(name)
+    assert v2._norm(ref[:v2._MAX_CONTENT]) not in vg._norm_variants(name)
+    assert vg._operator_endpoint_text(
+        {"src": ref, "dst": "K", "op_type": "IMPL"}) & vg._norm_variants(name), (
+        "the endpoint set must cover the mint's entity-guard keys")
+    for cross_pass in (False, True):
+        el = {"entities": [{"name": name, "kind": "core:tool"}],
+              "events": [],
+              "points": [{"content": "K", "pointKind": "statement"}],
+              "operators": ([] if cross_pass else
+                            [{"src": ref, "dst": "K", "op_type": "IMPL"}])}
+        first = vg._item_id("entities", 0, el["entities"][0])
+        pass1, _w1 = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+        if cross_pass:
+            pool = vg.removal_pool(el, pass1)
+            union = {**pass1,
+                     "operators": [{"src": ref, "dst": "K",
+                                    "op_type": "IMPL"}]}
+            out, warnings = vg.apply_vet(union, {}, prior=pool)
+        else:
+            out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+        assert out["operators"] == [], (cross_pass, warnings)
+        assert any("pruned" in w for w in warnings), (cross_pass, warnings)
+        payload, _res = _payload_of(out)
+        assert [p["content"] for p in payload["points"]] == ["K"], (
+            cross_pass,
+            "the discarded participant name was re-materialised as a Point")
+        assert payload["operators"] == []
+
+
+def test_discarded_point_closure_arm_does_not_enter_gone():
+    """#5069 re-review (P2): the REMOVED-content surface is keyed on the mint's
+    RESOLUTION keys only. A discarded point's entity-closure arm is not a key the
+    mint resolves it on, so it must not enter ``gone`` (a reversion here re-adds
+    the arm, over-pruning legitimate edges with a false "whose endpoint was
+    discarded" warning). Pins the split at the `_item_text_variants` call site,
+    which `_content_texts`'s survivor test does not constrain.
+    """
+    from tortoise import extractor_v2 as v2
+    content = "a" * 500 + " " * 900 + "b" * 600
+    variants = vg._item_text_variants(
+        "points", {"content": content, "pointKind": "statement"})
+    assert v2._norm(content) in variants          # the untruncated alias
+    assert v2._norm(content[:v2._MAX_CONTENT]) in variants   # the mint key
+    assert v2._norm(v2._norm(content)[:v2._MAX_CONTENT]) not in variants, (
+        "the entity-closure arm must not reach the content surface")
+
+
 def test_discarded_over_long_point_content_is_pruned_on_both_legs():
     """#5069 code-review (P1): ``_resolution_variants`` must carry the
     UNTRUNCATED ``_norm(raw)`` arm as well as the truncated key — the mint
