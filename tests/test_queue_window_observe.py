@@ -659,10 +659,48 @@ def test_build_record_tolerates_a_non_string_display_title():
 def test_window_excludes_runs_created_after_as_of():
     # A corpus can extend past the pinned `--as-of` (a dump captured later than
     # the window end); counting such a run would contradict `window.end`.
-    late = run("feature/late", "merge queue: checking #9 on main (abc1234)",
-               minutes_ago=-30)
+    late = run("mergify/merge-queue/late",
+               "merge queue: checking #9 on main (abc1234)", minutes_ago=-30)
     record = _build([*_corpus(), late])
-    assert "feature/late" not in {f["branch"] for f in record["batches"]["formations"]}
+    assert "mergify/merge-queue/late" not in {
+        f["branch"] for f in record["batches"]["formations"]}
+    # DISCRIMINATOR: push `now` past the late run and it must APPEAR. Without
+    # this leg the test passes even with the upper bound removed, because a
+    # non-queue branch is filtered out by the merge-queue branch prefix anyway.
+    later = obs.build_record([*_corpus(), late], 24,
+                             now=NOW + timedelta(minutes=90),
+                             config_path=MERGIFY_NO_MAX)
+    assert "mergify/merge-queue/late" in {
+        f["branch"] for f in later["batches"]["formations"]}
+
+
+def test_cli_refuses_an_empty_or_malformed_main_sha(tmp_path):
+    # A typo'd/empty `--main-sha` must not be recorded as `resolved origin/main
+    # at capture` — that is a false provenance claim.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    for bad in ("", "not-a-sha", "ZZZZZZZ"):
+        with pytest.raises(SystemExit):
+            obs.main(["--from-json", str(runs), "--window-hours", "24",
+                      "--main-sha", bad])
+
+
+def test_cli_emits_unknown_when_record_construction_raises(tmp_path, monkeypatch):
+    # The fail-closed net: a construction failure must be UNKNOWN/exit 2 and must
+    # overwrite a stale `OK` record on disk, never a traceback (exit 1) that
+    # leaves the stale artifact in place.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    out = tmp_path / "record.json"
+    out.write_text('{"status": "OK"}')
+
+    def boom(*_args, **_kw):
+        raise TypeError("expected string or bytes-like object")
+
+    monkeypatch.setattr(obs, "build_record", boom)
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 
 
 def test_interval_ends_are_clamped_to_now():

@@ -917,7 +917,7 @@ def main(argv=None):
     parser.add_argument("--conflicts-json", help="the instrument's --json .conflicts")
     parser.add_argument("--main-sha", help="the resolved origin/main sha for provenance "
                                             "(a --from-json replay is hermetic and does not "
-                                            "shell out unless this is given)")
+                                            "shell out unless this or --confirm-refs is given)")
     parser.add_argument("--as-of", help="ISO timestamp to treat as 'now' — pins the window end "
                                         "to the corpus's coverage so a replay is reproducible "
                                         "and recent runs missing from the dump cannot look "
@@ -972,6 +972,17 @@ def main(argv=None):
         as_of = _ts(args.as_of)
         if as_of is None:
             parser.error(f"--as-of is not a parseable ISO-8601 timestamp: {args.as_of!r}")
+    if args.main_sha is not None:
+        # Same presence-not-truthiness rule as the other flags: an empty or
+        # malformed `--main-sha` (a typo, an unset variable) must NOT be recorded
+        # as `resolved origin/main at capture` — that is a false provenance
+        # claim about a value the caller never supplied.
+        if not args.main_sha:
+            parser.error("--main-sha was given an empty value")
+        if not re.fullmatch(r"[0-9a-f]{7,40}", args.main_sha):
+            parser.error(f"--main-sha is not a hex sha: {args.main_sha!r}")
+    if args.out is not None and not args.out:
+        parser.error("--out was given an empty value")
     if args.conflicts_json is not None:
         if not args.conflicts_json:
             parser.error("--conflicts-json was given an empty value")
@@ -1030,8 +1041,9 @@ def main(argv=None):
     confirmed = len(refs) if refs is not None else None
     # Provenance: resolve origin/main only on a LIVE read (it shells out to `git
     # ls-remote`). A `--from-json` replay stays hermetic unless the caller passes
-    # `--main-sha`, so an offline replay never silently depends on the network —
-    # and the test suite's `--from-json` cases perform no network I/O.
+    # `--main-sha` OR `--confirm-refs` (the latter is an explicit opt-in to a live
+    # queue-ref read), so an offline replay never SILENTLY depends on the network
+    # — and the test suite's `--from-json` cases perform no network I/O.
     resolved_sha = args.main_sha or (resolve_origin_main() if args.live else None)
     try:
         record = build_record(
@@ -1057,7 +1069,7 @@ def main(argv=None):
             # 1, and no record written — leaving a stale OK on disk).
             record["truncated"] = True
     text = jsonlib.dumps(record, indent=2, sort_keys=False)
-    if args.out:
+    if args.out is not None:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
     else:
         print(text)

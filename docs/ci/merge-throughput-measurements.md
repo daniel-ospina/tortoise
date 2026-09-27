@@ -232,7 +232,7 @@ with open("runs.raw.jsonl") as src, open("runs.jsonl", "w") as out:
             out.write(json.dumps(r) + "\n")
 PY
 python3 tools/merge_throughput.py --json .conflicts > conflicts.json
-MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
+MAIN=56e2558399e73f9619b817016c92790a97c7b4bc   # capture-time origin/main — pinned, NOT `git ls-remote` (which moves past --as-of)
 python3 tools/queue_window_observe.py --from-json runs.jsonl --window-hours 8 \
     --as-of 2026-09-27T19:35:39Z --main-sha "$MAIN" \
     --confirm-refs --conflicts-json conflicts.json \
@@ -260,7 +260,7 @@ python3 tools/merge_throughput.py check capacity --max-oldest-minutes 120 --min-
 | wave sizes, 8 h | `{1: 2, 4: 2, 5: 5, 8: 1}` | 5 recurs 5×, the 4s recur 2×; the 8 is a **one-off** |
 | wave sizes, 14 d | `{1: 12, 2: 1, 4: 2, 5: 22, 8: 1, 10: 1, 15: 1}` | 5 recurs 22×; the 8, 10 and 15 are **one-offs** |
 | max observed batches | 8 (8 h) / 15 (14 d) | one-off bursts — never the effective value |
-| live queue refs at observation | *recorded per cut* (`live_queue_refs_at_observation`) | **momentary** corroboration only — a queue branch is short-lived, so this number is never the effective value and is not pinned as a doc figure |
+| live queue refs at observation | *recorded per cut* (`live_queue_refs_at_observation`) | **momentary** corroboration only — a queue branch is short-lived, so it is NOT the effective value here (`parallelism.basis = "largest wave size observed in >=2 waves"`). It stands in only as a **disclosed** fallback when the window has no repeatable wave (`basis = "direct ref listing (no repeatable wave in the window)"`), and it is never pinned as a doc figure |
 
 **Verdict: effective `max_parallel_checks` = 5 — the documented default, now measured.** The plan's
 ⟨C1⟩ is confirmed and strengthened: `#5527` setting `max_parallel_checks: 3` is a **reduction from an
