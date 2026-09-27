@@ -2779,16 +2779,21 @@ def _surface_probe_entries(sha: str):
 
     * EACH ENUMERATION IS RECONCILED AGAINST ITS OWN `total_count`. The rail
       does NOT read that field — it derives its total from the entries it
-      parsed — so a truncated page is not a shape the rail can detect at all.
-      The instrument can, cheaply, and a short page would otherwise report
-      GREEN (the `eligible` class) for a PR whose red sits on the unread page.
-      Failing closed here is strictly safer than the rail.
-    * an unreadable surface is UNKNOWN, a single verdict, rather than the
-      rail's separate `unreadable`/`partial`/`unmeasured` states, all three of
-      which its callers refuse.
+      parsed (`total = len(best) + len(sbest)`) — so a truncated page is not a
+      shape the rail can detect at all. The instrument can, cheaply, and a short
+      page would otherwise report GREEN (the `eligible` class) for a PR whose
+      red sits on the unread page. Failing closed here is strictly safer than
+      the rail.
+    * AN EMPTY SURFACE IS UNKNOWN. Of the rail's separate
+      `unreadable`/`partial`/`unmeasured` states, its callers REFUSE the first
+      two and PROCEED on `unmeasured` ("PROCEEDS on UNMEASURED", a surface with
+      no checks yet that certifies nothing) — so mapping an empty surface to
+      UNKNOWN is a THIRD strengthening, not parity, and it is the one a reader
+      must not "correct": following the rail here would let a 0-check surface
+      read as measured.
 
-    A surface that is unreadable, PARTIAL or truncated is therefore UNKNOWN —
-    never GREEN, and never a partial list of reds.
+    A surface that is unreadable, PARTIAL, truncated or EMPTY is therefore
+    UNKNOWN — never GREEN, and never a partial list of reds.
     """
     runs, run_total = fetch_check_runs(sha)
     statuses, status_total = fetch_statuses(sha)

@@ -1250,20 +1250,28 @@ def test_rail_surface_token_sets_match():
             if match:
                 found[name] = set(re.findall(r'"([^"]+)"', match.group(1)))
         # The non-code events are a `case` ARM in the rail, not a set, so the
-        # set-shaped regex above never sees them. Parsing the arm keeps the
-        # exemption genuinely rail-verified: an event REMOVED from the rail
-        # must not stay exempt here, which is a fail-open direction.
-        arm = re.search(r"^\s*([a-z_]+(?:\|[a-z_]+)+)\)\s*noncode=1", body,
-                        re.M)
-        if arm:
-            found["NON_CODE_EVENTS"] = set(arm.group(1).split("|"))
+        # set-shaped regex above never sees them. Every matching arm is parsed
+        # (a rail that splits `schedule|issues|issue_comment` into three arms is
+        # read correctly), so an event REMOVED from the rail cannot stay exempt
+        # here — a fail-open direction.
+        arm_events = set()
+        for arm in re.finditer(
+                r"^\s*([a-z_]+(?:\|[a-z_]+)*)\)\s*noncode=1", body, re.M):
+            arm_events |= set(arm.group(1).split("|"))
+        if arm_events:
+            found["NON_CODE_EVENTS"] = arm_events
         if found:
+            # EVERY declared set must have been FOUND. A parser that silently
+            # stops matching a set retires that pin — the failure mode is a
+            # green test over an unverified set, so a missing name is loud.
+            missing = {name for name, _py in _RAIL_TOKEN_SETS} - set(found)
+            if missing:
+                pytest.fail(f"rail readable but these token sets were not "
+                            f"found: {sorted(missing)} — parity unverifiable")
             # The record must still describe the LIVE rail: otherwise the pin
             # above holds the instrument to a record that has itself gone stale.
             record = _json.loads(_RAIL_TOKENS_PATH.read_text())
             for rail_name, py_name in _RAIL_TOKEN_SETS:
-                if rail_name not in found:
-                    continue
                 assert found[rail_name] == set(record[rail_name]), (
                     f"the committed rail record for {rail_name} no longer "
                     f"matches {path} — update the record and the instrument "
@@ -2541,18 +2549,32 @@ def test_surface_probe_refuses_a_truncated_status_enumeration(monkeypatch):
     monkeypatch.setattr(mt, "fetch_statuses",
                         lambda sha: ([{"context": "c", "state": "success"}], 5))
     assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+    # A MISSING/non-numeric status total is unreadable, exactly as it is on the
+    # check-run half — the two endpoints are reconciled by the same rule.
+    monkeypatch.setattr(mt, "fetch_statuses",
+                        lambda sha: ([{"context": "c", "state": "success"}],
+                                     None))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+    monkeypatch.setattr(mt, "fetch_statuses",
+                        lambda sha: ([{"context": "c", "state": "success"}],
+                                     True))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
 
 
 def test_fetch_statuses_reports_an_unreadable_body(monkeypatch):
-    """The reader that decides whether the consumer ever sees UNKNOWN."""
+    """The reader that decides whether the consumer ever sees UNKNOWN.
+
+    A `_gh_api` failure returns the string sentinel, so the first two cases are
+    one guard, not two: any non-dict body is UNKNOWN. The distinction that
+    matters is the LAST pair — an EMPTY status list is a successful read of a
+    surface with no statuses, not an unreadable endpoint.
+    """
     monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: mt.UNKNOWN)
     assert mt.fetch_statuses("a" * 40) == (mt.UNKNOWN, mt.UNKNOWN)
     monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: "not-a-dict")
     assert mt.fetch_statuses("a" * 40) == (mt.UNKNOWN, mt.UNKNOWN)
     monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: {"statuses": "x"})
     assert mt.fetch_statuses("a" * 40) == (mt.UNKNOWN, mt.UNKNOWN)
-    # A well-formed body, including the EMPTY one (a sha with no statuses is
-    # READ SUCCESSFULLY — that is not an unreadable endpoint).
     monkeypatch.setattr(mt, "_gh_api",
                         lambda *a, **k: {"statuses": [], "total_count": 0})
     assert mt.fetch_statuses("a" * 40) == ([], 0)
@@ -2563,7 +2585,12 @@ def test_fetch_statuses_reports_an_unreadable_body(monkeypatch):
 
 
 def test_run_event_resolves_the_first_run_id_in_the_url(monkeypatch):
-    """`_run_event` resolves the first `/runs/<N>` it finds, and only digits."""
+    """`_run_event` resolves the FIRST `/runs/<N>` in the url.
+
+    The id is a RUN id, so only digits may be taken from it: a URL whose
+    segment is not all digits resolves to nothing, which BLOCKS rather than
+    resolving some other endpoint.
+    """
     seen = []
 
     def fake_api(path, *a, **k):
@@ -2575,11 +2602,15 @@ def test_run_event_resolves_the_first_run_id_in_the_url(monkeypatch):
         "https://github.com/o/r/actions/runs/111/job/2?x=/runs/222") == \
         "salvage"
     assert seen == [f"repos/{mt.OWNER_REPO}/actions/runs/111"]
-    # A URL with no run id is UNKNOWN, and UNKNOWN blocks.
+    # A non-numeric segment is NOT a run id — no call is made at all.
     seen.clear()
-    assert mt._run_event("https://example.com/job/2") == mt.UNKNOWN
+    assert mt._run_event("https://github.com/o/r/actions/runs/abc") == \
+        mt.UNKNOWN
     assert seen == []
+    # A URL with no run id is UNKNOWN, and UNKNOWN blocks.
+    assert mt._run_event("https://example.com/job/2") == mt.UNKNOWN
     assert mt._run_event("") == mt.UNKNOWN
+    assert seen == []
 
 
 def test_stale_by_clock_refuses_a_red_that_started_after_the_anchor():
