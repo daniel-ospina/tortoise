@@ -1,0 +1,829 @@
+{
+  "status": "OK",
+  "window": {
+    "hours": 8.0,
+    "end": "2026-09-27T10:27:09Z",
+    "queue_runs_in_window": 358,
+    "queue_branches_in_window": 35,
+    "main_sha": "5b6cb93"
+  },
+  "parallelism": {
+    "effective_max_parallel_checks": 5,
+    "configured_max_parallel_checks": 5,
+    "configured_source": "documented-default (not set in .mergify.yml)",
+    "basis": "largest wave size observed in >=2 waves",
+    "wave_sizes": [
+      {
+        "at": "2026-09-27T02:52:55Z",
+        "size": 5
+      },
+      {
+        "at": "2026-09-27T03:27:15Z",
+        "size": 1
+      },
+      {
+        "at": "2026-09-27T04:09:11Z",
+        "size": 5
+      },
+      {
+        "at": "2026-09-27T04:46:07Z",
+        "size": 1
+      },
+      {
+        "at": "2026-09-27T05:25:18Z",
+        "size": 5
+      },
+      {
+        "at": "2026-09-27T06:04:43Z",
+        "size": 1
+      },
+      {
+        "at": "2026-09-27T06:37:05Z",
+        "size": 5
+      },
+      {
+        "at": "2026-09-27T07:11:13Z",
+        "size": 1
+      },
+      {
+        "at": "2026-09-27T07:18:00Z",
+        "size": 5
+      },
+      {
+        "at": "2026-09-27T07:58:22Z",
+        "size": 1
+      },
+      {
+        "at": "2026-09-27T08:37:07Z",
+        "size": 5
+      }
+    ],
+    "wave_size_counts": {
+      "1": 5,
+      "5": 6
+    },
+    "max_observed_batches": 5,
+    "live_queue_refs_at_observation": 2,
+    "live_queue_refs_note": "a momentary count, recorded as CORROBORATION only: a queue branch is short-lived, so this number is not the effective value",
+    "formation_size_distribution": {
+      "1": 5,
+      "2": 30
+    },
+    "sampling_caveat": "Event-derived: queue-branch create/delete and per-run start/end timestamps from the Actions API. The wave grouping is bounded to a 360s formation gap, so two genuinely separate waves closer than that gap are merged into one; per-ref polling would alias SHORT-LIVED branches downward (M3), which is why the event timestamps, not the poll, set the value."
+  },
+  "batches": {
+    "events": 30,
+    "batch_sizes": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "max_batch_size": 2,
+    "bisection_singles": 5,
+    "conflicted_set": {
+      "total": 166,
+      "conflicting": 21,
+      "unknown": 1
+    },
+    "verified_at": "2026-09-27T10:27:09Z",
+    "bisection_prs": [
+      5383,
+      5371,
+      5369,
+      5356,
+      5343
+    ],
+    "formations": [
+      {
+        "at": "2026-09-27T02:52:55Z",
+        "branch": "mergify/merge-queue/3dfc819ee8",
+        "size": 2,
+        "batch_prs": [
+          5383,
+          5369
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T02:53:09Z",
+        "branch": "mergify/merge-queue/0fccc2272a",
+        "size": 2,
+        "batch_prs": [
+          5371,
+          5334
+        ],
+        "stacked_prs": [
+          5383,
+          5369
+        ],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T02:53:23Z",
+        "branch": "mergify/merge-queue/62ccfd24a2",
+        "size": 2,
+        "batch_prs": [
+          5356,
+          5343
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T02:53:37Z",
+        "branch": "mergify/merge-queue/fb2dc02c50",
+        "size": 2,
+        "batch_prs": [
+          5341,
+          5307
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T02:53:52Z",
+        "branch": "mergify/merge-queue/888841e22c",
+        "size": 2,
+        "batch_prs": [
+          5311,
+          5289
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T03:27:15Z",
+        "branch": "mergify/merge-queue/eb8b0d40c7",
+        "size": 1,
+        "batch_prs": [
+          5383
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": true
+      },
+      {
+        "at": "2026-09-27T04:09:11Z",
+        "branch": "mergify/merge-queue/ee6904b7dd",
+        "size": 2,
+        "batch_prs": [
+          5371,
+          5369
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T04:09:25Z",
+        "branch": "mergify/merge-queue/3867e7df7e",
+        "size": 2,
+        "batch_prs": [
+          5356,
+          5343
+        ],
+        "stacked_prs": [
+          5371,
+          5369
+        ],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T04:09:39Z",
+        "branch": "mergify/merge-queue/be8c8d0cc1",
+        "size": 2,
+        "batch_prs": [
+          5341,
+          5307
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T04:10:37Z",
+        "branch": "mergify/merge-queue/8559cd7d62",
+        "size": 2,
+        "batch_prs": [
+          5334,
+          5289
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T04:10:52Z",
+        "branch": "mergify/merge-queue/dae255e8de",
+        "size": 2,
+        "batch_prs": [
+          5311,
+          5249
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T04:46:07Z",
+        "branch": "mergify/merge-queue/1e16619592",
+        "size": 1,
+        "batch_prs": [
+          5371
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": true
+      },
+      {
+        "at": "2026-09-27T05:25:18Z",
+        "branch": "mergify/merge-queue/de89f90216",
+        "size": 2,
+        "batch_prs": [
+          5369,
+          5334
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T05:25:33Z",
+        "branch": "mergify/merge-queue/fb34eae123",
+        "size": 2,
+        "batch_prs": [
+          5356,
+          5343
+        ],
+        "stacked_prs": [
+          5369,
+          5334
+        ],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T05:25:49Z",
+        "branch": "mergify/merge-queue/1bf0d726d8",
+        "size": 2,
+        "batch_prs": [
+          5341,
+          5307
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T05:26:07Z",
+        "branch": "mergify/merge-queue/34e5342bba",
+        "size": 2,
+        "batch_prs": [
+          5311,
+          5289
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T05:26:21Z",
+        "branch": "mergify/merge-queue/23eb8f7d4f",
+        "size": 2,
+        "batch_prs": [
+          5300,
+          5249
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T06:04:43Z",
+        "branch": "mergify/merge-queue/eb5e4606cc",
+        "size": 1,
+        "batch_prs": [
+          5369
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": true
+      },
+      {
+        "at": "2026-09-27T06:37:05Z",
+        "branch": "mergify/merge-queue/947c06284f",
+        "size": 2,
+        "batch_prs": [
+          5356,
+          5343
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T06:37:15Z",
+        "branch": "mergify/merge-queue/de3acff9b4",
+        "size": 2,
+        "batch_prs": [
+          5341,
+          5307
+        ],
+        "stacked_prs": [
+          5356,
+          5343
+        ],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T06:37:27Z",
+        "branch": "mergify/merge-queue/31464d7a14",
+        "size": 2,
+        "batch_prs": [
+          5334,
+          5315
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T06:37:40Z",
+        "branch": "mergify/merge-queue/5298400234",
+        "size": 2,
+        "batch_prs": [
+          5311,
+          5289
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T06:37:54Z",
+        "branch": "mergify/merge-queue/30bcbfe84b",
+        "size": 2,
+        "batch_prs": [
+          5300,
+          5249
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T07:11:13Z",
+        "branch": "mergify/merge-queue/9dafcb1ea2",
+        "size": 1,
+        "batch_prs": [
+          5356
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": true
+      },
+      {
+        "at": "2026-09-27T07:18:00Z",
+        "branch": "mergify/merge-queue/f0e2d62e6d",
+        "size": 2,
+        "batch_prs": [
+          5343,
+          5341
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T07:18:13Z",
+        "branch": "mergify/merge-queue/2a14b69e6c",
+        "size": 2,
+        "batch_prs": [
+          5334,
+          5315
+        ],
+        "stacked_prs": [
+          5343,
+          5341
+        ],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T07:18:27Z",
+        "branch": "mergify/merge-queue/e08acab20d",
+        "size": 2,
+        "batch_prs": [
+          5311,
+          5289
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T07:18:41Z",
+        "branch": "mergify/merge-queue/bb768e1c08",
+        "size": 2,
+        "batch_prs": [
+          5307,
+          5249
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T07:18:58Z",
+        "branch": "mergify/merge-queue/f60c59a8e5",
+        "size": 2,
+        "batch_prs": [
+          5300,
+          5248
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T07:58:22Z",
+        "branch": "mergify/merge-queue/2a914c05db",
+        "size": 1,
+        "batch_prs": [
+          5343
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": true
+      },
+      {
+        "at": "2026-09-27T08:37:07Z",
+        "branch": "mergify/merge-queue/24e89988e1",
+        "size": 2,
+        "batch_prs": [
+          5341,
+          5307
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T08:37:18Z",
+        "branch": "mergify/merge-queue/9ace938629",
+        "size": 2,
+        "batch_prs": [
+          5334,
+          5315
+        ],
+        "stacked_prs": [
+          5341,
+          5307
+        ],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T08:37:31Z",
+        "branch": "mergify/merge-queue/4d13d564c6",
+        "size": 2,
+        "batch_prs": [
+          5311,
+          5289
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T08:37:46Z",
+        "branch": "mergify/merge-queue/a0a607fb50",
+        "size": 2,
+        "batch_prs": [
+          5300,
+          5249
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      },
+      {
+        "at": "2026-09-27T08:38:01Z",
+        "branch": "mergify/merge-queue/a28493a81c",
+        "size": 2,
+        "batch_prs": [
+          5283,
+          5248
+        ],
+        "stacked_prs": [],
+        "main_sha": "5b6cb93",
+        "bisection": false
+      }
+    ]
+  },
+  "invalidations": {
+    "red_waves": 10,
+    "waves": 11,
+    "batch_waves": 6,
+    "red_batch_waves": 5,
+    "discarded_speculative": 20,
+    "heavy_leg_conclusions": {
+      "failure": 30
+    },
+    "per_wave": [
+      {
+        "at": "2026-09-27T02:52:55Z",
+        "wave_size": 5,
+        "red": true,
+        "head_batch_prs": [
+          5383,
+          5369
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 4
+      },
+      {
+        "at": "2026-09-27T03:27:15Z",
+        "wave_size": 1,
+        "red": true,
+        "head_batch_prs": [
+          5383
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 0
+      },
+      {
+        "at": "2026-09-27T04:09:11Z",
+        "wave_size": 5,
+        "red": true,
+        "head_batch_prs": [
+          5371,
+          5369
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 4
+      },
+      {
+        "at": "2026-09-27T04:46:07Z",
+        "wave_size": 1,
+        "red": true,
+        "head_batch_prs": [
+          5371
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 0
+      },
+      {
+        "at": "2026-09-27T05:25:18Z",
+        "wave_size": 5,
+        "red": true,
+        "head_batch_prs": [
+          5369,
+          5334
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 4
+      },
+      {
+        "at": "2026-09-27T06:04:43Z",
+        "wave_size": 1,
+        "red": true,
+        "head_batch_prs": [
+          5369
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 0
+      },
+      {
+        "at": "2026-09-27T06:37:05Z",
+        "wave_size": 5,
+        "red": true,
+        "head_batch_prs": [
+          5356,
+          5343
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 4
+      },
+      {
+        "at": "2026-09-27T07:11:13Z",
+        "wave_size": 1,
+        "red": true,
+        "head_batch_prs": [
+          5356
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 0
+      },
+      {
+        "at": "2026-09-27T07:18:00Z",
+        "wave_size": 5,
+        "red": true,
+        "head_batch_prs": [
+          5343,
+          5341
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 4
+      },
+      {
+        "at": "2026-09-27T07:58:22Z",
+        "wave_size": 1,
+        "red": true,
+        "head_batch_prs": [
+          5343
+        ],
+        "heavy_leg_conclusions": [
+          "failure"
+        ],
+        "discarded_speculative": 0
+      },
+      {
+        "at": "2026-09-27T08:37:07Z",
+        "wave_size": 5,
+        "red": false,
+        "head_batch_prs": [
+          5341,
+          5307
+        ],
+        "heavy_leg_conclusions": [],
+        "discarded_speculative": 0
+      }
+    ],
+    "waste_ratio": 3.33,
+    "verified_at": "2026-09-27T10:27:09Z"
+  },
+  "capacity": {
+    "queued": 2,
+    "in_progress": 39,
+    "combined": 40,
+    "oldest_minutes": 180.9,
+    "oldest_at": "2026-09-27T07:51:21Z",
+    "capacity_at_first_failure": "UNKNOWN",
+    "capacity_at_first_failure_batches": "UNKNOWN",
+    "capacity_at_first_failure_reason": "no run in the window failed to acquire a runner",
+    "max_queue_wait_minutes": 181.9,
+    "runs_delayed_over_60min": 2,
+    "configured_max_parallel_checks": 5,
+    "configured_source": "documented-default (not set in .mergify.yml)",
+    "samples": {
+      "queued": 2,
+      "in_progress": 39,
+      "queued_plus_running": 40
+    },
+    "verified_at": "2026-09-27T10:27:09Z",
+    "records": {
+      "queued": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      },
+      "in_progress": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      },
+      "oldest_minutes": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      },
+      "capacity_at_first_failure": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      }
+    }
+  },
+  "batch-size": {
+    "events": 30,
+    "batch_sizes": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "max_batch_size": 2,
+    "bisection_singles": 5,
+    "conflicted_set": {
+      "total": 166,
+      "conflicting": 21,
+      "unknown": 1
+    },
+    "verified_at": "2026-09-27T10:27:09Z"
+  },
+  "parallelism-headroom": {
+    "queued": 2,
+    "in_progress": 39,
+    "combined": 40,
+    "oldest_minutes": 180.9,
+    "oldest_at": "2026-09-27T07:51:21Z",
+    "capacity_at_first_failure": "UNKNOWN",
+    "capacity_at_first_failure_batches": "UNKNOWN",
+    "capacity_at_first_failure_reason": "no run in the window failed to acquire a runner",
+    "max_queue_wait_minutes": 181.9,
+    "runs_delayed_over_60min": 2,
+    "configured_max_parallel_checks": 5,
+    "configured_source": "documented-default (not set in .mergify.yml)",
+    "samples": {
+      "queued": 2,
+      "in_progress": 39,
+      "queued_plus_running": 40
+    },
+    "verified_at": "2026-09-27T10:27:09Z",
+    "records": {
+      "queued": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      },
+      "in_progress": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      },
+      "oldest_minutes": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      },
+      "capacity_at_first_failure": {
+        "verified_at": "2026-09-27T10:27:09Z",
+        "source": "Actions API run timestamps"
+      }
+    }
+  },
+  "verified_at": "2026-09-27T10:27:09Z"
+}
