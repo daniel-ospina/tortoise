@@ -1,10 +1,12 @@
-// overview.test.js — run with node --test (Node 20+, zero deps: the
-// derivations are pure, no jsdom/React needed) (#2000 W4).
+// overview.test.js — run with node --test (Node 20+; the derivations are pure and
+// need no jsdom/React — #2000 W4. One source guard parses main.jsx with
+// @babel/parser, which the sibling securityHeaders.test.js already requires).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { parse } from '@babel/parser'
 import {
   OVERVIEW_ELEMENTS,
   overviewConnection,
@@ -218,39 +220,86 @@ test('#4646 (A): card and wizard step-3 state the SAME fact for the grandfathere
     'the card and the step-3 heading must state the SAME observed fact')
 })
 
-/**
- * The argument text of every `wizardStageLabel(...)` / `wizardStepSub(...)` call,
- * found by balanced parentheses from the opening `(`.
- *
- * The CALL is judged, never a line: a widened argument can be pushed onto a
- * continuation line, and two calls can share one line — either defeats a
- * line-shaped proxy. `\s*` before the `(` so a call spelled `wizardStageLabel (`
- * is still found. Quotes are skipped so a `)` inside a string cannot close the
- * call early.
- */
-function wizardCallArgs(src) {
-  const out = []
-  const opener = /wizard(?:StageLabel|StepSub)\s*\(/g
-  for (let m; (m = opener.exec(src)) !== null; ) {
-    const i = m.index + m[0].length - 1
-    let depth = 0
-    let end = -1
-    for (let j = i; j < src.length; j++) {
-      const ch = src[j]
-      if (ch === '"' || ch === "'" || ch === '`') {
-        for (j++; j < src.length && src[j] !== ch; j++) {
-          if (src[j] === '\\') j++
-        }
-        continue
-      }
-      if (ch === '(') depth++
-      else if (ch === ')' && --depth === 0) { end = j + 1; break }
-    }
-    assert.notEqual(end, -1, `unbalanced parentheses in a wizard call at index ${m.index}`)
-    out.push(src.slice(i, end))
-    opener.lastIndex = end
+/** Walk every node of a babel AST, skipping location/comment metadata. */
+function visitNodes(node, fn) {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const child of node) visitNodes(child, fn)
+    return
   }
-  return out
+  fn(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
+    visitNodes(node[key], fn)
+  }
+}
+
+const WIZARD_RENDER_CALLEES = new Set(['wizardStageLabel', 'wizardStepSub'])
+
+/**
+ * Every `wizardStageLabel(...)` / `wizardStepSub(...)` call in `src`, from the AST.
+ *
+ * From the AST rather than from the text, and that is the whole point. Five review
+ * rounds each walked through a textual reading of this guard: an exact total cannot
+ * see a NEWLY ADDED widened site; a line-shaped scan lets a widened call borrow a
+ * bare `connected:` from a sibling call, an object literal, or a string on the same
+ * line; a call widened on a CONTINUATION line escapes a line scan entirely; and a
+ * SPREAD, a computed `['connected']` key, a `connected :` with a space before the
+ * colon, or a duplicate key that wins by coming LAST all leave exactly one
+ * `connected: serverHarnessConnected` in the text while the resolved value is
+ * widened. Each of those shipped a heading that disagreed with the h1 — the #2914
+ * class this guard exists for — with the whole suite green.
+ *
+ * So the question is not which characters appear, but WHICH PROPERTY BINDS
+ * `connected` AND WHAT ITS VALUE IS, and both are read off the parse tree.
+ * Parsing the RAW source is deliberate: a commented-out call is not a call.
+ */
+function wizardRenderSites(src, relPath = 'main.jsx') {
+  const jsx = /\.[jt]sx$/.test(relPath)
+  const ast = parse(src, {
+    sourceType: 'module',
+    plugins: jsx ? ['typescript', 'jsx'] : ['typescript'],
+  })
+  const sites = []
+  visitNodes(ast.program, (node) => {
+    if (node.type !== 'CallExpression') return
+    if (node.callee?.type !== 'Identifier' || !WIZARD_RENDER_CALLEES.has(node.callee.name)) return
+    sites.push({
+      name: node.callee.name,
+      line: node.loc?.start?.line ?? null,
+      options: (node.arguments ?? [])[1] ?? null,
+    })
+  })
+  return sites
+}
+
+/**
+ * The LAST binding of `connected` in an options object literal, and its kind.
+ *
+ * LAST, because that is the one that wins in JavaScript. A `SpreadElement` is a
+ * candidate too — it comes last and can carry the key, so a spread after the bare
+ * property overrides it rather than being a harmless flourish. A computed
+ * `['connected']` key and a `connected :` with a space before the colon resolve to
+ * the same name here, which is exactly what the text checks kept missing.
+ */
+function lastConnectedBinding(options) {
+  if (options?.type !== 'ObjectExpression') return null
+  let last = null
+  for (const prop of options.properties ?? []) {
+    if (prop.type === 'SpreadElement' || prop.type === 'SpreadProperty') {
+      last = { kind: 'spread', value: null }
+      continue
+    }
+    const key = prop.key
+    const name = key?.type === 'Identifier' && !prop.computed ? key.name
+      : key?.type === 'StringLiteral' ? key.value
+      : null
+    if (name !== 'connected') continue
+    last = prop.type === 'ObjectProperty'
+      ? { kind: 'property', value: prop.value }
+      : { kind: prop.type, value: null }
+  }
+  return last
 }
 
 test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared helper', async () => {
@@ -299,21 +348,9 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // a second, widened variable). Every wizard heading must pass the BARE
   // identifier (round 4, P1).
   //
-  // Checked per CALL, not as an exact total and not per line.
-  //
-  // An exact total could never see a NEWLY ADDED widened site — widening one of
-  // them leaves the bare count unchanged, so a count of 3 stays green while a
-  // fourth, widened heading ships. And a line-shaped check is only a PROXY for the
-  // call, which two review rounds walked through: a widened call passed it by
-  // borrowing a bare `connected:` from a sibling call, an unrelated object literal,
-  // or even a string on the same line; and a call whose argument was widened on a
-  // CONTINUATION line escaped it entirely — verified, that shape left the whole
-  // suite green while the rendered label read "connected" for a disconnected
-  // harness, the #2914 class this guard exists for. So the call's own parentheses
-  // are scanned and the ARGUMENT is judged — and a spread or an `Object.assign`
-  // inside those arguments is refused, because a textual `connected:` is not the
-  // RESOLVED value: either can override the key while leaving the text check
-  // satisfied (verified shipping a widened heading with the suite green).
+  // Read from the AST rather than from the text — see `wizardRenderSites`, which
+  // records the four textual readings review walked through. What is judged here is
+  // the property that actually BINDS `connected`, and the value it binds.
   //
   // The old expectation of 2 was simply behind the source: #5496 added
   // `wizardStepSub`'s call site BEFORE #5413 wrote this assertion, so it was born
@@ -321,35 +358,37 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // ci.yml is pull_request-only, so nothing grades main on this surface.
   //
   // The floor is a sanity check on the SCAN, not a pin on the source: it exists so
-  // a predicate that stops matching cannot pass vacuously. It is deliberately NOT
-  // an exact equality — that exactness is what let the count sit one behind the
+  // a parse that stops finding the sites cannot pass vacuously. It is deliberately
+  // NOT an exact equality — that exactness is what let the count sit one behind the
   // source for days — so a genuine removal lowers it on purpose.
-  const wizardCalls = wizardCallArgs(code)
-  assert.ok(wizardCalls.length >= 3,
-    `expected at least three wizard render sites, found ${wizardCalls.length} — either the scan ` +
+  const wizardSites = wizardRenderSites(mainJsxSrc)
+  assert.ok(wizardSites.length >= 3,
+    `expected at least three wizard render sites, found ${wizardSites.length} — either the parse ` +
       'is broken, or a render site was removed: if the removal is intended, lower this floor')
-  for (const call of wizardCalls) {
-    assert.equal((call.match(/connected:\s*/g) ?? []).length, 1,
-      'expected exactly one `connected:` argument in this wizard call — a second one can satisfy this '
-      + `check for a widened argument. One call, one \`connected:\`: ${call.replace(/\s+/g, ' ').trim()}`)
-    // A textual `connected:` is not the RESOLVED value: a spread (or an
-    // Object.assign) placed after it overrides the key while leaving exactly one
-    // bare `connected:` in the text — verified shipping a widened heading with the
-    // whole suite green, on the announcement site that no other test pins. So the
-    // arguments must be written out in full. This is a constraint on three call
-    // sites, not a general rule about spreads.
-    assert.doesNotMatch(call, /\.\.\./,
-      'a wizard render site must not SPREAD its arguments — a spread after the bare `connected:` '
-      + 'overrides it while leaving this text check satisfied. Write the call out in full: '
-      + `${call.replace(/\s+/g, ' ').trim()}`)
-    assert.doesNotMatch(call, /\bObject\.assign\b/,
-      'a wizard render site must not Object.assign overrides onto its arguments — a later '
-      + '`connected` key overrides the bare one while leaving this text check satisfied: '
-      + `${call.replace(/\s+/g, ' ').trim()}`)
-    assert.match(call, /connected:\s*serverHarnessConnected\s*[,}]/,
-      'every wizard render site must pass the bare serverHarnessConnected as `connected` — '
-        + 'no inline widening at the render site')
+  for (const site of wizardSites) {
+    const where = `${site.name}${site.line === null ? '' : ` (main.jsx:${site.line})`}`
+    const binding = lastConnectedBinding(site.options)
+    assert.ok(binding,
+      `${where} must pass its options as an object literal that binds \`connected\` — an argument `
+      + 'this guard cannot resolve is refused, not assumed harmless')
+    assert.equal(binding.kind, 'property',
+      `${where} binds \`connected\` with a ${binding.kind} LAST — a spread or a method placed after `
+      + 'the bare property overrides it, so the property is written out in full')
+    const value = binding.value
+    const shown = value?.type === 'Identifier' ? value.name : (value?.type ?? 'nothing')
+    assert.ok(value?.type === 'Identifier' && value.name === 'serverHarnessConnected',
+      `${where} must bind \`connected\` to the bare identifier serverHarnessConnected — the LAST `
+      + 'binding of the key is the one that wins, so a duplicate, a conditional, or a spread overrides '
+      + `the bare property. Found: ${shown}`)
   }
+  // The CALL is only half of it: the announcement RENDERS this label, so widening
+  // at the USE site tells the same lie while leaving every `connected:` argument
+  // untouched — verified shipping "You're all set" for a disconnected harness with
+  // the whole suite green.
+  assert.match(code,
+    /setWizardStepAnnounce\(\s*`Step \$\{wizardStep \+ 1\} of 4: \$\{label\}`\s*\)/,
+    'the step announcement must render the guarded `label` verbatim — a widened expression at the '
+      + 'USE site bypasses the call-level check entirely')
   // ... and then that the import resolves to the shared module's own export.
   const mod = await import('./connectionObservation.js')
   assert.equal(typeof mod.harnessConnectionObserved, 'function')
