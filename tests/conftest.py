@@ -1223,18 +1223,19 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
     # ``test_analytics_write_path_resolution``). Swapping the cache dict by
     # reference makes each test start with an empty cache; monkeypatch restores
     # the untouched original at teardown.
+    #
+    # Neither client is closed here on purpose. The swap leaves each
+    # unreferenced once monkeypatch restores the attribute at teardown, so GC
+    # reclaims them; calling ``_analytics_http_reset()`` instead would close a
+    # client while a straggling telemetry worker (``_cp_offload`` abandons the
+    # AWAIT on a wait-bound miss but never the daemon worker, CPython #87185)
+    # may still be mid-POST — the #4608 class, which turns a delivered event
+    # into a spurious ``fallback``. A test that builds a REAL client AND emits
+    # closes it in its own ``finally`` (``test_pooled_client_reuses_one_tcp_
+    # connection_across_emits``).
     monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
                         {"key": None, "client": None})
     mon.ANALYTICS_OUTCOME_COUNT.clear()
-    yield
-    # #4462: close whatever pooled client this test built before the swapped
-    # dict is restored. Without this, a test that exercises the CONSTRUCTED leg
-    # (``test_analytics_write_path_resolution``, or the real-loopback pool test)
-    # leaks a live connection pool for the rest of the session. Finalizers run
-    # LIFO and ``monkeypatch`` was requested first, so it is restored AFTER this
-    # — the swapped dict is still installed here, and this closes its client. It
-    # also runs after the test body, so no emit is in flight.
-    ha._analytics_http_reset()
 
 
 @pytest.fixture

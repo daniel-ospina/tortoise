@@ -785,28 +785,34 @@ def test_analytics_http_reset_closes_and_drops_the_cached_client(monkeypatch):
     assert second is not first, "reset did not drop the cached client (#4462)"
 
 
-def test_pooled_client_rebuilds_on_key_change_without_closing_the_superseded(
+def test_pooled_client_rebuilds_on_url_or_key_change_without_closing_the_superseded(
         monkeypatch):
-    """A changed sink key builds a FRESH client, and the superseded one is
-    DROPPED, never closed — an in-flight emitter may still hold it, and closing
-    a pool under a live request is the #4608 class.
+    """Each cache-key element forces a FRESH client on its own, and the
+    superseded one is DROPPED, never closed — an in-flight emitter may still
+    hold it, and closing a pool under a live request is the #4608 class.
 
     Mutation A: return the cached client regardless of key → one construction
-    instead of two (a pool warmed for the old configuration serves the new).
-    Mutation B: close the superseded client → ``closes`` is 1.
+    instead of three (a pool warmed for the old configuration serves the new).
+    Mutation B: drop ``url`` OR ``key`` from ``_analytics_http_key`` → that
+    element no longer forces a rebuild.
+    Mutation C: close the superseded client → ``closes`` is 1.
     """
     _prod_env(monkeypatch)
     rec = _record_pooled_client(monkeypatch)
 
-    first = ha._analytics_http_client("https://a4462.supabase.co", "k")
-    same = ha._analytics_http_client("https://a4462.supabase.co", "k")
-    other = ha._analytics_http_client("https://b4462.supabase.co", "k")
+    first = ha._analytics_http_client("https://a4462.supabase.co", "k1")
+    same = ha._analytics_http_client("https://a4462.supabase.co", "k1")
+    # Vary each element while the OTHER is held constant, so a regression that
+    # drops one from ``_analytics_http_key`` cannot be masked by a change to
+    # the other (varying the key only after a URL change would still rebuild).
+    by_key = ha._analytics_http_client("https://a4462.supabase.co", "k2")
+    by_url = ha._analytics_http_client("https://b4462.supabase.co", "k2")
 
     assert same is first, "an unchanged key must reuse the cached client"
-    assert len(rec.instances) == 2, (
-        f"a changed key built {len(rec.instances)} clients — it must rebuild "
-        "exactly once")
-    assert other is not first, other
+    assert len(rec.instances) == 3, (
+        f"changing the url or the service key built {len(rec.instances)} "
+        "clients — each element must force exactly one rebuild")
+    assert by_key is not first and by_url is not by_key, (by_key, by_url)
     assert rec.closes == 0, (
         "the superseded client was CLOSED while an in-flight emitter may "
         "still hold it — the #4608 class, not re-derived here (#4462)"

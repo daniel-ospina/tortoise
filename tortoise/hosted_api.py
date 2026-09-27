@@ -1129,9 +1129,6 @@ async def _lifespan(app):
     _READY_PROBE.reset()
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
-    # ── #4462: likewise drop any pooled analytics client left by a previous
-    # app instance. This runs before uvicorn binds, so nothing is in flight.
-    _analytics_http_reset()
 
     # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
     # task, the dedicated /healthz listener and the stall watchdog are all
@@ -22950,21 +22947,34 @@ _ANALYTICS_POST_TIMEOUT_S = 5
 # client, so it is bound to NO event loop: that is what makes cross-executor
 # reuse safe, and why a pooled ``AsyncClient`` was not used.
 #
-# LIFETIME: process-lifetime by design, and deliberately NOT closed at shutdown
-# — mirroring ``SupabaseControlPlane._http`` (never closed). A shutdown close
-# would race an in-flight telemetry worker — the seam abandons the AWAIT on a
-# wait-bound miss but never the daemon thread (CPython #87185) — and turn a
-# delivered event into a spurious JSONL fallback/degradation. That
-# close-in-flight contract is #4608's subject and is not re-derived here; the
-# process exit reclaims the sockets. ``_analytics_http_reset()`` is the
-# test/ops seam, also called from the ``_lifespan`` startup reset block (beside
-# ``_probe_sdk_reset()``) so no handle from a previous app instance survives.
+# LIFETIME: process-lifetime by design, and closed from NO production path —
+# mirroring ``SupabaseControlPlane._http`` (never closed). Closing a pool while
+# an emitter may still hold it (at shutdown, or a startup reset across an
+# in-process reload) would race an in-flight telemetry worker — the seam
+# abandons the AWAIT on a wait-bound miss but never the daemon thread (CPython
+# #87185) — and turn a delivered event into a spurious JSONL
+# fallback/degradation. That close-in-flight contract is #4608's subject and is
+# not re-derived here: the handle is dropped, never closed under a live holder,
+# and GC reclaims the sockets once no emitter holds it (at the latest at process
+# exit). ``_analytics_http_reset()`` exists for tests/ops only — it is
+# deliberately NOT wired into ``_lifespan``, because the env-keyed cache already
+# rebuilds on a changed sink and a startup close would be one more close under a
+# possible straggler for no gain.
+#
+# Why not share the other process-wide pool to the same host
+# (``SupabaseControlPlane._http``)? ``SupabaseControlPlane.__init__`` is
+# fail-closed — it RAISES when the env is unconfigured — while this sink must be
+# lazily gated on ``configured`` and must never raise (#3677/#3820). Sharing
+# would import that raise into the emit path, so the two pools stay separate by
+# design.
 _ANALYTICS_HTTP_CACHE: dict = {"key": None, "client": None}
 _ANALYTICS_HTTP_LOCK = threading.Lock()
 # Connection ceiling, pinned explicitly so it is auditable. This is an UPPER
 # BOUND, not a concurrency limiter: it sits far above the most emitters this
-# process can run at once — the telemetry pool's 4 workers plus the loop's
-# shared default executor (``min(32, cpu+4)``) plus the MCP lane — so no emit
+# process can run at once — the telemetry pool's 4 workers, the loop's shared
+# default executor (``min(32, cpu+4)``), and the MCP lane (the SAME shared
+# default executor while a loop is running; an ephemeral daemon thread is its
+# no-loop fallback, ``mcp_server.py``) — so no emit
 # waits on a pool slot in practice. Every lane is off-loop, so even a saturated
 # pool could never stall the event loop. If emitter concurrency ever did exceed
 # it, httpcore would queue and the pool phase would expire into the never-raise
@@ -22998,12 +23008,14 @@ def _analytics_http_key(url: str, key: str) -> tuple:
 
 
 def _analytics_http_reset() -> None:
-    """Close + drop the cached analytics client (tests / ops; lifespan startup).
+    """Close + drop the cached analytics client (tests / ops only).
 
-    NOT safe to call concurrently with a live emit: httpx raises on a closed
-    client, which the never-raise guard turns into a JSONL ``fallback``. The
-    ``_lifespan`` startup call runs before uvicorn binds (nothing in flight),
-    and the tests call it after their body.
+    NOT wired into ``_lifespan`` and NOT safe to call concurrently with a live
+    emit: httpx raises on a closed client, which the never-raise guard turns
+    into a JSONL ``fallback``. The env-keyed cache already rebuilds on a changed
+    sink, so a startup reset would be one more close under a possible straggler
+    (the #4608 class) for no gain. The tests that call this do so after their
+    own synchronous emits have returned.
 
     The ``close()`` is individually guarded: this must never raise, and test
     doubles standing in for ``httpx.Client`` do not all define ``close()``.
@@ -23035,7 +23047,8 @@ def _analytics_http_client(url: str, key: str):
     hold it, and closing a pool under a live request is the #4608 class — a
     delivered event recorded as a spurious ``fallback``/degradation. The
     supersede path is reachable only on a runtime sink/timeout change, which
-    production never performs, so the dropped pool is reclaimed at process exit.
+    production never performs; GC reclaims the dropped pool once no emitter
+    holds it (at the latest at process exit).
     """
     cache_key = _analytics_http_key(url, key)
     import httpx
