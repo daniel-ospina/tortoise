@@ -1774,11 +1774,6 @@ def scan_branch_surface(
         surface.add(ref, f"matched issue-number ({issue})", "strong")
 
 
-# The only line kinds `git worktree list --porcelain` emits inside a record.
-# Anything else means the parse is not reading the format it thinks it is.
-_WORKTREE_LINE_KINDS = ("worktree ", "HEAD ", "branch ")
-
-
 def _worktree_blocks(porcelain: str) -> list[dict]:
     """Parse `git worktree list --porcelain`, REFUSING anything it cannot read.
 
@@ -1975,8 +1970,23 @@ def _require_issue_payload(data: dict, where: str) -> None:
                 f"({type(login).__name__}) — refusing (NOT clean)"
             )
     for index, comment in enumerate(data["comments"]):
-        body = comment.get("body")
-        if body is not None and not isinstance(body, str):
+        # ⛔ REQUIRED, AND A STRING — not merely "non-None if present". `body` is
+        # the ONLY field the claim gate reads on a comment, and it is read on the
+        # BLOCKING issue surface. A missing key passed the type check, then
+        # `comment.get("body") or ""` turned it into EMPTY, no claim matched, and
+        # the run reported "no in-flight work" — absence indistinguishable from
+        # emptiness, which is the one distinction this contract exists to make.
+        # A null body is refused for the same reason: GitHub sends a string
+        # (possibly empty) for every real comment, so null is malformation, not
+        # an empty comment.
+        if "body" not in comment:
+            raise SurfaceError(
+                f"{where} has a comment with no 'body' at index {index} — a "
+                "reader consumes it on a BLOCKING surface, so absence would "
+                "silently drop a claim (NOT clean)"
+            )
+        body = comment["body"]
+        if not isinstance(body, str):
             raise SurfaceError(
                 f"{where} has a non-string comment body at index {index} "
                 f"({type(body).__name__}) — refusing (NOT clean)"
@@ -2231,7 +2241,14 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
     has_next = _LINK_NEXT_RE.search(link_values) is not None
     if last_match:
         approx_total = int(last_match.group(1)) * page_size
-        partial = approx_total > len(prs)
+        # ⛔ `has_next` IS DECISIVE, exactly as the invariant above says. Reading
+        # only `last` here meant that when the two relations disagreed — `last`
+        # parseable, `next` present — the page was reported as "the complete
+        # list" while the response itself proved a further page existed, i.e. the
+        # sample-as-everything failure this tool exists to prevent. The advisory
+        # surface cannot change an exit code, so no test caught it; the human
+        # reading the report is the one who was misled.
+        partial = has_next or approx_total > len(prs)
     elif has_next or link_values:
         # More pages provably exist, or a Link header exists that this parser
         # could not interpret. Report partial-with-a-floor rather than claiming
@@ -2920,6 +2937,30 @@ def run_preflight(
                         _sha = _pr.get("headSha")
                         if _sha:
                             merged_head_shas.add(str(_sha))
+                # ⛔ THIS ADVISORY SURFACE'S DATA FEEDS A BLOCKING ONE, and the
+                # authority split does not forbid it — the split is about which
+                # surface can BLOCK, not about where evidence comes from. The
+                # `merged_head_shas` harvested just above (from the closed-PR
+                # sample, authority ADVISORY) are passed to the BLOCKING branch
+                # and worktree scans, where predicate 1 uses them to DEMOTE a hit
+                # to `weak` — so advisory data can turn COLLISION into CLEAN.
+                #
+                # That is deliberate (D4: the sample is already fetched, so the
+                # squash-merge test costs zero API calls) and it is safe in
+                # exactly one direction:
+                #
+                #   * it can only ever REMOVE a hit, never add one — every entry
+                #     is an exact head SHA from a MERGED PR record, and a failed
+                #     or empty sample leaves the branches BLOCKING;
+                #   * so a failed closed-PR sample is fail-CLOSED, which is
+                #     asserted by
+                #     `test_branch_still_blocks_when_the_closed_pr_sample_fails`.
+                #
+                # Keep it that way: this coupling is the one place where the
+                # advisory/blocking split is not structural, and it is the only
+                # reason the report's "ONLY a BLOCKING surface can decide the
+                # verdict" is a statement about BLOCKING, not about evidence.
+                #
                 # `use_closing_field=False`: this payload is REST `/pulls`, which
                 # has no `closingIssuesReferences`. Every hit here is advisory.
                 scan_pr_surface(surface, prs, issue, identity,
@@ -3138,7 +3179,13 @@ def format_report(
 
     hits = [h for s in ordered for h in s.hits]
     # ── authority (#5251) ───────────────────────────────────────────────────
-    # ONLY a BLOCKING surface can decide the verdict. An advisory surface is
+    # ONLY a BLOCKING surface can decide the verdict — which is a statement about
+    # which surface may BLOCK, NOT about where its evidence comes from: the
+    # advisory closed-PR sample's head SHAs are deliberately consumed by the
+    # blocking branch scans to demote squash-merge residue (D4). That coupling
+    # can only ever REMOVE a hit, and it is stated where the harvest happens.
+    #
+    # An advisory surface is
     # still queried, still hit, and still reported — it simply cannot block a
     # dispatch, and its failure cannot conceal a collision, so it must not set
     # INCOMPLETE either. Filtering by SURFACE (not by hit strength) is what

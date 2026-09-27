@@ -110,7 +110,13 @@ case "$1 $2" in
     if [ -n "${GH_STUB_CLOSED_PR_TOTAL_PAGES:-}" ]; then
       base="$3"
       printf 'link: <https://api.github.com/%s&page=1>; rel="first", <https://api.github.com/%s&page=%s>; rel="last"\n' "$base" "$base" "$GH_STUB_CLOSED_PR_TOTAL_PAGES"
-      if [ "$GH_STUB_CLOSED_PR_TOTAL_PAGES" -gt 1 ] 2>/dev/null; then
+      # GH_STUB_CLOSED_PR_FORCE_NEXT=1 emits `rel="next"` even when the last
+      # page number says this is a single-page result. That is the only way to
+      # construct the case where the two relations DISAGREE, which is the shape
+      # a page reported as "the complete list" while proving a further page
+      # exists (review cycle 9).
+      if [ "$GH_STUB_CLOSED_PR_TOTAL_PAGES" -gt 1 ] 2>/dev/null \
+         || [ "${GH_STUB_CLOSED_PR_FORCE_NEXT:-0}" = "1" ]; then
         printf 'link: <https://api.github.com/%s&page=2>; rel="next"\n' "$base"
       fi
     fi
@@ -873,10 +879,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # element was an OBJECT and left its STRING fields untouched, so a
         # non-string value in one of them produced a traceback with no VERDICT
         # line and exit 1 — read by callers as COLLISION. `title`/`headRefName`
-        # are required and must be strings; `body`/`state` may legitimately be
+        # are required and must be strings; only `body` may legitimately be
         # null. `state` is covered here because it is one of those fields, and a
         # contract has to cover the whole set rather than the three that came
-        # first to mind.
+        # first to mind. See
+        # `test_open_pr_with_null_state_and_truthy_merged_at_is_incomplete` for
+        # why a null `state` is a REFUSAL rather than a nullable field: its
+        # absence removes the liveness short-circuit, so a live open PR carrying
+        # a truthy `mergedAt` was read as merged and reported CLEAN.
         for key, bad in (("title", 5), ("headRefName", 5), ("body", 5),
                          ("state", 5)):
             with self.subTest(field=key):
@@ -1021,6 +1031,79 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: INCOMPLETE", out)
                 self.assertIn("closing-reference-source-unavailable", out)
                 self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_missing_comment_body_is_incomplete_not_clean(self):
+        # ⛔ THE P1 OF CYCLE 9, and it is cycle 8's PR-side fix applied one
+        # surface over and NOT applied here. `body` was type-checked but never
+        # REQUIRED, so a comment carrying no `body` key passed the contract and
+        # then `comment.get("body") or ""` read it as EMPTY — no claim matched,
+        # and the BLOCKING issue surface reported "6/6 surfaces queried, no
+        # in-flight work". Absence indistinguishable from emptiness is the one
+        # distinction this contract exists to make.
+        #
+        # A comment has no second field to carry the hit: on a PR the title, the
+        # head branch and `closingIssuesReferences` all still speak, whereas
+        # `body` is the ONLY thing the claim gate reads on a comment — so absence
+        # here drops strictly more than the PR case rated a P2 in cycle 8.
+        # The comment below carries NO `body` key at all. It is written through
+        # `_write_issue_payload`, which bypasses the fixture normalizer, because
+        # the normalizer's job is to supply keys the real CLI always sends — the
+        # same reason the missing-`comments` test bypasses it.
+        self._write_issue_payload({
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "url": f"https://example.invalid/issues/{ISSUE}",
+            "assignees": [],
+            "comments": [{"author": {"login": "test-agent"},
+                          "url": f"https://example.invalid/issues/{ISSUE}#issuecomment-1"}],
+        })
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("comment with no 'body'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_null_comment_body_is_incomplete_not_clean(self):
+        # A null body is refused for the same reason as a missing one: the
+        # reader does `comment.get("body") or ""`, so null reads as EMPTY and
+        # drops the claim identically. GitHub sends a STRING (possibly empty)
+        # for a real comment, so null is malformation, not an empty comment.
+        self._write_issue_payload({
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "url": f"https://example.invalid/issues/{ISSUE}",
+            "assignees": [],
+            "comments": [{"body": None, "author": {"login": "test-agent"},
+                          "url": f"https://example.invalid/issues/{ISSUE}#issuecomment-1"}],
+        })
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("non-string comment body", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_branch_still_blocks_when_the_closed_pr_sample_fails(self):
+        # ⛔ THE ONE PLACE THE ADVISORY/BLOCKING SPLIT IS NOT STRUCTURAL, pinned
+        # so it cannot drift. `merged_head_shas` — the squash-merge test's ONLY
+        # evidence — is harvested from the ADVISORY closed-PR sample and consumed
+        # by the BLOCKING branch scan. That is deliberate (D4: the sample is
+        # already fetched), and it is safe because it can only ever REMOVE a hit:
+        # when the sample cannot be read, the set stays EMPTY and every branch
+        # stays BLOCKING.
+        #
+        # So the failure direction is fail-CLOSED, and this asserts it: a branch
+        # named after the issue, with a malformed closed-PR sample, must still
+        # COLLIDE. If a later edit ever made advisory data ADD a hit, or made a
+        # failed sample suppress one, this is the test that goes red.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-mine")
+        # A malformed element: `_require_pr_dicts` refuses it, so the harvest
+        # never runs and `merged_head_shas` stays empty. Written DIRECTLY,
+        # because the fixture normalizer itself rejects a non-object element.
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps([None]))
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("do NOT dispatch", out)
+        self.assertNotIn("squash-merged", out)
 
     def test_malformed_open_pr_element_is_incomplete_not_a_traceback(self):
         # ⛔ A list holding a non-object used to CRASH with no VERDICT line and
@@ -2472,6 +2555,36 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[recently-closed PRs]", out)
         self.assertIn("⚠ PARTIAL — advisory sample, cannot block", out)
         self.assertIn("sampled the most recent 2 of ~5 closed PR(s)", out)
+
+    def test_closed_pr_next_relation_beats_a_flattering_last(self):
+        # ⛔ THE TWO RELATIONS CAN DISAGREE, AND `last` MUST NOT WIN. The
+        # invariant stated in `_closed_pr_sample` is that a `Link` carrying
+        # `rel="next"` PROVES more pages exist and must never be reported as
+        # "this page is the complete list" — "even when the rel=last entry is
+        # absent or unparseable". The implementation only consulted `next` when
+        # `last` was ABSENT, so a disagreeing pair resolved in favour of the
+        # flattering one: a page whose own header proved a further page existed
+        # was labelled complete.
+        #
+        # Exit code is unaffected (the surface is ADVISORY); the human reading
+        # the report is the one misled — and "a partial list presented as
+        # everything" is the failure this tool exists to prevent.
+        #
+        # `last` says ONE page (so the old arithmetic concluded "complete"),
+        # while `next` proves page 2 exists.
+        self.gh_fixtures(closed_prs=[
+            {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
+            {"number": 4, "title": "b", "body": "", "headRefName": "chore/b"},
+        ])
+        rc, out = self.run_tool(
+            extra_args=["--closed-pr-limit", "2"],
+            env_extra={"GH_STUB_CLOSED_PR_TOTAL_PAGES": "1",
+                       "GH_STUB_CLOSED_PR_FORCE_NEXT": "1"},
+        )
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("⚠ PARTIAL — advisory sample, cannot block", out)
+        self.assertNotIn("(this page is the complete list)", out)
 
     def test_complete_pr_list_reports_the_count_and_stays_clean(self):
         self.gh_fixtures(open_prs=[
