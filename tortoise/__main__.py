@@ -6483,11 +6483,14 @@ _SESSION_INDEX_EMPTY_DETAIL = (
 )
 
 #: The remediation for a target that was explicitly configured but has no DB
-#: file: name the configuration surface the user actually set. Shared by BOTH
+#: file: point at the target, not at the first-run remedy. Shared by BOTH
 #: variants (empty and populated corpus) so the arm cannot answer a config
 #: error with a first-run remedy in one variant and nothing in the other.
-_SESSION_INDEX_CONFIGURED_FIX = ("fix the configured target: "
-                                 "TORTOISE_DB_URI / TORTOISE_DB_PATH / --db")
+#: Deliberately NOT an enumeration of the DB-target knobs — several flags and env
+#: vars reach this arm (`--db`, `--path`, TORTOISE_DB_URI, FALKORDB_*,
+#: TORTOISE_DB_PATH) and the `Graph: health` row above already names the
+#: resolved target, so a list here is a drift surface, not information.
+_SESSION_INDEX_CONFIGURED_FIX = ("fix the configured target, then re-run doctor")
 
 
 def _session_index_rows_without_graph(
@@ -6509,8 +6512,8 @@ def _session_index_rows_without_graph(
       detail and the `tortoise init` remediation.
     * ``pre-init-configured`` — an EXPLICITLY CONFIGURED target has no DB file.
       #2204's verdict split grades that a config error (❌ + rc 1 on the
-      `Graph: health` row), so this row names the target's own configuration
-      surface rather than the first-run remediation.
+      `Graph: health` row), so this row points at the configured target rather
+      than at the first-run remediation.
     * ``graph-unavailable`` — the target did not resolve, or the projection /
       status call raised. The corpus is reported, never graded.
 

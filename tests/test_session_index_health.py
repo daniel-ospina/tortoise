@@ -369,9 +369,11 @@ def test_doctor_session_indexing_configured_target_names_config_surface(
 
     for row in (empty_row, full_row):
         assert "configured target" in row, row
-        assert "TORTOISE_DB_URI" in row and "--db" in row, row
+        assert "fix the configured target" in row, row
         assert "tortoise init" not in row, row
         assert "⚠️" in row and "❌" not in row, row
+    assert "corpus empty" in empty_row, empty_row   # the empty variant
+    assert "1 corpus file," in full_row, full_row    # the populated variant
     assert full_out.count("Session indexing") == 1, full_out
     assert rc_empty == 1 and rc_full == 1
 
