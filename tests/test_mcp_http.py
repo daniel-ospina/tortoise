@@ -2048,3 +2048,288 @@ class TestGraphSetRecordingHTTP:
                 params={"tid": team["id"]},
             ).result_set
             assert rows and rows[0][0] is None, rows
+
+
+# ── #3656: the tools/call admission boundary, named ────────────────────────
+
+class TestToolCallAdmissionBoundary:
+    """#3656 observed ``tools/call`` answered with ``-32602 "Invalid request
+    parameters"`` (empty ``data``) for every tool and every token, for ~1 minute.
+
+    WHAT THIS PINS, and why it is a boundary test rather than a race test: on the
+    hosted surface the SDK session starts ``Initialized`` (``stateless_http`` is
+    on), so ``ServerSession._received_request``'s "before initialization was
+    complete" arm cannot fire, and ``_handle_incoming`` cannot race its own
+    writer because it is called from the receive loop itself. The only remaining
+    producer of that signature is ``ClientRequest.model_validate`` in
+    ``mcp/shared/session.py`` -- i.e. the envelope really was rejected. The
+    defect that remains, and that these tests bound, is that the SDK reports it
+    with ``data: ""`` and no member, so a client (and an operator reading the
+    wire) cannot tell WHICH member was wrong -- or tell a params rejection from
+    an internal failure.
+
+    So the invariant is exact, and the oracle is the SDK rather than this code:
+    ``/mcp`` answers ``-32602`` for a ``tools/call`` **iff** the SDK's own
+    ``JSONRPCMessage`` + ``ClientRequest`` checks reject it, and when it does the
+    reason names the rejected member. See ``mcp_server._tools_call_rejection``.
+
+    Dispatched calls use ``tortoise_list_namespaces`` deliberately: these tests
+    bound ADMISSION, and a tool that computes embeddings would drag the
+    (unrelated, environment-dependent) embedder into a boundary test.
+    """
+
+    # The request verbatim from #3656.
+    ISSUE_REQUEST = {  # noqa: RUF012
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "tortoise_create_point",
+                   "arguments": {"kind": "statement",
+                                 "content": "vgate-ab-probe"}},
+    }
+    CHEAP_TOOL = "tortoise_list_namespaces"
+
+    @classmethod
+    def _client(cls, tmp_path, monkeypatch, name="admission"):
+        """Registry on TORTOISE_DB_PATH (same graph the middleware verifies
+        against) + the MCP app, mirroring TestOnboardingToolGating."""
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / f"{name}.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create(name)
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        return tc
+
+    def test_issue_reproducer_malformed_call_names_the_rejected_member(
+            self, tmp_path, monkeypatch):
+        """The deterministic reproducer of #3656's exact wire signature.
+
+        Pre-fix the body is ``{"code": -32602, "message": "Invalid request
+        parameters", "data": ""}`` -- unactionable, and indistinguishable from
+        an internal fault. Post-fix the same code carries the rejected member.
+        """
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            # #3656's request with `name` dropped -- well-formed JSON, invalid
+            # `tools/call`. No tool is dispatched either way.
+            payload = {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {"kind": "statement",
+                                         "content": "vgate-ab-probe"}},
+            }
+            r, body = _mcp_post(tc, payload)
+            assert r.status_code == 200, r.text
+            err = body["error"]
+            assert err["code"] == -32602, body
+            # The member the SDK rejected is named, on the wire.
+            assert "params.name" in err["message"], body
+            assert err["data"]["method"] == "tools/call", body
+            assert ["params", "name"] in [e["loc"] for e in err["data"]["errors"]], body
+
+    def test_issue_request_envelope_is_accepted(self, tmp_path, monkeypatch):
+        """#3656's request is well-formed: the SDK's own model accepts it, so the
+        guard passes it through and cannot be the source of the reported
+        ``-32602``. Asserted on the guard directly -- the verbatim payload names
+        a point-creating tool, and dispatching it would drag the embedder into a
+        boundary test."""
+        from tortoise.mcp_server import _tools_call_rejection
+        assert _tools_call_rejection(self.ISSUE_REQUEST) is None
+
+    @pytest.mark.parametrize("params,member", [
+        (None, ["params"]),
+        ({"arguments": {}}, ["params", "name"]),
+        ({"name": 7, "arguments": {}}, ["params", "name"]),
+        ({"name": CHEAP_TOOL, "arguments": ["x"]}, ["params", "arguments"]),
+    ])
+    def test_each_rejected_member_is_named(self, tmp_path, monkeypatch,
+                                           params, member):
+        tc = self._client(tmp_path, monkeypatch,
+                          name=f"adm-{member[-1]}-{len(str(params))}")
+        with tc:
+            payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call"}
+            if params is not None:
+                payload["params"] = params
+            r, body = _mcp_post(tc, payload)
+            assert r.status_code == 200, r.text
+            err = body["error"]
+            assert err["code"] == -32602, body
+            assert ".".join(member) in err["message"], body
+            assert member in [e["loc"] for e in err["data"]["errors"]], body
+
+    def test_wellformed_tools_call_is_never_answered_with_invalid_params(
+            self, tmp_path, monkeypatch):
+        """Every well-formed variant: the surface answers with a RESULT (never a
+        JSON-RPC error). Whether the tool then succeeds or reports isError is
+        irrelevant here -- the admission boundary is what this pins."""
+        tc = self._client(tmp_path, monkeypatch)
+        wellformed = [
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": None}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": {},
+                        "_meta": {"progressToken": "t"}}},
+            # Hidden from tools/list once onboarding completes, still callable.
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "tortoise_onboarding_state", "arguments": {}}},
+            # Unregistered name: a tool outcome, not an admission rejection.
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": "tortoise_nonexistent_xyz", "arguments": {}}},
+            # Tool-argument failures are FastMCP's, surfaced as isError results.
+            {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+             "params": {"name": self.CHEAP_TOOL, "arguments": {"bogus": 1}}},
+        ]
+        with tc:
+            for payload in wellformed:
+                r, body = _mcp_post(tc, payload)
+                assert r.status_code == 200, (payload, r.text)
+                assert "error" not in body, (
+                    f"well-formed {payload.get('params')!r} was rejected: {body}")
+                assert "result" in body, body
+
+    def test_genuinely_invalid_tools_call_still_returns_invalid_params(
+            self, tmp_path, monkeypatch):
+        """Bar: the fix must not blanket-accept. An invalid envelope keeps the
+        SDK's own code (-32602) -- only the reason is added."""
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            for payload in (
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": 7, "arguments": {}}},
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": self.CHEAP_TOOL, "arguments": ["x"]}},
+            ):
+                r, body = _mcp_post(tc, payload)
+                assert r.status_code == 200, r.text
+                assert body["error"]["code"] == -32602, body
+
+    def test_admission_decision_equals_the_sdk_admission_decision(
+            self, tmp_path, monkeypatch):
+        """The anti-widening guard, with the SDK as the oracle.
+
+        For every shape below, the surface's accept/reject decision must equal
+        the SDK's own two admission expressions, run here explicitly. A future
+        change that widens what `/mcp` accepts (the naive "fix" for #3656), or
+        one that narrows it, fails here.
+        """
+        from mcp.types import ClientRequest, JSONRPCMessage
+
+        def sdk_rejects(raw) -> bool:
+            try:
+                message = JSONRPCMessage.model_validate(raw)
+                dumped = message.root.model_dump(by_alias=True, mode="json",
+                                                 exclude_none=True)
+                ClientRequest.model_validate(dumped)
+            except Exception:
+                return True
+            return False
+
+        cheap = self.CHEAP_TOOL
+        shapes = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": None, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": 7, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": ["x"]}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": "x"}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": None}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {"bogus": 1}}},
+        ]
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            for raw in shapes:
+                expected = sdk_rejects(raw)
+                r, body = _mcp_post(tc, dict(raw))
+                assert r.status_code == 200, (raw, r.text)
+                if "error" in body:
+                    assert body["error"]["code"] == -32602, (raw, body)
+                    assert expected, (
+                        "the surface rejected a request the SDK accepts "
+                        f"(over-strict): {raw} -> {body}")
+                else:
+                    assert not expected, (
+                        "the surface accepted a request the SDK rejects "
+                        f"(widened): {raw} -> {body}")
+
+    def test_other_methods_are_not_intercepted(self, tmp_path, monkeypatch):
+        """The guard is scoped to `tools/call` requests: `initialize`,
+        `tools/list` and notifications keep their existing responses."""
+        tc = self._client(tmp_path, monkeypatch)
+        with tc:
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/list"})
+            assert r.status_code == 200 and "result" in body, body
+            assert "tools" in body["result"], body
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18",
+                           "capabilities": {},
+                           "clientInfo": {"name": "p", "version": "1"}}})
+            assert r.status_code == 200 and "result" in body, body
+            r = tc.post("/mcp", json={"jsonrpc": "2.0",
+                                      "method": "notifications/initialized"})
+            assert r.status_code in (200, 202), r.text
+
+    def test_concurrent_calls_and_listings_never_produce_invalid_params(
+            self, tmp_path, monkeypatch):
+        """#3656's transient was reported under concurrency. Pin that concurrent
+        `tools/call` traffic interleaved with the gated `tools/list` cannot
+        produce the signature."""
+        import threading
+
+        tc = self._client(tmp_path, monkeypatch)
+        failures: list = []
+        lock = threading.Lock()
+
+        def worker(wid):
+            try:
+                for i in range(3):
+                    payload = {"jsonrpc": "2.0", "id": 100 + wid * 10 + i,
+                               "method": "tools/call",
+                               "params": {"name": self.CHEAP_TOOL,
+                                          "arguments": {}}}
+                    r = tc.post("/mcp", json=payload)
+                    body = _parse_sse_json(r)
+                    if isinstance(body, dict) and "error" in body:
+                        with lock:
+                            failures.append((wid, i, body))
+                    if i == 0:
+                        tc.post("/mcp", json={"jsonrpc": "2.0",
+                                              "id": 200 + wid,
+                                              "method": "tools/list"})
+            except Exception as exc:
+                with lock:
+                    failures.append((wid, "EXC", f"{type(exc).__name__}: {exc}"))
+
+        with tc:
+            threads = [threading.Thread(target=worker, args=(w,))
+                       for w in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert not failures, f"concurrent traffic produced errors: {failures}"
