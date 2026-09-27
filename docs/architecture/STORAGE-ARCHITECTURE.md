@@ -69,7 +69,7 @@ is either `6,003 / 1,672` (MiB) or `5,725 / 1,594` (decimal)** — at most two o
 true at once. The *decision* is untouched by this (bytes remain the unit); the *derivation* is corrected here so the
 error is not propagated into the allowance.
 
-⚠️ **This block SUPERSEDES the body's older figures.** §3 and §12 read **141 MB** and **45 MB** of indices where this
+⚠️ **This block SUPERSEDES the body's older figures.** §2 and §12 read **141 MB** and **45 MB** of indices where this
 block reads **143 MB / 46 MB**, and §13's issue-map row concludes *"~3 KB per node (140 MB ÷ ~45k total nodes)"* —
 a **third** denominator (~45k, and a different residency set). The **`~3 KB` estimate is superseded by this block's
 `1,672 B` per resident node**; the figures are not interchangeable and the `~45k` node count is not re-measured here.
@@ -87,12 +87,17 @@ precedent for the denominator error class** — §1 corrects a *growth-horizon* 
   cap branch.
 - **The meter is measurement-only and FAIL-SOFT** — its own docstring is explicit: *"NOT A DIAL. Nothing here
   prices, caps, tiers, refuses or throttles. It is the instrument, not the setting (#5331 is measurement only)"*,
-  and *"FAIL-SOFT … never raise"*. Do not describe the meter as fail-closed; the **fail-closed** behaviour belongs to
-  the (unwritten) **gate**, which refuses to enforce a configured allowance it cannot measure.
+  and *"FAIL-SOFT … never raise"*. Do not describe the **meter** as fail-closed; the fail-closed behaviour belongs to
+  the **gate**.
 
-⇒ **A requirement on the not-yet-written gate, not a shipped default:** the byte meter must be wired into the gate
-**before** any allowance is configured, because a gate that is fail-closed on a missing reading would otherwise 500
-every points-gated write. That ordering is a constraint on the work, not a statement of what exists.
+⇒ **The gate itself IS written — on the cap branch, not on `main`.** `_enforce_storage_allowance`
+(`tortoise/quota.py` on `feat/5331-node-to-byte-cap`) raises `QuotaCheckError` when no reading is supplied, and that
+branch's `pricing.py` describes the design as *"FAIL-CLOSED when no reading is supplied"*. The gate is therefore not
+missing. **What is missing is the WIRING**: no production caller supplies a `storage_reading`, so the gate is inert,
+and configuring an allowance today would 500 every points-gated write.
+
+⇒ **A requirement on the not-yet-done wiring, not a shipped default:** the meter must be wired into the gate **before**
+any allowance is configured. That ordering is a constraint on the work, not a statement of what exists.
 
 > **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the
 > customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node

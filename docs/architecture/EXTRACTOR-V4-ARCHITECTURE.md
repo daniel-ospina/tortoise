@@ -38,7 +38,8 @@ reason to prefer measurable steps over inferred ones: §16.2's rule (a claim mus
 surface.
 
 **⛔ Where the measurement is — PLANNED, not present.** The capture lane does **not** record token counters on `main`
-today: the per-org ledger carries `capture_calls` and `capture_cost_usd` only. **`#5045` (PR #5697, unmerged) will
+today: of its capture-lane columns, the per-org ledger carries only `capture_calls` and `capture_cost_usd` (the
+ask-lane counters `ask_calls`/`ask_tokens_in`/`ask_tokens_out` are separate and already present). **`#5045` (PR #5697, unmerged) will
 add `capture_tokens_in`/`capture_tokens_out`**; the **ask** lane already records `ask_tokens_in/out`. When the
 capture columns land, **the spend ceiling stays blind to them by construction** — `metering_cohort_spend` and
 `get_cohort_spend_usd` read **only** `ask_cost_usd` + `capture_cost_usd`, so adding token counters cannot change the
