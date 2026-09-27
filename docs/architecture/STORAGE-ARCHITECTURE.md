@@ -19,6 +19,35 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 ---
 
+## ⛔ THE STORAGE UNIT IS BYTES — decision, owner, 2026-09-26 (`#4495`)
+
+**Read this before the rest of the document.** The body below is written in the **node** unit (`~25,000 quota nodes`, `140 MB`, `$73/GB`). The owner ruling of 2026-09-26 keeps the *bytes* and retires the **node as the customer-facing unit**:
+
+- **Storage is billed in MB/GB**, as both our cost input **and** the customer-facing unit — *"migrate away from counting nodes and start counting in mb/gb for storage (both as a cost input for us and customer facing bill them per mb/gb as they understand that)"*.
+- **Exceeding the storage allowance is PURCHASED OVERAGE, not refusal** — consistent with the 22 September ruling that tiers price *features*, never refusal.
+- **Overage is bought with PREPAID CREDITS**, not a postpaid "max spend" approval — the owner's stated reason is cashflow.
+- The tier carries a **starter amount** of storage and usage; the subscription itself is priced on **features**.
+
+**Why the node unit is not merely deprecated but replaced:** a node count **never shrinks**, so a full customer stayed full permanently (the P0 in `#4495` was 24,978/25,000 with 16 points of headroom and a whole-capture refusal). A byte allowance has the shape of the flow allowance — **consumed, paid for, and reset by purchase** — so it cannot produce a "paid, full and permanently refused" customer. The ruling therefore does **not** extend the never-refusal ruling to the node cap; it **removes the unit the question was about**.
+
+**Measured basis, unchanged (2026-09-25, live graph — keep these, they are the numbers the allowance must be denominated in):**
+
+| quantity | measured | note |
+|---|---|---|
+| resident nodes | **89,701** | `MATCH (n)` |
+| nodes the quota predicate counts | **24,978** | **3.59× divergence** — the denominator trap |
+| `GRAPH.MEMORY USAGE` | **143 MB** (indices 46 MB) | sampling estimate, `SAMPLES`=100 |
+| per **capped** node | **6,003 B** | against the **1,024 B** the pricing model declares |
+| per **resident** node | **1,594 B** | the figure that sank the earlier 5.6 KB claim |
+
+⚠️ **Every node-denominated figure in this document must carry its denominator.** The 6,003 B and the 1,594 B differ **3.8×** on the *same* graph purely by choice of denominator — that is the error class `§1`'s correction note and `#4333` exist to catch.
+
+**Status of the migration:** the byte meter is built (`tortoise/graph_storage.py`, `#5331`); the byte gate ships **off by default** (no `max_storage_bytes` configured ⇒ the node cap still enforces), and enabling an allowance **requires the byte meter to be wired into the gate first** — the gate is deliberately fail-closed on a missing reading. Prices are **not** set by this document: the owner calibrates from consumption **after** the beta launch.
+
+> **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) makes the cap permanent while the number it counts never shrinks, and (c) is a unit customers cannot reason about.
+
+---
+
 ## 1. The problem
 
 One user's graph reached **25,000 quota nodes in 3–4 active days** - **140 MB of resident memory at $73/GB/month ≈ $9.98/month for a single user, and every further GB costs another $73/month in perpetuity.** The product's constraint is a **$19 price with <$9 total cost per user**, and the graph keeps growing with tenure.
