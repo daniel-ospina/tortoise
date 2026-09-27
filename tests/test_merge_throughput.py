@@ -1765,6 +1765,8 @@ def test_committed_constants_are_pinned():
     assert mt.M4_RECORD_WINDOW_DAYS == 14
     assert mt.GAP_VALUE_TOLERANCE == 0.10
     assert mt.CEILING_TOLERANCE == 0.10
+    assert mt.CEILING_MAX == 200000
+    assert mt.HARD_MAX_SWEEP_CONCURRENCY == 8
 
 
 def test_min_population_can_only_raise_the_committed_floor():
@@ -1884,3 +1886,147 @@ def test_collect_conflicts_retains_unprobed_prs(monkeypatch):
     out = mt.collect_conflicts(bound=1)
     assert out["total_count"] == 2
     assert out["items"][1]["unknown"] is True
+
+
+# ---------------------------------------------------------------------------
+# Round-8 hardening: close the mutations that survived the round-7 suite.
+# ---------------------------------------------------------------------------
+
+def test_parallelism_headroom_rejects_negative_fields():
+    ok = {"capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+          "records": _cap_records()}
+    for bad in ({"capacity_at_first_failure": -1},
+                {"configured_max_parallel_checks": -1},
+                {"capacity_at_first_failure": -1,
+                 "configured_max_parallel_checks": -5}):
+        assert run_check("parallelism-headroom", json={**ok, **bad},
+                         require_fresh=True) == 2, bad
+
+
+def test_sweep_concurrency_hard_ceiling_is_8(monkeypatch):
+    monkeypatch.setattr(mt.os, "cpu_count", lambda: 32)
+    monkeypatch.delenv("MERGE_THROUGHPUT_MAX_CONCURRENCY", raising=False)
+    with pytest.raises(SystemExit):
+        mt.validate_sweep_concurrency(9)
+
+
+def test_or_artifact_ceiling_above_the_committed_range_is_2(tmp_path):
+    text = ("## ceiling\nceiling_prs_per_day: 300000\n"
+            "ceiling_source: effective_parallel,effective_batch,cycle_minutes\n")
+    payload = {"prs_per_day": 100, "gap": {"terms": {
+        "effective_parallel": {"value": 100, "source": "M3"},
+        "effective_batch": {"value": 10, "source": "M5"},
+        "cycle_minutes": {"value": 4.8, "source": "M2"}}}}
+    assert run_check("prs-per-day", json=payload, min=200,
+                     or_artifact=f"{_artifact(tmp_path, text)}#ceiling") == 2
+
+
+def test_gap_non_positive_ceiling_is_2(gap_repo):
+    p = _gap_payload(2.0)
+    p["gap"]["terms"]["ceiling"]["value"] = 0
+    p["gap"]["value"] = 0
+    assert run_check("gap", json=p, max=2) == 2
+
+
+def test_gap_missing_named_term_is_2(gap_repo):
+    p = _gap_payload()
+    got = p["gap"]["terms"].pop("wait")
+    p["gap"]["terms"]["x1"] = got
+    assert run_check("gap", json=p, max=2) == 2
+
+
+def test_capacity_require_complete_reconciles_population():
+    ok = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+          "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+          "items": [{"id": 1}], "total_count": 1, "records": _cap_records()}
+    assert run_check("capacity", json=dict(ok, total_count=3),
+                     require_complete=True) == 2
+
+
+def test_capacity_fresh_string_record_is_age_checked(tmp_path, monkeypatch):
+    (tmp_path / "rec.json").write_text(_json.dumps({"verified_at": _iso(30)}))
+    monkeypatch.setattr(mt, "REPO", tmp_path)
+    payload = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+               "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+               "records": {f: "rec.json" for f in mt._CAPACITY_FRESH_FIELDS}}
+    assert run_check("capacity", json=payload, min_headroom=1,
+                     require_fresh=True) == 2
+
+
+def test_merge_tree_error_is_unknown(monkeypatch):
+    def fake_run(cmd, **kw):
+        if "rev-parse" in cmd:
+            return SimpleNamespace(returncode=0, stdout="x", stderr="")
+        return SimpleNamespace(returncode=2, stdout="", stderr="fatal")
+
+    monkeypatch.setattr(mt.subprocess, "run", fake_run)
+    assert mt.merge_tree_conflict(Path("."), "origin/main", "origin/x") is mt.UNKNOWN
+
+
+def test_gap_malformed_and_non_numeric_terms_are_2(gap_repo):
+    p = _gap_payload()
+    p["gap"]["terms"]["wait"] = None
+    assert run_check("gap", json=p, max=2) == 2
+    p = _gap_payload()
+    p["gap"]["terms"]["wait"]["value"] = mt.UNKNOWN
+    assert run_check("gap", json=p, max=2) == 2
+
+
+def test_attribution_rejects_non_boolean_main_red():
+    ok = {"pr": 5, "main_red": False, "culprit_sha": "a" * 40}
+    assert run_check("attribution", json=dict(ok, main_red="yes"), pr=5, max=5) == 2
+
+
+def test_conflicts_and_no_languish_reconcile_without_require_complete():
+    mismatch = {"items": [{"number": i, "conflicting": False} for i in range(12)],
+                "total_count": 10, "read_ok": True}
+    assert run_check("conflicts", json=mismatch, max=5) == 2
+    rows = {"items": [{"number": i, "classification": "open", "moved_in_window": True}
+                      for i in range(12)], "total_count": 10, "read_ok": True}
+    assert run_check("no-languish", json=rows, exclude=[]) == 2
+
+
+def test_require_fresh_is_refused_where_no_freshness_test_exists():
+    for name, payload, opts in (
+        ("queue-eta", {"items": [{"eta_minutes": 10}], "total_count": 1,
+                       "read_ok": True}, {"max": 120, "min_depth": 1}),
+        ("prs-per-day", {"prs_per_day": 250,
+                         "verified_at": "2020-01-01T00:00:00Z"}, {"min": 200}),
+        ("conflicts", {"items": [{"number": i, "conflicting": False}
+                                 for i in range(12)],
+                       "total_count": 12, "read_ok": True}, {"max": 5}),
+    ):
+        assert run_check(name, json=payload, require_fresh=True, **opts) == 2, name
+
+
+def test_sha_sentinels_never_bind_a_head():
+    runs = [{"name": "a", "status": "completed", "conclusion": "success", "id": 1,
+             "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]
+    assert run_check("main-gate", json={
+        "check_runs": runs, "total_count": 1, "required": ["a"],
+        "sha": mt.UNKNOWN, "live_main_sha": mt.UNKNOWN},
+        strict=True, require_fresh=True) == 2
+    assert run_check("queue-entry", json={
+        "pr": 5, "entered_queue": True, "trigger": "auto_merge_conditions",
+        "head_sha": mt.UNKNOWN, "run_sha": mt.UNKNOWN,
+        "verified_at": NOW}, pr=5, require_fresh=True) == 2
+
+
+def test_duplicate_check_run_ids_are_unknown():
+    def run(conclusion, ident):
+        return {"name": "a", "status": "completed", "conclusion": conclusion,
+                "id": ident, "details_url": f"x/{ident}", "app": {"slug": "g"},
+                "workflow": "w"}
+
+    assert mt.verdict_from_check_runs([run("success", 7), run("failure", 7)]) == mt.UNKNOWN
+    assert mt.mergify_mergeable([run("failure", 7), run("success", 7)]) == mt.UNKNOWN
+
+
+def test_report_does_not_launder_a_failed_collector(monkeypatch):
+    for fn in ("collect_conflicts", "collect_fast_files_unclassified",
+               "api_main_sha", "fetch_check_runs"):
+        monkeypatch.setattr(mt, fn, lambda *a, **k: {})
+    monkeypatch.setattr(mt, "live_main_sha", lambda *a, **k: mt.UNKNOWN)
+    report = mt.build_report(fixture=None)
+    assert report["fast_files_unclassified"] is mt.UNKNOWN
+    assert report["durations_map"]["sampled_keys"] is mt.UNKNOWN
