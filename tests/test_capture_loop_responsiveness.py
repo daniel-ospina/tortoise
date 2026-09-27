@@ -1662,15 +1662,20 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     recording projection stub, so this does NO graph I/O and cannot depend on
     the test-redirect/lane in which the file runs.
 
-    The probe corpus is GENERATED, not hand-listed. A five-literal spot-check
-    was GREEN against an added `_get_proj` branch (`startswith("01")` →
-    `tenant_{ns}`) because none of its literals was ULID-shaped — exactly the
-    "mirror that is nearly right" this guard exists to catch. See the corpus
-    construction below.
+    The probe corpus and the pinned literal set are GENERATED, not
+    hand-listed, and both come from `_get_proj`'s own AST rather than from a
+    literal SPELLING: every string constant in a predicate — a comparison
+    (`==` / `!=` / `in` / `not in`) or a `startswith` / `endswith` /
+    `__contains__` argument — is a probe AND must equal the pinned set. A
+    five-literal spot-check was GREEN against an added `_get_proj` branch
+    (`startswith("01")` → `tenant_{ns}`) because none of its literals was
+    ULID-shaped — exactly the "mirror that is nearly right" this guard exists
+    to catch. See the corpus construction below.
     """
+    import ast
     import inspect
     import random
-    import re
+    import textwrap
 
     import tortoise.embeddings as emb_mod
     import tortoise.hosted_api as ha_mod
@@ -1704,17 +1709,40 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
         return seen[-1]
 
     # ── probe corpus ──────────────────────────────────────────────────────
-    # (a) PREDICATE-DERIVED: every `==`/`startswith` string literal in
+    # (a) PREDICATE-DERIVED: every STRING CONSTANT appearing in a predicate in
     #     `_get_proj`'s OWN source becomes a probe, so a new literal-bearing
     #     branch is exercised BY CONSTRUCTION — a mirror that does not restate
-    #     it then fails the parity loop below. The pinned predicate-set
-    #     assertion after the loop makes any NEW predicate an explicit test
-    #     edit (and catches one the probes happen to satisfy).
+    #     it then fails the parity loop below. Extraction is AST-based, not a
+    #     spelling regex: a constant is collected wherever it sits in a
+    #     comparison (`==` / `!=` / `in` / `not in`, on EITHER side), or as an
+    #     argument of `str.startswith` / `str.endswith` / `__contains__`. A
+    #     single-quoted literal, an `in`/`not in` test, an `endswith`, or a
+    #     tuple/list of literals is therefore seen exactly like the
+    #     `== "..."` / `startswith(...)` spellings round 1's regexes matched.
+    #     (Those regexes saw only double-quoted `==`/`!=` and `startswith`, so
+    #     `"zzz" in ns`, `ns.endswith("zzz")` and `ns == 'zzz'` each escaped
+    #     BOTH the corpus and the pinned set, leaving the guard green.)
     src = inspect.getsource(sdk_mod.TortoiseSDK._get_proj)
-    eq_lits = set(re.findall(r'(?:==|!=)\s*"([^"]*)"', src))
-    prefix_lits: set[str] = set()
-    for _m in re.finditer(r"startswith\((.*?)\)", src, re.S):
-        prefix_lits.update(re.findall(r'"([^"]*)"', _m.group(1)))
+
+    def _string_consts(node: ast.AST) -> set[str]:
+        return {n.value for n in ast.walk(node)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)}
+
+    _PREDICATE_OPS = (ast.Eq, ast.NotEq, ast.In, ast.NotIn)
+    _PREDICATE_CALLS = {"startswith", "endswith", "__contains__"}
+    predicate_lits: set[str] = set()
+    for _node in ast.walk(ast.parse(textwrap.dedent(src))):
+        if isinstance(_node, ast.Compare) and any(
+                isinstance(_op, _PREDICATE_OPS) for _op in _node.ops):
+            predicate_lits |= _string_consts(_node.left)
+            for _comp in _node.comparators:
+                predicate_lits |= _string_consts(_comp)
+        elif (isinstance(_node, ast.Call)
+                and isinstance(_node.func, ast.Attribute)
+                and _node.func.attr in _PREDICATE_CALLS):
+            for _arg in _node.args:
+                predicate_lits |= _string_consts(_arg)
     # (b) REAL-CREDENTIAL SHAPES: a production `org_id` is a ULID
     #     ("01"-prefixed Crockford base32) — the shape the old spot-check
     #     lacked — plus the named shapes it carried and a seeded fuzz over the
@@ -1723,10 +1751,10 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
                          "registry",
                          "01J8ZZK4M7HQ3X9Z8R2K6VWPB",
                          "01HZX9K4M7HQ3X9Z8R2K6VWPC", "01ULID"]
-    corpus += sorted(eq_lits)
-    corpus += sorted(prefix_lits)
-    corpus += [f"{p}{sfx}" for p in sorted(prefix_lits)
-               for sfx in ("x", "01J8ZZK4M7HQ3X9Z8R2K6VWPB")]
+    corpus += sorted(predicate_lits)
+    # a prefix / membership literal only fires with something appended
+    corpus += [f"{_lit}{_sfx}" for _lit in sorted(predicate_lits)
+               for _sfx in ("x", "01J8ZZK4M7HQ3X9Z8R2K6VWPB")]
     _rng = random.Random(3365)
     _ns_alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
     corpus += ["".join(_rng.choice(_ns_alphabet)
@@ -1743,17 +1771,21 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
             f"the request by a graph it never opens (#3365)")
 
     # Structural half: a NEW predicate in `_get_proj` must be a deliberate
-    # test edit, not silent corpus drift. `_get_proj`'s only predicate shape
-    # today is a string literal in `==`/`startswith`, so this pins the set.
-    # (Residual, stated: a branch whose predicate carries NO string literal
-    # and that no probe shape satisfies — e.g. `len(ns) == 7` — is not
-    # derivable from source; the fuzz over the id alphabet is the guard for
-    # real shapes there.)
-    assert eq_lits == {"registry"} and prefix_lits == {
-        "test_", "tortoise_test", "test-"}, (
-            "_get_proj's namespace predicates changed (eq="
-            f"{sorted(eq_lits)}, startswith={sorted(prefix_lits)}): re-verify "
-            "_graph_name_for_namespace and extend this guard's corpus")
+    # test edit, not silent corpus drift. This pins the AST-derived literal
+    # set, so a new predicate-bearing branch reds HERE even when the parity
+    # loop cannot see it — e.g. a behaviour-preserving `endswith("zzz")`
+    # returning the same `org_{ns}` the else branch would.
+    # (Residual, stated precisely: a branch whose condition carries NO string
+    # constant in `_get_proj`'s own body is not observable from source — a
+    # literal-free predicate such as `len(ns) == 7`, or one that delegates the
+    # test to a helper/computed value such as `_is_ulid(ns)`. Such a branch
+    # adds neither a probe nor a pinned literal; the seeded namespace fuzz is
+    # the guard for a real shape it happens to match. Every predicate written
+    # with a string literal is covered by construction.)
+    assert predicate_lits == {"registry", "test_", "tortoise_test", "test-"}, (
+        "_get_proj's namespace predicates changed (literals="
+        f"{sorted(predicate_lits)}): re-verify _graph_name_for_namespace and "
+        "extend this guard's corpus")
     # explicit graph_name: verbatim, and it wins over the namespace family
     assert _opened(namespace="team-001", graph_name="org_x_g_1") \
         == ha_mod._graph_name_for_namespace("team-001", graph_name="org_x_g_1") \
