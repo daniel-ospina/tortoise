@@ -109,6 +109,14 @@ def test_cancelled_only_reads_no_verdict():
     assert verdict.groups[0].state == "absent"
 
 
+def test_stale_only_reads_no_verdict():
+    # `stale` is the other completed conclusion that measured nothing (pinned
+    # beside `cancelled` in the plan): stale-only reads no-verdict, never red.
+    verdict = compute_verdict(SHA, [check_run(1, "test", "stale", run_id=100)], [])
+    assert verdict.verdict == NO_VERDICT
+    assert verdict.counts["red"] == 0
+
+
 def test_in_flight_group_reads_in_flight():
     runs = [run_entry(100, "Python CI", workflow_id=1), run_entry(101, "CI", workflow_id=2)]
     check_runs = [
@@ -261,6 +269,38 @@ def test_check_run_without_a_resolvable_workflow_groups_under_its_app():
     assert all(g.workflow is None and g.workflow_key is None for g in verdict.groups)
 
 
+def test_two_apps_with_the_same_job_name_do_not_collapse():
+    # The `app` axis of the group key: two vendors, same job name, no run id.
+    # Dropping `app` from the key would let netlify's green mask vercel's red.
+    check_runs = [
+        check_run(1, "deploy", "failure", app="vercel", details_url="https://vercel.com/x/1"),
+        check_run(2, "deploy", "success", app="netlify", details_url="https://netlify.com/x/2"),
+    ]
+    verdict = compute_verdict(SHA, check_runs, [])
+    assert verdict.verdict == RED
+    assert len(verdict.groups) == 2
+    assert {g.app for g in verdict.groups} == {"vercel", "netlify"}
+
+
+def test_unresolved_actions_url_does_not_collapse_two_workflows():
+    # An Actions check whose details_url carries no parseable run id has NO
+    # stable identity. It must be grouped per entry, not share the
+    # (github-actions, None, job) fallback group — otherwise two workflows
+    # sharing a job name collapse and the newer green masks the older red.
+    check_runs = [
+        check_run(
+            1, "test", "failure", details_url="https://github.com/o/r/actions/runs/NOPE/job/1"
+        ),
+        check_run(
+            2, "test", "success", details_url="https://github.com/o/r/actions/runs/NOPE2/job/2"
+        ),
+    ]
+    runs = [run_entry(100, "A", workflow_id=1), run_entry(101, "B", workflow_id=2)]
+    verdict = compute_verdict(SHA, check_runs, runs)
+    assert verdict.verdict == RED
+    assert len(verdict.groups) == 2
+
+
 def test_newest_attempt_is_decided_by_check_run_id_not_started_at():
     runs = [run_entry(100, "Python CI", workflow_id=1)]
     # The higher id is the newer attempt even though its started_at is null and
@@ -275,23 +315,39 @@ def test_newest_attempt_is_decided_by_check_run_id_not_started_at():
 
 
 def test_an_unnamed_red_is_not_masked_by_a_newer_unnamed_green():
-    check_runs = [check_run(1, "", "failure"), check_run(2, "", "success")]
-    verdict = compute_verdict(SHA, check_runs, [])
+    # A RESOLVABLE run id is supplied deliberately: the per-entry routing must
+    # come from the UNNAMED guard alone, not from an unresolved workflow.
+    runs = [run_entry(100, "CI", workflow_id=1)]
+    check_runs = [
+        check_run(1, "", "failure", run_id=100),
+        check_run(2, "", "success", run_id=100),
+    ]
+    verdict = compute_verdict(SHA, check_runs, runs)
     assert verdict.verdict == RED
     assert len(verdict.groups) == 2
 
 
 def test_placeholder_named_check_is_treated_as_unnamed():
+    # Resolvable workflow; the per-entry routing must come from the PLACEHOLDER
+    # guard alone (the name is non-empty, so `not raw_name` does not fire).
+    runs = [run_entry(100, "CI", workflow_id=1)]
     check_runs = [
-        check_run(1, UNNAMED_JOB, "failure"),
-        check_run(2, UNNAMED_JOB, "success"),
+        check_run(1, UNNAMED_JOB, "failure", run_id=100),
+        check_run(2, UNNAMED_JOB, "success", run_id=100),
     ]
-    assert compute_verdict(SHA, check_runs, []).verdict == RED
+    assert compute_verdict(SHA, check_runs, runs).verdict == RED
 
 
 def test_named_check_with_a_missing_id_is_grouped_per_entry():
-    check_runs = [check_run(None, "test", "failure"), check_run(None, "test", "success")]
-    verdict = compute_verdict(SHA, check_runs, [])
+    # Resolvable workflow; the per-entry routing must come from the ID-LESS
+    # guard alone. Without it the two id-less attempts share one group and the
+    # newer green masks the older red.
+    runs = [run_entry(100, "CI", workflow_id=1)]
+    check_runs = [
+        check_run(None, "test", "failure", run_id=100),
+        check_run(None, "test", "success", run_id=100),
+    ]
+    verdict = compute_verdict(SHA, check_runs, runs)
     assert verdict.verdict == RED
     assert len(verdict.groups) == 2
 
@@ -344,6 +400,18 @@ def test_red_then_cancelled_then_green_reads_green():
         check_run(3, "test", "success", run_id=100),
     ]
     assert compute_verdict(SHA, check_runs, runs).verdict == GREEN
+
+
+def test_red_then_stale_in_the_same_group_reads_red():
+    # `stale` is absence, exactly like `cancelled`: a measured red survives it.
+    runs = [run_entry(100, "Python CI", workflow_id=1)]
+    check_runs = [
+        check_run(1, "test", "failure", run_id=100),
+        check_run(2, "test", "stale", run_id=100),
+    ]
+    verdict = compute_verdict(SHA, check_runs, runs)
+    assert verdict.verdict == RED
+    assert verdict.groups[0].voided_red is True
 
 
 def test_red_then_skipped_in_the_same_group_reads_red():
@@ -481,6 +549,12 @@ def test_resolve_workflow_run_id():
     assert resolve_workflow_run_id("https://vercel.com/x/1") is None
     assert resolve_workflow_run_id(None) is None
     assert resolve_workflow_run_id("") is None
+    # A run id followed by a query string / fragment still resolves.
+    assert resolve_workflow_run_id("https://github.com/o/r/actions/runs/123?x=1") == "123"
+    assert resolve_workflow_run_id("https://github.com/o/r/actions/runs/123#job") == "123"
+    # An Actions URL whose run id cannot be parsed stays unresolved; the caller
+    # then groups it per entry (test_unresolved_actions_url_...).
+    assert resolve_workflow_run_id("https://github.com/o/r/actions/runs/NOPE/job/1") is None
 
 
 def test_build_run_workflow_map_uses_only_workflow_id_as_key():
@@ -692,6 +766,19 @@ def test_cli_partial_read_failure_is_exit_2(monkeypatch, capsys):
 
 def test_cli_refuses_a_short_sha(capsys):
     rc = main(["0123456", "--repo", "o/r"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "verdict=" not in captured.out
+
+
+def test_cli_offline_refuses_a_short_sha(tmp_path, capsys):
+    # The sha invariant is enforced at the compute entry point too: the offline
+    # seam (--check-runs-json) is what the merge rail will feed, so it must
+    # refuse a short sha exactly like the fetch path.
+    check_runs = _write_pages(
+        tmp_path, "check-runs.json", [cr_page([check_run(1, "test", "success", run_id=100)])]
+    )
+    rc = main(["0123456", "--check-runs-json", str(check_runs), "--repo", "o/r"])
     captured = capsys.readouterr()
     assert rc == 2
     assert "verdict=" not in captured.out
