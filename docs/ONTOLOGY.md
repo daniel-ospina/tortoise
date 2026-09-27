@@ -42,8 +42,9 @@ doc_status: live
 >   may traverse it — neither the support path (`IMPL`/`NAND`) nor the
 >   source-credibility prior path (`_apply_source_inheritance`, which reads
 >   `extractedFrom`). **Relevance is not expressed by this link; it is expressed on
->   the operator** (`IMPL`/`NAND`) — the shape AIF gives relevance (`RA-node`), scoped
->   to relevance only, since operator-less direct `IMPL`/`NAND` edges also exist (§8).
+>   the operator** (`IMPL`/`NAND`). The AIF scheme node (`RA-node`) is cited only as an
+>   **illustrative** analogy for relevance-on-the-operator, and operator-less direct
+>   `IMPL`/`NAND` edges also exist (§8).
 > - Enforcement status is stated rather than implied: the three meanings are
 >   **declarations** (`_VALID_EDGE_PREDICATES` is a flat membership set). What *is*
 >   enforced is the **durability** half — `related` sits in **neither**
@@ -583,6 +584,7 @@ performs, produces, uses, authoredBy, ownedBy, managedBy,
 hasMember, holdsRole, memberOf, reportsTo,
 participatesIn, hasPart, related, dependsOn, references,
 wasDerivedFrom
+```
 
 > **#214 (2026-08-06):** `instantiates` removed — Event→Action legacy from v2.5;
 > Action was dissolved in Ontology v3.0.
@@ -672,7 +674,6 @@ wasDerivedFrom
 > label and its replay key are one unit: `STRUCTURAL_REL_LABELS` holds the target
 > label and the replay-key selection sits beside it in `stub_key`, so the two must
 > move together, and the replay branch keys on `etype in DERIVABLE_STRUCTURAL_RELS`.
-```
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 
