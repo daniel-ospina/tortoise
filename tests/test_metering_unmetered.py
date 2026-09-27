@@ -478,11 +478,19 @@ def test_supabase_lane_writes_and_reads_the_representation(sb, monkeypatch):
 
 def test_supabase_lane_refuses_an_undeclared_class_and_an_unknown_org(
         sb, monkeypatch):
-    """The SQL lane's constraints are observable through the seam.
+    """The OUTCOME through the seam: an undeclared class and an unknown org both
+    leave NO row behind (``fake.tables[...] == []``).
 
-    Mutation caught: dropping the CHECK (an invented class is stored) or the org
-    FK (a representation row for an org that does not exist — unreadable
-    alongside anything, and unattributable in triage).
+    Stated carefully, because the outcome is layered: the Python vocabulary
+    guard and the fake's own check also refuse these, and
+    ``record_unmetered_increment`` never raises, so this test pins the OUTCOME
+    rather than any single layer. What it would catch is a change that lets
+    either call STORE a row.
+
+    The layers themselves are pinned elsewhere, and by mutation: the SQL CHECK by
+    the pglite suite (``an UNDECLARED drop_class was accepted``) and the
+    Python<->SQL vocabulary contract test; the org FK by the same suite's
+    ``the org FK is missing — a row was written for an unknown org`` probe.
     """
     fake = _fake_cp()
     monkeypatch.setattr(sb, "get_control_plane", lambda: fake)
