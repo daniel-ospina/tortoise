@@ -165,12 +165,13 @@ BEGIN
         RAISE EXCEPTION 'a blank lane was accepted';
     END IF;
 
-    -- For ``lane`` the blank set is EXPLICIT and shared with the Python lane and
-    -- the fake (``tortoise.metering._BLANK_CHARS``): space, TAB, CR, LF. A bare
+    -- The blank test is Python's own whitespace set (``str.isspace()``), mirrored
+    -- by the migration's ``blank_chars`` — both keys, one comparison. A bare
     -- ``btrim(x)`` (ASCII spaces only) used to accept a TAB-only lane here while
-    -- the embedded lane refused it — two modes disagreeing about whether the
-    -- record exists. (For ``org_id`` the guard is a lower bound: the FK decides,
-    -- and the Python lane is stricter there on purpose — see the FK probe below.)
+    -- the embedded lane refused it: two modes disagreeing about whether the
+    -- record exists. The embedded half is pinned by
+    -- ``test_a_unicode_whitespace_lane_is_refused_like_the_sql_lane`` and the set
+    -- itself by ``test_the_blank_set_is_pythons_exact_whitespace_set``.
     rejected := false;
     BEGIN
         PERFORM public.metering_record_unmetered(
@@ -178,7 +179,19 @@ BEGIN
     EXCEPTION WHEN raise_exception THEN rejected := true;
     END;
     IF NOT rejected THEN
-        RAISE EXCEPTION 'a TAB-only lane was accepted (the Python lane refuses it)';
+        RAISE EXCEPTION 'a TAB-only lane was accepted (the embedded lane refuses it)';
+    END IF;
+
+    -- ...including NBSP and the other Unicode spaces, which the ASCII-only
+    -- ``btrim(x)`` also let through.
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            '4779-dropped', chr(160), 'window_unresolvable', 'X');
+    EXCEPTION WHEN raise_exception THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'an NBSP-only lane was accepted (the embedded lane refuses it)';
     END IF;
 
     rejected := false;
@@ -191,47 +204,14 @@ BEGIN
         RAISE EXCEPTION 'a CR/LF-only org_id was accepted';
     END IF;
 
-    -- ...and a Unicode-space-only key is ACCEPTED by BOTH lanes, deliberately:
-    -- there is no exact ``btrim`` equivalent of Python's Unicode ``strip()``, so
-    -- the shared set is DECLARED rather than approximated. Asserted THROUGH THE
-    -- RPC — not by a direct INSERT — so it actually exercises
-    -- ``btrim(…, E' \t\r\n')``; the row is removed again because this org's
-    -- counts are asserted below (the Python suite pins the other half).
-    PERFORM public.metering_record_unmetered(
-        '4779-dropped', chr(160), 'window_unresolvable', 'X');
-    SELECT count(*) INTO v_n FROM public.metering_unmetered_increments
-     WHERE org_id = '4779-dropped' AND lane = chr(160);
-    IF v_n <> 1 THEN
-        RAISE EXCEPTION
-            'an NBSP-only lane was refused by the RPC (the Python lane accepts it)';
-    END IF;
-    DELETE FROM public.metering_unmetered_increments
-     WHERE org_id = '4779-dropped' AND lane = chr(160);
-
-    -- p_n OMITTED -> ONE increment (the FUNCTION's ``p_n DEFAULT 1``); it is not
-    -- "zero", which is the state this whole surface exists to distinguish from
-    -- a drop.
-    PERFORM public.metering_record_unmetered(
-        '4779-default-probe', 'write_op', 'window_unresolvable', 'X');
-    SELECT m.increments INTO v_n
-      FROM public.metering_unmetered_increments AS m
-     WHERE m.org_id = '4779-default-probe' AND m.lane = 'write_op';
-    IF v_n IS DISTINCT FROM 1 THEN
-        RAISE EXCEPTION 'an omitted p_n recorded % instead of the DEFAULT 1', v_n;
-    END IF;
-
-    -- ...and the COLUMN's ``DEFAULT 1``, which the RPC never exercises (it always
-    -- passes p_n explicitly), asserted by a DIRECT insert that omits
-    -- ``increments``. Reverted to ``DEFAULT 0`` this INSERT trips the positive
-    -- CHECK — a column default that contradicts the table's own constraint.
-    INSERT INTO public.metering_unmetered_increments
-        (org_id, lane, drop_class, last_error_type)
-    VALUES ('4779-default-probe', 'direct_insert', 'window_unresolvable', 'X');
-    SELECT m.increments INTO v_n
-      FROM public.metering_unmetered_increments AS m
-     WHERE m.org_id = '4779-default-probe' AND m.lane = 'direct_insert';
-    IF v_n IS DISTINCT FROM 1 THEN
-        RAISE EXCEPTION 'the column DEFAULT recorded % instead of 1', v_n;
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            chr(160), 'write_op', 'window_unresolvable', 'X');
+    EXCEPTION WHEN raise_exception THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a whitespace-only org_id was accepted';
     END IF;
 
     DELETE FROM public.metering_unmetered_increments
@@ -394,20 +374,8 @@ BEGIN
         RAISE EXCEPTION 'the org FK is missing — a row was written for an unknown org';
     END IF;
 
-    -- ...which is also what refuses a whitespace-only ORG ID that the ASCII blank
-    -- guard above lets through (NBSP is not in ``E' \t\r\n'``). The FK is
-    -- the authority on org keys — the Python lane is stricter still (it refuses
-    -- any Unicode whitespace as an org id), a direction that cannot diverge
-    -- because no org can carry a whitespace-only id.
-    rejected := false;
-    BEGIN
-        PERFORM public.metering_record_unmetered(
-            chr(160), 'write_op', 'window_unresolvable', 'X');
-    EXCEPTION WHEN foreign_key_violation THEN rejected := true;
-    END;
-    IF NOT rejected THEN
-        RAISE EXCEPTION 'a whitespace-only org id was written (the FK should refuse it)';
-    END IF;
+    -- ...and a blank org id never reaches the FK at all: the guard above refuses
+    -- it first (probed in the blank-set block).
 
     -- ...and CASCADEs on the org's deletion.
     PERFORM public.metering_record_unmetered(

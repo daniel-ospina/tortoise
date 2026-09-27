@@ -501,18 +501,6 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 # asymmetry is declared in the runbook's ``UNMETERED_INCREMENT`` row. Either
 # way the writer logs and never raises.
 
-#: #4779: the DECLARED blank set for the ``lane`` key, shared by this module's
-#: guard, the migration's ``btrim(p_lane, E' \t\r\n')`` and the fake control
-#: plane. ASCII space/TAB/CR/LF only, on purpose: Python's bare ``str.strip()``
-#: also removes Unicode whitespace, which Postgres ``btrim`` cannot express, so a
-#: shared EXPLICIT set is what keeps the two deployment modes agreeing on which
-#: records exist (see ``record_unmetered_increment``).
-#:
-#: It applies to ``lane`` ONLY. ``org_id`` is refused by the broad Unicode test
-#: instead — that direction cannot diverge, because the Supabase lane's FK is
-#: the wider authority on whether an org key can name a row at all.
-_BLANK_CHARS = " \t\r\n"
-
 #: #4779: the DECLARED drop vocabulary, mirrored by the CHECK constraint on
 #: ``metering_unmetered_increments.drop_class`` (migration 20260927000001). An
 #: ad-hoc string here would re-create the re-derivation defect at the
@@ -565,30 +553,21 @@ def record_unmetered_increment(lane: str, org_id: str | None,
     not either. A failed representation is logged at WARNING — never silent —
     and the leg-3 alert remains the backstop.
     """
-    # ``org_id``/``lane`` are refused when BLANK, not only when falsy — but they
-    # are refused by DIFFERENT tests, because the two keys have different
-    # authorities behind them.
+    # ``org_id``/``lane`` are refused when BLANK, not only when falsy — and the
+    # blank test is Python's OWN whitespace set (bare ``strip()``), mirrored
+    # EXACTLY by the SQL lane so the two deployment modes agree on which records
+    # exist. The mirror is ``blank_chars`` in the migration, copied verbatim from
+    # ``20260919000001`` (the set that mirrors ``_current_period``); a
+    # cross-language contract test asserts it equals ``str.isspace()``, so the
+    # copy cannot drift.
     #
-    # ORG: the BROAD Unicode test (bare ``strip()``). Stricter than the SQL guard
-    # on purpose, and safe in that direction: a record must name a real org, and
-    # the Supabase lane enforces that with the FK, so a whitespace-only org key
-    # (NBSP included) yields no row there. Being stricter HERE only stops the
-    # EMBEDDED lane from writing a durable node for an org that exists in no
-    # table ("a whitespace-only org would even create a node no reader could join
-    # to ``organizations``"). Narrowing this to the shared set below would reopen
-    # exactly that divergence.
-    #
-    # LANE: the DECLARED ASCII set — space/TAB/CR/LF — shared verbatim with the
-    # migration's ``btrim(p_lane, E' \t\r\n')`` and the fake, because ``lane``
-    # has no FK and no other authority. A bare ``str.strip()`` here removes
-    # Unicode whitespace too, which made the embedded lane REFUSE a TAB-only lane
-    # the Supabase lane WRITES; there is no exact ``btrim`` equivalent of
-    # Python's Unicode ``strip()`` to widen SQL with, so the set is DECLARED
-    # rather than approximated. A lane made only of NBSP is therefore accepted by
-    # all three lanes, which is consistent and harmless (``lane`` is
-    # unconstrained by design; the real inventory is enumerated from source).
+    # Why exactness matters HERE: a bare SQL ``btrim(x)`` removes ASCII spaces
+    # only, so a TAB-only lane was refused on the embedded lane and WRITTEN on
+    # the Supabase lane — two modes disagreeing about whether the record exists,
+    # which is the defect this guard closes (and unmetered rows are also read
+    # back by org).
     if (not org_id or not str(org_id).strip()
-            or not lane or not str(lane).strip(_BLANK_CHARS)
+            or not lane or not str(lane).strip()
             or drop_class not in _DROP_CLASSES):
         return None
     try:

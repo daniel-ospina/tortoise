@@ -158,25 +158,25 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-DECLARE v_total integer;
+DECLARE
+    v_total integer;
+    -- The whitespace set Python's ``str.strip()`` (``str.isspace()``) removes:
+    -- ASCII whitespace + the C0 separators + NEL/NBSP + the Unicode space
+    -- separators. Copied VERBATIM from ``blank_chars`` in
+    -- ``20260919000001_metering_period_end_repair.sql`` (the set that mirrors the
+    -- runtime authority ``metering._current_period``), so the embedded and
+    -- Supabase lanes compare keys IDENTICALLY for BOTH org_id and lane: a
+    -- TAB- or NBSP-only key must not be refused on one lane and written on the
+    -- other. A cross-language contract test asserts this literal decodes to
+    -- exactly Python's ``str.isspace()`` set
+    -- (``tests/test_metering_unmetered.py::test_the_blank_set_is_pythons_exact_whitespace_set``),
+    -- so the copy cannot drift.
+    blank_chars constant text := E' \t\n\v\f\r\u001C\u001D\u001E\u001F\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
 BEGIN
-    -- The BLANK guard uses an EXPLICIT character set shared with the Python lane
-    -- and the fake for ``lane`` (``tortoise.metering._BLANK_CHARS``): a bare
-    -- ``btrim(x)`` removes ASCII spaces only, while Python's bare ``str.strip()``
-    -- also removes tabs/newlines and Unicode whitespace — so a TAB-only lane was
-    -- refused on the embedded lane and WRITTEN here. Both sides now refuse
-    -- exactly space/TAB/CR/LF for ``lane``; see the Python guard for why that set
-    -- is declared rather than approximated.
-    --
-    -- For ``org_id`` this RPC guard is a LOWER bound, not the authority: the FK
-    -- (here and on ``organizations``) decides whether the key can name a row at
-    -- all, and the Python lane is deliberately STRICTER for ``org_id`` (any
-    -- Unicode whitespace, not just this set) — a direction that cannot diverge,
-    -- since a whitespace-only org id matches no real org.
-    IF p_org_id IS NULL OR btrim(p_org_id, E' \t\r\n') = '' THEN
+    IF p_org_id IS NULL OR btrim(p_org_id, blank_chars) = '' THEN
         RAISE EXCEPTION 'metering_record_unmetered: p_org_id is required';
     END IF;
-    IF p_lane IS NULL OR btrim(p_lane, E' \t\r\n') = '' THEN
+    IF p_lane IS NULL OR btrim(p_lane, blank_chars) = '' THEN
         RAISE EXCEPTION 'metering_record_unmetered: p_lane is required';
     END IF;
     IF p_n IS NULL OR p_n < 1 THEN

@@ -338,14 +338,14 @@ class FakeControlPlane:
                     "zero increment is the state this table exists to "
                     "distinguish")
             n = int(p["p_n"]) if p.get("p_n") is not None else 1
-            # This mirrors the RPC's guard, which is the ASCII set for BOTH keys
-            # (``btrim(…, E' \t\r\n')``) — see ``tortoise.metering._BLANK_CHARS``.
-            # For ``org_id`` the RPC is a lower bound and the FK below is the
-            # authority (the Python lane is deliberately stricter for org ids).
-            if org_id is None or not str(org_id).strip(" \t\r\n"):
+            # The RPC's guard is Python's own whitespace set, mirrored exactly by
+            # the migration's ``blank_chars`` (a bare ``btrim(x)`` would refuse
+            # fewer keys than the embedded lane does) — so this fake uses the
+            # Python test as well, for BOTH keys.
+            if org_id is None or not str(org_id).strip():
                 raise RuntimeError(
                     "metering_record_unmetered: p_org_id is required")
-            if lane is None or not str(lane).strip(" \t\r\n"):
+            if lane is None or not str(lane).strip():
                 raise RuntimeError(
                     "metering_record_unmetered: p_lane is required")
             if n < 1:
