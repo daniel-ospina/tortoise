@@ -1716,7 +1716,13 @@ class TestDistinguishingDifference:
                 ("the server pings the server pool",
                  "the server pool pings the server"),
                 # A fixed tail (`a gift`) must not absorb either argument.
-                ("alice gave bob a gift", "bob gave alice a gift")):
+                ("alice gave bob a gift", "bob gave alice a gift"),
+                # An adjective inside a noun phrase decides nothing by itself:
+                # this is still a genuine inversion (who met whom), and it is
+                # refused — while `the red car hit the truck` / `the car hit the
+                # red truck`, the same "adjective inside an NP" shape, folds
+                # because its decomposition closes the gap on one side.
+                ("the tall woman met the man", "the man met the tall woman")):
             assert v2.distinguishing_difference(prior, rival) \
                 == "substituted_content", (prior, rival)
             assert not v2.fold_allowed(prior, rival), (prior, rival)
@@ -1898,10 +1904,14 @@ class TestDistinguishingDifference:
                  "the db is down and the server is up"),
                 ("alice and bob and carol shipped",
                  "carol and bob and alice shipped"),
-                # The multi-token-block residual, pinned because the docstring
-                # claims every residual is: an adjective inside one noun phrase
-                # is not one exchange, so the pair keeps folding even though the
-                # two claims differ (which car hit which).
+                # A multi-token block whose token-level decomposition leaves the
+                # blocks adjacent on ONE side folds by the SAME adjacency rule as
+                # the pairs above — this one DOES differ (which car hit which),
+                # so the fold is a pinned FAIL-OPEN in the delete direction.  It
+                # is NOT folded "because the comparison is over tokens": an
+                # adjective inside a noun phrase decides nothing on its own
+                # (`the tall woman met the man` / `the man met the tall woman`
+                # is refused, pinned as the inversion it is).
                 ("the red car hit the truck",
                  "the car hit the red truck"),
                 # A conjunction joining two CLAUSES rather than two commuting

@@ -4451,7 +4451,10 @@ def _role_inversion(a: str, b: str) -> bool:
         failed silently`` against ``silently the build failed``; ``from the
         depot we shipped the crate`` against ``we shipped the crate from the
         depot``; ``she drove the car to the office on tuesday`` against ``she
-        drove the car on tuesday to the office``.  Where the gap holds on BOTH
+        drove the car on tuesday to the office``; and ``the red car hit the
+        truck`` against ``the car hit the red truck`` — that last pair DOES
+        differ (which car hit which), so its fold is a FAIL-OPEN in the delete
+        direction, which is why it is pinned.  Where the gap holds on BOTH
         sides the same surface shape is REFUSED (FAIL-CLOSED, both claims
         kept): ``in staging the alpha engine processed the delta record``
         against ``the alpha engine processed the delta record in staging``;
@@ -4494,9 +4497,6 @@ def _role_inversion(a: str, b: str) -> bool:
       * an exchange whose frame ALSO changed stays foldable — a one-sided
         preposition is the documented broadening case (``_connective_swap``),
         and it is the shape active/passive shares;
-      * MULTI-token blocks that are not ONE exchange (an adjective inside one
-        of the noun phrases) stay foldable, because the comparison is over
-        tokens;
       * a COPULA's two arguments in exchanged order (``the owner is the
         manager`` against ``the manager is the owner``) is now refused, and
         that refusal is FAIL-CLOSED: a copula is a relator, so the exchange is
@@ -4528,9 +4528,9 @@ def _role_inversion(a: str, b: str) -> bool:
     of a structural shape, so a construction the reading cannot distinguish
     from a re-assigned slot is refused (FAIL-CLOSED, both claims kept) while a
     construction covered by a declared exemption above — the adjacency
-    RE-FLOW, the multi-token block, or the coordination straddle, all of them
-    FAIL-OPEN in the DELETE direction — still folds and can lose a rival.  A
-    newly found shape must be pinned and added here, and it can land on EITHER
+    RE-FLOW (which is also what folds a multi-token block whose decomposition
+    closes the gap) or the coordination straddle, both FAIL-OPEN in the DELETE
+    direction — still folds and can lose a rival.  A newly found shape must be pinned and added here, and it can land on EITHER
     side; "not listed" must not be read as "safe".
     """
     # Orientation-invariant.  The in-capture seam calls
