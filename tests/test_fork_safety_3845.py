@@ -77,6 +77,7 @@ pytestmark = pytest.mark.embedded_only
 # a real regression. A timeout is now INCONCLUSIVE; a parked child is still a
 # FAIL regardless of timing (structural evidence beats a wall clock).
 from tests._verdict import inconclusive  # noqa: E402
+from tests._fork_safety_verdict import assert_fixed_race_verdict  # noqa: E402
 
 _FIXTURE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -84,10 +85,10 @@ _FIXTURE = os.path.join(
 )
 #: The redis client's own socket read budget. #4742: under load this expires
 #: inside `_race`, so a timeout on it is evidence about the host, not the wedge.
+#: It is the one deadline named by every client-side INCONCLUSIVE the
+#: classifier emits: the `INFO` probe, the setup query and the DR-restore copy
+#: all run on THIS client, so there is no separate probe deadline to invent.
 _SOCKET_TIMEOUT_S = 4.0
-#: The fork-counter probe carries no own deadline; a timeout on `INFO` is the
-#: same class as `_SOCKET_TIMEOUT_S` (the client's budget, not the wedge).
-_PROBE_DEADLINE_S = _SOCKET_TIMEOUT_S
 #: How long each race runs.  With the holder below the leak lands within
 #: 7-20 copies in every measured run; the window stays generous so a loaded
 #: machine cannot turn it into a false green.
@@ -140,15 +141,36 @@ def _cpu_seconds(stamp: str) -> float:
     return seconds
 
 
-def _is_timeout_error(exc: BaseException) -> bool:
-    """True when ``exc`` is the redis client's socket-budget expiry (#4742).
+_TIMEOUT_TYPES: tuple[type[BaseException], ...] | None = None
 
-    A client ``TimeoutError``/"Timeout reading from socket" on this hostile-lock
-    fixture is evidence about host load, not about the wedge. Matched by name so
-    the harness does not import ``redis`` at module scope.
+
+def _timeout_types() -> tuple[type[BaseException], ...]:
+    """The NARROW classes a client socket *budget* expiry raises (#4742).
+
+    ``redis-py`` translates a socket read deadline into its own
+    ``redis.exceptions.TimeoutError`` ("Timeout reading from socket"); the
+    builtin covers a bare ``socket.timeout`` surfacing unwrapped. Matched by
+    CLASS, never by message text: the wedge's own signature is a *refusal*
+    (``redis.exceptions.ConnectionError``), and a refusal whose wording happens
+    to contain "timeout" must stay a FAIL (#5049 rule 1). ``redis`` is imported
+    lazily so the harness needs it only when a client call actually fails.
     """
-    name = type(exc).__name__.lower()
-    return "timeout" in name or "timeout" in str(exc).lower()
+    global _TIMEOUT_TYPES
+    if _TIMEOUT_TYPES is None:
+        types: tuple[type[BaseException], ...] = (TimeoutError,)
+        try:
+            from redis.exceptions import TimeoutError as _RedisTimeout
+        except Exception:  # pragma: no cover - redis is a hard dependency
+            _RedisTimeout = None  # type: ignore[assignment]
+        if _RedisTimeout is not None and _RedisTimeout is not TimeoutError:
+            types = types + (_RedisTimeout,)
+        _TIMEOUT_TYPES = types
+    return _TIMEOUT_TYPES
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """True when ``exc`` is the client's socket-budget expiry (#4742)."""
+    return isinstance(exc, _timeout_types())
 
 
 def _daemon_children(daemon_pid: int):
@@ -164,10 +186,15 @@ def _daemon_children(daemon_pid: int):
     empty output where a header is always expected). A failure must never read
     as "no children": that would make a wedge look green (`#5049`).
     """
-    proc = subprocess.run(
-        ["ps", "-eo", "pid,ppid,time"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid,ppid,time"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        # `ps` not on PATH / not executable: the census is UNREADABLE, which is
+        # the declared ``None`` — never an ERROR escaping as a test verdict.
+        return None
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     found = []
@@ -262,15 +289,25 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
         time.sleep(0.05)
     assert os.path.exists(sock), "embedded test daemon never opened its socket"
 
-    result = {"copies": 0, "attempts": 0, "errors": 0, "last_err": None,
-              "hung": [], "forks": None, "clone_nodes": None,
-              "swapped_nodes": None, "verify_err": None,
-              "timeout_errors": 0, "sampling_unavailable": False}
+    result = {"copies": 0, "attempts": 0, "errors": 0,
+              "non_timeout_errors": 0, "last_err": None,
+              "last_non_timeout_err": None, "hung": [], "forks": None,
+              "clone_nodes": None, "swapped_nodes": None, "verify_err": None,
+              "verify_timeout": False, "timeout_errors": 0,
+              "sampling_unavailable": False, "setup_timeout_err": None}
     try:
         from falkordb import FalkorDB
         db = FalkorDB(unix_socket_path=sock, socket_timeout=_SOCKET_TIMEOUT_S)
         g = db.select_graph("src")
-        g.query("CREATE (:P {i:1})")
+        try:
+            g.query("CREATE (:P {i:1})")
+        except Exception as exc:
+            # the shared client budget can expire before the graph exists — the
+            # same load class as everywhere else, never an escaping test ERROR.
+            if _is_timeout_error(exc):
+                result["setup_timeout_err"] = f"{type(exc).__name__}: {exc}"
+                return result
+            raise
         forks0 = _total_forks(db)
         time.sleep(4)  # let the holder thread start (it delays past startup)
         first_seen: dict[int, tuple[float, float]] = {}
@@ -285,6 +322,10 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
                 result["last_err"] = str(exc)
                 if _is_timeout_error(exc):
                     result["timeout_errors"] += 1
+                else:
+                    result["non_timeout_errors"] += 1
+                    result["last_non_timeout_err"] = (
+                        f"{type(exc).__name__}: {exc}")
             result["attempts"] += 1
             children = _daemon_children(proc.pid)
             if children is None:
@@ -330,6 +371,7 @@ def _race(holder: str, serverconfig: dict | None, dbdir: str) -> dict:
                 result["swapped_nodes"] = int(rows[0][0]) if rows else None
             except Exception as exc:
                 result["verify_err"] = f"{type(exc).__name__}: {exc}"
+                result["verify_timeout"] = _is_timeout_error(exc)
     finally:
         # Own-process hygiene only: kill the daemon WE started and the module
         # children carrying ITS pid as parent.  Never a fleet-wide sweep.
@@ -354,112 +396,16 @@ def holder():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _assert_fixed_race_verdict(result: dict) -> None:
-    """#5049 verdict for the FIX-path race — structural evidence beats a clock.
-
-    Polarity, in this order:
-
-    * a parked child is a FAIL regardless of any timeout (the wedge is structural);
-    * a census/counter that could not be READ is INCONCLUSIVE — never a PASS, or
-      the non-vacuity proof would be void;
-    * a client socket timeout under load is INCONCLUSIVE (evidence about the host);
-    * only a fully-observed healthy race PASSes.
-    """
-    assert result["hung"] == [], (
-        f"module-fork child parked {result['hung']} with the fork-safe "
-        f"config {fork_safe_serverconfig()!r}; last error "
-        f"{result['last_err']!r}")
-    if result["sampling_unavailable"]:
-        inconclusive(
-            "the daemon child census (`ps`) could not be read, so a wedge "
-            "cannot be ruled out",
-            deadline_s=_RACE_SECONDS,
-            diagnosis=f"the census failure is not 'no children': {result}",
-        )
-    if result["forks"] is None:
-        inconclusive(
-            "the fork counter (`INFO`) could not be read, so non-vacuity is "
-            "unproven (a PASS here would prove nothing)",
-            deadline_s=_PROBE_DEADLINE_S,
-            diagnosis=f"last error {result['last_err']!r}",
-        )
-    # non-vacuity: this asserts the fork path RAN, from redis's own counter,
-    # so a green result cannot come from a copy that never forked.
-    assert result["forks"] >= result["copies"] > 0, (
-        f"the fork path did not run: {result}")
-    assert result["copies"] > 0, f"the race never ran: {result}"
-    if result["timeout_errors"]:
-        inconclusive(
-            "a client socket call exceeded its budget under load",
-            deadline_s=_SOCKET_TIMEOUT_S,
-            diagnosis=(
-                f"{result['timeout_errors']} timeout(s) of "
-                f"{result['attempts']} attempts: {result['last_err']!r}"),
-        )
-    if result["verify_err"] is not None and "timeout" in result["verify_err"].lower():
-        inconclusive(
-            "the DR-restore verification copy exceeded the client socket "
-            "budget under load",
-            deadline_s=_SOCKET_TIMEOUT_S,
-            diagnosis=result["verify_err"],
-        )
-    assert result["last_err"] is None, result
-    assert result["verify_err"] is None, result
-    assert result["clone_nodes"] == 1, result
-    assert result["swapped_nodes"] == 1, result
-
-
-def _healthy_result(*, copies: int = 5, forks: int = 6) -> dict:
-    """A fully-observed healthy race result (the PASS shape)."""
-    return {
-        "copies": copies, "attempts": copies, "errors": 0, "last_err": None,
-        "hung": [], "forks": forks, "clone_nodes": 1, "swapped_nodes": 1,
-        "verify_err": None, "timeout_errors": 0, "sampling_unavailable": False,
-    }
-
-
-def test_fixed_race_verdict_passes_a_fully_observed_healthy_race():
-    _assert_fixed_race_verdict(_healthy_result())
-
-
-def test_fixed_race_verdict_skips_on_a_client_timeout():
-    result = _healthy_result()
-    result["timeout_errors"] = 1
-    result["last_err"] = "Timeout reading from socket"
-    with pytest.raises(pytest.skip.Exception):
-        _assert_fixed_race_verdict(result)
-
-
-def test_fixed_race_verdict_fails_on_a_parked_child_even_with_a_timeout():
-    """Structural evidence (a parked child) beats a timing event."""
-    result = _healthy_result()
-    result["hung"] = [(12345, 3.0, 0.0)]
-    result["timeout_errors"] = 1
-    with pytest.raises(AssertionError):
-        _assert_fixed_race_verdict(result)
-
-
-def test_fixed_race_verdict_skips_when_the_fork_counter_is_unreadable():
-    """A PASS with an unreadable counter would prove nothing (non-vacuity)."""
-    result = _healthy_result()
-    result["forks"] = None
-    with pytest.raises(pytest.skip.Exception):
-        _assert_fixed_race_verdict(result)
-
-
-def test_fixed_race_verdict_skips_when_the_child_census_could_not_be_read():
-    result = _healthy_result()
-    result["sampling_unavailable"] = True
-    with pytest.raises(pytest.skip.Exception):
-        _assert_fixed_race_verdict(result)
-
-
 def test_fork_child_does_not_hang_with_the_production_config(holder):
     """(b)+(c) — with the fork-safe verbosity the same race produces NO parked
     module-fork child, no fork refusal, and the copy still copies."""
     dbdir = tempfile.mkdtemp(prefix="fork-safety-fixed-")
     result = _race(holder, fork_safe_serverconfig(), dbdir)
-    _assert_fixed_race_verdict(result)
+    assert_fixed_race_verdict(
+        result,
+        race_deadline_s=_RACE_SECONDS,
+        socket_budget_s=_SOCKET_TIMEOUT_S,
+    )
 
 
 def test_without_the_fix_the_same_race_hangs_a_child(holder):

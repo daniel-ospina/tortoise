@@ -24,8 +24,9 @@ Design constraints:
   `tests/conftest.py` module level without perturbing the #1686 test-mode import
   ordering.
 * The INCONCLUSIVE skip reason is a **declared family** (`INCONCLUSIVE_PREFIX`)
-  that `tools/skip-guard.py` exempts, so a load-induced skip cannot be
-  re-classified as an availability regression by the skip guard.
+  whose wording deliberately names NO availability class — so the skip guard's
+  FalkorDB trip does not apply to it, and no per-flake allow-list entry is
+  needed (#5049's owner frame: `tools/skip-guard.py` is unchanged).
 """
 
 from __future__ import annotations
@@ -175,10 +176,12 @@ def host_capability(probe: Callable[[], bool], *, what: str, remedy: str) -> Non
         pytest.skip(f"HOST CAPABILITY [#5049]: {what} unavailable — {remedy}")
 
 
-# Node floors are PER INVOCATION (a shared constant would be wrong for one of
-# them): a `--experimental-strip-types` driver needs the flag (22.7, the floor
-# `tests/test_capture_spool.py::_node_that_can_strip_ts` already records),
-# while a bare `node --test <file>.ts` relies on type stripping being default-on.
+# The ONLY floor this increment declares. Every converted site invokes node with
+# `--experimental-strip-types`, which needs 22.7 — the floor
+# `tests/test_capture_spool.py::_node_that_can_strip_ts` already records. The
+# bare `node --test <file>.ts` floor (type stripping must be default-on) is a
+# DIFFERENT, higher band and is deliberately a REMAINING member of #5049, not a
+# constant declared here.
 NODE_FLOOR_STRIP_TYPES: tuple[int, int] = (22, 7)
 
 
@@ -203,7 +206,14 @@ def node_version(node: str = "node") -> tuple[int, int] | None:
 
 
 def node_meets(floor: tuple[int, int], node: str = "node") -> bool:
-    """True when the node on PATH is at or above ``floor`` (a prerelease below the floor is not)."""
+    """True when the node on PATH is at or above ``floor``.
+
+    ``node_version`` reports ``(major, minor)`` only, so a prerelease is compared
+    AT its numeric floor: ``v22.7.0-rc.1`` meets ``(22, 7)`` and RUNS. That is
+    deliberate — the floor is a numeric capability band, and a candidate build of
+    it carries the same flag. Pinned by
+    ``tests/test_verdict_contract.py::test_node_version_parses_the_runtime``.
+    """
     version = node_version(node)
     return version is not None and version >= floor
 
@@ -220,6 +230,8 @@ def require_node_floor(
     ``absent="fail"`` preserves a site's recorded decision that a *missing* node
     must fail loudly (a skipped guard can look like a passing one); even then a
     present-but-too-old node SKIPs, because it is a host-capability gap (rule 5).
+    A present-but-UNPROBEABLE node (garbage/non-zero ``--version``) is a broken
+    host, not a capability gap, so it fails loud for ``absent="fail"`` sites too.
     """
     if shutil.which(node) is None:
         if absent == "fail":
@@ -236,7 +248,15 @@ def require_node_floor(
         return
     version = node_version(node)
     if version is None:
-        # present but unprobeable (garbage/non-zero --version) — a capability gap
+        # Present but unprobeable. A host that cannot say which runtime it has is
+        # broken, not capability-poor: `absent="fail"` sites must fail loud here
+        # exactly as they do when node is absent.
+        if absent == "fail":
+            pytest.fail(
+                f"the node runtime for {what} did not report a parseable "
+                f"`--version`; refusing to skip, because a skipped guard looks "
+                f"like a passing one — need node >= {floor[0]}.{floor[1]}"
+            )
         host_capability(
             lambda: False,
             what=f"a probeable Node runtime for {what}",
