@@ -42,20 +42,26 @@ doc_status: live
 >   may traverse it — neither the support path (`IMPL`/`NAND`) nor the
 >   source-credibility prior path (`_apply_source_inheritance`, which reads
 >   `extractedFrom`). **Relevance is not expressed by this link; it is expressed on
->   the operator** (`IMPL`/`NAND`), which is the AIF scheme-node design — claims
->   connect only through a scheme (`E ⊆ V×V \ I×I`).
+>   the operator** (`IMPL`/`NAND`) — the shape AIF gives relevance (`RA-node`), scoped
+>   to relevance only, since operator-less direct `IMPL`/`NAND` edges also exist (§8).
 > - Enforcement status is stated rather than implied: the three meanings are
 >   **declarations** (`_VALID_EDGE_PREDICATES` is a flat membership set). What *is*
->   enforced is the weight half — `related` sits in **neither**
+>   enforced is the **durability** half — `related` sits in **neither**
 >   `DERIVABLE_STRUCTURAL_RELS` nor `SUPERSEDE_STRUCTURAL_RELS`, pinned by
 >   `test_related_is_neutral_by_construction` (#5547). Wiring a producer requires
 >   revisiting both sets first (#2489).
+> - ⛔ **The weight half is NOT enforced, and the rule above is breached today:** the
+>   EP affected-set traversal is unfiltered on relation (`ep.py:807`), so a `related`
+>   edge onto an operator reaches `_update_claim_posterior` and can reset the node's
+>   prior — **#5566**. Recorded as the target, not as current behaviour.
 > - Precedent recorded: SKOS `skos:related` (W3C); ConceptNet `/r/RelatedTo` ("the
 >   most general relation … can't determine what that relationship is"); AIF's
 >   scheme-node constraint.
-> - Known defect on the designated operator route, **not** fixed here: **#5566** — a
->   non-logical edge onto an operator pulls the node into the affected set, where its
->   prior is discarded (`Beta(1,1)`). Owner-reserved (belief model, DECISION-LEDGER §22).
+> - Known defect on the designated operator route, **and it breaches the rule above
+>   today**: **#5566** — a non-logical edge onto an operator pulls the node into the
+>   affected set, where its prior is discarded (`Beta(1,1)`). The EP traversal is
+>   unfiltered on relation, so `related` is not yet weight-free in fact. Owner-reserved
+>   (belief model, DECISION-LEDGER §22).
 >
 > **Changelog v3.17 (2026-09-24 — issue #4937, the F1 ruling recorded on #2552 — MITIGATES retires from the operator menu):**
 > - §2: the operator KINDS are `IMPL`/`NAND` (+ declared labels). `MITIGATES`
@@ -611,11 +617,16 @@ wasDerivedFrom
 > support is propagated (the `IMPL`/`NAND` path), and it must not be traversed when
 > the system weighs how much to trust a source (`_apply_source_inheritance`, which
 > reads `extractedFrom`). A structural link a confidence path walks is no longer
-> neutral — it is an argument wearing a neutral name. **Relevance is therefore not
-> expressed here: it is expressed on the operator** — by an `IMPL`/`NAND` attached to
-> the operator's node. That is the Argument Interchange Format's scheme-node design,
-> in which claims connect to one another only through a scheme (`E ⊆ V×V \ I×I`), and
-> it is the sanctioned route for "this is relevant to that".
+> neutral — it is an argument wearing a neutral name.
+>
+> **Where relevance is expressed: not here.** Relevance belongs on the **operator** —
+> by attaching an `IMPL`/`NAND` to the operator's node — the shape the Argument
+> Interchange Format gives it (the scheme node, `RA-node`: the rationale for a
+> relation lives on the scheme). **That citation is scoped to relevance only.**
+> Plain support or contradiction between two claims may also be an **operator-less
+> direct `IMPL`/`NAND` edge** (§8 below, `create_direct_edge`), so claims do **not**
+> connect only through a scheme in this ontology, and the neutral link is not the
+> thing that makes relevance possible.
 >
 > **`related` — enforcement status (normative detail).** The three meanings above
 > follow the SKOS Reference (W3C Recommendation): symmetric (`owl:SymmetricProperty`,
@@ -628,11 +639,25 @@ wasDerivedFrom
 >
 > **Declared, not machine-enforced.** Symmetry, non-transitivity and
 > hierarchy-disjointness are declarations: `_VALID_EDGE_PREDICATES` is a flat
-> frozenset and `create_edge()` checks membership only. What *is* enforced is the
-> weight half — `related` is in **neither** `DERIVABLE_STRUCTURAL_RELS` (no replay
-> descriptor) **nor** `SUPERSEDE_STRUCTURAL_RELS` (a supersede does not transfer it),
-> pinned by `tests/test_dry_run_preview.py` ("in NO transfer leg") and
-> `test_related_is_neutral_by_construction` (#5547).
+> frozenset and `create_edge()` checks membership only — there is no symmetry,
+> transitivity or disjointness logic anywhere in the code, and no test asserts them.
+>
+> **The durability half IS enforced — the confidence half is NOT.** What is enforced
+> is *transfer and replay*: `related` is in **neither** `DERIVABLE_STRUCTURAL_RELS`
+> (no replay descriptor) **nor** `SUPERSEDE_STRUCTURAL_RELS` (a supersede does not
+> transfer it — it stays at the old point), pinned by
+> `tests/test_dry_run_preview.py` ("in NO transfer leg") and
+> `test_related_is_neutral_by_construction` (#5547). **These two sets govern
+> durability, not weight** — do not read their enforcement as the rule above being
+> true in the code.
+>
+> ⛔ **"Carries no epistemic weight" is a DECISION WITH A KNOWN BREACH — it is the
+> target, not today's behaviour.** The EP affected-set traversal is **unfiltered on
+> relation** (`ep.py:807`, `:922`, `:937`), so a `related` edge that lands on an
+> operator *does* reach `_update_claim_posterior` (`ep.py:625+`), which recomputes
+> that node as `Beta(1,1)` and **discards its prior** — **#5566**. Until that is
+> fixed, `related` **can** change a belief number. Tracked as its own defect and
+> owner-reserved (belief model, DECISION-LEDGER §22).
 >
 > **Wiring a producer requires revisiting both sets first.** Per #2489 a predicate's
 > label and its replay key are one unit: `STRUCTURAL_REL_LABELS` holds the target
