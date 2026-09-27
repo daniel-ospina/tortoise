@@ -11,6 +11,8 @@ gone. Semantics under test:
   - provider availability reflects the keys the code actually consumes
     (ANTHROPIC_API_KEY excluded — #722)
 """
+from __future__ import annotations
+
 import os
 import tempfile
 
@@ -742,3 +744,295 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
     assert "Extraction:" not in _run("replayed", "a")
     # a KEYLESS store: this IS the not-extracted state — must be disclosed.
     assert "Extraction: no-provider" in _run("no-provider", "b")
+    # #4258: an EXTRACTION-DISABLED store — the team's setting, not the key —
+    # is the SAME not-extracted state and must be disclosed under its own mode
+    # (narrowing the store-only tuple back to no-provider only REDs this).
+    assert "Extraction: extraction-disabled" in _run("extraction-disabled", "c")
+
+
+# ── #4258: the per-org "capture also extracts into memory" user setting ──────
+# Owner ruling on #3892 (comment 5723832861 — user-configurable, default ON;
+# reaffirmed by 5737715963): extraction into memory is a USER
+# SETTING, default ON; the non-default is "store but don't extract". The setting
+# is read per-org from onboarding_state.capture_extract, with absence reading ON
+# (an older stored state must never silently mean OFF).
+
+
+def test_capture_extract_absence_reads_on(monkeypatch):
+    """#4258 (proof a + the mutation guard for proof d): the per-org setting is
+    read with an EXPLICIT ``True`` default — an older stored onboarding state
+    (key absent) resolves ON, never OFF.
+
+    MUTATION: changing the read to ``.get("capture_extract")`` (no default) or
+    inverting its polarity makes THIS test RED.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # an OLD stored state — no `capture_extract` key at all.
+    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                        lambda org_id: {"session_recording": True})
+    assert ha_mod._capture_extract_enabled({"org_id": "old-team"}) is True
+
+    # an explicit OFF is honoured …
+    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                        lambda org_id: {"capture_extract": False})
+    assert ha_mod._capture_extract_enabled({"org_id": "off-team"}) is False
+
+    # … and an explicit ON too.
+    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                        lambda org_id: {"capture_extract": True})
+    assert ha_mod._capture_extract_enabled({"org_id": "on-team"}) is True
+
+
+def test_capture_extract_defaults_on_and_registered():
+    """#4258: the key is registered in BOTH live default-state dicts (so a NEW
+    org is default ON and the allowlist writer stops dropping it) and the PATCH
+    model carries the field."""
+    from tortoise.hosted_api import (
+        _ALLOWED_STATE_KEYS,
+        _ONBOARDING_DEFAULT_STATE,
+        DEFAULT_ONBOARDING_STATE,
+        OnboardingStatePatchRequest,
+    )
+
+    assert DEFAULT_ONBOARDING_STATE["capture_extract"] is True
+    assert _ONBOARDING_DEFAULT_STATE["capture_extract"] is True
+    # the allowlist is DERIVED from _ONBOARDING_DEFAULT_STATE, so asserting
+    # capture_extract's membership here would be implied by the line above and
+    # could never fail on its own. Assert the DERIVATION instead — that is the
+    # property that actually keeps the PATCH writer from dropping the key.
+    assert set(_ONBOARDING_DEFAULT_STATE.keys()) == _ALLOWED_STATE_KEYS
+    assert "capture_extract" in OnboardingStatePatchRequest.model_fields
+
+
+@pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
+def test_capture_extract_off_stores_without_extracting(monkeypatch, client):
+    """#4258 (proof b): with the setting OFF a capture still STORES the session
+    and its turns (retrievable), runs NO extraction, and the receipt says so
+    visibly under its OWN extraction_mode — never folded into "llm" (a false
+    claim) or "no-provider" (a false reason).
+
+    The provider IS available (the fixture's mock seam), so the setting is the
+    ONLY reason extraction is skipped — this is the guard against routing the
+    OFF state through the keyless "no-provider" branch.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    assert ha_mod._llm_provider_available() is True
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+
+    marker = "extractoffproofzzq"
+    conv = [{"role": "user",
+             "content": f"we decided the {marker} capture stores but never extracts"}]
+    r = client.post("/v1/sessions", json={"conversation": conv})
+    assert r.status_code == 200, r.text[:400]
+    body = r.json()
+    sid = body["session_id"]
+
+    # (1) visible, truthful receipt under its OWN mode.
+    assert body["extraction_mode"] == "extraction-disabled", body
+    assert body["extracted"] == 0, body
+    assert body["turns"] == 1, body
+    assert body["errors"] == [], body
+    warnings = " ".join(body["warnings"])
+    assert "STORED" in warnings and "searchable" in warnings, warnings
+    assert "capture_extract" in warnings, warnings
+
+    # (2) it LANDED — the Session + its turn Point exist and are wired …
+    sdk = ha_mod._make_sdk(namespace="test-team-722")
+    proj = sdk._get_proj()
+    wired = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+        params={"sid": sid}).result_set
+    assert wired[0][0] == 1, "the store-only capture must store its turn Point"
+    # … and NO extracted (non-episodic) point was minted.
+    extracted_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.is_episodic IS NULL OR p.is_episodic = false RETURN count(p)",
+        params={"sid": sid}).result_set
+    assert extracted_rows[0][0] == 0, "OFF must mint no extracted points"
+
+    # (3) the record is retry-eligible: capture_ok False + lane "disabled" (a
+    # DISTINCT value from the keyless "none", #4258 — see
+    # _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a LATER re-capture with
+    # extraction back ON re-attempts (#2335 TRUE retry).
+    st = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set[0]
+    assert st[0] is False and st[1] == "disabled", st
+
+    # (4) retrievable through the EXISTING read path while extraction is OFF —
+    # proof (b) says "stored AND retrievable", so assert the REAL search rather
+    # than the warning's own word "searchable".
+    s = client.get("/v1/search", params={"q": marker})
+    assert s.status_code == 200, s.text[:300]
+    assert any(marker in (h.get("content") or "")
+               for h in s.json()["results"]), s.json()
+
+
+@pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
+def test_capture_extract_on_extracts(monkeypatch, client):
+    """#4258 (proof c): with the setting ON the capture ATTEMPTS extraction —
+    the offline mock extractor runs (zero network, zero LLM spend) and mints at
+    least one memory point.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
+    r = client.post("/v1/sessions", json={"conversation": [
+        {"role": "user", "content": "we decided to ship serve --http first"},
+        {"role": "assistant",
+         "content": "agreed, the website config is the root cause"},
+    ]})
+    assert r.status_code == 200, r.text[:400]
+    body = r.json()
+    assert body["extraction_mode"] == "llm:mock", body
+    assert body["extracted"] >= 1, body
+
+
+def test_capture_extract_is_per_org(monkeypatch, client):
+    """#4258: the setting is PER-ORG — turning extraction off for one team must
+    leave another team's default ON (never a per-graph or global flag)."""
+    import tortoise.hosted_api as ha_mod
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    assert ha_mod._capture_extract_enabled({"org_id": "test-team-722"}) is False
+    # a different org, whose stored state lacks the key, still reads ON.
+    assert ha_mod._capture_extract_enabled({"org_id": "other-team-4258"}) is True
+
+
+def test_store_only_lane_is_one_derivation():
+    """#4258: BOTH writers of the Session lane derive from `_store_only_lane`,
+    so the durable record and the #3129 abandoned marker cannot disagree. The
+    user setting outranks the transient missing key when both hold."""
+    from tortoise.hosted_api import _store_only_lane
+    from tortoise.sdk import _CAPTURE_EXTRACTOR_LANE_DISABLED
+
+    assert _store_only_lane(True, True) == "none"
+    assert _store_only_lane(True, False) == _CAPTURE_EXTRACTOR_LANE_DISABLED
+    assert _store_only_lane(False, False) == _CAPTURE_EXTRACTOR_LANE_DISABLED
+
+
+def test_capture_extract_off_recapture_on_m2_is_not_called_keyless(
+        monkeypatch, client):
+    """#4258: the disabled store records lane "disabled", NOT "none" — so the
+    M2-replay disclosure cannot diagnose a team whose key IS configured as
+    "stored WITHOUT a provider key". Mutation guard: recording "none" for the
+    disabled store (the pre-review overload) makes the first warning assert
+    fire.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+    )
+
+    # a provider IS available; the M2 lane is what makes the re-attempt refuse.
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    marker = "m2disabledproofzzq"
+    conv = [{"role": "user",
+             "content": f"we decided the {marker} capture is store-only"}]
+
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-hosted-m2-disabled"})
+    assert r1.status_code == 200, r1.text[:400]
+    assert r1.json()["extraction_mode"] == "extraction-disabled", r1.json()
+
+    # re-capture the SAME session_id: on M2 the retry gate refuses, so it
+    # replays.
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-hosted-m2-disabled"})
+    assert r2.status_code == 200, r2.text[:400]
+    body = r2.json()
+    assert body["extraction_mode"] == "replayed", body
+    warnings = " ".join(body["warnings"])
+    assert _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING not in warnings, (
+        "a configured-key, setting-disabled prior must never be diagnosed as "
+        "keyless: " + warnings)
+    assert _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in warnings, (
+        "the disabled prior must disclose its OWN reason + remedy: " + warnings)
+
+
+@pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
+def test_capture_extract_off_then_on_recapture_extracts(monkeypatch, client):
+    """#4258: the disabled store (lane "disabled") is RETRY-ELIGIBLE — after
+    the team turns extraction back ON, an explicit re-capture of the SAME
+    session extracts on the #2335 TRUE-retry lane instead of replaying
+    forever. Mutation guard: dropping `disabled` from
+    `_CAPTURE_EXTRACTOR_LANES_RETRYABLE` REDs this test.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    conv = [{"role": "user",
+             "content": "we decided the recapture-after-on path extracts"}]
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-disabled-then-on"})
+    assert r1.json()["extraction_mode"] == "extraction-disabled", r1.json()
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-disabled-then-on"})
+    body = r2.json()
+    assert body["extraction_mode"] not in ("extraction-disabled", "replayed"), (
+        "turning extraction back on + re-capturing must re-attempt, not replay: "
+        + str(body))
+    assert body["extraction_mode"] == "llm:mock", body
+    assert body["extracted"] >= 1, body
+
+
+def test_capture_extract_off_with_no_provider_discloses_both(monkeypatch, client):
+    """#4258 + #3892: when extraction is OFF **and** no provider key is present,
+    BOTH reasons are true — the receipt keeps the `no-provider` mode (a missing
+    key is the harder blocker) but must ALSO carry the extraction-disabled
+    warning, so the user's own setting never vanishes from the disclosure.
+
+    Mutation guard: reverting the additive warning to
+    `warnings=[_CAPTURE_NO_PROVIDER_WARNING]` REDs this test. The control
+    (extraction ON, still keyless) proves the warning is NOT emitted when only
+    the key is missing.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_WARNING,
+        _CAPTURE_NO_PROVIDER_WARNING,
+    )
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert ha_mod._llm_provider_available() is False
+
+    def _post(marker):
+        r = client.post("/v1/sessions", json={"conversation": [
+            {"role": "user",
+             "content": f"we decided the {marker} capture holds both reasons"}]})
+        assert r.status_code == 200, r.text[:400]
+        return r.json()
+
+    # OFF setting + no key ⇒ both warnings, mode stays no-provider.
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    body = _post("bothreasonsproofzzq")
+    assert body["extraction_mode"] == "no-provider", body
+    assert _CAPTURE_NO_PROVIDER_WARNING in body["warnings"], body["warnings"]
+    assert _CAPTURE_EXTRACTION_DISABLED_WARNING in body["warnings"], (
+        "the user's OFF setting must be disclosed even when the key is missing")
+
+    # the DURABLE lane names the setting, not the transient key (#4258): the
+    # replay disclosure reads this value, so a later key-added re-capture must
+    # still be diagnosed as setting-disabled, never as keyless.
+    sdk = ha_mod._make_sdk(namespace="test-team-722")
+    lane = sdk._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_extractor",
+        params={"sid": body["session_id"]}).result_set[0][0]
+    assert lane == "disabled", lane
+
+    # control: extraction ON + still keyless ⇒ ONLY the no-provider reason.
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
+    ctrl = _post("onlykeymissingproofzzq")
+    assert ctrl["extraction_mode"] == "no-provider", ctrl
+    assert _CAPTURE_NO_PROVIDER_WARNING in ctrl["warnings"], ctrl["warnings"]
+    assert _CAPTURE_EXTRACTION_DISABLED_WARNING not in ctrl["warnings"], (
+        "with extraction ON there is one reason — the setting is not off")
