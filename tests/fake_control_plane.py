@@ -281,7 +281,7 @@ class FakeControlPlane:
                              "capture_cost_usd": cost})
             return None
         if fn == "metering_set_graph_storage":
-            # #5331: migration 20260926000001 — a GAUGE SETTER mirroring the SQL
+            # #5331: migration 20260926000002 — a GAUGE SETTER mirroring the SQL
             # RPC. The fake must OVERWRITE (``= EXCLUDED`` semantics), not add:
             # a test that cannot tell a gauge from an increment cannot catch the
             # double-count defect the gauge design exists to avoid.
