@@ -28424,7 +28424,8 @@ async def oauth_authorize(request: Request):
                 redirect_uri=params["redirect_uri"] or None,
                 response_type=params["response_type"] or None,
                 code_challenge=params["code_challenge"] or None,
-                code_challenge_method=params["code_challenge_method"] or None),
+                code_challenge_method=params["code_challenge_method"] or None,
+                scope=params["scope"] or None),
             op="oauth_authorize_params")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
@@ -28535,7 +28536,8 @@ async def oauth_consent(request: Request):
                 redirect_uri=body.get("redirect_uri") or None,
                 response_type=body.get("response_type") or None,
                 code_challenge=body.get("code_challenge") or None,
-                code_challenge_method=body.get("code_challenge_method") or "S256"),
+                code_challenge_method=body.get("code_challenge_method") or "S256",
+                scope=body.get("scope") or None),
             op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)

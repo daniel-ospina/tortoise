@@ -59,11 +59,10 @@ logger = logging.getLogger("tortoise.oauth")
 # advertises (#2866). `offline_access` is accepted (Claude's connector
 # requests it, and the AS does mint refresh tokens unconditionally) without
 # becoming a default fallback or a PRM-advertised scope. The superset
-# relation is structural. NOTE: scope enforcement is DCR-only today —
-# `validate_authorize_params` takes no `scope` parameter, so the
-# authorize/consent path forwards an unvalidated scope into the minted token
-# (pre-existing, filed as #3128). Do not read this constant as an authorize
-# gate.
+# relation is structural. `validate_scope` reads this list on the
+# authorize/consent/mint paths and `register_client` shares its membership
+# test (#3128), so SCOPES_ACCEPTED is the whole scope policy — never mint a
+# scope that is not in it.
 SCOPES_SUPPORTED = ["mcp"]
 SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]
 ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
@@ -313,6 +312,53 @@ def _now_iso() -> str:
 def _sha256(value: str) -> str:
     """Hex digest — the stored form for codes/tokens/secrets (never plaintext)."""
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+# ── Scope policy (the single allow-list gate, #3128) ────────────────────────
+
+def _unsupported_scope(scope: str) -> list[str]:
+    """Scope tokens this AS does not accept (empty ⇒ every token is accepted).
+
+    The ONE membership test against ``SCOPES_ACCEPTED``, shared by the DCR
+    gate (``register_client``) and the authorize/consent/mint gate
+    (``validate_scope``) so the two can never drift from the advertised set
+    (#3128).
+    """
+    return [s for s in scope.split() if s not in SCOPES_ACCEPTED]
+
+
+def validate_scope(scope, *, default: str | None = None) -> str:
+    """The authorize/consent/mint scope gate (#3128).
+
+    Returns the canonical (space-delimited, single-spaced) scope string, or
+    raises ``invalid_scope`` when any requested token is outside
+    ``SCOPES_ACCEPTED``. Per RFC 6749 §3.3 + §4.1.2.1 an unsupported scope is
+    a client error (``invalid_scope``: "The requested scope is invalid,
+    unknown, or malformed") — it is REJECTED, never silently minted onto an
+    authorization code or a token claim. §3.3's alternative ("MAY fully or
+    partially ignore the scope requested") is deliberately not used to
+    intersect with the client's registered scope: #2866 admits
+    ``offline_access`` at the AS level for a client that requests it, and a
+    default ``mcp`` registration would otherwise be silently narrowed — a
+    user-visible revocation of a scope the AS advertises.
+
+    A blank/absent scope falls back to ``default`` and then to
+    ``SCOPES_SUPPORTED`` (RFC 6749 §3.3 pre-defined default). A non-string
+    scope is malformed ⇒ ``invalid_scope``.
+    """
+    blank = scope is None or (isinstance(scope, str) and not scope.split())
+    resolved = default if blank else scope
+    if resolved is None or (isinstance(resolved, str) and not resolved.split()):
+        resolved = " ".join(SCOPES_SUPPORTED)
+    if not isinstance(resolved, str):
+        raise OAuthError(400, "invalid_scope", "scope must be a string.")
+    unknown = _unsupported_scope(resolved)
+    if unknown:
+        # Deliberately does NOT echo the requested tokens: the value is
+        # attacker-controlled and lands in a redirect query string.
+        raise OAuthError(400, "invalid_scope",
+                         f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
+    return " ".join(resolved.split())
 
 
 def _new_token(prefix: str) -> str:
@@ -787,8 +833,7 @@ def register_client(cp, body: dict) -> dict:
         scope = " ".join(SCOPES_SUPPORTED)
     if not isinstance(scope, str):
         raise OAuthError(400, "invalid_client_metadata", "scope must be a string.")
-    requested = scope.split()
-    if any(s not in SCOPES_ACCEPTED for s in requested):
+    if _unsupported_scope(scope):
         raise OAuthError(400, "invalid_client_metadata",
                          f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
 
@@ -854,8 +899,16 @@ def _verify_client_auth(cp, client_id: str, body: dict) -> dict:
 def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               response_type: str | None,
                               code_challenge: str | None,
-                              code_challenge_method: str | None) -> dict:
-    """Validate the /oauth/authorize request. Returns the client row."""
+                              code_challenge_method: str | None,
+                              scope: str | None = None) -> dict:
+    """Validate the /oauth/authorize request. Returns the client row.
+
+    #3128: ``scope`` is the requested scope and is validated HERE — on the one
+    path shared by GET /oauth/authorize (page render) and POST /oauth/consent
+    (code mint) — so an out-of-allow-list scope is refused before a code is
+    stored. ``scope or client.get("scope")`` mirrors the mint fallback
+    exactly.
+    """
     client = resolve_client(cp, client_id)
     try:
         if client is None:
@@ -878,6 +931,10 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                    for u in registered_uris):
             raise OAuthError(400, "invalid_request",
                              "redirect_uri is not registered for this client.")
+        # #3128: the requested scope is checked against SCOPES_ACCEPTED (the
+        # same set DCR enforces) BEFORE the consent page renders or a code is
+        # minted. A scope the AS does not advertise is a client error.
+        validate_scope(scope or client.get("scope"))
         if not code_challenge or not _valid_pkce(code_challenge):
             raise OAuthError(400, "invalid_request",
                              "code_challenge (PKCE, 43-128 chars) is required.")
@@ -1407,6 +1464,11 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
     orphan pair is rolled back so exactly one rotation wins (PR #1264 review
     P2 — no double rotation under concurrent workers).
     """
+    # #3128: the mint is the LAST line for a scope claim. Validating here (in
+    # addition to the authorize/consent gate) means no token row can ever carry
+    # a scope outside SCOPES_ACCEPTED — including a legacy code/refresh row
+    # written before the gate existed, or any future caller of this writer.
+    scope = validate_scope(scope)
     access = _new_token(ACCESS_TOKEN_PREFIX)
     refresh = _new_token(REFRESH_TOKEN_PREFIX)
     refresh_id = secrets.token_urlsafe(16)

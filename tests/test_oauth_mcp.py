@@ -3106,3 +3106,148 @@ class TestCimdOccupancy3669:
             f"a failing authorize resolution cost {len(calls)} fetch attempts "
             "— the error handler must not re-resolve (#3669 finding 2)")
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #3128 — the authorize/consent/mint scope allow-list gate
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestScopeAllowList:
+    """#3128: an OAuth ``scope`` outside SCOPES_ACCEPTED must not reach a
+    stored authorization code or a minted token claim.
+
+    The gate lives in ``tortoise.oauth.validate_scope``, called from BOTH
+    request doors (``validate_authorize_params`` → GET /oauth/authorize and
+    POST /oauth/consent) and from the token writer (``_issue_tokens``). The
+    tests below pin all three, and pin that a legitimate scope still mints.
+    """
+
+    @staticmethod
+    def _consent(tc, reg, challenge, scope, *, state="st-3128"):
+        return tc.post("/oauth/consent", json={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": state,
+            "scope": scope, "resource": None},
+            headers={"Authorization": "Bearer fake-session-jwt"})
+
+    def test_authorize_refuses_scope_outside_allow_list(
+            self, api_client):
+        """GET /oauth/authorize is the page-render door: an unadvertised scope
+        is refused with RFC 6749 §4.1.2.1 ``invalid_scope`` (redirected to the
+        registered redirect_uri), so the consent page never displays it."""
+        tc, _ = api_client
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-3128",
+            "scope": "admin", "resource": ""}, follow_redirects=False)
+        assert r.status_code == 307, r.text
+        assert "error=invalid_scope" in r.headers["location"]
+        assert "state=st-3128" in r.headers["location"]
+
+    def test_consent_refuses_scope_outside_allow_list_and_mints_no_code(
+            self, api_client, session_user):
+        """POST /oauth/consent is the code-mint door: the unadvertised scope is
+        a 400 ``invalid_scope`` and NO authorization code row is written — so
+        it can never be exchanged into a token claim."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)          # registered scope: 'mcp'
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = self._consent(tc, reg, challenge, "admin")
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert "admin" not in r.json()["error_description"]
+        assert cp.tables.get("oauth_codes", []) == []
+        assert cp.tables.get("oauth_access_tokens", []) == []
+        assert cp.tables.get("oauth_refresh_tokens", []) == []
+
+    def test_consent_refuses_a_non_string_scope(
+            self, api_client, session_user):
+        """A non-string scope is malformed (RFC 6749 §4.1.2.1), not coerced
+        into a minted claim."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = self._consent(tc, reg, challenge, {"evil": 1})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert cp.tables.get("oauth_codes", []) == []
+
+    def test_mint_refuses_out_of_allow_list_scope_and_writes_no_claim(
+            self, api_client):
+        """``_issue_tokens`` is the single writer of token rows: it refuses an
+        unadvertised scope before writing, so no token claim can ever carry
+        one — even from a caller that bypasses the request doors."""
+        from tortoise.oauth import OAuthError, _issue_tokens
+        _, cp = api_client
+        with pytest.raises(OAuthError) as exc:
+            _issue_tokens(cp, client_id="ct_3128", user_id=_U1,
+                          org_id="team-free-001", scope="admin", resource=None)
+        assert exc.value.error == "invalid_scope"
+        assert cp.tables.get("oauth_access_tokens", []) == []
+        assert cp.tables.get("oauth_refresh_tokens", []) == []
+
+    def test_a_legacy_code_row_cannot_mint_an_out_of_allow_list_claim(
+            self, api_client, session_user):
+        """Defence in depth: a code row that already carries an unadvertised
+        scope (written before the gate existed) cannot be exchanged into a
+        token with that claim — the mint refuses and writes nothing."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        for row in cp.tables["oauth_codes"]:
+            row["scope"] = "admin"          # model the pre-gate stored value
+        r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                      verifier=flow["verifier"])
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert [t["scope"] for t in cp.tables.get("oauth_access_tokens", [])] == []
+        assert [t["scope"] for t in cp.tables.get("oauth_refresh_tokens", [])] == []
+
+    def test_allow_listed_scope_still_mints_the_expected_claim(
+            self, api_client, session_user):
+        """No over-correction: the advertised scopes still mint, and the
+        token's ACTUAL claim is exactly what was requested."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, scope="mcp offline_access")
+        verifier, challenge = _pkce()
+        r = self._consent(tc, reg, challenge, "mcp offline_access")
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=reg["client_id"], code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["scope"] == "mcp offline_access"
+        acc = [t for t in cp.tables["oauth_access_tokens"]
+               if t["revoked_at"] is None]
+        ref = [t for t in cp.tables["oauth_refresh_tokens"]
+               if t["revoked_at"] is None]
+        assert [t["scope"] for t in acc] == ["mcp offline_access"]
+        assert [t["scope"] for t in ref] == ["mcp offline_access"]
+
+    def test_omitted_scope_still_mints_the_default_claim(
+            self, api_client, session_user):
+        """RFC 6749 §3.3 pre-defined default: an absent scope keeps minting the
+        AS default ('mcp'), unchanged by the gate."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()
+        r = tc.post("/oauth/consent", json={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-3128",
+            "resource": None},
+            headers={"Authorization": "Bearer fake-session-jwt"})
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=reg["client_id"], code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["scope"] == "mcp"
+        acc = [t for t in cp.tables["oauth_access_tokens"]
+               if t["revoked_at"] is None]
+        assert [t["scope"] for t in acc] == ["mcp"]
