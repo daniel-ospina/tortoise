@@ -2095,3 +2095,34 @@ def test_queue_entry_unknown_trigger_is_unknown_not_a_miss():
                      pr=5) == 2
     assert run_check("queue-entry", json={**base, "trigger": "manual"},
                      pr=5) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round-10: the documented `python3` invocation, and an observed `false`.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not Path("/usr/bin/python3").exists(),
+                    reason="no system python3 to mirror the plan's command")
+def test_tool_runs_under_the_documented_system_python3():
+    """Every §11 criterion is written `python3 tools/merge_throughput.py …`.
+
+    A crash at import exits 1 — the contract's MISS — so an interpreter the
+    tool cannot import is a fabricated red, not an error. The tool must not
+    require an interpreter newer than the one the plan's commands use.
+    """
+    result = subprocess.run(
+        ["/usr/bin/python3", str(ROOT / "tools" / "merge_throughput.py"),
+         "check", "capacity"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert result.returncode == 2, result.stderr
+    assert "ImportError" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_queue_entry_observed_false_is_a_miss():
+    base = {"pr": 5, "trigger": "auto_merge_conditions", "verified_at": NOW}
+    assert run_check("queue-entry", json={**base, "entered_queue": False},
+                     pr=5) == 1
+    assert run_check("queue-entry", json={**base, "entered_queue": "false"},
+                     pr=5) == 2

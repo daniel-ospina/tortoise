@@ -27,7 +27,9 @@ Conflicts: `git merge-tree`, because the GitHub mergeability field under-reports
 
 Spec: the #5215 merge-throughput plan §10 Task 1.
 
-Stdlib only (Python 3.12).
+Stdlib only; must import on the `python3` the §11 criteria use, so nothing
+newer than 3.9 (see the `timezone.utc` note below) and `datetime.UTC` is
+avoided deliberately.
 """
 from __future__ import annotations
 
@@ -40,7 +42,11 @@ import re
 import statistics
 import subprocess
 import sys
-from datetime import UTC, datetime
+
+# `timezone.utc`, not `datetime.UTC` (3.11+): every §11 criterion invokes this
+# tool as `python3 tools/merge_throughput.py`, and a crash at import exits 1 —
+# the contract's MISS — so a newer-interpreter-only import fabricates a red.
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -190,7 +196,7 @@ def _parse_ts(value: object):
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
+        dt = dt.replace(tzinfo=timezone.utc)  # noqa: UP017 - must import on 3.9 (see header)
     return dt
 
 
@@ -198,7 +204,7 @@ def _age_days(value: object):
     dt = _parse_ts(value)
     if dt is None:
         return None
-    return (datetime.now(UTC) - dt).total_seconds() / 86400.0
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0  # noqa: UP017
 
 
 def _fresh_record(record) -> bool:
@@ -752,10 +758,9 @@ def collect_conflicts(bound=None):
     if assert_main_unchanged(main_sha, after) is UNKNOWN:
         return {"items": [], "total_count": 0, "read_ok": True,
                 "main_moved": True}
-    probed = {
-        id(pr): conflict
-        for (pr, _sha), conflict in zip(probe_refs, results, strict=False)
-    }
+    probed = {}
+    for index, (pr, _sha) in enumerate(probe_refs):
+        probed[id(pr)] = results[index]
     items = []
     for pr, sha in refs:
         # A PR without a head sha was not probed: it is UNKNOWN, never silently
@@ -1094,9 +1099,14 @@ def _check_queue_entry(payload: dict, opts: dict) -> int:
     trigger = payload.get("trigger")
     if entered is None or trigger is None:
         return 2
-    if entered is not True:
-        print(f"2: entered_queue is {entered!r}, not a boolean true")
+    if not isinstance(entered, bool):
+        print(f"2: entered_queue is {entered!r}, not a boolean")
         return 2
+    if entered is False:
+        # An observed "not entered" is the miss S2 exists to detect; only an
+        # unobserved (absent/non-boolean) value is UNKNOWN.
+        print("1: queue entry was never observed on this PR's head")
+        return 1
     if trigger in (None, UNKNOWN):
         print("2: queue-entry trigger was never observed")
         return 2
@@ -1707,7 +1717,7 @@ def run_check(name: str, json=None, **opts) -> int:
 # ---------------------------------------------------------------------------
 
 def _fixture_gap(value: float = 2.0):
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: UP017
     ceiling = 100
     observed = round(ceiling / value, 6)
     return {
