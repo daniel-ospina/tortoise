@@ -58,8 +58,10 @@ ontology:
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
   #   - nearMisses:   confusable kinds (own pack, `ns:kind`, or core) — the
-  #                   post-extraction kind classifier's rerank input, NOT
-  #                   extraction-prompt guidance
+  #                   post-extraction kind classifier's rerank input. The
+  #                   ENGINE does not render them into the S2/S4 extraction
+  #                   prompt (`tools/probe_extractor.py` does render them into
+  #                   the offline calibration probe's EXTRACTION_SYSTEM)
   #   - extractable:  bool, default true — false = registered but never minted
   #                   by extraction
   #   - storeAs:      claim|decision|entity|tag|event — default inferred from
