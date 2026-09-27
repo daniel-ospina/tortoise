@@ -2607,10 +2607,13 @@ GRAPH_SIZE_TIMEOUT = PROBE_TIMEOUT
 #: count runs on. Deliberately NOT ``_probe_worker()``: a stalled label count
 #: on the SINGLE probe slot would hold it and block the NEXT health probe's
 #: ``RETURN 1``, turning a graph_size problem into a false ``degraded`` — the
-#: #3143 symptom class. A separate pool isolates the two failure domains; its
-#: own bounded backlog (``_SingleSlotWorker.MAX_BACKLOG``) fails fast once the
-#: slot is held past the budget, so a persistently stalled count reports
-#: ``graph_size_error`` instead of queueing without bound.
+#: #3143 symptom class. A separate pool isolates the two failure domains.
+#: Its backlog is BOUNDED but fills slowly: a wedge makes each queued call pay
+#: the full ``GRAPH_SIZE_TIMEOUT`` — still bounded, so a health call is never
+#: pinned by the stall — until the backlog reaches
+#: ``_SingleSlotWorker.MAX_BACKLOG`` (32), after which submissions fail fast
+#: with ``_WorkerBacklogFull``. The recovery seam is
+#: ``_reset_graph_size_worker()``, not the backlog.
 GRAPH_SIZE_WORKER_NAME = "tortoise-graph-size-worker"
 
 #: Prefix of the per-call ``graph_size_error`` marker's structural cases; a
@@ -2629,7 +2632,9 @@ def _bounded_graph_size(target, timeout: float) -> int:
     ``graph_size_error`` instead of leaving ``graph_size: 0`` to be misread as
     an empty graph. The worker thread is abandoned, never cancelled (CPython
     #87185), and is a daemon, so a stalled count cannot block interpreter
-    exit.
+    exit. A worker wedged on a permanently stalled count is dropped with
+    ``_reset_graph_size_worker()`` (mirrors ``_reset_probe_worker()``), so
+    ``graph_size`` is measurable again without a process restart.
     """
     future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
     try:
@@ -2645,6 +2650,19 @@ def _bounded_graph_size(target, timeout: float) -> int:
         raise TimeoutError(
             f"graph_size count exceeded its {timeout}s budget") from exc
     return sum(counts.values())
+
+
+def _reset_graph_size_worker() -> None:
+    """Drop the graph-size worker so the next count lazily starts a fresh one.
+
+    Mirrors ``_reset_probe_worker()``: the escape hatch for tests and for ops
+    recovery when a count is presumed wedged past any realistic budget. The
+    old (possibly wedged) thread is a daemon — it is abandoned, never joined,
+    so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
+    life of the process and force a restart (#3253 review P2).
+    """
+    with _DAEMON_WORKERS_LOCK:
+        _DAEMON_WORKERS.pop(GRAPH_SIZE_WORKER_NAME, None)
 
 
 def metrics(sdk=None, setup_timeout=None) -> dict:

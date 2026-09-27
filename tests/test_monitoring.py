@@ -98,6 +98,19 @@ def _fresh_probe_worker():
     monitoring._reset_probe_worker()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_graph_size_worker():
+    """#3253 review P2: the DEDICATED graph-size worker is process-lifetime
+    too. A test that wedges it (the stalled-taxonomy tests below) would leave
+    the ONE slot held, so every later ``graph_size`` count in the file pays
+    the full budget and ``graph_size`` stops being measurable — leaking a
+    wedged worker into the next test. Drop it per test, the same recovery
+    seam ops uses to fix a wedged count without a process restart."""
+    monitoring._reset_graph_size_worker()
+    yield
+    monitoring._reset_graph_size_worker()
+
+
 class TestProbeDb:
     """probe_db() deep-check (#1384) — never raises, hard-bounded."""
 
@@ -824,6 +837,66 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
             release.set()
         assert probe["ok"] is True, probe
         assert elapsed < 1.0, f"the probe lane queued behind the count: {elapsed:.2f}s"
+
+    def test_wedged_count_is_bounded_and_reset_restores_measurement(
+            self, monkeypatch):
+        """#3253 review P2 — the post-stall behaviour no test covered.
+
+        ONE permanently stalled ``taxonomy()`` count wedges the single
+        graph-size slot for the life of the process, because the worker is a
+        singleton and the stalled ``taxonomy()`` is abandoned, not cancelled.
+        Two properties
+        must hold and neither was pinned: (a) every LATER ``metrics()`` call
+        is still bounded — it queues behind the wedged slot and pays the
+        budget (failing fast only once the backlog of 32 is FULL), never
+        unbounded; and (b) ``_reset_graph_size_worker()`` drops the wedged
+        worker so ``graph_size`` is measurable again with no restart. Pre-fix
+        there was no reset seam at all, so (b) could not pass.
+        """
+        import threading
+
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", budget)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the graph-size worker until the test ends — never
+                # returns during the loop, so the slot stays wedged.
+                release.wait(30.0)
+                return {"Point": 1}
+
+        try:
+            # The first call is abandoned at the budget; the worker is left
+            # wedged on the stalled count.
+            first = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert first["graph_size_error"] is not None, first
+
+            # (a) Later calls queue behind the wedged slot and each pay the
+            # budget — but none may be UNBOUNDED. A generous absolute bound
+            # (matching this file's 1.0s tolerance for a 0.05s budget):
+            # pre-fix an unbounded call would ride the stalled count instead.
+            for i in range(3):
+                started = time.monotonic()
+                result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+                elapsed = time.monotonic() - started
+                assert result["graph_size_error"] is not None, (i, result)
+                assert result["graph_size"] == 0, (i, result)
+                assert elapsed < 1.0, (
+                    f"post-stall metrics() call {i} was not bounded: "
+                    f"{elapsed:.4f}s (budget {budget}s)")
+
+            # (b) The recovery seam: drop the wedged worker and the very next
+            # count is measurable again. Without it, graph_size stayed
+            # unmeasured for the process lifetime.
+            monitoring._reset_graph_size_worker()
+            recovered = monitoring.metrics(
+                sdk=FakeSDK(db_ok=True, graph_size=7))
+            assert recovered["graph_size"] == 7, recovered
+            assert recovered["graph_size_error"] is None, recovered
+        finally:
+            release.set()
+            monitoring._reset_graph_size_worker()
 
     def test_probe_failure_marks_graph_size_unavailable(self):
         """A degraded report must not leave ``graph_size_error`` as None —
