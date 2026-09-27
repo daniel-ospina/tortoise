@@ -4160,7 +4160,10 @@ def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
     has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
     if not (has_json and has_sse):
         return False  # _validate_accept_header: 406
-    version = headers.get("mcp-protocol-version") or DEFAULT_NEGOTIATED_VERSION
+    # The SDK substitutes the default only when the header is ABSENT (`is
+    # None`), so a present-but-empty value is its 400 -- `.get(k, default)`, not
+    # `or`, or an empty header would be silently upgraded to the default.
+    version = headers.get("mcp-protocol-version", DEFAULT_NEGOTIATED_VERSION)
     if version not in SUPPORTED_PROTOCOL_VERSIONS:
         return False  # _validate_protocol_version: 400 -32600
     declared = headers.get("content-length")

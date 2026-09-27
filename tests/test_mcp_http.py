@@ -2532,6 +2532,9 @@ class TestToolCallAdmissionBoundary:
         ({"Accept": "application/json"}, 406),
         # An unsupported protocol version is `_validate_protocol_version`'s 400.
         ({"MCP-Protocol-Version": "1999-01-01"}, 400),
+        # ... and so is a PRESENT but EMPTY one: the SDK substitutes the default
+        # only when the header is absent (`is None`), not when it is "".
+        ({"MCP-Protocol-Version": ""}, 400),
         # A declared body over the app's cap: the OUTER
         # `mcp_auth.RequestBodySizeMiddleware` (1 MB) owns this 413, and the
         # guard must neither buffer it nor answer for it. The SDK's own 4 MiB
