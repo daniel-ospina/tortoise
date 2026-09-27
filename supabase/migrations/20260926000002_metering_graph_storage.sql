@@ -1,5 +1,17 @@
--- Migration 20260926000001: the GRAPH STORAGE gauge on the metering ledger
+-- Migration 20260926000002: the GRAPH STORAGE gauge on the metering ledger
 -- (#5331, lane c7-instrumentation).
+--
+-- ⚠️ WHY 000002 AND NOT 000001. The sibling #5045 branch adds
+-- ``20260926000001_metering_capture_tokens.sql``, and the two files touch
+-- DISJOINT objects, so nothing about the SQL collides — but the VERSION
+-- PREFIX is the key of ``supabase_migrations.schema_migrations``, and this
+-- repo guards that key twice: ``tests/test_migration_append_only.py::
+-- test_prefix_duplicates_rejected`` and ``tests/test_migration_drift_gate.py::
+-- test_duplicate_prefix_blocks`` (#1235 — *"duplicate still blocks"*,
+-- *"db push would abort"*). Two files sharing a prefix therefore turn main RED
+-- as soon as both land, regardless of merge order. ``000002`` follows the
+-- same-day convention already in this directory (20260925000001/00002). Do not
+-- "tidy" this back to 000001.
 --
 -- WHY THIS EXISTS. The owner ruling (2026-09-26) is that storage is counted in
 -- MB/GB, not nodes. ``GRAPH.MEMORY USAGE`` returns MB directly and is already
