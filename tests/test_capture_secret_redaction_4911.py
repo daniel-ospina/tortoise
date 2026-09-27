@@ -388,8 +388,18 @@ def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
         "the whole credential survived the cut, so this test proves nothing")
 
 
+@pytest.mark.parametrize("secret,kind,direction", [
+    # SHRINKS: 72 chars -> 26 (`[REDACTED:openai_api_key]`) — the old test's
+    # only shape, which made the post-scrub re-clip a no-op and hid the defect.
+    ("sk-proj-" + _fill(64), "openai_api_key", "shrinking"),
+    # EXPANDS: 20 chars -> 28 (`[REDACTED:aws_access_key_id]`) — the P1 shape.
+    ("AKIA" + "ABCDEFGHIJKLMNOP", "aws_access_key_id", "expanding"),
+    # EXPANDS: 30 chars -> 32 (`[REDACTED:stripe_webhook_secret]`) — a second
+    # expanding shape alongside aws, so the direction is pinned twice.
+    ("whsec_" + _fill(24), "stripe_webhook_secret", "expanding-whsec"),
+])
 def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
-        sdk, monkeypatch):
+        sdk, monkeypatch, secret, kind, direction):
     """#4911 and #4897 COMPOSE: a turn that is both cut AND carrying a
     credential must (a) still have the credential redacted and counted, and
     (b) still carry the truncation marker — neither control may eat the other.
@@ -398,20 +408,25 @@ def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
     appended after the cut must not be removed by the scrubber, and the
     scrubber's replacement must not sit where the marker's length reservation
     assumed text — so the two markers coexist and the count is still recorded.
+
+    ⛔ BOTH redaction DIRECTIONS are pinned. A shrinking replacement (the
+    original shape only) makes a post-scrub re-clip a silent no-op, so the
+    marker could report the SCRUBBED length (5,008 for a 6,927-char turn) and
+    this test still passed. The marker's length is the turn as POSTed, either
+    way.
     """
     _keyless(monkeypatch)
     from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
-    secret = "sk-proj-" + _fill(64)
     # The credential sits INSIDE the kept window; the turn is long enough that
     # a marker must also be appended.
     content = f"My key is {secret} and here is why. " + "context " * 800
     assert len(content) > _CAPTURE_TURN_CAP
-    sid = "sess-4897-4911-compose"
+    sid = f"sess-4897-4911-compose-{direction}"
     res = sdk.capture_session([{"role": "user", "content": content}],
                               session_id=sid)
     stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
     assert secret not in stored, "the credential survived the combined cut+scrub"
-    assert "[REDACTED:openai_api_key]" in stored, (
+    assert f"[REDACTED:{kind}]" in stored, (
         "the credential must be MARKED redacted, not silently dropped")
     assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
         "the truncation marker must survive alongside the redaction marker")

@@ -421,7 +421,8 @@ export const SPOOL_DIR = join(homedir(), ".tortoise", "capture-spool");
  *
  * `SPOOL_MAX_ENTRY_BYTES` must exceed the SERVER's own legal maximum, or a
  * legal capture is discarded as oversized: the handler accepts `MAX_TURNS`
- * (500) turns of up to `TURN_MAX_CHARS` (5000) characters, and non-ASCII text
+ * (500) turns of up to `TURN_MAX_CHARS` characters — the client clip reserves
+ * the #4897 truncation marker inside that window — and non-ASCII text
  * is up to 4 UTF-8 bytes per character → ~10 MB of JSON. 16 MiB leaves room for
  * the envelope. (A 4 MiB ceiling silently discarded legal CJK sessions.)
  */

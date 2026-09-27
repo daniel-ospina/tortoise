@@ -4126,6 +4126,110 @@ def test_capture_stores_a_truncation_marker_with_the_true_length(sdk):
         "the stored body must be the turn's own prefix"
 
 
+def test_an_expanding_redaction_reports_the_true_pre_redaction_length(sdk):
+    """#4897 P1: the marker's length is the PRE-redaction turn, not the scrubbed one.
+
+    ``_capture_turn_window`` clips first, so its marker carries the turn's TRUE
+    length. #4911 then replaces a credential — and ``aws_access_key_id`` (20
+    chars) is SHORTER than its ``[REDACTED:aws_access_key_id]`` marker (28), an
+    EXPANDING redaction, so the already-windowed body grows past the cap.
+    Re-clipping that grown body (the pre-fix ``_capture_turn_texts``) re-derived
+    "original length" from the SCRUBBED string, so the store claimed 5,008 for a
+    6,927-char turn (the review's reproduction). A SHRINKING credential — the
+    only shape the old composition test used — made the re-clip a no-op and hid
+    the defect.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TURN_CAP,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    key = "AKIA" + "ABCDEFGHIJKLMNOP"          # aws_access_key_id, 20 chars
+    content = "y" * 4900 + " " + key + " tail " + "z" * 2000
+    assert len(content) == 6927 > _CAPTURE_TURN_CAP
+    sdk.capture_session([{"role": "user", "content": content}])
+    stored = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+    ).result_set[0][0]
+    assert key not in stored, "the credential must still be redacted (#4911)"
+    assert "[REDACTED:aws_access_key_id]" in stored
+    assert _TRUNCATION_SENTINEL in stored, "the cut must still be marked"
+    assert f"original length {len(content)}" in stored, (
+        "the marker reports a POST-redaction length — the pre-redaction turn "
+        "length is the only honest value")
+    # The post-redaction size is exactly what the pre-fix re-clip wrote into the
+    # marker. Prove this fixture exercises that case and that the false total is
+    # not what the node now reports.
+    redacted, _counts = _redact_turn_contents(
+        _capture_turn_window([{"role": "user", "content": content}]))
+    scrubbed_len = len(redacted[0]["content"])
+    assert scrubbed_len > _CAPTURE_TURN_CAP, (
+        "this fixture must exercise an EXPANDING redaction, or it proves "
+        "nothing")
+    assert f"original length {scrubbed_len} chars]" not in stored, (
+        "the false post-redaction total is still being written")
+
+
+def test_an_expanding_redaction_keeps_stored_and_extraction_markers_in_parity():
+    """#721 parity must hold WITH a credential — the case the marker is for.
+
+    The stored node and the extraction transcript are built from the SAME window
+    and the SAME scrub, so their markers must report the SAME true length. The
+    pre-fix re-clip gave the NODE the scrubbed length while the transcript still
+    carried the window's true length, so the two disagreed exactly when the
+    marker mattered (the review's 6923-vs-5006 divergence). The existing parity
+    test used NO credential, which made its claim vacuously true.
+    """
+    from tortoise.sdk import (
+        _capture_turn_texts,
+        _capture_turn_window,
+        _redact_turn_contents,
+        _session_llm_transcript,
+    )
+    key = "AKIA" + "ABCDEFGHIJKLMNOP"
+    content = "y" * 4900 + " " + key + " tail " + "z" * 2000
+    windowed = _capture_turn_window([{"role": "user", "content": content}])
+    # The extraction leg builds its transcript from the SCRUBBED window —
+    # ``_extract_session_llm`` and ``_materialize_session_source`` both do this.
+    redacted, _counts = _redact_turn_contents(windowed)
+    transcript, _est = _session_llm_transcript(redacted)
+    stored = _capture_turn_texts(windowed)[0]
+    assert stored == "[user] " + redacted[0]["content"], (
+        "the stored turn and the scrubbed window the transcript is built from "
+        "must be the same text")
+    assert f"original length {len(content)}" in transcript
+    assert f"original length {len(content)}" in stored
+
+
+def test_a_complete_turn_with_an_expanding_credential_is_not_falsely_marked(sdk):
+    """A turn AT the cap is COMPLETE; an expanding redaction must not mark it.
+
+    The pre-fix re-clip turned a complete 5,000-char turn into a marked one as
+    soon as a credential expanded it past the cap, and recorded the
+    post-redaction length as the "original". The redaction markup is a
+    replacement, not recovered conversation, so the body may exceed the cap and
+    NO truncation marker is written.
+    """
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+    key = "AKIA" + "ABCDEFGHIJKLMNOP"
+    prefix = "My AWS key is " + key + " and the rest is filler. "
+    content = prefix + "y" * (_CAPTURE_TURN_CAP - len(prefix))
+    assert len(content) == _CAPTURE_TURN_CAP, "the turn must be exactly at the cap"
+    sdk.capture_session([{"role": "user", "content": content}])
+    stored = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+    ).result_set[0][0]
+    assert "[REDACTED:aws_access_key_id]" in stored
+    assert _TRUNCATION_SENTINEL not in stored, (
+        "a complete turn was marked as truncated only because the redaction "
+        "replacement is longer than the value it replaced")
+    body = stored[len("[user] "):]
+    assert len(body) == _CAPTURE_TURN_CAP + (
+        len("[REDACTED:aws_access_key_id]") - len(key)), (
+        "the body is the complete turn plus the redaction markup — no "
+        "conversation was dropped to pay for it")
+
+
 def test_capture_extraction_input_and_stored_turn_agree_with_the_marker(
         sdk, monkeypatch):
     """#721 stored-source parity survives the marker: the LLM sees the SAME
