@@ -216,7 +216,8 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
 # The five it named now declare `writes=True` (#4170: the permission lives on the
 # entry), so `WRITE_TOOL_NAMES` is the single authority and the exemption is
 # empty by construction. `exemption_set_violations` below is the property that
-# replaced it — see its docstring for why an empty-set equality would be vacuous.
+# replaced it — an annotation/flag coherence check, broader than the name list it
+# stood in for.
 
 
 def served_registry() -> list:
@@ -1043,14 +1044,16 @@ def exemption_set_violations(entries) -> list[str]:
 
     This used to pin "writer-annotated AND NOT in WRITE_TOOL_NAMES AND
     `http_policy is False`" to exactly `NON_HTTP_WRITER_TOOLS` — the five entries
-    that were writer-annotated yet served as reads (#4474). Setting `writes=True`
-    on those five (#4170: the permission lives on the entry) leaves that
-    exemption empty, so the old equality would compare an empty set to an empty
-    set and could NEVER fire — a check that cannot fail is not a check. It is
-    restated as the property the exemption was standing in for: `readOnlyHint`
-    and the declared `writes` flag must agree. A `_rw()`/`_idem()` entry with
-    `writes=False` — the #4474 defect — still fails, so the check is provably
-    able to fire (pinned by the rogue probe in `test_exemption_set_is_exact`).
+    that were writer-annotated yet served as reads (#4474). After those five
+    declared `writes=True` (#4170: the permission lives on the entry) the
+    exemption is empty, so that name-list equality is either a permanent false
+    red (list kept at its five names) or a narrower, one-directional restatement
+    keyed to `http_policy is False` (list emptied to match). It is restated as
+    the property it was approximating and could only ever see half of:
+    `readOnlyHint` and the declared `writes` flag must agree, in both
+    directions, for any entry. A `_rw()`/`_idem()` entry with `writes=False` —
+    the #4474 defect — still fails (pinned by the rogue probes in
+    `test_exemption_set_is_exact`).
 
     Note this is the ANNOTATION half, not the handler half: a handler that
     reaches a graph mutation is caught by `write_classification_violations`.

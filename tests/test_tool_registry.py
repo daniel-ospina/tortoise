@@ -859,9 +859,9 @@ class TestCapabilityModel:
         the same statement — measured over the SERVED set, retired names included
         (#3883): a retired writer is still callable by name, so it is not exempt
         from the guard. #4474 removed the last five entries where the two
-        disagreed, so the served set must now be clean AND the check must still
-        be able to fire — the old empty-set equality could not, and a predicate
-        that can never fail is not a check."""
+        disagreed, so the exemption is empty and the check is restated as the
+        invariant the name list stood for — both directions, any `http_policy`.
+        The rogue probes below prove it can still fire."""
         from tool_surface_capabilities import exemption_set_violations, served_registry
 
         from tortoise.tool_registry import _ro, _rw
