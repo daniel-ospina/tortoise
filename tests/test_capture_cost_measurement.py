@@ -15,6 +15,7 @@ Nothing here touches the billing path: the customer-visible unit stays
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import sys
@@ -1571,6 +1572,47 @@ def test_m2_usage_sink_prices_the_spend_the_lane_incurred(tmp_path, monkeypatch)
     assert props["calls_without_usage"] == 0
     assert props["unattributed"] == 0
     assert set(props["by_stage"]) == {"m2"}
+
+
+def test_m2_a_raising_usage_sink_must_not_erase_the_call():
+    """#5822 review P2 — the ORDER of the count inside the sink is load-bearing.
+
+    ``_emit_usage_sink`` swallows an accumulator raise by design ("a metering
+    observer must NEVER flip a call outcome"), so a MALFORMED provider payload
+    raises INSIDE ``_accumulate_call_cost`` — ``{"prompt_tokens": "abc"}``
+    trips ``int("abc")``, and a JSON ``1e309`` parses to ``inf`` and trips
+    ``int(inf)``. The point is that such a payload is well-formed JSON from a
+    provider, not a hand-built object.
+
+    If the sink bumped ``attempts`` BEFORE accumulating, the caller would see
+    ``llm_calls == calls_made``, compute ``unattributed = max(0, calls_made -
+    calls) == 0``, leave the roll-up empty, and have ``_capture_cost_props``
+    return ``None`` — ERASING every call from the report. That is strictly
+    worse than the #3824 ``unattributed`` disclosure the lane had before this
+    sink existed: the fix must never launder the blind spot into silence.
+    Counting AFTER keeps the residual honest.
+
+    REDs on: counting before accumulating (the pre-review order).
+    """
+    from tortoise.sdk import _session_llm_usage_sink
+
+    bad_payloads = (
+        {"prompt_tokens": "abc"},          # int("abc") -> ValueError
+        {"prompt_tokens": float("inf")},   # JSON 1e309 -> int(inf) -> OverflowError
+        {"completion_tokens": "def"},
+        {"completion_tokens": float("inf")},
+    )
+    for bad in bad_payloads:
+        stats: dict = {}
+        sink = _session_llm_usage_sink(stats)
+        with contextlib.suppress(Exception):
+            # the emitter suppresses it; we only care about the resulting state
+            sink(provider="openai", model_id="m",
+                 usage=bad, usage_present=True)
+        assert stats.get("attempts", 0) == 0, (
+            "a raise inside the accumulator must leave the count untouched, so "
+            "the caller's residual still discloses the call — got "
+            f"{stats!r} for {bad!r}")
 
 
 def test_m2_missing_usage_block_is_disclosed_never_fabricated(

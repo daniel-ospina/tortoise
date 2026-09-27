@@ -331,18 +331,34 @@ def _session_llm_usage_sink(stats: dict):
     call, so the two increment together. ``usage`` may be ``None``/``{}``
     when the provider sent none — ``_accumulate_call_cost`` then discloses
     ``calls_without_usage`` instead of inventing tokens.
+
+    ⚠️ ORDER IS LOAD-BEARING (#5822 review P2): the count is bumped AFTER
+    ``_accumulate_call_cost``, never before. ``_emit_usage_sink`` swallows an
+    accumulator raise by design ("a metering observer must NEVER flip a call
+    outcome"), so a malformed provider payload — ``{"prompt_tokens":
+    "abc"}``, or ``1e309`` which parses to ``inf`` and overflows ``int()`` —
+    raises INSIDE the accumulator. Bumping the counter first would leave
+    ``calls == calls_made``, so ``unattributed = max(0, calls_made - calls)
+    == 0``, the roll-up stays empty, and ``_capture_cost_props`` returns
+    ``None``: the call is ERASED from the report, which is strictly worse
+    than the #3824 ``unattributed`` disclosure this lane had before. Counting
+    after keeps the residual honest — an unaccounted-for call is disclosed on
+    a row, never erased.
     """
     from tortoise.extractor_v2 import _accumulate_call_cost
 
     def _sink(*, provider, model_id, usage, usage_present):
         u = usage if isinstance(usage, dict) else {}
-        stats["attempts"] = int(stats.get("attempts", 0)) + 1
+        # Count AFTER accumulating (see the ORDER note above): a raise here
+        # must leave ``attempts`` untouched so the caller's residual still
+        # discloses the call.
         _accumulate_call_cost(
             stats,
             prompt_tokens=u.get("prompt_tokens"),
             completion_tokens=u.get("completion_tokens"),
             cost_usd=u.get("cost"),
             provider=provider, model=model_id)
+        stats["attempts"] = int(stats.get("attempts", 0)) + 1
 
     return _sink
 
