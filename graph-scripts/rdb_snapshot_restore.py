@@ -151,6 +151,13 @@ def _docker(args: list[str], timeout: int = 30,
 # and a whole-reply substring test would raise on it (#3089 F4).
 _AUTH_ERROR_TOKENS = ("NOAUTH", "WRONGPASS")
 _AUTH_FAILED_PREFIX = "AUTH FAILED"
+# #3089: the server's reply when a CREDENTIAL was supplied but no password is
+# configured. It rides redis-cli's ``AUTH failed:`` stderr line, yet the COMMAND
+# still runs and its complete reply is on stdout (measured: rc 0,
+# ``CONFIG GET dir`` -> ``dir\n/var/lib/falkordb/data``). A credential left in
+# the URI after auth was disabled is an ordinary configuration, so this warning
+# about the credential must not be read as a rejection of the command.
+_NO_PASSWORD_CONFIGURED = "CALLED WITHOUT ANY PASSWORD CONFIGURED"
 
 
 def _first_line(stream: str | None) -> str:
@@ -165,18 +172,45 @@ def _first_line(stream: str | None) -> str:
     return ""
 
 
+def _is_no_password_warning(stderr_head: str) -> bool:
+    """True for the CREDENTIAL warning, not a command rejection (#3089).
+
+    redis-cli's auto-AUTH line when the URI supplies a credential but the
+    server has no password configured::
+
+        AUTH failed: ERR AUTH <password> called without any password
+        configured for the default user. Are you sure your configuration is
+        correct?
+
+    Anchored on the ``AUTH failed:`` shape AND the server's no-password reason;
+    it does not match a ``WRONGPASS`` rejection, where the command is instead
+    refused with ``NOAUTH`` on stdout.
+    """
+    line = stderr_head.upper()
+    return (line.startswith(_AUTH_FAILED_PREFIX)
+            and _NO_PASSWORD_CONFIGURED in line)
+
+
 def _auth_rejection(proc: subprocess.CompletedProcess) -> str | None:
     """The server's credential rejection, or None when the reply is data.
 
-    Shape-keyed (#3089 F4): a real rejection is either the first stdout line
-    being an error reply whose LEADING TOKEN is ``NOAUTH``/``WRONGPASS``, or
-    redis-cli's own auto-AUTH failure line on stderr (``AUTH failed: WRONGPASS
-    …``). The stderr line is the only place the precise ACL reason appears —
-    the stdout reply is always ``NOAUTH Authentication required.`` — so both
-    error lines are returned when present (a stdout DATA line is never folded
-    into the message). ``returncode`` is reported for diagnosis but is not the
-    trigger: the measured rejection exits 0, so the shape check is what has to
-    carry the verdict (a marker buried in a value never matches it).
+    Shape-keyed (#3089 F4): a real rejection is a first stdout line whose
+    LEADING TOKEN is ``NOAUTH``/``WRONGPASS``, or redis-cli's own auto-AUTH
+    failure line on stderr (``AUTH failed: WRONGPASS …``). The stderr line is
+    the only place the precise ACL reason appears — the stdout reply is always
+    ``NOAUTH Authentication required.`` — so both error lines are returned when
+    present (a stdout DATA line is never folded into the message).
+    ``returncode`` is reported for diagnosis but is not the trigger: the
+    measured rejection exits 0, so the shape check is what has to carry the
+    verdict (a marker buried in a value never matches it).
+
+    #3089: the no-password warning (``_is_no_password_warning``) is the ONE
+    ``AUTH failed:`` line that is NOT a rejection — the credential is the
+    subject, and the command ran (its reply is the non-empty stdout this
+    predicate demands). A rejected COMMAND never has a data reply on stdout, so
+    every genuine ``NOAUTH``/``WRONGPASS`` still raises, and an empty stdout
+    beside the warning stays a raise (fail closed — an unknown reply must not
+    become ``appendonly=no`` and let a restore proceed over a live AOF).
     """
     stdout_head = _first_line(proc.stdout)
     stderr_head = _first_line(proc.stderr)
@@ -188,12 +222,23 @@ def _auth_rejection(proc: subprocess.CompletedProcess) -> str | None:
     stderr_is_auth_failure = (
         stderr_head.upper().startswith(_AUTH_FAILED_PREFIX)
         or stderr_token in _AUTH_ERROR_TOKENS)
-    if not stdout_is_auth_error and not stderr_is_auth_failure:
+
+    if stdout_is_auth_error:
+        # The COMMAND was refused. Report the reply, plus the client's own
+        # reason line when it adds detail (stdout carries only NOAUTH).
+        parts = [stdout_head]
+        if stderr_is_auth_failure and stderr_head not in parts:
+            parts.append(stderr_head)
+        return " ".join(parts)
+
+    if (stderr_is_auth_failure and stdout_head
+            and _is_no_password_warning(stderr_head)):
+        # Credential warning + a complete reply: the command succeeded.
         return None
-    parts = [stdout_head] if stdout_is_auth_error else []
-    if stderr_is_auth_failure and stderr_head not in parts:
-        parts.append(stderr_head)
-    return " ".join(parts)
+
+    if stderr_is_auth_failure:
+        return stderr_head
+    return None
 
 
 def _rejection_message(container: str, cmd: tuple[str, ...], rejection: str,

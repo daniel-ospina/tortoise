@@ -640,3 +640,160 @@ def test_marker_inside_config_value_is_not_a_rejection(monkeypatch):
     info = rdb_snapshot_restore._container_rdb_info("c", password="pw")
     assert info == {"dir": "/data/NOAUTH-backups",
                     "dbfilename": "dump-WRONGPASS.rdb"}
+
+
+# ── #3089: the credential warning must not fail a no-password server ──────
+#
+# A regression the auth wiring introduced: putting the decoded credential in
+# REDISCLI_AUTH makes redis-cli auto-AUTH even when the server has NO password
+# configured. Measured live (falkordb/falkordb:latest started without
+# `requirepass`, driven with `docker exec -e REDISCLI_AUTH … redis-cli`):
+#
+#   stdout: "dir\n/var/lib/falkordb/data\n"      (the COMMAND ran, rc 0)
+#   stderr: "AUTH failed: ERR AUTH <password> called without any password
+#            configured for the default user. Are you sure your configuration
+#            is correct?"
+#
+# A URI that carries a password while the server runs without `requirepass` is
+# an ordinary configuration (auth was disabled, the credential stayed in the
+# URI/config), so treating that stderr line as a rejection turns a working DR
+# restore into a fail-closed one. The predicate must read the credential
+# warning as a warning; a genuine NOAUTH/WRONGPASS still raises.
+
+_NO_PASSWORD_WARNING = (
+    "AUTH failed: ERR AUTH <password> called without any password configured "
+    "for the default user. Are you sure your configuration is correct?")
+
+
+def _no_password_docker(record: list[dict]):
+    """A `_docker` stand-in emulating a server with NO password configured.
+
+    The failing state is the pair itself — a complete reply on stdout WITH the
+    credential warning on stderr — and it is reachable here because every
+    redis-cli call answers exactly that. `REDISCLI_AUTH` is recorded so the test
+    can prove the credential really was carried (the warning cannot be observed
+    otherwise).
+    """
+    table = {
+        ("CONFIG", "GET", "dir"): "dir\n/var/lib/falkordb/data\n",
+        ("CONFIG", "GET", "dbfilename"): "dbfilename\ndump.rdb\n",
+        ("CONFIG", "GET", "appendonly"): "appendonly\nno\n",
+        ("BGSAVE",): "Background saving started\n",
+        ("LASTSAVE",): "9999999999\n",
+    }
+
+    def _docker(args, timeout=30, env=None):
+        child_env = dict(env or {})
+        if "redis-cli" in args:
+            rest = tuple(args[args.index("redis-cli") + 1:])
+            if rest[:1] == ("--user",):
+                rest = rest[2:]
+            stdout = table.get(rest, "")
+            record.append({"args": list(args), "env": child_env,
+                           "stdout": stdout, "stderr": _NO_PASSWORD_WARNING})
+            return subprocess.CompletedProcess(args, 0, stdout=stdout,
+                                               stderr=_NO_PASSWORD_WARNING)
+        if args[:1] == ["cp"]:
+            dest = args[-1]
+            if ":" not in dest:  # host-side destination (snapshot's cp out)
+                with open(dest, "w", encoding="utf-8") as fh:
+                    fh.write("REDIS0009-fake-rdb")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    return _docker
+
+
+def test_password_uri_against_server_without_password_succeeds(
+        monkeypatch, tmp_path):
+    """#3089: a credential + a no-password server must SUCCEED, not fail loud.
+
+    Class-B: the state that makes the code fail is `REDISCLI_AUTH` carrying a
+    password to a server that answers the command (stdout data) while warning
+    about the credential on stderr; `_no_password_docker` makes that state
+    reachable for BOTH `snapshot()` and `restore()`. On `ac347c5df` the
+    `AUTH failed:` stderr line was read as a rejection, so both RAISED.
+    """
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "graph_stats_for",
+        lambda _u: {"by_label": {"Point": 2}}, raising=False)
+    record: list[dict] = []
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker",
+                        _no_password_docker(record))
+
+    snap = rdb_snapshot_restore.snapshot(AUTH_URI, str(tmp_path), CONTAINER)
+    assert snap["ok"] is True, snap
+    assert snap["graph_stats"] == {"by_label": {"Point": 2}}
+
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        rest = rdb_snapshot_restore.restore(AUTH_URI, fh.name, CONTAINER,
+                                            yes=True)
+    assert rest["ok"] is True, rest
+
+    cli = [r for r in record if "redis-cli" in r["args"]]
+    assert cli, "no redis-cli call was made"
+    # Every call carried the URI credential (that is what triggers the warning)
+    # and still returned a complete reply.
+    assert all(r["env"].get("REDISCLI_AUTH") == "falkordb" for r in cli), cli
+    assert all(r["stdout"].strip() for r in cli), cli
+    # The warning really was on the stderr the predicate judged — the success
+    # above is not the warning being absent.
+    assert all("called without any password configured" in r["stderr"]
+               for r in cli), cli
+
+
+def test_no_password_warning_without_a_reply_still_raises(monkeypatch):
+    """#3089: the warning is tolerated only WITH a complete reply (fail closed).
+
+    An empty stdout beside the warning is an unknown reply, not data — it must
+    stay a raise so `_appendonly_state` cannot read "no output" as
+    `appendonly=no` and let a restore proceed over a live AOF.
+    """
+    def _docker(args, timeout=30, env=None):
+        return subprocess.CompletedProcess(args, 0, stdout="",
+                                           stderr=_NO_PASSWORD_WARNING)
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with pytest.raises(RuntimeError, match="rejected"):
+        rdb_snapshot_restore._redis_cli("c", "CONFIG", "GET", "appendonly",
+                                        password="pw")
+
+
+def test_stderr_only_auth_failure_still_raises(monkeypatch):
+    """#3089: a genuine stderr rejection is not narrowed into a warning.
+
+    `WRONGPASS` shares the `AUTH failed:` prefix with the no-password warning,
+    so the predicate must key on the REASON too: this one still raises.
+    """
+    def _docker(args, timeout=30, env=None):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="", stderr=(
+                "AUTH failed: WRONGPASS invalid username-password pair or "
+                "user is disabled.\n"))
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with pytest.raises(RuntimeError, match="WRONGPASS"):
+        rdb_snapshot_restore._redis_cli("c", "CONFIG", "GET", "dir",
+                                        password="pw")
+
+
+def test_wrong_password_on_requirepass_still_fails_loudly(monkeypatch):
+    """#3089 F3: the anonymous wrong-password rejection keeps its own hint.
+
+    No user is named, so the credential was supplied and rejected — the message
+    must not tell the operator to "supply the password", and must redact it.
+    """
+    def _docker(args, timeout=30, env=None):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="NOAUTH Authentication required.\n",
+            stderr=("AUTH failed: WRONGPASS invalid username-password pair "
+                    "or user is disabled.\n"))
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with pytest.raises(RuntimeError) as excinfo:
+        rdb_snapshot_restore._redis_cli("c", "CONFIG", "GET", "dir",
+                                        password="s3cr3t")
+    message = str(excinfo.value)
+    assert "WRONGPASS" in message, message
+    assert "a password was supplied and rejected" in message, message
+    assert "no password was supplied" not in message, message
+    assert "s3cr3t" not in message, "the credential leaked into the error"
