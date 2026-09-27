@@ -37,9 +37,12 @@ the **node as the customer-facing unit**:
   measured consumption.
 
 **⚠️ Why the node unit is not merely deprecated but replaced — and what actually removes the P0.** The stored data
-*"does not shrink back on its own"* (the ruling's own qualifier; a node count does fall when nodes are deleted
-or purged — but **not** when one is superseded, which leaves the old point in place and only adds a `CORRECTS` edge,
-and the quota predicate carries no status filter, so a superseded point is still counted), so a customer who filled the stock cap stayed full **without doing anything further** — the
+*"does not shrink back on its own"* (**the wording is this issue's QUESTION comment, not the ruling's** — the
+ruling's own synthesis renders the same fact as *"stock never resets while flow does"*. The qualifier carries the
+argument, so it is kept: a node count does fall when nodes are deleted
+or purged — but **not** when one is superseded, which **does not delete the old point**: it marks it outdated and
+adds a `CORRECTS` edge. The node is still there, and the quota predicate carries no status filter, so a superseded
+point is still counted), so a customer who filled the stock cap stayed full **without doing anything further** — the
 P0 in `#4495` was **24,978 of 25,000, i.e. 22 points of headroom**, and a later capture in the same window was
 refused outright at **24,984 of 25,000 (16 points)** with no partial acceptance.
 
