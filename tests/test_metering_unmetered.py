@@ -630,7 +630,7 @@ def test_a_blank_lane_or_org_is_refused_on_the_embedded_lane(
 
 
 def test_the_blank_set_is_pythons_exact_whitespace_set():
-    """CROSS-LANGUAGE CONTRACT: the SQL blank set IS Python's ``str.isspace()``.
+    r"""CROSS-LANGUAGE CONTRACT: the SQL blank set IS Python's ``str.isspace()``.
 
     The embedded lane compares keys with a bare ``str.strip()``; the Supabase
     lane compares them with ``btrim(key, blank_chars)``. If those two sets differ
@@ -640,13 +640,23 @@ def test_the_blank_set_is_pythons_exact_whitespace_set():
     WROTE it on the Supabase lane).
 
     The migration's literal is checked to decode to EXACTLY Python's whitespace
-    set, in both directions, so a hand-edited copy cannot drift. This is the same
-    contract, and the same constant, that ``20260919000001`` established for
-    ``subscription_id`` — see ``blank_chars`` there.
+    set, in both directions, so a hand-edited copy cannot drift.
+
+    THE DECODER IS POSTGRES'S, NOT PYTHON'S, and that distinction is the point.
+    PostgreSQL's E-string escapes are ``\b \f \n \r \t`` plus octal, ``\xhh``
+    and ``\uXXXX``; "any other character following a backslash is taken
+    literally", so ``E'\v'`` is the LETTER 'v' in real Postgres — while pglite
+    (which the SQL suite runs on) accepts ``\v`` as U+000B. A decoder that
+    borrowed Python's escapes would therefore assert the SOURCE TEXT and pass
+    while production built a set containing 'v' and missing the vertical tab.
+    That is not hypothetical: the neighbouring migration's copy of this set
+    carries exactly that ``\v`` (#5853).
 
     Mutation caught: dropping or adding any character in the migration's literal
-    (e.g. removing ``\u00A0``, which would let an NBSP-only key be written
-    through the RPC while the embedded lane refuses it).
+    (e.g. removing ``\u00A0`` — an NBSP-only key is then written through the RPC
+    while the embedded lane refuses it), and any escape Postgres reads
+    differently from Python (``\v`` -> 'v', which this decoder maps to 'v' and
+    which pglite would NOT catch).
     """
     sql = _MIGRATION.read_text(encoding="utf-8")
     m = re.search(r"blank_chars constant text := E'([^']*)'", sql)
@@ -654,8 +664,9 @@ def test_the_blank_set_is_pythons_exact_whitespace_set():
     decoded = re.sub(
         r"\\u([0-9A-Fa-f]{4})|\\(.)",
         lambda g: (chr(int(g.group(1), 16)) if g.group(1)
-                   else {"t": "\t", "n": "\n", "v": "\x0b", "f": "\x0c",
-                         "r": "\r", "\\": "\\", "'": "'"}[g.group(2)]),
+                   else {"t": "\t", "n": "\n", "f": "\x0c",
+                         "r": "\r", "b": "\x08", "\\": "\\",
+                         "'": "'"}.get(g.group(2), g.group(2))),
         m.group(1))
     python_set = {c for c in map(chr, range(0x10000)) if c.isspace()}
     assert set(decoded) == python_set, (
@@ -665,7 +676,7 @@ def test_the_blank_set_is_pythons_exact_whitespace_set():
     )
 
 
-@pytest.mark.parametrize("lane", ["\t", "\n", "\xa0", "\u2000", "\u001c"])
+@pytest.mark.parametrize("lane", ["\t", "\n", "\x0b", "\xa0", "\u2000", "\u001c"])
 def test_a_unicode_whitespace_lane_is_refused_like_the_sql_lane(
         reg, registry_lane, lane):
     """A whitespace-only LANE is refused on the embedded lane — every character

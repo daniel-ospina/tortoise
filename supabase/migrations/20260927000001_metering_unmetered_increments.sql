@@ -162,16 +162,21 @@ DECLARE
     v_total integer;
     -- The whitespace set Python's ``str.strip()`` (``str.isspace()``) removes:
     -- ASCII whitespace + the C0 separators + NEL/NBSP + the Unicode space
-    -- separators. Copied VERBATIM from ``blank_chars`` in
-    -- ``20260919000001_metering_period_end_repair.sql`` (the set that mirrors the
-    -- runtime authority ``metering._current_period``), so the embedded and
-    -- Supabase lanes compare keys IDENTICALLY for BOTH org_id and lane: a
-    -- TAB- or NBSP-only key must not be refused on one lane and written on the
-    -- other. A cross-language contract test asserts this literal decodes to
-    -- exactly Python's ``str.isspace()`` set
-    -- (``tests/test_metering_unmetered.py::test_the_blank_set_is_pythons_exact_whitespace_set``),
-    -- so the copy cannot drift.
-    blank_chars constant text := E' \t\n\v\f\r\u001C\u001D\u001E\u001F\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
+    -- separators, so the embedded and Supabase lanes compare keys IDENTICALLY for
+    -- BOTH org_id and lane: a TAB-, NBSP- or VT-only key must not be refused on
+    -- one lane and written on the other.
+    --
+    -- Taken from ``blank_chars`` in ``20260919000001_metering_period_end_repair.sql``
+    -- (the set that mirrors the runtime authority ``metering._current_period``),
+    -- with ONE correction: the vertical tab is written ``\u000B`` and not
+    -- ``\v``. PostgreSQL has no ``\v`` escape — "any other character following a
+    -- backslash is taken literally" — so ``E'\v'`` is the LETTER 'v' in real
+    -- Postgres, which would put a ``v`` in this set and leave U+000B out (see
+    -- #5853 for the pre-existing occurrence). pglite ACCEPTS ``\v`` as U+000B, so
+    -- the SQL suite cannot catch that; a source-text contract test decodes this
+    -- literal with POSTGRES escape semantics instead
+    -- (``tests/test_metering_unmetered.py::test_the_blank_set_is_pythons_exact_whitespace_set``).
+    blank_chars constant text := E' \t\n\u000B\f\r\u001C\u001D\u001E\u001F\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
 BEGIN
     IF p_org_id IS NULL OR btrim(p_org_id, blank_chars) = '' THEN
         RAISE EXCEPTION 'metering_record_unmetered: p_org_id is required';

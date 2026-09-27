@@ -194,6 +194,26 @@ BEGIN
         RAISE EXCEPTION 'an NBSP-only lane was accepted (the embedded lane refuses it)';
     END IF;
 
+    -- ...and the VERTICAL TAB, which is the one character whose escape differs
+    -- between the two parsers (`E'\v'` is U+000B in pglite, but the LETTER 'v' in
+    -- real Postgres — see #5853), so the literal writes it as ``\u000B`` and this
+    -- probe checks the composed set rather than the source text.
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            '4779-dropped', chr(11), 'window_unresolvable', 'X');
+    EXCEPTION WHEN raise_exception THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a VT-only lane was accepted (the embedded lane refuses it)';
+    END IF;
+
+    -- ...while the LETTER 'v' is an ordinary lane character, in both lanes.
+    -- (The mutation this catches: a ``\v`` escape in the literal, which puts 'v'
+    -- in the set — accepted here, refused by Python.)
+    PERFORM public.metering_record_unmetered(
+        '4779-default-probe', 'v', 'window_unresolvable', 'X');
+
     rejected := false;
     BEGIN
         PERFORM public.metering_record_unmetered(
