@@ -151,8 +151,17 @@ fmt_iso() {
 # ISO-8601 (or fmt_iso's `epoch:<n>` fallback) -> epoch, or "" when unparseable.
 # A "" is the fail-closed direction: an unreadable/`unparseable` heartbeat is
 # NOT a fresh one.
+#
+# ⚠️ The Actions API emits `2026-09-12T22:15:01.000-05:00` — fractional seconds
+# AND a numeric offset — and BSD `date -j -f` matches such a format as a PREFIX
+# and silently DISCARDS the rest. Measured: that string -> 1789251301, i.e. the
+# wall time read as UTC, **5 h early**; the only signal is a warning on stderr
+# that `2>/dev/null` drops, so the result is a WRONG-BUT-PLAUSIBLE epoch — which
+# the "" fail-closed contract cannot catch. The offset is therefore normalised
+# HERE, arithmetically, so both `date` implementations agree; an unrecognised
+# shape fails closed rather than being prefix-matched into a plausible instant.
 iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
-  local iso="$1" e
+  local iso="$1" e off=0 tail sign hh mm
   [ -n "$iso" ] || { printf ''; return 0; }
   case "$iso" in
     epoch:*)
@@ -165,14 +174,39 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
       [ "${#e}" -le 12 ] || { printf ''; return 0; }
       printf '%s' "$e"; return 0 ;;
   esac
-  e="$(date -u -d "$iso" +%s 2>/dev/null || true)"
+
+  case "$iso" in
+    *[+-][0-9][0-9]:[0-9][0-9])
+      tail="${iso%??????}"
+      off="${iso#"$tail"}"
+      sign="${off%"${off#?}"}"
+      hh="${off#?}"; hh="${hh%%:*}"
+      mm="${off##*:}"
+      hh="$(printf '%s' "$hh" | sed 's/^0*//')"; [ -n "$hh" ] || hh=0
+      mm="$(printf '%s' "$mm" | sed 's/^0*//')"; [ -n "$mm" ] || mm=0
+      off=$(( hh * 3600 + mm * 60 ))
+      [ "$sign" = "-" ] && off=$(( 0 - off ))
+      iso="$tail" ;;
+    *Z) iso="${iso%Z}" ;;
+  esac
+
+  # Drop fractional seconds (`…:01.000`), then require EXACTLY the wall-clock
+  # shape. A shape that reaches neither branch above is not something the API
+  # emits, and BSD `date` would prefix-match it — so refuse it.
+  case "$iso" in *.*) iso="${iso%%.*}" ;; esac
+  case "$iso" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) : ;;
+    *) printf ''; return 0 ;;
+  esac
+
+  # GNU date first (the production runner), BSD second (the harness). The `Z`
+  # makes GNU's reading explicitly UTC, matching BSD's `-u`.
+  e="$(date -u -d "${iso}Z" +%s 2>/dev/null || true)"
   if [ -z "$e" ]; then
-    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null || true)"
-  fi
-  if [ -z "$e" ]; then
-    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "${iso%Z}" +%s 2>/dev/null || true)"
+    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "$iso" +%s 2>/dev/null || true)"
   fi
   case "$e" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+  e=$(( e - off ))
   printf '%s' "$e"
 }
 

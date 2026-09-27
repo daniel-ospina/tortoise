@@ -745,6 +745,38 @@ assert_eq "$RC" "1" "47: a failed HEARTBEAT search alone → exit 1"
 assert_contains "$OUT" "heartbeat search failed" "47: …and names it"
 assert_eq "$(count_calls 'GH POST')" "0" "47: …and files NO alert (a fall-through would file a false page)"
 
+# 48. the created_at shape the Actions API ACTUALLY emits carries fractional
+# seconds AND a numeric offset. BSD `date -j -f` matches it as a PREFIX and drops
+# the tail (`Warning: Ignoring 10 extraneous characters`), returning the wall
+# time as UTC — 5 h early, and a wrong-but-plausible epoch that "" cannot catch.
+# Both shapes below are the SAME instant, so both must reach the SAME verdict: if
+# the offset is dropped, the second lands 5 h earlier, leaves the 90-min grace
+# and reads ESTABLISHED -> STALE -> exit 1.
+reset_case
+LIVENESS_T=1789269301                                  # 2026-09-13T03:15:01Z
+WF_UTC="2026-09-13T03:15:01Z"
+WF_OFF="2026-09-12T22:15:01.000-05:00"                # the same instant, API shape
+export LIVENESS_NOW_EPOCH="$((LIVENESS_T + 1800))"     # the feature is 30 min old
+export STUB_WF_CREATED_AT="$WF_UTC"
+run_checker
+assert_eq "$RC" "0" "48a: a Z created_at 30 min old → inside the grace, exit 0"
+assert_contains "$OUT" "is only 30 min old" "48a: …and the age is read as 30 min"
+reset_case
+export LIVENESS_NOW_EPOCH="$((LIVENESS_T + 1800))"
+export STUB_WF_CREATED_AT="$WF_OFF"
+run_checker
+assert_eq "$RC" "0" "48b: the SAME instant in the API's ±HH:MM shape → the same verdict"
+assert_contains "$OUT" "is only 30 min old" "48b: …and the offset is APPLIED, not discarded (a dropped offset reads 330 min → STALE)"
+
+# 49. once the offset has been normalised away, a shape the API does not emit
+# must fail CLOSED rather than be prefix-matched into a plausible instant.
+reset_case
+export LIVENESS_NOW_EPOCH="$((LIVENESS_T + 1800))"
+export STUB_WF_CREATED_AT="2026-09-13T03:15:01+banana"
+run_checker
+assert_eq "$RC" "1" "49: an unrecognised created_at shape → STALE (fail closed, not a prefix guess)"
+assert_contains "$OUT" "could not be read" "49: …and it says the age could not be read"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "availability-liveness.test.sh: $PASS passed, 0 failed ✅"
