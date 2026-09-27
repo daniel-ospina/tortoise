@@ -1277,6 +1277,22 @@ def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
     # parameter is still READ, as a cross-check, so a disagreeing caller is told
     # rather than silently overridden.
     safe_spread = safe_max - safe_min
+    if not math.isfinite(safe_spread):
+        # ⛔ The DERIVED spread needs its own guard — the per-input finiteness
+        # checks do NOT provide it, because subtracting two individually finite
+        # extremes can overflow to inf (min=-1e308, max=1e308). Measured before
+        # this: the Supabase lane STORED ``spread_mb = inf`` and a strict encoder
+        # then rejected the row, while the embedded lane dropped the write — the
+        # two substrates disagreed on the same input. This is the identical
+        # defect the meter guards at the source (``measure_graph_storage`` fails
+        # the reading rather than publish an infinite spread), so the boundary
+        # DROPS the write, exactly as it already does for a non-finite total:
+        # keeping the last good reading beats persisting an unusable one.
+        _logger.warning(
+            "graph storage metering dropped a non-finite DERIVED spread "
+            "(team=%s min=%r max=%r total=%r) — not writing an inf spread",
+            org_id, safe_min, safe_max, total)
+        return None
     if spread_mb is not None and _is_finite(spread_mb):
         supplied = float(spread_mb)
         if abs(supplied - safe_spread) > 1e-9:
