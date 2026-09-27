@@ -560,6 +560,61 @@ def test_writer_drops_non_integer_samples(org):
         org, total_mb=5.0, samples="many") is None
 
 
+def test_writer_drops_a_FRACTIONAL_count_not_floors_it(org):
+    """GUARD (review finding): the writer must not FLOOR a finite non-integer.
+
+    ``int(5.9) == 5`` succeeds, so the ledger boundary stored ``samples=5`` for a
+    request of 5.9 — the precise "stored figure would misstate its own
+    precision" case its own docstring says is dropped. The reader was fixed for
+    this and the writer was not: the same source/ledger drift. Both now call ONE
+    validator, so they cannot diverge again.
+    """
+    from tortoise import metering
+    assert metering.record_graph_storage_reading(
+        org, total_mb=5.0, samples=5.9) is None
+    assert metering.record_graph_storage_reading(
+        org, total_mb=5.0, samples=3, repeats=3.9) is None
+
+
+def test_writer_clamps_an_out_of_range_count_like_the_reader(org):
+    """GUARD: the writer must bound a count the same way the reading does.
+
+    Previously ``samples=0`` was stored (a figure the docstring itself flags) and
+    a huge count was stored unclamped, while ``measure_graph_storage`` clamped to
+    ``[1, SAMPLES_MAX]`` / ``[1, REPEATS_MAX]``. Both now agree.
+    """
+    from tortoise import metering
+    from tortoise.graph_storage import REPEATS_MAX, SAMPLES_MAX
+    row = metering.record_graph_storage_reading(
+        org, total_mb=5.0, samples=0, repeats=10**9)
+    assert row is not None, "a clamp is not a drop"
+    assert row["graph_storage_samples"] == 1, row
+    assert row["graph_storage_repeats"] == REPEATS_MAX, row
+    row = metering.record_graph_storage_reading(
+        org, total_mb=5.0, samples=10**9, repeats=2)
+    assert row["graph_storage_samples"] == SAMPLES_MAX, row
+
+
+def test_writer_enforces_its_own_relational_invariants(org):
+    """GUARD (review finding): the stored row must not contradict itself.
+
+    The migration defines ``graph_storage_spread_mb`` as "max_mb - min_mb — the
+    OBSERVED spread", and the reader relies on ``min <= total <= max``. A
+    contradictory trio was persisted verbatim: measured ``min=9, total=5, max=1``
+    and ``indices=9`` against ``total=2``. Both are now repaired at the boundary,
+    mirroring what the source already does.
+    """
+    from tortoise import metering
+    row = metering.record_graph_storage_reading(
+        org, total_mb=5.0, indices_mb=9.0, min_mb=9.0, max_mb=1.0,
+        spread_mb=-8.0, samples=10, repeats=1)
+    assert row is not None, row
+    assert row["graph_storage_min_mb"] <= row["graph_storage_mb"] <= row["graph_storage_max_mb"], row
+    assert row["graph_storage_spread_mb"] == row["graph_storage_max_mb"] - row["graph_storage_min_mb"], row
+    assert row["graph_storage_indices_mb"] is None, (
+        f"a share exceeding its total is not a usable part-of-whole: {row}")
+
+
 def test_writer_drops_a_non_finite_count_and_never_raises(org):
     """GUARD (review finding): the WRITER must fail soft on a non-finite count.
 
