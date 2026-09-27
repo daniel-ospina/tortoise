@@ -901,25 +901,60 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
     # So: match the qualifier and the name LOOSELY (quoted or not, spaced or
     # not), bind each body to its OWN opener bounded by the next definition of
     # ANY name, and make an unbindable body a hard failure rather than a skip.
+    #
+    # ⛔ CASE-INSENSITIVE, and that is a SEMANTICS fact, not a style choice:
+    # Postgres FOLDS an unquoted identifier to lower case, so
+    # ``CREATE FUNCTION public.METERING_COHORT_SPEND(…)`` IS a redefinition of
+    # the live ceiling (proved in ``pg_proc.proname``). Matched case-sensitively
+    # that file yielded ZERO openers and hit ``continue`` — a token read written
+    # in upper case passed silently, which is exactly the silent-narrowing class
+    # this guard exists to prevent. (The ``len(defs) > 1`` floor does not alarm
+    # either: the two historical definitions still satisfy it.)
+    # The flag is applied to QUOTED names too, which OVER-INCLUDES: a quoted
+    # ``public."METERING_COHORT_SPEND"`` is genuinely a DIFFERENT function from
+    # the unquoted name, yet it is flagged. That direction is deliberate and
+    # safe — the guard can only ever flag MORE, never silently clear a real
+    # ceiling read, and no migration in this repo uses a quoted case-variant.
+    # A per-file "mentions the identifier but yields no opener ⇒ fail" net was
+    # REJECTED: ``20260926000001`` names the function in prose/comments, so the
+    # net false-positives on a file that defines nothing. Case-folding removes
+    # the shape the net was proposed for; the residual (a block comment between
+    # FUNCTION and the name) is disclosed above.
+    _RE_I = re.IGNORECASE
     _OPENER = (
         r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
         r'(?:(?:"?[A-Za-z_][A-Za-z_0-9]*"?)\s*\.\s*)?"?' + _IDENT + r'"?\s*\('
     )
     _ANY_DEF = r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
     _BODY = r"\bAS\s+\$(\$|[A-Za-z_][A-Za-z_0-9]*\$)(.*?)\$\1;"
+    # ⛔ The workload DENYLIST. This is a denylist, not an allowlist, and the
+    # limit is stated rather than hidden: it catches every workload counter this
+    # schema has or is credibly about to grow — the token family under ANY name
+    # spelling (``capture_tokens_in``, ``capture_tok_in``, ``tok_out``), the
+    # write/edge/call counters — but a counter invented under an unrelated name
+    # would still pass. The ceiling must see ONLY the cost lanes; a token count
+    # is extraction workload and is explicitly not the resource the ceiling
+    # meters.
+    _FORBIDDEN_WORKLOAD = re.compile(
+        r"\b[a-z_]*tok[a-z_]*\b"
+        r"|\b[a-z_]*ops[a-z_]*\b"
+        r"|\b[a-z_]*edges?[a-z_]*\b"
+        r"|\b[a-z_]*calls?[a-z_]*\b",
+        _RE_I,
+    )
     for f in files:
         text = f.read_text()
         # Count OPENERS, not mere mentions: a migration that only names the
         # function in a comment defines nothing and must not trip this.
-        starts = [m.start() for m in re.finditer(_OPENER, text)]
+        starts = [m.start() for m in re.finditer(_OPENER, text, _RE_I)]
         if not starts:
             continue
-        bounds = [m.start() for m in re.finditer(_ANY_DEF, text)]
+        bounds = [m.start() for m in re.finditer(_ANY_DEF, text, _RE_I)]
         for start in starts:
             # Bound this definition's window at the NEXT definition of any
             # name, so a body can never be borrowed from a following function.
             end = next((b for b in bounds if b > start), len(text))
-            m = re.search(_BODY, text[start:end], re.S)
+            m = re.search(_BODY, text[start:end], re.S | _RE_I)
             assert m is not None, (
                 f"{f.name}: an opener for {_IDENT} at offset {start} has no "
                 f"parseable 'AS $$ … $$;' body before the next definition — "
@@ -941,9 +976,11 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
         assert "ask_cost_usd" in body and "capture_cost_usd" in body, (
             f"metering_cohort_spend in {name} no longer sums the cost lanes: "
             f"{body}")
-        assert "token" not in body.lower(), (
-            f"metering_cohort_spend in {name} reads a TOKEN column — the "
-            f"spend ceiling must never see extraction workload: {body}")
+        offender = _FORBIDDEN_WORKLOAD.search(body)
+        assert offender is None, (
+            f"metering_cohort_spend in {name} reads the workload counter "
+            f"{offender.group(0)!r} — the spend ceiling must never see "
+            f"extraction workload: {body}")
 
     # The embedded twin. Read the LIVE Cypher between the reader's def and the
     # next section banner, so this cannot pass on a comment elsewhere.
