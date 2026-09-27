@@ -2229,7 +2229,7 @@ class TestToolCallAdmissionBoundary:
                 f"guard and the SDK's own session disagree on {raw}: "
                 f"guard={guard_rejected} sdk={sdk_rejected} ({live})")
 
-    def test_second_arm_of_the_signature_is_a_broken_incoming_stream(self):
+    def test_second_arm_of_the_signature_is_a_broken_incoming_stream(self, caplog):
         """Measures #3656's OTHER producer -- the one this change does NOT fix.
 
         The same ``except Exception`` in ``BaseSession._receive_loop`` answers a
@@ -2246,6 +2246,11 @@ class TestToolCallAdmissionBoundary:
         established here; what is established is that the signature has a second,
         request-agnostic producer, so the module comment says so instead of
         claiming the parameter case is the only one.
+
+        The wire form asserted below is the SDK's, not ours. An upstream release
+        that reports this arm correctly must not redden this repo, so the exact
+        form is pinned only while it holds: the test xfails (with the reason) at
+        runtime rather than failing, and the properties that ARE ours stay hard.
         """
         import logging
 
@@ -2257,41 +2262,47 @@ class TestToolCallAdmissionBoundary:
 
         from tortoise.mcp_server import _tools_call_rejection
 
-        logging.disable(logging.WARNING)
+        # The SDK logs a 30-error dump here; keep the test output readable
+        # without a process-wide logging switch (caplog restores the level).
+        caplog.set_level(logging.CRITICAL)
         raw = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                "params": {"name": self.CHEAP_TOOL, "arguments": {}}}
-        try:
-            # The request-side guard sees nothing wrong: the envelope is valid.
-            assert _tools_call_rejection(raw) is None, raw
+        # The request-side guard sees nothing wrong: the envelope is valid.
+        assert _tools_call_rejection(raw) is None, raw
 
-            async def ask():
-                read_send, read_recv = anyio.create_memory_object_stream(8)
-                write_send, write_recv = anyio.create_memory_object_stream(8)
-                session = ServerSession(
-                    read_recv, write_send,
-                    InitializationOptions(
-                        server_name="admission-oracle", server_version="1",
-                        capabilities=ServerCapabilities(), instructions=None),
-                    stateless=True)
-                async with session:
-                    await session.incoming_messages.aclose()
-                    await read_send.send(SessionMessage(
-                        message=JSONRPCMessage.model_validate(raw)))
-                    try:
-                        with anyio.fail_after(2.0):
-                            return await write_recv.receive()
-                    except TimeoutError:
-                        return None
+        async def ask():
+            read_send, read_recv = anyio.create_memory_object_stream(8)
+            write_send, write_recv = anyio.create_memory_object_stream(8)
+            session = ServerSession(
+                read_recv, write_send,
+                InitializationOptions(
+                    server_name="admission-oracle", server_version="1",
+                    capabilities=ServerCapabilities(), instructions=None),
+                stateless=True)
+            async with session:
+                await session.incoming_messages.aclose()
+                await read_send.send(SessionMessage(
+                    message=JSONRPCMessage.model_validate(raw)))
+                try:
+                    with anyio.fail_after(2.0):
+                        return await write_recv.receive()
+                except TimeoutError:
+                    return None
 
-            got = anyio.run(ask)
-            assert got is not None, "expected the SDK to answer"
-            body = json.loads(got.message.model_dump_json(by_alias=True))
-            # #3656's signature verbatim, for a request that is NOT malformed.
-            assert body["error"]["code"] == -32602, body
-            assert body["error"]["message"] == "Invalid request parameters", body
-            assert body["error"]["data"] == "", body
-        finally:
-            logging.disable(logging.NOTSET)
+        got = anyio.run(ask)
+        assert got is not None, "expected the SDK to answer"
+        body = json.loads(got.message.model_dump_json(by_alias=True))
+        # Stable across an upstream fix: this arm answers an ERROR for a
+        # well-formed request instead of dispatching it.
+        assert "error" in body, body
+        if (body["error"].get("code") != -32602
+                or body["error"].get("message") != "Invalid request parameters"
+                or body["error"].get("data") != ""):
+            pytest.xfail(
+                "upstream mcp no longer answers this arm with INVALID_PARAMS/"
+                f"data='' (got {body['error']!r}); the arm itself still exists, "
+                "which is what the claim in mcp_server rests on -- update the "
+                "module comment rather than this test")
 
     def test_issue_request_envelope_is_accepted(self):
         """#3656's request is well-formed, so no request-side guard can be the
@@ -2305,6 +2316,24 @@ class TestToolCallAdmissionBoundary:
         from tortoise.mcp_server import _tools_call_rejection
         assert _tools_call_rejection(self.ISSUE_REQUEST) is None
         assert self._sdk_session_verdict(self.ISSUE_REQUEST) is None
+
+    def test_the_named_error_is_uncacheable_and_unbuffered(self, tmp_path,
+                                                           monkeypatch):
+        """The intercepted error must carry the transport's own cache/buffer
+        headers (``Cache-Control: no-cache, no-transform``,
+        ``X-Accel-Buffering: no``), as a real client and its proxies rely on
+        them; the rest of the frame is asserted by the reproducer test.
+        """
+        tc = self._client(tmp_path, monkeypatch, name="headers")
+        with tc:
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}})
+            assert r.status_code == 200, r.text
+            assert body["error"]["code"] == -32602, body
+            assert r.headers.get("cache-control") == "no-cache, no-transform", \
+                dict(r.headers)
+            assert r.headers.get("x-accel-buffering") == "no", dict(r.headers)
 
     @pytest.mark.parametrize("params,member", [
         (None, ["params"]),
@@ -2448,6 +2477,12 @@ class TestToolCallAdmissionBoundary:
         {"jsonrpc": "2.0", "id": 1, "error": {"code": 1, "message": "m"}},
         # A tools/call NOTIFICATION (no id): the SDK only logs these.
         {"jsonrpc": "2.0", "method": "tools/call", "params": {}},
+        # `method` AND `error` in one body: the union resolves this to a
+        # JSONRPCError, so the transport answers 202. This is the shape the
+        # root-type gate exists for -- remove it and the guard answers -32602
+        # for a request the SDK dispatches as a response.
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "error": {"code": 1, "message": "m"}},
         # A batch array and a non-object body are the transport's business.
         [{"jsonrpc": "2.0", "id": 1, "method": "tools/call"}],
         "not-an-object",
@@ -2466,6 +2501,23 @@ class TestToolCallAdmissionBoundary:
         """
         from tortoise.mcp_server import _tools_call_rejection
         assert _tools_call_rejection(raw) is None, raw
+
+    def test_a_response_shaped_body_still_gets_the_transports_202(
+            self, tmp_path, monkeypatch):
+        """The root-type gate (gate 2), at the HTTP boundary: a body with
+        ``method`` AND ``error`` resolves to a JSONRPCError, which the transport
+        answers ``202`` -- the middleware must not turn that into a ``-32602``.
+
+        The guard-level test above pins the predicate; this pins that the
+        middleware honours it, which is the shape gate 2 was added for.
+        """
+        tc = self._client(tmp_path, monkeypatch, name="resp-shape")
+        with tc:
+            r = tc.post("/mcp", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "error": {"code": 1, "message": "m"}})
+            assert r.status_code == 202, (r.status_code, r.text)
+            assert "params.name" not in r.text, r.text
 
     @pytest.mark.parametrize("headers,expected_status", [
         # `application/jsonx` must stay the transport's 415 -- an exact part
@@ -2626,9 +2678,13 @@ class TestToolCallAdmissionBoundary:
                                           "arguments": {}}}
                     r = tc.post("/mcp", json=payload)
                     body = _parse_sse_json(r)
-                    if isinstance(body, dict) and "error" in body:
+                    # Every call must come back a RESULT: a status other than
+                    # 200, a body that is not an object, or one without a
+                    # `result` are all failures, not just an `error` envelope.
+                    if r.status_code != 200 or not (
+                            isinstance(body, dict) and "result" in body):
                         with lock:
-                            failures.append((wid, i, body))
+                            failures.append((wid, i, r.status_code, body))
                     if i == 0:
                         tc.post("/mcp", json={"jsonrpc": "2.0",
                                               "id": 200 + wid,

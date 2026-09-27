@@ -3986,10 +3986,13 @@ def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
        through untouched.
     2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
        ONLY a request; a notification / response / error body is answered
-       ``202 Accepted`` (`mcp/server/streamable_http.py`). Without this gate a
-       body carrying ``method``/``id`` *and* ``result`` resolves to a response,
-       and the guard would replace the SDK's 202 with a ``-32602`` -- the
-       over-strict direction, which breaks a working caller.
+       ``202 Accepted`` (`mcp/server/streamable_http.py`). This gate is
+       load-bearing for a body carrying ``method``/``id`` **and an ``error``
+       member**, which the union resolves to ``JSONRPCError`` (measured: a
+       ``result`` member instead resolves to a REQUEST, which always has a real
+       rejection reason and is handled by gate 3). Without this gate the guard
+       would replace that body's 202 with a ``-32602`` -- the over-strict
+       direction, which breaks a working caller.
     3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
        -- what ``BaseSession._receive_loop`` runs, and the producer of the
        opaque ``-32602 "Invalid request parameters"`` this guard exists to
@@ -4322,10 +4325,12 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
           response / error root is answered 202 by the transport, and this
           middleware must not turn that into a ``-32602``.
 
-        Framing mirrors the transport's: HTTP 200, ``text/event-stream``, one
-        ``event: message`` carrying the JSON-RPC error, then close. A client
-        that can parse an SDK error parses this one; only ``message`` and
-        ``data`` differ, and they now name the rejected member.
+        As the transport does, this marks the response uncacheable and
+        unbuffered (``Cache-Control: no-cache, no-transform`` and
+        ``X-Accel-Buffering: no``): a proxy must not store or coalesce a
+        JSON-RPC error, and the frame is one event long. The body framing is the
+        transport's SSE event; the headers are pinned by
+        ``test_the_named_error_is_uncacheable_and_unbuffered``.
         """
 
         async def dispatch(self, request, call_next):
@@ -4360,7 +4365,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 request_id=raw["id"],
             ))
             return Response(f"event: message\ndata: {body}\n\n",
-                            status_code=200, media_type="text/event-stream")
+                            status_code=200, media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache, no-transform",
+                                     "X-Accel-Buffering": "no"})
 
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
