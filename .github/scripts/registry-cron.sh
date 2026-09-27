@@ -1039,39 +1039,54 @@ ANALYTICS_THRESHOLD_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.silent_th
 ANALYTICS_ATTEMPTS="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.canary_attempts|type)=="number" then (.analytics.canary_attempts|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
 ANALYTICS_SILENT=0
 ANALYTICS_FRESH=0
-# R2 (bug-scan P3): `${x%.*}` TRUNCATES, and truncation of a non-plain-decimal
-# operand is not a parse. jq prints 1.2e16 as `1.2E+16`, whose integer part
-# truncates to `1` — which compares under any threshold and would resolve an
-# open incident on a grossly STALE age (fail-open). So the shape is validated
-# explicitly: only `digits[.digits]` is comparable, everything else (empty,
-# sign, exponent, hex, whitespace, a second dot) is unmeasurable and leaves the
-# kind untouched. Leading zeros cannot occur: jq never emits them.
+# R2/R3 (bug-scan P3 -> R3 P1): `${x%.*}` TRUNCATES, and truncation of a
+# non-plain-decimal operand is not a parse. jq prints 1.2e16 as `1.2E+16`,
+# whose integer part truncates to `1` — which compares under any threshold and
+# would resolve an open incident on a grossly STALE age (fail-open). Bash also
+# compares in signed 64-bit only: an all-digit operand longer than that makes
+# `[ -gt ]` ERROR (rc=2), and a failed comparison must never read as "fresh".
+# So the shape is validated explicitly — only `digits[.digits]` with at most 18
+# integer digits is comparable; everything else (empty, sign, exponent, hex,
+# whitespace, a second dot, an int64-overflowing magnitude) is unmeasurable and
+# leaves the kind untouched. Leading zeros cannot occur: jq never emits them.
 ANALYTICS_AGE_INT=""
 case "$ANALYTICS_AGE_S" in
   ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
-  *) ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}" ;;
+  *)
+    ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}"
+    [ "${#ANALYTICS_AGE_INT}" -le 18 ] || ANALYTICS_AGE_INT=""
+    ;;
 esac
 ANALYTICS_UPTIME_INT=""
 case "$ANALYTICS_UPTIME_S" in
   ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
-  *) ANALYTICS_UPTIME_INT="${ANALYTICS_UPTIME_S%%.*}" ;;
+  *)
+    ANALYTICS_UPTIME_INT="${ANALYTICS_UPTIME_S%%.*}"
+    [ "${#ANALYTICS_UPTIME_INT}" -le 18 ] || ANALYTICS_UPTIME_INT=""
+    ;;
 esac
 ANALYTICS_THRESHOLD_INT=""
 case "$ANALYTICS_THRESHOLD_S" in
   ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
-  *) ANALYTICS_THRESHOLD_INT="${ANALYTICS_THRESHOLD_S%%.*}" ;;
+  *)
+    ANALYTICS_THRESHOLD_INT="${ANALYTICS_THRESHOLD_S%%.*}"
+    [ "${#ANALYTICS_THRESHOLD_INT}" -le 18 ] || ANALYTICS_THRESHOLD_INT=""
+    ;;
 esac
 if [ "$ANALYTICS_INTENDED" = "true" ] && [ -n "$ANALYTICS_THRESHOLD_INT" ]; then
   if [ -n "$ANALYTICS_AGE_INT" ]; then
-    if [ "$ANALYTICS_AGE_INT" -gt "$ANALYTICS_THRESHOLD_INT" ]; then
+    # TWO probes, not one: the comparison must be observed to have SUCCEEDED
+    # before it decides anything. A single `if ... else FRESH` would treat a
+    # comparison ERROR as freshness (the R3 P1 regression).
+    if [ "$ANALYTICS_AGE_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
       ANALYTICS_SILENT=1
-    else
+    elif [ "$ANALYTICS_AGE_INT" -ge 0 ] 2>/dev/null; then
       # A MEASURED age at or under the threshold — the only shape that proves
       # a delivered write.
       ANALYTICS_FRESH=1
     fi
   elif [ -n "$ANALYTICS_UPTIME_INT" ] \
-       && [ "$ANALYTICS_UPTIME_INT" -gt "$ANALYTICS_THRESHOLD_INT" ]; then
+       && [ "$ANALYTICS_UPTIME_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
     # No delivered write SINCE BOOT, and the process is past the threshold —
     # not a cold start. This is the "the emitter never ran" arm.
     ANALYTICS_SILENT=1
