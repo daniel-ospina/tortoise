@@ -72,17 +72,21 @@ _CONNECT_MAX_WAIT_S = 60
 # ── URI + container helpers ──────────────────────────────────────────────
 
 def parse_uri(uri: str) -> dict:
-    """Parse a connection URI into host/port/password/graph components."""
+    """Parse a URI into host/port/username/password/graph components."""
     from urllib.parse import urlparse
 
     from tortoise.config import parse_uri_userinfo
     parsed = urlparse(uri)
-    # #3039: decode userinfo through the single shared rule.
-    _username, password = parse_uri_userinfo(uri)
+    # #3039/#3089: decode userinfo through the single shared rule. BOTH fields
+    # are returned so a client can authenticate: a named-user URI
+    # (redis://user:pw@host) carries a username, the anonymous docker://:pw@host
+    # form does not (None -> ""), matching the client-default sentinel.
+    username, password = parse_uri_userinfo(uri)
     return {
         "scheme": parsed.scheme,
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 6379,
+        "username": username or "",
         "password": password or "",
         "graph": parsed.path.lstrip("/") or "tortoise",
     }
@@ -117,7 +121,8 @@ def graph_stats_for(uri: str) -> dict:
     return graph_stats(proj)
 
 
-def _docker(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+def _docker(args: list[str], timeout: int = 30,
+            env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run a docker CLI command.
 
     Returns the CompletedProcess on completion, but NOTE: it does NOT convert a
@@ -125,9 +130,56 @@ def _docker(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
     RAISES `subprocess.TimeoutExpired` at the wall. Callers must treat a
     raising call as a real outcome. (Assuming "no raise" here is the root of
     the #2993 outage: a raising `docker stop` escaped before the recovery.)
+
+    ``env`` is handed to the child (``None`` inherits this process's
+    environment). It exists so ``_redis_cli`` can put the DB password in the
+    ``docker exec`` environment instead of its argv (#3089).
     """
     return subprocess.run(["docker", *args], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, env=env)
+
+
+# redis-cli prints an error reply on STDOUT with exit status 0, so a rejected
+# credential is indistinguishable from data at the CompletedProcess level. Left
+# unchecked, "NOAUTH Authentication required." became the RDB directory name and
+# restore failed with "Could not find the file NOAUTH ..." (#3089).
+_AUTH_ERROR_MARKERS = ("NOAUTH", "WRONGPASS")
+
+
+def _redis_cli(container: str, *cmd: str, password: str = "",
+               username: str = "",
+               timeout: int = 15) -> subprocess.CompletedProcess:
+    """Run ``redis-cli`` in the container, authenticated when a credential exists.
+
+    The password is delivered through the container's ``REDISCLI_AUTH``
+    environment — the bare ``docker exec -e REDISCLI_AUTH`` form takes its value
+    from THIS process's environment — never ``-a``, so it appears in neither the
+    host's nor the container's process argv (#3089). A named user is passed with
+    ``--user``; the anonymous ``docker://:pw@host`` form omits it.
+
+    Raises RuntimeError when the server rejects (or lacks) the credential,
+    rather than returning the NOAUTH/WRONGPASS reply for a caller to parse as a
+    config value — the alternative is the misleading "file not found" above.
+    """
+    args = ["exec"]
+    env = None
+    if password:
+        args += ["-e", "REDISCLI_AUTH"]
+        env = {**os.environ, "REDISCLI_AUTH": password}
+    args += [container, "redis-cli"]
+    if username:
+        args += ["--user", username]
+    args += list(cmd)
+
+    r = _docker(args, timeout=timeout, env=env)
+    reply = (r.stdout or "").strip()
+    if any(marker in reply for marker in _AUTH_ERROR_MARKERS):
+        raise RuntimeError(
+            f"redis-cli {' '.join(cmd)} was rejected by {container!r}: "
+            f"{reply} — supply the password in the URI "
+            "(docker://:PASSWORD@host:port/graph) for a requirepass instance."
+        )
+    return r
 
 
 def resolve_container(uri: str, container: str | None) -> str:
@@ -168,17 +220,19 @@ def resolve_container(uri: str, container: str | None) -> str:
     return "falkordb"
 
 
-def _container_rdb_info(container: str) -> dict:
-    """CONFIG GET dir + dbfilename via docker exec redis-cli."""
+def _container_rdb_info(container: str, password: str = "",
+                        username: str = "") -> dict:
+    """CONFIG GET dir + dbfilename via authenticated docker exec redis-cli."""
     def _cfg(key: str) -> str:
-        r = _docker(["exec", container, "redis-cli", "CONFIG", "GET", key],
-                    timeout=15)
+        r = _redis_cli(container, "CONFIG", "GET", key, password=password,
+                       username=username)
         lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
         return lines[-1] if lines else ""
     return {"dir": _cfg("dir"), "dbfilename": _cfg("dbfilename")}
 
 
-def _appendonly_state(container: str) -> dict:
+def _appendonly_state(container: str, password: str = "",
+                      username: str = "") -> dict:
     """CONFIG GET appendonly — AOF preference check (restore no-op risk).
 
     Redis/FalkorDB loads the AOF in preference to the RDB on cold start: a
@@ -187,21 +241,24 @@ def _appendonly_state(container: str) -> dict:
     (#915) — here we detect and refuse instead of deleting inside a stopped
     container (conf-60).
     """
-    r = _docker(["exec", container, "redis-cli", "CONFIG", "GET",
-                 "appendonly"], timeout=15)
+    r = _redis_cli(container, "CONFIG", "GET", "appendonly",
+                   password=password, username=username)
     lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
     val = lines[-1].lower() if lines else ""
     return {"aof_enabled": val == "yes", "value": val or ""}
 
 
-def _bgsave_and_wait(container: str, start_ts: int, timeout_s: int = 120) -> dict:
+def _bgsave_and_wait(container: str, start_ts: int, password: str = "",
+                     username: str = "", timeout_s: int = 120) -> dict:
     """Trigger BGSAVE and poll LASTSAVE until it advances past start_ts."""
-    r = _docker(["exec", container, "redis-cli", "BGSAVE"], timeout=30)
+    r = _redis_cli(container, "BGSAVE", password=password, username=username,
+                   timeout=30)
     if r.returncode != 0:
         return {"ok": False, "error": f"BGSAVE failed: {r.stderr.strip()}"}
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        r = _docker(["exec", container, "redis-cli", "LASTSAVE"], timeout=15)
+        r = _redis_cli(container, "LASTSAVE", password=password,
+                       username=username)
         if r.returncode == 0 and r.stdout.strip().isdigit():
             ts = int(r.stdout.strip())
             if ts > start_ts:
@@ -219,7 +276,7 @@ def snapshot(uri: str, out_dir: str, container: str | None,
     Returns {"ok": bool, "rdb": str, "meta": str, ...}. Side effects: BGSAVE,
     docker cp (unless dry_run).
     """
-    cfg = parse_uri(uri)  # noqa: F841
+    cfg = parse_uri(uri)
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
 
@@ -235,7 +292,7 @@ def snapshot(uri: str, out_dir: str, container: str | None,
 
     cname = resolve_container(uri, container)
 
-    info = _container_rdb_info(cname)
+    info = _container_rdb_info(cname, cfg["password"], cfg["username"])
     if not info["dir"] or not info["dbfilename"]:
         return {"ok": False,
                 "error": f"could not read RDB config from container {cname!r} — "
@@ -248,7 +305,9 @@ def snapshot(uri: str, out_dir: str, container: str | None,
     stats = graph_stats_for(uri)
 
     # 2. BGSAVE + wait for LASTSAVE to advance
-    lastsave = _bgsave_and_wait(cname, start_ts=int(time.time()) - 5)
+    lastsave = _bgsave_and_wait(cname, start_ts=int(time.time()) - 5,
+                                password=cfg["password"],
+                                username=cfg["username"])
     if not lastsave["ok"]:
         return lastsave
 
@@ -298,7 +357,7 @@ def restore(uri: str, rdb_file: str, container: str | None,
     if not os.path.isfile(rdb_file):
         return {"ok": False, "error": f"RDB file not found: {rdb_file}"}
 
-    cfg = parse_uri(uri)  # noqa: F841
+    cfg = parse_uri(uri)
     cname = resolve_container(uri, container)
 
     # Expected state from the snapshot sidecar (verification handshake)
@@ -322,7 +381,7 @@ def restore(uri: str, rdb_file: str, container: str | None,
     # AOF guard: with appendonly=yes the server loads the AOF in PREFERENCE
     # to the placed RDB on start — this restore would silently no-op and
     # serve pre-restore data (conf-60; projection.remove_stale_aof, #915).
-    aof = _appendonly_state(cname)
+    aof = _appendonly_state(cname, cfg["password"], cfg["username"])
     if aof["aof_enabled"]:
         return {"ok": False,
                 "error": f"container {cname!r} has appendonly=yes — Redis loads "
@@ -335,7 +394,7 @@ def restore(uri: str, rdb_file: str, container: str | None,
     # Pre-restore sanity: capture current state for the audit trail + read
     # the RDB location BEFORE the stop (docker exec fails on stopped containers).
     before = graph_stats_for(uri)
-    info = _container_rdb_info(cname)
+    info = _container_rdb_info(cname, cfg["password"], cfg["username"])
 
     restarted = False
     recovery_ok: bool | None = None

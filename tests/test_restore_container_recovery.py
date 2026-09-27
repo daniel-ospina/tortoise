@@ -24,6 +24,8 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "graph-scripts"))
@@ -32,20 +34,45 @@ import rdb_snapshot_restore  # noqa: E402
 
 CONTAINER = "falkordb-test"
 URI = "docker://:@localhost:16379/tortoise"
+# #3089: a URI that carries a credential AND a named user (redis:// form).
+AUTH_URI = "docker://:falkordb@localhost:16379/tortoise"
+NAMED_USER_URI = "redis://alice:s3cr3t@localhost:16379/tortoise"
 
 
 def _stub_non_docker_helpers(monkeypatch) -> None:
     """Neutralise everything that would touch a real graph or container."""
     monkeypatch.setattr(
         rdb_snapshot_restore, "_appendonly_state",
-        lambda _c: {"aof_enabled": False}, raising=False)
+        lambda _c, password="", username="": {"aof_enabled": False},
+        raising=False)
     monkeypatch.setattr(
         rdb_snapshot_restore, "_container_rdb_info",
-        lambda _c: {"dir": "/var/lib/falkordb/data", "dbfilename": "dump.rdb"},
+        lambda _c, password="", username="": {
+            "dir": "/var/lib/falkordb/data", "dbfilename": "dump.rdb"},
         raising=False)
     monkeypatch.setattr(
         rdb_snapshot_restore, "graph_stats_for", lambda _u: {"by_label": {}},
         raising=False)
+
+
+def _auth_replies(args: list[str], env: dict[str, str]) -> tuple[str, int]:
+    """stdout/rc for a redis-cli call against a fake requirepass server.
+
+    Without ``REDISCLI_AUTH`` the server answers ``NOAUTH`` on STDOUT with rc 0
+    — the real behaviour that let an unauthenticated path mis-parse the reply as
+    config data (#3089). With it, the real CONFIG/BGSAVE/LASTSAVE replies.
+    """
+    if not env.get("REDISCLI_AUTH"):
+        return "NOAUTH Authentication required.\n", 0
+    rest = tuple(args[args.index("redis-cli") + 1:])
+    table = {
+        ("CONFIG", "GET", "dir"): "dir\n/data\n",
+        ("CONFIG", "GET", "dbfilename"): "dbfilename\ndump.rdb\n",
+        ("CONFIG", "GET", "appendonly"): "appendonly\nno\n",
+        ("BGSAVE",): "Background saving started\n",
+        ("LASTSAVE",): "9999999999\n",
+    }
+    return table.get(rest, ""), 0
 
 
 def _fake_docker_failing_on(fail_verb: str):
@@ -318,3 +345,145 @@ def test_restore_reports_original_error_when_recovery_also_fails(monkeypatch):
     assert "STOPPED" in result["error"], (
         "a failed recovery must be reported, not silently absorbed"
     )
+
+
+# ── #3089: the URI credential must reach the redis-cli transport ──────────
+#
+# `parse_uri` decoded the credential and both snapshot()/restore() discarded it
+# (an unused-variable suppression), so every server-facing command ran through an
+# unauthenticated `docker exec redis-cli`. A requirepass server answers "NOAUTH Authentication
+# required." on STDOUT with rc 0, which the code then parsed as a directory name
+# — so restore failed with a bogus "Could not find the file NOAUTH ..." and a
+# snapshot never ran. These tests drive the real snapshot()/restore() against a
+# fake that emulates that server, so the failing state is reachable, not merely
+# the parsed string asserted.
+
+def _auth_enforcing_docker(record: list):
+    """A `_docker` stand-in that emulates a password-protected FalkorDB.
+
+    Mirrors the two real behaviours the bug depended on: redis-cli answers
+    NOAUTH on stdout with rc 0 unless REDISCLI_AUTH is in the child env, and
+    `docker cp` to the resulting NOAUTH-shaped path fails as the daemon does.
+    """
+    def _docker(args, timeout=30, env=None):
+        record.append((list(args), dict(env or {})))
+        if "redis-cli" in args:
+            stdout, rc = _auth_replies(args, dict(env or {}))
+            return subprocess.CompletedProcess(args, rc, stdout=stdout,
+                                               stderr="")
+        if args[:1] == ["cp"] and "NOAUTH" in " ".join(args):
+            return subprocess.CompletedProcess(
+                args, 1, stdout="",
+                stderr=("Error response from daemon: Could not find the file "
+                        "NOAUTH Authentication required. in container"))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    return _docker
+
+
+def test_restore_authenticates_to_requirepass_instance(monkeypatch):
+    """#3089: restore() must drive an authenticated redis-cli transport."""
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "graph_stats_for",
+        lambda _u: {"by_label": {"Point": 2}}, raising=False)
+    record: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker",
+                        _auth_enforcing_docker(record))
+
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        result = rdb_snapshot_restore.restore(AUTH_URI, fh.name, CONTAINER,
+                                              yes=True)
+
+    assert result["ok"] is True, result
+    assert result["verified"] is True
+    cli = [(a, e) for a, e in record if "redis-cli" in a]
+    assert cli, "restore never invoked redis-cli"
+    assert all(e.get("REDISCLI_AUTH") == "falkordb" for _, e in cli), cli
+    assert all("falkordb" not in a for a, _ in cli), (
+        "the password leaked into redis-cli argv")
+    assert all("NOAUTH" not in " ".join(a)
+               for a, _ in record if a[:1] == ["cp"]), (
+        "docker cp targeted a path derived from the NOAUTH reply")
+
+
+def test_snapshot_authenticates_to_requirepass_instance(monkeypatch, tmp_path):
+    """#3089: snapshot() must drive an authenticated redis-cli transport."""
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "graph_stats_for",
+        lambda _u: {"by_label": {"Point": 2}}, raising=False)
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "_bgsave_and_wait",
+        lambda c, start_ts, password="", username="", timeout_s=120:
+        {"ok": True, "lastsave": 1}, raising=False)
+    record: list[tuple[list[str], dict[str, str]]] = []
+
+    def _docker(args, timeout=30, env=None):
+        record.append((list(args), dict(env or {})))
+        if "redis-cli" in args:
+            stdout, rc = _auth_replies(args, dict(env or {}))
+            return subprocess.CompletedProcess(args, rc, stdout=stdout,
+                                               stderr="")
+        if args[:1] == ["cp"]:
+            if "NOAUTH" in " ".join(args):
+                return subprocess.CompletedProcess(
+                    args, 1, stdout="",
+                    stderr="Could not find the file NOAUTH in container")
+            with open(args[-1], "w", encoding="utf-8") as fh:
+                fh.write("REDIS0009-fake-rdb")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    result = rdb_snapshot_restore.snapshot(AUTH_URI, str(tmp_path), CONTAINER)
+
+    assert result["ok"] is True, result
+    assert result["graph_stats"] == {"by_label": {"Point": 2}}
+    assert result["uri"] == "docker://:****@localhost:16379/tortoise"
+    cli = [(a, e) for a, e in record if "redis-cli" in a]
+    assert cli, "snapshot never invoked redis-cli"
+    assert all(e.get("REDISCLI_AUTH") == "falkordb" for _, e in cli), cli
+    assert all("falkordb" not in a for a, _ in cli)
+
+
+def test_auth_rejection_fails_loudly_not_as_data(monkeypatch):
+    """#3089: a NOAUTH reply raises, instead of becoming a directory name.
+
+    The URI carries no credential, so the requirepass server rejects redis-cli;
+    the failure must name the cause instead of surfacing as the daemon's
+    misleading "file not found".
+    """
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "graph_stats_for",
+        lambda _u: {"by_label": {}}, raising=False)
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "_docker",
+        lambda args, timeout=30, env=None: subprocess.CompletedProcess(
+            args, 0, stdout="NOAUTH Authentication required.\n", stderr=""))
+
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh, \
+            pytest.raises(RuntimeError, match="rejected"):
+        rdb_snapshot_restore.restore(URI, fh.name, CONTAINER, yes=True)
+
+
+def test_redis_cli_uses_env_not_argv(monkeypatch):
+    """#3089: the password travels in REDISCLI_AUTH, never in argv; --user iff named."""
+    seen: dict = {}
+
+    def _docker(args, timeout=30, env=None):
+        seen["args"] = list(args)
+        seen["env"] = dict(env or {})
+        return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+
+    rdb_snapshot_restore._redis_cli("c", "CONFIG", "GET", "dir",
+                                    password="s3cr3t", username="alice")
+    assert "REDISCLI_AUTH" in seen["args"]
+    assert "s3cr3t" not in " ".join(seen["args"]), "password leaked into argv"
+    assert seen["env"]["REDISCLI_AUTH"] == "s3cr3t"
+    assert "--user" in seen["args"] and "alice" in seen["args"]
+
+    # anonymous docker:// form: no user, no auth material at all
+    rdb_snapshot_restore._redis_cli("c", "PING")
+    assert "--user" not in seen["args"]
+    assert "REDISCLI_AUTH" not in seen["args"]
+    assert seen["env"] == {}
