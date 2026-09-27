@@ -41,12 +41,16 @@ from datetime import UTC, datetime
 
 import pytest
 
+import tortoise.hosted_backup as hosted_backup
 from tortoise.backup_config import BackupConfig
 from tortoise.backup_ledger import (
     BACKUP_OBJECT_SUFFIXES,
     COVERAGE_VERIFIED,
     LEDGER_FORMAT,
+    MANIFEST_SUFFIX,
+    MISMATCH,
     MISSING,
+    UNREADABLE,
     UNREPORTED,
     VERIFIED,
     BackupVerificationError,
@@ -134,6 +138,50 @@ class _FailsLedgerUploadStorage(MemoryStorage):
         super().upload(key, data, content_type=content_type)
 
 
+class _SameLengthCorruptStorage(MemoryStorage):
+    """Persists a SAME-LENGTH corruption of dump.enc — silent bit-rot. A
+    byte-length check cannot see it; only the sha256 comparison can."""
+
+    def upload(self, key, data, content_type=None):
+        if key.endswith("dump.enc"):
+            super().upload(key, data[:-1] + bytes([data[-1] ^ 0xFF]))
+        else:
+            super().upload(key, data, content_type=content_type)
+
+
+class _DownloadRaisesStorage(MemoryStorage):
+    """Download of one object raises a non-KeyError — the destination is
+    present-but-unreadable, a state distinct from a missing object."""
+
+    def download(self, key):
+        if key.endswith("dump.enc"):
+            raise RuntimeError("transient transport failure")
+        return super().download(key)
+
+
+class _ListRaisesStorage(MemoryStorage):
+    """Prefix listing raises — coverage can then never certify the ABSENCE of
+    unreported objects, so it must fail closed."""
+
+    def list(self, prefix):
+        raise RuntimeError("listing unavailable")
+
+
+class _LedgerDeleteFailsStorage(MemoryStorage):
+    """Delete of ledger.json raises while the flag is set — the transient
+    failure that must not orphan the ledger. Flippable so the retry can
+    succeed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_ledger_delete = True
+
+    def delete(self, key):
+        if self.fail_ledger_delete and key.endswith("ledger.json"):
+            raise RuntimeError("R2 transient failure deleting ledger.json")
+        super().delete(key)
+
+
 def _config() -> BackupConfig:
     return BackupConfig(
         enabled=True,
@@ -193,6 +241,38 @@ def test_dump_graph_fails_closed_below_the_page_size(monkeypatch):
         proj.close()
 
 
+def test_dump_graph_fails_closed_when_only_the_edge_read_is_truncated(monkeypatch):
+    """The EDGE totality guard is load-bearing on its own: a cap that leaves the
+    NODE read complete but truncates the EDGE read must still fail.
+
+    Class-B: cap=100, 50 nodes / 200 edges. The 50-row node read fits under the
+    cap and is COMPLETE (so the node guard at the #5062 block passes); the edge
+    read comes back 100 of 200, which is exactly the state the edge guard exists
+    to catch. Remove the edge guard and this test fails with a returned dump of
+    ``read_edge_count = 100`` for a 200-edge store instead of a ValueError.
+    """
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_points(proj.g, 50)
+        proj.g.query(
+            "UNWIND range(1,200) AS i "
+            "MATCH (a:Point {id: toString((i % 50) + 1)}) "
+            "MATCH (b:Point {id: toString(((i * 7) % 50) + 1)}) "
+            "CREATE (a)-[:REL {i: i}]->(b)"
+        )
+        store_edges = int(
+            proj.g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
+        )
+        assert store_edges == 200  # the fixture really holds the truncated set
+
+        with pytest.raises(
+            ValueError, match=r"exported 100 edges but the graph holds 200"
+        ):
+            dump_graph(_CappedGraph(proj.g, 100), graph_name=proj.graph_name)
+        proj.close()
+
+
 def test_dump_graph_reports_the_stores_counts_as_the_reference(monkeypatch):
     """The ledger records the STORE's count, side by side with the artifact's —
     without it a ledger cannot prove the artifact is not short."""
@@ -245,6 +325,63 @@ def test_create_backup_rolls_back_when_the_ledger_write_fails(monkeypatch):
         store = _FailsLedgerUploadStorage()
 
         with pytest.raises(RuntimeError, match=r"ledger\.json"):
+            create_backup(proj, registry, store, org_id="team_x",
+                          graph_name=proj.graph_name)
+
+        assert store.list("backups/team_x/") == []
+        proj.close()
+
+
+def test_create_backup_refuses_a_same_length_corruption(monkeypatch):
+    """Silent bit-rot: the destination holds the SAME NUMBER of bytes as the
+    ledger records but different content. The byte-length check passes; the
+    sha256 comparison (the commit's core "download every object, hash it"
+    claim) is what refuses it.
+
+    Class-B: ``_SameLengthCorruptStorage`` flips the last byte of dump.enc, so
+    ``len(data) == ledger.bytes`` while the hashes differ — the reachable state
+    that makes the sha comparison, not the length check, the failing one.
+    """
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_points(proj.g, 5)
+        registry = proj.db.select_graph("registry_tortoise")
+        store = _SameLengthCorruptStorage()
+
+        with pytest.raises(BackupVerificationError) as exc:
+            create_backup(proj, registry, store, org_id="team_x",
+                          graph_name=proj.graph_name)
+
+        assert "mismatch" in str(exc.value)
+        assert store.list("backups/team_x/") == []
+        proj.close()
+
+
+def test_create_backup_fails_closed_when_the_readback_itself_raises(
+    monkeypatch,
+):
+    """A read-back that cannot COMPLETE is not a read-back that verified: the
+    failure is wrapped as ``BackupVerificationError`` and the object set is
+    rolled back — never a self-reported success.
+
+    Class-B: ``verify_ledger`` raising is the state that reaches the guard
+    (the module-level import is the seam); without the guard the RuntimeError
+    escapes unwrapped and nothing is rolled back.
+    """
+    _set_env_key(monkeypatch)
+
+    def _boom(storage, ledger):
+        raise RuntimeError("read-back blew up")
+
+    monkeypatch.setattr(hosted_backup, "verify_ledger", _boom)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_points(proj.g, 5)
+        registry = proj.db.select_graph("registry_tortoise")
+        store = MemoryStorage()
+
+        with pytest.raises(BackupVerificationError, match="could not complete"):
             create_backup(proj, registry, store, org_id="team_x",
                           graph_name=proj.graph_name)
 
@@ -332,6 +469,126 @@ def test_verify_ledger_third_state_is_distinct_from_verified_and_failed():
     assert states[f"backups/{backup_id}/gone.bin"] == MISSING
     assert states[dump_key] == VERIFIED
     assert UNREPORTED not in states.values()  # unreported is NOT an object state
+
+
+def test_verify_object_reaches_the_sha256_comparison_on_a_same_length_change():
+    """The same-length case must fail on the SHA comparison, not the length
+    check — a corruption the length check cannot see.
+
+    Class-B: the stored object is the same length as the ledger records but one
+    byte differs, so ``_verify_object`` passes the length branch and reaches the
+    sha256 comparison (`backup_ledger.py` sha-mismatch return).
+    """
+    store = MemoryStorage()
+    backup_id = "team_x/20260101T000000Z_abcd"
+    dump_key = f"backups/{backup_id}/dump.enc"
+    self_key = f"backups/{backup_id}/ledger.json"
+    good = b"0123456789"
+    store.upload(dump_key, good[:-1] + b"X")  # same length, different bytes
+    ledger = build_ledger(
+        backup_id=backup_id, org_id="team_x", graph_name="tortoise",
+        self_key=self_key, created_at="c", written_at="c",
+        objects=[LedgerObject(dump_key, len(good),
+                              hashlib.sha256(good).hexdigest(), "c")],
+        source_node_count=1, source_edge_count=0,
+        dump_node_count=1, dump_edge_count=0, read_edge_count=0,
+    )
+    store.upload(self_key, serialize_ledger(ledger))
+
+    v = verify_ledger(store, ledger)
+
+    obj = next(o for o in v.objects if o.key == dump_key)
+    assert obj.state == MISMATCH
+    # The length branch was NOT the one that fired — this is the sha comparison.
+    assert obj.detail.startswith("sha256 read back")
+    assert not v.ok
+
+
+def test_verify_object_flags_an_object_with_no_key_and_a_non_mapping():
+    """Malformed ledger entries are ``unreadable``, never silently skipped: an
+    object with no key and an entry that is not a mapping.
+
+    Class-B: the ledger is built valid, then the objects list is replaced with
+    the two malformed shapes — the reachable states that make each return fire.
+    """
+    store = MemoryStorage()
+    backup_id = "team_x/20260101T000000Z_abcd"
+    self_key = f"backups/{backup_id}/ledger.json"
+    ledger = build_ledger(
+        backup_id=backup_id, org_id="team_x", graph_name="tortoise",
+        self_key=self_key, created_at="c", written_at="c", objects=[],
+        source_node_count=1, source_edge_count=0,
+        dump_node_count=1, dump_edge_count=0, read_edge_count=0,
+    )
+    ledger["objects"] = [{"bytes": 1, "sha256": "x"}, "not-a-mapping"]
+    store.upload(self_key, serialize_ledger(ledger))
+
+    v = verify_ledger(store, ledger)
+
+    details = [o.detail for o in v.objects]
+    assert "ledger object has no key" in details
+    assert "ledger object is not a mapping" in details
+    states = {o.detail: o.state for o in v.objects}
+    assert states["ledger object has no key"] == UNREADABLE
+    assert states["ledger object is not a mapping"] == UNREADABLE
+    assert not v.ok
+
+
+def test_verify_object_flags_an_unreadable_download_as_unreadable():
+    """A download that raises a non-KeyError is ``unreadable`` — distinct from
+    ``missing`` — and fails coverage.
+
+    Class-B: ``_DownloadRaisesStorage`` raises only for dump.enc, so the object
+    is present in the listing yet its bytes cannot be read.
+    """
+    store = _DownloadRaisesStorage()
+    backup_id = "team_x/20260101T000000Z_abcd"
+    dump_key = f"backups/{backup_id}/dump.enc"
+    self_key = f"backups/{backup_id}/ledger.json"
+    blob = b"encrypted"
+    store.upload(dump_key, blob)
+    ledger = build_ledger(
+        backup_id=backup_id, org_id="team_x", graph_name="tortoise",
+        self_key=self_key, created_at="c", written_at="c",
+        objects=[LedgerObject(dump_key, len(blob),
+                              hashlib.sha256(blob).hexdigest(), "c")],
+        source_node_count=1, source_edge_count=0,
+        dump_node_count=1, dump_edge_count=0, read_edge_count=0,
+    )
+    store.upload(self_key, serialize_ledger(ledger))
+
+    v = verify_ledger(store, ledger)
+
+    obj = next(o for o in v.objects if o.key == dump_key)
+    assert obj.state == UNREADABLE
+    assert "RuntimeError" in obj.detail
+    assert not v.ok
+
+
+def test_verify_ledger_fails_closed_when_the_listing_fails():
+    """A listing that cannot complete can never certify the absence of
+    unreported objects — it is recorded as a distinct unreported marker and
+    coverage FAILS.
+
+    Class-B: ``_ListRaisesStorage`` raises on every prefix listing; without the
+    fail-closed branch the read-back would treat the empty list as "no extra
+    objects" and verify.
+    """
+    store = _ListRaisesStorage()
+    backup_id = "team_x/20260101T000000Z_abcd"
+    self_key = f"backups/{backup_id}/ledger.json"
+    ledger = build_ledger(
+        backup_id=backup_id, org_id="team_x", graph_name="tortoise",
+        self_key=self_key, created_at="c", written_at="c", objects=[],
+        source_node_count=1, source_edge_count=0,
+        dump_node_count=1, dump_edge_count=0, read_edge_count=0,
+    )
+    store.upload(self_key, serialize_ledger(ledger))
+
+    v = verify_ledger(store, ledger)
+
+    assert v.unreported == (f"<list-failed:backups/{backup_id}/>",)
+    assert not v.ok
 
 
 def test_verify_ledger_refuses_a_ledger_without_source_counts():
@@ -424,6 +681,47 @@ def test_prune_deletes_every_object_including_the_ledger(monkeypatch):
 
         assert manifest["backup_id"] in deleted
         assert store.list("backups/team_x/") == []
+        proj.close()
+
+
+def test_prune_retry_converges_when_only_the_ledger_delete_fails(monkeypatch):
+    """A transient failure deleting ONLY ledger.json must not orphan it: the
+    manifest (the enumeration key) is deleted last, so the next prune re-lists
+    the archive and retries.
+
+    Class-B: the store raises on the ledger delete (flag set) and then stops
+    raising. Pre-fix the manifest was deleted BEFORE the ledger, so the retry
+    could not see the archive — the ledger stayed forever (``prune #2 deleted:
+    []``). Here prune #1 must leave the manifest, and prune #2 must converge to
+    an empty prefix.
+    """
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_points(proj.g, 3)
+        registry = proj.db.select_graph("registry_tortoise")
+        store = _LedgerDeleteFailsStorage()
+        manifest = create_backup(proj, registry, store, org_id="team_x",
+                                 graph_name=proj.graph_name)
+        backup_id = manifest["backup_id"]
+
+        deleted1 = prune_backups(store, "team_x", keep_daily=0, keep_weekly=0,
+                                 keep_hourly=0)
+
+        # The failing delete is recorded, but nothing is reported deleted…
+        assert deleted1 == []
+        keys1 = store.list(f"backups/{backup_id}/")
+        # …and crucially the MANIFEST survives, so a retry can still find it.
+        assert f"backups/{backup_id}/{MANIFEST_SUFFIX}" in keys1
+        assert f"backups/{backup_id}/{BACKUP_OBJECT_SUFFIXES[0]}" not in keys1
+
+        # The transient failure clears — the retry converges.
+        store.fail_ledger_delete = False
+        deleted2 = prune_backups(store, "team_x", keep_daily=0, keep_weekly=0,
+                                 keep_hourly=0)
+
+        assert deleted2 == [backup_id]
+        assert store.list(f"backups/{backup_id}/") == []
         proj.close()
 
 

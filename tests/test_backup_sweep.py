@@ -1684,6 +1684,11 @@ def test_sweep_writes_flat_index_and_prunes_custom_flats_on_default_failure(shar
         # Pre-#2313 C5-era flat dumps: one for the DEFAULT, one for the CUSTOM
         default_bid = _seed_flat_for_sweep(store, "team_fi", _team_graph("team_fi"), 0.1)
         custom_bid = _seed_flat_for_sweep(store, "team_fi", ns, 0.1)
+        # #5062 review F4: a flat artifact that carries a ledger must not be
+        # orphaned by the custom-era cleanup — the cleanup must route through
+        # the shared object set, not a hardcoded dump+manifest pair. Pre-fix
+        # this ledger survives the drain (the assertion below fails).
+        store.upload(f"backups/{custom_bid}/ledger.json", b"{}")
 
         r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                               config=_config())

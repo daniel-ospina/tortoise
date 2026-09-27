@@ -63,6 +63,7 @@ from typing import Callable, Protocol  # noqa: UP035
 from tortoise.backup_ledger import (
     BACKUP_OBJECT_SUFFIXES,
     LEDGER_SUFFIX,
+    MANIFEST_SUFFIX,
     BackupVerificationError,
     LedgerObject,
     build_ledger,
@@ -1143,17 +1144,35 @@ def _delete_backup_objects(storage, backup_id: str) -> bool:
     so a rollback or prune can never leave an orphan ``ledger.json`` that a later
     sweep could read as coverage.
 
+    Order is MANIFEST LAST. ``prune_backups`` enumerates the pool by
+    ``manifest.json`` alone, so deleting the manifest before an object whose
+    delete then failed would make that object unreachable forever: the archive
+    is no longer listed, so nothing ever retries it. With the enumeration key
+    deleted last, ANY partial delete leaves it behind, the next run re-lists the
+    archive, and the already-deleted objects are no-op deletes — the delete
+    converges on retry.
+
     Returns True when every object was deleted. A locked (or otherwise failed)
     delete is logged and returns False — never raises — so the prune keeps
     pruning the rest of the pool (#2319: bucket locks block deletion inside the
-    window; the object is retried on a later run once the retention expires). A
-    partial delete (dump gone, manifest delete failed) converges on the next
-    run: the manifest is re-listed and the missing dump delete is a no-op
-    success.
+    window; the object is retried on a later run once the retention expires).
     """
     ok = True
-    for suffix in BACKUP_OBJECT_SUFFIXES:
+    # The enumeration key is deleted LAST (#5062 review F3) — see the docstring.
+    ordered = [s for s in BACKUP_OBJECT_SUFFIXES if s != MANIFEST_SUFFIX]
+    ordered.append(MANIFEST_SUFFIX)
+    for suffix in ordered:
         key = f"backups/{backup_id}/{suffix}"
+        if suffix == MANIFEST_SUFFIX and not ok:
+            # An object a delete left behind must stay reachable: the manifest
+            # is the ONLY enumeration key, so removing it now would orphan that
+            # object from every later run. Leave the archive listed for the
+            # retry (the already-deleted objects are no-op deletes then).
+            logger.warning(
+                "prune: keeping %s — %s still has objects to delete on a "
+                "later run", key, backup_id,
+            )
+            continue
         try:
             storage.delete(key)
         except Exception as e:
@@ -2452,10 +2471,10 @@ def count_data_nodes(db, graph_name: str) -> int:
     defect, #4525) while this count treats it as data. The parity is pinned by
     ``tests/test_dr_endpoints.py::TestDrRebaseline::test_count_data_nodes_matches_the_dump_node_set``.
 
-    ⚠️ Above FalkorDB's ``RESULTSET_SIZE`` (default 10000) this is the
-    COMPLETE data-node count while ``dump_graph``'s own node read is truncated
-    (#4515) — so it is the more-correct value there, and the two surfaces
-    diverge by design until #4515 is fixed.
+    #5062 folded #4515: :func:`dump_graph`'s node read is now keyset-paged and
+    cross-checked against THIS count, so the two surfaces no longer diverge — a
+    dump that falls short of this count fails closed instead of exporting a
+    silently truncated artifact, and this is the reference it must meet.
     """
     from tortoise.hosted_api import (
         _EXPORT_SKIP_LABELS,

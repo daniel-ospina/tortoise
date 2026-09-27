@@ -34,7 +34,6 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Iterable  # noqa: UP035
 
 logger = logging.getLogger(__name__)
@@ -42,15 +41,21 @@ logger = logging.getLogger(__name__)
 #: Ledger document schema version.
 LEDGER_FORMAT = "backup-ledger/1"
 
+#: Suffix of the ledger document itself.
+LEDGER_SUFFIX = "ledger.json"
+
+#: Suffix of the manifest — the archive's ENUMERATION KEY. ``prune_backups``
+#: discovers archives by ``manifest.json`` alone, so a delete path must remove
+#: this LAST: deleting it first would make any object whose delete then failed
+#: permanently unreachable (no retry can list the archive without it).
+MANIFEST_SUFFIX = "manifest.json"
+
 #: The COMPLETE object set of one backup. ONE home (#5062): the write path
 #: writes exactly these, the read-back verifies exactly these, and the delete
 #: paths (prune, rollback) remove exactly these. Adding an object to a backup
 #: without adding it here would leave a suffix the read-back never covers and
 #: the prune never collects.
-BACKUP_OBJECT_SUFFIXES: tuple[str, ...] = ("dump.enc", "manifest.json", "ledger.json")
-
-#: Suffix of the ledger document itself.
-LEDGER_SUFFIX = "ledger.json"
+BACKUP_OBJECT_SUFFIXES: tuple[str, ...] = ("dump.enc", MANIFEST_SUFFIX, LEDGER_SUFFIX)
 
 # ── Per-object verification states ──────────────────────────────────────────
 VERIFIED = "verified"
@@ -164,11 +169,6 @@ class LedgerVerification:
         if self.shortfall:
             parts.append(f"shortfall={self.shortfall}")
         return "; ".join(parts)
-
-
-def backup_prefix(backup_id: str) -> str:
-    """The storage prefix holding one backup's objects."""
-    return f"backups/{backup_id}/"
 
 
 def build_ledger(
@@ -350,28 +350,3 @@ def _as_int(value) -> int | None:
     except (TypeError, ValueError):
         return None
 
-
-def delete_backup_objects(storage, backup_id: str, *, best_effort: bool = True) -> bool:
-    """Delete the COMPLETE object set of one backup (all suffixes).
-
-    Returns True when every delete succeeded. A failed delete is logged and, when
-    ``best_effort``, never raised — the prune path is already best-effort and
-    retries on a later run. The value of routing every caller through here is
-    that a rolled-back backup can never leave an orphan ``ledger.json`` behind,
-    which a later sweep could read as coverage.
-    """
-    ok = True
-    for suffix in BACKUP_OBJECT_SUFFIXES:
-        key = backup_prefix(backup_id) + suffix
-        try:
-            storage.delete(key)
-        except Exception as e:
-            ok = False
-            logger.warning("delete of %s failed: %s", key, e)
-            if not best_effort:
-                raise
-    return ok
-
-
-def now_iso() -> str:
-    return datetime.now(UTC).isoformat()
