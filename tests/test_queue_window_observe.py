@@ -695,6 +695,26 @@ def test_cli_refuses_an_empty_out(tmp_path):
         obs.main(["--from-json", str(runs), "--window-hours", "24", "--out", ""])
 
 
+def test_oldest_minutes_is_unknown_when_no_queue_interval_exists():
+    # A queue run that never waited (started == created) yields NO queue
+    # interval; the field must read UNKNOWN, never a null the instrument's
+    # `--max-oldest-minutes` check could treat as 0 (fail-open).
+    rec = _build([run("mergify/merge-queue/x",
+                      "merge queue: checking #1 on main (abc1234)",
+                      minutes_ago=5, wait_min=0)])
+    assert rec["capacity"]["oldest_minutes"] == obs.UNKNOWN
+    assert rec["capacity"]["queued"] == obs.UNKNOWN
+
+
+def test_queue_wait_fields_are_unknown_when_no_run_ever_started():
+    r = run("mergify/merge-queue/x", "merge queue: checking #1 on main (abc1234)",
+            minutes_ago=5, conclusion="startup_failure")
+    r["run_started_at"] = None
+    rec = _build([r])
+    assert rec["capacity"]["oldest_minutes"] == obs.UNKNOWN
+    assert rec["capacity"]["max_queue_wait_minutes"] == obs.UNKNOWN
+
+
 def test_cli_records_a_caller_supplied_main_sha_verbatim(tmp_path):
     # The value is recorded, but NOT labelled as one this tool resolved.
     runs = tmp_path / "runs.jsonl"
