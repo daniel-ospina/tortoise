@@ -104,7 +104,7 @@ while [ $# -gt 0 ]; do
 done
 payload=""
 if [ "$input" = "1" ]; then payload="$(cat)"; fi
-echo "GH $method ${path%%\?*}" >> "$STUB_TMP/calls.log"
+echo "GH $method $path" >> "$STUB_TMP/calls.log"
 
 case "$path" in
   search/issues*)
@@ -579,6 +579,48 @@ seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_at=epoch:abc\\n"}' "$HEART
 run_checker
 assert_eq "$RC" "1" "34: heartbeat_at=epoch:abc → exit 1 (unparseable, never a coerced 0)"
 assert_contains "$OUT" "heartbeat-record-unparseable" "34: …reason is unparseable"
+
+# 35. LEADING-ZERO epochs are all-digit and within the length bound, but bash
+# reads them as OCTAL: the compare errors (clamp skipped) and $(( )) aborts with
+# "value too great for base" — killing the run BEFORE the alert is filed, so the
+# record reaches neither the STALE path nor the durable alert.
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=000000000009\\n"}' "$HEARTBEAT_MARKER_FIXTURE")"
+run_checker
+assert_eq "$RC" "1" "35: a leading-zero heartbeat_epoch → exit 1 (decimal-normalized, not an octal abort)"
+assert_contains "$(created_json)" "reason=heartbeat-too-old" "35: …the record reaches the STALE path"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "35: …and the DURABLE alert is actually filed"
+
+# 36. the same via the ISO fallback form the watchdog can write.
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_at=epoch:000000000009\\n"}' "$HEARTBEAT_MARKER_FIXTURE")"
+run_checker
+assert_eq "$RC" "1" "36: a leading-zero heartbeat_at=epoch: → exit 1 (decimal-normalized)"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "36: …and the alert is filed"
+
+# 37. the publication-boundary scrub is pinnable directly through the script's
+# LIVENESS_LIB_ONLY seam (it is otherwise only exercised indirectly).
+RAW_LEAKY='url=https://x?token=SUPERSECRET&k=1 FlyV1 abcDEF123 fm2_abcdefghijklmnopqrstuvwxyz 123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+REDACTED="$(LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; redact_text "$2"' _ "$CHECKER" "$RAW_LEAKY")"
+assert_not_contains "$REDACTED" "SUPERSECRET" "37: a ?token= value is scrubbed at the publication boundary"
+assert_not_contains "$REDACTED" "FlyV1 abcDEF123" "37: …a FlyV1 token is scrubbed"
+assert_not_contains "$REDACTED" "fm2_abcdefghijklmnopqrstuvwxyz" "37: …an fm2_ key is scrubbed"
+assert_not_contains "$REDACTED" "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" "37: …a Telegram-shaped token is scrubbed"
+assert_contains "$REDACTED" "<redacted>" "37: …and the scrub is visible in the text"
+# …and it does not mangle ordinary text.
+assert_eq "$(LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; redact_text "$2"' _ "$CHECKER" 'plain message, no secrets')" "plain message, no secrets" "37: ordinary text passes through unchanged"
+
+# 38. the search QUERY is constrained (an unpinned constraint is a silent
+# behaviour change: without is:open, a CLOSED alert is re-adopted and PATCHed
+# instead of a new issue being created, leaving the durable half of the alert
+# dead). The stub now logs the full query, so this is observable.
+reset_case
+seed_heartbeat 5
+run_checker
+HB_QUERY="$(grep -m1 'search/issues' "$STUB_TMP/calls.log" 2>/dev/null || true)"
+assert_contains "$HB_QUERY" "is%3Aopen" "38: the heartbeat search is constrained to OPEN issues"
+assert_contains "$HB_QUERY" "in%3Atitle" "38: …searches the TITLE (the marker is a body comment)"
+assert_contains "$HB_QUERY" "author%3Aapp%2Fgithub-actions" "38: …and to the Actions app"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

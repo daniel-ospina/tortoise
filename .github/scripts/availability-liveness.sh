@@ -197,6 +197,17 @@ normalize_max_age() { # <raw> -> minutes
 
 urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 
+# ⛔ STRIP LEADING ZEROS before any arithmetic. `00`, `007` … are all-digit and
+# within every length bound, but bash's `[ -gt ]` and `$(( ))` read a
+# LEADING-ZERO operand as OCTAL: `000000000009` errors the compare (a condition
+# reads that as FALSE, so the future-clamp is skipped) and then aborts the
+# arithmetic with "value too great for base", killing the run BEFORE the alert is
+# filed — the record reaches neither the STALE path nor the durable alert. The
+# threshold validator already normalizes this way; the epoch paths must too. An
+# all-zero input collapses to "", which the caller treats as unparseable
+# (epoch 0 is 1970 — stale either way).
+dec_strip_zeros() { printf '%s' "${1:-}" | sed 's/^0*//'; }
+
 # Publication-boundary scrub, mirroring the watchdog's redact_text. This script
 # holds no probe URL, Fly token or Telegram token, so only the SHAPE pass can
 # matter today — but the boundary is where the watchdog's own invariant lives
@@ -403,6 +414,7 @@ heartbeat_age_min=unknown"
         iso_raw="$(printf '%s' "$body" | sed -n 's/^heartbeat_at=\(.*\)$/\1/p' | head -n1)"
         hb_epoch="$(iso_to_epoch "$iso_raw")"
       fi
+      if [ -n "$hb_epoch" ]; then hb_epoch="$(dec_strip_zeros "$hb_epoch")"; fi
       if [ -z "$hb_epoch" ]; then
         state="stale"; reason="heartbeat-record-unparseable"
         age_clause="heartbeat_issue=#${hb_issue}
@@ -431,7 +443,7 @@ heartbeat_age_min=${age_min}"
     # (which predates this feature and would make the first run alarm). An
     # unreadable value fails closed (assume it should have run).
     wf_created="$(workflow_created_at)"
-    wf_epoch="$(iso_to_epoch "$wf_created")"
+    wf_epoch="$(dec_strip_zeros "$(iso_to_epoch "$wf_created")")"
     if [ -n "$wf_epoch" ] && [ "$wf_epoch" -gt "$NOW" ]; then wf_epoch="$NOW"; fi
     if [ -n "$wf_epoch" ]; then
       wf_age=$(( (NOW - wf_epoch) / 60 ))
