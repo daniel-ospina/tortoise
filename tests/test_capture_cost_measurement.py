@@ -1777,6 +1777,42 @@ def test_accumulate_call_cost_bounds_the_accumulated_total():
     assert math.isfinite(json.loads(json.dumps(cost))["cost_usd"]), cost
 
 
+def test_rollup_does_not_reintroduce_a_non_finite_total():
+    """#5822 cycle-5 P3 — the AGGREGATION seam undoes a per-stage guard.
+
+    ``_accumulate_call_cost`` now bounds its own running total, but
+    ``_rollup_llm`` is called ONCE PER STAGE into the same ``llm_stats``, and it
+    re-summed with a plain ``round(a + b, 6)``. Two stages whose totals are each
+    finite (``1e308``) therefore overflow at the roll-up, and the emitted row
+    carries ``inf`` again: httpx encodes with ``allow_nan=False``, so the row is
+    dropped from ``analytics_events``, and ``inf + x == inf`` swallows every
+    later charge.
+
+    Reachable on the DEFAULT v2 lane (a provider reporting ``usage.cost``), not
+    only the opt-in M2 lane.
+
+    REDs on: summing the cross-stage total without re-checking finiteness.
+    """
+    from tortoise.extractor_v2 import _rollup_llm
+
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0}
+    for stage in ("s1", "s2"):
+        _rollup_llm(
+            llm,
+            {"cost": {"calls": 1, "prompt_tokens": 100,
+                      "completion_tokens": 10, "cost_usd": 1e308}},
+            stage=stage)
+
+    assert math.isfinite(llm["cost_usd"]), (
+        f"the rolled-up total must never be inf: {llm!r}")
+    assert llm["cost_usd"] == 1e308, llm     # the first representable total
+    assert llm["calls_without_cost"] == 1, (
+        f"the unrepresentable aggregate is disclosed: {llm!r}")
+    # the row must survive the exact encoding the analytics sink performs
+    assert math.isfinite(json.loads(json.dumps(llm))["cost_usd"]), llm
+
+
 def test_m2_missing_usage_block_is_disclosed_never_fabricated(
         tmp_path, monkeypatch):
     """A provider response with NO usage block must not be turned into a
