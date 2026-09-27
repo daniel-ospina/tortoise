@@ -1,0 +1,74 @@
+# availability-liveness (#4573) — the INDEPENDENT liveness check for the
+# availability pager.
+#
+# WHY A SEPARATE WORKFLOW. The watchdog it checks (availability-watchdog.yml)
+# is fail-closed for a broken CHANNEL (#3887), but a dead MONITOR — the
+# workflow disabled, GitHub dropping the schedule, a crash before the down path
+# — produces NO RUN AT ALL. No run means no escalation and a silent log, so
+# "the pager is dead" is indistinguishable from "all clear". This workflow is
+# the external observer that closes that class. It MUST be a different workflow
+# with its own schedule: a check that lives inside availability-watchdog.yml is
+# silenced by `gh workflow disable availability-watchdog` — the very failure it
+# is meant to catch.
+#
+# CHANNEL INDEPENDENCE (the load-bearing property). The heartbeat travels
+# watchdog -> rolling GitHub issue body. This checker reads that body and
+# alarms through a GitHub issue PLUS a failing run (GitHub's own failure
+# notifications) — it never calls Telegram, and it does not read the incident
+# issue the Telegram leg is keyed on. A dead Telegram bot therefore cannot
+# silence the check on Telegram. (Residual: a GitHub Actions outage takes both
+# halves out; closing that needs an endpoint external to GitHub, which is an
+# external account + an owner decision, deliberately out of scope — stated in
+# the runbook, not hidden.)
+#
+# CADENCE. Cron intent is irrelevant to a dead-man switch; the threshold is
+# MEASURED. Run this every 30 min so the check itself is not the bottleneck;
+# the staleness bound (HEARTBEAT_MAX_AGE_MIN, default 90 = 3x the measured p95
+# inter-arrival of ~28.6 min) is in the script's header, with the 14.2-day
+# population it was measured from.
+name: availability-liveness
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub's scheduled delivery is best-effort, so treat
+    # every timestamp as approximate — the script's threshold, not this cron,
+    # is what tolerates that.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+# Never overlap: two runs would race on the same alert issue.
+concurrency:
+  group: availability-liveness
+  cancel-in-progress: false
+
+# contents: read for actions/checkout; issues: write for the alert issue;
+# actions: read for the watchdog workflow's own metadata (used to tell a fresh
+# deploy, which has nothing to verify yet, from a monitor that should have run).
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # persist-credentials: false — this job only reads a file; the workflow
+      # token carries issues:write and must not be written into .git/config.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the pager's heartbeat (#4573)
+        env:
+          # Actions does NOT export GITHUB_TOKEN itself, so GH_TOKEN must be
+          # named explicitly or the checker is deaf (#2140). STEP-level only: a
+          # job-level env is handed to actions/checkout too.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional operator override of the staleness bound. Unset expands to
+          # EMPTY, which is the script's measured default (90 min). The script
+          # normalizes a garbage value back to the default. Raising it trades
+          # detection latency for fewer false alarms; LOWERING it below the
+          # measured tail (p99 ~54 min, max ~64 min) will false-fire.
+          HEARTBEAT_MAX_AGE_MIN: ${{ vars.HEARTBEAT_MAX_AGE_MIN }}
+        run: bash .github/scripts/availability-liveness.sh

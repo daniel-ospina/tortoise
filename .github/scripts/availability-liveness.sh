@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# ============================================================================
+# availability-liveness.sh — INDEPENDENT dead-man switch for the availability
+# pager (#4573). The checker half; the record half is emit_heartbeat() in
+# .github/scripts/availability-watchdog.sh.
+#
+# THE GAP (#4573)
+# ---------------
+# availability-watchdog.sh (#3887) is fail-closed for a broken CHANNEL: an
+# undelivered sustained-incident page is durable (escalate_state=failed) and the
+# run goes red. It cannot see a dead MONITOR — a disabled workflow, a dropped
+# schedule, or a crash before the down path means NO RUN AT ALL, so no
+# escalation fires and the log is silent. "The pager is dead" reads exactly like
+# "all clear" — the same fail-open class, one level up.
+#
+# THE CANONICAL FIX (see #4573's sources: promlabs end-to-end watchdog alerts,
+# Grafana metamonitoring / Dead Man's Snitch, OneUptime, pingcap/dead-mans-switch)
+# ------------------------------------------------------------------------------
+# An always-firing heartbeat, checked by a service EXTERNAL to the monitored
+# path. THIS script is that checker, run by a SEPARATE workflow
+# (availability-liveness.yml) on its OWN schedule — so `gh workflow disable
+# availability-watchdog` and a dropped watchdog schedule cannot silence it.
+#
+# ⛔ TWO LOAD-BEARING PROPERTIES, neither optional:
+#
+#   1. THE HEARTBEAT DOES NOT TRAVEL THE CHANNEL IT VERIFIES. The watchdog
+#      writes its heartbeat into a rolling GitHub ISSUE BODY and pages humans
+#      over TELEGRAM. This checker READS the issue body and ALARMS through a
+#      GitHub issue plus a RED RUN (GitHub's own failure notifications) — it
+#      never calls Telegram, and it does not read the incident issue the
+#      Telegram leg is keyed on. A dead Telegram bot cannot silence this check.
+#      RESIDUAL (stated in the runbook, not hidden): an outage of GitHub
+#      Actions itself takes both halves out. Closing that needs an endpoint
+#      external to GitHub (Dead Man's Snitch / OneUptime) — an external account
+#      and an owner decision, deliberately out of this scope.
+#
+#   2. THE CADENCE IS MEASURED, NOT INTENDED. The watchdog's cron *intent* is
+#      5 min; its MEASURED delivery is ~96 runs/day. Re-measured for this issue
+#      over the whole live population (workflow created 2026-09-13) through
+#      2026-09-27T08:55:32Z — 14.22 days, n=1377 scheduled runs:
+#
+#          runs/day = 96.8      mean inter-arrival = 14.88 min
+#          median 11.9 · p90 23.9 · p95 28.6 · p99 53.8 · max 63.5 min
+#          gaps > 45 min: 15    gaps > 60 min: 4
+#
+#      ⛔ THE MEAN IS NOT THE THRESHOLD BASIS. `3 x 15 = 45 min` would have
+#      FALSE-FIRED 15 times in that 14.2-day window — GitHub drops and delays
+#      scheduled runs under load, and a pager that cries wolf is the defect
+#      restated. The default threshold is therefore 3 x the measured p95
+#      inter-arrival (3 x 28.6 = 85.8, rounded UP to 90 min), which clears the
+#      observed max (63.5 min) with ~40% headroom. Re-measure before changing
+#      it; the reason it is not `3 x mean` is in this block, not in a comment
+#      somewhere else.
+#
+# IN-REPO PRECEDENT (followed, not reinvented)
+# --------------------------------------------
+# registry-cron.sh already implements a watcher-down heartbeat: it reads
+# `.watcher.age_minutes` from the status payload, and when the watcher is dead
+# (`running != true` or `age > 30`) it files a `WATCHER_DOWN` GitHub alert and
+# fails the run. Same shape here: a measured staleness bound, an independent
+# reader, a deduped alert issue, and a red run as the second delivery.
+# DELIBERATE DIVERGENCE, stated so a later reader does not "unify" them: the
+# WATCHER_DOWN reader and the restart leg share the app's /status payload, while
+# this heartbeat lives on a channel deliberately SEPARATE from the Telegram page
+# — because the thing being verified IS the pager.
+#
+# EXIT CONTRACT: 0 = fresh (or not yet established); 1 = STALE or the checker
+# itself could not assess — both are loud, and a non-zero exit fails the run.
+#
+# Harness: .github/scripts/availability-liveness.test.sh (stubs gh, no network).
+
+set -euo pipefail
+
+REPO="${GITHUB_REPOSITORY:-daniel-ospina/tortoise}"
+GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+ALERT_LABEL="${ALERT_LABEL:-auto-filed}"
+
+# ⛔ PARITY: these two constants MUST match availability-watchdog.sh verbatim or
+# the search never matches the record (and the checker alarms forever). The
+# harness asserts the parity by reading both files, so a rename on one side
+# cannot land green.
+HEARTBEAT_MARKER='<!-- availability-watchdog-heartbeat -->'
+HEARTBEAT_TITLE='[OPS] availability-watchdog heartbeat (rolling)'
+
+LIVENESS_ALERT_MARKER='<!-- availability-liveness-alert -->'
+LIVENESS_ALERT_TITLE='[OPS] availability-watchdog LIVENESS — no heartbeat'
+
+# The workflow whose schedule the heartbeat proves. Read (metadata only) to
+# distinguish "the monitor has never run (a fresh deploy, nothing to verify
+# yet)" from "the monitor should have run and produced nothing".
+WATCHDOG_WORKFLOW="${WATCHDOG_WORKFLOW:-availability-watchdog.yml}"
+# MEASURED threshold (see the header). 90 = 3 x measured p95 (28.6), rounded up.
+HEARTBEAT_MAX_AGE_MIN="${HEARTBEAT_MAX_AGE_MIN:-90}"
+# Test seam: pin "now" so age arithmetic is deterministic.
+LIVENESS_NOW_EPOCH="${LIVENESS_NOW_EPOCH:-}"
+
+# ── logging (all to STDERR; stdout is DATA only) ─────────────────────────────
+log() { echo "$*" >&2; }
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  note() { echo "::notice::$*" >&2; }
+  warn() { echo "::warning::$*" >&2; }
+  fail() { echo "::error::$*" >&2; }
+else
+  note() { echo "NOTICE: $*" >&2; }
+  warn() { echo "WARNING: $*" >&2; }
+  fail() { echo "ERROR: $*" >&2; }
+fi
+
+now_epoch() {
+  if [ -n "$LIVENESS_NOW_EPOCH" ]; then
+    printf '%s' "$LIVENESS_NOW_EPOCH"
+  else
+    date -u +%s
+  fi
+}
+
+# epoch -> ISO-8601 Z (GNU date first, BSD fallback — the harness runs on both).
+fmt_iso() {
+  date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null && return 0
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null && return 0
+  printf 'epoch:%s' "$1"
+}
+
+# ISO-8601 (or fmt_iso's `epoch:<n>` fallback) -> epoch, or "" when unparseable.
+# A "" is the fail-closed direction: an unreadable/`unparseable` heartbeat is
+# NOT a fresh one.
+iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
+  local iso="$1" e
+  [ -n "$iso" ] || { printf ''; return 0; }
+  case "$iso" in
+    epoch:*)
+      e="${iso#epoch:}"
+      case "$e" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+      printf '%s' "$e"; return 0 ;;
+  esac
+  e="$(date -u -d "$iso" +%s 2>/dev/null || true)"
+  if [ -z "$e" ]; then
+    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null || true)"
+  fi
+  if [ -z "$e" ]; then
+    e="$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "${iso%Z}" +%s 2>/dev/null || true)"
+  fi
+  case "$e" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+  printf '%s' "$e"
+}
+
+# bash arithmetic is decimal-by-surprise ($((08)) is invalid octal). A
+# human-editable env value is normalized before it reaches $(( )).
+to_int() { # <raw> <default>
+  local raw digits
+  raw="$(printf '%s' "${1:-}" | tr -dc '0-9')"
+  [ -n "$raw" ] || { printf '%s' "$2"; return 0; }
+  digits="${#raw}"
+  [ "$digits" -le 12 ] || { printf '%s' "$2"; return 0; }
+  raw="$(printf '%s' "$raw" | sed 's/^0*//')"
+  [ -n "$raw" ] || raw="0"
+  printf '%s' "$raw"
+}
+
+urlencode() { printf '%s' "$1" | jq -sRr @uri; }
+
+# ── GitHub issue helpers ────────────────────────────────────────────────────
+# Echoes a positive issue number, "" when none is open, or "__ERR__" when the
+# search failed or answered something unparseable. SECURITY: this is a PUBLIC
+# repo, so "an open issue whose title matches" is NOT ours. Any account can open
+# an issue with our title and a FORGED heartbeat body; adopting it would let a
+# stranger claim the pager is alive (a fail-OPEN mute of the liveness check).
+# So the search carries `author:app/github-actions` AND each item is re-checked
+# against the reserved `github-actions[bot]` login, an EXACT title and the
+# body-only marker.
+search_issue() { # <body-marker> <exact-title>
+  local q enc out n
+  # ⛔ The QUERY term must be the TITLE, not the body marker: `in:title` searches
+  # titles, and the body marker is an HTML comment that never appears in one —
+  # using it made the search return zero results every time, so the checker
+  # would re-file a duplicate alert on every stale run instead of finding the
+  # open one. The marker still gates adoption in the jq below (a same-titled
+  # issue from another producer is never adopted).
+  q="repo:${REPO} is:issue is:open in:title author:app/github-actions \"$2\""
+  enc="$(urlencode "$q")"
+  if ! out="$(gh api "search/issues?q=${enc}&per_page=100" --paginate 2>/dev/null)"; then
+    printf '__ERR__'; return 0
+  fi
+  if ! n="$(printf '%s' "$out" | jq -rs --arg login 'github-actions[bot]' --arg title "$2" --arg marker "$1" \
+      '[.[].items[]? | select((.user.login // "") == $login) | select((.title // "") == $title) | select(((.body // "") | contains($marker)))][0].number // empty' 2>/dev/null)"; then
+    printf '__ERR__'; return 0
+  fi
+  # EMPTY = "not found" (a real answer: the caller may create one or fall back
+  # to the bootstrap path). Only a NON-EMPTY non-numeric value is ERR. Collapsing
+  # the two would make "no heartbeat issue yet" read as "the search is broken".
+  [ -n "$n" ] || { printf ''; return 0; }
+  case "$n" in
+    *[!0-9]*) printf '__ERR__'; return 0 ;;
+  esac
+  printf '%s' "$n"
+}
+
+get_issue_body() { # <n> -> the body, or __ERR__ when the read failed
+  local out body
+  if ! out="$(gh api "repos/${REPO}/issues/$1" 2>/dev/null)"; then
+    printf '__ERR__'; return 0
+  fi
+  if ! body="$(printf '%s' "$out" | jq -r '.body // ""' 2>/dev/null)"; then
+    printf '__ERR__'; return 0
+  fi
+  printf '%s' "$body"
+}
+
+create_issue() { # <title> <body> -> number ("" on failure)
+  local payload out n
+  payload="$(jq -n --arg t "$1" --arg b "$2" --arg l "$ALERT_LABEL" \
+    '{title:$t, body:$b, labels:[$l]}')"
+  if ! out="$(printf '%s' "$payload" | gh api "repos/${REPO}/issues" --method POST --input - 2>/dev/null)"; then
+    printf ''; return 0
+  fi
+  n="$(printf '%s' "$out" | jq -r '.number // empty' 2>/dev/null || true)"
+  case "$n" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+  printf '%s' "$n"
+}
+
+update_issue_body() { # <n> <body> -> 0 ok / 1 failed
+  local payload
+  payload="$(jq -n --arg b "$2" '{body:$b}')"
+  if ! printf '%s' "$payload" | gh api "repos/${REPO}/issues/$1" --method PATCH --input - >/dev/null 2>&1; then
+    warn "issue body update failed for #$1"
+    return 1
+  fi
+  return 0
+}
+
+comment_issue() { # <n> <body> -> 0 ok / 1 failed
+  local payload
+  payload="$(jq -n --arg b "$2" '{body:$b}')"
+  if ! printf '%s' "$payload" | gh api "repos/${REPO}/issues/$1/comments" --method POST --input - >/dev/null 2>&1; then
+    warn "comment failed on #$1"
+    return 1
+  fi
+  return 0
+}
+
+close_issue() { # <n> -> 0 ok / 1 failed
+  if ! printf '%s' '{"state":"closed"}' | gh api "repos/${REPO}/issues/$1" --method PATCH --input - >/dev/null 2>&1; then
+    warn "close failed on #$1"
+    return 1
+  fi
+  return 0
+}
+
+# The watchdog workflow's created_at (ISO) or "" when it cannot be read. Used
+# ONLY to keep a fresh deploy from alerting before the monitor has had a chance
+# to write its first heartbeat; an unreadable value is NOT treated as young.
+workflow_created_at() {
+  local out
+  if ! out="$(gh api "repos/${REPO}/actions/workflows/${WATCHDOG_WORKFLOW}" 2>/dev/null)"; then
+    printf ''; return 0
+  fi
+  printf '%s' "$out" | jq -r '.created_at // ""' 2>/dev/null || printf ''
+}
+
+# ── the alert body ──────────────────────────────────────────────────────────
+# Kept in ONE place so the filed body and the deduped update can never drift.
+liveness_body() { # <reason> <age-clause>
+  cat <<BODY
+${LIVENESS_ALERT_MARKER}
+liveness_state=stale
+reason=$1
+${2}
+threshold_min=${HEARTBEAT_MAX_AGE_MIN}
+checked_at=$(fmt_iso "$NOW")
+
+⛔ **The availability pager's own liveness check is failing.** No heartbeat has been
+recorded by \`availability-watchdog\` within ${HEARTBEAT_MAX_AGE_MIN} minutes, or its record is
+unreadable. This is the "dead monitor" case: a disabled workflow, a dropped schedule,
+or a crash before the down path produces **no escalation and no run log** — so up to
+now, "the pager is dead" read exactly like "all clear".
+
+**This alert is deliberately not sent over Telegram.** The Telegram leg is the thing
+under suspicion; the heartbeat and this alert therefore travel a different channel
+(this GitHub issue plus the failed run). A working Telegram bot is NOT evidence that
+the pager is alive.
+
+**Check, in this order:**
+1. \`gh workflow list --all\` → is \`availability-watchdog\` \`active\`? A disabled schedule
+   produces no runs and no heartbeat (\`gh workflow enable availability-watchdog\`).
+2. \`gh run list --workflow availability-watchdog.yml --limit 20\` → are scheduled runs
+   arriving? A gap here with an \`active\` workflow is GitHub dropping the schedule.
+3. The rolling heartbeat issue \`${HEARTBEAT_TITLE}\` → does its \`heartbeat_at=\` field move?
+4. If runs ARE arriving but the heartbeat is not, read the last run's log for the
+   \`heartbeat:\` lines — the record is best-effort, and the liveness check is
+   fail-closed on the read side, so a heartbeat that stops arriving IS the alarm.
+
+**Measured cadence, not cron intent:** the 5-minute cron delivers ~96 runs/day
+(mean inter-arrival ~15 min). But the measured p95 gap is ~28.6 min and the measured
+**max is ~63.5 min** (GitHub drops/delays scheduled runs), so \`3 × mean = 45 min\` would
+false-fire ~15 times per 14 days. The threshold is ${HEARTBEAT_MAX_AGE_MIN} min =
+3 × the measured p95. Runbook: docs/infra-runbook.md → § *Out-of-band availability watchdog*.
+BODY
+}
+
+# ── main ────────────────────────────────────────────────────────────────────
+main() {
+  local hb_issue body hb_epoch age_min reason age_clause wf_created wf_epoch wf_age alert state
+
+  # Fail closed: a checker that cannot alert is a deaf checker.
+  if [ -z "$GH_TOKEN" ]; then
+    fail "GH_TOKEN is not set — refusing to run a liveness checker that cannot file its alert (a deaf checker is worse than no checker)"
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    fail "jq is required"
+    exit 1
+  fi
+  HEARTBEAT_MAX_AGE_MIN="$(to_int "$HEARTBEAT_MAX_AGE_MIN" 90)"
+  [ "$HEARTBEAT_MAX_AGE_MIN" -ge 1 ] 2>/dev/null || HEARTBEAT_MAX_AGE_MIN=90
+  NOW="$(now_epoch)"
+
+  log "availability-liveness (#4573) — checker for ${REPO}; threshold=${HEARTBEAT_MAX_AGE_MIN} min"
+  state="fresh"; reason=""; age_clause=""; age_min=""
+
+  hb_issue="$(search_issue "$HEARTBEAT_MARKER" "$HEARTBEAT_TITLE")"
+  case "$hb_issue" in
+    __ERR__)
+      # "cannot read the heartbeat" is NOT "the pager is dead", and it is not
+      # "all clear" either. Do not file a liveness-alert issue on a transient
+      # search failure (that would be a false page); fail the run loudly so the
+      # checker's own blindness is visible and retried next run.
+      fail "heartbeat search failed — cannot assess the pager's liveness this run (not treated as fresh; retried on the next run)"
+      exit 1 ;;
+  esac
+
+  if [ -n "$hb_issue" ]; then
+    body="$(get_issue_body "$hb_issue")"
+    if [ "$body" = "__ERR__" ]; then
+      state="stale"; reason="heartbeat-record-unreadable"
+      age_clause="heartbeat_issue=#${hb_issue}
+heartbeat_age_min=unknown"
+      warn "heartbeat record #${hb_issue} could not be read — treating as STALE (an unreadable heartbeat is not a fresh one)"
+    else
+      hb_epoch=""
+      # Prefer the epoch field (no date parsing), fall back to the ISO field.
+      local ep_raw
+      ep_raw="$(printf '%s' "$body" | sed -n 's/^heartbeat_epoch=\([0-9][0-9]*\)$/\1/p' | head -n1)"
+      if [ -n "$ep_raw" ]; then
+        hb_epoch="$ep_raw"
+      else
+        local iso_raw
+        iso_raw="$(printf '%s' "$body" | sed -n 's/^heartbeat_at=\(.*\)$/\1/p' | head -n1)"
+        hb_epoch="$(iso_to_epoch "$iso_raw")"
+      fi
+      if [ -z "$hb_epoch" ]; then
+        state="stale"; reason="heartbeat-record-unparseable"
+        age_clause="heartbeat_issue=#${hb_issue}
+heartbeat_age_min=unknown"
+        warn "heartbeat record #${hb_issue} carries no parseable heartbeat time — treating as STALE"
+      else
+        # A future stamp (runner clock skew) is clamped to now: it is not
+        # evidence of staleness, and the next scheduled run re-stamps it.
+        [ "$hb_epoch" -gt "$NOW" ] && hb_epoch="$NOW"
+        age_min=$(( (NOW - hb_epoch) / 60 ))
+        age_clause="heartbeat_issue=#${hb_issue}
+heartbeat_at=$(fmt_iso "$hb_epoch")
+heartbeat_age_min=${age_min}"
+        if [ "$age_min" -gt "$HEARTBEAT_MAX_AGE_MIN" ]; then
+          state="stale"; reason="heartbeat-too-old"
+          warn "heartbeat is ${age_min} min old (threshold ${HEARTBEAT_MAX_AGE_MIN} min) — PAGER LIVENESS FAILING"
+        else
+          log "heartbeat is ${age_min} min old (threshold ${HEARTBEAT_MAX_AGE_MIN} min) — pager is LIVE"
+        fi
+      fi
+    fi
+  else
+    # No heartbeat record at all. Distinguish a fresh deploy (nothing to verify
+    # yet) from a monitor that should have written one: read the watchdog
+    # workflow's own created_at. Unreadable => fail closed (assume it should
+    # have run).
+    wf_created="$(workflow_created_at)"
+    wf_epoch="$(iso_to_epoch "$wf_created")"
+    if [ -n "$wf_epoch" ] && [ "$wf_epoch" -gt "$NOW" ]; then wf_epoch="$NOW"; fi
+    if [ -n "$wf_epoch" ]; then
+      wf_age=$(( (NOW - wf_epoch) / 60 ))
+      age_clause="heartbeat_issue=none
+watchdog_workflow_age_min=${wf_age}"
+      if [ "$wf_age" -le "$HEARTBEAT_MAX_AGE_MIN" ]; then
+        log "no heartbeat record yet and the watchdog workflow is only ${wf_age} min old — not yet established; not alerting"
+        state="fresh"; reason="not-yet-established"
+      else
+        state="stale"; reason="no-heartbeat-record"
+        warn "no heartbeat record exists and the watchdog workflow is ${wf_age} min old — the pager may never have run"
+      fi
+    else
+      state="stale"; reason="no-heartbeat-record"
+      age_clause="heartbeat_issue=none
+watchdog_workflow_age_min=unknown"
+      warn "no heartbeat record exists and the watchdog workflow's age could not be read — treating as STALE (fail closed)"
+    fi
+  fi
+
+  alert="$(search_issue "$LIVENESS_ALERT_MARKER" "$LIVENESS_ALERT_TITLE")"
+  case "$alert" in
+    __ERR__)
+      fail "liveness-alert search failed — refusing to file or resolve (never duplicate); cannot confirm the alert state"
+      exit 1 ;;
+  esac
+
+  if [ "$state" = "stale" ]; then
+    local new_body
+    new_body="$(liveness_body "$reason" "$age_clause")"
+    if [ -z "$alert" ]; then
+      if ! alert="$(create_issue "$LIVENESS_ALERT_TITLE" "$new_body")" || [ -z "$alert" ]; then
+        fail "LIVENESS STALE (${reason}) and the alert issue could not be filed — this failing run IS the alert"
+        exit 1
+      fi
+      note "filed liveness alert #${alert} (${reason})"
+    else
+      # Dedupe: ONE alert issue. The body carries the current age/reason; a
+      # body write is not a comment, so a long failure does not spam watchers.
+      if ! update_issue_body "$alert" "$new_body"; then
+        fail "liveness is STALE (${reason}) but the alert body on #${alert} could not be updated — this failing run IS the alert"
+        exit 1
+      fi
+      note "liveness alert #${alert} is still STALE (${reason}) — body refreshed"
+    fi
+    fail "PAGER LIVENESS FAILING (${reason}) — the availability watchdog has not recorded a heartbeat within ${HEARTBEAT_MAX_AGE_MIN} min. See #${alert}. Alerted over GitHub (issue + failing run), NOT Telegram, because the Telegram leg is what is under suspicion."
+    exit 1
+  fi
+
+  # Fresh. Resolve a standing alert if one is open — a stale OPEN alert is its
+  # own false alarm. Close BEFORE commenting, so a failing close cannot re-post
+  # "Recovered" on every run.
+  if [ -n "$alert" ]; then
+    if ! close_issue "$alert"; then
+      fail "liveness recovered but the alert issue #${alert} could not be closed — failing the run so the stale alert is not silent"
+      exit 1
+    fi
+    if ! comment_issue "$alert" "✅ **Recovered** — a heartbeat has been recorded within ${HEARTBEAT_MAX_AGE_MIN} min at $(fmt_iso "$NOW") (${age_clause//$'\n'/'; '}). The pager is live again; this alert is closed and re-files automatically if the heartbeat goes stale."; then
+      fail "#${alert} was CLOSED but the 'Recovered' comment failed — the state is correct, the record is missing; failing the run so it is not silent"
+      exit 1
+    fi
+    note "closed liveness alert #${alert} (recovered)"
+  fi
+  note "pager liveness OK — heartbeat within ${HEARTBEAT_MAX_AGE_MIN} min"
+  exit 0
+}
+
+if [ "${LIVENESS_LIB_ONLY:-0}" != "1" ]; then
+  main "$@"
+fi

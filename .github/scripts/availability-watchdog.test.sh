@@ -97,6 +97,11 @@ DOWN_TITLE_FIXTURE='[monitor] PROD DOWN — api.premiselabs.co is not answering 
 DEGRADED_TITLE_FIXTURE='[monitor] PROD DEGRADED — api.premiselabs.co answered the availability probe unexpectedly'
 DRILL_DOWN_TITLE_FIXTURE='[monitor] DRILL DOWN — staging.example.test [DRILL] is not answering the availability probe'
 INCIDENT_STATE_MARKER_FIXTURE='<!-- availability-watchdog-state -->'
+# #4573: the rolling liveness record's production title + body marker. The
+# liveness harness asserts these match the checker's constants byte-for-byte;
+# duplicated here so the watchdog fixtures exercise the REAL dedupe key.
+HEARTBEAT_TITLE_FIXTURE='[OPS] availability-watchdog heartbeat (rolling)'
+HEARTBEAT_MARKER_FIXTURE='<!-- availability-watchdog-heartbeat -->'
 
 PASS=0
 FAIL=0
@@ -265,11 +270,39 @@ while [ $# -gt 0 ]; do
 done
 payload=""
 if [ "$input" = "1" ]; then payload="$(cat)"; fi
-echo "GH $method ${path%%\?*}" >> "$STUB_TMP/calls.log"
+# #4573: route the LIFENESS heartbeat traffic under its own log prefix so every
+# incident assertion (which counts `GH POST …/issues`, `GH PATCH`, `GH-Q …`) is
+# untouched by the heartbeat leg. A heartbeat request is: a search whose query
+# names the heartbeat title, a create whose payload carries the heartbeat title,
+# or a read/write of the reserved heartbeat issue number.
+is_hb=0
+case "$path" in
+  *heartbeat*) is_hb=1 ;;
+  */issues)
+    case "$payload" in *"availability-watchdog heartbeat"*) is_hb=1 ;; esac ;;
+  */issues/*)
+    [ "${path##*/}" = "${STUB_HEARTBEAT_ISSUE:-7000}" ] && is_hb=1 ;;
+esac
+if [ "$is_hb" = "1" ]; then
+  echo "GH-HEARTBEAT $method ${path%%\?*}" >> "$STUB_TMP/calls.log"
+else
+  echo "GH $method ${path%%\?*}" >> "$STUB_TMP/calls.log"
+fi
 
 case "$path" in
   search/issues*)
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
+    # #4573: the LIFENESS heartbeat search is a THIRD search shape (the incident
+    # dedupe and the cross-incident ledger are the other two). Answer it from its
+    # OWN fixture and log it under its own prefix so no incident assertion is
+    # perturbed. Default: no heartbeat issue open → the watchdog creates one.
+    case "$path" in
+      *heartbeat*)
+        [ "${STUB_HEARTBEAT_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: heartbeat search failed" >&2; exit 1; }
+        echo "GH-HEARTBEAT-Q paginate=${paginate} $path" >> "$STUB_TMP/calls.log"
+        printf '%s' "${STUB_HEARTBEAT_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}"
+        exit 0 ;;
+    esac
     case "$path" in
       *is%3Aopen*) : ;;
       *) [ "${STUB_LEDGER_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: ledger search failed" >&2; exit 1; } ;;
@@ -304,10 +337,30 @@ case "$path" in
     printf '%s' "$payload" | jq -c . >> "$STUB_TMP/comments.log"
     printf '{}' ;;
   */issues)
+    # #4573: the rolling heartbeat CREATE is routed to its own store, so no
+    # incident assertion (created.json / its post-count) sees it.
+    if [ "$is_hb" = "1" ]; then
+      printf '%s' "$payload" | jq -c . > "$STUB_TMP/heartbeat-created.json"
+      [ "${STUB_HEARTBEAT_CREATE_FAIL:-0}" = "1" ] && { echo "gh: heartbeat create failed" >&2; exit 1; }
+      printf '{"number":%s}' "${STUB_HEARTBEAT_ISSUE:-7000}"
+      exit 0
+    fi
     printf '%s' "$payload" | jq -c . > "$STUB_TMP/created.json"
     [ "${STUB_CREATE_FAIL:-0}" = "1" ] && { echo "gh: create failed" >&2; exit 1; }
     printf '{"number":%s}' "${STUB_NEW_ISSUE:-900}" ;;
   */issues/*)
+    # #4573: the heartbeat ISSUE read/write is routed away from the incident
+    # store, so `GH PATCH …` / `issue.json` assertions stay exact.
+    if [ "$is_hb" = "1" ]; then
+      if [ "$method" = "GET" ]; then
+        if [ -f "$STUB_TMP/heartbeat-issue.json" ]; then cat "$STUB_TMP/heartbeat-issue.json"; else printf '{"body":""}'; fi
+      else
+        [ "${STUB_HEARTBEAT_PATCH_FAIL:-0}" = "1" ] && { echo "gh: heartbeat patch failed" >&2; exit 1; }
+        printf '%s' "$payload" | jq -c . >> "$STUB_TMP/heartbeat-patched.log"
+        printf '{}'
+      fi
+      exit 0
+    fi
     if [ "$method" = "GET" ]; then
       [ "${STUB_GET_BODY_FAIL:-0}" = "1" ] && { echo "gh: body read failed" >&2; exit 1; }
       # A PER-ISSUE body store (round 4): the fail-closed ledger retry reads BOTH
@@ -403,9 +456,12 @@ reset_case() {
   : > "$STUB_TMP/calls.log"
   rm -f "$STUB_TMP/stderr.log"
   rm -f "$STUB_TMP/probe.count" "$STUB_TMP/control.count" "$STUB_TMP/created.json" "$STUB_TMP/patched.log" \
-        "$STUB_TMP/comments.log" "$STUB_TMP/issue.json" "$STUB_TMP"/issue.*.json
+        "$STUB_TMP/comments.log" "$STUB_TMP/issue.json" "$STUB_TMP"/issue.*.json \
+        "$STUB_TMP/heartbeat-created.json" "$STUB_TMP/heartbeat-patched.log" "$STUB_TMP/heartbeat-issue.json"
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
+        STUB_HEARTBEAT_SEARCH_JSON STUB_HEARTBEAT_SEARCH_FAIL STUB_HEARTBEAT_CREATE_FAIL \
+        STUB_HEARTBEAT_PATCH_FAIL STUB_HEARTBEAT_ISSUE GITHUB_EVENT_NAME HEARTBEAT_ENABLED \
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER STUB_LEDGER_SEARCH_FAIL \
         STUB_PROBE_RC STUB_PROBE_STDERR STUB_PROBE_HEADERS \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
@@ -488,6 +544,16 @@ scrub_unit() { # <text> <max>
 # rejoining a wrapped fragment first.
 redact_unit() { # <text>
   WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; redact_text "$1"' "$WATCHDOG" "$1"
+}
+
+# A heartbeat search result item as PRODUCTION would return it: authored by the
+# GitHub Actions bot with the heartbeat title and the heartbeat body marker.
+# search_json() cannot be reused (it carries the INCIDENT marker, so the
+# heartbeat adoption check would correctly reject it).
+heartbeat_search_json() { # <number> [title] [login]
+  local n="${1:-7000}" t="${2:-$HEARTBEAT_TITLE_FIXTURE}" l="${3:-github-actions[bot]}"
+  printf '{"items":[{"number":%s,"title":"%s","body":"%s","user":{"login":"%s","type":"Bot"}}]}' \
+    "$n" "$t" "$HEARTBEAT_MARKER_FIXTURE" "$l"
 }
 
 # seed an existing open incident in the stub's issue store.
@@ -2918,6 +2984,91 @@ PENDING_NOTE="$(WATCHDOG_LIB_ONLY=1 bash -c '
 ' "$WATCHDOG")"
 assert_contains "$PENDING_NOTE" "being attempted" "note: escalate_state=pending renders the 'being attempted' text (the crash-between-PATCHes story)"
 assert_not_contains "$PENDING_NOTE" "A human was paged" "note: …and does NOT claim a human was reached"
+
+# ── #4573: the rolling pager-liveness heartbeat ───────────────────────────
+# A liveness check that cannot fail is the defect restated, so these pin the
+# EMISSION contract that the independent checker (availability-liveness.sh)
+# reads. They are mutation-sensitive by construction: delete the emit_heartbeat
+# call (or its scheduled-run guard) and every case below goes red.
+hb_created() { [ -f "$STUB_TMP/heartbeat-created.json" ] && cat "$STUB_TMP/heartbeat-created.json" || echo '{}'; }
+hb_patched() { [ -f "$STUB_TMP/heartbeat-patched.log" ] && jq -r -s 'last.body // ""' "$STUB_TMP/heartbeat-patched.log" || echo ''; }
+
+# (hb1) a healthy scheduled run records a heartbeat the checker can read.
+reset_case
+export STUB_PROBE_CODES="200"
+run_watchdog
+assert_eq "$RC" "0" "hb1: UP run still exits 0"
+assert_contains "$(hb_created)" "availability-watchdog-heartbeat" "hb1: heartbeat body carries the liveness marker the checker searches on"
+assert_contains "$(hb_created)" "heartbeat_at=" "hb1: heartbeat body carries the parseable heartbeat_at field"
+assert_contains "$(hb_created)" "heartbeat_epoch=" "hb1: …and the epoch field (no date parsing on the read side)"
+assert_contains "$(hb_created)" "verdict=UP" "hb1: heartbeat records the verdict"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "hb1: the heartbeat did NOT go through the incident create path"
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb1: exactly one heartbeat record written"
+
+# (hb2) a DOWN run ALSO heartbeats. This is the assertion that distinguishes
+# "the monitor ran" from "the service was up": emitting only on success would
+# page about the pager during every real outage (a working pager is red then).
+reset_case
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$RC" "1" "hb2: DOWN run still exits 1 (the incident remains the alert)"
+assert_contains "$(hb_created)" "verdict=DOWN" "hb2: a DOWN run STILL records a heartbeat (the monitor is alive)"
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb2: …exactly once"
+
+# (hb3) a NON-scheduled run (drill / manual dispatch) must NOT refresh the
+# dead-man switch: it proves the SCRIPT works, not that the SCHEDULE delivers,
+# and a dropped/disabled schedule is the failure surface being watched.
+reset_case
+export STUB_PROBE_CODES="200"
+export GITHUB_EVENT_NAME="workflow_dispatch"
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT')" "0" "hb3: workflow_dispatch writes NO heartbeat (only a schedule proves the schedule)"
+assert_contains "$OUT" "heartbeat: skipped" "hb3: …and says why"
+
+# (hb4) an existing rolling heartbeat issue is UPDATED, never duplicated.
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_SEARCH_JSON="$(heartbeat_search_json 7000)"
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "0" "hb4: an open heartbeat issue → NO new issue (dedupe by title+marker+author)"
+assert_eq "$(count_calls 'GH-HEARTBEAT PATCH')" "1" "hb4: …instead it PATCHes the rolling record"
+assert_contains "$(hb_patched)" "heartbeat_at=" "hb4: the PATCH carries a fresh heartbeat_at"
+
+# (hb4b) a FORGED heartbeat issue (human author) is never adopted — otherwise a
+# stranger on a public repo could claim the pager is alive (a fail-OPEN mute).
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_SEARCH_JSON="$(heartbeat_search_json 7000 "$HEARTBEAT_TITLE_FIXTURE" "attacker")"
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT PATCH')" "0" "hb4b: a human-authored look-alike is NOT adopted (never PATCHed)"
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb4b: …a fresh machine record is filed instead"
+
+# (hb5/hb6) the heartbeat is BEST-EFFORT: the checker is fail-closed on the
+# read side, so a write/search failure must not redden an otherwise-green
+# monitor — it must be LOUD instead (the staleness itself will alarm).
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_CREATE_FAIL=1
+run_watchdog
+assert_eq "$RC" "0" "hb5: a heartbeat CREATE failure does NOT fail a healthy run"
+assert_contains "$OUT" "heartbeat: could not create" "hb5: …but it is logged loudly"
+
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_SEARCH_FAIL=1
+run_watchdog
+assert_eq "$RC" "0" "hb6: a heartbeat SEARCH failure does NOT fail a healthy run"
+assert_contains "$OUT" "heartbeat: search failed" "hb6: …but it is logged loudly"
+
+# (hb7) the operator kill switch records nothing (and the checker will then
+# alarm BY DESIGN — a silence is never an all-clear).
+reset_case
+export STUB_PROBE_CODES="200"
+export HEARTBEAT_ENABLED=0
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT')" "0" "hb7: HEARTBEAT_ENABLED=0 writes nothing"
+assert_contains "$OUT" "heartbeat: disabled" "hb7: …and says so"
 
 # ── unit: the gh stub's argument loop ALWAYS makes progress ────────────────
 # `--method` / `--jq` as the LAST argument used to make `shift 2` fail, and a
