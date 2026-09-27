@@ -37,7 +37,12 @@
 #     16. alert search fails                    → exit 1, no create/close
 #     17. missing GH_TOKEN                       → exit 1 before any gh call
 #     18. HEARTBEAT_MAX_AGE_MIN garbage/0        → normalized to the measured default
+#     18f/18g/18h. int-overflow values (threshold, heartbeat_epoch, epoch:) are
+#         unparseable → the default / STALE, never a wrapped-negative "LIVE"
 #     19. the produced alert body NAMES the channel independence (not Telegram)
+#   Fail-closed side effects
+#     21. a stale alert that CANNOT be filed    → exit 1 (the run is the alert)
+#     22. a recovery comment that fails          → exit 1 (not silent)
 #   Parity
 #     20. the heartbeat TITLE + MARKER match the watchdog's byte-for-byte
 #         (a rename on one side would otherwise alarm forever)
@@ -266,6 +271,7 @@ printf '{"body":"%s\\nheartbeat_at=%s\\nheartbeat_epoch=%s\\n"}' "$HEARTBEAT_MAR
 export STUB_HB_SEARCH_JSON="$(printf '{"items":[{"number":7000,"title":"%s","body":"%s","user":{"login":"github-actions[bot]","type":"Bot"}}]}' "$HEARTBEAT_TITLE_FIXTURE" "$HEARTBEAT_MARKER_FIXTURE")"
 run_checker
 assert_eq "$RC" "0" "8: a future-stamped heartbeat → clamped to now, exit 0"
+assert_contains "$OUT" "heartbeat is 0 min old" "8: …the age is CLAMPED to 0 (an unclamped future stamp would log a negative age)"
 
 # 9. no record + an ESTABLISHED workflow → alarm.
 reset_case
@@ -348,24 +354,28 @@ seed_heartbeat 30
 export HEARTBEAT_MAX_AGE_MIN=0
 run_checker
 assert_eq "$RC" "0" "18: HEARTBEAT_MAX_AGE_MIN=0 is normalized to the default (a 30-min heartbeat stays fresh)"
+assert_contains "$OUT" "threshold=90 min" "18: …and the ACTIVE threshold is the measured default 90 (not an empty/raw fallback)"
 
 reset_case
 seed_heartbeat 30
 export HEARTBEAT_MAX_AGE_MIN=2h
 run_checker
 assert_eq "$RC" "0" "18b: '2h' is REJECTED to the 90-min default, not digit-stripped to 2 min"
+assert_contains "$OUT" "threshold=90 min" "18b: …the ACTIVE threshold is 90 (mutation D: a %s fallback of '' errors the compare and mutes the check)"
 
 reset_case
 seed_heartbeat 30
 export HEARTBEAT_MAX_AGE_MIN=-1
 run_checker
 assert_eq "$RC" "0" "18c: '-1' is rejected to the default, not read as 1 min"
+assert_contains "$OUT" "threshold=90 min" "18c: …the ACTIVE threshold is 90, not the raw token"
 
 reset_case
 seed_heartbeat 30
 export HEARTBEAT_MAX_AGE_MIN=1.5h
 run_checker
 assert_eq "$RC" "0" "18d: '1.5h' is rejected to the default, not read as 15 min"
+assert_contains "$OUT" "threshold=90 min" "18d: …the ACTIVE threshold is 90, not 15"
 
 # 18e. a VALID explicit integer is honoured (the fix is validation, not a mute
 # that always returns the default). 60 min > the 30-min heartbeat → fresh; and
@@ -395,6 +405,15 @@ seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=99999999999999999999
 run_checker
 assert_eq "$RC" "1" "18g: an unbounded heartbeat_epoch is unparseable → STALE (an int-wrap must not read as LIVE)"
 
+# 18h. the iso_to_epoch `epoch:` overflow guard is the SIBLING of 18g — the
+# watchdog's fmt_iso fallback can write `heartbeat_at=epoch:<n>`, so this path is
+# production-reachable, and an unbounded value would wrap the same way.
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_at=epoch:99999999999999999999\\n"}' "$HEARTBEAT_MARKER_FIXTURE")"
+run_checker
+assert_eq "$RC" "1" "18h: an unbounded heartbeat_at=epoch: is unparseable → STALE (the iso_to_epoch sibling of 18g)"
+assert_contains "$OUT" "heartbeat-record-unparseable" "18h: …reason is unparseable, not a wrapped-negative age"
+
 # 19. the alert body names the channel independence (the load-bearing property).
 reset_case
 seed_heartbeat 400
@@ -411,6 +430,25 @@ checker_title="$(grep -m1 '^HEARTBEAT_TITLE=' "$CHECKER" | cut -d= -f2- | tr -d 
 checker_marker="$(grep -m1 '^HEARTBEAT_MARKER=' "$CHECKER" | cut -d= -f2- | tr -d "'\"")"
 assert_eq "$checker_title" "$watchdog_title" "20: HEARTBEAT_TITLE matches the watchdog's"
 assert_eq "$checker_marker" "$watchdog_marker" "20: HEARTBEAT_MARKER matches the watchdog's"
+
+# 21. a stale heartbeat whose alert CANNOT be filed still fails the run (the
+# failing run IS the alert). STUB_ALERT_CREATE_FAIL was a dead seam until now.
+reset_case
+seed_heartbeat 200
+export STUB_ALERT_CREATE_FAIL=1
+run_checker
+assert_eq "$RC" "1" "21: stale but the alert issue cannot be filed → exit 1 (the run itself is the alert)"
+assert_contains "$OUT" "could not be filed" "21: …and NAMES the un-fileable alert (not just the generic stale failure)"
+
+# 22. a recovery whose 'Recovered' comment fails is not silent.
+reset_case
+seed_heartbeat 3
+seed_open_alert 500
+export STUB_COMMENT_FAIL=1
+run_checker
+assert_eq "$RC" "1" "22: recovered and closed, but the Recovered comment failed → exit 1 (not silent)"
+assert_contains "$(patched_all)" "CLOSE 500" "22: …the close itself succeeded; only the comment failed"
+assert_contains "$OUT" "Recovered' comment failed" "22: …and NAMES the failed recovery comment"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
