@@ -296,6 +296,21 @@ def test_heartbeat_block_shape(monkeypatch):
     assert PROD_URL not in blob and PROD_KEY not in blob
 
 
+def test_heartbeat_age_is_clamped_non_negative(monkeypatch):
+    """A delivery landing between the read of the clock and the read of the
+    stamp must not publish a NEGATIVE age. The driver reads a negative age as
+    "not yet established" and would then leave a genuinely resolved incident
+    open for a whole cadence; the block clamps instead (R2 bug-scan P4)."""
+    _prod_env(monkeypatch)
+    # A stamp in the future is the adversarial form of that interleaving.
+    monkeypatch.setattr(ha, "_ANALYTICS_LAST_DELIVERED_AT", datetime.now(UTC) + timedelta(seconds=30))
+
+    block = ha._analytics_heartbeat_block()
+
+    assert block["age_s"] == 0.0, f"age must be clamped to 0, got {block['age_s']}"
+    assert block["last_delivered_at"] is not None
+
+
 def test_heartbeat_block_is_cold_start_safe(monkeypatch):
     """No delivered write YET is ``age_s=None`` (a fabricated boot seed would
     be a last-attempt stamp) — the driver disambiguates with ``uptime_s``."""
@@ -328,7 +343,7 @@ def _status(**env):
 
     from fastapi.testclient import TestClient
 
-    old = {k: os.environ.get(k) for k in env}
+    old = {k: os.environ.get(k) for k in ("FASTAPI_INTERNAL_KEY", *env)}
     os.environ["FASTAPI_INTERNAL_KEY"] = "test-internal-3944"
     os.environ.update({k: v for k, v in env.items() if v is not None})
     try:

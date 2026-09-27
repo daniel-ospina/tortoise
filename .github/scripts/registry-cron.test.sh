@@ -135,6 +135,8 @@
 #  90. #3944: a cold start must NOT RESOLVE an open incident (no delivered
 #      write yet — resolving would delete the dedup object on zero evidence)
 #  91. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
+#  92. #3944: an exponent-notation age is NOT a measurement (truncation must
+#      not read as fresh) — it files on the stale uptime and never resolves
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1971,6 +1973,27 @@ assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "91. an unmeasurable block does NOT resolve the open incident"
 assert_contains "$OUT" "analytics heartbeat not yet established" \
   "91. the log reports the record as unestablished, not fresh"
+
+# ── 92. #3944: an exponent-notation age is NOT a measurement ───────────────
+# R2 (bug-scan P3): `${x%.*}` truncates, and jq prints 1.2e16 as `1.2E+16` —
+# whose integer part truncates to `1` and would compare UNDER any threshold,
+# RESOLVING an open incident on a grossly stale age. The operand shape is now
+# validated, so this reads as unmeasurable-for-age and the stale `uptime_s`
+# supplies the verdict: file, never resolve.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 1.2e16 10000)"
+run_driver
+assert_eq "$RC" 1 "92. an exponent-notation age reds the run (stale uptime)"
+# The open incident (#321) is adopted rather than re-filed, so assert the
+# DECISION from the log line, not a POST.
+assert_contains "$OUT" "analytics sink silent (age=1.2E+16s" \
+  "92. an uncomparable age is not read as fresh"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "92. a truncated non-decimal age NEVER resolves the open incident"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
