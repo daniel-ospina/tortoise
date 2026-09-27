@@ -1,6 +1,10 @@
 # Plan-review cycle board — #5215 merge-throughput plan (lane: merge-throughput-plan)
 # Fresh-context reviewers dispatched via `task` (pi -p), one per role per cycle.
 # Written by the plan lane. The plan doc carries the matching `[ADVERSARIAL-BOUND]` line.
+#
+# REWRITTEN 2026-09-26 (cycle 10) by the plan-residual lane. The predecessor board was accurate
+# through cycle 5 and was NOT updated for cycles 6-9; this file now covers all ten cycles. The
+# plan body is the source of the per-cycle detail (§14 Changelog); this board is the review STATE.
 
 plan: docs/plans/2026-09-26-5215-merge-throughput.md
 scoping: docs/scoping/2026-09-26-5215-merge-throughput.md
@@ -11,30 +15,33 @@ tier: high
 clean: false
 exit_reason: >-
   ESCALATION EXIT — NOT CLEAN. The plan declares an `### Adversarial Threat Surface`
-  (§7, TH1–TH7), so the plan-review skill's **adversarial domain** applies: bounded by that
-  surface with a **cap of 2 cycles**, and its clean exit is a fresh reviewer returning
-  `THREAT SURFACE COVERED` — not a literal `NO ISSUES FOUND`. This lane ran **5 cycles** (cap
-  exceeded at cycle 3) and the cycle-5 adversarial reviewer returned **ISSUES**, not
-  `THREAT SURFACE COVERED`. A cap/cap-exceeded exit that leaves issues unresolved is an
-  ESCALATION, never a completion, and is recorded here so the artifact cannot be read as clean.
-  All MECHANICAL findings and both cycle-4 P0s were fixed; the residuals below remain open and
-  must be acknowledged by a human before the plan is executed.
+  (§7, TH1–TH7, 8 vectors once TH4 is split), so the plan-review skill's **adversarial domain**
+  applies: bounded by that surface with a **cap of 2 cycles**, and its clean exit is a fresh
+  reviewer returning `THREAT SURFACE COVERED` — not a literal `NO ISSUES FOUND`.
+  The cap was exceeded at cycle 3. **Ten cycles have now run and the adversarial reviewer has
+  returned `THREAT SURFACE COVERED` in NONE of them** (cycles 4–9 each returned `ISSUES` with a
+  substantive bypass; cycle 10's re-review is dispatched, not yet returned). A cap-exceeded exit
+  that leaves issues unresolved is an ESCALATION, never a completion, and is recorded here so the
+  artifact cannot be read as clean. All P0s found in cycles 4–9 were fixed; the residuals below
+  remain open and must be acknowledged by a human before the plan is executed.
 
-also_reached: adversarial-cap-exceeded   # cap is 2; reached 5
-cycles: 5
-reviewers_per_cycle: [5, 5, 5, 5, 3]     # cycle 5 = adversarial gate + vacuity + contract
-plan_modified_per_cycle: [true, true, true, true, true]
+also_reached: adversarial-cap-exceeded   # cap is 2; reached 10 (cycles 4-9 all ISSUES)
+cycles: 10
+reviewers_per_cycle: [5, 5, 5, 5, 3, 6, 6, 4, 4, 4]   # c5/c8/c9/c10 = adversarial gate + vacuity + failure-mode + contract
+plan_modified_per_cycle: [true, true, true, true, true, true, true, true, true, true]
 
 # DISTINCT-after-dedup basis, NOT raw. Deliberately one basis; do not mix.
-issues_per_cycle: [30, 40, 25, 45, 29]
+# Cycles 9 and 10 are the same reviewer set; cycle 10's count is the pre-fix cycle-9 set.
+issues_per_cycle: [30, 40, 25, 45, 29, 10, 15, 24, 18, 18]
 
 # Recurrence is |current ∩ prev| / |prev| on (location, severity) hashes.
-# Cycle 5 recurrence is HIGH: four issues recurred at sites this lane had CLAIMED fixed in
-# cycle 4 but had only half-fixed (an appended correction rather than a replacement, or a
-# duplicate copy left in the other document). That is a mechanical discipline failure in the
-# FIXER, not a research failure — the fixes are now applied as replacements.
-fingerprint_recurrence_cycle5: 0.55
-detector_fired: honest-stuck-adjacent   # high recurrence + cap exceeded ⇒ escalate, do not auto-exit
+# Cycle 7 recurrence is HIGH on ONE site (the §3 I10 row kept the predicate the cycle-6 fix had
+# replaced everywhere else — the append-not-replace defect at the AUTHORITATIVE site).
+# Cycles 8 and 9 recurrence is the same defect one layer down: I10's *mechanism* kept passing the
+# reviewers' bypass, which is why cycle 10 replaced the mechanism instead of patching it again.
+fingerprint_recurrence_cycle7: 0.40
+fingerprint_recurrence_cycle9: 0.35
+detector_fired: honest-stuck   # high recurrence + cap exceeded + no COVERED verdict ⇒ escalate
 
 # ── CYCLE LOG ──────────────────────────────────────────────────────────────────
 cycles_log:
@@ -51,54 +58,137 @@ cycles_log:
       The S-criteria were VACUOUS (all `| jq -e` pipelines passed on the "UNKNOWN" sentinel) →
       the instrument now owns the exit-code contract (check <name> → 0/1/2) with a three-way test.
       I2 made mode-aware; grouping keyed on (app, workflow, name); the rail parity check
-      reclassified as operational (scripts/ is an unresolvable absolute symlink at runtime);
-      D9 corrected to defer to #3467's recorded decision; ⟨C4⟩ (main's red is a defect); added the
-      durations bridge (Task 4b), I9, Task 8/D13, TH7, mergify_mergeable vs main_gate.
+      reclassified as operational; D9 corrected to defer to #3467's recorded decision; ⟨C4⟩
+      (main's red is a defect); added the durations bridge (Task 4b), I9, Task 8/D13, TH7.
   - cycle: 3
     verdict: 5 × ISSUES (no P0)
     applied: >-
       Completed the CLI contract (17 checks + full grammar); corrected the "five contexts never
-      report on a queue head" claim (empirically false — verified on queue batch PR #5639); resolved
-      the 8-vs-9 task-count contradiction in favour of Parallel Session; attributed the guard to
-      Task 4 (was Task 5 in five places); numbered Task 4's static sub-clauses; made the grouping
-      test discriminating; reconciled the S3/S4/falsifier thresholds; named Daniel in all 13
-      decision rows; resynced the scoping doc.
+      report on a queue head" claim (empirically false — verified on queue batch PR #5639);
+      resolved the 8-vs-9 task-count contradiction; attributed the guard to Task 4; numbered Task 4's
+      static sub-clauses; made the grouping test discriminating; reconciled the S3/S4/falsifier
+      thresholds; named Daniel in all decision rows; resynced the scoping doc.
   - cycle: 4
-    verdict: 5 × ISSUES — 2 fresh P0s
+    verdict: 5 × ISSUES — 2 fresh P0s; adversarial cap exceeded
     findings_of_note: >-
       P0-1 I1 could never pass (mixed Mergify non-check conditions with GitHub status contexts).
       P0-2 S9 was vacuous ({items: [], total_count: 0} ⇒ exit 0, and a unit test pinned it).
       Three P1s were INTRODUCED BY CYCLE-3 FIXES: Task 8 was made I1's re-verifier (an admin read
-      inside CI, which Task 4 forbids); Task 4b's bidirectional key agreement was unsatisfiable;
-      TH7's home (#4606) was wrong — #4606 is CLOSED (2026-09-25).
+      inside CI, which Task 4 forbids); Task 4b's key agreement was unsatisfiable; TH7's home
+      (#4606) was wrong — #4606 is CLOSED (2026-09-25).
     applied: >-
       I1 scoped to check-conditions with a green fixture; S9 given --min-population + the vacuous
-      test inverted; I1's freshness moved to a MANUAL dated operational step (Task 8 covers only the
-      five main signals — no admin secret enters Actions); Task 4b one-way (collector_keys ⊆ yml_keys)
-      with the existing DURATION_COVERAGE_MIN = 0.90 floor; Task 4 two-step rollout (the base-ref pin
-      deadlocked the PR that creates the guard); TH7 residual FILED as #5649 and cited; S1/S3/S5/S6/
-      S7/S10/S11/S13/S14/S15 made non-vacuous; I9 redefined; TH4 delegated to #5570.
+      test inverted; I1's freshness moved to a MANUAL dated operational step; Task 4b one-way
+      (collector_keys ⊆ yml_keys) with DURATION_COVERAGE_MIN = 0.90; TH7 residual FILED as #5649;
+      S1/S3/S5/S6/S7/S10/S11/S13/S14/S15 made non-vacuous; I9 redefined; TH4 delegated to #5570.
   - cycle: 5
-    verdict: 3 × ISSUES — adversarial gate returned ISSUES, NOT `THREAT SURFACE COVERED`
+    verdict: 4 × ISSUES — adversarial gate returned ISSUES, NOT `THREAT SURFACE COVERED`
     findings_of_note: >-
       1 P0: S7's cycle filter used the run's conclusion, but a docs-only selector-skipped run
       CONCLUDES `success`, so a 3-minute docs-only run passed `cycle ≤ 30`.
-      Recurrence: four sites claimed fixed in cycle 4 were only half-fixed (S8's `--and check` form
-      in §11; the §2.2 `welcome-e2e-monitor` leg — a correction APPENDED beside the stale text; the
-      scoping-doc TH6 union form; the scoping-doc TH7 bullet claimed but never added).
-      Adversarial: TH6 uncovered (only a manual detector; `.github/settings.yml` unguarded and
-      declares one context, not six); TH4 detect-only (delegated); TH7 fail-vain until promotion.
+      Recurrence: four sites claimed fixed in cycle 4 were only half-fixed (an appended correction
+      rather than a replacement, or a duplicate copy left in the other document).
+      Adversarial: TH6 uncovered; TH4 detect-only; TH7 fail-vain until promotion.
     applied: >-
-      S7 keyed on the HEAVY leg's conclusion, N ≥ 5; I1's RHS fixed to bare names (the .split raised
-      IndexError on "docs"); I2 exits 2 on an unrecognised injection mode; I9's predicates unified;
-      `--strict` / `--max-oldest-minutes` / `--min-headroom` added to the grammar; `--min-population`
-      given a concrete value (the open-PR total); `--require-fresh` split into window AND sha-binding;
-      `--or-artifact` requires a typed int, single occurrence, in the anchored section; S1 requires
-      ≥1 observed `success`; Task 4b gained a collector-side floor; Task 4's promotion is an owned
-      deliverable (N=10, owner, artifact) with step-level continue-on-error only; clause (vii)
-      downgraded to detect-only; clause (viii) added for .github/settings.yml; `safety-invariants`
-      dropped (18 → 17 checks); Task 8 Sequencing names Task 4. All four recurrence sites REPLACED,
-      not appended.
+      S7 keyed on the HEAVY leg's conclusion, N ≥ 5; I1's RHS fixed to bare names; I2 exits 2 on an
+      unrecognised injection mode; I9's predicates unified; `--strict`/`--max-oldest-minutes`/
+      `--min-headroom` added; `--require-fresh` split into window AND sha-binding; `--or-artifact`
+      requires a typed int; S1 requires ≥1 observed `success`; Task 4b gained a collector-side floor;
+      clause (vii) downgraded to detect-only; clause (viii) added for .github/settings.yml;
+      `safety-invariants` dropped (18 → 17 checks). All four recurrence sites REPLACED.
+  - cycle: 6
+    verdict: 6 × ISSUES — adversarial gate NOT `THREAT SURFACE COVERED`; 2 P0s + 8 P1s
+    findings_of_note: >-
+      P0 (adversarial): I10 claimed to force a live re-read, but a committed record is hand-writable
+      — it removes the SILENCE of an entry-gate change, not the need for the live read.
+      P0 (vacuity): S15's floor was a caller-supplied shell value ("$OPEN_TOTAL") that empty-expands
+      to 0, reinstating `0 == 0`.
+      P0 (failure-mode, INTRODUCED BY CYCLE 6): a single required step running the base guard against
+      the head config makes one wrong clause a repo-wide merge freeze with no bypass-free recovery.
+    applied: >-
+      I10 reframed as a silence detector with the live re-read promoted to D14 (owned, dated);
+      S15/S9/S7 given structural floors; the TH7 pin reworked to inventory + base-self-consistency;
+      TH1/TH3/TH4(b)/TH7 declared out of bound with owners; I9 unified in S14/T-G/Task 4b; S8 given
+      heavy-leg + durations-map requirements; S11 gained `--require-fresh`; S1's NO_MAIN_SIGNAL
+      arithmetic stated; Task 8's emission mechanism named; the wave map given one-writer-per-file.
+  - cycle: 7
+    verdict: 6 × ISSUES — adversarial gate NOT `THREAT SURFACE COVERED`; 3 P0s + ~12 P1s
+    findings_of_note: >-
+      P0-1 (two reviewers independently): §3's I10 row still read `sha == live_main_sha` while §7 /
+      clause (viii)(a) / the scoping doc said the base ref's sha — the append-not-replace defect at
+      the AUTHORITATIVE site.
+      P0-2 (adversarial): I10's trigger compared only the mode + the check-success name set, so
+      deleting a NON-CHECK entry condition (`-draft`, with `auto_merge_conditions: true` silently
+      auto-queuing drafts — the E4 state) left no record diff.
+      P0-3 (failure-mode + integration): `manifest-integrity` also runs on `push:[main]`, where
+      `github.base_ref` is empty — a literal "base-ref-unavailable ⇒ fail closed" reading would have
+      reddened main on every post-merge push.
+    applied: >-
+      I10 replaced (base ref's sha + the FULL condition list); the TH7 pin made fetch-aware with
+      empty-base ⇒ HEAD; clause (vii) rewritten from an evasion list to a structural rule;
+      `--min-population` gained MIN_OPEN_PR_POPULATION; S4 given a derived ceiling; Task 8's
+      workflow_call given a `main_health` input + `secrets: inherit`; the `--and` production widened;
+      §5's blanket 7-day window made per-row.
+  - cycle: 8
+    verdict: 4 × ISSUES — adversarial gate NOT `THREAT SURFACE COVERED`; 3 P0s (two independent)
+    findings_of_note: >-
+      Two independent reviewers showed I10 was NOT a detector: a union-only condition comparison let
+      a SECOND `queue_rule` through; a config-only comparison let a SECOND job named `python-ci-gate`
+      (in ci.yml) through with no config diff; the record requirement was CONTENT-FREE, so a
+      verified_at-only re-stamp passed; and `git diff "$BASE"...HEAD` has NO MERGE BASE in the
+      depth-1 `manifest-integrity` checkout — in a required job that is either a total merge freeze
+      or (under the repo's `|| true` idiom) a permanently dead detector.
+      P0 (vacuity): S4's `round(parallel × batch × 60 / cycle)` is PRs per HOUR, so the
+      reconciliation certified a 24×-understated ceiling and REJECTED the correct one.
+    applied: >-
+      I10 scoped to the gate's definition (whole `.mergify.yml` + the emitter map, content-matched);
+      clause (vii) made to scan every managed .gitattributes, pin the containing JOB's pull_request
+      path, and require a real --paths set; S4's constant fixed to 1440; S13's provenance claim made
+      honest; `incomplete_results: true` added; `baseline-fresh` given a consumer; `--min-depth`
+      bound to batch-size; `--require-fresh` given a PR-head form.
+  - cycle: 9
+    verdict: 4 × ISSUES — adversarial gate NOT `THREAT SURFACE COVERED`; 4 P0s + ~14 P1/P2s
+    findings_of_note: >-
+      The cycle-9 I10 was STILL not a detector: its pass condition compared only
+      `required_contexts`/`emitters` to the head, so a NON-CHECK condition change (a removed
+      `-draft` + `auto_merge_conditions: true`) carried a MATCHING record and passed on a
+      `verified_at` bump; the emitter map parsed `*.yml` only.
+      TWO NEW FREEZE VECTORS: (a) `manifest-integrity` runs `ci_selection.py --integrity`, which
+      fails on any `tests/**/test_*.py` not listed in `config/ci-surfaces.yml` — the plan's own
+      Wave-0 PR would never go green, because no Files line registered the new test file;
+      (b) `base_sha == github.event.pull_request.base.sha` CANNOT hold on a `mergify/merge-queue/*`
+      head (its base is main's tip at batch creation, not the author's), so I10 would have red
+      `python-ci-gate` PERMANENTLY on the queue for exactly the gate-definition PRs — including the
+      plan's own first lever #5384a.
+      Also: the claimed revert recovery was FALSE (Actions evaluates the workflow from the PR's merge
+      ref); `settings_home_consistent: true` would red main on every push; S6 omitted the
+      `--min-depth` its grammar bound; S8's 0.90 floor was unsatisfiable on a top-15 projection;
+      S4's tolerance and term units were unpinned; `--require-fresh` was undefined for S3/S6/S7/S9/S15.
+    applied: >-
+      See cycle 10 below — the mechanism was REPLACED rather than patched again.
+  - cycle: 10
+    verdict: DISPATCHED (adversarial gate + vacuity + failure-mode + contract) — verdict NOT YET RETURNED
+    applied: >-
+      REDESIGN: I10's entire diff/base-ref apparatus is DELETED and replaced by a HEAD-COMPUTED
+      `gate_digest = sha256(canonical(entry-gate projection))` over all `queue_rules[*]` (names AND
+      full condition lists), `merge_conditions`, the effective `branch_protection_injection_mode`,
+      `autoqueue`/`auto_merge_conditions`, and the emitter map (`.github/workflows/*.yml` AND
+      `*.yaml`); I10 asserts `gate_digest(head) == record.gate_digest` plus a fresh `verified_at`.
+      This closes the content-free re-stamp, the second-queue_rule / second-emitter evasions, and the
+      queue-head deadlock AT ONCE; no base fetch and no `fetch-depth: 0` are needed, so
+      `manifest-integrity` keeps its depth-1 checkout and its 5-minute budget.
+      FREEZE FIXES: `config/ci-surfaces.yml` registration added to Task 1's and Task 4's Files lines;
+      `settings_home_consistent` explicitly defaulted false/absent with the reason.
+      Also: clause (vii) scans every managed .gitattributes, pins the containing job's
+      `pull_request` path (a job gated off `mergify[bot]` no longer escapes) and requires the real
+      `--paths` set; the revert-recovery claim corrected; `required-contexts.json` unified to ONE
+      schema (gate_digest / required_contexts / emitters / verified_at / read_sha, read_sha
+      provenance-only); S6 gains `--min-depth 1`; S8's floor becomes a NON-EMPTY projection with the
+      0.90 coverage floor moved to the manifest side; S4 pins `cycle_minutes` and a ±10% tolerance
+      numerically; `incomplete_results: true ⇒ 2` added to the instrument contract; `--require-fresh`
+      given a stored-record / live-read / PR-head form set; the Wave-0 "no other task writes" claim
+      corrected to PER WAVE; Task 4b sequencing names M2 + M4; and the scoping doc's base-ref,
+      conflict-arithmetic and TH6 residues resynced.
 
 # ── RESIDUAL ISSUES (open; must be acknowledged before execution) ──────────────
 residuals:
@@ -106,54 +196,77 @@ residuals:
     severity: high
     threat: TH6
     issue: >-
-      TH6 has no mechanical detector in CI. The only live required-set check is the manual,
-      quarterly operational clause; `.github/settings.yml` — the home #3467 designated — declares
-      `required_status_checks.contexts: [redis-guard]` (one context, not the live six) and is read
-      by no test or workflow. Task 4 clause (viii) will add a static assertion OR record the file as
-      inert — but that choice is unresolved.
+      TH6 (silent entry-gate change) is claimed COVERED by I10's cycle-10 `gate_digest`, but that
+      claim has NOT been re-reviewed to `THREAT SURFACE COVERED` — cycles 6-9 each returned a
+      substantive bypass of the then-current I10. Cycle 10's re-review is dispatched and its verdict
+      is unknown. If the fresh adversarial reviewer does NOT return `THREAT SURFACE COVERED`, TH6
+      has no accepted in-bound cover and must either be re-classified OUT OF BOUND (the only
+      complete detector is the live admin read, I1/D14, which the required path cannot run without
+      deadlocking every PR) or the owner must decide how to cover it. Note the owner already
+      REJECTED a server-side rule / CODEOWNERS direction on #4282; do not re-propose it silently.
     owner: Daniel
     artifact: comment on #5215
   - id: R2
     severity: medium
-    threat: TH4
+    threat: TH4(b)
     issue: >-
       Fail-open registry union is DELEGATED to #5570 (its validator `tools/registry_integrity.py`
-      does not exist in the repo). Task 4 clause (vii) only DETECTS (a no-op validator satisfies it).
-      The fail-closed property lives in #5570's own test. This plan does not close TH4.
+      does not exist in the repo). Task 4 clause (vii) now checks presence, shape, the containing
+      job's pull_request path, and a non-empty `--paths` set — but not the validator's CORRECTNESS.
+      Out of bound by declaration; the fail-closed property lives in #5570's own test.
     owner: #5570 lane
     artifact: PR #5570
   - id: R3
     severity: medium
     threat: TH7
     issue: >-
-      A PR can delete the guard's invocation from the required job while its tool file stays intact.
-      Filed as #5649 (the earlier attribution to #4606 was wrong — #4606 closed 2026-09-25). TH7 is
-      mitigated, not closed; the guard is additionally fail-vain until its promotion PR lands.
+      A PR can delete the guard's invocation from the required job, or rewrite an emitting job's body
+      to pass trivially, while its tool file stays intact. Filed as #5649. Out of bound by
+      declaration; mitigated only by the inventory pin (a clause cannot be deleted or renamed).
     owner: Daniel
     artifact: issue #5649
   - id: R4
     severity: medium
-    threat: TH7 / bootstrap
+    threat: TH1 / TH3
     issue: >-
-      Task 4's Step-1 PR ships the guard `continue-on-error` (advisory), so TH2/TH6/TH7 detection is
-      fail-vain until the Step-2 promotion PR lands. The promotion is now an owned deliverable
-      (N=10 green soaks, owner Daniel, artifact comment on #5215) but is not yet scheduled.
+      I8 (review attestation) is ABSENT: this diff neither publishes nor reads it, so no test here
+      can cover forging or replaying it. Owner #5433; decision-by 2026-10-03 (D1). Out of bound by
+      declaration.
+    owner: Daniel (#5433 / D1)
+    artifact: issue #5433
+  - id: R5
+    severity: medium
+    threat: measurement integrity (not a TH)
+    issue: >-
+      The measurement records (M1-M8) are committed files a human can author, and NOTHING in the
+      plan authenticates their producer. `--require-fresh` proves a record is FRESH, not that it was
+      measured; a hand-written M3 `{effective_parallel: 5, verified_at: <today>}` satisfies S13/S4
+      and a hand-written M4 satisfies S14/S11. This is disclosed in §5 and in S13's row (the
+      authorship control is I1/D14, and I1 governs only `required-contexts.json`, not M3/M4). A
+      producer-provenance mechanism is NOT designed here.
     owner: Daniel
     artifact: comment on #5215
-  - id: R5
+  - id: R6
     severity: low
+    threat: process
     issue: >-
       The plan's remaining issue count is high and the loop exited by escalation, not by a clean
-      verdict. A human must decide whether to (a) accept the plan as-is with these residuals, or
-      (b) authorize another review round (which would exceed the adversarial cap a second time).
+      verdict. A human must decide whether to (a) accept the plan with these residuals, (b) authorize
+      another review round (which exceeds the adversarial cap again), or (c) run the cycle-10
+      re-review and act on its verdict alone.
     owner: Daniel
     artifact: comment on #5215
 
 # ── PROOF ──────────────────────────────────────────────────────────────────────
-# The plan's own two P0s (cycle 4) are closed and were re-verified on cycle 5:
-#   I1 — a green fixture built from the current correct .mergify.yml reports SATISFIED; non-check
-#        conditions do not leak (the LHS predicate filters them).  (cycle-5 reviewer, verified)
-#   S9 — {items: [], total_count: 0, read_ok: false} ⇒ exit 2; the vacuity-pinning test is inverted.
+# Verified-closed P0s, re-verified by fresh reviewers after their fix:
+#   cycle-4 P0-1 (I1 unsatisfiable) — the LHS predicate filters non-check conditions; green fixture
+#                                    built from the current correct .mergify.yml reports SATISFIED.
+#   cycle-4 P0-2 (S9 vacuous)      — {items: [], total_count: 0, read_ok: false} ⇒ exit 2.
+#   cycle-6 P0   (S15 floor)       — floor is structural (MIN_OPEN_PR_POPULATION), not caller-supplied.
+#   cycle-8 P0   (S4 unit)         — the per-day constant is 1440 and `cycle_minutes` is pinned.
+#   cycle-9 P0   (freeze vectors)  — ci-surfaces registration added; the queue-head base_sha equality
+#                                    is DELETED (replaced by the head-computed gate_digest).
 # Remaining residuals above are NOT verified-closed; they are open by design and disclosed.
 disclosure: >-
-  [ADVERSARIAL-BOUND] cycles=5 cap=2 threats=7 covered=5 residuals=#5649 TH4→#5570 TH6
+  [ADVERSARIAL-BOUND] cycles=10 cap=2 threats=7 vectors=8 covered=4 out-of-bound=4
+  residuals=#5433,#5570,#5649,D14

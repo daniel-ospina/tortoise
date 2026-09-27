@@ -32,7 +32,7 @@ separate success criteria.**
 | open PRs | **135** | `search/issues` live |
 | PRs genuinely in Mergify's queue | **30** (label `queued`; all 8 sampled show `Mergify Merge Queue = in_progress`) | live |
 | PRs conflicting at merge time | **44** (of which **21** by `git merge-tree`) | corpus §1 |
-| of those, conflicted on 3 shared artifacts | **33** (ci-surfaces 25, sdk-rename-table 8, surface-manifest 4) | corpus §1, §8 |
+| of those, conflicted on 3 shared artifacts | **33 PRs** — the shared-artifact pair counts are **ci-surfaces 25, sdk-rename-table 8, surface-manifest 4 = 37 pairs**; **37 pairs ≠ 33 PRs** (plan S9 states the split; cycle 10) | corpus §1, §8 |
 | PRs auto-queued in 7 days | **0** | corpus §7 |
 | labelled `queue-accelerator` (label is **inert** — #5527 unlanded) | **8** | live |
 
@@ -193,7 +193,9 @@ Alternatives rejected (with when they *would* have been right):
 
 The plan's own subject is the merge gate, so its changes are **gate-integrity** changes. The declared
 in-scope threat classes are exactly the ways a throughput change could let something land that should
-not:
+not. **The bound covers the vectors this plan's own diff can introduce or weaken; where a vector is
+outside it, that is stated per threat below, with the reason and the filed owner — a declared boundary,
+not a hidden gap.**
 
 - **TH1 — unreviewed change lands.** No change may remove the review path or make it optional.
 - **TH2 — unverified change lands.** A check may be *relocated* (entry → merge) but never *removed*; no
@@ -201,18 +203,66 @@ not:
 - **TH3 — attestation forged or replayed.** The head-bound review record must not become
   head-independent.
 - **TH4 — fail-open registry union.** `merge=union` must redden on duplicate/conflicting keys rather than
-  silently merging; a validator that cannot fail closed is a violation.
+  silently merging; a validator that cannot fail closed is a violation. **Split by vector:** (a) *a union
+  landing with no validator invocation inside the gate* — **covered, fail-closed** by plan Task 4 clause
+  (vii) (hard exit 1; fixture: union + no invocation ⇒ 1; `.gitattributes` is **absent** today, so the clause
+  is green until a union appears — and this plan makes no `.gitattributes` change); (b) *the validator's own
+  correctness* — **out of this plan's change surface**, it is #5570's own
+  `test_validated_set_equals_unioned_set`, since `tools/registry_integrity.py` **does not exist** and the
+  union + validator is unlanded #5570's content.
 - **TH5 — false green from capacity.** Runner starvation must never read as success (a `cancelled` or
   never-started job is not a pass).
 - **TH6 — silent entry-gate change.** `branch_protection_injection_mode` must not be changed without the
-  live required-context set re-read and compared, **on check-conditions only**
-  (`{c.split('=',1)[1] for c in queue_conditions+merge_conditions if c.startswith('check-success=')} ==
-  set(live required contexts)` — the earlier `== queue_conditions ∪ merge_conditions` form **could never
-  pass** and was retracted: `base=main`/`-draft` are not status contexts and every check entry carries a
-  `check-success=` prefix). See plan §3 I1 — **the plan is authoritative.**
-- **TH7 — a PR weakens its own guard in the same commit.** Base-ref pinning stops a PR *stubbing* a guard's
-  implementation, but not a PR *deleting its invocation* from the required job. Residual filed as **#5649**
-  (the earlier attribution to #4606 was wrong — #4606 closed 2026-09-25).
+  live required-context set re-read and compared, **on check-conditions only**:
+  `{c.split('=',1)[1] for c in queue_conditions+merge_conditions if c.startswith('check-success=')} ==
+  set(live required contexts)` — `base=main`/`-draft` are not status contexts and every check entry carries
+  a `check-success=` prefix. **Detectors:** plan §3 **I10** (a change to the mode, to **any non-check entry
+  condition (`base=main`, `-draft`)**, or to the `check-success` name set, must carry a refreshed
+  `docs/ci/required-contexts.json`'s **`gate_digest` matching the head**, else exit 1 —
+  mechanical and **green today**), I2's exit 2 on an unrecognised mode, and I1's live comparison. **Cycle 7:
+  I10 removes the *silence*, not the live read** — the live comparison stays I1, now **owned and dated as
+  D14** (quarterly, first by 2026-12-31). **Cycle 8: the compared set is the FULL condition list** — a mode+check-name trigger alone let `-draft` be
+  deleted silently (with `auto_merge_conditions: true` that auto-queues drafts, the exact state E4 forbids),
+  so the detector now diffs every entry condition, and its granularity is the **PR change set**, not one
+  commit. **Cycle 9: the detector is scoped to the gate's DEFINITION** — it compares **any byte of
+  `.mergify.yml`** and the **emitter map** (`required context name → (workflow, job)`), because a union-only
+  condition comparison let a second `queue_rule` through and a config-only comparison let a second job named
+  for a required context through with no config diff; the record's **content must match the head**
+  (`required_contexts` + `emitters`), so a bare `verified_at` re-stamp fails. **Cycle 10 — the mechanism is
+  now a HEAD-COMPUTED DIGEST, not a diff at all:** `docs/ci/required-contexts.json` carries
+  `gate_digest = sha256(canonical(entry-gate projection))` over all `queue_rules[*]` (names **and** full
+  condition lists), `merge_conditions`, the effective `branch_protection_injection_mode`,
+  `autoqueue`/`auto_merge_conditions`, and the emitter map (`.github/workflows/*.yml` **and** `*.yaml`); I10
+  asserts `gate_digest(head) == record.gate_digest`. Every diff-based form was defeated: the record was
+  content-free (a `verified_at` bump passed), `git diff "$BASE"...HEAD` has **no merge base** in the job's
+  depth-1 checkout, and `github.event.pull_request.base.sha` **differs on the Mergify queue head** from the
+  author's committed value — so it could never hold there, **permanently deadlocking the queue for exactly
+  the gate-definition PRs (including #5384a)**. A digest of the head has none of those failure modes and is
+  computable on every event. A PR that rewrites an emitting job's *body* to pass trivially is **TH7/#5649**,
+  not TH6.
+  The `.github/settings.yml` staleness (`contexts: [redis-guard]` against the live six) is **not** a TH6
+  vector: it is the declaration-home item **I11**, owned by **D9 / #3467** (its Open Question 3, its named
+  write step, its consistency test). See plan §3 I1/I10/I11 — **the plan is authoritative.**
+- **TH7 — a PR weakens its own guard in the same commit.** **OUT OF THE BOUND, FILED #5649 (cycle 7).** Both
+  vectors — *stubbing the guard's implementation* and *deleting its invocation from the required job* — are
+  defeated by the same capability (a PR that edits `.github/workflows/python-ci.yml` can also delete the
+  assertion that pins it), no in-repo test can close that, and the only mechanism that could — a server-side
+  rule — is **rejected by the owner**. Disclosed, not claimed closed. **What the plan does instead** (plan
+  §7, §10 Task 4): the pin is an **inventory + base-self-consistency** check (a clause cannot be deleted or
+  renamed; a wrong clause stays **fixable** by an ordinary PR, so a red clause cannot freeze the repo), and
+  the base read **fetches the base ref first** (the `manifest-integrity` checkout is shallow). **Cycle 10:
+  the base read is DELETED entirely** — the pin is a **head-self-consistency** check against the head's own
+  workflow tree, and I10's digest is head-computed, so `manifest-integrity` needs no base fetch and no
+  `fetch-depth: 0` (it keeps its depth-1 checkout and 5-minute budget), and there is no push/PR asymmetry to
+  special-case. **Cycle 9 (superseded): an
+  EMPTY base ref means `HEAD`, not a failure** — on `push:[main]` there is no base, and the pin is trivially
+  inactive; the fail-closed branch is reserved for a **fetch failure** or a **present-but-unreadable** base
+  object (and, when the base has no guard file at all — Task 4's own landing PR — the inventory assertion is
+  trivially satisfied). Only that narrower reading is correct; "any unavailable base ref ⇒ fail" would red
+  `manifest-integrity` on every post-merge push.
+- **TH1 / TH3 — out of the bound (same reason).** I8 is ABSENT: this diff neither publishes nor reads the
+  review attestation, so no test here can cover forging or replaying it. Owner **#5433 / D1**,
+  decision-by 2026-10-03. Out of bound is a stated boundary, not silence.
 
 Out of scope for the adversarial bound: the correctness of the tests themselves, and content/UX
 surfaces (none touched).
