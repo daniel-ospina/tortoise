@@ -211,6 +211,38 @@ def test_doctor_includes_session_indexing(env, capsys, monkeypatch):
     assert rc in (0, 1)
 
 
+def test_doctor_surfaces_session_indexing_before_init(
+        env, capsys, monkeypatch, tmp_path):
+    """PIN (#5815): the session-index row must render on a NEVER-INITIALIZED
+    machine — no Tortoise DB file at the resolved target.
+
+    The row nested inside the graph-health `else:` under the #2204 pre-init
+    guard, so on a no-DB host (CI, or a fresh machine — exactly where `doctor`
+    is first run) the check silently vanished and its contract went unmet.
+    HOME + the canonical default are isolated so the pre-init path is taken
+    deterministically, and #2204's side-effect-free rule is asserted: doctor
+    must not create the state it only inspects.
+    """
+    from tortoise import config as _config
+    from tortoise.__main__ import main
+
+    for var in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FALKORDB_HOST",
+                "FALKORDB_PORT", "FALKORDB_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
+                        str(tmp_path / ".tortoise" / "tortoise.db"))
+
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+
+    assert "Session indexing" in out, out
+    assert "corpus empty" in out, out
+    assert "not set up yet" in out  # the pre-init branch really was taken
+    assert rc == 0  # #2204: a missing DEFAULT target is the expected first run
+    assert not (tmp_path / ".tortoise").exists()  # no state created
+
+
 # ── duplicate sessionIds (#280 review P2) ────────────────────────────
 
 

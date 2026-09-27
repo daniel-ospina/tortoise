@@ -6475,6 +6475,46 @@ def _cmd_index_github(args):
         indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
+#: #280 check 4 — the session-index row, rendered from the SAME literal in
+#: both graph states so the pre-init and live verdicts can never drift.
+_SESSION_INDEX_EMPTY_DETAIL = (
+    "corpus empty — nothing indexed (expected for new setups)"
+)
+
+
+def _session_index_rows_without_graph() -> list[tuple[str, str, str]]:
+    """Session-indexing rows for a NEVER-INITIALIZED target (#5815).
+
+    The check lives in the graph-health `else:` branch, which the #2204
+    pre-init guard SKIPS when no Tortoise DB file exists. That made the row
+    vanish on exactly the machines `doctor` is built for — a fresh install and
+    CI — while a developer host with a DB rendered it, so the gap read as a
+    flake. The corpus is reachable without a graph, so the row is rendered
+    from a corpus-only scan here.
+
+    Verdict is ⚠️, never ❌: with no graph every corpus file is unindexed BY
+    CONSTRUCTION, so the pre-init row reports the corpus state rather than
+    grading an index that cannot exist yet — this keeps the #2204 contract
+    (a missing DEFAULT target is the expected first-run state, rc 0) intact.
+    No SDK / projection is constructed: the #2204 guard exists so doctor never
+    creates state on a target it only inspects.
+    """
+    from pathlib import Path
+
+    from tortoise.session_indexer import session_corpus_dir
+    try:
+        corpus = Path(session_corpus_dir())
+        files = sorted(corpus.rglob("*.md")) if corpus.is_dir() else []
+    except Exception as e:
+        return [("Session indexing", "⚠️", f"check unavailable: {str(e)[:60]}")]
+    if not files:
+        return [("Session indexing", "⚠️", _SESSION_INDEX_EMPTY_DETAIL)]
+    return [("Session indexing", "⚠️",
+             f"{len(files)} corpus files, none indexed — no graph at the "
+             "resolved target yet (run `tortoise init`, then `tortoise index "
+             "sessions`)")]
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -6638,6 +6678,11 @@ def _cmd_doctor(args):
                 "TORTOISE_DB_PATH / --db."
             )
             results.append(("Graph: health", _icon, _detail))
+            # #280 check 4 / #5815: the session-index row MUST also render here.
+            # It sits in the `else:` below (it needs the open projection to
+            # read indexed Events), so before this call the row was skipped
+            # ENTIRELY on a no-DB machine — the fresh-install / CI case.
+            results.extend(_session_index_rows_without_graph())
         else:
             try:
                 from tortoise.sdk import TortoiseSDK
@@ -6659,7 +6704,7 @@ def _cmd_doctor(args):
                         _fc = _chk4["file_count"]
                         if _fc == 0:
                             results.append(("Session indexing", "⚠️",
-                                            "corpus empty — nothing indexed (expected for new setups)"))
+                                            _SESSION_INDEX_EMPTY_DETAIL))
                         else:
                             _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
                             _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
