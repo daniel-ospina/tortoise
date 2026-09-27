@@ -404,6 +404,36 @@ def test_writer_drops_non_integer_samples(org):
         org, total_mb=5.0, samples="many") is None
 
 
+def test_writer_maps_a_non_finite_index_share_to_absent(org):
+    """GUARD (review finding): a non-finite index share is ABSENT, not 0.0.
+
+    ``graph_storage_indices_mb`` is nullable precisely so "the engine did not
+    report an index share" stays distinguishable from "reported as 0". The
+    writer previously coerced a NaN to ``0.0`` — a fabricated clean figure
+    written into the one column whose whole point is that distinction, and one
+    a consumer cannot tell apart from a real measurement.
+
+    MEASURED non-vacuity: reverting ``safe_indices`` to
+    ``_finite_or(indices_mb, 0.0)`` makes THIS test red and nothing else —
+    before it existed the whole suite stayed green under that revert, so the
+    property was correct but unfalsifiable.
+    """
+    from tortoise import metering
+    # Populate the column with a real reading first: a NaN must CLEAR it to
+    # absent, and must not leave 0.0 or keep the stale 9.0.
+    metering.record_graph_storage_reading(org, total_mb=143.0, indices_mb=9.0)
+    assert metering.get_graph_storage_reading(org)["graph_storage_indices_mb"] == 9.0
+    metering.record_graph_storage_reading(
+        org, total_mb=144.0, indices_mb=float("nan"))
+    reading = metering.get_graph_storage_reading(org)
+    assert reading["graph_storage_indices_mb"] is None, (
+        "a non-finite index share must be stored as ABSENT — 0.0 is a "
+        f"fabricated measurement and a kept value is a stale one: {reading!r}")
+    # ...and the TOTAL, which IS finite, still landed: the drop is scoped to the
+    # field that was non-finite, not to the whole reading.
+    assert reading["graph_storage_mb"] == 144.0
+
+
 def test_record_graph_storage_skips_a_failed_reading(org):
     """GUARD: a failed measurement must NOT be written as a zero-byte graph."""
     from tortoise import metering

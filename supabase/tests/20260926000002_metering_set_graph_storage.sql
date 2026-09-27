@@ -8,8 +8,12 @@
 -- ``graph_storage_mb = EXCLUDED.graph_storage_mb`` →
 -- ``= public.metering_records.graph_storage_mb + EXCLUDED.graph_storage_mb``
 -- (a double-count of the same graph's bytes) left every test green. The
--- harness applies EVERY migration and then runs EVERY ``supabase/tests/*.sql``
--- suite, so the function under test here is the one 20260926000002 shipped.
+-- harness applies EVERY migration and then runs the suites named in
+-- ``supabase/tests/pglite/validate.mjs``'s EXPLICIT ``suites`` array — that list
+-- is not a glob, so a new ``.sql`` file here runs ONLY once registered there.
+-- (Registering it is part of this commit; a suite file alone would have been
+-- dead code that still read as coverage.) The function under test is therefore
+-- the one 20260926000002 shipped.
 --
 -- Each DO block RAISE EXCEPTIONs on the specific mutation it catches, so a
 -- green schema drill means the artifact BEHAVES — not merely that it exists.
