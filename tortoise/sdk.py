@@ -778,7 +778,12 @@ def _redact_summary_strings(obj, _depth: int = 0):
     never mutated.
 
     ⛔ KEYS are scrubbed too: ``json.dumps`` renders keys into the prompt, so an
-    unscrubbed key is the same leak in a different position. (If two keys
+    unscrubbed key is the same leak in a different position. Every key is passed
+    through this function recursively, so a ``str`` key is redacted and a tuple
+    key's ``str`` elements are redacted with it (a key that is neither a ``str``
+    nor a container of them — e.g. ``bytes`` — is passed through, but such a key
+    is not JSON-renderable: ``json.dumps`` raises ``TypeError`` before emitting
+    any key, so it cannot carry a credential into the prompt). (If two keys
     redact to the same marker the later one wins — a duplicate key is not a
     summary shape, and the alternative is a leak.)
 
@@ -805,7 +810,7 @@ def _redact_summary_strings(obj, _depth: int = 0):
     if isinstance(obj, str):
         return redact_secrets(obj)[0]
     if isinstance(obj, dict):
-        return {(k if not isinstance(k, str) else _redact_summary_strings(k)):
+        return {_redact_summary_strings(k):
                 _redact_summary_strings(v, _depth + 1) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_summary_strings(v, _depth + 1) for v in obj]

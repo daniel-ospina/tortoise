@@ -109,6 +109,56 @@ def test_a_real_deepseek_key_is_still_redacted_when_glued_to_a_suffix():
         assert counts.get("deepseek_api_key") == 1, (suffix, counts)
 
 
+_LOWER = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _fill_lower(n: int) -> str:
+    return (_LOWER * (n // len(_LOWER) + 1))[:n]
+
+
+def test_sk_body_length_sweep_32_to_44_leaves_no_tail():
+    """#5470 residual (review): the sub-40 combined-body gap.
+
+    The generic rule's 40-char floor and the plain deepseek rule's
+    ``(?![A-Za-z0-9])`` terminator CONSPIRE: when ``run + separator + tail`` is
+    under 40 the generic rule cannot see the token, while the deepseek rule
+    matches the run and ACCEPTS the separator — leaving the tail in the graph
+    with the count reporting one redaction
+    (``sk-<32>-A`` -> ``[REDACTED:deepseek_api_key]-A``). The sweep pins the
+    boundary at every body length so a later change cannot re-open it.
+    """
+    for n in range(32, 45):
+        body = _fill_lower(n)
+        for suffix in ("", "-", "-A", "_AAAAAA", "-tailword"):
+            token = _join("sk-", body, suffix)
+            out, counts = redact_secrets(token)
+            assert out in ("[REDACTED:deepseek_api_key]",
+                           "[REDACTED:openai_api_key]"), (n, suffix, out)
+            assert _no_slice_survives(token, out), (n, suffix, out)
+            assert body[:8] not in out, (n, suffix, out)
+            assert counts, (n, suffix, counts)
+
+    # The plain-run boundary is unchanged by the tail filler: 32-39 -> narrow
+    # (deepseek), >=40 -> generic (openai), exactly as before this fix.
+    for n in range(32, 40):
+        out, counts = redact_secrets(_join("sk-", _fill_lower(n)))
+        assert out == "[REDACTED:deepseek_api_key]", (n, out)
+        assert counts == {"deepseek_api_key": 1}, (n, counts)
+    for n in range(40, 45):
+        out, counts = redact_secrets(_join("sk-", _fill_lower(n)))
+        assert out == "[REDACTED:openai_api_key]", (n, out)
+        assert counts == {"openai_api_key": 1}, (n, counts)
+
+    # The filler must not be bought by narrowing the terminator: a real
+    # >=32-char key glued to ``_``/``-`` is still removed WHOLE (the tail class
+    # is greedy, so the suffix goes with it rather than being left behind).
+    for sep, tail in (("_", "suffix"), ("-", "suffix")):
+        token = _join("sk-", _fill_lower(32), sep, tail)
+        out, counts = redact_secrets(token)
+        assert out == "[REDACTED:deepseek_api_key]", (token, out)
+        assert tail not in out, (token, out)
+
+
 # ── #5471 — the bare `Bearer` rule fires on credentials, not on prose ───────
 
 def test_bare_bearer_does_not_redact_ordinary_identifiers():
@@ -143,6 +193,41 @@ def test_bare_bearer_still_redacts_credential_shaped_tokens():
         assert out == "bearer [REDACTED:bearer_token]", (name, out)
         assert token not in out, (name, out)
         assert counts == {"bearer_token": 1}, (name, counts)
+
+
+def test_bare_bearer_redacts_a_run_that_follows_a_separator():
+    """#5471 regression (review): the run signal must see a run ANYWHERE.
+
+    The gated rule anchored the unbroken-run alternative at the candidate's
+    FIRST character (``[A-Za-z0-9.+/=]{24,}``), so a ``-``/``_`` before a 24+
+    char run ended the scan. Every shape below is a COMPLETE credential that the
+    pre-#5471 rule redacted, so on the gated rule it was stored VERBATIM with
+    ``capture_redactions: 0`` — a caught-to-verbatim recall regression. The
+    lead-in class must include ``-``/``_`` for the same reason a narrowed
+    lookbehind is refused elsewhere in this module.
+    """
+    positives = {
+        # The run must be NON-hex for three of these, or the hex signal (which
+        # is anchored at the start and DOES reach a following hex run) masks
+        # the bug — that masking is why the original review missed the
+        # separator case for ``ab_``.
+        "mailgun key- + 32 hex": _join("key-", _fill(32, "0123456789abcdef")),
+        "shopify shpat_ + 32 hex": _join("shpat_", _fill(32, "0123456789abcdef")),
+        "ab_ + 35 lowercase base62 (g-z)": _join("ab_", _fill(35, "z")),
+        "x_ + 32 lowercase base62 (g-z)": _join("x_", _fill(32, "z")),
+    }
+    for name, token in positives.items():
+        out, counts = redact_secrets(f"bearer {token}")
+        assert out == "bearer [REDACTED:bearer_token]", (name, out)
+        assert token not in out, (name, out)
+        assert _no_slice_survives(token, out), (name, out)
+        assert counts == {"bearer_token": 1}, (name, counts)
+
+    # The other direction in the same test: the widening must not swallow the
+    # prose this rule exists to spare. Byte-identical, no counts.
+    for text in ("the bearer authentication-middleware-component-v2 is loaded",
+                 "pass bearer token_from_some_config_name here"):
+        assert redact_secrets(text) == (text, {}), text
 
 
 def test_bare_bearer_never_leaves_a_long_token_s_tail():

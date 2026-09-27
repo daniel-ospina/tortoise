@@ -270,3 +270,30 @@ def test_summary_depth_guard_scrubs_a_deep_str_leaf():
         obj = [obj]
     out = _redact_summary_strings(obj)
     assert secret not in str(out)
+
+
+def test_summary_scrubs_a_non_str_key_recursively():
+    """P3 review: the docstring claims KEYS are scrubbed — make it true.
+
+    A non-``str`` key used to be passed through verbatim, so a credential inside
+    a tuple key survived ``_redact_summary_strings`` while the docstring said
+    keys were scrubbed. It is latent today (``json.dumps`` rejects a tuple key
+    and ``construct_graph`` is caught), but the function now recurses into every
+    key, so a tuple key's ``str`` elements are redacted with it and the claim
+    holds. ``bytes``/non-container keys are still passed through, but they are
+    not JSON-renderable — ``json.dumps`` raises before emitting any key — so
+    they cannot carry a credential into the prompt.
+    """
+    secret = _secret()
+    out = _redact_summary_strings({("k", secret): "innocuous"})
+    assert secret not in str(out), out
+    (key,) = out
+    assert isinstance(key, tuple), key
+    assert "[REDACTED:github_token]" in key, key
+
+    # A non-str scalar key cannot carry a credential and is preserved as-is.
+    assert _redact_summary_strings({1: "v"}) == {1: "v"}
+    # And a str key is still redacted (the original claim's working half).
+    keyed = _redact_summary_strings({secret: "v"})
+    assert secret not in str(keyed), keyed
+    assert "[REDACTED:github_token]" in str(keyed), keyed

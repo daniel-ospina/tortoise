@@ -426,6 +426,27 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("openai_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{40,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="openai_api_key")),
+    # ⛔ THE TAIL FILLER for the sub-40 gap the generic floor leaves (found in
+    # review of #5470). The generic rule needs 40 body chars; a `sk-` token
+    # whose ``run + separator + tail`` is UNDER 40 is therefore invisible to it.
+    # The plain deepseek rule below still matches the 32+ run, its
+    # ``(?![A-Za-z0-9])`` terminator ACCEPTS the separator, and it replaces the
+    # run ALONE — the tail is then unrecoverable because the ``sk-`` anchor is
+    # gone and the receipt still reports one redaction
+    # (``sk-<32>-A`` -> ``[REDACTED:deepseek_api_key]-A``).
+    # This rule consumes the separator-run AND everything after it, so the whole
+    # token goes. It sits AFTER the generic rule (so the ``>= 40``-char case keeps
+    # the wide label and the wide span) and BEFORE the plain deepseek rule (so
+    # the separable tail is consumed before the plain rule can claim the run).
+    #
+    # ⛔ Do NOT narrow its tail class to a ``(?![A-Za-z0-9_-])`` terminator: that
+    # would stop matching a real key glued to a ``_suffix`` — the recall
+    # regression already rejected for the plain deepseek rule (#5470). The
+    # greedy tail class IS the terminator here: it consumes to the end of the
+    # body alphabet, so no part of the token survives.
+    ("deepseek_api_key",
+     re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}[-_][A-Za-z0-9_-]*"),
+     _REDACTION_VALUE.format(kind="deepseek_api_key")),
     # DeepSeek — the body is EXACTLY 32 LOWERCASE alnum characters, which sits
     # BELOW the generic `sk-` rule's 40 floor, so without this rule a pasted
     # DeepSeek key was stored verbatim with `capture_redactions: 0` (found in
@@ -449,6 +470,9 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # `(?![A-Za-z0-9_-])` was the other candidate and it REGRESSES recall — a
     # real 32-char key glued to `_suffix` then matches nothing at all (pinned by
     # `test_a_credential_touching_a_word_character_is_still_redacted`).
+    # The SEPARABLE-TAIL variant sits BETWEEN the generic rule and this one, so a
+    # run followed by `-`/`_` whose combined body is under 40 is consumed whole
+    # before this rule can claim the run alone (the tail-filler comment above).
     ("deepseek_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="deepseek_api_key")),
@@ -678,21 +702,32 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # cleartext while the count said it was redacted. The ``Authorization:`` rule
     # above is unchanged — its header-name anchor is precise on its own.
     #
+    # ⛔ The unbroken-run signal matches a run ANYWHERE in the candidate, not
+    # only at its start: its lead-in class INCLUDES ``-``/``_`` so a ≥24-char run
+    # sitting after a separator is still seen (``key-<32 hex>``,
+    # ``shpat_<32>``, ``x_<32 hex>``). The earlier form (``[A-Za-z0-9.+/=]{24,}``)
+    # was anchored at the candidate's first character, so a ``-``/``_`` before the
+    # run ended the scan — every one of those shapes was caught by the pre-#5471
+    # rule (any 24+ char space-free span) and then STORED VERBATIM here with
+    # ``capture_redactions: 0``. The lead-in class must contain ``-``/``_``
+    # (a lead-in of ``[A-Za-z0-9.+/=]*`` alone still stops at the separator and
+    # misses the same four shapes). The whole-token capture below is unchanged.
+    #
     # Known recall residual (documented, not silent): a ≥24-char token that is
     # ALL lowercase, contains a ``g``-``z`` letter (so it is not hex) AND is
-    # split by ``-``/``_`` into runs shorter than 24 (a lowercase base62/base36
+    # split by ``-``/``_`` into runs ALL shorter than 24 (a lowercase base62/base36
     # key with separators) is indistinguishable BY SHAPE from a prose slug, so
-    # it is not redacted here. The unbroken form of the same key IS caught (the
-    # third signal), a random generator produces the separated form only
-    # coincidentally, and the ``Authorization: Bearer …`` rule still catches it
-    # in header form; claiming it would require the entropy guess the module
-    # header rejects, at the cost of re-redacting the prose this fix is for.
+    # it is not redacted here. The unbroken form of the same key IS caught
+    # ANYWHERE in the candidate (the third signal), and the
+    # ``Authorization: Bearer …`` rule still catches it in header form; claiming
+    # the split form would require the entropy guess the module header rejects,
+    # at the cost of re-redacting the prose this fix is for.
     ("bearer_token",
      re.compile(r"(\b(?i:bearer)\s+)"
                 r"(?=[A-Za-z0-9._\-+/=]{24,}(?![A-Za-z0-9._\-+/=]))"
                 r"(?=[A-Za-z0-9._\-+/=]*[A-Z+/=]"
                 r"|[0-9a-f._\-]{24,}"
-                r"|[A-Za-z0-9.+/=]{24,})"
+                r"|[A-Za-z0-9._\-+/=]*[A-Za-z0-9+/=]{24,})"
                 r"([A-Za-z0-9._\-+/=]{24,})"),
      r"\g<1>" + _REDACTION_VALUE.format(kind="bearer_token")),
 )
