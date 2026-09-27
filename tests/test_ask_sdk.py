@@ -392,9 +392,30 @@ def test_date_leg_attaches_no_session_id():
 
 
 def _ask_key(h: dict) -> str:
-    """The ask lane's own ``dedup_pool`` key extractor (``ask_lane.py``)."""
-    return (h.get("session_id") or h.get("session_date")
-            or f"idx:{h.get('lme_session_index', -1)}")
+    """The REAL ask-lane ``dedup_pool`` key — ``retrieval.ask_session_key``
+    (single-sourced, #4155), never a local copy that can drift from the
+    pipeline it claims to pin."""
+    from tortoise.retrieval import ask_session_key
+    return ask_session_key(h)
+
+
+def test_ask_session_key_precedence():
+    """#4155: the key the ask lane buckets on consults the identity the
+    point fetch ALREADY populates — snake ``session_id``, then the camel
+    ``sessionId`` — before the coarser date fallback and the index bucket.
+    ``_pkg_session`` (the packaging slice) is the SAME key, not a copy."""
+    from tortoise.retrieval import _pkg_session, ask_session_key
+    assert ask_session_key({
+        "session_id": "snake", "sessionId": "camel",
+        "session_date": "2023-01-01"}) == "snake"
+    assert ask_session_key({
+        "sessionId": "camel", "session_date": "2023-01-01"}) == "camel"
+    # an empty camel value is ABSENT, never a bucket named ""
+    assert ask_session_key({
+        "sessionId": "", "session_date": "2023-01-01"}) == "2023-01-01"
+    assert ask_session_key({"lme_session_index": 7}) == "idx:7"
+    assert ask_session_key({}) == "idx:-1"
+    assert _pkg_session({"sessionId": "camel"}) == "camel"
 
 
 def _seed_transcript_chunks(sdk: TortoiseSDK, session_id: str, date: str,
@@ -422,14 +443,19 @@ def _seed_transcript_chunks(sdk: TortoiseSDK, session_id: str, date: str,
 
 
 def test_date_leg_does_not_rebucket_a_chunk_pool():
-    """D3 pool-safety, non-vacuously measured (#4106).
+    """D3 pool-safety, non-vacuously measured (#4106), re-measured after
+    #4155.
 
-    Raw chunks carry NO snake ``session_id`` on the hit (the point fetch
-    emits the camel ``sessionId`` only) and NEVER ``lme_session_index``, so
-    the pre-#4106 key for every one of them was the single global bucket
-    ``idx:-1``. On the collision-prone case — two sessions sharing ONE date —
-    the date leg must therefore keep exactly the same survivors. Measured
-    through the real ``dedup_pool`` with the real ask key, not assumed.
+    Raw chunks carry NO snake ``session_id`` on the hit — only the camel
+    ``sessionId`` the point fetch derives from the ``:Session`` ``CONTAINS``
+    edge (#4155) — and NEVER ``lme_session_index``. On the collision-prone
+    case — two sessions sharing ONE date — the date leg must still keep
+    exactly the same survivors: the fetch-populated camel identity outranks
+    the date in BOTH readings, so attaching the date re-buckets nothing (and
+    #4155's whole point is that the survivors are now PER SESSION, not the
+    single global ``idx:-1`` bucket the pre-#4155 key chain produced).
+    Measured through the real ``dedup_pool`` with the real ask key, not
+    assumed.
     """
     sdk = _new_sdk()
     _seed_transcript_chunks(sdk, "chunkA", TURN_DATE)
@@ -439,10 +465,12 @@ def test_date_leg_does_not_rebucket_a_chunk_pool():
     ann = sdk.annotate_ask_hits(hits)
     assert len(hits) >= 4, [h.get("id") for h in hits]
     assert all(h["point_kind"] == "session-transcript" for h in hits), hits
-    # Preconditions, both measured: the date IS populated, and no hit
-    # carries a snake session_id (so the pre-fix key is the global idx:-1).
+    # Preconditions, all measured: the date IS populated; no hit carries a
+    # snake session_id; and the fetch DID populate the camel identity, one
+    # bucket per session (#4155 — without it the pre-fix key was idx:-1).
     assert all(h.get("session_date") == TURN_DATE for h in ann), ann
     assert not any(h.get("session_id") for h in hits), hits
+    assert {h.get("sessionId") for h in ann} == {"chunkA", "chunkB"}, ann
 
     from tortoise.retrieval import dedup_pool
     stripped = [{k: v for k, v in h.items() if k != "session_date"}
@@ -453,17 +481,26 @@ def test_date_leg_does_not_rebucket_a_chunk_pool():
     assert [h["id"] for h in with_date] == [h["id"] for h in without], (
         "the date leg re-bucketed the chunk pool: "
         f"{[h['id'] for h in with_date]} vs {[h['id'] for h in without]}")
-    # ... and the survivors sit in ONE bucket in both readings (the same-date
-    # case is exactly the pre-fix global collapse, preserved not widened).
-    assert {_ask_key(h) for h in ann} == {TURN_DATE}
-    assert {_ask_key(h) for h in stripped} == {"idx:-1"}
+    # ... and the survivors sit in the PER-SESSION camel buckets in both
+    # readings — the same-date collision that used to collapse the pool into
+    # ONE bucket (``idx:-1`` pre-#4106, the shared date after it) is gone.
+    assert {_ask_key(h) for h in ann} == {"chunkA", "chunkB"}
+    assert {_ask_key(h) for h in stripped} == {"chunkA", "chunkB"}
     sdk.close()
 
 
 def test_date_leg_never_narrows_the_chunk_pool():
-    """#4106 measured effect on DISTINCT dates: the date key is a refinement
-    of the pre-fix global ``idx:-1`` bucket, so it can restore chunks that
-    collapse was dropping — and can never keep fewer."""
+    """#4106 measured effect on DISTINCT dates, isolated after #4155: with NO
+    identity the date key is a refinement of the identity-less ``idx:-1``
+    bucket, so it can restore chunks the collapse was dropping — and can
+    never keep fewer.
+
+    #4155 makes the fetch-populated camel ``sessionId`` outrank the date, so
+    the camel key is stripped from BOTH readings here — otherwise this would
+    re-measure the camel identity, not the DATE leg it is named for. The
+    snake/idx fallback is what remains, so the only difference between the
+    two readings IS ``session_date``.
+    """
     sdk = _new_sdk()
     _seed_transcript_chunks(sdk, "chunkA", "2023-03-15")
     _seed_transcript_chunks(sdk, "chunkB", "2023-04-01")
@@ -471,16 +508,21 @@ def test_date_leg_never_narrows_the_chunk_pool():
                                   include_terminal=True)
     ann = sdk.annotate_ask_hits(hits)
     from tortoise.retrieval import dedup_pool
-    stripped = [{k: v for k, v in h.items() if k != "session_date"}
-                for h in ann]
-    with_date = dedup_pool(ann, max_chunks_per_session=3, session_key=_ask_key)
-    without = dedup_pool(stripped, max_chunks_per_session=3,
+    camel_stripped = [{k: v for k, v in h.items() if k != "sessionId"}
+                      for h in ann]
+    identityless = [{k: v for k, v in h.items()
+                     if k not in ("session_date", "sessionId")}
+                    for h in ann]
+    with_date = dedup_pool(camel_stripped, max_chunks_per_session=3,
+                           session_key=_ask_key)
+    without = dedup_pool(identityless, max_chunks_per_session=3,
                          session_key=_ask_key)
     # Non-vacuity: the date leg produced DISTINCT per-session buckets, and
-    # the pre-fix reading really was the single global bucket — so the
+    # the identity-less reading really was the single global bucket — so the
     # superset assertion below has signal (equality would red here).
-    assert {_ask_key(h) for h in ann} == {"2023-03-15", "2023-04-01"}, ann
-    assert {_ask_key(h) for h in stripped} == {"idx:-1"}, stripped
+    assert {_ask_key(h) for h in camel_stripped} == {
+        "2023-03-15", "2023-04-01"}, camel_stripped
+    assert {_ask_key(h) for h in identityless} == {"idx:-1"}, identityless
     assert {h["id"] for h in without} < {h["id"] for h in with_date}, (
         "expected the global idx:-1 bucket to have collapsed more hits: "
         f"{sorted(h['id'] for h in without)} vs "
@@ -488,6 +530,50 @@ def test_date_leg_never_narrows_the_chunk_pool():
     assert {h["id"] for h in without} <= {h["id"] for h in with_date}, (
         f"the date leg DROPPED hits: {[h['id'] for h in without]} -> "
         f"{[h['id'] for h in with_date]}")
+    sdk.close()
+
+
+def test_dedup_key_reads_the_camel_session_id_on_a_date_less_pool(
+        monkeypatch):
+    """#4155 regression, end-to-end through the real ask lane.
+
+    A captured-turn/transcript chunk carries NO snake ``session_id`` (only
+    ``annotate_ask_hits``'s Event join attaches one, and these points have no
+    ``eventId``) and no ``lme_session_index``. Its identity is the camel
+    ``sessionId`` the point fetch populates from the ``:Session``
+    ``CONTAINS`` edge. On a DATE-LESS pool (the sessions record no
+    ``created_at``) the pre-#4155 key chain (snake ``session_id`` →
+    ``session_date`` → ``idx:``) therefore collapsed every chunk into the
+    single global bucket ``idx:-1``, so ``dedup_pool``'s per-session cap
+    applied GLOBALLY: 8 chunks across 2 sessions → 3 survivors. The camel
+    identity must bucket PER SESSION → 3 survivors each, 6 total.
+    """
+    # The fleet shell carries TORTOISE_API_URL; the eval lane needs a LOCAL
+    # graph (the hosted ask surface was removed in #3849).
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    sdk = _new_sdk()
+    for sid in ("chunkA", "chunkB"):
+        _seed_transcript_chunks(sdk, sid, TURN_DATE, n=4)
+    # DATE-LESS: no recorded session time, so the date-leg fallback is empty
+    # and the ONLY identity on the wire is the fetch's camel ``sessionId``.
+    proj = sdk._get_proj()
+    for sid in ("chunkA", "chunkB"):
+        proj.g.query("MATCH (s:Session {id:$sid}) REMOVE s.created_at",
+                     params={"sid": sid})
+    _install_fake(sdk, monkeypatch)
+    result = run_ask_lane(sdk, "verbatim chunk smoker",
+                          question_date="2023-06-01")
+    evidence = result["evidence"]
+    surviving = [
+        f"verbatim chunk {ci} of {sid}"
+        for sid in ("chunkA", "chunkB")
+        for ci in range(4)
+        if f"verbatim chunk {ci} of {sid}" in evidence
+    ]
+    assert len(surviving) == 6, (
+        f"the per-session chunk cap applied globally: {surviving}")
+    assert sum(1 for s in surviving if "chunkA" in s) == 3, surviving
+    assert sum(1 for s in surviving if "chunkB" in s) == 3, surviving
     sdk.close()
 
 
