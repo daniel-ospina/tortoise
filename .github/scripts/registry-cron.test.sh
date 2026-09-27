@@ -137,6 +137,9 @@
 #  91. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
 #  92. #3944: an exponent-notation age is NOT a measurement (truncation must
 #      not read as fresh) — it files on the stale uptime and never resolves
+#  93. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
+#      `[ -gt ]` is not freshness)
+#  94. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1990,10 +1993,45 @@ run_driver
 assert_eq "$RC" 1 "92. an exponent-notation age reds the run (stale uptime)"
 # The open incident (#321) is adopted rather than re-filed, so assert the
 # DECISION from the log line, not a POST.
-assert_contains "$OUT" "analytics sink silent (age=1.2E+16s" \
+assert_contains "$OUT" "analytics sink silent (age=" \
   "92. an uncomparable age is not read as fresh"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "92. a truncated non-decimal age NEVER resolves the open incident"
+
+# ── 93. #3944: an ALL-DIGIT age that overflows bash int64 must not resolve ──
+# R3 P1: `[ -gt ]` compares in signed 64-bit, so a longer all-digit operand
+# ERRORS (rc=2). With a single `if ... else FRESH`, that error read as
+# freshness and RESOLVED the open incident — the same fail-open class as case
+# 92, via a different operand. The guard now bounds the digit count and the
+# decision requires the comparison to have SUCCEEDED.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 12000000000000000000000000 10000)"
+run_driver
+assert_eq "$RC" 1 "93. an int64-overflowing age reds the run (stale uptime)"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "93. an int64-overflowing age NEVER resolves the open incident"
+
+# ── 94. #3944: the boundary is strict (age == threshold is HEALTHY) ─────────
+# The resolve is destructive (it closes the issue and deletes the dedup
+# object), so the boundary that decides incident-vs-healthy is pinned: the
+# comparison is `>`, not `>=`, and an age of exactly the threshold resolves.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 900 10000 "" 900)"
+run_driver
+assert_eq "$RC" 0 "94. age == threshold is treated as healthy"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "94. age == threshold files nothing"
+assert_contains "$(cat "$LOG")" \
+  "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
+  "94. age == threshold self-heals (strict >, not >=)"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

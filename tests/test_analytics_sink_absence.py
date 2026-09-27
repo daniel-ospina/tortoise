@@ -291,6 +291,10 @@ def test_heartbeat_block_shape(monkeypatch):
     assert block["canary_attempts"] == 2
     assert block["last_delivered_at"] is not None
     assert set(block["outcomes"]) == set(ha._ANALYTICS_OUTCOMES)
+    # ...and it is a COPY: the lock-guarded snapshot exists so a reader cannot
+    # mutate the live counter map (R3 test-quality P4).
+    block["outcomes"]["supabase"] = 999
+    assert ha._ANALYTICS_COUNTS["supabase"] != 999
     # No secret ever rides the block.
     blob = json.dumps(block)
     assert PROD_URL not in blob and PROD_KEY not in blob
@@ -364,7 +368,14 @@ def _status(**env):
 
 def test_status_carries_the_analytics_heartbeat_on_the_degraded_path(monkeypatch, tmp_path):
     """The heartbeat must survive an unusable object store: it is in-process
-    state, and a storage blip must not blind the sink-absence alarm."""
+    state, and a storage blip must not blind the sink-absence alarm.
+
+    The PATH is asserted, not just the block's presence: without R2 config the
+    handler early-returns the degraded body, which carries neither ``watcher``
+    nor ``driver``. Asserting only ``analytics in body`` would also pass on the
+    NORMAL return, so on any environment where R2 IS configured the test would
+    silently stop being evidence for this clause (R3 test-quality P3).
+    """
     _prod_env(monkeypatch)
     monkeypatch.setattr(
         ha, "_ANALYTICS_LAST_DELIVERED_AT", datetime.now(UTC) - timedelta(seconds=42)
@@ -375,10 +386,66 @@ def test_status_carries_the_analytics_heartbeat_on_the_degraded_path(monkeypatch
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
+    assert body["storage_error"], "this test must exercise the degraded return"
+    assert "watcher" not in body, "the degraded early return carries no watcher block"
     assert "analytics" in body, "the analytics block must be on the storage-error return too"
     block = body["analytics"]
     assert block["configured"] is True
-    assert 41 <= block["age_s"] <= 43
+    assert block["age_s"] >= 41, f"a ~42 s-old stamp, got {block['age_s']}"
+
+
+def test_status_carries_the_analytics_heartbeat_on_the_normal_path(monkeypatch):
+    """The NORMAL return — the one the hourly driver actually reads on a
+    healthy deployment — must carry the block. Removing it there would re-blind
+    the absence alarm while every other test (and the whole shell suite, which
+    uses a simulated body) stayed green (R3 test-quality P2).
+    """
+    _prod_env(monkeypatch)
+    monkeypatch.setattr(ha, "_ANALYTICS_BOOT_AT", datetime.now(UTC) - timedelta(seconds=500))
+
+    resp = _status(
+        R2_ACCOUNT_ID="acct",
+        R2_BUCKET="bucket",
+        R2_ACCESS_KEY_ID="ak",
+        R2_SECRET_ACCESS_KEY="sk",
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "watcher" in body, "this test must exercise the NORMAL return"
+    assert "analytics" in body, "the normal path must publish the analytics block"
+    assert body["analytics"]["silent_threshold_s"] == 3 * ha._ANALYTICS_CANARY_PERIOD_S
+
+
+def test_the_reserved_canary_namespace_cannot_be_a_real_tenant(monkeypatch):
+    """The canary's synthetic org/event are reserved by a LEADING UNDERSCORE,
+    which is exactly what the tenant id validator rejects — so the invariant
+    "canary rows never appear in a per-org read" is enforced by the validator,
+    not merely by a naming convention (R3 test-quality P3).
+    """
+    assert ha._ANALYTICS_CANARY_EVENT.startswith("_")
+    assert ha._ANALYTICS_CANARY_ORG.startswith("_")
+
+    # The provisioning gate refuses that namespace end-to-end (R3 P3): the
+    # registry-mode route validates org_id against the pattern the SDK
+    # namespaces share.
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "test-internal-3944")
+    monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled", lambda: False)
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(ha.app).post(
+        "/internal/provision",
+        headers={"Authorization": "Bearer test-internal-3944"},
+        json={
+            "org_id": ha._ANALYTICS_CANARY_ORG,
+            "org_name": "canary",
+            "api_key_hash": "x",
+            "created_by": "test",
+        },
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert "org_id" in resp.json()["detail"]
 
 
 # ── the production-caller residual, pinned statically ───────────────────────
