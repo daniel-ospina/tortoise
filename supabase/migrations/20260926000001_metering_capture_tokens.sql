@@ -40,15 +40,19 @@ ALTER TABLE public.metering_records
     ADD COLUMN IF NOT EXISTS capture_tokens_in  bigint NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS capture_tokens_out bigint NOT NULL DEFAULT 0;
 
--- ⛔ ``NOT NULL DEFAULT 0`` IS LOAD-BEARING, NOT TIDINESS. A metering row is
--- created by whichever lane writes FIRST — ``metering_increment`` on a plain
--- write, ``metering_increment_ask`` on an ask — and those RPCs do NOT mention
--- the capture token columns. ``NULL + n`` is NULL in SQL, so without the
--- NOT NULL DEFAULT the capture token counters would evaluate to NULL forever
--- on every pre-existing (and every ask-first) row, and a reader would render
--- 0 with no error anywhere: a permanently dead figure that looks like "no
--- extraction work". (The embed precedent 20260925000003 and the capture
--- cost columns 20260917000001 carry the same reasoning; this is its copy.)
+-- ⛔ ``NOT NULL DEFAULT 0`` — and the reason is narrower than it looks. The
+-- INCREMENT PATH is already NULL-safe on its own: it wraps the column in
+-- ``coalesce(capture_tokens_in, 0) + p_tokens_in``, so a nullable column would
+-- still increment correctly. The NOT NULL DEFAULT is load-bearing for the rows
+-- this RPC NEVER TOUCHES: a metering row is created by whichever lane writes
+-- FIRST — ``metering_increment`` on a plain write, ``metering_increment_ask``
+-- on an ask — and those RPCs do not mention the capture token columns at all.
+-- Without the default, every such row reads NULL to a reader with no error
+-- anywhere, which renders as 0 and looks like "no extraction work".
+-- (The capture cost columns 20260917000001, which ARE on main, carry the same
+-- reasoning and are the precedent to read; the embed columns
+-- 20260925000003 mirror it but live on an unmerged sibling branch, so they are
+-- NOT yet deployable history.)
 COMMENT ON COLUMN public.metering_records.capture_tokens_in IS
     '#5045: prompt (input) tokens consumed by the LLM calls attributed to '
     'this window''s capture/extraction work. WORKLOAD, never price — it is '

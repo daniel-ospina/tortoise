@@ -872,13 +872,41 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
               / "migrations")
     files = sorted(migdir.glob("*.sql"))
     defs: list[tuple[str, str]] = []
+    # ⛔ ACCEPT EVERY SHAPE, THEN FAIL CLOSED ON ANYTHING UNPARSED. The original
+    # pattern required an unquoted ``public.``, the literal name, and the
+    # ``$$`` tag — so a re-issue written as ``CREATE FUNCTION "public".…``,
+    # unqualified, or with a named dollar tag (``AS $fn$ … $fn$``) was
+    # INVISIBLE to this scan. That is the silent-narrowing failure the
+    # ``len(defs) > 1`` floor below believes it prevents and cannot, because
+    # the floor is already satisfied by the two HISTORICAL definitions: a
+    # third, LIVE one could be missed with no alarm raised. So match broadly,
+    # and assert PER FILE that a file mentioning the identifier yielded at
+    # least one parsed body — an unseeable definition then fails loudly instead
+    # of shrinking the evidence set.
+    _IDENT = "metering_cohort_spend"
+    # The definition OPENER, deliberately excluding the dollar-quoted tail.
+    _OPENER = (
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+        r'(?:(?:"public")\.|public\.)?' + _IDENT + r"\s*\("
+    )
+    _PATTERN = (
+        _OPENER +
+        r".*?AS\s+\$(\$|[A-Za-z_][A-Za-z_0-9]*\$)(.*?)\$\1;"
+    )
     for f in files:
         text = f.read_text()
-        for m in re.finditer(
-            r"CREATE (?:OR REPLACE )?FUNCTION public\.metering_cohort_spend"
-            r"\b.*?AS \$\$(.*?)\$\$;", text, re.S,
-        ):
-            defs.append((f.name, " ".join(m.group(1).split())))
+        # Count OPENERS, not mere mentions: a migration that only names the
+        # function in a comment defines nothing and must not trip this.
+        openers = len(re.findall(_OPENER, text))
+        if openers == 0:
+            continue
+        parsed = list(re.finditer(_PATTERN, text, re.S))
+        assert len(parsed) == openers, (
+            f"{f.name} opens {openers} definition(s) of {_IDENT} but the scan "
+            f"parsed {len(parsed)} — a definition in this file is invisible to "
+            f"the guard, so every assertion below is blind to it")
+        for m in parsed:
+            defs.append((f.name, " ".join(m.group(2).split())))
 
     # The ceiling's definition is re-issued at least once. If this ever fails,
     # the enumeration narrowed and every assertion below became evidence about

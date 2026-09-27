@@ -1097,9 +1097,10 @@ def test_migration_adds_capture_token_columns_and_reissues_the_rpc(monkeypatch):
     signature is DROPPED (never left as a callable OVERLOAD); and the
     supabase-mode record path sends the SAME ``p_*`` body keys.
 
-    RED: a column that is nullable (a NULL-coalescing counter that never
-    increments), a missing DROP, a missing token param, or a Python body key
-    that disagrees with the SQL signature.
+    RED: a column that is nullable AND left un-defaulted (a row minted by a
+    lane that never mentions the token columns then reads NULL, which renders
+    as 0 and looks like "no extraction work"), a missing DROP, a missing token
+    param, or a Python body key that disagrees with the SQL signature.
     """
     import re as _re
     from pathlib import Path
