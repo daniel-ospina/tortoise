@@ -2081,6 +2081,7 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
     stalled loop cannot interleave.
     """
     import tortoise.hosted_api as ha_mod
+    from tortoise import sdk as sdk_mod
     from tortoise.hosted_api import app
 
     monkeypatch.setattr(
@@ -2092,7 +2093,10 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
     records: list[tuple[str, float]] = []
     cyphers: list[str] = []
     writer_threads: list[str] = []
-    orig_writer = ha_mod._write_capture_turns
+    # #3551: the hosted lane now calls the shared SDK primitive, which calls
+    # `_write_capture_turns` from `tortoise/sdk.py` — patch the DEFINITION site,
+    # not a hosted-module alias (hosted no longer imports it).
+    orig_writer = sdk_mod._write_capture_turns
 
     def _timed_query(self, cypher, *args, **kwargs):
         started = time.perf_counter()
@@ -2108,7 +2112,7 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
         return orig_writer(*args, **kwargs)
 
     monkeypatch.setattr(graph_cls, "query", _timed_query)
-    monkeypatch.setattr(ha_mod, "_write_capture_turns", _wrapped_writer)
+    monkeypatch.setattr(sdk_mod, "_write_capture_turns", _wrapped_writer)
 
     async def _run():
         transport = httpx.ASGITransport(app=app)
@@ -2120,7 +2124,7 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
 
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
-    monkeypatch.setattr(ha_mod, "_write_capture_turns", orig_writer)
+    monkeypatch.setattr(sdk_mod, "_write_capture_turns", orig_writer)
     on_loop = [d for name, d in records if name == "MainThread"]
     return resp, len(on_loop), sum(on_loop), writer_threads, cyphers
 
@@ -2210,9 +2214,14 @@ def test_capture_turn_store_is_one_batched_implementation(client, monkeypatch):
     assert writer is not None, (
         "the shared batched turn writer (_write_capture_turns) is missing "
         "from tortoise/sdk.py (#3086)")
-    assert getattr(ha_mod, "_write_capture_turns", None) is writer, (
-        "the hosted capture lane does not call the SDK's turn writer — the "
-        "per-turn store is forked again (the drift class #3086 deletes)")
+    # #3551: the shared seam the hosted lane must reach is the primitive that
+    # owns the :Session MERGE + turn store (it delegates to `_write_capture_turns`
+    # in sdk.py). The hosted module re-exports it, and the identity must hold.
+    assert getattr(ha_mod, "_write_session_and_turns", None) is \
+        sdk_mod._write_session_and_turns, (
+            "the hosted capture lane does not call the SDK's shared writer "
+            "(_write_session_and_turns) — the capture store is forked again "
+            "(the drift class #3086/#3551 deletes)")
 
     monkeypatch.setattr(
         TortoiseSDK, "_extract_session_v2",

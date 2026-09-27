@@ -321,6 +321,13 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
+  # turn store). DUAL-REGISTERED (`api` + `core`): it guards both
+  # `tortoise/hosted_api.py::_capture_session_impl` (api) and
+  # `tortoise/sdk.py::TortoiseSDK.capture_session` (sdk, a SHARED_MODULE) — and
+  # a named-surface match REPLACES the `core` fallback, so both entries are
+  # needed for a hosted_api.py-only or sdk.py-only PR to run it.
+  - test_write_session_and_turns_3551.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
   # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
@@ -878,6 +885,7 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
@@ -2173,6 +2181,7 @@ durations:
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
   test_capture_session.py: 53.9
+  test_write_session_and_turns_3551.py: 70.8  # #3551: locally measured (8 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — refresh from CI junit
   test_battery_setup.py: 67.9
   test_graph_write_loop_responsiveness.py: 19.6
   test_read_routes_loop_responsiveness.py: 6.5
