@@ -60,6 +60,15 @@ UNKNOWN = "UNKNOWN"
 # (test_non_red_token_set_matches_the_rail). The RAIL IS AUTHORITATIVE; these
 # tokens are the instrument's copy of the rule.
 NON_RED_CONCLUSIONS = frozenset({"success", "neutral", "skipped", "cancelled", "stale"})
+#: The LEGACY `commit-status` half of the same surface (the rail's
+#: NON_RED_STATE / MEASURING_STATE). The rail probes TWO endpoints —
+#: `/check-runs` AND `/status` — and treats a read missing either one as a
+#: PARTIAL surface it refuses outright ("a partial read is a failure to look,
+#: not half a certificate", #1261): the half that could not be read is exactly
+#: where a red would hide. A red living only on the status half must therefore
+#: not be invisible here.
+NON_RED_STATES = frozenset({"success"})
+MEASURING_STATES = frozenset({"success", "failure", "error"})
 GREEN_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 STRICT_GREEN = frozenset({"success"})
 IN_FLIGHT_STATUSES = frozenset(
@@ -77,8 +86,19 @@ MEASURING_CONCLUSIONS = frozenset(
 )
 #: The placeholder identity for an unnamed check run. The rail CLASSIFIES an
 #: unnamed run rather than dropping it (a dropped red could vanish from the
-#: surface), and this keeps the same property here.
+#: surface) AND keys it by its OWN per-entry identity, so a newer unnamed
+#: non-red cannot SUPERSEDE an older unnamed red and discard it before
+#: classification (#1353). Both halves of that rule are reproduced here.
 UNNAMED_CHECK = "(unnamed check)"
+#: The same placeholder for the legacy status half (`sbest`).
+UNNAMED_STATUS = "(unnamed status)"
+#: The Actions events that measure no revision, as the BASE's clock sees them.
+#: The rail exempts these from the base probe only (`allow_noncode=1` on the
+#: base, `0` on the PR tree): a repo whose cron lanes are red most days would
+#: otherwise refuse every merge. On the PR's EVALUATED TREE the exemption is
+#: vacuous by construction — a default-branch run cannot attach to a PR head
+#: sha — so it is never applied there. An UNRESOLVED event always blocks.
+NON_CODE_EVENTS = frozenset({"schedule", "issues", "issue_comment"})
 #: The evaluated-tree verdict tokens — the rail's three refusal classes.
 SURFACE_GREEN, SURFACE_RED, SURFACE_PENDING = "GREEN", "RED", "PENDING"
 _SURFACE_VERDICTS = (SURFACE_GREEN, SURFACE_RED, SURFACE_PENDING)
@@ -423,6 +443,23 @@ def _is_sha(value) -> bool:
         return False
     token = value.strip()
     return bool(token) and token.upper() != UNKNOWN
+
+
+def _newest_status(group: list[dict]):
+    """Newest legacy status by its own stamp — the rail's `sbest` rule.
+
+    The rail compares `stamp > best[ctx][0]` STRICTLY, so an equal stamp keeps
+    the entry it saw FIRST and a tie must not be resolved by list order. An
+    unreadable stamp is the empty string, which compares older than any real
+    one exactly as the rail's `ts_epoch('')` arm does.
+    """
+    best = None
+    best_stamp = None
+    for status in group:
+        stamp = str(status.get("updated_at") or status.get("created_at") or "")
+        if best_stamp is None or stamp > best_stamp:
+            best, best_stamp = status, stamp
+    return best
 
 
 def _newest(group: list[dict]):
@@ -838,6 +875,25 @@ def fetch_check_runs(sha: str):
     if not isinstance(runs, list):
         return UNKNOWN, UNKNOWN
     return runs, body.get("total_count")
+
+
+def fetch_statuses(sha: str):
+    """(statuses, total_count) for `sha`'s legacy commit-status half.
+
+    The rail's SECOND endpoint. The combined-status body reports aggregate
+    `state: pending` when it carries ZERO statuses, so only the per-context
+    entries are ever read — the aggregate is not a verdict about anything.
+    """
+    body = _gh_api(
+        f"repos/{OWNER_REPO}/commits/{sha}/status?per_page=100",
+        paginate=True,
+    )
+    if body is UNKNOWN or not isinstance(body, dict):
+        return UNKNOWN, UNKNOWN
+    statuses = body.get("statuses")
+    if not isinstance(statuses, list):
+        return UNKNOWN, UNKNOWN
+    return statuses, body.get("total_count")
 
 
 def required_contexts():
@@ -1772,7 +1828,7 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         # OWN columns before excluding on it — otherwise a row can declare
         # `bucket:"draft"` (or `classification:"draft"`) with `draft:false`
         # and hide a moveless PR.
-        if "bucket" in row:
+        if label is not None:
             row_surface, row_stale = surface_from_evidence(
                 row.get("surface_evidence"))
             expected = classify_bucket(
@@ -1780,10 +1836,21 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
                 conflict=row.get("conflict"), surface=row_surface,
                 stale=row_stale, hard_stop=HARD_STOP_D12,
                 terminal=TERMINAL_D5, dead_weight=DEAD_WEIGHT_EVIDENCE)
-            if row["bucket"] != expected:
-                print(f"2: no-languish row {row.get('number')} bucket "
-                      f"{row['bucket']!r} is not the first match ({expected!r})")
-                return 2
+            # BOTH columns are exclusion channels (`_excluded` reads either), so
+            # BOTH must be checked. The legacy `classification` column ALSO
+            # carries a legacy vocabulary (`open`), which is not a bucket and
+            # has nothing to re-derive against; when its label is written in
+            # the BUCKET vocabulary, though, it is making a bucket claim and is
+            # re-derived like `bucket`. Without this arm, `classification:
+            # "draft"` with `draft:false` hid a moveless PR while the same row
+            # written with `bucket` was refused.
+            declared = row["bucket"] if "bucket" in row else label
+            if declared in rank or "bucket" in row:
+                if declared != expected:
+                    print(f"2: no-languish row {row.get('number')} bucket "
+                          f"{declared!r} is not the first match "
+                          f"({expected!r})")
+                    return 2
         for key in ("hard_stop", "terminal_decision", "draft"):
             if (row.get(key) is True and label in rank
                     and rank[label] > rank[key]):
@@ -2566,23 +2633,37 @@ def validate_triage_rows(rows, *, total_count=None,
 # the two cannot drift.
 # ---------------------------------------------------------------------------
 
-def classify_surface_runs(runs):
-    """(verdict, anchor_iso, reds, pending) for one check-run surface.
+def _surface_entries(runs, statuses=()):
+    """(verdict, anchor_iso, red_entries, pending) — the rail's grouping rules.
 
-    Mirrors the rail's check-surface probe (#1261), which is the AUTHORITY for
-    the RE-MEASURE class:
+    `red_entries` is a list of `{name, started, url, app}` dicts. Every caller
+    but one wants only `(name, started)`; `base_blocking_reds` additionally
+    needs the source run's URL, because §4.6's base clock EXEMPTS a red on a
+    non-code Actions event and the event can only be resolved from the run.
+
+    Mirrors the rail's `check_surface_probe` (#1261/#1353), which is the
+    AUTHORITY for the RE-MEASURE class:
 
     * the newest attempt per `(app.slug, name)` decides — a re-run leaves the
       OLD failing run in place beside the new one, so an ungrouped read reports
       a red GitHub itself shows green;
+    * an UNNAMED (or placeholder-named) run is keyed by its OWN per-entry
+      identity as well, so a newer unnamed non-red cannot SUPERSEDE an older
+      unnamed red and discard it before classification (#1353);
+    * the LEGACY `commit-status` half is classified too, by the same rules —
+      the rail reads both endpoints and a red that lives only on the status
+      half must not be invisible;
     * an UNRESOLVED identity (an unorderable multi-attempt group) is UNKNOWN,
       never GREEN — the fail-closed direction the rail takes for a surface it
       cannot read;
     * a COMPLETED run is non-red only for a conclusion in
-      `NON_RED_CONCLUSIONS`; every OTHER spelling, including a null one, is RED;
+      `NON_RED_CONCLUSIONS` (a status only for a state in `NON_RED_STATES`);
+      every OTHER spelling, including a null one, is RED;
     * an in-flight status is PENDING, never red;
     * only a MEASURING conclusion may set the surface's last-production time,
-      and a run that exercised nothing must not advance it.
+      and a run that exercised nothing must not advance it. `pending` on a
+      legacy status is the state GitHub reports for a body carrying ZERO
+      statuses, so it is never a failure AND never a measurement.
 
     Grouping deliberately mirrors the rail's `(app, name)` rather than the
     instrument's finer `(app, workflow, name)`: the rail DEFINES this refusal
@@ -2592,16 +2673,44 @@ def classify_surface_runs(runs):
     if not isinstance(runs, list):
         return UNKNOWN, None, [], 0
     groups: dict = {}
-    for run in runs:
+    for index, run in enumerate(runs):
         if not isinstance(run, dict):
             continue
-        name = str(run.get("name") or "") or UNNAMED_CHECK
-        groups.setdefault((_app_slug(run), name), []).append(run)
-    if not groups:
+        raw_name = str(run.get("name") or "")
+        name = raw_name or UNNAMED_CHECK
+        if raw_name and raw_name != UNNAMED_CHECK:
+            key = (_app_slug(run), name)
+        else:
+            # PER-ENTRY identity, exactly as the rail keys it (#1353): the
+            # newest-attempt rule must not let one unnamed run supersede
+            # another, because the superseded one may be the only red.
+            key = (_app_slug(run), name, _run_id(run) or ("entry", index))
+        groups.setdefault(key, []).append(run)
+    st_groups: dict = {}
+    for index, status in enumerate(statuses or ()):
+        if not isinstance(status, dict):
+            continue
+        raw_ctx = str(status.get("context") or "")
+        ctx = raw_ctx or UNNAMED_STATUS
+        if raw_ctx and raw_ctx != UNNAMED_STATUS:
+            key = (ctx,)
+        else:
+            key = (ctx, "entry", index)
+        st_groups.setdefault(key, []).append(status)
+    if not groups and not st_groups:
         return UNKNOWN, None, [], 0
     reds = []
     pending = 0
     anchor = None
+
+    def note_red(name, run):
+        reds.append({
+            "name": name,
+            "started": str(run.get("started_at") or ""),
+            "url": str(run.get("html_url") or ""),
+            "app": _app_slug(run),
+        })
+
     for key, group in groups.items():
         newest = _newest(group)
         if newest is None:
@@ -2612,7 +2721,7 @@ def classify_surface_runs(runs):
             if status in IN_FLIGHT_STATUSES:
                 pending += 1
             elif concl not in NON_RED_CONCLUSIONS:
-                reds.append((key[1], str(newest.get("started_at") or "")))
+                note_red(key[1], newest)
             continue
         completed = str(newest.get("completed_at") or "")
         parsed = _parse_ts(completed)
@@ -2620,7 +2729,25 @@ def classify_surface_runs(runs):
             if anchor is None or parsed > anchor[0]:
                 anchor = (parsed, completed)
         if concl not in NON_RED_CONCLUSIONS:
-            reds.append((key[1], str(newest.get("started_at") or "")))
+            note_red(key[1], newest)
+    for key, group in st_groups.items():
+        newest = _newest_status(group)
+        if newest is None:
+            return UNKNOWN, None, [], 0
+        context = key[0]
+        state = str(newest.get("state") or "")
+        stamp = str(newest.get("updated_at")
+                    or newest.get("created_at") or "")
+        if state == "pending":
+            pending += 1
+            continue
+        if state not in NON_RED_STATES:
+            reds.append({"name": context, "started": stamp,
+                         "url": "", "app": "commit-status"})
+        parsed = _parse_ts(stamp)
+        if state in MEASURING_STATES and parsed is not None:
+            if anchor is None or parsed > anchor[0]:
+                anchor = (parsed, stamp)
     if reds:
         verdict = SURFACE_RED
     elif pending:
@@ -2630,12 +2757,72 @@ def classify_surface_runs(runs):
     return verdict, (anchor[1] if anchor else None), reds, pending
 
 
-def surface_probe(sha: str):
-    """`classify_surface_runs` over the check runs attached to `sha`."""
-    runs, _total = fetch_check_runs(sha)
-    if runs is UNKNOWN:
+def classify_surface_runs(runs, statuses=()):
+    """(verdict, anchor_iso, reds, pending) — `reds` as `(name, started_iso)`."""
+    verdict, anchor, entries, pending = _surface_entries(runs, statuses)
+    if verdict is UNKNOWN:
         return UNKNOWN, None, [], 0
-    return classify_surface_runs(runs)
+    return verdict, anchor, [(e["name"], e["started"]) for e in entries], pending
+
+
+def _surface_probe_entries(sha: str):
+    """`_surface_entries` over the WHOLE surface attached to `sha`, or UNKNOWN.
+
+    THE RAIL READS TWO ENDPOINTS AND REFUSES A PARTIAL SURFACE. The rail's
+    `check_surface_probe` fetches `/check-runs` AND `/status` independently and
+    returns `partial` — a refusal — when either one could not be read, because
+    the half that was not read is exactly where a red would hide; it is the
+    read failure that disarmed §4.6/§4.7 and merged the stale green (#1261). It
+    also consumes the enumeration's own `total_count`, so a TRUNCATED page is
+    refused the same way (Task 1's `_check_main_gate` fails closed on exactly
+    this; this newer, more consequential consumer must not be the one place
+    that accepts a partial read).
+
+    An UNREADABLE, PARTIAL or TRUNCATED surface is therefore UNKNOWN here —
+    never GREEN, and never a partial list of reds.
+    """
+    runs, total = fetch_check_runs(sha)
+    statuses, _status_total = fetch_statuses(sha)
+    if runs is UNKNOWN and statuses is UNKNOWN:
+        return UNKNOWN, None, [], 0
+    if runs is UNKNOWN or statuses is UNKNOWN:
+        return UNKNOWN, None, [], 0
+    if not _is_num(total) or len(runs) != total:
+        return UNKNOWN, None, [], 0
+    return _surface_entries(runs, statuses)
+
+
+def surface_probe(sha: str):
+    """`classify_surface_runs` over the whole surface attached to `sha`."""
+    verdict, anchor, entries, pending = _surface_probe_entries(sha)
+    if verdict is UNKNOWN:
+        return UNKNOWN, None, [], 0
+    return verdict, anchor, [(e["name"], e["started"]) for e in entries], pending
+
+
+def _run_event(url):
+    """The Actions EVENT that produced a run, resolved from its own URL.
+
+    The run id is taken from the check run's `html_url` — the SAME field the
+    rail reads — and resolved by `gh api .../actions/runs/<id>`. A resolve that
+    answers NOTHING is UNKNOWN, and an UNKNOWN event BLOCKS: the non-code
+    exemption is never the default, because defaulting to exempt would convert
+    the guard into a fail-open.
+
+    A LEGACY COMMIT STATUS IS NEVER RESOLVED, and its empty `url` guarantees
+    that here: the `target_url` on a status row is the app's own arbitrary
+    link, so a `/runs/<N>` inside it names SOME run, not the run that produced
+    the row — and a commit status has no triggering Actions event at all. The
+    row stays code-measuring and blocks (#1446).
+    """
+    match = re.search(r"/runs/(\d+)", str(url or ""))
+    if not match:
+        return UNKNOWN
+    body = _gh_api(f"repos/{OWNER_REPO}/actions/runs/{match.group(1)}")
+    if body is UNKNOWN or not isinstance(body, dict):
+        return UNKNOWN
+    event = str(body.get("event") or "")
+    return event or UNKNOWN
 
 
 def base_blocking_reds():
@@ -2646,6 +2833,12 @@ def base_blocking_reds():
     rail refuses only on a red, because refusing on movement alone would refuse
     essentially every open PR). UNKNOWN means the read failed and no staleness
     judgement is possible.
+
+    ONLY CODE-MEASURING REDS ENTER THE CLOCK. The rail probes the BASE with
+    `allow_noncode=1`: a red on a `schedule`/`issues`/`issue_comment` run
+    measures no revision, and blocking on it would refuse every merge whenever
+    the cron lanes are red. A red whose event cannot be RESOLVED blocks — the
+    exemption is decided by the surface, never granted by default.
     """
     body = _gh_api(f"repos/{OWNER_REPO}/commits/main")
     if body is UNKNOWN or not isinstance(body, dict):
@@ -2653,9 +2846,14 @@ def base_blocking_reds():
     sha = body.get("sha")
     if not _is_sha(sha):
         return UNKNOWN
-    verdict, _anchor, reds, _pending = surface_probe(sha)
+    verdict, _anchor, entries, _pending = _surface_probe_entries(sha)
     if verdict is UNKNOWN:
         return UNKNOWN
+    reds = []
+    for entry in entries:
+        if _run_event(entry.get("url")) in NON_CODE_EVENTS:
+            continue
+        reds.append((entry["name"], entry["started"]))
     return sha, reds
 
 
@@ -2728,6 +2926,16 @@ def build_surface_evidence(verdict, *, produced=None, stale=None,
                 parts.append(f"merge_ref_base={merge_ref_base}")
             if base_head:
                 parts.append(f"base_head={base_head}")
+            if not (base_red_started or merge_ref_base or base_head):
+                # §4.6's UNREADABLE-TIME arm: the base IS red, but the run's
+                # own start could not be parsed, so there is no timestamp to
+                # cite and `red` alone is not evidence of a COMPARISON. Name
+                # the arm explicitly instead of emitting a string the parser
+                # (rightly) refuses — a producer that cannot round-trip its
+                # own evidence turns one unreadable start into a hard refusal
+                # of the WHOLE read, which is a worse answer than the row it
+                # was trying to describe.
+                parts.append("base_red_unreadable=1")
     else:
         if reds:
             parts.append("reds=" + ",".join(sorted(str(r) for r in reds)))
@@ -2767,6 +2975,8 @@ def surface_from_evidence(evidence):
         return UNKNOWN, UNKNOWN
     if stale == "1" and not (fields.get("base_red_started")
                              or fields.get("merge_ref_base")
+                             or fields.get("base_head")
+                             or fields.get("base_red_unreadable") == "1"
                              or fields.get("no_measuring_check") == "1"):
         return UNKNOWN, UNKNOWN
     return verdict, stale == "1"
@@ -2819,7 +3029,26 @@ def collect_triage_stale_surface(prs, base=None, bound=None):
                 pending=pending)
             continue
         stale, red_job, red_started = _stale_by_clock(anchor, clock)
-        if (stale is False and _is_sha(parent) and parent != base_sha):
+        if stale is True:
+            # §4.6 — a base red began AFTER this surface last produced, so the
+            # surface has not measured it. `red_started` may be empty (the
+            # unreadable-time arm); `build_surface_evidence` names that arm so
+            # the string still round-trips.
+            out[number] = build_surface_evidence(
+                verdict, produced=anchor, stale=True,
+                base_red_started=red_started, red=red_job)
+            continue
+        # §4.6 did not refuse. §4.7 is the SECOND, independent signal and on a
+        # RED base it is MANDATORY — the sweep's whole purpose is to certify
+        # the tree the merge will produce, so a merge ref whose base parent
+        # cannot be READ is a surface this sweep cannot certify. The rail fails
+        # closed on exactly this ("FAIL CLOSED ON AN UNREADABLE PARENT … 'I did
+        # not look' is never a green"), and falling through here would emit
+        # `verdict=GREEN; stale=0` — the rail's ACCEPT class — for a PR the
+        # rail refuses. Refuse the read rather than mislabel the row.
+        if clock and not _is_sha(parent):
+            return None
+        if clock and parent != base_sha:
             # §4.7: the merge ref was computed against a base that does not
             # contain the current base's red — the green was never measured
             # against the tree the merge will produce.
@@ -2828,9 +3057,7 @@ def collect_triage_stale_surface(prs, base=None, bound=None):
                 merge_ref_base=parent, base_head=base_sha)
             continue
         out[number] = build_surface_evidence(
-            verdict, produced=anchor, stale=stale,
-            base_red_started=(red_started if stale else None),
-            red=(red_job if stale else None))
+            verdict, produced=anchor, stale=False)
     return out
 
 

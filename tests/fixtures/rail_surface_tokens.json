@@ -1,0 +1,17 @@
+{
+  "_note": "A COMMITTED record of the rail's surface token sets, read from agent-infra scripts/admin-merge.sh (the authority for the evaluated-tree surface). It exists because the ONLY other rail pin lived behind a host-local agent-infra checkout: scripts/admin-merge.sh is untracked in this repo, so on every CI runner the parity test skipped and a drift in these sets shipped unpinned. Pin the instrument's constants against THIS file (always runs), and — when the rail is resolvable on the host — additionally assert this file still matches the live rail, so the record itself cannot rot. A set may only change when the rail changes AND this record is updated in the same commit.",
+  "_source": "scripts/admin-merge.sh (symlinked from $AGENT_INFRA_PATH/scripts/admin-merge.sh)",
+  "_read_at_rail_lines": {
+    "NON_RED_CONC": 1762,
+    "NON_RED_STATE": 1763,
+    "MEASURING_CONC": 1780,
+    "MEASURING_STATE": 1781,
+    "IN_FLIGHT_STATUS": 1904
+  },
+  "NON_RED_CONC": ["cancelled", "neutral", "skipped", "stale", "success"],
+  "NON_RED_STATE": ["success"],
+  "MEASURING_CONC": ["action_required", "failure", "success", "timed_out"],
+  "MEASURING_STATE": ["error", "failure", "success"],
+  "IN_FLIGHT_STATUS": ["in_progress", "pending", "queued", "requested", "waiting"],
+  "NON_CODE_EVENTS": ["issue_comment", "issues", "schedule"]
+}

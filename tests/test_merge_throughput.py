@@ -1185,17 +1185,48 @@ def _scratch_repo(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Rail parity (operational; skips when agent-infra is unresolvable on a runner).
+# Rail parity — a COMMITTED pin plus a live check when the rail is resolvable.
 # ---------------------------------------------------------------------------
+
+_RAIL_TOKENS_PATH = ROOT / "tests" / "fixtures" / "rail_surface_tokens.json"
+_RAIL_TOKEN_SETS = (
+    ("NON_RED_CONC", "NON_RED_CONCLUSIONS"),
+    ("NON_RED_STATE", "NON_RED_STATES"),
+    ("MEASURING_CONC", "MEASURING_CONCLUSIONS"),
+    ("MEASURING_STATE", "MEASURING_STATES"),
+    ("IN_FLIGHT_STATUS", "IN_FLIGHT_STATUSES"),
+    ("NON_CODE_EVENTS", "NON_CODE_EVENTS"),
+)
+
+
+def test_surface_token_sets_match_the_committed_rail_record():
+    """The instrument's token sets against the COMMITTED rail record.
+
+    This half ALWAYS RUNS. The live rail pin below skipped on every CI runner —
+    `scripts/admin-merge.sh` is untracked in this repo, so the only parity
+    check on these sets was inert exactly where it mattered. A drift in any of
+    these sets is a drift in what the instrument treats as GREEN, so it must
+    break a test that a runner actually executes.
+    """
+    record = _json.loads(_RAIL_TOKENS_PATH.read_text())
+    for rail_name, py_name in _RAIL_TOKEN_SETS:
+        assert set(record[rail_name]) == set(getattr(mt, py_name)), (
+            f"{py_name} drifted from the committed rail record {rail_name}")
+
 
 def test_rail_surface_token_sets_match():
     """The rail is AUTHORITATIVE for the check-surface rules (plan I6).
 
-    THREE token sets drive its probe: the non-red allow-list, the MEASURING
-    predicate (the only conclusions that may set the staleness anchor), and the
-    named in-flight statuses. The instrument OBSERVES that rule, so each set is
-    pinned here — a vendor adding a conclusion must break this test rather than
-    silently widen what the instrument treats as green.
+    SIX token sets drive its probe: the non-red allow-list and MEASURING
+    predicate for EACH endpoint (check runs AND legacy statuses), the named
+    in-flight statuses, and the non-code actions events. The instrument
+    OBSERVES that rule, so each set is pinned here — a vendor adding a
+    conclusion must break this test rather than silently widen what the
+    instrument treats as green.
+
+    Split into two halves because they fail differently: the committed record
+    above always runs, while THIS half can only run where the rail is readable
+    (and records the rail's own sets back into the record when it is).
     """
     candidates = []
     import os
@@ -1214,19 +1245,27 @@ def test_rail_surface_token_sets_match():
             continue
         read_any = True
         found = {}
-        for name in ("NON_RED_CONC", "MEASURING_CONC", "IN_FLIGHT_STATUS"):
+        for name, _py_name in _RAIL_TOKEN_SETS:
             match = re.search(rf"^{name}\s*=\s*\{{([^}}]*)\}}", body, re.M)
             if match:
                 found[name] = set(re.findall(r'"([^"]+)"', match.group(1)))
         if found:
-            assert found.get("NON_RED_CONC") == set(mt.NON_RED_CONCLUSIONS)
-            assert found.get("MEASURING_CONC") == set(mt.MEASURING_CONCLUSIONS)
-            assert found.get("IN_FLIGHT_STATUS") == set(mt.IN_FLIGHT_STATUSES)
+            # The record must still describe the LIVE rail: otherwise the pin
+            # above holds the instrument to a record that has itself gone stale.
+            record = _json.loads(_RAIL_TOKENS_PATH.read_text())
+            for rail_name, py_name in _RAIL_TOKEN_SETS:
+                if rail_name in found:
+                    assert found[rail_name] == set(record[rail_name]), (
+                        f"the committed rail record for {rail_name} no longer "
+                        f"matches {path} — update the record and the instrument "
+                        f"together")
+                    assert found[rail_name] == set(getattr(mt, py_name))
             return
     if read_any:
         pytest.fail("rail readable but its surface token sets were not found — "
                     "parity unverifiable")
-    pytest.skip("agent-infra rail not resolvable on this host (operational check)")
+    pytest.skip("agent-infra rail not resolvable on this host (operational "
+                "check; the committed record above still pinned the sets)")
 
 
 # ---------------------------------------------------------------------------
@@ -2283,10 +2322,11 @@ def test_surface_verdict_selects_the_rail_refusal_class():
 
 def _cr(number, name, conclusion, *, status="completed", app="github-actions",
         rid=None, started="2026-09-27T10:00:00Z",
-        completed="2026-09-27T10:05:00Z"):
+        completed="2026-09-27T10:05:00Z", html_url=""):
     return {"id": rid if rid is not None else number, "name": name,
             "status": status, "conclusion": conclusion, "app": {"slug": app},
-            "started_at": started, "completed_at": completed}
+            "started_at": started, "completed_at": completed,
+            "html_url": html_url}
 
 
 def test_surface_probe_newest_attempt_per_app_name_decides():
@@ -2299,6 +2339,29 @@ def test_surface_probe_newest_attempt_per_app_name_decides():
     assert verdict == mt.SURFACE_GREEN
     assert reds == [] and pending == 0
     assert anchor == "2026-09-27T10:35:00Z"
+
+
+def test_surface_probe_newest_attempt_is_by_id_not_by_timestamp():
+    """`id` decides the newest attempt — NOT a timestamp.
+
+    GitHub does not guarantee that a re-run's `completed_at` is later than the
+    run it supersedes (a re-run can complete quickly while the superseded run
+    was long, and a re-run's start is recorded for the WHOLE attempt). If
+    ordering were timestamp-primary, an OLDER id carrying a later timestamp
+    would win and a genuine red would be dropped — the false GREEN this
+    grouping exists to prevent. Here the newer id is the RED, so an
+    id-primary read must report RED and a timestamp-primary read would not.
+    """
+    verdict, _anchor, reds, _pending = mt.classify_surface_runs([
+        _cr(1, "python-ci-gate", "success",
+            started="2026-09-27T09:00:00Z",
+            completed="2026-09-27T12:00:00Z"),
+        _cr(2, "python-ci-gate", "failure",
+            started="2026-09-27T09:30:00Z",
+            completed="2026-09-27T11:00:00Z"),
+    ])
+    assert verdict == mt.SURFACE_RED
+    assert reds == [("python-ci-gate", "2026-09-27T09:30:00Z")]
 
 
 def test_surface_probe_unknown_conclusion_is_red():
@@ -2341,6 +2404,105 @@ def test_surface_probe_non_measuring_check_does_not_set_the_anchor():
     ])
     assert verdict == mt.SURFACE_GREEN
     assert anchor == "2026-09-27T09:00:00Z"
+
+
+def test_surface_probe_unnamed_runs_are_keyed_per_entry_not_collapsed():
+    """An UNNAMED run is classified on its OWN identity (#1353).
+
+    The rail keys an unnamed run by its own per-entry identity as well as
+    `(app, name)`, so a newer unnamed non-red cannot SUPERSEDE an older unnamed
+    red and discard it before classification. Collapsing every unnamed run into
+    one `(app, "(unnamed check)")` group and keeping only the newest id drops
+    the red — a surface that reads GREEN where the rail reads RED.
+    """
+    older_red = {"id": 1, "name": "", "status": "completed",
+                 "conclusion": "failure", "app": {"slug": "github-actions"},
+                 "started_at": "2026-09-27T09:00:00Z",
+                 "completed_at": "2026-09-27T09:05:00Z"}
+    newer_green = {"id": 2, "name": "", "status": "completed",
+                   "conclusion": "success", "app": {"slug": "github-actions"},
+                   "started_at": "2026-09-27T10:00:00Z",
+                   "completed_at": "2026-09-27T10:05:00Z"}
+    verdict, _anchor, reds, _pending = mt.classify_surface_runs(
+        [older_red, newer_green])
+    assert verdict == mt.SURFACE_RED
+    assert reds == [(mt.UNNAMED_CHECK, "2026-09-27T09:00:00Z")]
+    # A single unnamed run is classified too, never dropped.
+    assert mt.classify_surface_runs([older_red])[0] == mt.SURFACE_RED
+
+
+def test_surface_probe_reads_the_legacy_status_half():
+    """The rail probes TWO endpoints; a red on the status half is a red."""
+    def status(context, state, stamp="2026-09-27T10:00:00Z"):
+        return {"context": context, "state": state, "updated_at": stamp}
+
+    verdict, _anchor, reds, _pending = mt.classify_surface_runs(
+        [_cr(1, "test (a)", "success")], [status("legacy", "failure")])
+    assert verdict == mt.SURFACE_RED
+    assert reds == [("legacy", "2026-09-27T10:00:00Z")]
+    # An UNNAMED status state is classified, never dropped (#1353).
+    assert mt.classify_surface_runs([], [status("", "mystery")])[0] == \
+        mt.SURFACE_RED
+
+
+def test_surface_probe_status_pending_is_not_a_measurement():
+    """`pending` is never red AND must not advance the anchor (#1353).
+
+    The combined-status body reports aggregate `pending` for a body carrying
+    ZERO statuses, and a pending status's `updated_at` is when it was queued,
+    not when anything was measured. Letting it stamp the anchor moved the
+    last-production time FORWARD past the real evaluation, so a base red that
+    began in between compared as already-measured.
+    """
+    pending = {"context": "legacy", "state": "pending",
+               "updated_at": "2026-09-27T12:00:00Z"}
+    measured = {"context": "measured", "state": "success",
+                "updated_at": "2026-09-27T09:00:00Z"}
+    verdict, anchor, reds, pending_n = mt.classify_surface_runs(
+        [], [pending, measured])
+    assert verdict == mt.SURFACE_PENDING
+    assert reds == [] and pending_n == 1
+    assert anchor == "2026-09-27T09:00:00Z"
+
+
+def test_surface_probe_refuses_a_truncated_enumeration(monkeypatch):
+    """A TRUNCATED page is a failure to look, not a clean surface.
+
+    `total_count` is the enumeration's own claim about how many check runs
+    exist; a short list against it is a partial read. Task 1's
+    `_check_main_gate` fails closed on exactly this, and a partial read here
+    would report GREEN/`eligible` for a PR whose red sits on an unread page.
+    """
+    runs = [_cr(1, "test (a)", "success")]
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: (runs, 3))
+    monkeypatch.setattr(mt, "fetch_statuses", lambda sha: ([], 0))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+    # A missing/None total is unreadable, never "assume complete".
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: (runs, None))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+    # POSITIVE CONTROL: an agreeing total still reads the surface.
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: (runs, 1))
+    assert mt.surface_probe("a" * 40)[0] == mt.SURFACE_GREEN
+
+
+def test_surface_probe_refuses_a_partial_surface(monkeypatch):
+    """ONE unread endpoint is a PARTIAL surface, which the rail refuses.
+
+    The rail fetches `/check-runs` and `/status` independently and refuses when
+    either could not be read, because the half it could not read is exactly
+    where a red would hide (#1261). Returning the readable half as a verdict is
+    the fail-open that disarmed §4.6/§4.7.
+    """
+    runs = [_cr(1, "test (a)", "success")]
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: (runs, 1))
+    monkeypatch.setattr(mt, "fetch_statuses", lambda sha: (mt.UNKNOWN, mt.UNKNOWN))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: (mt.UNKNOWN, mt.UNKNOWN))
+    monkeypatch.setattr(mt, "fetch_statuses", lambda sha: ([], 0))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+    # BOTH unreadable is UNREADABLE (also a refusal, never GREEN).
+    monkeypatch.setattr(mt, "fetch_statuses", lambda sha: (mt.UNKNOWN, mt.UNKNOWN))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
 
 
 def test_stale_by_clock_refuses_a_red_that_started_after_the_anchor():
@@ -2395,6 +2557,150 @@ def test_collect_triage_stale_surface_refuses_a_failed_surface(monkeypatch):
                         lambda sha: (mt.UNKNOWN, None, [], 0))
     assert mt.collect_triage_stale_surface(
         prs, base=("b" * 40, [("test (b)", "2026-09-27T10:45:26Z")])) is None
+
+
+def test_surface_evidence_round_trips_an_unreadable_base_red_start():
+    """§4.6's UNREADABLE-TIME arm must round-trip its own evidence.
+
+    A base red whose `started_at` cannot be parsed makes §4.6 refuse with no
+    timestamp to cite. If the producer then emitted `stale=1` with neither a
+    timestamp nor a marker, the parser (rightly) called it UNKNOWN, validation
+    rejected the WHOLE read, and the documented `re_measure` row was
+    unreachable — one unreadable start hard-failed the sweep. The arm is named
+    explicitly instead.
+    """
+    evidence = mt.build_surface_evidence(
+        mt.SURFACE_GREEN, produced="2026-09-27T09:00:00Z", stale=True,
+        base_red_started=None, red="test (b)")
+    assert "base_red_unreadable=1" in evidence
+    assert mt.surface_from_evidence(evidence) == (mt.SURFACE_GREEN, True)
+    # And the row it produces is the stale-green class, not `eligible`.
+    assert mt._surface_bucket(*mt.surface_from_evidence(evidence)) == \
+        "re_measure"
+    # A timestamped red still cites the timestamp, not the marker.
+    timed = mt.build_surface_evidence(
+        mt.SURFACE_GREEN, produced="2026-09-27T09:00:00Z", stale=True,
+        base_red_started="2026-09-27T10:45:26Z", red="test (b)")
+    assert "base_red_unreadable" not in timed
+    assert mt.surface_from_evidence(timed) == (mt.SURFACE_GREEN, True)
+
+
+def test_collect_triage_stale_surface_47_unreadable_parent_refuses(monkeypatch):
+    """§4.7 on a RED base FAILS CLOSED when the parent cannot be read.
+
+    With the base red and §4.6 not firing, §4.7 is the sweep's remaining
+    certification that the green was measured against the tree the merge will
+    produce. The rail refuses an unreadable parent ("I did not look is never a
+    green"); falling through would emit `verdict=GREEN; stale=0` — the rail's
+    ACCEPT class — for a PR the rail blocks.
+    """
+    prs = [{"number": 1, "head": {"sha": "a" * 40}}]
+    monkeypatch.setattr(mt, "surface_probe",
+                        lambda sha: (mt.SURFACE_GREEN, "2026-09-27T11:00:00Z",
+                                     [], 0))
+    monkeypatch.setattr(mt, "merge_ref_base_parent", lambda pr: mt.UNKNOWN)
+    assert mt.collect_triage_stale_surface(
+        prs, base=("b" * 40, [("test (b)", "2026-09-27T10:45:26Z")])) is None
+    # POSITIVE CONTROL: a READABLE parent that matches the base head still
+    # certifies the green as fresh — the refusal is about the read, not the
+    # base being red.
+    monkeypatch.setattr(mt, "merge_ref_base_parent", lambda pr: "b" * 40)
+    fresh = ("verdict=GREEN; stale=0; produced=2026-09-27T11:00:00Z")
+    assert mt.collect_triage_stale_surface(
+        prs, base=("b" * 40,
+                   [("test (b)", "2026-09-27T10:45:26Z")])) == {1: fresh}
+    # A GREEN base never consults §4.7 at all, so an unreadable parent there is
+    # not a refusal — there is nothing a green base could have failed to
+    # measure.
+    monkeypatch.setattr(mt, "merge_ref_base_parent", lambda pr: mt.UNKNOWN)
+    assert mt.collect_triage_stale_surface(prs, base=("b" * 40, [])) == \
+        {1: fresh}
+
+
+def test_base_reds_exempt_a_non_code_event(monkeypatch):
+    """A `schedule`/`issues` red does not enter §4.6's BASE clock.
+
+    The rail probes the base with `allow_noncode=1`: such a run measures no
+    revision, and blocking on it would refuse every merge whenever the cron
+    lanes are red. An UNRESOLVED event still blocks — the exemption is decided
+    by the surface, never granted by default.
+    """
+    runs = [_cr(1, "cron-lane", "failure",
+                html_url="https://github.com/o/r/actions/runs/11/job/1"),
+            _cr(2, "test (b)", "failure",
+                html_url="https://github.com/o/r/actions/runs/22/job/1")]
+    events = {11: "schedule", 22: "pull_request"}
+
+    def fake_api(path, *a, **k):
+        if path.endswith("/commits/main"):
+            return {"sha": "c" * 40}
+        match = re.search(r"/actions/runs/(\d+)$", path)
+        if match:
+            return {"event": events.get(int(match.group(1)), "")}
+        return mt.UNKNOWN
+
+    monkeypatch.setattr(mt, "_gh_api", fake_api)
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: (runs, 2))
+    monkeypatch.setattr(mt, "fetch_statuses", lambda sha: ([], 0))
+    assert mt.base_blocking_reds() == (
+        "c" * 40, [("test (b)", "2026-09-27T10:00:00Z")])
+    # AN UNRESOLVED EVENT BLOCKS: defaulting to exempt would be a fail-open.
+    events = {}
+    assert mt.base_blocking_reds() == (
+        "c" * 40,
+        [("cron-lane", "2026-09-27T10:00:00Z"),
+         ("test (b)", "2026-09-27T10:00:00Z")])
+
+
+def test_base_reds_never_run_resolve_a_legacy_commit_status(monkeypatch):
+    """A status red's `target_url` must not inherit an exempting event.
+
+    A commit status's URL is the app's OWN arbitrary link: a `/runs/<N>` inside
+    it names SOME run, not the run that produced the row, and a status has no
+    triggering Actions event at all. The rail clears the run id for a
+    `commit-status` app so such a red stays code-measuring and blocks (#1446).
+    """
+    statuses = [{"context": "legacy", "state": "failure",
+                 "updated_at": "2026-09-27T10:00:00Z",
+                 "target_url": "https://github.com/o/r/actions/runs/11"}]
+
+    def fake_api(path, *a, **k):
+        if path.endswith("/commits/main"):
+            return {"sha": "c" * 40}
+        return {"event": "schedule"}
+
+    monkeypatch.setattr(mt, "_gh_api", fake_api)
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: ([], 0))
+    monkeypatch.setattr(mt, "fetch_statuses", lambda sha: (statuses, 1))
+    assert mt.base_blocking_reds() == (
+        "c" * 40, [("legacy", "2026-09-27T10:00:00Z")])
+
+
+def test_no_languish_refuses_a_bucket_label_hidden_in_classification():
+    """A bucket word in the LEGACY column is a bucket claim, and is checked.
+
+    `_excluded` reads EITHER classification column, so both are exclusion
+    channels. A row declaring `classification:"draft"` with `draft:false`
+    excluded a moveless PR while the same row written with `bucket` was
+    refused. The legacy column's OWN vocabulary (`open`) is not a bucket and
+    has nothing to re-derive against, so it is left alone.
+    """
+    hidden = [{"number": i, "classification": "draft", "draft": False,
+               "conflict": False, "moved_in_window": False}
+              for i in range(12)]
+    assert run_check(
+        "no-languish",
+        json={"items": hidden, "total_count": 12, "read_ok": True,
+              "window_days": 7},
+        require_complete=True) == 2
+    # The legacy `open` vocabulary is untouched — it is not a bucket word.
+    legacy = [{"number": i, "classification": "open",
+               "moved_in_window": False} for i in range(12)]
+    assert run_check(
+        "no-languish",
+        json={"items": legacy, "total_count": 12, "read_ok": True,
+              "window_days": 7},
+        require_complete=True) == 1
 
 
 def test_collect_triage_stale_surface_green_base_is_fresh(monkeypatch):
@@ -2670,11 +2976,24 @@ def test_triage_enumeration_failure_is_none(monkeypatch):
 
 
 def test_triage_refuses_a_truncated_enumeration(monkeypatch):
-    """A partial page that reconciles only against ITSELF is a silent truncation."""
+    """A partial page that reconciles only against ITSELF is a silent truncation.
+
+    The independent total is read AFTER the surface sweep, so the surface must
+    be stubbed out here — otherwise `_triage_rows` refuses at the surface gate
+    and this test passes without ever reaching the reconciliation it names.
+    """
     prs = [{"number": i, "draft": False} for i in range(5)]
     monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
     monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: {})
     monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
+    monkeypatch.setattr(
+        mt, "collect_triage_stale_surface",
+        lambda *a, **k: {p["number"]: FRESH_EVIDENCE for p in prs})
+    # POSITIVE CONTROL: with a total that AGREES, the same read must succeed —
+    # so the refusals below cannot be satisfied by an earlier gate.
+    monkeypatch.setattr(mt, "open_pr_total", lambda: len(prs))
+    rows, total = mt._triage_rows()
+    assert rows is not None and total == len(prs)
     # The API says there are 9 open PRs; the enumeration returned 5.
     monkeypatch.setattr(mt, "open_pr_total", lambda: 9)
     assert mt._triage_rows() == (None, 0)

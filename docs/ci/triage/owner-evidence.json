@@ -216,12 +216,6 @@
     "tier": "holder"
   },
   {
-    "number": 5248,
-    "owner": "session:01a0d65b-af2",
-    "owner_evidence": "branch=fix/2383; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 \u2014 recovered. **PUSH YOUR WORK FIRST.** **Your pane was respawned.** Your session had **frozen** \u2014 session file",
-    "tier": "holder"
-  },
-  {
     "number": 5264,
     "owner": "session:01a0d689-fc5",
     "owner_evidence": "branch=fix/3631-abuse-notify-budget; session=01a0d689-fc55-7379-a6d5-ea2eacf5fc71; holder=git-command naming the branch; first_msg=# Lane C \u2014 recovered (wedged again). Continue #4614. **Your pane was respawned.** Your session file was **byte-identical",
@@ -1002,9 +996,45 @@
     "tier": "holder"
   },
   {
-    "number": 5801,
+    "number": 5803,
     "owner": "UNKNOWN",
-    "owner_evidence": "no holder session found for branch=mergify/merge-queue/c9485d3608",
+    "owner_evidence": "no holder session found for branch=feat/mt-task5-triage",
+    "tier": "unknown"
+  },
+  {
+    "number": 5805,
+    "owner": "UNKNOWN",
+    "owner_evidence": "no holder session found for branch=fix/5131-role-inversion",
+    "tier": "unknown"
+  },
+  {
+    "number": 5807,
+    "owner": "UNKNOWN",
+    "owner_evidence": "no holder session found for branch=mergify/merge-queue/7a1fe21b90",
+    "tier": "unknown"
+  },
+  {
+    "number": 5808,
+    "owner": "UNKNOWN",
+    "owner_evidence": "no holder session found for branch=mergify/merge-queue/3ad2db79c5",
+    "tier": "unknown"
+  },
+  {
+    "number": 5809,
+    "owner": "UNKNOWN",
+    "owner_evidence": "no holder session found for branch=mergify/merge-queue/6c763e4cbf",
+    "tier": "unknown"
+  },
+  {
+    "number": 5810,
+    "owner": "UNKNOWN",
+    "owner_evidence": "no holder session found for branch=mergify/merge-queue/03b4e0d93c",
+    "tier": "unknown"
+  },
+  {
+    "number": 5811,
+    "owner": "UNKNOWN",
+    "owner_evidence": "no holder session found for branch=mergify/merge-queue/0087960203",
     "tier": "unknown"
   }
 ]
