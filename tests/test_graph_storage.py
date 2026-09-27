@@ -47,6 +47,15 @@ REPLY = [
     b"indices_sz_mb", 0,
 ]
 
+#: The SAME reply as it arrives from a client that decoded it itself: a dict
+#: whose nested value is STILL a flat list. Both shapes must normalise — the
+#: parser advertises this one, so it has to measure, not merely parse.
+DICT_REPLY = {
+    "total_graph_sz_mb": 4,
+    "indices_sz_mb": 1,
+    "amortized_node_attributes_by_label_sz_mb": [b"Point", 3, b"Object", 1],
+}
+
 
 def _reply(total_mb: float, indices_mb: float = 0.0) -> list:
     return [b"total_graph_sz_mb", total_mb, b"indices_sz_mb", indices_mb]
@@ -92,6 +101,35 @@ def test_parse_rejects_a_reply_without_total():
     """GUARD: a list with no ``total_graph_sz_mb`` is malformed, not empty."""
     with pytest.raises(ValueError):
         parse_memory_usage([b"indices_sz_mb", 0])
+
+
+def test_parse_normalises_a_client_decoded_dict_reply():
+    """GUARD (review finding): the advertised dict shape must be NORMALISED.
+
+    A client that decoded the reply itself hands back a dict whose nested value
+    is still a flat list. Returning that dict VERBATIM left the one shape this
+    parser advertises failing downstream — the per-label unpack raised
+    ``'list' object has no attribute 'items'``, which the outer fail-soft
+    handler turned into ``ok=False``, discarding a well-formed reading.
+    """
+    parsed = parse_memory_usage(DICT_REPLY)
+    assert parsed["amortized_node_attributes_by_label_sz_mb"] == {
+        "Point": 3, "Object": 1}
+
+
+def test_measure_reads_a_client_decoded_dict_reply():
+    """GUARD (review finding): end to end, the dict shape must MEASURE.
+
+    Measured before the fix: ``ok=False`` with
+    ``error="'list' object has no attribute 'items'"`` — a well-formed reply
+    silently discarded, which reads to a consumer as "no reading", not as a
+    parser defect.
+    """
+    r = measure_graph_storage(_FakeClient([DICT_REPLY]), "org_x")
+    assert r.ok is True, r.error
+    assert r.total_mb == 4.0
+    assert r.indices_mb == 1.0
+    assert r.node_attributes_mb == {"Point": 3.0, "Object": 1.0}
 
 
 # ── the reading ───────────────────────────────────────────────────────────

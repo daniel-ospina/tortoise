@@ -1229,7 +1229,14 @@ def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
         return None
     safe_min = _finite_or(min_mb, total) if min_mb is not None else total
     safe_max = _finite_or(max_mb, total) if max_mb is not None else total
-    safe_indices = _finite_or(indices_mb, 0.0) if indices_mb is not None else None
+    # A non-finite index share is ABSENT, not zero (review finding):
+    # ``graph_storage_indices_mb`` is nullable precisely so "the engine did not
+    # report an index share" stays distinguishable from "reported as 0" — the
+    # distinction this meter exists to keep. Defaulting a NaN to 0.0 would write
+    # a fabricated clean figure, which is the one thing a measurement must not do.
+    safe_indices = None
+    if indices_mb is not None and _is_finite(indices_mb):
+        safe_indices = float(indices_mb)
     period = _require_period(org_id, "graph storage metering")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     with _ask_meter_lock(org_id):

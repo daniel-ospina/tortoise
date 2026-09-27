@@ -92,6 +92,27 @@ def _decode(value: Any) -> str:
     return str(value)
 
 
+def _normalise_field(key: str, value: Any) -> Any:
+    """Decode a nested flat key/value list into a dict; pass anything else through.
+
+    FalkorDB delivers the per-label breakdown as a NESTED flat list. BOTH reply
+    shapes must be normalised: a client that decoded the reply itself hands back
+    a dict whose values may STILL hold that nested list, so normalising only the
+    list branch left the advertised dict shape failing on a well-formed reply
+    (``'list' object has no attribute 'items'`` downstream).
+    """
+    if isinstance(value, (list, tuple)):
+        if len(value) % 2 != 0:
+            raise ValueError(
+                f"GRAPH.MEMORY USAGE nested field {key!r} is not a flat "
+                f"key/value list (odd length {len(value)})")
+        return {
+            _decode(value[j]): value[j + 1]
+            for j in range(0, len(value), 2)
+        }
+    return value
+
+
 def parse_memory_usage(reply: Any) -> dict[str, Any]:
     """Parse a ``GRAPH.MEMORY USAGE`` reply into a dict.
 
@@ -106,8 +127,12 @@ def parse_memory_usage(reply: Any) -> dict[str, Any]:
     meter's fail-soft path depends on).
     """
     if isinstance(reply, dict):
-        # A client configured to decode the reply itself may hand back a dict.
-        parsed = {str(k): v for k, v in reply.items()}
+        # A client configured to decode the reply itself may hand back a dict
+        # — whose nested values may still be flat lists, so normalise them.
+        parsed = {
+            _decode(k): _normalise_field(_decode(k), v)
+            for k, v in reply.items()
+        }
         if "total_graph_sz_mb" in parsed:
             return parsed
         raise ValueError(
@@ -125,14 +150,7 @@ def parse_memory_usage(reply: Any) -> dict[str, Any]:
         key = _decode(reply[i])
         value = reply[i + 1]
         if isinstance(value, (list, tuple)):
-            if len(value) % 2 != 0:
-                raise ValueError(
-                    f"GRAPH.MEMORY USAGE nested field {key!r} is not a flat "
-                    f"key/value list (odd length {len(value)})")
-            value = {
-                _decode(value[j]): value[j + 1]
-                for j in range(0, len(value), 2)
-            }
+            value = _normalise_field(key, value)
         parsed[key] = value
     if "total_graph_sz_mb" not in parsed:
         raise ValueError(
