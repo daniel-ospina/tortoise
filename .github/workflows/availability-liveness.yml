@@ -42,8 +42,10 @@ concurrency:
   cancel-in-progress: false
 
 # contents: read for actions/checkout; issues: write for the alert issue;
-# actions: read for the watchdog workflow's own metadata (used to tell a fresh
-# deploy, which has nothing to verify yet, from a monitor that should have run).
+# actions: read for the LIVENESS workflow's own created_at — the age of this
+# feature, used to tell a fresh deploy (nothing to verify yet) from a monitor
+# that should have run. Deliberately NOT the watchdog workflow's age: that would
+# alarm from the first run (see availability-liveness.sh's header).
 permissions:
   contents: read
   issues: write

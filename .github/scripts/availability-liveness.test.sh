@@ -9,9 +9,11 @@
 # ⛔ NON-VACUITY IS THE POINT. A liveness check that cannot fail is the defect
 # (#4573) restated, so the load-bearing cases are the ones where the checker
 # MUST go red: a stale heartbeat, an absent heartbeat on an established monitor,
-# an unparseable/unreadable record, and a failed search. Every one of them
-# asserts BOTH the non-zero exit AND the filed/updated alert — a check that
-# merely logs would pass a weaker test while proving nothing.
+# and an unparseable/unreadable record. Each of those asserts BOTH the non-zero
+# exit AND the filed/updated alert. The failed-search cases (15/16/29/47) assert
+# the mirror-image side effect — exit 1 with NO alert filed, never a false page —
+# because a check that merely logs would pass a weaker test while proving
+# nothing, and a check that false-pages on a transient failure is worse.
 #
 # Coverage:
 #   Freshness
@@ -732,7 +734,7 @@ assert_contains "$OUT" "ignoring the pin" "46: …and it is rejected loudly, not
 assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "46: …and the durable alert is filed"
 
 # 47. the heartbeat-search failure arm in ISOLATION. STUB_SEARCH_FAIL (case 15) is
-# all-or-nothing, so a mutation that turns the heartbeat arm's exit into a
+# all-or-nothing, so a change that turns the heartbeat arm's exit into a
 # fall-through would reach the ALERT-search failure later and still exit 1 — the
 # false page it would file stays invisible. The targeted knob pins it alone.
 reset_case
