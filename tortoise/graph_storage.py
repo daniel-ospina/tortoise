@@ -169,7 +169,11 @@ def _resolve_samples(value: Any) -> int:
     """
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is NOT academic: ``int(float("inf"))`` (and
+        # ``int(Decimal("Infinity"))``) raises it, and this function's contract
+        # is that a bad input FAILS SOFT — it must never propagate a raise into
+        # a request. NaN arrives as ValueError, +-inf as OverflowError.
         raise ValueError(f"SAMPLES must be an integer, got {value!r}") from None
     if n < 1:
         _logger.warning(
@@ -187,7 +191,9 @@ def _resolve_repeats(value: Any) -> int:
     """Validate the repeat count to a whole number >= 1 (clamped, warned)."""
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # See ``_resolve_samples``: ``int(inf)`` raises OverflowError, and a
+        # raise here would escape ``measure_graph_storage``'s fail-soft contract.
         raise ValueError(
             f"repeats must be an integer, got {value!r}") from None
     if n < 1:
