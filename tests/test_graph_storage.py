@@ -28,6 +28,7 @@ from tortoise import graph_storage
 from tortoise.graph_storage import (
     EXCLUDED_OVERHEAD,
     PRECISION_NOTE,
+    REPEATS_MAX,
     SAMPLES_DEFAULT,
     SAMPLES_MAX,
     measure_graph_storage,
@@ -291,6 +292,63 @@ def test_a_huge_whole_sample_count_is_clamped_not_raised():
     assert r.samples == SAMPLES_MAX
 
 
+def test_measure_rejects_a_fractional_sample_count():
+    """GUARD (review finding): a finite non-integer must not be FLOORED.
+
+    ``int(5.9) == 5`` silently, so a config value like ``total_nodes * 0.01``
+    produced an ``ok=True`` reading reporting a precision the run never had —
+    which the docstring says is rejected. Caught by the same rule for repeats.
+    """
+    for bad in (5.9, 1.0001):
+        r = measure_graph_storage(_FakeClient([_reply(4)]), "org_x", samples=bad)
+        assert r.ok is False, (
+            f"samples={bad!r} must FAIL, not be floored to a different count: {r!r}")
+    r = measure_graph_storage(_FakeClient([_reply(4)]), "org_x", repeats=2.5)
+    assert r.ok is False, r
+    # ...and a WHOLE float is still accepted, so this rejects fractions only.
+    r = measure_graph_storage(_FakeClient([_reply(4)]), "org_x", samples=3.0)
+    assert r.ok is True and r.samples == 3
+
+
+def test_a_huge_repeat_count_is_clamped_to_this_modules_bound():
+    """GUARD (review finding): ``repeats`` must be BOUNDED above.
+
+    Every repeat is a synchronous engine round trip, so ``repeats=10**9`` was a
+    hang / MemoryError rather than a measurement, while ``samples`` was already
+    clamped. ``REPEATS_MAX`` is this module's own bound (the engine documents
+    none for the repeat count) and the clamp is warned, like ``SAMPLES``.
+
+    Asserted on the RESOLVER — driving 10**9 repeats through
+    ``measure_graph_storage`` is the very hang this guards against, and a fake
+    client cannot supply the replies.
+    """
+    assert REPEATS_MAX >= 1
+    assert graph_storage._resolve_repeats(10**9) == REPEATS_MAX
+    assert graph_storage._resolve_repeats(REPEATS_MAX + 1) == REPEATS_MAX
+    # ...and an in-range count is untouched, so this clamps rather than pins.
+    assert graph_storage._resolve_repeats(3) == 3
+
+
+def test_the_meter_drops_an_index_share_larger_than_its_total():
+    """GUARD (review finding): enforce the invariant the comment cites.
+
+    The comment justifying the NaN drop says "the index share never exceeds the
+    total", and a test asserts it — but only by choosing the same repeat, never
+    by validating a malformed reply. A finite 9.0 against a total of 2.0 was
+    published at ``ok=True``, contradicting it. Dropped to ABSENT, like a NaN;
+    the total is unaffected.
+    """
+    client = _FakeClient([[
+        b"total_graph_sz_mb", 2.0,
+        b"indices_sz_mb", 9.0,
+    ]])
+    r = measure_graph_storage(client, "org_x")
+    assert r.ok is True, r
+    assert r.indices_mb is None, (
+        f"a share exceeding its total is not a usable share: {r.indices_mb!r}")
+    assert r.total_mb == 2.0
+
+
 # ── fail-soft ─────────────────────────────────────────────────────────────
 
 def test_measure_fails_soft_on_engine_error():
@@ -500,6 +558,44 @@ def test_writer_drops_non_integer_samples(org):
     from tortoise import metering
     assert metering.record_graph_storage_reading(
         org, total_mb=5.0, samples="many") is None
+
+
+def test_writer_drops_a_non_finite_count_and_never_raises(org):
+    """GUARD (review finding): the WRITER must fail soft on a non-finite count.
+
+    The resolvers in this module were fixed for ``int(float("inf"))`` raising
+    OverflowError, but the LEDGER writer kept the same narrow
+    ``(TypeError, ValueError)`` and so let the same input escape as a raise out
+    of a fail-soft write — the identical defect at the sibling site, while its
+    own docstring promised a non-integer count is "dropped the same way".
+    """
+    from tortoise import metering
+    for bad in (float("inf"), float("-inf")):
+        assert metering.record_graph_storage_reading(
+            org, total_mb=5.0, samples=bad) is None, f"samples={bad!r} raised"
+        assert metering.record_graph_storage_reading(
+            org, total_mb=5.0, repeats=bad) is None, f"repeats={bad!r} raised"
+
+
+def test_the_meter_helpers_never_raise_on_an_uncoercible_magnitude():
+    """GUARD (review finding): "is this finite?" must ANSWER, not raise.
+
+    ``float(10**400)`` raises ``OverflowError: int too large to convert to
+    float`` — so both helpers must catch it and return their non-finite answer,
+    rather than propagating a raise out of a fail-soft boundary.
+    """
+    from tortoise import metering
+    assert metering._is_finite(10**400) is False
+    assert metering._is_finite(float("inf")) is False
+    assert metering._finite_or(10**400, 7.0) == 7.0
+    assert metering._is_finite(3.5) is True
+
+
+def test_writer_drops_a_non_finite_value_and_never_raises(org):
+    """GUARD: a huge magnitude on the ledger path also fails soft."""
+    from tortoise import metering
+    assert metering.record_graph_storage_reading(
+        org, total_mb=10**400) is None
 
 
 def test_writer_maps_a_non_finite_index_share_to_absent(org):

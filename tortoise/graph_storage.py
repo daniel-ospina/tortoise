@@ -68,6 +68,15 @@ SAMPLES_DEFAULT = 100
 #: above it is clamped, with a warning, rather than passed through.
 SAMPLES_MAX = 10_000
 
+# ⛔ This module's OWN bound, not a FalkorDB limit: ``repeats`` drives that many
+# SYNCHRONOUS engine round trips, so an unbounded value is a hang (or a
+# MemoryError building the totals tuple), not a measurement. The engine
+# documents no maximum for the repeat COUNT — ``SAMPLES`` is the engine's own
+# knob and has its own ceiling above — so this is ours, and it is deliberately
+# modest: the repeats exist to produce a min/max RANGE, and a count beyond a
+# couple of dozen is a typo, not a tighter estimate.
+REPEATS_MAX = 32
+
 #: What ``GRAPH.MEMORY USAGE`` does NOT include. The strings are part of the
 #: reading (not only of this docstring) because a consumer that only ever sees
 #: the number must still be able to read what it leaves out.
@@ -175,6 +184,14 @@ def _resolve_samples(value: Any) -> int:
         # is that a bad input FAILS SOFT — it must never propagate a raise into
         # a request. NaN arrives as ValueError, +-inf as OverflowError.
         raise ValueError(f"SAMPLES must be an integer, got {value!r}") from None
+    if n != value:
+        # A FINITE NON-INTEGER must not be silently FLOORED (``int(5.9) == 5``):
+        # the caller's input is wrong, and a floored count would report a
+        # precision the run never had — exactly the "silently-different
+        # measurement" this docstring says is rejected. ``n != value`` accepts
+        # whole floats (5.0) and Decimal("5") while rejecting 5.9.
+        raise ValueError(
+            f"SAMPLES must be a whole number, got {value!r}") from None
     if n < 1:
         _logger.warning(
             "graph storage: SAMPLES=%r is below 1 — clamping to 1", value)
@@ -188,7 +205,12 @@ def _resolve_samples(value: Any) -> int:
 
 
 def _resolve_repeats(value: Any) -> int:
-    """Validate the repeat count to a whole number >= 1 (clamped, warned)."""
+    """Validate the repeat count to a whole number in ``[1, REPEATS_MAX]``.
+
+    Out-of-range values are CLAMPED with a warning, matching ``SAMPLES`` — the
+    upper bound matters here because every repeat is a synchronous engine round
+    trip, so an unbounded count is a hang rather than a measurement.
+    """
     try:
         n = int(value)
     except (TypeError, ValueError, OverflowError):
@@ -196,10 +218,18 @@ def _resolve_repeats(value: Any) -> int:
         # raise here would escape ``measure_graph_storage``'s fail-soft contract.
         raise ValueError(
             f"repeats must be an integer, got {value!r}") from None
+    if n != value:
+        raise ValueError(
+            f"repeats must be a whole number, got {value!r}") from None
     if n < 1:
         _logger.warning(
             "graph storage: repeats=%r is below 1 — clamping to 1", value)
         return 1
+    if n > REPEATS_MAX:
+        _logger.warning(
+            "graph storage: repeats=%r exceeds this module's max %d — clamping "
+            "to %d", value, REPEATS_MAX, REPEATS_MAX)
+        return REPEATS_MAX
     return n
 
 
@@ -365,7 +395,14 @@ def measure_graph_storage(client: Any, graph_name: Any, *,
         indices = source.get("indices_sz_mb")
         if indices is not None:
             indices = float(indices)
-            if not math.isfinite(indices):
+            if not math.isfinite(indices) or indices > point:
+                # A share that EXCEEDS the point estimate is a malformed reply:
+                # the module's invariant is that the index share is a PART of
+                # the total, and the comment above justifies dropping NaN by
+                # citing exactly that. Enforcing it here keeps the claim a
+                # consumer contract instead of a hope — a finite 9.0 against a
+                # total of 2.0 is dropped for the same reason a NaN is: it is
+                # not a usable share. The TOTAL is unaffected and stays `ok`.
                 indices = None
         raw_attrs = source.get("amortized_node_attributes_by_label_sz_mb") or {}
         # Same standard per label: a non-finite value is NOT a measurement, so
