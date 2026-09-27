@@ -639,40 +639,62 @@ def test_the_blank_set_is_pythons_exact_whitespace_set():
     removes ASCII spaces only, refused a TAB-only lane on the embedded lane and
     WROTE it on the Supabase lane).
 
-    The migration's literal is checked to decode to EXACTLY Python's whitespace
-    set, in both directions, so a hand-edited copy cannot drift.
+    The migration's literal is decoded with POSTGRES ESCAPE SEMANTICS for the
+    declared parser version and checked to equal EXACTLY Python's whitespace set,
+    in both directions, so a hand-edited copy cannot drift.
 
-    THE DECODER IS POSTGRES'S, NOT PYTHON'S, and that distinction is the point.
-    PostgreSQL's E-string escapes are ``\b \f \n \r \t`` plus octal, ``\xhh``
-    and ``\uXXXX``; "any other character following a backslash is taken
-    literally", so ``E'\v'`` is the LETTER 'v' in real Postgres — while pglite
-    (which the SQL suite runs on) accepts ``\v`` as U+000B. A decoder that
-    borrowed Python's escapes would therefore assert the SOURCE TEXT and pass
-    while production built a set containing 'v' and missing the vertical tab.
-    That is not hypothetical: the neighbouring migration's copy of this set
-    carries exactly that ``\v`` (#5853).
+    The literal is ALSO required to spell U+000B as ``\u000B``, asserted
+    separately below. That second assertion is a POLICY, not a parser
+    disagreement (it corrects an earlier claim in this docstring): PostgreSQL 17,
+    the version ``supabase/config.toml`` declares, implements
+    ``case 'v': return '\v';`` in
+    ``src/backend/parser/scan.l::unescape_single_char`` (commit ae6d06f096), so
+    ``E'\v'`` and ``E'\u000B'`` compose the same character on this project's
+    parser — no SQL probe on a PG17-or-later engine can object to ``\v``. It is
+    nonetheless held to ``\u000B`` because ``\v`` does not exist in PostgreSQL 16
+    and earlier, and the manual's escape table omits it while stating that any
+    other character after a backslash "is taken literally" — a trap for a reader
+    who consults the documentation.
 
     Mutation caught: dropping or adding any character in the migration's literal
     (e.g. removing ``\u00A0`` — an NBSP-only key is then written through the RPC
-    while the embedded lane refuses it), and any escape Postgres reads
-    differently from Python (``\v`` -> 'v', which this decoder maps to 'v' and
-    which pglite would NOT catch).
+    while the embedded lane refuses it), any escape this decoder reads
+    differently from the parser, and the ``\v`` spelling — which the equality
+    check CANNOT see, because on this parser it decodes to the intended U+000B,
+    so the explicit assertion below is what catches it.
     """
     sql = _MIGRATION.read_text(encoding="utf-8")
     m = re.search(r"blank_chars constant text := E'([^']*)'", sql)
     assert m, "the migration no longer declares a blank_chars constant"
+    # The declared parser's escape set (PostgreSQL 17): \uXXXX / \UXXXXXXXX,
+    # \xhh, \ooo, and the single-character escapes b f n r t v; any other
+    # character after a backslash is itself.
     decoded = re.sub(
-        r"\\u([0-9A-Fa-f]{4})|\\(.)",
-        lambda g: (chr(int(g.group(1), 16)) if g.group(1)
-                   else {"t": "\t", "n": "\n", "f": "\x0c",
-                         "r": "\r", "b": "\x08", "\\": "\\",
-                         "'": "'"}.get(g.group(2), g.group(2))),
+        r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})|\\x([0-9A-Fa-f]{1,2})"
+        r"|\\([0-7]{1,3})|\\(.)",
+        lambda g: (
+            chr(int(g.group(1), 16)) if g.group(1)
+            else chr(int(g.group(2), 16)) if g.group(2)
+            else chr(int(g.group(3), 16)) if g.group(3)
+            else chr(int(g.group(4), 8)) if g.group(4)
+            else {"t": "\t", "n": "\n", "f": "\x0c", "r": "\r",
+                  "b": "\x08", "v": "\x0b", "\\": "\\", "'": "'"}
+            .get(g.group(5), g.group(5))
+        ),
         m.group(1))
     python_set = {c for c in map(chr, range(0x10000)) if c.isspace()}
     assert set(decoded) == python_set, (
         "the SQL blank set and Python's str.isspace() disagree: "
         f"sql-only={sorted(set(decoded) - python_set)!r} "
         f"python-only={sorted(python_set - set(decoded))!r}"
+    )
+    # POLICY (see the docstring): PostgreSQL 17 decodes `\v` to U+000B, so the
+    # equality check above accepts it — the spelling is held to `\u000B` because
+    # it is undocumented and absent before PostgreSQL 17.
+    assert "\\v" not in m.group(1), (
+        "the vertical tab must be spelled \\u000B, not \\v: PostgreSQL only "
+        "implements the \\v escape from version 17, and the manual omits it "
+        "(any other escape 'is taken literally')"
     )
 
 

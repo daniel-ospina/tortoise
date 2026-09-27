@@ -168,14 +168,18 @@ DECLARE
     --
     -- Taken from ``blank_chars`` in ``20260919000001_metering_period_end_repair.sql``
     -- (the set that mirrors the runtime authority ``metering._current_period``),
-    -- with ONE correction: the vertical tab is written ``\u000B`` and not
-    -- ``\v``. PostgreSQL has no ``\v`` escape — "any other character following a
-    -- backslash is taken literally" — so ``E'\v'`` is the LETTER 'v' in real
-    -- Postgres, which would put a ``v`` in this set and leave U+000B out (see
-    -- #5853 for the pre-existing occurrence). pglite ACCEPTS ``\v`` as U+000B, so
-    -- the SQL suite cannot catch that; a source-text contract test decodes this
-    -- literal with POSTGRES escape semantics instead
-    -- (``tests/test_metering_unmetered.py::test_the_blank_set_is_pythons_exact_whitespace_set``).
+    -- with the vertical tab spelled ``\u000B`` rather than ``\v``. That is a
+    -- portability choice, NOT a parser disagreement: PostgreSQL 17 — the version
+    -- this project declares — DOES implement the ``\v`` escape
+    -- (``src/backend/parser/scan.l::unescape_single_char``, ``case 'v'``, added by
+    -- commit ae6d06f096) and decodes it to U+000B, identically to ``\u000B``. It
+    -- is avoided because the escape does not exist before PostgreSQL 17, and
+    -- because the manual's escape table omits it while stating that any other
+    -- character after a backslash "is taken literally" — so a reader consulting
+    -- the documentation reads ``\v`` as the letter ``v``. ``\u000B`` means
+    -- U+000B on every parser version and needs no such caveat
+    -- (``tests/test_metering_unmetered.py::test_the_blank_set_is_pythons_exact_whitespace_set``
+    -- holds the spelling to that policy).
     blank_chars constant text := E' \t\n\u000B\f\r\u001C\u001D\u001E\u001F\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
 BEGIN
     IF p_org_id IS NULL OR btrim(p_org_id, blank_chars) = '' THEN

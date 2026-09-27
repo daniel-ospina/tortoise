@@ -194,10 +194,10 @@ BEGIN
         RAISE EXCEPTION 'an NBSP-only lane was accepted (the embedded lane refuses it)';
     END IF;
 
-    -- ...and the VERTICAL TAB, which is the one character whose escape differs
-    -- between the two parsers (`E'\v'` is U+000B in pglite, but the LETTER 'v' in
-    -- real Postgres — see #5853), so the literal writes it as ``\u000B`` and this
-    -- probe checks the composed set rather than the source text.
+    -- ...and the VERTICAL TAB. This probe exercises the COMPOSED SET, not the
+    -- source text: a pglite parser decodes either spelling to U+000B (`\v` from
+    -- PostgreSQL 17 on, `\u000B` always), so it cannot object to `\v` — only the
+    -- source-text contract test in the Python suite holds the spelling.
     rejected := false;
     BEGIN
         PERFORM public.metering_record_unmetered(
@@ -208,9 +208,10 @@ BEGIN
         RAISE EXCEPTION 'a VT-only lane was accepted (the embedded lane refuses it)';
     END IF;
 
-    -- ...while the LETTER 'v' is an ordinary lane character, in both lanes.
-    -- (The mutation this catches: a ``\v`` escape in the literal, which puts 'v'
-    -- in the set — accepted here, refused by Python.)
+    -- ...while the LETTER 'v' is an ordinary lane character, in both lanes. This
+    -- pins that no member of the set IS 'v' — e.g. a hand-edited literal that lost
+    -- its backslash. It is NOT the `\v` mutation: on this parser that escape
+    -- composes U+000B, the intended character, so it is invisible here.
     PERFORM public.metering_record_unmetered(
         '4779-default-probe', 'v', 'window_unresolvable', 'X');
 
