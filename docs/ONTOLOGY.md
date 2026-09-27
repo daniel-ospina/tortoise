@@ -1185,9 +1185,11 @@ edge attribute.
 | Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
 | `related` — the neutral association edge (§3.9) | **No** — plain edge | **none** — evidence-free by construction; no belief path may read it |
 
-- **Neutral vs structural (#5025):** the row above permits a `confidence` attribute on a
-  plain structural edge; `related` is the predicate where that is **not** permitted,
-  because its neutrality is the point. "Structural" and "belief-free" are not synonyms:
+- **Neutral vs structural (#5025):** the `Structural edge without mitigation` row above
+  permits a `confidence` attribute on a plain structural edge; for `related` that
+  attribute is **not a weight** — the property may exist, and no confidence path reads
+  it — because its neutrality is the point. "Structural" and "belief-free" are not
+  synonyms:
   `extractedFrom` is structural and **does** carry weight, via the Beta prior set in
   `_apply_source_inheritance`. A predicate is neutral only when no read path traverses it
   — see §3.9 for the breach that currently leaves `related`'s neutrality a target rather
