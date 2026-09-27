@@ -269,15 +269,34 @@ def apply_payload_operators(proj, sdk, operators: list, *,
 
     ``direction`` is deliberately NOT part of the key — the acceptance is
     ONE node per ``(op_type, src, dst)`` triple, matching the eval lane's
-    probe. On a repeat the guard ``continue``s (the eval lane's semantics),
-    so the node is neither re-created NOR added to the returned list: the
-    return contract is CREATED ids only, and a caller stamping provenance
-    must never claim a node a prior commit created (the #4936 rule above).
-    Because the guard probes the GRAPH, a duplicate triple WITHIN one payload
-    collapses too, exactly as it does in the eval lane — the same belief
-    inflation otherwise survives as a within-call duplicate (and that is why
-    #4936's ``test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats``
-    now pins the collapsed count instead of the old two-node one).
+    probe (so the FIRST write's direction wins; pinned by
+    ``test_direction_is_not_part_of_the_key_first_write_wins``). On a repeat
+    the guard ``continue``s (the eval lane's semantics), so the node is
+    neither re-created NOR added to the returned list: the return contract is
+    CREATED ids only, and a caller stamping provenance must never claim a node
+    a prior commit created (the #4936 rule above). Because the guard probes
+    the GRAPH, a duplicate triple WITHIN one payload collapses too, exactly as
+    it does in the eval lane — the same belief inflation otherwise survives as
+    a within-call duplicate (and that is why #4936's
+    ``test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats``
+    now pins the collapsed count instead of the old two-node list).
+
+    ⚠️ SCOPE — the probe is SINGLE-TARGET: ``idx:1`` is the only target it
+    reads, because every caller here passes ``[dst]``. ``sdk.create_operator``
+    accepts ``target_ids: list`` and IS called with several targets elsewhere
+    (``sdk.py:9895``), so a future MULTI-TARGET caller would get the first
+    target idempotent and the rest duplicated. Widen the probe to read the
+    whole target set before routing such a caller here.
+
+    ⚠️ The MITIGATES fallback below is IMPL-only (it hardcodes
+    ``op_type:'IMPL'``), so ``continue``-ing a skipped NAND leaves a
+    NAND-targeted mitigation with nothing to attach to and it is dropped with
+    a warning. Not reachable today — ``OperatorTarget.op_type`` is
+    ``Literal["IMPL"]`` (``commit_schema.py:464``) and the extractor emits
+    ``op_type: "IMPL"`` (``extractor_v2.py:5868``) — but this guard is the
+    first thing that makes that fallback load-bearing for a skipped same-call
+    operator, so extend the fallback (``t_op_type`` + the mapped edge) in the
+    same change that widens the schema.
     """
     target_op_ids: dict[tuple, str] = {}
     created_ids: list[str] = []

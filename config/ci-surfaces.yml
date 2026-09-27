@@ -2039,7 +2039,7 @@ durations:
   test_assembly_fixtures.py: 2.2
   test_epic903_hosted.py: 2.2
   test_operator_dedup_parity.py: 1.4
-  test_operator_idempotency_4971.py: 95.0  # unmeasured — local embedded/carve-out measurement (5 tests, ~95s); refresh from CI junit
+  test_operator_idempotency_4971.py: 95.0  # unmeasured — local embedded/carve-out measurement (8 tests, ~79s); refresh from CI junit
   test_search_promoted_fields.py: 1.5
   test_selfhost_rest.py: 1.4
   test_volunteer_reflex_harness_seam.py: 1.5

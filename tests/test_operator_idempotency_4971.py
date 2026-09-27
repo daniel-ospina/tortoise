@@ -129,6 +129,75 @@ def test_control_distinct_op_type_still_written(tmp_path):
     assert (impl, nand) == (1, 1)
 
 
+def test_part_whole_ops_collapse_on_repeat_and_stay_distinct_by_op_type(tmp_path):
+    """The two components of the key that IMPL/NAND cannot exercise.
+
+    Every other test in this file uses IMPL/NAND, where the EDGE TYPE already
+    equals ``op_type`` — so neither the part/whole -> ``hasPart`` mapping nor
+    ``op_type``'s membership in the node filter is load-bearing in them, and
+    both mutants stay green there (found in review of PR #5791). This test
+    kills both at once:
+
+      * a repeated ``composedOf`` must collapse to ONE node — it does so only
+        if the probe maps part/whole ops to ``hasPart``, because that is the
+        edge ``create_operator`` actually writes (``sdk.py:7881``);
+      * ``composedOf`` then ``contains`` over the SAME endpoints must stay
+        TWO nodes — they share the ``hasPart`` edge type and both endpoints,
+        so ONLY the node's ``op_type`` separates them.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "whole a")["id"]
+    b = sdk.create_point("statement", "part b")["id"]
+
+    def count(op_type):
+        return proj.g.query(
+            "MATCH (o:Point {is_operator:true, op_type:$t}) RETURN count(o)",
+            params={"t": op_type}).result_set[0][0]
+
+    apply_payload_operators(proj, sdk, [_raw_op(a, b, "composedOf")])
+    assert count("composedOf") == 1
+
+    # The repeat — collapses ONLY via the part/whole -> hasPart mapping.
+    apply_payload_operators(proj, sdk, [_raw_op(a, b, "composedOf")])
+    assert count("composedOf") == 1, (
+        "a repeated part/whole op must collapse: the probe must read the "
+        "hasPart edge create_operator actually writes (sdk.py:7881), not a "
+        "raw composedOf label that no write ever creates")
+
+    # A DIFFERENT part/whole op over the same endpoints: same hasPart edge
+    # type, same src/dst — only the node's op_type separates them.
+    apply_payload_operators(proj, sdk, [_raw_op(a, b, "contains")])
+    assert count("contains") == 1
+    assert count("composedOf") == 1, (
+        "composedOf and contains are DISTINCT operators even though both "
+        "write a hasPart edge between the same two nodes — dropping the "
+        "node's op_type from the probe would over-block here")
+
+
+def test_direction_is_not_part_of_the_key_first_write_wins(tmp_path):
+    """``direction`` is deliberately outside the key (the acceptance is ONE
+    node per ``(op_type, src, dst)`` triple) — so a later write with a
+    different direction is a no-op and the FIRST value is what persists.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "claim a")["id"]
+    b = sdk.create_point("statement", "claim b")["id"]
+
+    apply_payload_operators(
+        proj, sdk, [dict(_raw_op(a, b), direction="bidirectional")])
+    apply_payload_operators(
+        proj, sdk, [dict(_raw_op(a, b), direction="unidirectional")])
+
+    assert _impl_operator_count(proj) == 1
+    stored = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+        "RETURN o.direction").result_set
+    assert [r[0] for r in stored] == ["bidirectional"], (
+        "the first write's direction persists — direction is not in the key")
+
+
 def test_repeat_pass_keeps_mitigation_attached_once(tmp_path):
     """The guard skips the IMPL on a repeat, so the MITIGATES second pass
     must still resolve the pre-existing operator (its Cypher fallback) and
