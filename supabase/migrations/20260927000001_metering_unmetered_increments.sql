@@ -160,10 +160,17 @@ SET search_path = ''
 AS $$
 DECLARE v_total integer;
 BEGIN
-    IF p_org_id IS NULL OR btrim(p_org_id) = '' THEN
+    -- The BLANK guard uses an EXPLICIT character set shared with the Python lane
+    -- and the fake (``tortoise.metering._BLANK_CHARS``): a bare ``btrim(x)``
+    -- removes ASCII spaces only, while Python's bare ``str.strip()`` also removes
+    -- tabs/newlines and Unicode whitespace — so a TAB-only lane was refused on
+    -- the embedded lane and WRITTEN here. Both sides now refuse exactly
+    -- space/TAB/CR/LF; see the Python guard for why the set is declared rather
+    -- than approximated.
+    IF p_org_id IS NULL OR btrim(p_org_id, E' \t\r\n') = '' THEN
         RAISE EXCEPTION 'metering_record_unmetered: p_org_id is required';
     END IF;
-    IF p_lane IS NULL OR btrim(p_lane) = '' THEN
+    IF p_lane IS NULL OR btrim(p_lane, E' \t\r\n') = '' THEN
         RAISE EXCEPTION 'metering_record_unmetered: p_lane is required';
     END IF;
     IF p_n IS NULL OR p_n < 1 THEN

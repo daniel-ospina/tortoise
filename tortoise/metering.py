@@ -501,6 +501,14 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 # asymmetry is declared in the runbook's ``UNMETERED_INCREMENT`` row. Either
 # way the writer logs and never raises.
 
+#: #4779: the DECLARED blank set shared by the three lanes — this module's
+#: guard, the migration's ``btrim(…, E' \t\r\n')`` and the fake control plane.
+#: ASCII space/TAB/CR/LF only, on purpose: Python's bare ``str.strip()`` also
+#: removes Unicode whitespace, which Postgres ``btrim`` cannot express, so a
+#: shared EXPLICIT set is what keeps the two deployment modes agreeing on which
+#: records exist (see ``record_unmetered_increment``).
+_BLANK_CHARS = " \t\r\n"
+
 #: #4779: the DECLARED drop vocabulary, mirrored by the CHECK constraint on
 #: ``metering_unmetered_increments.drop_class`` (migration 20260927000001). An
 #: ad-hoc string here would re-create the re-derivation defect at the
@@ -553,18 +561,30 @@ def record_unmetered_increment(lane: str, org_id: str | None,
     not either. A failed representation is logged at WARNING — never silent —
     and the leg-3 alert remains the backstop.
     """
-    # ``org_id``/``lane`` are refused when BLANK, not only when falsy: the SQL
-    # lane refuses them with ``btrim(…) = ''`` and the fake emulates the same,
-    # so a whitespace-only value must not create a row on the embedded lane that
-    # the Supabase lane would have refused (the two modes must agree on what a
-    # valid record is).
-    if (not org_id or not str(org_id).strip()
-            or not lane or not str(lane).strip()
+    # ``org_id``/``lane`` are refused when BLANK, not only when falsy. The three
+    # lanes share ONE DECLARED set — ASCII space, TAB, CR, LF — spelled out here,
+    # in the migration's ``btrim(p_org_id, E' \t\r\n')`` and in the fake, so the
+    # embedded and Supabase lanes cannot disagree about whether a record exists.
+    #
+    # The set is DECLARED rather than approximated because a bare ``str.strip()``
+    # is NOT the same test: it also removes Unicode whitespace (NBSP et al.), for
+    # which there is no exact ``btrim`` equivalent in Postgres. Widening Python
+    # while SQL stayed ASCII would make the embedded lane refuse keys the
+    # Supabase lane accepts — the divergence, pointing the other way. So both
+    # sides refuse exactly ``_BLANK_CHARS``; a key made only of NBSP is accepted
+    # by both (``lane`` is unconstrained by design — see the module docstring —
+    # and the inventory of real lanes is enumerated from source, not from here).
+    if (not org_id or not str(org_id).strip(_BLANK_CHARS)
+            or not lane or not str(lane).strip(_BLANK_CHARS)
             or drop_class not in _DROP_CLASSES):
         return None
     try:
         n = max(1, int(n))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is NOT hypothetical: ``int(float('inf'))`` raises it, and
+        # the three writers pass caller-supplied ``n``/``calls``. This floor sits
+        # outside the write ``try``, so an uncaught OverflowError here would
+        # escape a function whose whole contract is that it never raises.
         n = 1
     try:
         if _supabase_mode():

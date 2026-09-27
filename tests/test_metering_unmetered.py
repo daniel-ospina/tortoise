@@ -562,16 +562,16 @@ def test_the_supabase_lane_threads_the_batch_size(sb, monkeypatch):
         QuotaCheckError("x")) == 1  # the default is ONE, not zero
 
 
-@pytest.mark.parametrize("lane", ["", "   "])
+@pytest.mark.parametrize("lane", ["", "   ", "\t", "\n", " \t\r\n"])
 @pytest.mark.parametrize("org", ["   "])
 def test_a_blank_lane_or_org_is_refused_on_the_embedded_lane(
         reg, registry_lane, lane, org):
     """A blank ``lane``/``org_id`` is refused HERE, exactly as the SQL lane does.
 
-    The migration refuses them with ``btrim(…) = ''`` and the fake emulates
-    that, so accepting them on the embedded lane would make the two deployment
-    modes disagree about which records exist — a whitespace-only org would even
-    create a node no reader could join to ``organizations``.
+    The migration refuses them with ``btrim(…, E' \t\r\n')`` and the fake
+    emulates that, so accepting them on the embedded lane would make the two
+    deployment modes disagree about which records exist — a whitespace-only org
+    would even create a node no reader could join to ``organizations``.
 
     Mutation caught: guarding only ``not org_id``/``not lane`` (falsy), not the
     blank string.
@@ -584,6 +584,68 @@ def test_a_blank_lane_or_org_is_refused_on_the_embedded_lane(
         "write_op", org, DROP_CLASS_WINDOW_UNRESOLVABLE,
         QuotaCheckError("x")) is None
     assert get_unmetered_increments(tid) == []
+
+
+def test_the_blank_set_is_the_DECLARED_ascii_set_not_python_whitespace(
+        reg, registry_lane):
+    """The three lanes share ONE declared blank set: space, TAB, CR, LF.
+
+    A bare ``str.strip()`` is not the same test as the migration's
+    ``btrim(x, E' \t\r\n')``: it also removes Unicode whitespace, so the embedded
+    lane would refuse a key the Supabase lane ACCEPTS — the same divergence this
+    guard exists to close, pointing the other way (Python's bare ``strip()`` is
+    a strict superset, and Postgres ``btrim`` has no Unicode equivalent). The
+    set is therefore declared explicitly on both sides; this test pins both
+    halves of the declaration.
+
+    Mutation caught: reverting either side to its lenient/native form — a bare
+    ``strip()`` here refuses the NBSP key below, and a bare ``btrim(x)`` in the
+    migration accepts the TAB key (pinned by the SQL suite's probe).
+    """
+    _sdk, tid = reg
+    # A member of the declared set is refused...
+    assert record_unmetered_increment(
+        "\t", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("x")) is None
+    # ...and a Unicode-space-only key is ACCEPTED, deliberately: it is not in the
+    # declared set, and BOTH lanes accept it (the SQL suite asserts the same for
+    # the RPC, so a future change that widens one side reddens one of the two).
+    assert record_unmetered_increment(
+        "\xa0", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("x")) == 1
+    rows = get_unmetered_increments(tid)
+    assert [r["lane"] for r in rows] == ["\xa0"], rows
+
+
+def test_a_batch_that_cannot_be_counted_never_makes_the_writer_raise(
+        reg, registry_lane):
+    """``n`` is floored from ANY value, and the floor never raises.
+
+    ``int(float('inf'))`` raises ``OverflowError``, and the three writers pass
+    caller-supplied ``n``/``calls`` (``record_capture_usage(calls=…)``) into
+    this function. The floor sits OUTSIDE the write ``try``, so an uncaught
+    OverflowError would escape a function whose whole contract is that it never
+    raises — from a best-effort metering writer, i.e. into a request path.
+
+    Mutation caught: catching only ``(TypeError, ValueError)`` at the floor.
+    """
+    _sdk, tid = reg
+    counts = [
+        record_unmetered_increment(
+            "write_op", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
+            QuotaCheckError("x"), bad)
+        for bad in (float("inf"), float("-inf"), float("nan"), object())
+    ]
+    # Four calls, each floored to ONE (cumulative 1,2,3,4) — i.e. not one of
+    # them raised, and none recorded a nonsense count.
+    assert counts == [1, 2, 3, 4], counts
+
+    # ...and a writer whose caller supplied a non-finite batch still records the
+    # drop instead of raising out of the handler.
+    assert record_unmetered_increment(
+        "capture_ledger", tid, DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED,
+        QuotaCheckError("x"), float("inf")) == 1
+    assert get_unmetered_increment_total([tid]) == 5
 
 
 def test_a_failed_read_back_is_not_a_dropped_increment(
@@ -698,12 +760,15 @@ def test_the_drop_is_represented_after_the_per_org_lock_is_released(
 
 def test_the_fake_refuses_an_explicit_null_p_n_like_the_migration(
         sb, monkeypatch):
-    """Parity contract: an OMITTED ``p_n`` defaults to 1; an explicit NULL is
-    refused — mirroring ``IF p_n IS NULL OR p_n < 1 THEN RAISE``.
+    """Parity contract with the RPC: an OMITTED ``p_n`` defaults to 1; an explicit
+    NULL is refused (``IF p_n IS NULL OR p_n < 1 THEN RAISE``); a key blank in
+    the DECLARED set is refused; and a Unicode-space-only key is NOT blank.
 
     The fake is the only schema the Python lane runs against, so a fake that
     collapsed NULL onto the default would encode a write the real RPC rejects,
-    and any test of that case would pin the wrong behaviour.
+    and any test of that case would pin the wrong behaviour. The same applies in
+    the other direction for the blank set: a bare ``.strip()`` here would refuse
+    a key ``btrim(x, E' \t\r\n')`` accepts.
     """
     fake = _fake_cp()
     monkeypatch.setattr(sb, "get_control_plane", lambda: fake)
@@ -719,6 +784,21 @@ def test_the_fake_refuses_an_explicit_null_p_n_like_the_migration(
             "p_drop_class": "window_unresolvable",
             "p_error_type": "QuotaCheckError", "p_n": None,
         })
+
+    with pytest.raises(RuntimeError, match="p_lane is required"):
+        fake.rpc("metering_record_unmetered", {
+            "p_org_id": "org-4779", "p_lane": "\t",
+            "p_drop_class": "window_unresolvable",
+            "p_error_type": "QuotaCheckError", "p_n": 1,
+        })
+
+    # NBSP is Unicode whitespace but NOT in the declared set, so — like the RPC
+    # and the Python guard — the fake accepts this lane.
+    assert fake.rpc("metering_record_unmetered", {
+        "p_org_id": "org-4779", "p_lane": "\xa0",
+        "p_drop_class": "window_unresolvable",
+        "p_error_type": "QuotaCheckError", "p_n": 1,
+    }) == 1
 
 
 def test_a_negative_or_none_batch_is_floored_at_one(reg, registry_lane):

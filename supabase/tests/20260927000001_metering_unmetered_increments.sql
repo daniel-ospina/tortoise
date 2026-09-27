@@ -109,7 +109,9 @@ END $$;
 --    dropping the p_n guard (a zero count is recorded — the exact state this
 --    table exists to distinguish); reverting ``increments`` to ``DEFAULT 0``
 --    (the direct-insert probe below then trips the positive CHECK); accepting an
---    explicit NULL p_n (which the Python lane refuses too).
+--    explicit NULL p_n (which the Python lane refuses too); a bare ``btrim(x)``
+--    for the blank guard (a TAB-only lane is then written here but refused on the
+--    embedded lane).
 --    The probe org below exists only for the two DEFAULT checks and is removed
 --    with the records (the surface is FK-keyed to ``organizations``, so neither
 --    can be written without the other).
@@ -117,6 +119,12 @@ END $$;
 DO $$
 DECLARE rejected boolean; v_n integer;
 BEGIN
+    -- This probe org exists only for the blank-set and DEFAULT probes below, and
+    -- is removed with the records (the surface is FK-keyed to ``organizations``,
+    -- so neither can be written without the other).
+    INSERT INTO public.organizations (id, name, graph_name)
+    VALUES ('4779-default-probe', '4779-default-probe', 'org_4779-default-probe')
+    ON CONFLICT (id) DO NOTHING;
     rejected := false;
     BEGIN
         PERFORM public.metering_record_unmetered(
@@ -157,12 +165,51 @@ BEGIN
         RAISE EXCEPTION 'a blank lane was accepted';
     END IF;
 
+    -- The blank set is EXPLICIT and shared with the Python lane/fake
+    -- (``tortoise.metering._BLANK_CHARS``): space, TAB, CR, LF. A bare
+    -- ``btrim(x)`` (ASCII spaces only) used to accept a TAB-only lane here while
+    -- the embedded lane refused it — two modes disagreeing about whether the
+    -- record exists.
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            '4779-dropped', E'\t', 'window_unresolvable', 'X');
+    EXCEPTION WHEN raise_exception THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a TAB-only lane was accepted (the Python lane refuses it)';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            E'\n', 'write_op', 'window_unresolvable', 'X');
+    EXCEPTION WHEN raise_exception THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a CR/LF-only org_id was accepted';
+    END IF;
+
+    -- ...and a Unicode-space-only key is ACCEPTED by BOTH lanes, deliberately:
+    -- there is no exact ``btrim`` equivalent of Python's Unicode ``strip()``, so
+    -- the shared set is DECLARED rather than approximated. Asserted THROUGH THE
+    -- RPC — not by a direct INSERT — so it actually exercises
+    -- ``btrim(…, E' \t\r\n')``; the row is removed again because this org's
+    -- counts are asserted below (the Python suite pins the other half).
+    PERFORM public.metering_record_unmetered(
+        '4779-dropped', chr(160), 'window_unresolvable', 'X');
+    SELECT count(*) INTO v_n FROM public.metering_unmetered_increments
+     WHERE org_id = '4779-dropped' AND lane = chr(160);
+    IF v_n <> 1 THEN
+        RAISE EXCEPTION
+            'an NBSP-only lane was refused by the RPC (the Python lane accepts it)';
+    END IF;
+    DELETE FROM public.metering_unmetered_increments
+     WHERE org_id = '4779-dropped' AND lane = chr(160);
+
     -- p_n OMITTED -> ONE increment (the FUNCTION's ``p_n DEFAULT 1``); it is not
     -- "zero", which is the state this whole surface exists to distinguish from
     -- a drop.
-    INSERT INTO public.organizations (id, name, graph_name)
-    VALUES ('4779-default-probe', '4779-default-probe', 'org_4779-default-probe')
-    ON CONFLICT (id) DO NOTHING;
     PERFORM public.metering_record_unmetered(
         '4779-default-probe', 'write_op', 'window_unresolvable', 'X');
     SELECT m.increments INTO v_n
@@ -268,12 +315,14 @@ BEGIN
 END $$;
 
 -- ============================================================================
--- 6) THE READERS. ``metering_unmetered_for_org`` is BOUNDED by construction
---    (lanes x declared classes <= 12 rows), which is why it can be a row read
---    at all; ``metering_unmetered_total`` is a SINGLE scalar, so db-max-rows
---    cannot truncate the cohort answer.
---    Mutation caught: adding a lane/class without bounding the row count;
---    returning the cohort total per row instead of one scalar.
+-- 6) THE READERS. ``metering_unmetered_for_org`` is a bounded ROW read — bounded
+--    by the CALLERS' lane inventory (six swallow sites x two declared classes),
+--    NOT by the schema, since ``lane`` is deliberately unconstrained — which is
+--    why it can be a row read at all; ``metering_unmetered_total`` is a SINGLE
+--    scalar, so db-max-rows cannot truncate the cohort answer.
+--    Mutation caught: returning the cohort total per row instead of one scalar;
+--    a NULL-tolerant empty/NULL-cohort check (``total <> 0`` is NULL, not TRUE,
+--    when the function returns NULL — so the assertion must be NULL-safe).
 -- ============================================================================
 DO $$
 DECLARE n integer; total bigint;
