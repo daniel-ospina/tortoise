@@ -48,9 +48,9 @@ used: a global per-test timeout *fails* a test, which is the shape #5049 rule 1 
 
 | # | Surface | Kind | Test layer | Failure modes (≥2) |
 |---|---|---|---|---|
-| S1 | `tests/_verdict.py` helper API | pure logic | unit (`tests/test_verdict_contract.py`) | condition never true; timeout exception escapes; insufficient recorded margin; Node absent / below floor / garbage `--version` |
+| S1 | `tests/_verdict.py` helper API + the extracted `tests/_fork_safety_verdict.py` classifier | pure logic | unit (`tests/test_verdict_contract.py`) | condition never true; timeout exception escapes; insufficient recorded margin; Node absent / below floor / garbage `--version`; a parked child or a race/verify refusal masked by a timeout or an unreadable metric; an unreadable census/counter read as a pass |
 | S2 | `tests/conftest.py` autouse per-test reset | pytest fixture lifecycle | unit + order test | global not cleared before a test; ambient env read; fixture runs before `monkeypatch` undo |
-| S3 | Converted real-process sites (`tests/test_fork_safety_3845.py`, `tests/test_embedded_lifecycle.py`) | real subprocess + unix socket | integration (embedded carve-out; fork-safety is darwin-gated → unit-covered on Linux) | client socket timeout under load; parent-exit exceeds deadline; `ps` sampling unavailable |
+| S3 | Converted real-process sites (`tests/test_fork_safety_3845.py`, `tests/test_embedded_lifecycle.py`) + the extracted verdict classifier (`tests/_fork_safety_verdict.py`) | real subprocess + unix socket | integration (embedded carve-out; fork-safety is darwin-gated → unit-covered on Linux) | client socket timeout under load; parent-exit exceeds deadline; `ps` sampling unavailable; setup-budget expiry misattributed to the fork counter; verify-stage (DR-restore) refusal masked by a load event |
 | S4 | Node driver sites (`tests/test_admin_origin_redirect.py`, `tests/test_provisioning_edge_function.py`, `tests/test_blog_agent_delete_guard.py`) | subprocess Node driver | integration (host-capability gated; wiring pin in the unit file) | Node absent; Node < 22.7; probe returns garbage/nonzero |
 | S5 | CI selection manifests (`config/ci-surfaces.yml`, `tools/ci_selection.py::SHARED_MODULES`, durations map) | static config gates | `tests/test_ci_selection.py` | new test file unregistered → integrity RED; conftest module-level helper not in SHARED_MODULES → under-selection RED |
 
@@ -109,10 +109,12 @@ guards; keep CI lean).
   armed global cannot reach a test body) and after. The conftest fixture is authoritative; the
   pre-existing per-module `_isolate_atexit_budget` remains (documented as belt-and-braces) and is
   NOT removed here to avoid perturbing a module mid-flight.
-- **D4 — Host capability is a SKIP; the floor is per-invocation.** `NODE_FLOOR_STRIP_TYPES = (22,7)`
-  for `--experimental-strip-types` drivers, `NODE_FLOOR_DEFAULT_ON = (22,18)` for the bare
-  `node --test` invocation. The blog-delete guard's deliberate `absent="fail"` policy is preserved;
-  only a *present-but-too-old* Node SKIPs.
+- **D4 — Host capability is a SKIP; the floor is per-invocation.** This increment declares exactly
+  ONE floor, `NODE_FLOOR_STRIP_TYPES = (22,7)` — the `--experimental-strip-types` band every converted
+  site invokes. The bare `node --test` (type-stripping default-on) band is a DIFFERENT, higher floor
+  (>= 22.18, with the 23.x discontinuity) and is a **Remaining member** of #5049, deliberately NOT
+  declared here (see the `NODE_FLOOR_STRIP_TYPES` comment in `tests/_verdict.py`). The blog-delete
+  guard's deliberate `absent="fail"` policy is preserved; only a *present-but-too-old* Node SKIPs.
 - **D5 — #4017 is re-scoped to what is true on this base.** Verified: `_post_ask` and
   `tests/test_ask_api.py` were removed (#3929); `ask_lane.py:438,848` now *fail loud* when
   `TORTOISE_API_URL` is set; the live ambient-production vector is
@@ -131,7 +133,7 @@ outcome cannot borrow the FAIL verdict.
 
 **Acceptance:** `tests/_verdict.py` exists, is stdlib-only + `pytest`, and exposes `wait_for`,
 `inconclusive`, `inconclusive_on_timeout`, `Deadline`, `HarnessDefect`, `host_capability`,
-`node_meets`, `require_node_floor`, `NODE_FLOOR_STRIP_TYPES`, `NODE_FLOOR_DEFAULT_ON`,
+`node_meets`, `require_node_floor`, `NODE_FLOOR_STRIP_TYPES`,
 `PROCESS_GLOBALS`, `reset_process_globals`. `tests/test_verdict_contract.py` covers every API and
 the sabotage legs.
 
@@ -147,7 +149,9 @@ with `INCONCLUSIVE` and the deadline named; **sabotage leg** — the same input 
 `assert` raises `AssertionError` (the old shape this replaces); an insufficient *recorded*
 `Deadline` raises `HarnessDefect`; an ambient/live "measured" insufficiency yields INCONCLUSIVE
 (patched transport observed → proves no live measurement); `node_meets` boundaries
-(`v22.6.9`→skip, `v22.7.0`→ok, `v22.7`→ok, `v22.7.0-rc.1`→skip, `v24`→ok, `""`/garbage/None→skip).
+(`v22.6.9`→skip, `v22.7.0`→ok, `v22.7`→ok, `v22.7.0-rc.1`→ok (a prerelease is compared
+AT its numeric floor — the band, not a build identity), `v24`→ok,
+`""`/garbage/None→skip).
 **Step 2: Run — expect `ModuleNotFoundError`.**
 **Step 3: Implement `tests/_verdict.py`.**
 **Step 4: Run — expect PASS; then run `tests/test_ci_selection.py` — expect PASS.**
@@ -277,9 +281,12 @@ contract closed it.
 - [ ] `tests/_verdict.py` exists; the contract is the single home for the **converted** sites (rules 1, 2, 4, 5); rule 3 is named separately, and the remaining rule-1 waiters are enumerated below.
 - [ ] No converted site can produce FAIL from a wall-clock expiry — it SKIPs and names the deadline.
 - [ ] The autouse reset removes the #4913/#4017 ordering dependence (proved by order tests incl. the `monkeypatch` leg).
-- [ ] A too-old/absent-Node host SKIPs at the converted driver sites, with per-invocation floors.
+- [ ] A too-old/absent-Node host SKIPs at the converted driver sites, on the declared flag floor
+      (the default-on band is a remaining member — D4).
 - [ ] Manifest edits land (`config/ci-surfaces.yml` + `SHARED_MODULES`) so `test_ci_selection.py` is green.
-- [ ] Remaining members enumerated with their home; CI stays lean (one contract file + one test file).
+- [ ] Remaining members enumerated with their home; CI stays lean (the contract and the extracted
+      `tests/_fork_safety_verdict.py` classifier share one unit test file; the classifier is NOT in
+      `SHARED_MODULES`, so a change to it selects `core` only).
 
 ## Review status (plan-review, bounded at 2 cycles)
 
@@ -302,5 +309,36 @@ P1/P2 residuals, all of which are **documented, not chased**, per the owner's bo
 
 Exit reason: **capped (2 cycles)** — remaining issues acknowledged and carried into the PR body,
 not silently closed. Per `AGENTS.md` §Hard Cap this is an **escalation** exit, not a clean one.
+
+### Code-review (implementation)
+
+Three review cycles ran on the implementation (fresh contexts). Cycle 1 found four real defects: the
+classifier's verdict polarity (a race-stage product refusal was maskable by an unreadable
+`ps`/`INFO` metric, and a setup-budget expiry was maskable by the fork-counter branch), tautological
+assertions in the new skip-guard pin, and this doc's own drift (the never-shipped
+`NODE_FLOOR_DEFAULT_ON`, and the unnamed extracted module now recorded in S1/S3 and the acceptance
+list). Cycle 2 confirmed those corrections and found the SAME polarity defect one branch lower: the
+DR-restore verify-stage refusal and the clone-node counts were still maskable by every load-class
+branch (verified against the base `99a98ddc5`, where those asserts were unconditional — so the
+resume was a real gap, not a design choice). Cycle 3 found that the new "must FAIL" pins were
+themselves defeatable by the masking class: `pytest.raises(AssertionError)` lets the classifier's
+`pytest.skip.Exception` escape as a *green skip*, so the pins now assert the verdict through a
+`_must_fail` helper that fails on an escaping skip.
+
+The final commit closes the class: both stages' non-timeout refusals FAIL above every load branch,
+the verify-stage timeout and setup-budget expiry are read before the clone counts they can leave
+unobserved, and the clone counts FAIL where observed. A mutation leg — the pre-fix classifier
+swapped into a copy, not in place — reds **7 of the 14** classifier pins with **zero skips**.
+
+One cycle was used beyond the stated 2-cycle bound; each closure was a re-occurrence of the same
+defect class rather than a new dimension, and the cycle-3 assertion-shape fix is verified by that
+mutation leg rather than by a fourth dispatch (the documented review-loop runaway this bound
+exists to prevent). Recorded here for audit, not narrated as a clean exit.
+
+The same commit carries the correction note for `ad28d2173`'s message, which per the repo's rule on
+already-pushed messages is corrected rather than force-pushed away: that message said
+`tests/test_verdict_contract.py (29 passed)` where the file collects **27** at that revision, and said
+`tools/skip-guard.py` exempts the INCONCLUSIVE family — that exemption was **reverted** here, because
+the contract's wording deliberately names no availability class and therefore needs no exemption.
 
 <!-- plan-review: cycles=2, status=capped, version=2.3.0 -->

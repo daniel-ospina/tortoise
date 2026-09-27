@@ -14,11 +14,16 @@ These pin the contract's discriminating power:
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import pytest
 
 from tests import _verdict
+from tests._fork_safety_verdict import (
+    assert_fixed_race_verdict,
+    healthy_result,
+)
 from tests._verdict import (
     AMBIENT_ENV_GLOBALS,
     PROCESS_GLOBALS,
@@ -201,6 +206,46 @@ def test_node_meets_compares_the_major_minor_floor(monkeypatch, version, ok):
     assert node_meets((22, 7)) is ok
 
 
+def test_node_version_parses_the_runtime(monkeypatch):
+    """The `node_version` regex — the one probe the node tests above stub out.
+
+    A prerelease is compared AT its numeric floor (``v22.7.0-rc.1`` -> (22, 7)),
+    which is what makes `node_meets` a capability-band test rather than a
+    build-identity test; garbage, a non-zero exit, and an unspawnable binary are
+    all host-capability gaps (None), never a product verdict.
+    """
+
+    class _Completed:
+        def __init__(self, stdout: str, returncode: int = 0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+    seen = {"stdout": "v22.7.0\n", "rc": 0}
+    monkeypatch.setattr(
+        _verdict.subprocess,
+        "run",
+        lambda *a, **k: _Completed(seen["stdout"], seen["rc"]),
+    )
+    for stdout, expected in [
+        ("v22.7.0\n", (22, 7)),
+        ("v22.7\n", (22, 7)),
+        ("v22.7.0-rc.1\n", (22, 7)),
+        ("v24.1.0\n", (24, 1)),
+        ("garbage\n", None),
+        ("\n", None),
+    ]:
+        seen["stdout"], seen["rc"] = stdout, 0
+        assert _verdict.node_version() == expected, stdout
+    seen["stdout"], seen["rc"] = "v22.7.0\n", 1
+    assert _verdict.node_version() is None, "a non-zero --version is unprobeable"
+
+    def _unspawnable(*a, **k):
+        raise OSError("no node")
+
+    monkeypatch.setattr(_verdict.subprocess, "run", _unspawnable)
+    assert _verdict.node_version() is None, "an unspawnable node is unprobeable"
+
+
 def test_require_node_floor_skips_below_the_floor(monkeypatch):
     monkeypatch.setattr(_verdict.shutil, "which", lambda _n: "/usr/bin/node")
     monkeypatch.setattr(_verdict, "node_version", lambda node="node": (22, 6))
@@ -236,3 +281,173 @@ def test_node_driver_site_gates_on_the_floor(monkeypatch):
 
     with pytest.raises(pytest.skip.Exception):
         admin._run([])
+
+
+# ── the #3845 fork-safety classifier (#4742/#5049), extracted for #5049 ─────
+# It lives in `tests/_fork_safety_verdict.py` rather than in the platform-gated
+# evidence file because that file's def count is pinned in
+# `config/ci-expected-nodeids/platform-gated.txt`. These pin its POLARITY, which
+# is the whole point of the extraction: structural evidence beats a clock, and
+# an unobservable property is INCONCLUSIVE — never a pass.
+def _must_fail(result: dict, *, match: str) -> None:
+    """Assert the classifier FAILs — never PASSes, and never SKIPs.
+
+    The INCONCLUSIVE exit is a `pytest.skip.Exception`, which is NOT an
+    `AssertionError`: under the regressed branch ordering the classifier SKIPs,
+    so a bare `pytest.raises(AssertionError)` would let that escape as a *green*
+    skip — the very regression these pins exist to catch would read as "not
+    applicable", and no skip budget covers this file. A skip here is a failure.
+    """
+    try:
+        assert_fixed_race_verdict(
+            result, race_deadline_s=15.0, socket_budget_s=4.0
+        )
+    except pytest.skip.Exception as exc:
+        pytest.fail(
+            "the classifier reported INCONCLUSIVE where a FAIL is required — "
+            f"the regression this pins: {exc}"
+        )
+    except AssertionError as exc:
+        assert re.search(match, str(exc)), str(exc)
+        return
+    pytest.fail("the classifier PASSED where a FAIL is required")
+
+
+def test_fixed_race_healthy_result_is_the_pass_shape():
+    assert_fixed_race_verdict(
+        healthy_result(), race_deadline_s=15.0, socket_budget_s=4.0
+    )
+
+
+def test_fixed_race_parked_child_fails_even_alongside_a_timeout():
+    """A parked child is a FAIL, and a client timeout in the SAME run must not
+    downgrade it to INCONCLUSIVE (the wedge is structural, not a clock)."""
+    result = healthy_result()
+    result["hung"] = [(4242, 6.0, 0.0)]
+    result["errors"] = 3
+    result["timeout_errors"] = 3
+    result["last_err"] = "Timeout reading from socket"
+    _must_fail(result, match=r"parked.*4242")
+
+
+def test_fixed_race_non_timeout_refusal_fails_even_alongside_a_timeout():
+    """A refusal (the wedge's own signature) is a product FAIL; a later
+    timeout in the same run must not mask it as a load-class skip."""
+    result = healthy_result()
+    result["errors"] = 2
+    result["non_timeout_errors"] = 1
+    result["last_non_timeout_err"] = "ConnectionError: the fork slot is wedged"
+    result["timeout_errors"] = 1
+    result["last_err"] = "Timeout reading from socket"
+    _must_fail(result, match="non-timeout")
+
+
+@pytest.mark.parametrize(
+    "unobservable", [{"sampling_unavailable": True}, {"forks": None}]
+)
+def test_fixed_race_refusal_fails_despite_an_unreadable_metric(unobservable):
+    """A refusal is read from the CLIENT, so an unusable harness metric (`ps`
+    census or `INFO` counter) must not downgrade it to INCONCLUSIVE — the same
+    masking the timeout branch is forbidden from doing."""
+    result = healthy_result()
+    result.update(unobservable)
+    result["errors"] = 1
+    result["non_timeout_errors"] = 1
+    result["last_non_timeout_err"] = "ConnectionError: the fork slot is wedged"
+    _must_fail(result, match="non-timeout")
+
+
+def test_fixed_race_unreadable_census_is_inconclusive_never_a_pass():
+    result = healthy_result()
+    result["sampling_unavailable"] = True
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        assert_fixed_race_verdict(
+            result, race_deadline_s=15.0, socket_budget_s=4.0
+        )
+    message = str(excinfo.value)
+    assert "INCONCLUSIVE [#5049]" in message
+    assert "census" in message
+
+
+def test_fixed_race_unreadable_fork_counter_is_inconclusive_never_a_pass():
+    result = healthy_result()
+    result["forks"] = None
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        assert_fixed_race_verdict(
+            result, race_deadline_s=15.0, socket_budget_s=4.0
+        )
+    assert "fork counter" in str(excinfo.value)
+
+
+def test_fixed_race_setup_budget_expiry_names_the_setup_not_the_counter():
+    """A setup-budget expiry leaves ``forks`` at its initial None. If the
+    counter branch were read first the cause would be misreported as an
+    unreadable counter with ``last error None``; the setup budget must be named.
+    """
+    result = healthy_result()
+    result["forks"] = None
+    result["setup_timeout_err"] = "TimeoutError: Timeout reading from socket"
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        assert_fixed_race_verdict(
+            result, race_deadline_s=15.0, socket_budget_s=4.0
+        )
+    message = str(excinfo.value)
+    assert "setup query" in message
+    assert "fork counter" not in message
+
+
+def test_fixed_race_client_timeout_is_inconclusive():
+    result = healthy_result()
+    result["errors"] = 1
+    result["timeout_errors"] = 1
+    result["last_err"] = "Timeout reading from socket"
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        assert_fixed_race_verdict(
+            result, race_deadline_s=15.0, socket_budget_s=4.0
+        )
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "load_event",
+    [
+        {
+            "errors": 1,
+            "timeout_errors": 1,
+            "last_err": "Timeout reading from socket",
+        },
+        {"sampling_unavailable": True},
+        {"forks": None},
+    ],
+)
+def test_fixed_race_verify_refusal_fails_despite_a_load_event(load_event):
+    """The DR-restore leg carries the wedge's own signature too, so a
+    non-timeout refusal there FAILs — a race timeout or an unreadable harness
+    metric must not mask it."""
+    result = healthy_result()
+    result.update(load_event)
+    result["verify_err"] = "ResponseError: could not fork"
+    _must_fail(result, match="verify leg refused")
+
+
+def test_fixed_race_verify_timeout_is_inconclusive_never_a_fail():
+    result = healthy_result()
+    result["verify_err"] = "TimeoutError: Timeout reading from socket"
+    result["verify_timeout"] = True
+    result["clone_nodes"] = None
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        assert_fixed_race_verdict(
+            result, race_deadline_s=15.0, socket_budget_s=4.0
+        )
+    assert "INCONCLUSIVE [#5049]" in str(excinfo.value)
+
+
+def test_fixed_race_wrong_clone_count_fails_despite_a_race_timeout():
+    """The clone counts are observed whenever the verify leg completed, so a
+    wrong count is a data-integrity FAIL even alongside a load event."""
+    result = healthy_result()
+    result["errors"] = 1
+    result["timeout_errors"] = 1
+    result["last_err"] = "Timeout reading from socket"
+    result["clone_nodes"] = 0
+    _must_fail(result, match="clone_nodes")

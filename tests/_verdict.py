@@ -44,8 +44,11 @@ from typing import Any, NoReturn
 import pytest
 
 #: The declared reason family for "the property could not be observed in the
-#: deadline". `tools/skip-guard.py` exempts this prefix; the wording is part of
-#: the contract, not a per-site string.
+#: deadline". A deadline-class skip names NO availability class, so the skip
+#: guard's FalkorDB/embedder trips cannot apply to it and `tools/skip-guard.py`
+#: needs no exemption for it (pinned by
+#: `tests/test_skip_guard.py::test_inconclusive_reason_needs_no_exemption`).
+#: The wording is part of the contract, not a per-site string.
 INCONCLUSIVE_PREFIX = "INCONCLUSIVE [#5049]"
 
 #: A harness (test-substrate) defect — the harness is at fault, not the change.
