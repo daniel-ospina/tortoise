@@ -2342,6 +2342,60 @@ class TestToolCallAdmissionBoundary:
         assert _tools_call_rejection(self.ISSUE_REQUEST) is None
         assert self._sdk_session_verdict(self.ISSUE_REQUEST) is None
 
+    def test_a_hidden_onboarding_tool_is_not_an_admission_error(
+            self, tmp_path, monkeypatch):
+        """#3656's third hypothesis, MEASURED: a tool that disappears from
+        ``tools/list`` once onboarding completes still dispatches -- the
+        89 -> 82 shrink is a listing change, not an admission rejection.
+
+        The hidden state is entered, not assumed: onboarding is completed
+        through the canonical state writer, the 60s gate cache is cleared, and
+        the listing is asserted to have dropped the tool BEFORE it is called.
+        """
+        from tortoise import mcp_server
+        from tortoise.hosted_api import _update_onboarding_state
+        from tortoise.mcp_server import create_http_app
+
+        hidden = "tortoise_onboarding_state"
+        db_path = str(tmp_path / "hidden.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.org_create("hidden-team")
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            assert hidden in self._list_names(tc, key)  # visible first
+            _update_onboarding_state(team["id"], onboarding_complete=True)
+            mcp_server._onboarding_state_cache.clear()
+            assert hidden not in self._list_names(tc, key), (
+                "the fixture did not enter the hidden state")
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": hidden, "arguments": {}}})
+            assert r.status_code == 200, r.text
+            # Dispatched normally: a tool RESULT, not an admission rejection.
+            assert "result" in body, body
+            assert body.get("error", {}).get("code") != -32602, body
+
+    @staticmethod
+    def _list_names(tc, key):
+        """The gated ``tools/list`` names, as the onboarding tests read them."""
+        r = tc.post("/mcp", headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }, json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200, r.text
+        return {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
+
     def test_the_named_error_is_uncacheable_and_unbuffered(self, tmp_path,
                                                            monkeypatch):
         """The intercepted error must carry the transport's own cache/buffer
