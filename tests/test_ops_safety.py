@@ -13,6 +13,7 @@ Covers:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -242,5 +243,167 @@ def test_rebuild_cli_bypasses_health_gate():
     try:
         counts = proj.rebuild_all(log_dir)
         assert counts["nodes"] == 2
+    finally:
+        proj.close()
+
+
+# ── torn trailing REMOVAL record (#3316) ─────────────────────────────────
+#
+# The tear taxonomy kept PARSE tears non-fatal, reasoning that a torn
+# REGISTRATION line means data LOSS (harmless to durability). The other
+# direction is not symmetric: a torn REMOVAL/terminal line means
+# RESURRECTION — the replay rebuilds the graph without the removal and the
+# state that was removed is served as current again, while recovery reports
+# success. A truncated record cannot be reconstructed, so a replay that drops
+# one is refused; a torn registration line keeps its tolerance.
+#
+# The classification is by RECORD TYPE, read from the raw (possibly
+# truncated) bytes — the signal `EventLog.read_all` now exposes as
+# `torn_trailing_raw`. `ObjectRetracted`, which issue #3316 names, is not on
+# this tree (its implementation, PR #3326, was closed unmerged); the records
+# that reach the same outcome here are the hard-delete `EntityMutated`
+# (op=delete) and `PointRetracted`, and both are covered by the same set.
+
+
+def _write_journal(path: str, *lines: str) -> None:
+    """Write journal lines verbatim (the last one may be a torn tail)."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line + "\n")
+
+
+def _point_added(pid: str) -> str:
+    return json.dumps({
+        "type": "PointAdded",
+        "point": {"id": pid, "content": f"content {pid}", "context": "torn"},
+    })
+
+
+def test_torn_removal_record_is_not_replayed_into_a_resurrection():
+    """A torn TRAILING hard-delete record must not rebuild the deleted Point
+    back to life, and the recovery must not report success for that.
+
+    Before the fix: ``read_all`` skipped the torn tail, ``recover_from_log``
+    replayed the ``PointAdded`` without the ``EntityMutated`` delete, the
+    Point came back ``live``, and ``recovered`` was True.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "torn_removal.db")
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    # A SIGKILL mid-append: truncated inside the record, after its type field.
+    torn = full[:full.index('"op"')]
+    _write_journal(os.path.join(tmp, "events.jsonl"), _point_added("gone-1"), torn)
+
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")   # the 0-node "lost DB" case
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is False, result
+        assert "EntityMutated" in result["reason"], result
+        assert result["log_points"] == 1, result   # the log WAS parsed
+        count = proj.g.query(
+            "MATCH (n:Point {id:'gone-1'}) RETURN count(n)").result_set[0][0]
+        assert count == 0, "the hard-deleted Point was resurrected"
+    finally:
+        proj.close()
+
+
+def test_torn_registration_record_keeps_its_tolerance():
+    """No over-correction in the harmless direction: a torn trailing
+    REGISTRATION record is still skipped and the earlier records replay."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "torn_registration.db")
+    _write_journal(
+        os.path.join(tmp, "events.jsonl"),
+        _point_added("kept-1"),
+        '{"type": "PointAdded", "point": {"id": "torn-2", "content": ',
+    )
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is True, result
+        assert result["log_points"] == 1, result
+        count = proj.g.query(
+            "MATCH (n:Point {id:'kept-1'}) RETURN count(n)").result_set[0][0]
+        assert count == 1, "the complete records before the tear must replay"
+    finally:
+        proj.close()
+
+
+def test_torn_record_with_no_legible_type_fails_closed():
+    """A tear BEFORE the type field cannot be proven harmless, so it must not
+    be replayed away silently (the conservative arm of the classifier)."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "torn_unreadable.db")
+    _write_journal(
+        os.path.join(tmp, "events.jsonl"),
+        _point_added("maybe-1"),
+        '{"event_id": "01JTORN", "ts": "2026-09-11T00:00:0',
+    )
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is False, result
+        assert "torn" in result["reason"], result
+    finally:
+        proj.close()
+
+
+def test_complete_log_with_a_removal_still_replays_identically():
+    """A COMPLETE journal that ends in a removal record is untouched by the
+    classifier: the removal folds, its target is gone, and its sibling lives."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "complete_removal.db")
+    _write_journal(
+        os.path.join(tmp, "events.jsonl"),
+        _point_added("gone-1"),
+        _point_added("kept-1"),
+        json.dumps({"type": "EntityMutated", "label": "Point",
+                    "id": "gone-1", "op": "delete", "seq": 3}),
+    )
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is True, result
+        assert result["log_points"] == 3, result
+        live = proj.g.query(
+            "MATCH (n:Point {id:'gone-1'}) RETURN count(n)").result_set[0][0]
+        kept = proj.g.query(
+            "MATCH (n:Point {id:'kept-1'}) RETURN count(n)").result_set[0][0]
+        assert live == 0, "the complete removal record must still fold"
+        assert kept == 1, "the replay must still have run"
+    finally:
+        proj.close()
+
+
+def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
+    """The CLI rebuild engine refuses the same journal, and refuses it BEFORE
+    the graph wipe — a refusal after the wipe is not a refusal."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "rebuild_torn.db")
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "sentinel",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(log_dir, "events.jsonl"),
+                   _point_added("sentinel"), full[:full.index('"op"')])
+
+    proj = FalkorProjection(db_path, skip_health_check=True)
+    try:
+        proj.g.query(
+            "CREATE (n:Point {id:'sentinel', content:'s', status:'live'})")
+        with pytest.raises(RuntimeError, match="resurrect"):
+            proj.rebuild_all(log_dir)
+        count = proj.g.query(
+            "MATCH (n:Point {id:'sentinel'}) RETURN count(n)").result_set[0][0]
+        assert count == 1, "the graph was wiped despite the refusal"
     finally:
         proj.close()

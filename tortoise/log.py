@@ -38,7 +38,64 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
+
+# ── torn-tail revival classification (#3316) ────────────────────────────
+#
+# ``read_all`` tolerates a torn TRAILING line on purpose: a crash mid-append
+# is an expected artifact, and a dropped REGISTRATION record means data LOSS.
+# The other direction is not symmetric. A dropped TERMINAL record — a
+# retraction, a supersession, a hard delete — means data RESURRECTION: the
+# replay rebuilds the graph WITHOUT the removal, so state a later read serves
+# as current comes back.
+#
+# A replay engine must therefore not treat every torn tail as tolerable. The
+# records below are the ones whose loss can revive state; a replayed journal
+# that dropped one is not a recovery of that journal.
+TORN_TAIL_REVIVAL_EVENT_TYPES = frozenset({
+    # Point lifecycle (``PointsMerged`` deletes the merged-away Points).
+    "PointRetracted", "PointSuperseded", "PointInvalidated", "PointsMerged",
+    # Object lane: ``ObjectSuperseded`` exists on this tree; ``ObjectRetracted``
+    # is the "$2977" lane (#3316 names it) and is listed so a journal carrying
+    # one is not silently replayed once that lane lands.
+    "ObjectSuperseded", "ObjectRetracted",
+    # The generic durable-mutation record: ``op="delete"`` is a hard delete and
+    # a ``state`` op can terminalize. A torn record's ``op`` may not have
+    # survived the tear, so it can never be proven non-destructive.
+    "EntityMutated",
+})
+
+# ``"type"`` is matched anywhere in the partial record (the JSONL envelope is
+# ``event_id`` / ``ts`` / ``type`` / …), so a tear after the type field is
+# legible; one before it is not, and an unlegible type is NOT assumed
+# harmless.
+_RECORD_TYPE_RE = re.compile(r'"type"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+
+
+def record_type_from_partial(raw: str) -> str | None:
+    """Best-effort ``type`` of a possibly-truncated JSONL record.
+
+    Returns ``None`` when the type did not survive the tear.
+    """
+    m = _RECORD_TYPE_RE.search(raw)
+    return m.group(1) if m else None
+
+
+def torn_record_may_revive_state(raw: str) -> bool:
+    """True when dropping *raw* (a torn trailing record) could REVIVE state.
+
+    False only for a record whose type is legible AND is not a
+    removal/terminal record — the data-LOSS direction the torn-tail tolerance
+    was designed for. An illegible type is True: it cannot be proven harmless.
+    """
+    t = record_type_from_partial(raw)
+    return t is None or t in TORN_TAIL_REVIVAL_EVENT_TYPES
+
+
+def torn_tail_revival_records(raws) -> list[str]:
+    """The dropped torn-tail records whose loss can REVIVE state (#3316)."""
+    return [r for r in raws if torn_record_may_revive_state(r)]
 
 
 class EventLog:
@@ -60,11 +117,17 @@ class EventLog:
         kill the very recovery tool (``rebuild_all`` / ``_auto_health_recover``).
         A malformed MID-FILE line is a separate corruption class (not a torn
         append) and raises an actionable error naming the file and line.
+
+        The raw text of every skipped trailing line is kept in
+        :attr:`torn_trailing_raw` so a replay engine can tell a harmful tear
+        from a harmless one (:func:`torn_record_may_revive_state`);
+        :attr:`torn_trailing_count` remains the count.
         """
         import logging
         if not self.path.exists():
             return []
         self.torn_trailing_count = 0
+        self.torn_trailing_raw: list[str] = []
         out = []
         lines = self.path.read_text(encoding="utf-8").splitlines()
         for idx, raw in enumerate(lines):
@@ -76,6 +139,9 @@ class EventLog:
             except ValueError:
                 if idx == len(lines) - 1:
                     self.torn_trailing_count += 1
+                    # Capped: a file with no newline is one "line", and only
+                    # the type-bearing prefix is ever consulted.
+                    self.torn_trailing_raw.append(line[:4096])
                     logging.getLogger(__name__).warning(
                         "EventLog %s: skipping torn trailing line %d "
                         "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",
@@ -87,6 +153,10 @@ class EventLog:
                         "skip (line-tolerance covers the trailing line only)"
                     ) from None
         return out
+
+    def torn_tail_revival_records(self) -> list[str]:
+        """Skipped trailing records whose loss can REVIVE state (#3316)."""
+        return torn_tail_revival_records(getattr(self, "torn_trailing_raw", []))
 
     # ── streaming tail (M1 / M4) ──────────────────────────────────────
 

@@ -971,12 +971,16 @@ def recover_from_log(events_dir: str, projection) -> dict:
         graph keeps its sidecar (nothing is lost) for a later explicit
         rebuild — this function never rebuilds a non-empty graph.
       - Query/log failures are caught and reported in the result, never
-        raised — the caller decides fail-loud policy. Torn trailing lines
-        (crash mid-append) are skipped, not fatal.
+        raised — the caller decides fail-loud policy. A torn trailing line
+        (crash mid-append) is skipped when its loss is the data-LOSS
+        direction the tolerance was written for; when the dropped record is a
+        removal/terminal one, dropping it would RESURRECT the state it
+        removed, so the replay is refused before any event is applied
+        (#3316). Mid-file corruption is refused for the same reason
+        (``EventLog.read_all`` raises there).
 
     Returns {recovered, log_points, db_points, reason}.
     """
-    import json as _json
     import os
 
     def _node_count() -> int | None:
@@ -1074,26 +1078,54 @@ def recover_from_log(events_dir: str, projection) -> dict:
                 "reason": f"ambiguous: {len(files)} adjacent JSONL logs "
                            f"({', '.join(files[:3])}...) — refusing auto-rebuild"}
 
-    # Parse the single log, tolerating a torn trailing line.
+    # Parse the single log. THE SHARED READER, so this engine cannot diverge
+    # from the others: a torn TRAILING line is skipped + counted, and a
+    # malformed MID-FILE line raises (EventLog.read_all's contract) instead of
+    # being dropped one-by-one as a local `except: torn += 1` loop did — that
+    # loop silently discarded corruption ANYWHERE in the file, not just the
+    # torn tail.
     log_path = os.path.join(events_dir, files[0])
-    events: list[dict] = []
-    torn = 0
+    from tortoise.log import (
+        TORN_TAIL_REVIVAL_EVENT_TYPES,
+        EventLog,
+        record_type_from_partial,
+    )
+
+    log = EventLog(log_path)
     try:
-        with open(log_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(_json.loads(line))
-                except Exception:
-                    torn += 1
+        events = log.read_all()
     except OSError as e:
         return {"recovered": False, "log_points": 0, "db_points": 0,
                 "reason": f"event log unreadable: {e}"}
+    except ValueError as e:
+        # Mid-file corruption. Replaying the surviving records would produce a
+        # graph that contradicts the journal, so this is untrustworthy rather
+        # than tolerable — and it must be refused BEFORE the replay, since a
+        # verdict after the mutation cannot un-apply it.
+        return {"recovered": False, "log_points": 0, "db_points": 0,
+                "reason": (f"refusing to replay {files[0]}: {e} — the graph "
+                           "was NOT rebuilt")}
     if not events:
         return {"recovered": False, "log_points": 0, "db_points": 0,
                 "reason": "event log empty or unreadable — nothing to recover"}
+
+    # #3316: a torn TRAILING record whose loss can REVIVE state is not the
+    # data-LOSS direction the tear tolerance was written for. A truncated
+    # record cannot be reconstructed, so the retraction survives only by not
+    # being contradicted: refuse the whole replay BEFORE applying anything,
+    # rather than rebuilding a graph that serves removed state as current.
+    revival = log.torn_tail_revival_records()
+    if revival:
+        kinds = ", ".join(sorted({record_type_from_partial(r) or "<unreadable>"
+                                 for r in revival}))
+        return {"recovered": False, "log_points": len(events), "db_points": 0,
+                "reason": (f"refusing to replay {files[0]}: the trailing record "
+                           f"is torn ({kinds}); its loss would resurrect "
+                           "removed state rather than lose data (#3316) — the "
+                           "graph was NOT rebuilt; repair or truncate the "
+                           "journal, then retry")}
+
+    torn = log.torn_trailing_count
 
     # Faithful replay via apply() (preserves context; restore uses the same
     # path). Per-event guard: one bad event must not abort the whole recovery.
@@ -1109,6 +1141,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
     applied = 0
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
+    # A record that was READ but could not be APPLIED is a second way a
+    # removal reaches the graph's absence: its type is known, so the revival
+    # set is consulted directly (#3316). A non-revival record stays a
+    # tolerated legacy-line skip (the pre-existing contract).
+    revival_failures: list[str] = []
     for seq, ev in enumerate(events):
         if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
             entity_link_events.append((seq, ev))
@@ -1118,6 +1155,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
             applied += 1
         except Exception:
             torn += 1
+            if (isinstance(ev, dict)
+                    and ev.get("type") in TORN_TAIL_REVIVAL_EVENT_TYPES):
+                revival_failures.append(str(ev.get("type")))
     if entity_link_events:
         try:
             applied += projection.fold_deferred_entity_links(
@@ -1125,9 +1165,21 @@ def recover_from_log(events_dir: str, projection) -> dict:
         except Exception:
             torn += len(entity_link_events)
     after = _node_count()
-    ok = applied > 0 and after is not None and after > 0
+    # A fold of a REMOVAL that did not apply is not a data-LOSS skip: the
+    # removal is missing and the state it removed is live again, so the
+    # recovery is not trustworthy even though the graph is non-empty.
+    ok = (applied > 0 and after is not None and after > 0
+          and not revival_failures)
+    _revived = ", ".join(sorted(set(revival_failures)))
+    reason = (f"replayed {applied} events from {files[0]}"
+              + (f" ({torn} skipped)" if torn else "")
+              + (f" ({_revived} could not be applied — removed state is live "
+                 "again)" if revival_failures else ""))
+    if not ok:
+        reason = (f"replay produced an empty graph ({applied} applied, "
+                  f"{torn} skipped)"
+                  + (f"; {_revived} could not be applied — removed state is "
+                     "live again" if revival_failures else ""))
     return {"recovered": ok, "log_points": len(events),
             "db_points": after if after is not None else 0,
-            "reason": f"replayed {applied} events from {files[0]}"
-            + (f" ({torn} skipped)" if torn else "") if ok
-            else "replay produced an empty graph"}
+            "reason": reason}

@@ -2324,6 +2324,34 @@ _HARD_DELETE_LABELS = frozenset({
 _POINTS_MERGED_LABELS = frozenset({"Point"})
 
 
+def _refuse_revival_torn_tail(revival_records) -> None:
+    """Refuse a replay whose journal dropped a removal/terminal record (#3316).
+
+    ``EventLog.read_all`` tolerates a torn TRAILING line because a crash
+    mid-append is expected and a dropped REGISTRATION record is only data
+    LOSS. A dropped removal/terminal record is the opposite: replay rebuilds
+    the graph without the removal, so state a later read serves as current is
+    live again (resurrection). A truncated record cannot be reconstructed, so
+    the only sound behaviour is to not rebuild at all.
+
+    Callers MUST invoke this BEFORE any wipe/replay — a verdict after the
+    mutation cannot un-apply it.
+    """
+    revival_records = list(revival_records or [])
+    if not revival_records:
+        return
+    from tortoise.log import record_type_from_partial
+
+    kinds = ", ".join(sorted({record_type_from_partial(r) or "<unreadable>"
+                              for r in revival_records}))
+    raise RuntimeError(
+        f"refusing to rebuild: the journal's torn trailing record is a "
+        f"removal/terminal record ({kinds}); replaying without it would "
+        f"resurrect the state it removed (#3316). The graph was NOT "
+        f"touched — repair or truncate the journal, then retry."
+    )
+
+
 def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
     """Per-``(id, label)`` journal seq of the LAST hard delete that can remove
     that label — ``{id: {label: max_delete_seq}}``.
@@ -3428,6 +3456,12 @@ class FalkorProjection(
         # wipe. #2943: verifying only after the wipe turns a durability bug
         # into permanent data loss, so the proof has to precede the mutation.
         events = list(log.read_all())
+        # #3316: refuse BEFORE the wipe when the journal's torn tail dropped a
+        # removal/terminal record — replaying without it resurrects removed
+        # state, and a registry-only/synthetic log object may not expose the
+        # attribute at all (then there is nothing to classify).
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -3741,7 +3775,12 @@ class FalkorProjection(
         journal_source: list[int] = []
         for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
-                chunk = EventLog(os.path.join(log_dir, fname)).read_all()
+                file_log = EventLog(os.path.join(log_dir, fname))
+                chunk = file_log.read_all()
+                # #3316: same refusal as `rebuild`/`recover_from_log`, before
+                # the wipe below.
+                _refuse_revival_torn_tail(
+                    file_log.torn_tail_revival_records())
                 journal_events.extend(chunk)
                 journal_source.extend([file_idx] * len(chunk))
 
