@@ -285,7 +285,9 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
                                                captured; the handler only logs)
       lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
       lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
-      the two correction-#8 revokes    → each the single capture for its terminal path
+      the three correction-#8 revokes  → each the single capture for its terminal path
+                                        (family revoke / membership revoke /
+                                        poisoned-scope revoke)
       `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
                                        → this call IS the single capture for that path
       `oauth_token` boundary           → this call IS the single capture for that path
@@ -1671,7 +1673,9 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
 
     Rotating per (user, org): each use revokes the presented token and mints
     a fresh pair. Org suspension revokes the whole (user, org) family;
-    a lapsed membership revokes the presented token.
+    a lapsed membership revokes the presented token. A stored scope no longer
+    in SCOPES_ACCEPTED (#3128) revokes the presented token and terminates the
+    grant with `invalid_grant` — no mint.
     """
     # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
     # `oauth_clients`; a wrap starting at the refresh-token SELECT leaves it
