@@ -1020,14 +1020,34 @@ def test_cross_pass_removed_entity_shielded_by_a_surviving_content():
     pass1, _w1 = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
     pool = vg.removal_pool(el, pass1)
     assert pool["removed_entities"], "fixture must remove the entity"
-    union = {"entities": [],
-             "events": [],
-             "points": [{"content": "foo", "pointKind": "statement"}],
+    union = {**pass1,
+             "points": [*pass1["points"],
+                        {"content": "foo", "pointKind": "statement"}],
              "operators": [{"src": "foo", "dst": "K", "op_type": "IMPL"}]}
     out, warnings = vg.apply_vet(union, {}, prior=pool)
     assert len(out["operators"]) == 1, (
         "a surviving point resolves 'foo' — the entity removal must not prune "
         "its operator")
+    assert not any("pruned" in w for w in warnings), warnings
+
+
+def test_present_entity_name_shields_the_content_half_of_the_prune():
+    """#5069 re-review (P2): the CONTENT half of the prune subtracts the
+    PRESENT-ENTITY shield too. With entity ``X`` present and a point whose
+    content is ``X`` DISCARDed, an operator naming ``X`` must not be pruned with
+    a false "whose endpoint was discarded" warning — the entity-named endpoint
+    is dropped by the mint's own guard. Sibling of
+    ``test_present_entity_name_does_not_get_its_operator_pruned`` for the content
+    half.
+    """
+    el = {"entities": [{"name": "X", "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "X", "pointKind": "statement"}],
+          "operators": [{"src": "X", "dst": "K", "op_type": "IMPL"}]}
+    first = vg._item_id("points", 0, el["points"][0])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert len(out["operators"]) == 1, (
+        "the entity is present — the mint drops the entity-named endpoint")
     assert not any("pruned" in w for w in warnings), warnings
 
 
