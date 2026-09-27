@@ -36,8 +36,10 @@
 -- best-effort by contract — a missing function is logged at WARNING and the
 -- write is dropped, while the READER degrades to a zero view. Deploying the code
 -- first therefore yields a SILENT ZERO (not an error), which is precisely the
--- fail-open this ledger exists to avoid. (Same operational note the
--- 20260918000001 / 20260925000003 migrations carry.)
+-- fail-open this ledger exists to avoid. (20260918000001, which IS on main,
+-- carries the same operational note; a second copy lives on the unmerged sibling
+-- branch ``fix/4488-embedding-encode-cost`` as 20260925000003, so it is not
+-- deployable history yet and must not be cited as if it were.)
 
 ALTER TABLE public.metering_records
     ADD COLUMN IF NOT EXISTS graph_storage_mb double precision NOT NULL DEFAULT 0,
