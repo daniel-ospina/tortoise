@@ -310,7 +310,10 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // CONTINUATION line escaped it entirely — verified, that shape left the whole
   // suite green while the rendered label read "connected" for a disconnected
   // harness, the #2914 class this guard exists for. So the call's own parentheses
-  // are scanned and the ARGUMENT is judged.
+  // are scanned and the ARGUMENT is judged — and a spread or an `Object.assign`
+  // inside those arguments is refused, because a textual `connected:` is not the
+  // RESOLVED value: either can override the key while leaving the text check
+  // satisfied (verified shipping a widened heading with the suite green).
   //
   // The old expectation of 2 was simply behind the source: #5496 added
   // `wizardStepSub`'s call site BEFORE #5413 wrote this assertion, so it was born
@@ -329,6 +332,20 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
     assert.equal((call.match(/connected:\s*/g) ?? []).length, 1,
       'expected exactly one `connected:` argument in this wizard call — a second one can satisfy this '
       + `check for a widened argument. One call, one \`connected:\`: ${call.replace(/\s+/g, ' ').trim()}`)
+    // A textual `connected:` is not the RESOLVED value: a spread (or an
+    // Object.assign) placed after it overrides the key while leaving exactly one
+    // bare `connected:` in the text — verified shipping a widened heading with the
+    // whole suite green, on the announcement site that no other test pins. So the
+    // arguments must be written out in full. This is a constraint on three call
+    // sites, not a general rule about spreads.
+    assert.doesNotMatch(call, /\.\.\./,
+      'a wizard render site must not SPREAD its arguments — a spread after the bare `connected:` '
+      + 'overrides it while leaving this text check satisfied. Write the call out in full: '
+      + `${call.replace(/\s+/g, ' ').trim()}`)
+    assert.doesNotMatch(call, /\bObject\.assign\b/,
+      'a wizard render site must not Object.assign overrides onto its arguments — a later '
+      + '`connected` key overrides the bare one while leaving this text check satisfied: '
+      + `${call.replace(/\s+/g, ' ').trim()}`)
     assert.match(call, /connected:\s*serverHarnessConnected\s*[,}]/,
       'every wizard render site must pass the bare serverHarnessConnected as `connected` — '
         + 'no inline widening at the render site')
