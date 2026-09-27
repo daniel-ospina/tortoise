@@ -67,8 +67,9 @@ restore racing a purge cannot interleave. A lock timeout returns 503.
 wired by #2317) so past-window trash is erased within a day of expiry — the
 runbook's erase claim is honored by the scheduler, not by operator memory. A
 purge body of status ``errors`` (per-tombstone failures — row kept as the
-retry anchor) or a non-2xx response fails the driver run loudly (red job),
-never a silent skip.
+retry anchor), a non-2xx response, or the driver's own `-m 300` ceiling being
+hit fails the driver run loudly (red job) **and files a dedup'd `PURGE_FAILED`
+incident** (#4612) — never a silent skip, and no longer log-only.
 
 ## RPO / RTO contract (#2317)
 
@@ -288,6 +289,22 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 > app's 10 s transport wait bound does **not** cover this prefix (#4939), so the
 > client's own `--max-time` is the only bound — a command without one hangs with
 > nothing printed instead of refusing legibly.
+>
+> **The ride-along's budget arithmetic (#4612).** The hourly driver's own `-m`
+> ceilings are 20 (status) / **600** (sweep) / **300** (purge) / 120 (reconcile) /
+> 20 (heartbeat), and the app's purge→`run_graph_purge` path takes a per-org
+> `_sweep_org_lock` with `_ORG_LOCK_TIMEOUT_S = 300` — i.e. **a single contended
+> org can consume the purge leg's entire 300 s budget and end in a
+> `driver_timeout`**, which is why that shape means "may still be running
+> server-side (or queued behind a restore)", not "did nothing". Worst case a run
+> holds the job for roughly 600 + 300 + 120 s of leg ceilings plus overhead,
+> against the workflow's `timeout-minutes: 30` job ceiling — so the legs can
+> exhaust the driver's budget without the *job* being killed mid-file. A leg
+> timeout is therefore a **reported** condition, never a silent one: it files
+> `PURGE_FAILED`/`RECONCILE_FAILED` with the curl exit and the derived shape.
+> (Raising these bounds is a separate decision — moving the purge off the
+> synchronous request path to 202-and-poll is the better long-term shape and was
+> explicitly deferred on #4967; #4612 did **not** touch any bound.)
 
 ### Residuals (recorded with this decision)
 - A guard-rejected archive (P0 / empty / data-loss) whose immediate delete is
@@ -335,13 +352,21 @@ make the hourly job RED, so a broken pipeline cannot stay green for weeks (the
 status is simpler and deliberately blunter — `file_alert` sets a run-level
 `LOUD` flag and every terminal exit goes through it, so *any* incident filed
 this run (APP_DOWN, WATCHER_DOWN, a per-team STALE from the direct-R2 leg, an
-R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE) exits
-1. (The converse does not hold: a hard driver/config failure — missing
-`GITHUB_TOKEN`, an unreadable R2 preflight, or a failed purge/reconcile
-ride-along — also exits 1 without filing. RED therefore means "broken or
-unverifiable", which is the point.) This is the actual fix for #2796: the
-31-day #2790 outage hid behind 40 consecutive `success` runs *after* the driver
-had already filed `STALE`.
+R2_DOWN — preflight or partial-listing — a stuck-lock SWEEP_NO_COVERAGE, or a
+PURGE_FAILED/RECONCILE_FAILED ride-along) exits 1. (The converse does not hold
+**only** where filing is impossible by construction: the two pre-flight guards —
+a missing `GITHUB_TOKEN`, or a missing `INTERNAL_API_URL`/`FASTAPI_INTERNAL_KEY`
+— exit 1 with no incident, because with no token/key there is no filing path at
+all. **#4612 corrected this paragraph:** it previously listed "a failed
+purge/reconcile ride-along" as a further hard failure that "exits 1 without
+filing", which read as though silence were a property of the ride-along. It was
+not — it was an untracked failure class. The ride-along legs now file like every
+other detected condition, which is what the SRE alert contract requires (a real
+condition in an unattended job must map to a response class; dedup — not silence
+— is the answer to noise). A detected condition that *can* be filed is never
+allowed to be silent.) RED therefore means "broken or unverifiable", which is the
+point. This is the actual fix for #2796: the 31-day #2790 outage hid behind
+40 consecutive `success` runs *after* the driver had already filed `STALE`.
 
 **Unknown ≠ empty (the dominant rule).** A failed `list-objects-v2` — the
 top-level listing, any per-team listing — or a failed `get-object` of the
@@ -478,7 +503,13 @@ asserts all five states, the unmeasurable-pool rule, the 0-team envelope, the
 stuck/unverifiable lock, unclassifiable-status and missing-token failsafes,
 redaction (DSN/header/prefix/quoted/newline-split shapes and the
 `compatible:`/`patch:`/`author:` false-positive guards, `last_sweep`, the purge
-body), self-heal tiers (incl. `SWEEP_NO_COVERAGE`),
+body **and the create-POST that publishes it**), self-heal tiers (incl.
+`SWEEP_NO_COVERAGE`), the ride-along's auto-filed `PURGE_FAILED`/`RECONCILE_FAILED`
+(filed on failure, both filed when both fail, resolved only on the leg's OWN
+success evidence, never on a skip, the truthful `driver_timeout` shape, and the
+wait-bound `504` named as an over-budget answer rather than an outage — #4612),
+the single declared ride-along curl-outcome vocabulary (`leg_shape`; the sweep
+leg keeps #5028's own `rc -eq 28` test),
 the dual-key delete, the multi-team tab-separated pool, the enabled+stale and
 enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
@@ -505,6 +536,8 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | SWEEP_CONFIG_ERROR | `enabled:false` **with** a non-null `config_error` — the sweep flag says "run" but `load_config()` raised (e.g. missing `REGISTRY_STREAM_KEY`). The pre-#2796 driver exited 0 here. Error text is redacted before filing | Fix the Fly secret/config (`§REGISTRY_STREAM_KEY`); the next healthy run self-heals |
 | SWEEP_OFF_STALE | `enabled:false`, no config/storage error, and the pool is not **measured fresh**: a `backups/{org_id}/default/` archive older than `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240m), a team prefix with no default archive at all, or a failed listing | Re-enable backups or declare a bounded pause; investigate why the flag is off. If a listing failed, check the R2 access key's `ListObjects` permission |
 | SWEEP_NO_COVERAGE | `enabled:true` but the sweep backed up 0 teams (the #2823 empty-enumeration class: `no_teams`/`no_work`/`no_eligible_teams`/`enum_failed`/`error`), **or** the R2 pool could not be measured, **or** `/status` was unclassifiable, **or** a held sweep lock outlived `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (or cannot be verified) | Inspect `last_sweep` on `/status`; the sweep enumerates 0 teams → #2823 / #2340 control-plane resolution. **Auto-resolves** on the next run whose pool is measured fresh and whose sweep backed up ≥1 team |
+| PURGE_FAILED | the hourly trash-purge ride-along did not complete (#4612): the purge leg did not answer **200 `status:ok`/`already_running`** — a non-2xx code, the driver's own `-m 300` ceiling being hit (`driver_timeout`), a response read without a body (`empty_response`), a request that never reached a response (`transport_error`), or a 200 carrying `status:errors` (per-org/per-graph purge failures). Subject-less. The incident body carries the HTTP code, curl's own exit, the derived shape, and the **redacted** response body | Expired trash is not being erased, or erasure is UNVERIFIED for this run, so tombstones can age past the recovery window. Triage the filed detail; a `driver_timeout` shape or a **504** means the purge may still be RUNNING server-side. A **504** — the failure the reporter observed on 2026-09-22 (#4412; the app-side cause was removed the next day by #4939's `/v1/internal/` exemption, so a 504 now most likely comes from the edge proxy) — is an over-budget answer from a control plane that IS answering, not a general outage, so it is retryable rather than a deadline on erasure. **Auto-resolves** on the next run whose purge answers 200 `status:ok`. `already_running` deliberately does NOT resolve it — it means the leg queued behind a held lock and proves nothing about erasure (#3127) |
+| RECONCILE_FAILED | the hourly reconcile ride-along did not complete (#4612): the leg did not complete a 2xx exchange — a non-2xx code, the driver's own `-m 120` ceiling being hit (`driver_timeout`), a response read without a body (`empty_response`), or a request that never reached a response (`transport_error`). Subject-less; body carries the HTTP code, curl's exit, the shape, and the redacted response | Stuck-pending re-provisioning and expired-bootstrap-key revocation are not running. Triage the filed detail; a **504** is a gateway timeout — an over-budget answer, not a general outage. **Auto-resolves** only on a COMPLETED 2xx exchange (curl exit 0 with a body): a 2xx received before a `-m` timeout is still recorded with curl exit 28, and resolving on the code alone would close a live incident on a transport failure |
 | NO_ELIGIBLE_TEAMS | team sweep enabled but the control plane enumerated **0 eligible (Pro) teams** (#655) | Almost always a control-plane/dialect problem, not an empty deployment — check `last_sweep.source` and the enumeration source (#2823/#2340). **Auto-resolves** when a conclusive sweep enumerates ≥1 team |
 | ENUM_DELTA | the team enumeration went `>0 → 0` between runs (#669) — a wiped enumeration source, i.e. the #2823 silent-degradation class | **Investigate before trusting any green run**: the same 0 that makes the sweep look idle is the incident. Suppressible during the registry flip via `TORTOISE_SUPPRESS_ENUM_DELTA=1`. **Auto-resolves** on the next conclusive run that enumerates ≥1 team (the guard only fires on the `>0 → 0` transition, so a fixed source clears it) |
 | GRAPH_NAME_RESOLUTION_FAIL | every enumerated team failed graph-name resolution (`resolution` results) — the control plane died between enumeration and the per-team phase (#669) | Check the control-plane read (`/status` → `last_sweep.source`, `graph_failures`). **Auto-resolves** on the next conclusive run in which at least one team's graph resolved |
@@ -553,7 +586,15 @@ surface and stayed open forever (the live case was #2821).
    * the endpoint resolves only incidents that are **actually open** (one R2 LIST
      per kind — never a read per graph, which at a few thousand graphs would add
      minutes under the sweep lock).
-2. **Recovery-side clear** — the driver's self-heal legs (above).
+2. **Recovery-side clear** — the driver's self-heal legs (above). `PURGE_FAILED`
+and `RECONCILE_FAILED` clear on the ride-along leg's **own** success evidence
+(#4612): the purge leg only on a 200 `status:ok` (an `already_running` answer
+means the leg queued behind a held lock and is **not** evidence of erasure), the
+reconcile leg only on a **completed** 2xx exchange (curl exit 0 with a body — a
+2xx whose transfer then hit the `-m` ceiling is still a transport failure). A
+**SKIPPED** ride-along (sweep `already_running`, or a timed-out/empty sweep)
+clears neither — no evidence was gathered, and the driver logs that it is leaving
+them unchanged.
 3. **Manual close only** — `DATA_LOSS_CANDIDATE` (a >50% node drop needs a human
 verdict: verify + re-baseline, or restore). `SIZE_GUARD_ABORT` closes through
 **re-baseline** (`POST /v1/internal/backups/re-baseline` resolves it together with

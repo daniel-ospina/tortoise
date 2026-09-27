@@ -103,6 +103,12 @@ KIND_OWNERS: dict[str, str] = {
     "SWEEP_OFF_STALE": WRITER_DRIVER,
     "SWEEP_NO_COVERAGE": WRITER_DRIVER,
     "LIVENESS_NO_WORK": WRITER_DRIVER,
+    # #4612: the ride-along legs' OWN success is the recovery evidence — the
+    # driver is the only surface that invokes them. Driver-only by construction,
+    # so an explicit entry (not "unspecified") stops any future surface from
+    # clearing them on evidence its probes never covered.
+    "PURGE_FAILED": WRITER_DRIVER,
+    "RECONCILE_FAILED": WRITER_DRIVER,
     # watcher: archive/stamp freshness + the driver heartbeat, read in-process.
     "STALE": WRITER_WATCHER,
     "NEVER_BACKED_UP": WRITER_WATCHER,
