@@ -161,7 +161,7 @@ fmt_iso() {
 # HERE, arithmetically, so both `date` implementations agree; an unrecognised
 # shape fails closed rather than being prefix-matched into a plausible instant.
 iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
-  local iso="$1" e off=0 tail sign hh mm
+  local iso="$1" e off=0 tail sign hh mm frac dt
   [ -n "$iso" ] || { printf ''; return 0; }
   case "$iso" in
     epoch:*)
@@ -193,9 +193,22 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
   # Drop fractional seconds (`…:01.000`), then require EXACTLY the wall-clock
   # shape. A shape that reaches neither branch above is not something the API
   # emits, and BSD `date` would prefix-match it — so refuse it.
-  case "$iso" in *.*) iso="${iso%%.*}" ;; esac
+  #
+  # ⚠️ The fraction is trimmed ONLY after it has been proven digits-only. A bare
+  # `${iso%%.*}` here would delete everything from the first dot — INCLUDING an
+  # offset or any other trailing token — before this check could see it, so
+  # `…:01.000+05:00garbage` would silently drop the offset and return a
+  # wrong-but-plausible epoch: the exact class this normalization exists to kill.
   case "$iso" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) : ;;
+    *.*)
+      frac="${iso##*.}"; dt="${iso%%.*}"
+      case "$dt" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) : ;;
+        *) printf ''; return 0 ;;
+      esac
+      case "$frac" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+      iso="$dt" ;;
     *) printf ''; return 0 ;;
   esac
 

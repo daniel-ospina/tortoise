@@ -777,6 +777,26 @@ run_checker
 assert_eq "$RC" "1" "49: an unrecognised created_at shape → STALE (fail closed, not a prefix guess)"
 assert_contains "$OUT" "could not be read" "49: …and it says the age could not be read"
 
+# 50. a trailing token AFTER a fractional part must not be silently trimmed
+# away. A bare `${iso%%.*}` would delete everything from the first dot —
+# including an offset — before the shape check ran, so this input would drop
+# `+05:00` and return a wrong-but-plausible epoch.
+reset_case
+for bad in "2026-09-13T03:15:01.000+05:00garbage" "2026-09-13T03:15:01.000garbage" "2026-09-13T03:15:01.5.Z"; do
+  reset_case
+  export LIVENESS_NOW_EPOCH="$((LIVENESS_T + 1800))"
+  export STUB_WF_CREATED_AT="$bad"
+  run_checker
+  assert_eq "$RC" "1" "50: '$bad' → STALE (a trailing token is refused, not trimmed)"
+done
+# …while a plain fractional part with an offset still parses (the real shape).
+reset_case
+export LIVENESS_NOW_EPOCH="$((LIVENESS_T + 1800))"
+export STUB_WF_CREATED_AT="2026-09-13T03:15:01.750Z"
+run_checker
+assert_eq "$RC" "0" "50b: a fractional part alone is still accepted (…:01.750Z → 30 min old)"
+assert_contains "$OUT" "is only 30 min old" "50b: …and the fraction is trimmed, not the instant"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "availability-liveness.test.sh: $PASS passed, 0 failed ✅"
