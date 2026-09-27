@@ -3412,10 +3412,10 @@ def metering_record_unmetered(cp, org_id: str, lane: str, drop_class: str,
     ``last_observed_at`` advances.
 
     ``drop_class`` is a CHECK-enforced closed vocabulary
-    (``window_unresolvable`` | ``increment_failed``) — an undeclared class is
-    refused by the database rather than stored as an ad-hoc string. Best-effort
-    by contract: the Python caller swallows failures so metering can never block
-    a request.
+    (``window_unresolvable`` | ``increment_write_unconfirmed``) — an undeclared
+    class is refused by the database rather than stored as an ad-hoc string.
+    Best-effort by contract: the Python caller swallows failures so metering can
+    never block a request.
 
     Uses ``rpc_value`` (``return=representation``) so the single round trip
     carries the new total back — the counter is the reader's whole subject, and
@@ -3432,13 +3432,13 @@ def metering_record_unmetered(cp, org_id: str, lane: str, drop_class: str,
 def metering_unmetered_for_org(cp, org_id: str) -> list[dict]:
     """Every representation row for ONE org (#4779) — the triage read.
 
-    A ``RETURNS TABLE`` RPC, and BOUNDED by construction at lanes x declared
-    classes (<= 12 rows for one org), which is why a row read is safe here: the
-    PostgreSQL ``db-max-rows`` cap PostgREST applies to a row LIST cannot
-    truncate a set this small (the truncation mode that made
-    ``metering_cohort_spend`` a scalar RPC — 20260917000001 §"The cap's two
-    READS"). The cohort-wide read is :func:`metering_unmetered_total`, which is
-    a single scalar.
+    A ``RETURNS TABLE`` RPC. The row count is bounded by the CALLERS' lane
+    inventory (six swallow sites x two declared classes for this code), not by
+    the schema — ``lane`` is deliberately unconstrained — which is what makes a
+    row LIST safe here: the PostgreSQL ``db-max-rows`` cap PostgREST applies to
+    a row list cannot truncate a set this small. The cohort-wide read is
+    :func:`metering_unmetered_total`, which is a single scalar and therefore
+    row-cap-proof BY CONSTRUCTION rather than by convention.
 
     Returns ``[]`` for an org with no drops — an org that has never been
     unmeterable genuinely has nothing to show, and that is the value a control

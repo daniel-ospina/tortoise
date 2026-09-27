@@ -328,7 +328,16 @@ class FakeControlPlane:
             org_id = p.get("p_org_id")
             lane = p.get("p_lane")
             drop_class = p.get("p_drop_class")
-            n = int(p.get("p_n") if p.get("p_n") is not None else 1)
+            # An OMITTED p_n defaults to 1 (the SQL signature's DEFAULT); an
+            # EXPLICIT None is refused, exactly as the migration's
+            # ``IF p_n IS NULL OR p_n < 1 THEN RAISE`` does. Collapsing the two
+            # would let the fake encode a row the real RPC rejects.
+            if "p_n" in p and p["p_n"] is None:
+                raise RuntimeError(
+                    "metering_record_unmetered: p_n must be >= 1 (got NULL) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            n = int(p["p_n"]) if p.get("p_n") is not None else 1
             if org_id is None or not str(org_id).strip():
                 raise RuntimeError(
                     "metering_record_unmetered: p_org_id is required")
@@ -340,7 +349,8 @@ class FakeControlPlane:
                     f"metering_record_unmetered: p_n must be >= 1 (got {n}) — a "
                     "zero increment is the state this table exists to "
                     "distinguish")
-            if drop_class not in ("window_unresolvable", "increment_failed"):
+            if drop_class not in ("window_unresolvable",
+                                  "increment_write_unconfirmed"):
                 raise RuntimeError(
                     "metering_record_unmetered: new row violates the declared "
                     f"drop_class vocabulary ({drop_class!r})")

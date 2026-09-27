@@ -107,10 +107,15 @@ END $$;
 --    rather than a literal.
 --    Mutation caught: dropping the CHECK (an undeclared class is accepted);
 --    dropping the p_n guard (a zero count is recorded — the exact state this
---    table exists to distinguish).
+--    table exists to distinguish); reverting ``increments`` to ``DEFAULT 0``
+--    (the direct-insert probe below then trips the positive CHECK); accepting an
+--    explicit NULL p_n (which the Python lane refuses too).
+--    The probe org below exists only for the two DEFAULT checks and is removed
+--    with the records (the surface is FK-keyed to ``organizations``, so neither
+--    can be written without the other).
 -- ============================================================================
 DO $$
-DECLARE rejected boolean;
+DECLARE rejected boolean; v_n integer;
 BEGIN
     rejected := false;
     BEGIN
@@ -150,6 +155,52 @@ BEGIN
     END;
     IF NOT rejected THEN
         RAISE EXCEPTION 'a blank lane was accepted';
+    END IF;
+
+    -- p_n OMITTED -> ONE increment (the FUNCTION's ``p_n DEFAULT 1``); it is not
+    -- "zero", which is the state this whole surface exists to distinguish from
+    -- a drop.
+    INSERT INTO public.organizations (id, name, graph_name)
+    VALUES ('4779-default-probe', '4779-default-probe', 'org_4779-default-probe')
+    ON CONFLICT (id) DO NOTHING;
+    PERFORM public.metering_record_unmetered(
+        '4779-default-probe', 'write_op', 'window_unresolvable', 'X');
+    SELECT m.increments INTO v_n
+      FROM public.metering_unmetered_increments AS m
+     WHERE m.org_id = '4779-default-probe' AND m.lane = 'write_op';
+    IF v_n IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'an omitted p_n recorded % instead of the DEFAULT 1', v_n;
+    END IF;
+
+    -- ...and the COLUMN's ``DEFAULT 1``, which the RPC never exercises (it always
+    -- passes p_n explicitly), asserted by a DIRECT insert that omits
+    -- ``increments``. Reverted to ``DEFAULT 0`` this INSERT trips the positive
+    -- CHECK — a column default that contradicts the table's own constraint.
+    INSERT INTO public.metering_unmetered_increments
+        (org_id, lane, drop_class, last_error_type)
+    VALUES ('4779-default-probe', 'direct_insert', 'window_unresolvable', 'X');
+    SELECT m.increments INTO v_n
+      FROM public.metering_unmetered_increments AS m
+     WHERE m.org_id = '4779-default-probe' AND m.lane = 'direct_insert';
+    IF v_n IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'the column DEFAULT recorded % instead of 1', v_n;
+    END IF;
+
+    DELETE FROM public.metering_unmetered_increments
+     WHERE org_id = '4779-default-probe';
+    DELETE FROM public.organizations WHERE id = '4779-default-probe';
+
+    -- ...and an EXPLICIT NULL is refused rather than silently defaulted: a
+    -- caller that computed a batch size and got NULL has a bug, and defaulting
+    -- it to 1 would hide an unknown number of lost increments behind a 1.
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            '4779-dropped', 'write_op', 'window_unresolvable', 'X', p_n := NULL);
+    EXCEPTION WHEN raise_exception THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'an explicit NULL p_n was accepted';
     END IF;
 END $$;
 
@@ -255,11 +306,11 @@ BEGIN
         RAISE EXCEPTION 'cohort total is %, expected 8 + 7 = 15', total;
     END IF;
     total := public.metering_unmetered_total(ARRAY[]::text[]);
-    IF total <> 0 THEN
+    IF total IS DISTINCT FROM 0 THEN
         RAISE EXCEPTION 'an empty cohort reads %, expected 0', total;
     END IF;
     total := public.metering_unmetered_total(NULL);
-    IF total <> 0 THEN
+    IF total IS DISTINCT FROM 0 THEN
         RAISE EXCEPTION 'a NULL cohort reads %, expected 0', total;
     END IF;
 END $$;
@@ -275,7 +326,7 @@ BEGIN
     -- A second class on the SAME lane is its own row, not an accumulation onto
     -- the first. Mutation caught: a PK that omits drop_class.
     PERFORM public.metering_record_unmetered(
-        '4779-dropped', 'write_op', 'increment_failed', 'RuntimeError');
+        '4779-dropped', 'write_op', 'increment_write_unconfirmed', 'RuntimeError');
     SELECT count(*) INTO n FROM public.metering_unmetered_increments
      WHERE org_id = '4779-dropped' AND lane = 'write_op';
     IF n <> 2 THEN

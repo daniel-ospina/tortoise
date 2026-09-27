@@ -47,6 +47,9 @@
 --     representation. A CP-wide outage drops the increment AND blocks this
 --     write (both drop causes are control-plane failures), and the alert
 --     channel — R2 + GitHub + Telegram, not the CP — is the backstop there.
+--     That backstop covers ``window_unresolvable`` only:
+--     ``increment_write_unconfirmed`` is represented-but-NOT-alerted, by design
+--     (its lane is a writer, not one of the six alerted swallow sites).
 --
 -- DECLARED DROP CLASSES. ``drop_class`` is a CLOSED vocabulary enforced by
 -- CHECK, because an ad-hoc string here would re-create the re-derivation defect
@@ -54,9 +57,13 @@
 -- Adding a class is a migration, deliberately:
 --   * ``window_unresolvable`` — ``_require_period`` raised; ``lane`` names the
 --     caller's swallow site (the same six tokens leg 3 reports);
---   * ``increment_failed``    — the writer's own increment call failed with the
---     window KNOWN; ``lane`` names the writer (``write_op``/``ask_ledger``/
---     ``capture_ledger``).
+--   * ``increment_write_unconfirmed`` — the writer's own increment call RAISED
+--     with the window KNOWN; ``lane`` names the writer (``write_op``/
+--     ``ask_ledger``/``capture_ledger``). Named UNCONFIRMED rather than failed
+--     on purpose: a raise does not prove the increment was not written
+--     (``metering_increment``'s lost-response case, #925), so this class
+--     carries an upper bound on the loss rather than a false claim made
+--     durable.
 -- ``lane`` itself is deliberately NOT constrained: the swallow-site inventory is
 -- enumerated from source by ``tests/test_metering_window_admission.py``, and a
 -- CHECK here would be a second, hand-maintained copy of that list.
@@ -71,31 +78,33 @@ CREATE TABLE IF NOT EXISTS public.metering_unmetered_increments (
         REFERENCES public.organizations(id) ON DELETE CASCADE,
     lane              text NOT NULL,
     drop_class        text NOT NULL,
-    increments        integer NOT NULL DEFAULT 0,
+    increments        integer NOT NULL DEFAULT 1,
     last_error_type   text,
     first_observed_at timestamptz NOT NULL DEFAULT now(),
     last_observed_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (org_id, lane, drop_class),
     CONSTRAINT metering_unmetered_drop_class_declared
-        CHECK (drop_class IN ('window_unresolvable', 'increment_failed')),
+        CHECK (drop_class IN ('window_unresolvable',
+                              'increment_write_unconfirmed')),
     CONSTRAINT metering_unmetered_increments_positive
         CHECK (increments > 0)
 );
 
 COMMENT ON TABLE public.metering_unmetered_increments IS
     '#4779 (leg 2 of #3981): increments the period-keyed meter could NOT record, '
-    'because the org''s window was unresolvable or the increment write failed. '
-    'Keyed by (org_id, lane, drop_class) — all three exist when the window does '
-    'not. A COUNT, never a dollar figure, and NEVER read by metering_cohort_spend.';
+    'because the org''s window was unresolvable or the increment write did not '
+    'confirm. Keyed by (org_id, lane, drop_class) — all three exist when the '
+    'window does not. A COUNT, never a dollar figure, and NEVER read by '
+    'metering_cohort_spend; for increment_write_unconfirmed it is an UPPER BOUND. ';
 COMMENT ON COLUMN public.metering_unmetered_increments.lane IS
     '#4779: the metering lane the drop happened on. For window_unresolvable it is '
     'the caller''s swallow site (the same six tokens the UNMETERED_INCREMENT '
-    'incident reports); for increment_failed it is the writer '
+    'incident reports); for increment_write_unconfirmed it is the writer '
     '(write_op/ask_ledger/capture_ledger). Unconstrained on purpose — the site '
     'inventory is enumerated from source by tests/test_metering_window_admission.py.';
 COMMENT ON COLUMN public.metering_unmetered_increments.drop_class IS
     '#4779: the DECLARED drop vocabulary (CHECK-enforced): window_unresolvable | '
-    'increment_failed. Adding a class is a migration, not an ad-hoc literal.';
+    'increment_write_unconfirmed. Adding a class is a migration, not an ad-hoc literal.';
 COMMENT ON COLUMN public.metering_unmetered_increments.increments IS
     '#4779: how many increments this org+lane+class dropped. CUMULATIVE and never '
     'reset (a reset erases the evidence). Not money and not a cap input.';
@@ -189,8 +198,10 @@ GRANT EXECUTE ON FUNCTION public.metering_record_unmetered(text, text, text,
 -- truncated read here UNDERSTATES how long an org has been unmeterable, which
 -- is the one question this table exists to answer (the same failure mode that
 -- made ``metering_cohort_spend`` an RPC, 20260917000001 §"The cap's two READS").
--- So: a per-org read, bounded by construction at lanes x classes (<= 12 rows),
--- and a cohort read that returns a SINGLE scalar.
+-- So: a per-org read, whose row count is bounded by the CALLERS' lane inventory
+-- (six swallow sites x two declared classes for this code — NOT by the schema,
+-- since ``lane`` is deliberately unconstrained), and a cohort read that returns
+-- a SINGLE scalar and is therefore row-cap-proof by construction.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.metering_unmetered_for_org(p_org_id text)
