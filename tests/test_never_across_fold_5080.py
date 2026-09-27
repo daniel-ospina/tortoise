@@ -9,8 +9,9 @@ the pair (``#5131``).  The authoritative predicate is
 ``extractor_v2._boundary`` — the connective class is enumerated by
 ``_CONNECTIVE_SLOTS``/``_CONNECTIVE_MEMBERS``, the role-inversion class by
 ``_frame_and_content``/``_block_exchange``/``_coordination_between`` (whose
-exemption is enumerated by ``_COORDINATION_MEMBERS``, NOT by the clause-relation
-slot, which is a different and smaller set), and the
+exemption is enumerated by ``_COORDINATION_MEMBERS``, the SMALLER set — a
+strict subset of the clause-relation slot, which is NOT the enumeration to
+follow), and the
 labels it can report by ``distinguishing_difference``; the prose below is a
 reading aid.  Both
 write-path fold sites enforce that boundary from ONE implementation
@@ -298,6 +299,21 @@ IDENTITY_DIMENSIONS = {
     "negation", "condition", "scope", "language", "substituted_content",
     "unreadable",
 }
+
+
+# `_frame_and_content` reads a token containing a DIGIT as frame (the value
+# branch), so a pin built from `f"w{i}"` has an EMPTY content list: the
+# exchange scan is never reached and the pin asserts nothing.  These are
+# digit-free and prefixed so they collide with no stopword, clock unit or date
+# word, which makes them CONTENT.
+def _alpha_token(i: int) -> str:
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = letters[r] + out
+    return "zz" + out
 
 
 class TestDistinguishingDifference:
@@ -1785,7 +1801,15 @@ class TestDistinguishingDifference:
         for a, b in (
                 ("we ship the server, the client",
                  "we ship the client, the server"),
-                ("the cat the dog chased", "the dog the cat chased")):
+                ("the cat the dog chased", "the dog the cat chased"),
+                # A whole CLAUSE or adjunct moving as a UNIT is a legitimate
+                # reorder, but the token walk sees only a block crossing another
+                # and refuses it — FAIL-CLOSED, both claims kept, and pinned so
+                # the class is a recorded boundary rather than a surprise.
+                ("in staging the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record in staging"),
+                ("the deploy succeeded as the build completed",
+                 "as the build completed the deploy succeeded")):
             assert v2.distinguishing_difference(a, b) == "substituted_content", \
                 (a, b)
             assert not v2.fold_allowed(a, b), (a, b)
@@ -1888,45 +1912,58 @@ class TestDistinguishingDifference:
         The claim text is model output, so without a bound a long pair sharing
         an opening and a close made ONE comparison run for minutes — on the
         capture path, once per retrieved candidate.  The bound is what makes
-        that impossible; this pins that the bound EXISTS, that it is reached,
-        and that reaching it is read as REFUSE (both claims kept) rather than as
-        "no exchange" (which would let the seam delete the rival).
+        that impossible; this pins that BOTH bounds exist, that each is
+        reachable on its own, and that reaching either is read as REFUSE (both
+        claims kept) rather than as "no exchange" (which would let the seam
+        delete the rival).
 
-        The last two assertions are the pair that must never be caught by the
-        bound: two LONG, byte-equal claims.  On them the maximal head/tail
-        search is the budget's first casualty, so without the exact-equality
-        short circuit in `_role_inversion` a re-captured claim would read as a
-        rival and be duplicated — i.e. the bound would break idempotency.
+        The literal value of the ceiling is pinned, because it is a SAFETY
+        bound and not a similarity threshold: a change to it silently moves
+        which long claims fold, so it must be a deliberate act.
+
+        The last three assertions are the pair that must never be caught by the
+        bound: two LONG, byte-equal claims.  Above the ceiling the scan is not
+        attempted at all, so without the exact-equality short circuit in
+        `_role_inversion` a re-captured claim would read as a rival and be
+        duplicated — i.e. the bound would break idempotency.  They are built
+        from digit-free tokens so the content list is non-empty and the short
+        circuit (not the value branch, and not the `not content_a` early
+        return) is what the assertion actually exercises.
         """
-        assert isinstance(v2._BLOCK_EXCHANGE_BUDGET, int)
-        assert v2._BLOCK_EXCHANGE_BUDGET > 0
-        assert isinstance(v2._BLOCK_EXCHANGE_MAX_TOKENS, int)
-        assert v2._BLOCK_EXCHANGE_MAX_TOKENS > 0
-        # An unmatchable, long, same-content pair: the scan runs out of budget.
+        assert v2._BLOCK_EXCHANGE_MAX_TOKENS == 200
+        assert v2._BLOCK_EXCHANGE_BUDGET == 5000
+        # A pair above the LENGTH CEILING: the scan is not attempted at all.
         n = v2._BLOCK_EXCHANGE_MAX_TOKENS + 40
         seq = tuple((i, f"t{i}") for i in range(n))
         flipped = tuple((i, t) for i, (_, t) in enumerate(reversed(seq)))
         assert v2._block_exchange(seq, flipped) \
-            is v2._EXCHANGE_BUDGET_EXCEEDED
-        # ...and the BUDGET trips on its own, not only the length ceiling: the
-        # same sequence against itself is under the ceiling and has the maximal
+            == v2._EXCHANGE_BUDGET_EXCEEDED
+        # ...and the BUDGET trips on its own, not only the ceiling: the same
+        # sequence against itself is AT the ceiling and has the maximal
         # head/tail search, so only the attempt counter can stop it.
         inside = tuple((i, f"t{i}")
                        for i in range(v2._BLOCK_EXCHANGE_MAX_TOKENS))
         assert len(inside) <= v2._BLOCK_EXCHANGE_MAX_TOKENS
         assert v2._block_exchange(inside, inside) \
-            is v2._EXCHANGE_BUDGET_EXCEEDED
+            == v2._EXCHANGE_BUDGET_EXCEEDED
         assert v2._role_inversion_is_unscannable(
             v2._EXCHANGE_BUDGET_EXCEEDED)
         assert not v2._role_inversion_is_unscannable((0, 2, 0, 2))
-        # Every long pair is refused, whatever the two claims say...
-        long_a = "the " + " ".join(f"w{i}" for i in range(n))
-        long_b = "the " + " ".join(f"w{i}" for i in range(n - 1, -1, -1))
+        # The end-to-end path on real claim text: content-bearing (digit-free),
+        # longer than the ceiling, same frame multiset, same content multiset.
+        words = [_alpha_token(i) for i in range(n)]
+        long_a = " ".join(words)
+        long_b = " ".join(reversed(words))
+        _, content_a = v2._frame_and_content(long_a)
+        assert len(content_a) > v2._BLOCK_EXCHANGE_MAX_TOKENS, len(content_a)
+        assert v2._role_inversion(long_a, long_a) is False
+        # Every such long pair is refused, whatever the two claims say...
         assert not v2.fold_allowed(long_a, long_b)
         # ...EXCEPT the pair where nothing changed at all, which must still
         # read as the same claim rather than as a rival.
         assert v2.distinguishing_difference(long_a, long_a) is None
         assert v2.fold_allowed(long_a, long_a)
+        assert v2.supersede_allowed(long_a, long_a)
 
     def test_the_coordination_vocabulary_is_pinned_literally(self):
         """The exemption's members are an enumeration, so pin them.
@@ -1934,9 +1971,8 @@ class TestDistinguishingDifference:
         The exemption set is deliberately NARROWER than the clause-relation
         slot: `so` is a slot member and is NOT coordinating here.  A reader
         following only `_CONNECTIVE_SLOTS` would conclude the opposite, so the
-        literal set is pinned — and the import-time subset check that keeps the
-        two from drifting is asserted to be a real check, not a stripped
-        `assert`.
+        literal set is pinned, together with the subset relation the
+        import-time check enforces.
         """
         assert frozenset(
             {"and", "or", "nor", "but", "yet"}) == v2._COORDINATION_MEMBERS

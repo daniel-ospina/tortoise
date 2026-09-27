@@ -4239,11 +4239,15 @@ if not _CONNECTIVE_SLOTS[0] >= _COORDINATION_MEMBERS:
 _BLOCK_EXCHANGE_BUDGET = 5000
 # A second, cheaper ceiling on the input itself.  The budget bounds the number
 # of candidate decompositions; this bounds the length of each comparison those
-# candidates perform.  Above it the scan is not attempted and the pair is
-# refused — the same FAIL-CLOSED direction as the budget, and for the same
-# reason.  Both are far above any claim the extractor produces from a turn; a
-# pair that reaches them is either pathological or adversarial.
-_BLOCK_EXCHANGE_MAX_TOKENS = 120
+# candidates perform, so the two together bound the product.  Above it the
+# scan is not attempted and the sentinel is returned — the same FAIL-CLOSED
+# direction as the budget, and for the same reason.  The value is a SAFETY
+# bound and not a similarity threshold: it is deliberately generous (measured
+# worst case ≈0.5 s per call at the ceiling, versus minutes without it), and a
+# change to it is a deliberate act, not a tuning knob —
+# `test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up` pins the
+# literal so it cannot drift.
+_BLOCK_EXCHANGE_MAX_TOKENS = 200
 _EXCHANGE_BUDGET_EXCEEDED = (-1, -1, -1, -1)
 
 def _block_exchange(
@@ -4283,10 +4287,13 @@ def _block_exchange(
     claims' spans are returned so the coordination is read from the pair and
     not from whichever side happened to be first.
 
-    ``_EXCHANGE_BUDGET_EXCEEDED`` is returned instead when the scan hit
-    ``_BLOCK_EXCHANGE_BUDGET`` without deciding.  It is NOT "no exchange": the
-    caller REFUSES the fold, because a pair the scan could not decide must not
-    be allowed to delete a rival.
+    ``_EXCHANGE_BUDGET_EXCEEDED`` is returned instead when the scan could not
+    decide, which has TWO triggers: the input exceeds
+    ``_BLOCK_EXCHANGE_MAX_TOKENS`` (in which case the scan is not attempted at
+    all), or the scan runs ``_BLOCK_EXCHANGE_BUDGET`` attempted
+    decompositions without deciding.  It is NOT "no exchange": the caller
+    REFUSES the fold, because a pair the scan could not decide must not be
+    allowed to delete a rival.
     """
     if len(ca) != len(cb) or len(ca) < 2:
         return None
@@ -4356,11 +4363,13 @@ def _role_inversion_is_unscannable(
         exchange: tuple[int, int, int, int]) -> bool:
     """True when the exchange result means "could not decide", not "no".
 
-    A tiny predicate rather than a bare identity test at the call site, so the
+    A tiny predicate rather than a bare comparison at the call site, so the
     sentinel is read in exactly one place and its meaning is stated where it is
-    consumed.
+    consumed.  ``==`` rather than ``is`` because the sentinel is a VALUE: a
+    real span can never equal it (positions are non-negative and `lo < hi`), so
+    equality is unambiguous and survives the tuple being rebuilt.
     """
-    return exchange is _EXCHANGE_BUDGET_EXCEEDED
+    return exchange == _EXCHANGE_BUDGET_EXCEEDED
 
 
 def _coordination_between(content: str, lo: int, hi: int) -> bool:
@@ -4423,8 +4432,9 @@ def _role_inversion(a: str, b: str) -> bool:
     ``fold_allowed``, ``supersede_allowed``, ``classify_consolidation`` and
     ``dedup_classify.rephrase_hit`` all refuse from the one boundary.
 
-    Declared residuals, all pinned in ``tests/test_never_across_fold_5080.py``
-    so they cannot go silent:
+    Declared residuals, each pinned in ``tests/test_never_across_fold_5080.py``
+    so they cannot go silent — an enumeration of the KNOWN ones, not a
+    completeness claim (see the closing note below):
 
       * an exchange whose two blocks are ADJACENT in the raw stream has no
         relator between them and stays foldable — that shape is a RE-FLOW (an
@@ -4481,10 +4491,29 @@ def _role_inversion(a: str, b: str) -> bool:
         one: any relator with no structural direction lands here, and telling
         it from a directional one needs the semantics a token walk does not
         have.  FAIL-CLOSED, both claims kept, pinned;
-      * a pair LONG ENOUGH that the scan hits ``_BLOCK_EXCHANGE_BUDGET`` is
-        refused, and that is FAIL-CLOSED too (``_role_inversion_is_unscannable``):
-        the budget exists so a comparison cannot run away on the capture path,
-        and an undecided pair must not delete a rival.  Both claims are kept.
+      * a pair the scan cannot decide is refused, and that is FAIL-CLOSED
+        (``_role_inversion_is_unscannable``): either the input exceeds
+        ``_BLOCK_EXCHANGE_MAX_TOKENS`` (the scan is not attempted) or the scan
+        ran ``_BLOCK_EXCHANGE_BUDGET`` decompositions without deciding.  The
+        bounds exist so one comparison cannot run away on the capture path
+        (the seam runs the boundary once per retrieved candidate), and an
+        undecided pair must not delete a rival.  Both claims are kept;
+      * a WHOLE-CLAUSE or adjunct FRONTING (``in staging the alpha engine
+        processed the delta record`` against ``the alpha engine processed the
+        delta record in staging``, or ``as the build completed the deploy
+        succeeded`` against its mirror) is refused — FAIL-CLOSED, both claims
+        kept.  The moved phrase changed places as a UNIT, so the pair is a
+        legitimate reorder, but the token walk sees only that a block crossed
+        another and cannot tell a moved adjunct from a re-assigned argument; a
+        dedicated check needs the phrase's span, which this walk does not keep.
+
+    The list above is the residuals FOUND SO FAR, each pinned in
+    ``tests/test_never_across_fold_5080.py``.  It is an enumeration of the
+    known ones, NOT a proof of completeness: the rule is a token-level reading
+    of a structural shape, so any construction the reading cannot distinguish
+    from a re-assigned slot lands on the FAIL-CLOSED side (both claims kept) —
+    safe, but a cost.  A new shape must be pinned when it is found, and this
+    list extended; it must not be read as a closed set.
     """
     # Orientation-invariant.  The in-capture seam calls
     # `fold_allowed(prior, candidate)`, so which claim is first must not change
@@ -4510,10 +4539,11 @@ def _role_inversion(a: str, b: str) -> bool:
         return False
     # The SAME content in the SAME order is not an exchange, and it must be
     # decided here rather than by the scan: on two long, byte-equal claims the
-    # scan hits its budget before it exhausts the (maximal) head/tail search,
-    # and a re-captured claim would then read as a rival and be duplicated.
-    # Exact equality is the cheap, exact answer for the one pair that must
-    # never be refused.
+    # scan cannot decide — the length ceiling fires above
+    # `_BLOCK_EXCHANGE_MAX_TOKENS`, and below it the maximal head/tail search
+    # is the budget's first casualty — and a re-captured claim would then read
+    # as a rival and be duplicated.  Exact equality is the cheap, exact answer
+    # for the one pair that must never be refused.
     if [t for _, t in content_a] == [t for _, t in content_b]:
         return False
     exchange = _block_exchange(content_a, content_b)
