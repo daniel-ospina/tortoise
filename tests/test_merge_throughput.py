@@ -644,7 +644,8 @@ def _languish_payload(languishing=0):
               "classification": "open"} for i in range(12)]
     for i in range(languishing):
         items[i]["moved_in_window"] = False
-    return {"items": items, "total_count": 12, "read_ok": True}
+    return {"items": items, "total_count": 12, "read_ok": True,
+            "window_days": 7}
 
 
 def test_no_languish_three_way():
@@ -1311,13 +1312,11 @@ def test_cli_triage_fixture_row_shape():
     out = _run_cli("--triage", "--emit", "rows", "--fixture", "empty")
     assert out.returncode == 0, out.stderr
     rows = _json.loads(out.stdout)
-    assert rows and set(rows[0]) == {
-        "number", "bucket", "eligible", "conflict", "conflicted_paths",
-        "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
-        "owner_evidence", "owning_issue"}
-    # Task-5-owned judgements are UNKNOWN in Task 1, never a hardcoded False.
-    assert rows[0]["hard_stop"] == mt.UNKNOWN
-    assert rows[0]["terminal_decision"] == mt.UNKNOWN
+    assert rows and set(rows[0]) == set(mt.TRIAGE_SCHEMA_KEYS)
+    # Task 5 owns the taxonomy; the fixture row is a real first-match bucket.
+    assert rows[0]["bucket"] == "eligible"
+    assert rows[0]["hard_stop"] is False
+    assert rows[0]["terminal_decision"] is False
     assert rows[0]["superseded_by"] == mt.UNKNOWN
 
 
@@ -1426,7 +1425,8 @@ def test_no_languish_non_boolean_movement_is_2():
 def test_no_languish_unset_superseded_by_keeps_the_row_active():
     items = [{"number": i, "classification": "open", "moved_in_window": False,
               "superseded_by": ""} for i in range(12)]
-    payload = {"items": items, "total_count": 12, "read_ok": True}
+    payload = {"items": items, "total_count": 12, "read_ok": True,
+               "window_days": 7}
     assert run_check("no-languish", json=payload, exclude=["superseded_by"],
                      require_complete=True) == 1
 
@@ -1568,14 +1568,26 @@ def test_gh_api_retries_then_records_status(monkeypatch, capsys):
     assert "boom" in capsys.readouterr().err
 
 
-def test_triage_rows_marks_task5_judgements_unknown(monkeypatch):
-    monkeypatch.setattr(mt, "_gh_api",
-                        lambda *a, **k: [{"number": 1, "draft": False}])
-    rows = mt._triage_rows()
-    assert rows and rows[0]["draft"] is False
-    for field in ("bucket", "hard_stop", "terminal_decision", "superseded_by",
-                  "eligible", "conflict", "owner", "owner_evidence", "owning_issue"):
-        assert rows[0][field] == mt.UNKNOWN, field
+def test_triage_rows_classifies_every_pr(monkeypatch):
+    prs = [
+        {"number": 1, "draft": False, "title": "a (#10)", "head": {"ref": "fix/10-a"}},
+        {"number": 5136, "draft": True, "title": "h (#20)", "head": {"ref": "fix/20-h"}},
+        {"number": 2, "draft": True, "title": "d (#30)", "head": {"ref": "fix/30-d"}},
+    ]
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
+    monkeypatch.setattr(mt, "collect_triage_conflicts",
+                        lambda *a, **k: {1: (False, []), 5136: (True, ["f"]),
+                                         2: (True, ["g"])})
+    monkeypatch.setattr(mt, "open_pr_total", lambda: 3)
+    monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
+    rows, total = mt._triage_rows()
+    assert total == 3
+    assert [r["bucket"] for r in rows] == ["eligible", "hard_stop", "draft"]
+    assert rows[0]["conflicted_paths"] == []
+    assert rows[1]["conflicted_paths"] == ["f"]
+    assert rows[2]["conflict"] is True
+    assert rows[0]["owner"] == mt.UNKNOWN      # no evidence -> UNKNOWN
+    assert rows[0]["owning_issue"] == "10"
 
 
 def test_cli_numeric_flag_cannot_disarm_a_gate(tmp_path):
@@ -1704,7 +1716,8 @@ def test_gap_unknown_source_sentinel_is_2():
 def test_no_languish_unknown_superseded_by_keeps_row_active():
     items = [{"number": i, "classification": "open", "moved_in_window": False,
               "superseded_by": mt.UNKNOWN} for i in range(12)]
-    payload = {"items": items, "total_count": 12, "read_ok": True}
+    payload = {"items": items, "total_count": 12, "read_ok": True,
+               "window_days": 7}
     assert run_check("no-languish", json=payload, exclude=["superseded_by"],
                      require_complete=True) == 1
 
@@ -2069,23 +2082,26 @@ def test_prs_per_day_requires_a_fresh_snapshot(tmp_path):
 
 
 def test_no_languish_excludes_task_5_buckets():
-    rows = [{"number": i, "bucket": "hard_stop", "superseded_by": None,
+    rows = [{"number": i, "bucket": "hard_stop", "draft": False,
+             "hard_stop": True, "terminal_decision": False,
+             "conflict": False, "superseded_by": None,
              "moved_in_window": False} for i in range(12)]
     assert run_check("no-languish", json={"items": rows, "total_count": 12,
-                                          "read_ok": True},
+                                          "read_ok": True, "window_days": 7},
                      exclude=["hard_stop", "terminal_decision", "draft",
                               "superseded_by"],
                      require_complete=True) == 2
-    rows = [{"number": i, "bucket": "eligible", "moved_in_window": True}
-            for i in range(12)]
+    rows = [{"number": i, "bucket": "eligible", "draft": False,
+             "hard_stop": False, "terminal_decision": False,
+             "conflict": False, "moved_in_window": True} for i in range(12)]
     assert run_check("no-languish", json={"items": rows, "total_count": 12,
-                                          "read_ok": True},
+                                          "read_ok": True, "window_days": 7},
                      exclude=["hard_stop", "terminal_decision", "draft",
                               "superseded_by"],
                      require_complete=True) == 0
     bad = [{"number": i, "bucket": 3, "moved_in_window": True} for i in range(12)]
     assert run_check("no-languish", json={"items": bad, "total_count": 12,
-                                          "read_ok": True},
+                                          "read_ok": True, "window_days": 7},
                      exclude=[], require_complete=True) == 2
 
 
@@ -2126,3 +2142,685 @@ def test_queue_entry_observed_false_is_a_miss():
                      pr=5) == 1
     assert run_check("queue-entry", json={**base, "entered_queue": "false"},
                      pr=5) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — eligibility triage (plan §10 Task 5): ordered buckets, owners, no
+# mutation. The acceptance criteria are: exactly the schema keys; `bucket` is
+# FIRST-MATCH-WINS; the boolean columns are INDEPENDENT; `owner` is never the
+# PR author; counts reconcile; `--triage` issues no mutating request.
+# ---------------------------------------------------------------------------
+
+WORKLIST_JSON = ROOT / "docs" / "ci" / "triage" / "2026-09-27-eligible-worklist.json"
+OWNER_EVIDENCE_JSON = ROOT / "docs" / "ci" / "triage" / "owner-evidence.json"
+NO_LANG_JSON = ROOT / "docs" / "ci" / "triage" / "2026-09-27-no-languish.json"
+
+
+def _pr(number=1, title="a (#2)", draft=False, branch="fix/2-a", body=""):
+    return {"number": number, "title": title, "draft": draft,
+            "head": {"ref": branch}, "body": body}
+
+
+def test_triage_schema_keys_are_exact():
+    row = mt.build_triage_row(_pr(), conflict=False)
+    assert set(row) == set(mt.TRIAGE_SCHEMA_KEYS)
+    assert tuple(mt.TRIAGE_SCHEMA_KEYS) == (
+        "number", "bucket", "eligible", "conflict", "conflicted_paths",
+        "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
+        "owner_evidence", "owning_issue")
+
+
+def test_triage_unobserved_is_unknown_never_eligible():
+    row = mt.build_triage_row(_pr(), conflict=mt.UNKNOWN)
+    assert row["conflict"] == mt.UNKNOWN
+    assert row["bucket"] == mt.UNKNOWN    # an unobserved conflict cannot read clean
+    assert row["eligible"] == mt.UNKNOWN
+    assert row["draft"] is False          # an OBSERVED column stays observed
+
+
+@pytest.mark.parametrize("number,expected", [
+    (5136, "hard_stop"), (5461, "hard_stop"), (5465, "hard_stop"),
+    (5467, "hard_stop"), (5468, "hard_stop"),
+    (5285, "terminal_decision"), (4963, "terminal_decision"),
+    (5190, "dead_weight"), (5453, "dead_weight"), (5455, "dead_weight"),
+    (5460, "draft"),
+])
+def test_named_dispositions_win_the_first_match(number, expected):
+    # Every named PR is deliberately ALSO a draft and conflicted; the named
+    # disposition must win, which is exactly why the buckets are ordered.
+    row = mt.build_triage_row(
+        _pr(number=number, draft=True, branch=f"fix/{number}-x"), conflict=True)
+    assert row["bucket"] == expected
+    assert row["eligible"] is False
+    assert row["draft"] is True                 # the boolean is independent
+    assert row["hard_stop"] is (expected == "hard_stop")
+    assert row["terminal_decision"] is (expected == "terminal_decision")
+
+
+def test_draft_beats_conflicting_and_conflict_beats_eligible():
+    assert mt.classify_bucket(9999, draft=True, conflict=True) == "draft"
+    assert mt.classify_bucket(9999, draft=False, conflict=True) == "conflicting"
+    assert mt.classify_bucket(9999, draft=False, conflict=False) == "eligible"
+
+
+@pytest.mark.parametrize("draft,conflict", [
+    (mt.UNKNOWN, False), (mt.UNKNOWN, True), (False, mt.UNKNOWN),
+    (None, False), ("yes", False),
+    # a non-bool CONFLICT must not fall through to `eligible` either
+    (False, None), (False, "yes"), (False, 1), (False, 0), (False, {}),
+])
+def test_undecidable_inputs_are_never_eligible(draft, conflict):
+    assert mt.classify_bucket(9999, draft=draft, conflict=conflict) == mt.UNKNOWN
+
+
+def test_an_observed_draft_is_a_draft_even_with_an_unknown_conflict():
+    # `draft` is OBSERVED True: it decides before the unprobed conflict does.
+    assert mt.classify_bucket(9999, draft=True, conflict=mt.UNKNOWN) == "draft"
+
+
+def test_dead_weight_requires_positive_evidence():
+    # A PR whose work is not provably on main must NOT be placed in dead_weight.
+    assert mt.classify_bucket(424242, draft=True, conflict=False) == "draft"
+    assert mt.build_triage_row(_pr(424242, draft=True), conflict=False)[
+        "superseded_by"] == mt.UNKNOWN
+
+
+def test_validate_rejects_an_unsupported_dead_weight_and_a_lying_boolean():
+    # A dead_weight bucket with no superseded_by evidence is not a disposition.
+    row = mt.build_triage_row(_pr(5453, draft=True), conflict=True)
+    row["superseded_by"] = mt.UNKNOWN
+    assert any("no superseded_by evidence" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+    # A boolean column that disagrees with its own source set is a lie.
+    row = mt.build_triage_row(_pr(9999), conflict=False)
+    row["hard_stop"] = True
+    assert any("hard_stop disagrees" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+    row = mt.build_triage_row(_pr(9999), conflict=False)
+    row["terminal_decision"] = True
+    assert any("terminal_decision disagrees" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+
+
+def test_validate_rejects_an_unlabelled_or_unsupported_owner():
+    row = mt.build_triage_row(_pr(), conflict=False, owner=None,
+                              owner_evidence="branch=x")
+    assert any("neither UNKNOWN nor a label" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+    # A resolved owner must carry the session+branch+first-message evidence.
+    row = mt.build_triage_row(_pr(), conflict=False, owner="session:abc",
+                              owner_evidence="")
+    assert any("carries no owner_evidence" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+    row = mt.build_triage_row(_pr(), conflict=False, owner="session:abc",
+                              owner_evidence="a lane asserted it")
+    assert any("missing 'branch='" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+    row = mt.build_triage_row(_pr(), conflict=False, owner="session:abc",
+                              owner_evidence="branch=x; session=; first_msg=y")
+    assert any("missing 'session='" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+
+
+def test_validate_rejects_a_null_owner_from_a_null_evidence_field(monkeypatch):
+    # A JSON `null` owner must normalise to UNKNOWN, never survive as `None`.
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: [
+        {"number": 1, "draft": False, "title": "a (#2)",
+         "head": {"ref": "fix/2-a"}}])
+    monkeypatch.setattr(mt, "collect_triage_conflicts",
+                        lambda *a, **k: {1: (False, [])})
+    monkeypatch.setattr(mt, "open_pr_total", lambda: 1)
+    monkeypatch.setattr(mt, "load_triage_owner_evidence",
+                        lambda *a, **k: {1: {"owner": None,
+                                             "owner_evidence": None}})
+    rows, _total = mt._triage_rows()
+    assert rows[0]["owner"] == mt.UNKNOWN
+    assert rows[0]["owner_evidence"] == mt.UNKNOWN
+
+
+def test_validate_rejects_an_unknown_bucket_as_non_clean():
+    row = mt.build_triage_row(_pr(), conflict=mt.UNKNOWN)
+    errors = mt.validate_triage_rows([row], total_count=1, min_population=1)
+    assert any("is not one of the six buckets" in e for e in errors), errors
+def test_validate_rejects_a_bucket_that_is_not_the_first_match():
+    row = mt.build_triage_row(_pr(9999), conflict=True)
+    row["bucket"] = "eligible"          # a lie about a conflicted PR
+    row["eligible"] = True
+    errors = mt.validate_triage_rows([row], total_count=1, min_population=1)
+    assert any("first match" in e for e in errors), errors
+
+
+def test_validate_rejects_missing_and_extra_schema_keys():
+    row = mt.build_triage_row(_pr(), conflict=False)
+    missing = {k: v for k, v in row.items() if k != "owner_evidence"}
+    assert any("schema keys differ" in e
+               for e in mt.validate_triage_rows([missing], min_population=1))
+    extra = {**row, "surprise": 1}
+    assert any("schema keys differ" in e
+               for e in mt.validate_triage_rows([extra], min_population=1))
+
+
+def test_validate_rejects_owner_equal_to_the_shared_author_login():
+    row = mt.build_triage_row(_pr(), conflict=False,
+                              owner=mt.FLEET_AUTHOR_LOGIN,
+                              owner_evidence="author=@me")
+    errors = mt.validate_triage_rows([row], total_count=1, min_population=1)
+    assert any("shared PR-author login" in e for e in errors), errors
+
+
+def test_validate_accepts_a_session_owner_and_independent_booleans():
+    row = mt.build_triage_row(
+        _pr(5136, draft=True), conflict=True, conflicted_paths=["a.txt"],
+        owner="session:0123456789ab",
+        owner_evidence="branch=fix/20-h; session=0123456789ab; first_msg=...")
+    assert mt.validate_triage_rows([row], total_count=1, min_population=1) == []
+    assert row["draft"] is True and row["hard_stop"] is True
+
+
+def test_validate_reconciles_counts_and_enforces_the_population_floor():
+    rows = [mt.build_triage_row(_pr(), conflict=False)]
+    assert any("reconcile" in e
+               for e in mt.validate_triage_rows(rows, total_count=5,
+                                                min_population=1))
+    assert any("floor" in e
+               for e in mt.validate_triage_rows(rows, total_count=1))
+    assert mt.validate_triage_rows(rows, total_count=1, min_population=1) == []
+
+
+def test_validate_rejects_non_boolean_columns():
+    row = mt.build_triage_row(_pr(), conflict=False)
+    row["draft"] = "false"
+    errors = mt.validate_triage_rows([row], total_count=1, min_population=1)
+    assert any("draft is not boolean" in e for e in errors), errors
+
+
+def test_triage_issues_no_mutating_request(monkeypatch):
+    """`--triage` must issue no mutating request (mocked transport)."""
+    prs = [{"number": i, "draft": False, "title": f"x (#{i})",
+            "head": {"ref": f"fix/{i}-x"}} for i in range(1, 13)]
+    gh_calls = []
+    real_run = mt.subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if isinstance(cmd, (list, tuple)) and len(cmd) >= 2 and cmd[0] == "gh":
+            gh_calls.append(list(cmd))
+            return SimpleNamespace(returncode=0,
+                                   stdout=_json.dumps([prs]), stderr="")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(mt.subprocess, "run", fake_run)
+    monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: {})
+    monkeypatch.setattr(mt, "open_pr_total", lambda: 12)
+    monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
+    rows, total = mt._triage_rows()
+    assert len(rows) == 12 and total == 12
+    assert gh_calls, "the enumeration must go through gh"
+    mutating = ("-X", "--method", "-f", "--field", "--raw-field", "--input",
+                "POST", "PATCH", "PUT", "DELETE")
+    for call in gh_calls:
+        assert call[0] == "gh" and call[1] == "api", call
+        assert not any(token in call for token in mutating), call
+        assert any("pulls?state=open" in part for part in call), call
+
+
+def test_triage_refuses_a_failed_conflict_sweep(monkeypatch):
+    """A FAILED conflict sweep must refuse the whole read, not read as empty."""
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: [{"number": 1, "draft": False}])
+    monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: None)
+    assert mt._triage_rows() == (None, 0)
+
+
+def test_triage_enumeration_failure_is_none(monkeypatch):
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: mt.UNKNOWN)
+    assert mt._triage_rows() == (None, 0)
+    assert mt.collect_triage_conflicts() is None
+
+
+def test_triage_refuses_a_truncated_enumeration(monkeypatch):
+    """A partial page that reconciles only against ITSELF is a silent truncation."""
+    prs = [{"number": i, "draft": False} for i in range(5)]
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
+    monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: {})
+    monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
+    # The API says there are 9 open PRs; the enumeration returned 5.
+    monkeypatch.setattr(mt, "open_pr_total", lambda: 9)
+    assert mt._triage_rows() == (None, 0)
+    # An unreadable independent total is UNKNOWN, never "assume complete".
+    monkeypatch.setattr(mt, "open_pr_total", lambda: mt.UNKNOWN)
+    assert mt._triage_rows() == (None, 0)
+
+
+def test_validate_binds_dead_weight_evidence_to_the_verified_claim():
+    row = mt.build_triage_row(_pr(5190), conflict=False,
+                              dead_weight={5190: "#3405 (close_failed_at on main)"})
+    assert mt.validate_triage_rows([row], total_count=1, min_population=1) == []
+    row["superseded_by"] = "#9999 (a total lie)"
+    assert any("does not match the verified evidence" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+
+
+def test_validate_rejects_a_blank_conflicted_path():
+    row = mt.build_triage_row(_pr(), conflict=True, conflicted_paths=[""])
+    assert any("non-empty strings" in e
+               for e in mt.validate_triage_rows([row], total_count=1,
+                                                min_population=1))
+
+
+def test_validate_rejects_a_bogus_session_owner():
+    for bogus in ("session:totally-bogus", "session:branch", "session:",
+                  "session:session"):
+        row = mt.build_triage_row(
+            _pr(), conflict=False, owner=bogus,
+            owner_evidence="branch=branch; session=0123456789abcdef; first_msg=m")
+        assert any("owner is not the session cited" in e
+                   for e in mt.validate_triage_rows([row], total_count=1,
+                                                    min_population=1)), bogus
+
+
+def test_no_languish_bucket_and_classification_must_agree():
+    """A second classification column must not be a second hiding channel."""
+    base = {"number": 0, "bucket": "eligible", "conflict": False,
+            "superseded_by": mt.UNKNOWN, "moved_in_window": True}
+    items = [dict(base, number=i) for i in range(10)]
+    items.append(dict(base, number=10, classification="draft",
+                      moved_in_window=False))
+    payload = {"items": items, "total_count": 11, "read_ok": True,
+               "window_days": 7}
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"], require_complete=True) == 2
+
+
+def test_open_pr_total_pins_the_endpoint(monkeypatch):
+    """A `rel=last` from another resource must not be read as the total."""
+    def foreign(cmd, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=('HTTP/2.0 200 OK\n'
+                    'Link: <https://api.github.com/repositories/9/issues'
+                    '?per_page=1&page=7>; rel="last"\n'),
+            stderr="")
+    monkeypatch.setattr(mt.subprocess, "run", foreign)
+    assert mt.open_pr_total() == mt.UNKNOWN
+
+    def ours(cmd, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=('HTTP/2.0 200 OK\n'
+                    'Link: <https://api.github.com/repositories/9/pulls'
+                    '?state=open&per_page=1&page=164>; rel="last"\n'),
+            stderr="")
+    monkeypatch.setattr(mt.subprocess, "run", ours)
+    assert mt.open_pr_total() == 164
+
+    # A `/pulls?` inside a QUERY VALUE is not the pulls collection, and a
+    # `page=` inside a param value is not the pagination page.
+    def sneaky(cmd, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=('HTTP/2.0 200 OK\n'
+                    'Link: <https://api.github.com/repositories/9/issues'
+                    '?x=/pulls?&page=7>; rel="last"\n'
+                    'Link: <https://api.github.com/repositories/9/pulls'
+                    '?per_page=1&x=/pulls?page=3&page=164>; rel="last"\n'),
+            stderr="")
+    monkeypatch.setattr(mt.subprocess, "run", sneaky)
+    assert mt.open_pr_total() == 164
+
+
+def test_owner_evidence_absent_is_empty_never_the_author(tmp_path):
+    missing = tmp_path / "nope.json"
+    assert mt.load_triage_owner_evidence(missing) == {}
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert mt.load_triage_owner_evidence(bad) == {}
+    as_list = tmp_path / "list.json"
+    as_list.write_text(_json.dumps(
+        [{"number": 7, "owner": "session:abc", "owner_evidence": "branch=x"}]))
+    assert mt.load_triage_owner_evidence(as_list)[7]["owner"] == "session:abc"
+    as_dict = tmp_path / "dict.json"
+    as_dict.write_text(_json.dumps(
+        {"8": {"owner": "session:def", "owner_evidence": "branch=y"}}))
+    assert mt.load_triage_owner_evidence(as_dict)[8]["owner"] == "session:def"
+
+
+def test_tool_runs_under_the_documented_system_python3_for_triage():
+    """The §11 commands are `python3 tools/…`; a 3.10+-only builtin in the triage
+    path crashes at exec — exit 1, the contract's MISS. Exercise it there."""
+    py = "/usr/bin/python3"
+    if not Path(py).exists():
+        pytest.skip("no system python3")
+    script = (
+        "import sys; sys.path.insert(0, 'tools')\n"
+        "import merge_throughput as mt\n"
+        "mt.live_main_sha = lambda: 'deadbeef'\n"
+        "mt._ensure_object = lambda s: True\n"
+        "mt.merge_tree_conflict_detail = lambda *a: (False, [])\n"
+        "out = mt.collect_triage_conflicts([{'number': 1, 'head': {'sha': 'a'}}])\n"
+        "assert out == {1: (False, [])}, out\n"
+        "print('TRIAGE_OK')\n"
+    )
+    result = subprocess.run([py, "-c", script], capture_output=True, text=True,
+                            cwd=ROOT)
+    assert result.returncode == 0, result.stderr
+    assert "TRIAGE_OK" in result.stdout, result.stdout + result.stderr
+    assert "TypeError" not in result.stderr
+
+
+def test_committed_worklist_validates_and_reconciles():
+    # NO skipif: deleting the artifact must FAIL this test, not silently skip it.
+    assert WORKLIST_JSON.exists(), "the Task 5 worklist artifact must be committed"
+    payload = _json.loads(WORKLIST_JSON.read_text())
+    rows = payload["rows"]
+    assert payload["total_count"] == len(rows)
+    assert payload["bucket_order"] == list(mt.BUCKET_ORDER)
+    assert mt.validate_triage_rows(rows, total_count=payload["total_count"]) == []
+    counts = {}
+    for row in rows:
+        counts[row["bucket"]] = counts.get(row["bucket"], 0) + 1
+    assert sum(counts.values()) == payload["total_count"]
+    assert set(counts) <= set(mt.BUCKET_ORDER)
+    assert all(row["owner"] != mt.FLEET_AUTHOR_LOGIN for row in rows)
+
+
+def test_committed_worklist_findings_are_derivable():
+    """Every `findings` value a reader depends on must be recomputable from the
+    committed rows/evidence — a curated finding is an unverifiable one."""
+    payload = _json.loads(WORKLIST_JSON.read_text())
+    rows = payload["rows"]
+    findings = payload["findings"]
+    paths = {}
+    for row in rows:
+        if row["bucket"] != "conflicting":
+            continue
+        for path in row["conflicted_paths"]:
+            paths[path] = paths.get(path, 0) + 1
+    assert findings["conflict_artifact_paths"] == dict(
+        sorted(paths.items(), key=lambda kv: (-kv[1], kv[0])))
+    assert findings["conflict_artifact_paths_total"] == sum(paths.values())
+    assert findings["conflict_artifact_paths_scope"] == (
+        "rows in the conflicting bucket")
+    evidence = _json.loads(OWNER_EVIDENCE_JSON.read_text())
+    tiers = {}
+    for item in evidence:
+        tiers[item["tier"]] = tiers.get(item["tier"], 0) + 1
+    assert findings["owner_tiers"] == tiers
+    assert sum(tiers.values()) == len(rows)
+    assert findings["terminal_d5"] == sorted(mt.TERMINAL_D5)
+    assert findings["guard_surface_in_d12"] == sorted(mt.HARD_STOP_D12)
+    assert findings["dead_weight_evidence"] == {
+        str(k): v for k, v in mt.DEAD_WEIGHT_EVIDENCE.items()}
+    # A reclassified PR must NOT sit in the bucket it was reclassified out of.
+    by_number = {r["number"]: r for r in rows}
+    assert by_number[5196]["bucket"] == "conflicting"
+    assert 5196 not in mt.TERMINAL_D5
+    assert by_number[5460]["bucket"] == "draft"
+    assert 5460 not in mt.DEAD_WEIGHT_EVIDENCE
+    # The markdown's per-bucket headings must agree with the JSON.
+    markdown = WORKLIST_JSON.with_suffix(".md").read_text()
+    counts = {}
+    for row in rows:
+        counts[row["bucket"]] = counts.get(row["bucket"], 0) + 1
+    for bucket, count in counts.items():
+        assert f"## {bucket} ({count})" in markdown, (bucket, count)
+    # Every markdown row cell must equal the JSON row (evidence may be
+    # truncated in the table, so it is compared as a PREFIX of the JSON value —
+    # a blank or shortened cell is rejected, never silently accepted).
+    tier_by_number = {e["number"]: e["tier"] for e in
+                      _json.loads(OWNER_EVIDENCE_JSON.read_text())}
+    parsed = 0
+    for line in markdown.split("\n"):
+        match = re.match(r"\| #(\d+) \|", line)
+        if not match:
+            continue
+        parsed += 1
+        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
+        number = int(match.group(1))
+        row = by_number[number]
+        assert cells[2].strip("`") == row["owner"]
+        evidence = cells[3]
+        assert " *(" in evidence, "the table must carry the tier suffix"
+        assert evidence.rstrip().endswith("*")
+        tier = evidence[evidence.rindex(" *(") + 3:-2]
+        assert tier == tier_by_number[number], (number, tier)
+        evidence = evidence[:evidence.rindex(" *(")].rstrip()
+        assert evidence, f"row {number}: the markdown evidence cell is empty"
+        assert row["owner_evidence"].startswith(evidence.rstrip("…").rstrip("."))
+        assert cells[4] == str(row["conflict"])
+        assert cells[5] == row["superseded_by"]
+        assert cells[6] == str(row["owning_issue"])
+    assert parsed == len(rows), "every worklist row must appear in the markdown"
+    # And every row must be the row the COMMITTED evidence file produces.
+    evidence = {e["number"]: e for e in
+                _json.loads(OWNER_EVIDENCE_JSON.read_text())}
+    for row in rows:
+        assert row["owner"] == (evidence[row["number"]].get("owner")
+                                or mt.UNKNOWN)
+        assert row["owner_evidence"] == (
+            evidence[row["number"]].get("owner_evidence") or mt.UNKNOWN)
+        assert row["bucket"] == mt.classify_bucket(
+            row["number"], draft=row["draft"], conflict=row["conflict"],
+            hard_stop=mt.HARD_STOP_D12, terminal=mt.TERMINAL_D5,
+            dead_weight=mt.DEAD_WEIGHT_EVIDENCE)
+
+
+def test_committed_no_languish_records_its_window():
+    assert NO_LANG_JSON.exists(), "the S15 snapshot must be committed"
+    payload = _json.loads(NO_LANG_JSON.read_text())
+    assert payload["read_ok"] is True
+    assert payload["incomplete_results"] is False
+    assert payload["window_days"] > 0
+    assert payload["window_start"] < payload["window_end"]
+    assert len(payload["items"]) == payload["total_count"]
+    # NOT require_fresh: the artifact is a FROZEN point-in-time snapshot, so a
+    # clock-relative freshness gate would make this test fail on a date, not on
+    # a code change. The window arithmetic is asserted instead.
+    start = datetime.fromisoformat(payload["window_start"].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(payload["window_end"].replace("Z", "+00:00"))
+    verified = datetime.fromisoformat(payload["verified_at"].replace("Z", "+00:00"))
+    assert (end - start).days == payload["window_days"]
+    assert end == verified
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"],
+                     require_complete=True) == 0
+
+
+def test_no_languish_rejects_a_flag_that_disagrees_with_the_bucket():
+    """A flag on a LOWER-precedence bucket must not hide a languishing PR."""
+    row = {"number": 0, "bucket": "eligible", "draft": False,
+           "hard_stop": False, "terminal_decision": False,
+           "conflict": False, "superseded_by": mt.UNKNOWN,
+           "moved_in_window": True}
+    items = [dict(row, number=i) for i in range(10)]
+    items.append(dict(row, number=10, moved_in_window=False, draft=True))
+    payload = {"items": items, "total_count": 11, "read_ok": True,
+               "window_days": 7}
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"], require_complete=True) == 2
+    # A HIGHER-precedence bucket may legitimately carry a true flag: a
+    # hard_stop row that is ALSO a draft is excluded by its bucket, and the
+    # draft flag on it must NOT be rejected as an inconsistency.
+    rows = [dict(row, number=i) for i in range(1, 11)]
+    hs = dict(row, number=5136, bucket="hard_stop", hard_stop=True,
+              draft=True, moved_in_window=False)
+    payload2 = {"items": [*rows, hs], "total_count": 11, "read_ok": True,
+                "window_days": 7}
+    assert run_check("no-languish", json=payload2,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"], require_complete=True) == 0
+
+
+def test_no_languish_task5_schema_requires_a_window():
+    items = [{"number": i, "bucket": "eligible", "draft": False,
+              "hard_stop": False, "terminal_decision": False,
+              "conflict": False, "moved_in_window": True} for i in range(11)]
+    payload = {"items": items, "total_count": 11, "read_ok": True}
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"], require_complete=True) == 2
+
+
+def test_no_languish_refuses_a_label_that_is_not_the_first_match():
+    """The exclusion label is self-declared; it must BE the first match."""
+    liars = [{"number": 0, "bucket": "eligible", "draft": False,
+              "hard_stop": False, "terminal_decision": False,
+              "conflict": False, "moved_in_window": True} for _ in range(11)]
+    liars.append({"number": 99, "bucket": "draft", "draft": False,
+                  "hard_stop": False, "terminal_decision": False,
+                  "conflict": False, "moved_in_window": False})
+    payload = {"items": liars, "total_count": 12, "read_ok": True,
+               "window_days": 7}
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"], require_complete=True) == 2
+
+
+def test_no_languish_allows_overlapping_superseded_by_on_a_higher_bucket():
+    """A hard_stop row may also carry dead-weight evidence; it is still
+    excluded by its own bucket, and the marker must not refuse the record."""
+    rows = [{"number": i, "bucket": "eligible", "draft": False,
+             "hard_stop": False, "terminal_decision": False,
+             "conflict": False, "superseded_by": mt.UNKNOWN,
+             "moved_in_window": True} for i in range(1, 11)]
+    rows.append({"number": 5136, "bucket": "hard_stop", "draft": False,
+                 "hard_stop": True, "terminal_decision": False,
+                 "conflict": False, "superseded_by": "#3405 (landed)",
+                 "moved_in_window": False})
+    payload = {"items": rows, "total_count": 11, "read_ok": True,
+               "window_days": 7}
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"], require_complete=True) == 0
+
+
+def test_committed_no_languish_snapshot_matches_the_worklist():
+    """The S15 snapshot must be the worklist rows plus `moved_in_window` — a
+    hand-edited `bucket` in the snapshot is otherwise invisible."""
+    worklist = {r["number"]: r for r in
+                _json.loads(WORKLIST_JSON.read_text())["rows"]}
+    snapshot = _json.loads(NO_LANG_JSON.read_text())["items"]
+    assert len(snapshot) == len(worklist)
+    for item in snapshot:
+        row = worklist[item["number"]]
+        assert isinstance(item.get("moved_in_window"), bool)
+        for key, value in row.items():
+            assert item[key] == value, (item["number"], key)
+
+
+def test_no_languish_superseded_by_outside_dead_weight_is_2():
+    """`superseded_by` on a bucket that FOLLOWS dead_weight is inconsistent:
+    the row's first match should have been dead_weight."""
+    items = [{"number": i, "bucket": "eligible", "draft": False,
+              "hard_stop": False, "terminal_decision": False,
+              "conflict": False, "moved_in_window": False,
+              "superseded_by": mt.UNKNOWN} for i in range(11)]
+    items.append({"number": 11, "bucket": "eligible", "draft": False,
+                  "hard_stop": False, "terminal_decision": False,
+                  "conflict": False, "moved_in_window": False,
+                  "superseded_by": "a total lie: landed in #0"})
+    payload = {"items": items, "total_count": 12, "read_ok": True,
+               "window_days": 7}
+    assert run_check("no-languish", json=payload, exclude=["superseded_by"],
+                     require_complete=True) == 2
+
+
+def test_no_languish_nonpositive_window_days_is_2():
+    payload = _languish_payload(0)
+    payload["window_days"] = 0
+    assert run_check("no-languish", json=payload,
+                     exclude=["hard_stop", "terminal_decision", "draft",
+                              "superseded_by"],
+                     require_complete=True) == 2
+
+
+def test_merge_tree_conflict_detail_parses_paths_and_never_prose():
+    """The conflicted paths are lines[1:] up to the first blank line."""
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "rev-parse"]:
+            return SimpleNamespace(returncode=0, stdout="sha\n", stderr="")
+        assert cmd[:2] == ["git", "merge-tree"], cmd
+        return SimpleNamespace(returncode=1, stdout=(
+            "treeoid\n"
+            "config/ci-surfaces.yml\n"
+            "tools/ci_selection.py\n"
+            "\n"
+            "Auto-merging config/ci-surfaces.yml\n"
+            "CONFLICT (content): Merge conflict in config/ci-surfaces.yml\n"
+        ), stderr="")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mt.subprocess, "run", fake_run)
+    try:
+        conflict, paths = mt.merge_tree_conflict_detail(ROOT, "main", "branch")
+    finally:
+        monkeypatch.undo()
+    assert conflict is True
+    assert paths == ["config/ci-surfaces.yml", "tools/ci_selection.py"]
+
+
+def test_merge_tree_conflict_detail_clean_and_unknown():
+    def clean_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "rev-parse"]:
+            return SimpleNamespace(returncode=0, stdout="sha\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="treeoid\n", stderr="")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mt.subprocess, "run", clean_run)
+    try:
+        assert mt.merge_tree_conflict_detail(ROOT, "main", "branch") == (False, [])
+    finally:
+        monkeypatch.undo()
+
+    def missing_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="no ref")
+
+    monkeypatch.setattr(mt.subprocess, "run", missing_run)
+    try:
+        # A missing ref is UNKNOWN, never "no conflict".
+        assert mt.merge_tree_conflict_detail(ROOT, "main", "branch") == (
+            mt.UNKNOWN, [])
+    finally:
+        monkeypatch.undo()
+
+
+def test_5196_is_conflicting_not_terminal():
+    """The plan's E5 claim that #5196 asserts the opposite contract does not
+    reproduce: its own body places the state on `:Source` (what main says)."""
+    row = mt.build_triage_row(_pr(5196, branch="feat/3998-raw-absent-state"),
+                              conflict=True)
+    assert row["bucket"] == "conflicting"
+    assert row["terminal_decision"] is False
+
+
+def test_cli_triage_live_emits_the_reconcilable_envelope(monkeypatch, capsys):
+    """`--triage` (no --emit) must reconcile against the ENUMERATION total."""
+    prs = [{"number": i, "draft": False, "title": f"x (#{i})",
+            "head": {"ref": f"fix/{i}-x"}} for i in range(1, 13)]
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
+    monkeypatch.setattr(mt, "collect_triage_conflicts",
+                        lambda *a, **k: {i: (False, []) for i in range(1, 13)})
+    monkeypatch.setattr(mt, "open_pr_total", lambda: 12)
+    monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
+    assert mt._cli_triage([]) == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["total_count"] == 12
+    assert payload["bucket_order"] == list(mt.BUCKET_ORDER)
+    assert all(r["bucket"] == "eligible" for r in payload["rows"])
+
+
+def test_cli_triage_refuses_a_failed_conflict_sweep_through_main(monkeypatch):
+    prs = [{"number": i, "draft": False, "title": f"x (#{i})",
+            "head": {"ref": f"fix/{i}-x"}} for i in range(1, 13)]
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
+    monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: None)
+    assert mt._cli_triage([]) == 2

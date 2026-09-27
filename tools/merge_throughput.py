@@ -42,6 +42,7 @@ import re
 import statistics
 import subprocess
 import sys
+import urllib.parse
 
 # `timezone.utc`, not `datetime.UTC` (3.11+): every §11 criterion invokes this
 # tool as `python3 tools/merge_throughput.py`, and a crash at import exits 1 —
@@ -109,6 +110,63 @@ CEILING_MAX = 200000
 CEILING_TOLERANCE = 0.10  # ±10%, stated numerically
 
 EXCLUDE_KEYS = frozenset({"hard_stop", "terminal_decision", "draft", "superseded_by"})
+
+# ---------------------------------------------------------------------------
+# Task 5 — eligibility triage (plan §10 Task 5).
+#
+# The bucket taxonomy is Task 5's. `bucket` is FIRST-MATCH-WINS because the
+# categories overlap BY CONSTRUCTION (a recovered `wip` snapshot can be a
+# guard-surface PR AND a draft AND conflicted AND superseded all at once).
+# Task 1 emitted UNKNOWN for every Task-5-owned judgement so the two tasks
+# could not silently disagree; these are the judgements it deferred.
+# ---------------------------------------------------------------------------
+
+BUCKET_ORDER = (
+    "hard_stop",          # E7 / D12 — a wrong resolution silently disables a check
+    "terminal_decision",  # E5 / D5 — asserts the OPPOSITE contract to main
+    "dead_weight",        # E3 — the work already landed; nothing to merge
+    "draft",              # E4 — contract-bound verbatim preservation
+    "conflicting",        # git merge-tree conflict
+    "eligible",           # can enter the merge queue
+)
+
+#: The EXACT row schema. `--exclude` may name only keys from this set.
+TRIAGE_SCHEMA_KEYS = (
+    "number", "bucket", "eligible", "conflict", "conflicted_paths",
+    "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
+    "owner_evidence", "owning_issue",
+)
+
+#: E7 — HARD-STOP surfaces. This is D12's DECISION QUEUE (owner Daniel, by
+#: 2026-10-03): a wrong conflict resolution silently disables a check, so no
+#: lane may resolve one. Membership is the plan's named set; the guard surface
+#: each PR touches is recorded in `owner_evidence`/the worklist narrative.
+HARD_STOP_D12 = frozenset({5136, 5461, 5465, 5467, 5468})
+
+#: E5 — terminal conflicts asserting the OPPOSITE contract to main. D5: Daniel,
+#: 2026-10-03, per-PR adjudication (never a silent rebase). **#5196 is NOT here:
+#: its own body places the absent-raw state on the existing `:Source` record
+#: (`not a fourth kind of source`, STORAGE §9.4 ③), which is what main's D10
+#: doctrine already says — the plan's E5 claim for it does not reproduce, and a
+#: union rebase is mechanical. It is `conflicting`.**
+TERMINAL_D5 = frozenset({5285, 4963})
+
+#: E3 — dead weight, each with POSITIVE evidence that its work is already on
+#: main. `superseded_by` is evidence, never an inference; a candidate with no
+#: such evidence must NOT be placed here (it stays `draft`/`conflicting`).
+DEAD_WEIGHT_EVIDENCE = {
+    5190: "#3405 (close_failed_at on main)",
+    5453: "#4825 (merged PR for #4625; _update_onboarding_state on main)",
+    5455: "#2984 (issue #2922) — the function-local `import os` guard fix is on main",
+}
+
+#: EVERY lane on this fleet authenticates as this one account, so a PR author
+#: login can never name a lane. `owner` must never be this string.
+FLEET_AUTHOR_LOGIN = "daniel-ospina"
+
+#: The committed evidence file a live `--triage` reads for owner attribution.
+#: Absent/unreadable is UNKNOWN owners — never a guess from the PR author.
+TRIAGE_OWNER_EVIDENCE_PATH = REPO / "docs" / "ci" / "triage" / "owner-evidence.json"
 
 CHECK_NAMES = (
     "main-gate",
@@ -508,10 +566,12 @@ def bounded_map(fn, items, concurrency=DEFAULT_SWEEP_CONCURRENCY):
     return results
 
 
-def merge_tree_conflict(repo, main_ref: str, branch_ref: str):
-    """git merge-tree conflict probe. True/False, or UNKNOWN.
+def merge_tree_conflict_detail(repo, main_ref: str, branch_ref: str):
+    """(conflict, conflicted_paths). UNKNOWN on any unresolvable read.
 
-    A deleted branch or an unresolvable ref is UNKNOWN — never "no conflict".
+    The conflicted paths are the lines between the tree OID (line 1) and the
+    first blank line of `git merge-tree --write-tree --name-only` output; the
+    informational `Auto-merging`/`CONFLICT` prose follows that blank line.
     """
     for ref in (main_ref, branch_ref):
         try:
@@ -520,9 +580,9 @@ def merge_tree_conflict(repo, main_ref: str, branch_ref: str):
                 cwd=str(repo), capture_output=True, text=True, timeout=30, check=False,
             )
         except (OSError, subprocess.SubprocessError):
-            return UNKNOWN
+            return UNKNOWN, []
         if exists.returncode != 0:
-            return UNKNOWN
+            return UNKNOWN, []
     try:
         proc = subprocess.run(
             ["git", "merge-tree", "--write-tree", "--name-only", main_ref, branch_ref],
@@ -533,12 +593,26 @@ def merge_tree_conflict(repo, main_ref: str, branch_ref: str):
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return UNKNOWN
+        return UNKNOWN, []
     if proc.returncode == 0:
-        return False
+        return False, []
     if proc.returncode == 1:
-        return True
-    return UNKNOWN
+        paths = []
+        for line in proc.stdout.splitlines()[1:]:
+            if line == "":
+                break
+            paths.append(line)
+        return True, paths
+    return UNKNOWN, []
+
+
+def merge_tree_conflict(repo, main_ref: str, branch_ref: str):
+    """git merge-tree conflict probe. True/False, or UNKNOWN.
+
+    A deleted branch or an unresolvable ref is UNKNOWN — never "no conflict".
+    """
+    conflict, _paths = merge_tree_conflict_detail(repo, main_ref, branch_ref)
+    return conflict
 
 
 def assert_main_unchanged(before: str, after: str):
@@ -607,6 +681,60 @@ def _merge_pages(pages):
                     merged[key] = value
         return merged
     return pages
+
+
+def open_pr_total():
+    """The INDEPENDENT open-PR count, from the pagination Link header.
+
+    `_triage_rows` enumerates the population AND reconciles it against this, so
+    a silently truncated page (the §8 integration-map failure) cannot validate
+    clean — `len(rows) == len(body)` is a tautology, not a completeness check.
+    UNKNOWN on any failure; never a guess. Residual, stated rather than
+    hidden: this reconciles COUNTS, so a PR closing while another opens in the
+    same window is not detected — the artifact is a point-in-time snapshot and
+    records the `main_sha`/`generated_at` it was taken at.
+    """
+    path = f"repos/{OWNER_REPO}/pulls?state=open&per_page=1"
+    cmd = ["gh", "api", "--include", "-H",
+           "Accept: application/vnd.github+json", path]
+    for _attempt in range(GH_API_ATTEMPTS):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        lines = proc.stdout.splitlines()
+        if not lines or " 200 " not in lines[0]:
+            continue
+        for line in lines:
+            if not line.lower().startswith("link:"):
+                continue
+            for part in line[5:].split(","):
+                match = re.search(r'<([^>]+)>\s*;\s*rel="last"', part)
+                if not match:
+                    continue
+                # PIN the endpoint STRUCTURALLY: the URL's PATH must be the
+                # pulls collection (a substring `"/pulls?"` in a query value
+                # was a false positive), and `page` must be a real query key
+                # (not the first `page=` anywhere in the URL).
+                try:
+                    split = urllib.parse.urlsplit(match.group(1))
+                    query = urllib.parse.parse_qs(split.query)
+                except ValueError:
+                    continue
+                if not split.path.rstrip("/").endswith("/pulls"):
+                    continue
+                if "page" not in query:
+                    continue
+                try:
+                    return int(query["page"][0])
+                except (TypeError, ValueError):
+                    continue
+    print(f"UNKNOWN: could not read the open-PR total from {path}",
+          file=sys.stderr)
+    return UNKNOWN
 
 
 def live_main_sha():
@@ -1560,7 +1688,34 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
     if any(not isinstance(row, dict) for row in items):
         print("2: no-languish items are mis-shaped")
         return 2
+    # An S15 record must state the window `moved_in_window` was judged over —
+    # otherwise the boolean is unverifiable and the artifact can be hand-written
+    # all-true. A Task-5-schema record (a classification column) MUST state it;
+    # a legacy record that carries one must also have it be sensible.
+    task5_schema = any("bucket" in row or "classification" in row
+                       or "conflict" in row for row in items)
+    if task5_schema or "window_days" in payload:
+        window_days = _as_number(payload.get("window_days"))
+        if window_days is None or window_days <= 0:
+            print("2: no-languish window_days is missing or non-positive")
+            return 2
+    # A boolean may only mark a row into the FIRST-MATCH bucket it names: a row
+    # that sets `hard_stop`/`terminal_decision`/`draft` true while its bucket is
+    # a LOWER-precedence bucket is inconsistent, and must not be excluded on the
+    # strength of that flag (a higher-precedence bucket may legitimately carry a
+    # true flag — a hard_stop PR can also be a draft).
+    rank = {name: index for index, name in enumerate(BUCKET_ORDER)}
+    sup_unknown = (None, "", "null", UNKNOWN)
     for row in items:
+        # TWO classification columns that disagree are an unvalidated SECOND
+        # exclusion channel: `bucket` says eligible, `classification` says
+        # draft, and the row is hidden. Refuse the disagreement.
+        if (row.get("bucket") is not None
+                and row.get("classification") is not None
+                and row["bucket"] != row["classification"]):
+            print(f"2: no-languish row {row.get('number')} bucket "
+                  f"{row['bucket']!r} != classification {row['classification']!r}")
+            return 2
         for key in ("hard_stop", "terminal_decision", "draft"):
             if key in row and not isinstance(row[key], bool):
                 print(f"2: no-languish row {key!r} is not boolean")
@@ -1573,21 +1728,50 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         if superseded is not None and not isinstance(superseded, str):
             print("2: no-languish superseded_by is mis-shaped")
             return 2
+        # `superseded_by` is INDEPENDENT evidence (categories overlap), but it
+        # only makes sense on a bucket that PRECEDES dead_weight in first-match
+        # order: a marker on draft/conflicting/eligible is a record whose
+        # first-match bucket should have been dead_weight. Refuse it (exit 2)
+        # rather than let either column decide the row.
+        if (superseded not in sup_unknown and row.get("bucket") in rank
+                and rank[row["bucket"]] > rank["dead_weight"]):
+            print(f"2: no-languish row {row.get('number')} carries superseded_by "
+                  f"but its bucket {row['bucket']!r} follows dead_weight")
+            return 2
+        label = row.get("bucket", row.get("classification"))
+        # The label is SELF-DECLARED. Verify it is the first match of the row's
+        # OWN columns before excluding on it — otherwise a row can declare
+        # `bucket:"draft"` (or `classification:"draft"`) with `draft:false`
+        # and hide a moveless PR.
+        if "bucket" in row:
+            expected = classify_bucket(
+                row.get("number"), draft=row.get("draft"),
+                conflict=row.get("conflict"), hard_stop=HARD_STOP_D12,
+                terminal=TERMINAL_D5, dead_weight=DEAD_WEIGHT_EVIDENCE)
+            if row["bucket"] != expected:
+                print(f"2: no-languish row {row.get('number')} bucket "
+                      f"{row['bucket']!r} is not the first match ({expected!r})")
+                return 2
+        for key in ("hard_stop", "terminal_decision", "draft"):
+            if (row.get(key) is True and label in rank
+                    and rank[label] > rank[key]):
+                print(f"2: no-languish row {row.get('number')} sets {key}=true "
+                      f"but its bucket is {label!r}")
+                return 2
     excluded = set(excludes)
 
     def _excluded(row: dict) -> bool:
-        # Task 5's schema key for the classification is `bucket`; the booleans
-        # are optional columns beside it, not a substitute for it.
-        labels = {
-            str(row[key]) for key in ("bucket", "classification")
-            if row.get(key) is not None
-        }
+        # EXCLUSION KEYS OFF ONE CLASSIFICATION COLUMN ONLY — never the union of
+        # both (a disagreeing `classification` was a second hiding channel), and
+        # never a bare boolean. `bucket` is authoritative when present.
+        label = row.get("bucket", row.get("classification"))
+        labels = {str(label)} if label is not None else set()
         for key in excluded:
             if key == "superseded_by":
                 value = row.get("superseded_by")
-                if value not in (None, "", "null", UNKNOWN):
+                if value not in sup_unknown and row.get("bucket") == "dead_weight":
                     return True
-            elif row.get(key) or key in labels:
+            elif key in labels:
                 return True
         return False
 
@@ -1756,14 +1940,14 @@ _FIXTURES = {
 
 _FIXTURE_TRIAGE_ROWS = [{
     "number": 1,
-    "bucket": UNKNOWN,
-    "eligible": UNKNOWN,
-    "conflict": UNKNOWN,
+    "bucket": "eligible",
+    "eligible": True,
+    "conflict": False,
     "conflicted_paths": [],
     "superseded_by": UNKNOWN,
     "draft": False,
-    "hard_stop": UNKNOWN,
-    "terminal_decision": UNKNOWN,
+    "hard_stop": False,
+    "terminal_decision": False,
     "owner": UNKNOWN,
     "owner_evidence": UNKNOWN,
     "owning_issue": UNKNOWN,
@@ -2064,37 +2248,376 @@ def _cli_json(argv) -> int:
     return 0
 
 
-def _triage_rows():
-    """One Task-5-shaped row per open PR. NEVER mutates anything."""
+def _owning_issue(pr: dict) -> str:
+    """The issue this PR closes/serves, from title, branch or body."""
+    title = str(pr.get("title") or "")
+    branch = str((pr.get("head") or {}).get("ref") or "")
+    body = str(pr.get("body") or "")
+    match = re.search(r"\(#(\d+)\)", title)
+    if not match:
+        match = re.search(r"(?:fix|feat|chore|docs)/(\d+)", branch)
+    if not match:
+        match = re.search(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", body,
+                          re.IGNORECASE)
+    return match.group(1) if match else UNKNOWN
+
+
+def classify_bucket(number, *, draft, conflict, hard_stop=None,
+                    terminal=None, dead_weight=None):
+    """FIRST-MATCH-WINS bucket, in BUCKET_ORDER.
+
+    `draft`/`conflict` are tri-state. Only a POSITIVE observation may place a
+    row in `draft`/`conflicting`, and an UNKNOWN observation may NOT fall
+    through to `eligible` at the end — an unobserved state must never read as
+    "nothing to worry about".
+    """
+    number = _as_int(number)
+    if number is None:
+        return UNKNOWN
+    if number in (HARD_STOP_D12 if hard_stop is None else hard_stop):
+        return "hard_stop"
+    if number in (TERMINAL_D5 if terminal is None else terminal):
+        return "terminal_decision"
+    if number in (DEAD_WEIGHT_EVIDENCE if dead_weight is None else dead_weight):
+        return "dead_weight"
+    if not isinstance(draft, bool):
+        return UNKNOWN
+    if draft is True:
+        return "draft"
+    # `conflict` is tri-state by IDENTITY, exactly like `draft`: a `None`, `1`,
+    # `"yes"` or `{}` is an UNOBSERVED conflict, and must never fall through
+    # to `eligible` (the plan's "empty is UNKNOWN, never 0" rule).
+    if conflict is True:
+        return "conflicting"
+    if conflict is False:
+        return "eligible"
+    return UNKNOWN
+
+
+def build_triage_row(pr, *, conflict=UNKNOWN, conflicted_paths=None,
+                     owner=UNKNOWN, owner_evidence=UNKNOWN,
+                     owning_issue=UNKNOWN, hard_stop=None, terminal=None,
+                     dead_weight=None):
+    """Exactly TRIAGE_SCHEMA_KEYS. A judgement not made is UNKNOWN, not False."""
+    number = _as_int(pr.get("number"))
+    draft = pr.get("draft")
+    draft_tri = draft if isinstance(draft, bool) else UNKNOWN
+    if owning_issue is UNKNOWN:
+        owning_issue = _owning_issue(pr)
+    hard_set = HARD_STOP_D12 if hard_stop is None else hard_stop
+    term_set = TERMINAL_D5 if terminal is None else terminal
+    dead_set = DEAD_WEIGHT_EVIDENCE if dead_weight is None else dead_weight
+    bucket = classify_bucket(number, draft=draft_tri, conflict=conflict,
+                             hard_stop=hard_stop, terminal=terminal,
+                             dead_weight=dead_weight)
+    # `superseded_by` carries the evidence the BUCKET decision used — a caller
+    # that classifies with its own `dead_weight` mapping must not get a
+    # dead_weight bucket with the evidence column detached from it.
+    superseded = (dead_set.get(number, UNKNOWN)
+                  if isinstance(dead_set, dict) else UNKNOWN)
+    return {
+        "number": number,
+        "bucket": bucket,
+        "eligible": UNKNOWN if bucket is UNKNOWN else bucket == "eligible",
+        "conflict": conflict,
+        "conflicted_paths": list(conflicted_paths or []),
+        "superseded_by": superseded,
+        "draft": draft_tri,
+        "hard_stop": number in hard_set if number is not None else UNKNOWN,
+        "terminal_decision": number in term_set if number is not None else UNKNOWN,
+        "owner": owner,
+        "owner_evidence": owner_evidence,
+        "owning_issue": owning_issue,
+    }
+
+
+def validate_triage_rows(rows, *, total_count=None,
+                         min_population=MIN_OPEN_PR_POPULATION,
+                         hard_stop=None, terminal=None, dead_weight=None):
+    """[] when the Task-5 acceptance holds; otherwise the list of violations.
+
+    Asserts: the EXACT schema keys per row; `bucket` is the FIRST match of the
+    row's own independently-reported columns; `eligible` agrees with `bucket`;
+    the boolean columns are booleans; `owner` is never the shared author login;
+    and the row count reconciles to the enumerated open-PR total.
+    """
+    if not isinstance(rows, list):
+        return ["rows is not a list"]
+    hard_set = HARD_STOP_D12 if hard_stop is None else hard_stop
+    term_set = TERMINAL_D5 if terminal is None else terminal
+    errors: list = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            errors.append(f"row {index} is not a mapping")
+            continue
+        keys = set(row)
+        if keys != set(TRIAGE_SCHEMA_KEYS):
+            errors.append(
+                f"row {row.get('number')}: schema keys differ "
+                f"(missing={sorted(set(TRIAGE_SCHEMA_KEYS) - keys)}, "
+                f"extra={sorted(keys - set(TRIAGE_SCHEMA_KEYS))})"
+            )
+            continue
+        # UNKNOWN is NOT a bucket: a row whose dimension could not be observed
+        # is a NON-CLEAN read, and must fail the validator rather than pass as
+        # a row with an unrecognised label.
+        if row["bucket"] not in BUCKET_ORDER:
+            errors.append(
+                f"row {row['number']}: bucket {row['bucket']!r} is not one of "
+                f"the six buckets (an unobserved row is non-clean)"
+            )
+        expected = classify_bucket(
+            row["number"], draft=row["draft"], conflict=row["conflict"],
+            hard_stop=hard_stop, terminal=terminal, dead_weight=dead_weight,
+        )
+        if expected != row["bucket"]:
+            errors.append(
+                f"row {row['number']}: bucket {row['bucket']!r} is not the "
+                f"first match ({expected!r})"
+            )
+        # `eligible` is a strict boolean once the bucket is decided.
+        if row["bucket"] != UNKNOWN and row["eligible"] is not (
+                row["bucket"] == "eligible"):
+            errors.append(f"row {row['number']}: eligible disagrees with bucket")
+        # The boolean columns are recorded INDEPENDENTLY of `bucket` — so they
+        # must be asserted against their own source, not merely type-checked.
+        for key in ("draft", "hard_stop", "terminal_decision"):
+            if not isinstance(row[key], bool):
+                errors.append(f"row {row['number']}: {key} is not boolean")
+        number = _as_int(row["number"])
+        if isinstance(row["hard_stop"], bool) and number is not None and \
+                row["hard_stop"] != (number in hard_set):
+            errors.append(
+                f"row {row['number']}: hard_stop disagrees with the D12 set")
+        if isinstance(row["terminal_decision"], bool) and number is not None and \
+                row["terminal_decision"] != (number in term_set):
+            errors.append(
+                f"row {row['number']}: terminal_decision disagrees with the D5 set")
+        # A dead_weight row needs POSITIVE evidence: not merely "not the
+        # sentinel" — `""`, `"null"`, `None` and `0` all read as absent to
+        # S15's own exclusion test, so they must not validate here either.
+        if row["bucket"] == "dead_weight" and not (
+                isinstance(row["superseded_by"], str)
+                and row["superseded_by"].strip()
+                and row["superseded_by"] not in ("null", UNKNOWN)):
+            errors.append(
+                f"row {row['number']}: dead_weight carries no superseded_by evidence")
+        # When the default evidence map names this PR, the row's evidence must
+        # BE that verified claim — a fabricated `superseded_by` on a real
+        # dead_weight PR is the same defect as no evidence at all.
+        number = _as_int(row.get("number"))
+        if (row["bucket"] == "dead_weight" and number in DEAD_WEIGHT_EVIDENCE
+                and row["superseded_by"] != DEAD_WEIGHT_EVIDENCE[number]):
+            errors.append(
+                f"row {row['number']}: superseded_by does not match the verified "
+                f"evidence for this PR")
+        # `superseded_by` is INDEPENDENT evidence, but only a bucket that
+        # PRECEDES dead_weight may carry it — otherwise the row's first match
+        # should have been dead_weight (a marker on draft/conflicting/eligible
+        # is inconsistent, and S15 refuses it too).
+        rank = {name: index for index, name in enumerate(BUCKET_ORDER)}
+        if (isinstance(row["superseded_by"], str)
+                and row["superseded_by"] not in (UNKNOWN, "", "null")
+                and row["bucket"] in rank
+                and rank[row["bucket"]] > rank["dead_weight"]):
+            errors.append(
+                f"row {row['number']}: superseded_by is set on a "
+                f"{row['bucket']!r} row (its first match should be dead_weight)")
+        if not isinstance(row["conflict"], bool) and row["conflict"] != UNKNOWN:
+            errors.append(f"row {row['number']}: conflict is not tri-state")
+        paths = row["conflicted_paths"]
+        if not isinstance(paths, list) or any(
+                not isinstance(p, str) or not p.strip() for p in paths):
+            errors.append(
+                f"row {row['number']}: conflicted_paths is not a list of non-empty strings")
+        elif row["conflict"] is True and not paths:
+            errors.append(
+                f"row {row['number']}: a conflict carries no conflicted_paths")
+        elif row["conflict"] is False and paths:
+            errors.append(
+                f"row {row['number']}: a clean merge carries conflicted_paths")
+        owner = row["owner"]
+        if owner != UNKNOWN and not (isinstance(owner, str) and owner.strip()):
+            errors.append(f"row {row['number']}: owner is neither UNKNOWN nor a label")
+        if isinstance(owner, str) and owner == FLEET_AUTHOR_LOGIN:
+            errors.append(
+                f"row {row['number']}: owner is the shared PR-author login"
+            )
+        # A `session:` owner must BE the session cited in its own evidence — a
+        # bare substring test is satisfied by `session:branch` or `session:`.
+        if (isinstance(owner, str) and owner.startswith("session:")
+                and isinstance(row["owner_evidence"], str)):
+            fragment = owner[len("session:"):]
+            cited = re.search(r"session=([0-9a-fA-F-]+)", row["owner_evidence"])
+            if (len(fragment) < 4 or not cited
+                    or not cited.group(1).startswith(fragment)):
+                errors.append(
+                    f"row {row['number']}: owner is not the session cited in "
+                    f"owner_evidence")
+        evidence = row["owner_evidence"]
+        if owner != UNKNOWN:
+            if not (isinstance(evidence, str) and evidence.strip()):
+                errors.append(
+                    f"row {row['number']}: a resolved owner carries no owner_evidence")
+            else:
+                # The plan requires the TRIPLE, each part present AND non-empty.
+                for field in ("branch=", "session=", "first_msg="):
+                    index = evidence.find(field)
+                    value = ("" if index < 0
+                             else evidence[index + len(field):].split(";", 1)[0])
+                    if not value.strip():
+                        errors.append(
+                            f"row {row['number']}: owner_evidence is missing "
+                            f"{field!r} (session + branch + first message is the "
+                            f"required triple)")
+                        break
+    if total_count is not None:
+        numbers = [row.get("number") for row in rows if isinstance(row, dict)]
+        if len(numbers) != len(set(numbers)):
+            errors.append("row numbers are not unique (one row per open PR)")
+        if len(rows) != total_count:
+            errors.append(
+                f"rows={len(rows)} does not reconcile to total_count={total_count}"
+            )
+        if _is_num(total_count) and total_count < min_population:
+            errors.append(
+                f"population {total_count} is below the floor {min_population}"
+            )
+    return errors
+
+
+def collect_triage_conflicts(prs=None, bound=None):
+    """{pr number: (conflict, conflicted_paths)} over every open PR.
+
+    `prs` may be an already-enumerated open-PR list (so the caller sweeps the
+    SAME population it will emit rows for). Returns None when the population
+    could not be enumerated or `origin/main` moved under the sweep. A PR whose
+    head cannot be probed maps to (UNKNOWN, []) — never (False, []).
+    """
+    if prs is None:
+        prs = _gh_api(
+            f"repos/{OWNER_REPO}/pulls?state=open&per_page=100&sort=created&direction=asc",
+            paginate=True,
+        )
+    body = prs
+    if body is UNKNOWN or not isinstance(body, list):
+        return None
+    # A sweep that reads `origin/main` moving under it produces a MIXED read —
+    # some rows probed against one main, some against another. Task 1's
+    # `collect_conflicts` refuses that shape; the triage sweep must not be the
+    # one path that accepts it.
+    before = live_main_sha()
+    if before is UNKNOWN:
+        return None
+    bound = validate_sweep_concurrency(bound)
+    pairs = []
+    for pr in body:
+        if not isinstance(pr, dict):
+            continue
+        pairs.append((pr.get("number"), (pr.get("head") or {}).get("sha")))
+    probe = [(number, sha) for number, sha in pairs if sha]
+    bounded_map(_ensure_object, [sha for _number, sha in probe], bound)
+    results = bounded_map(
+        lambda item: merge_tree_conflict_detail(REPO, "origin/main", item[1]),
+        probe, bound,
+    )
+    if assert_main_unchanged(before, live_main_sha()) is UNKNOWN:
+        print("UNKNOWN: origin/main moved during the triage conflict sweep",
+              file=sys.stderr)
+        return None
+    # An INDEX loop, not `zip(..., strict=)`: the §11 criteria run this tool as
+    # `python3`, and on this host that is 3.9.6 — `strict=` is 3.10+ (round 10
+    # fixed exactly this class in `collect_conflicts`; the triage sweep must not
+    # reintroduce it, because a crash at import/exec exits 1 — the contract's
+    # MISS — and would fabricate a verdict).
+    out = {}
+    for index, (number, _sha) in enumerate(probe):
+        out[number] = results[index]
+    for number, _sha in pairs:
+        out.setdefault(number, (UNKNOWN, []))
+    return out
+
+
+def load_triage_owner_evidence(path=None):
+    """{pr number: {owner, owner_evidence}} from the committed evidence file.
+
+    Absent, unreadable, or malformed is an EMPTY map (owners become UNKNOWN) —
+    never a fallback to the PR author, which no lane can be derived from.
+    """
+    target = Path(path) if path else TRIAGE_OWNER_EVIDENCE_PATH
+    try:
+        payload = jsonlib.loads(target.read_text())
+    except (OSError, ValueError):
+        return {}
+    if isinstance(payload, dict) and isinstance(payload.get("rows"), list):
+        payload = payload["rows"]
+    out = {}
+    if isinstance(payload, list):
+        for entry in payload:
+            if isinstance(entry, dict) and _as_int(entry.get("number")) is not None:
+                out[_as_int(entry["number"])] = entry
+    elif isinstance(payload, dict):
+        for key, entry in payload.items():
+            number = _as_int(key)
+            if number is not None and isinstance(entry, dict):
+                out[number] = entry
+    return out
+
+
+def _triage_rows(conflicts=None, owners=None):
+    """(rows, enumerated_total) for every open PR, or (None, 0) on a failed read.
+
+    NEVER issues a mutating request. `enumerated_total` is the INDEPENDENT
+    open-PR count (the pagination Link header), so the caller reconciles the row
+    count against the API, not against `len(rows)` — which can never disagree.
+    """
     body = _gh_api(
         f"repos/{OWNER_REPO}/pulls?state=open&per_page=100&sort=created&direction=asc",
         paginate=True,
     )
     if body is UNKNOWN or not isinstance(body, list):
-        return None
+        return None, 0
+    # `live` distinguishes a real read from a fixture call: only a real read is
+    # reconciled against the API's independent total.
+    live = conflicts is None
+    if conflicts is None:
+        # Sweep the SAME population the rows will be emitted for.
+        conflicts = collect_triage_conflicts(body)
+    # A FAILED sweep (`None`) is not an empty sweep: refusing it is what keeps
+    # an unread conflict dimension from validating clean.
+    if conflicts is None:
+        return None, 0
+    # An independent total, when we are the live reader: a partial enumeration
+    # that reconciles only against itself is the silent-truncation failure.
+    total = len(body)
+    if live:
+        independent = open_pr_total()
+        if independent is UNKNOWN or independent != len(body):
+            print(f"UNKNOWN: enumerated {len(body)} open PRs but the API reports "
+                  f"{independent}", file=sys.stderr)
+            return None, 0
+        total = independent
+    if owners is None:
+        owners = load_triage_owner_evidence()
     rows = []
     for pr in body:
         if not isinstance(pr, dict):
             continue
-        rows.append({
-            "number": pr.get("number"),
-            # Task 5 owns the bucket taxonomy (hard_stop/terminal_decision/
-            # dead_weight/draft/conflicting/eligible). Task 1 emits only what it
-            # can observe; a Task-5-owned judgement is UNKNOWN, never a
-            # hardcoded False that reads as a real "no".
-            "bucket": "draft" if pr.get("draft") else UNKNOWN,
-            "eligible": UNKNOWN,
-            "conflict": UNKNOWN,
-            "conflicted_paths": [],
-            "superseded_by": UNKNOWN,
-            "draft": bool(pr.get("draft")),
-            "hard_stop": UNKNOWN,
-            "terminal_decision": UNKNOWN,
-            "owner": UNKNOWN,
-            "owner_evidence": UNKNOWN,
-            "owning_issue": UNKNOWN,
-        })
-    return rows
+        number = _as_int(pr.get("number"))
+        detail = conflicts.get(number, (UNKNOWN, []))
+        conflict, paths = detail if isinstance(detail, tuple) else (detail, [])
+        evidence = owners.get(number) or {}
+        # A JSON `null` must become UNKNOWN, not a `None` that reads as a label.
+        owner = evidence.get("owner") or UNKNOWN
+        owner_evidence = evidence.get("owner_evidence") or UNKNOWN
+        rows.append(build_triage_row(
+            pr,
+            conflict=conflict,
+            conflicted_paths=paths,
+            owner=owner,
+            owner_evidence=owner_evidence,
+        ))
+    return rows, total
 
 
 def _cli_triage(argv) -> int:
@@ -2107,12 +2630,24 @@ def _cli_triage(argv) -> int:
         if not _fixture_allowed():
             return 2
         rows = _FIXTURES.get(fixture, {}).get("triage", _FIXTURE_TRIAGE_ROWS)
+        total = len(rows)
+        # A fixture is synthetic: the open-PR population floor is a LIVE-read
+        # guard, so it does not apply to test data.
+        errors = validate_triage_rows(rows, total_count=total, min_population=1)
     else:
-        rows = _triage_rows()
+        rows, total = _triage_rows()
         if rows is None:
             print("2: could not enumerate open PRs", file=sys.stderr)
             return 2
-    print(jsonlib.dumps(rows if emit_rows else {"rows": rows}, indent=2, default=str))
+        # Reconcile against the ENUMERATION's own total, not `len(rows)`.
+        errors = validate_triage_rows(rows, total_count=total)
+    if errors:
+        for error in errors:
+            print(f"2: triage invariant violated — {error}", file=sys.stderr)
+        return 2
+    payload = rows if emit_rows else {
+        "rows": rows, "total_count": total, "bucket_order": list(BUCKET_ORDER)}
+    print(jsonlib.dumps(payload, indent=2, default=str))
     return 0
 
 
