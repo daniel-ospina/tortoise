@@ -2650,14 +2650,19 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     not_inverted`` (the #5358 sibling) documents and loops over the same
     fan-out; this mirrors it.
 
-    The refusal fires only when the successor's resolved start is itself
-    parseable — an unparseable resolved END is #5360's residual, not this
-    guard's.  An unparseable predecessor start is refused too, but with its
-    OWN message: it buckets LAST as ``(1, text)``, so the inversion
-    predicate fires for ANY successor, which is an ordering-fallback
-    artefact rather than a comparison — claiming the successor "precedes" a
-    value nothing precedes, and offering an advice string no caller could
-    satisfy, is worse than saying what is actually wrong.
+    The refusal fires only when BOTH instants are orderable.  A predecessor
+    start that is present-but-unparseable (``""``, ``"TBD"``, ``"2026-6-1"``)
+    is SKIPPED, not refused — matching ``_assert_window_start_not_inverted``,
+    the #5358 sibling, which documents the same choice: such a window already
+    covers no PARSEABLE instant, so the write cannot newly hide it from any
+    parseable query instant, whereas refusing would refuse on an
+    ordering-fallback artefact rather than a comparison.  It also matters
+    practically: ``create_point`` accepts any caller ``validFrom``, so a
+    legacy or imported point carrying a non-ISO start is reachable, and
+    refusing here would make such a point impossible to supersede until its
+    window was repaired — foreclosing the very write a caller would use to
+    move past it.  An unparseable resolved END is #5360's residual for the
+    same reason.
 
     Raises ``ValueError`` BEFORE any mutation at either call site, so no
     event is journaled and no half-write survives a refusal.
@@ -2690,26 +2695,13 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                     continue
                 k_old = _created_sort_key(old_vf)
                 if k_old[0] != 0:
-                    # An UNPARSEABLE predecessor start buckets LAST as
-                    # ``(1, text)``, so it sorts after every parseable
-                    # instant and the inversion predicate fires for ANY
-                    # successor. That is an ordering-fallback artefact, not
-                    # a comparison — so it gets its OWN message rather than
-                    # claiming the successor "precedes" a value nothing
-                    # precedes, and an advice string a caller could never
-                    # satisfy. The refusal itself is kept: the resulting
-                    # window is one no query instant can order.
-                    raise ValueError(
-                        f"supersede_point: refusing supersede {old_id!r} - "
-                        f"{new_id!r} - the predecessor's stored validFrom "
-                        f"{old_vf!r} is not an orderable instant, so the "
-                        f"successor's start {succ_vf!r} cannot be compared "
-                        f"against it; persisting it would leave an inverted "
-                        f"window no query instant resolves. Repair the "
-                        f"predecessor's window first with `update_point()` "
-                        f"to give it a parseable validFrom, or withdraw it "
-                        f"with `retract_point()` (window-agnostic)."
-                    )
+                    # Present but unorderable — skipped, NOT refused, and
+                    # with no message: it buckets LAST as ``(1, text)``, so
+                    # comparing it would fire for ANY successor on an
+                    # ordering-fallback artefact. The #5358 sibling proceeds
+                    # on this identical shape; two guards in one file must
+                    # not return opposite verdicts for one input.
+                    continue
                 if k_succ[1] < k_old[1]:
                     # Wording is pinned by two tests: the literal substring
                     # "inverted window", and scrub-stability under

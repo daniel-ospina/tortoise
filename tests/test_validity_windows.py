@@ -775,20 +775,31 @@ def test_window_end_falsey_or_unparseable_start_refused():
     """B4/B5 — the PRESENCE predicate is ``is not None`` and the measure is
     ``_created_sort_key`` (the read path's), not truthiness.
 
-    ``''`` and ``'not-a-date'`` key as unparseable ``(1, text)``, which sorts
-    AFTER every parseable instant — so an ordinary end precedes them and the
-    (degenerate) window is refused rather than persisted.  ``0`` keys as the
-    parseable epoch-0 instant, so it is only an inversion against an end that
-    precedes it.  The truthiness-based predicate this replaces would silently
-    skip all three."""
-    with pytest.raises(ValueError, match="inverted window"):
-        _window_end("", stored_vf="2026-06-01")
-    with pytest.raises(ValueError, match="inverted window"):
-        _window_end("not-a-date", stored_vf="2026-06-01")
+    The two predicates disagree in BOTH directions, and the fixture reaches
+    both:
+
+    - ``0`` is PRESENT but falsey.  It keys as the parseable epoch-0 instant,
+      so it is a real window start and IS compared — a truthiness predicate
+      would have skipped a genuine inversion.
+    - ``'not-a-date'`` is TRUTHY but unorderable, and ``''`` is falsey and
+      unorderable.  Both key as ``(1, text)``, which sorts after every
+      parseable instant, so comparing them would refuse ANY successor on an
+      ordering-fallback artefact.  Both are SKIPPED — the same choice
+      ``_assert_window_start_not_inverted``, the #5358 sibling, documents for
+      the identical shape.  (``''`` is skipped under EITHER predicate, so it is
+      not the case that discriminates them; ``'not-a-date'`` is.)
+
+    Both directions are pinned because they are different behaviours, not two
+    spellings of one.
+    """
+    # ``0`` is present-and-parseable: a real inversion, refused.
     with pytest.raises(ValueError, match="inverted window"):
         _window_end(0, stored_vf="1969-12-31T00:00:00+00:00")
-    # control: epoch-0 is a real instant, so a POST-epoch end is not inverted
+    # control: a POST-epoch end is not an inversion against epoch-0
     assert _window_end(0, stored_vf="2026-06-01") == "2026-06-01"
+    # present-but-UNORDERABLE starts are skipped, not refused.
+    assert _window_end("", stored_vf="2026-06-01") == "2026-06-01"
+    assert _window_end("not-a-date", stored_vf="2026-06-01") == "2026-06-01"
 
 
 def test_window_end_checks_EVERY_predecessor_start_not_just_the_first():
@@ -825,24 +836,31 @@ def test_window_end_checks_EVERY_predecessor_start_not_just_the_first():
     ) == "2026-06-10"
 
 
-def test_window_end_unparseable_predecessor_start_names_the_real_problem():
-    """An UNPARSEABLE predecessor start gets its own message, not the
-    inversion one.
+def test_unparseable_predecessor_start_matches_the_sibling_5358(sdk):
+    """An unorderable predecessor start is SKIPPED — exactly as the merged
+    #5358 sibling skips it — so the supersede still completes.
 
-    Value that makes it fail: the message text. ``''`` buckets LAST as
-    ``(1, '')``, so it sorts after EVERY parseable instant and the inversion
-    predicate fires for any successor — an ordering-fallback artefact, not a
-    comparison. Claiming the successor "precedes" a value nothing precedes,
-    and advising a start "on-or-after ''", sends the caller somewhere it
-    cannot go. The fixture reaches it — ``''`` is written as the stored start.
+    Value that makes it fail: the predecessor start ``'TBD'``, written through
+    the public create path.  The fixture reaches it — ``create_point`` accepts
+    any caller ``validFrom``, so a legacy or imported non-ISO start is a real
+    graph state.  Refusing here would make such a point impossible to
+    supersede until its window was repaired: the guard would refuse the very
+    write a caller uses to move past the bad point.  The sibling's docstring
+    states the same reasoning — the window already covers no PARSEABLE
+    instant, so the write cannot newly hide it from any parseable query.
     """
-    with pytest.raises(ValueError) as ei:
-        _window_end("", stored_vf="2026-06-01")
-    msg = str(ei.value)
-    assert "not an orderable instant" in msg, msg
-    assert "on-or-after" not in msg, (
-        "the unsatisfiable remedy is still being offered",
+    old = _make_point(sdk, content="legacy claim", validFrom="TBD")
+    new = _make_point(sdk, content="corrected claim", validFrom="2026-06-01")
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    op = _props(sdk, old["id"])
+    assert op["validFrom"] == "TBD", (
+        "the fixture must reach the unorderable start for this to mean anything"
     )
+    assert op["validTo"] == "2026-06-01"
+    assert op["status"] == "superseded"
+    assert _corrects_out(sdk, new["id"]) == 1
 
 
 def test_window_end_numeric_stored_value_stays_raw():
@@ -955,9 +973,19 @@ def test_supersede_refuses_when_a_DUPLICATE_predecessor_node_is_late(sdk):
         "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
         params={"id": dup}).result_set
     assert len(rows) == 2, rows
-    for vf, vt in rows:
+    # The PREMISE, asserted rather than assumed: the fixture must actually carry
+    # one start BEFORE the successor's and one AFTER it, or "it raised" would be
+    # the only evidence and a first-row-only read could pass by row luck (the
+    # verdict would flip if the server returned the early sibling first).
+    starts = {vf for vf, _ in rows}
+    assert starts == {"2026-06-01", "2026-06-20"}, (
+        f"the fan-out premise is not reached: {starts}"
+    )
+    assert any(vf > "2026-06-10" for vf in starts if vf), (
+        "no sibling start is AFTER the successor's — nothing to discriminate"
+    )
+    for _start, vt in rows:
         assert vt is None, f"a node was stamped despite the refusal: {rows}"
-        _ = vf
     assert _corrects_out(sdk, new["id"]) == 0
 
 

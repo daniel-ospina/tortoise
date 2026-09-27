@@ -317,6 +317,48 @@ start). Also still distinct and **unaddressed** here, per the issue's "do not co
 
 ## 5. Tests (tests FIRST)
 
+> **Shipped-state addendum.** The design in §3.1 is the plan as written; the
+> shipped shape differs in two places, and this addendum is the authoritative
+> statement of what is in the branch. Do not read §3.1's signature or the
+> mutation-proof set below as the shipped state without it.
+>
+> **Signature.** The helper takes `old_vfs`, a **SEQUENCE**, not the scalar
+> `old_vf` shown in §3.1 line 157. The writer's stamp is a bare
+> `MATCH (n:Point {id:$id}) SET n.validTo = …`, which binds **every** node
+> carrying that id, and point ids are not unique — so a first-row-only read
+> would pass the guard and still leave an inverted window on a sibling node,
+> with the verdict depending on server row order. Both call sites now pass every
+> row, mirroring `_assert_window_start_not_inverted` (#5358), which loops over
+> the same fan-out.
+>
+> **Unorderable starts are SKIPPED, not refused.** §3.1's predicate is
+> unconditional; the shipped one compares only when **both** instants are
+> parseable. An unparseable predecessor start buckets as `(1, text)`, which
+> sorts after every parseable instant, so comparing it would refuse ANY
+> successor on an ordering-fallback artefact — and, because `create_point`
+> accepts any caller `validFrom`, it would make a legacy point carrying a
+> non-ISO start impossible to supersede until its window was repaired, i.e.
+> refuse the very write a caller uses to move past it. The merged sibling guard
+> makes the same choice, and two guards in one file must not return opposite
+> verdicts for one input. #5360 owns unparseable bounds.
+>
+> **Tests added after this list was written.**
+> `test_window_end_checks_EVERY_predecessor_start_not_just_the_first` (the helper,
+> in both row orders, with a control), `test_supersede_refuses_when_a_DUPLICATE_predecessor_node_is_late`
+> (the end-to-end fan-out, asserting the fixture premise), and
+> `test_unparseable_predecessor_start_matches_the_sibling_5358` (the skip, through
+> the public create path).
+>
+> **Mutation proof (re-measured on the shipped rev).** Each mutation reds only its
+> own test; the two fan-out tests are deliberately independent, one covering the
+> helper and one the call site.
+>
+> | mutation | test that REDs |
+> |---|---|
+> | `old_vfs = [old_vf_rows[0][0]] …` (first row only, at the call site) | `test_supersede_refuses_when_a_DUPLICATE_predecessor_node_is_late` |
+> | `for old_vf in old_vfs[:1]:` (first row only, in the helper) | `test_window_end_checks_EVERY_predecessor_start_not_just_the_first` |
+> | drop the `k_old[0] != 0: continue` skip | `test_unparseable_predecessor_start_matches_the_sibling_5358` + `test_window_end_falsey_or_unparseable_start_refused` |
+
 `tests/test_validity_windows.py` is already in `config/ci-surfaces.yml:1058` — **no CI registration
 change needed**. Class-B question answered per test: **(1) what value makes it fail? (2) does the
 fixture make that value reachable?**
@@ -324,10 +366,10 @@ fixture make that value reachable?**
 Helper tests (import `_supersede_window_end`):
 1. `test_window_end_refuses_inverted_start` — table `(old_vf, succ_vf)`; `('2026-06-10','2026-06-01')` refused.
 2. `test_window_end_equal_start_allowed` — equal + format-only-equal (`…Z` vs `…+00:00`) allowed.
-3. `test_window_end_falsey_or_unparseable_start_refused` — presence/orderability predicate: `old_vf=""` + a parseable end (`'2026-06-01'`) is refused (an unparseable start sorts AFTER the end); `old_vf=0` + a **pre-epoch** end (`'1969-12-31T00:00:00+00:00'`) is refused; and a **truthy** unparseable start (`old_vf="not-a-date"`) against a parseable end is refused (B5's truthy half — distinct from the falsey `""` half). (A post-epoch end with `old_vf=0` is NOT an inversion — `(0, 0.0) < (0, <epoch>)` — so the `0` half must use the pre-epoch end to exercise the predicate.)
+3. `test_window_end_falsey_or_unparseable_start_refused` — presence/orderability predicate: `old_vf=""` + a parseable end (`'2026-06-01'`) is refused (an unparseable start sorts AFTER the end); `old_vf=0` + a **pre-epoch** end (`'1969-12-31T00:00:00+00:00'`) is refused; and a **truthy** unparseable start (`old_vf="not-a-date"`) against a parseable end is refused (B5's truthy half — distinct from the falsey `""` half). (A post-epoch end with `old_vf=0` is NOT an inversion — `(0, 0.0) < (0, <epoch>)` — so the `0` half must use the pre-epoch end to exercise the predicate.) ⚠️ **SUPERSEDED by the §5 addendum**: the shipped test refuses only the `0` row and asserts the `""`/`'not-a-date'` rows are SKIPPED — see the addendum above for why.
 4. `test_window_end_numeric_stored_value_stays_raw` — stored `1781049600.0` no kwarg → **returns the raw float** (pins the `-> str` regression).
 16. `test_window_end_numeric_kwarg_resolved_before_measure` — **B3's discriminator** (the undated-successor sibling of the existing `test_supersede_numeric_epoch_kwarg_refused`, `tests/test_validity_windows.py:363`; that one covers the *dated* successor, where #3980 already refuses). Setup: `old_vf='2026-06-10'`, **undated** successor, `valid_from=1780000000.0` — a real instant ~12 days earlier. The RAW float keys `(0, 1780000000.0)` → strictly less → would REFUSE; the RESOLVED string keys `(1, '1780000000.0')` → ALLOW. Assertions: (a) the call does **not** raise, and (b) it returns exactly the string `'1780000000.0'` (`isinstance(result, str)`), not the float. Dropping the `str()` — the natural `-> str` return-type regression the plan's §3.1 pins — makes (a) fail; returning `valid_from` unresolved makes (b) fail.
-    **The chosen epoch is a HOST-DEPENDENCE guard, and the test asserts it as a self-check.** `_created_sort_key` parses an ISO *date-only* string with `datetime.fromisoformat(...).timestamp()` on a NAIVE datetime, i.e. **host-LOCAL midnight** — so `'2026-06-10'` keys as `(0, 1781067600.0)` in UTC−5 but `(0, 1780999200.0)` in UTC+14. `.. == 1781000000.0` (the value first drafted here) would therefore key LESS than the predecessor's start on a UTC+14 host and the discriminator would silently vanish. The test must assert the premise explicitly — `assert _created_sort_key(raw_epoch) < _created_sort_key(old_vf)` — so the discriminator is self-verifying on any host (and the chosen epoch is ~1.2e7 s below the UTC+14 reading, far beyond any ±14 h offset). Do NOT hardcode `1781049600.0` as "the" key of `old_vf`: that number is the UTC midnight, and the plan's earlier draft stated it as if it were host-independent (reviewer #1, cycle 3).
+    **The chosen epoch is a HOST-DEPENDENCE guard, and the test asserts it as a self-check.** `_created_sort_key` parses an ISO *date-only* string with `datetime.fromisoformat(...).timestamp()` on a NAIVE datetime, i.e. **host-LOCAL midnight** — so `'2026-06-10'` keys as `(0, 1781067600.0)` in UTC−5 but `(0, 1780999200.0)` in UTC+14. `.. == 1781000000.0` (the value first drafted here) would therefore key LESS than the predecessor's start on a UTC+14 host and the discriminator would silently vanish. The test must assert the premise explicitly — `assert _created_sort_key(raw_epoch) < _created_sort_key(old_vf)` — so the discriminator is self-verifying on any host (and the chosen epoch is ~1.2e7 s below the UTC+14 reading, far beyond any ±14 h offset). Do NOT hardcode `1781049600.0` as "the" key of `old_vf`: that number is the UTC midnight, and the plan's earlier draft stated it as if it were host-independent.
     **Residual (out of scope, #5360):** because the persisted end is an unorderable string, the inversion is genuinely undetectable for this input — the test pins the CONSISTENCY of the measure with the artifact, not a repair; an undated successor + numeric kwarg still lands an unorderable `validTo`.
 
 Writer tests:
@@ -423,10 +465,10 @@ https://github.com/daniel-ospina/tortoise/issues/4021#issuecomment-5839986966.
    strictly before the predecessor's `validFrom`, on both required write paths.
 2. The refusal is fail-closed: zero graph mutation, zero `PointSuperseded` event, zero CORRECTS.
 3. Equality and format-only-equal values are allowed; only strict `<` is refused.
-4. Presence predicate `old_vf is not None` (falsey-but-present `0`/`""` are real starts).
+4. Presence predicate `old_vf is not None` (falsey-but-present `0` is a real start and **is** compared; `""` is present but unorderable and is **skipped** — see the §5 addendum).
 5. **The full selected test lane is green** (not just `tests/test_validity_windows.py`) — the refusal fires on a previously-accepted input and the writer is called from ~40 test files; the #3980 guard and resolution order remain byte-equivalent for every previously accepted/refused input.
 6. MCP `dry_run=True` refuses identically (verdict equal; message equal when the window is the only fault) and changes nothing; the refusal message **template** is scrub-stable (`_scrub_error(msg) == msg`).
-7. Tests fail at the pre-fix head, pass after; the mutation proof names the exact tests that RED on the reverted branch (`1, 3, 5, 6, 8, 11, 12, 13, 14, 15, 17`); test 16 pins the `str()`-measure (not the refusal).
+7. Tests fail at the pre-fix head, pass after; the mutation proof names the exact tests that RED on the reverted branch — see the §5 addendum's re-measured table, which is the shipped set (the list originally drafted here predates the skip decision and named tests that now assert it); test 16 pins the `str()`-measure (not the refusal).
 12. Every declared adversarial threat class B1–B7 is covered by a specific named test that REDs when the guard is absent (B3 → 16; B7 → 13/14/17); B8 is out of scope with its residual recorded.
 8. A read-path assertion pins that a **refused** retroactive attempt leaves the predecessor window intact and non-inverted (test 11), and that a legitimate forward supersede is non-inverted (test 10).
 9. ONTOLOGY §4.1/§4.7 + changelog v3.18 state the precondition, the rationale, the scope boundary, and **correct** the existing "never a gap" overstatement.
