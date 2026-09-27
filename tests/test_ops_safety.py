@@ -268,13 +268,20 @@ def test_rebuild_cli_bypasses_health_gate():
 # direction keeps its pre-existing tolerance (S15/T12, cycle-21), and a
 # COMPLETE journal folds identically in both directions.
 #
-# The classification is an ALLOWLIST of provably-additive record types
-# (`TORN_TAIL_HARMLESS_EVENT_TYPES` in tortoise/log.py): anything unlisted, and
-# anything whose type did not survive the tear, is REFUSED. The polarity is
-# deliberate — a new event type defaults to refused, not tolerated, because the
-# inverse (listing the removal types) fails OPEN and a new terminal type would
-# silently resurrect. The record type is read from the raw (possibly truncated)
-# bytes; `EventLog.read_all` exposes them as `torn_trailing_raw`.
+# The classification is an ALLOWLIST of record types whose loss is provably the
+# data-LOSS direction (`TORN_TAIL_HARMLESS_EVENT_TYPES` in tortoise/log.py):
+# folds that only MERGE/SET, or no fold at all. Anything unlisted, and anything
+# whose type did not survive the tear, is REFUSED. The polarity is deliberate —
+# a new event type defaults to refused, not tolerated, because the inverse
+# (listing the removal types) fails OPEN and a new terminal type would silently
+# resurrect. The record type is read from the raw (possibly truncated) bytes;
+# `EventLog.read_all` exposes them as `torn_trailing_raw`.
+#
+# The type test is over the TYPE alone, never over payload bytes: a torn record
+# is a prefix, so a key missing from it may still have been present in the
+# record being written. That is why `EventRecorded` is NOT allowlisted (its
+# connector-source fold deletes a superseded `:Source` + edge) even though its
+# loss is the data-LOSS direction for most records.
 #
 # `ObjectRetracted`, which issue #3316 names, is not on this tree (its
 # implementation, PR #3326, was closed unmerged); `PointRetracted` and the
@@ -282,8 +289,10 @@ def test_rebuild_cli_bypasses_health_gate():
 # by the same allowlist.
 #
 # The engines covered are `FalkorProjection.rebuild`, `FalkorProjection.
-# rebuild_all`, `recover_from_log`, and `backup.restore`'s JSONL fallback;
-# the `tortoise rebuild` CLI turns the refusal into a message, not a traceback.
+# rebuild_all`, `InMemoryProjection.rebuild`, `recover_from_log`, `backup.
+# restore`'s JSONL fallback, and the `tortoise rebuild` CLI (both its Falkor
+# path and its in-memory `ImportError` fallback), which turns the refusal into
+# a message, not a traceback.
 
 
 def _write_journal(path: str, *lines: str, torn_last: bool = False) -> None:
@@ -659,13 +668,25 @@ def test_backup_restore_refuses_a_torn_removal_tail():
         proj.close()
 
 
-def test_rebuild_cli_reports_the_refusal_as_a_message(capsys):
+def test_rebuild_cli_reports_the_refusal_as_a_message(capsys, monkeypatch):
     """The operator surface: ``tortoise rebuild`` exits non-zero and prints the
     refusal as a message (the same contract as the episodic refusal) instead of
-    dumping a traceback for an outcome the tool was designed to produce."""
+    dumping a traceback for an outcome the tool was designed to produce — and
+    it closes the embedded projection it opened before refusing."""
     import argparse
 
+    import tortoise.projection as projection_mod
     from tortoise.__main__ import _cmd_rebuild
+
+    closed = []
+    real_cls = projection_mod.FalkorProjection
+
+    class _Spy(real_cls):  # type: ignore[misc, valid-type]
+        def close(self):
+            closed.append(self)
+            super().close()
+
+    monkeypatch.setattr(projection_mod, "FalkorProjection", _Spy)
 
     tmp = _mk_tmp()
     db_path = os.path.join(tmp, "cli_refuse.db")
@@ -684,3 +705,70 @@ def test_rebuild_cli_reports_the_refusal_as_a_message(capsys):
     err = capsys.readouterr().err
     assert "Refused:" in err, err
     assert "resurrect" in err, err
+    # The refusal path opened a projection before the wipe; it must not leak
+    # the embedded server.
+    assert len(closed) == 1, "the refusal path did not close its projection"
+
+
+def test_rebuild_cli_inmemory_fallback_refuses_a_torn_tail(capsys, monkeypatch):
+    """The CLI's in-memory ``ImportError`` fallback is a replay engine too.
+
+    With no FalkorDB the refusal must still happen: folding the journal into an
+    in-memory "Done: …" would be the same resurrection reported as success, on
+    the one path documented as the way to rebuild without a DB.
+    """
+    import argparse
+
+    import tortoise.projection as projection_mod
+    from tortoise.__main__ import _cmd_rebuild
+
+    def _no_falkor(*_a, **_k):
+        raise ImportError("falkordb unavailable (forced by the test)")
+
+    monkeypatch.setattr(projection_mod, "FalkorProjection", _no_falkor)
+
+    tmp = _mk_tmp()
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "sentinel",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(log_dir, "events.jsonl"),
+                   _point_added("sentinel"), full[:full.index('"op"')],
+                   torn_last=True)
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=os.path.join(tmp, "x.db")))
+    assert rc == 1, "the fallback refusal must exit non-zero"
+    captured = capsys.readouterr()
+    assert "Refused:" in captured.err, captured.err
+    assert "Done:" not in captured.out, captured.out
+
+
+def test_rebuild_cli_inmemory_fallback_keeps_a_harmless_tear(capsys, monkeypatch):
+    """No over-correction: the fallback still reports its in-memory rebuild for
+    a torn record whose loss is the data-LOSS direction."""
+    import argparse
+
+    import tortoise.projection as projection_mod
+    from tortoise.__main__ import _cmd_rebuild
+
+    def _no_falkor(*_a, **_k):
+        raise ImportError("falkordb unavailable (forced by the test)")
+
+    monkeypatch.setattr(projection_mod, "FalkorProjection", _no_falkor)
+
+    tmp = _mk_tmp()
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    _write_journal(os.path.join(log_dir, "events.jsonl"),
+                   _point_added("kept-1"),
+                   '{"type": "PointAdded", "point": {"id": "torn-1", ',
+                   torn_last=True)
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=os.path.join(tmp, "x.db")))
+    captured = capsys.readouterr()
+    assert "Refused:" not in captured.err, captured.err
+    assert "Done: 1 total (1 statements, 0 operators) [in-memory, no DB]" \
+        in captured.out, captured.out
+    assert rc is None, f"a successful in-memory rebuild exits 0, got {rc!r}"

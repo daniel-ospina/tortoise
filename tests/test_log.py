@@ -13,7 +13,11 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.log import EventLog, torn_record_may_revive_state  # noqa: E402, RUF100
+from tortoise.log import (  # noqa: E402, RUF100
+    TORN_TAIL_HARMLESS_EVENT_TYPES,
+    EventLog,
+    torn_record_may_revive_state,
+)
 
 
 def _tmp(name):
@@ -333,21 +337,90 @@ def test_torn_record_may_revive_state_is_conservative_over_all_types():
     print("PASS test_torn_record_may_revive_state_is_conservative_over_all_types")
 
 
-def test_event_recorded_with_connector_metadata_is_not_harmless():
-    """``EventRecorded`` folds additively EXCEPT when it carries
-    connector-source metadata: ``_upsert_event`` →
-    ``_materialize_connector_source`` then DELETEs the old
-    ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source``.
-    The S15/T12 pin needs a plain torn ``EventRecorded`` to stay tolerable, so
-    the marker is checked on the raw prefix.
+def test_a_torn_event_recorded_is_refused_however_it_was_cut():
+    """``EventRecorded`` is NOT allowlisted, because a torn prefix cannot
+    prove the record lacked connector metadata.
+
+    ``_upsert_event`` → ``_materialize_connector_source`` DELETEs the
+    superseded ``(Source)-[:references]->(Event)`` edge and the orphaned
+    ``:Source`` whenever the record carries a registered connector
+    ``sourceKind`` or an explicit ``sourceUrl`` — and the connector emitters
+    write those keys LAST (after ``type``/``eventId``/``eventKind``/…), so a
+    tear almost anywhere lands BEFORE them. A prefix that merely happens not
+    to show the key is not evidence of absence, so the type is refused rather
+    than rescued by a marker-substring exception that would fail open.
     """
-    assert not torn_record_may_revive_state(
+    # The S15/T12 shape (a session event, no source field) — refused anyway.
+    assert torn_record_may_revive_state(
         '{"type": "EventRecorded", "id": "e1", "eventId": "s1"}')
+    # A tear inside the keys that gate the destructive leg.
     assert torn_record_may_revive_state(
         '{"type": "EventRecorded", "id": "e1", "sourceUrl": "https://x')
     assert torn_record_may_revive_state(
         '{"type": "EventRecorded", "id": "e1", "sourceKind": "github')
-    print("PASS test_event_recorded_with_connector_metadata_is_not_harmless")
+    # A tear in the byte immediately BEFORE the marker: the substring test the
+    # previous revision used returned False here, which is the fail-open hole.
+    assert torn_record_may_revive_state(
+        '{"type": "EventRecorded", "id": "e1", "sour')
+    assert torn_record_may_revive_state(
+        '{"type": "EventRecorded", "id": "e1", "source')
+    # A tear far past the retained-prefix cap: the cap cannot be allowed to
+    # hide the type and turn the record into a tolerated one.
+    long_torn = ('{"type": "EventRecorded", "id": "e1", "body": "'
+                 + "x" * 9000 + '", "sourceUrl": "https://x')
+    assert torn_record_may_revive_state(long_torn)
+    print("PASS test_a_torn_event_recorded_is_refused_however_it_was_cut")
+
+
+def test_torn_tail_allowlist_holds_no_destructive_type():
+    """The allowlist IS the fail-open/fail-closed switch, so pin its polarity.
+
+    Behavioural tests cover a handful of members; an edit that typos a name
+    into the set, or moves a removal/terminal type in — including a new one —
+    would otherwise be silent and simply stop the refusal firing.
+    """
+    # Named terminal / removal types that would resurrect state if tolerated.
+    destructive = {
+        "PointRetracted", "PointsMerged", "EntityMutated",
+        "ObjectSuperseded", "ConfidenceChanged", "DocumentCreated",
+        "DirectEdgeRepoint", "EventRecorded",
+    }
+    offenders = sorted(destructive & TORN_TAIL_HARMLESS_EVENT_TYPES)
+    assert not offenders, f"destructive types in the allowlist: {offenders}"
+    assert TORN_TAIL_HARMLESS_EVENT_TYPES
+    assert all(isinstance(t, str) and t for t in TORN_TAIL_HARMLESS_EVENT_TYPES)
+    # Every member must be a real record type. A typo would silently drop the
+    # tolerance for the intended type and never refuse anything new.
+    assert "PointAdded" in TORN_TAIL_HARMLESS_EVENT_TYPES
+    print("PASS test_torn_tail_allowlist_holds_no_destructive_type")
+
+
+def test_read_all_cap_does_not_turn_a_huge_torn_tail_harmless():
+    """``torn_trailing_raw`` is capped at 4096 bytes; the cap must stay
+    FAIL-CLOSED. A huge torn record whose type is beyond the cap reads as
+    unreadable and is refused, and a huge torn ``EventRecorded`` is refused on
+    its type regardless of where the cap cut.
+    """
+    p = _tmp("events.jsonl")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "PointAdded",
+                             "point": {"id": "a"}}) + "\n")
+        fh.write('{"pad": "' + "x" * 9000)  # type beyond the cap, malformed
+    log = EventLog(p)
+    assert len(log.read_all()) == 1
+    assert log.torn_trailing_count == 1
+    assert len(log.torn_trailing_raw[0]) == 4096
+    # Unreadable type after the cap → refused, never assumed harmless.
+    assert len(log.torn_tail_revival_records()) == 1
+
+    p2 = _tmp("events.jsonl")
+    with open(p2, "w", encoding="utf-8") as fh:
+        fh.write('{"type": "EventRecorded", "body": "' + "x" * 9000
+                 + '", "sourceUrl": "https://x')
+    log2 = EventLog(p2)
+    log2.read_all()
+    assert len(log2.torn_tail_revival_records()) == 1
+    print("PASS test_read_all_cap_does_not_turn_a_huge_torn_tail_harmless")
 
 
 def test_read_all_resets_torn_state_across_calls():

@@ -1115,10 +1115,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
         kinds = describe_torn_tail_revival(revival)
         return {"recovered": False, "log_points": len(events), "db_points": 0,
                 "reason": (f"refusing to replay {files[0]}: the trailing record "
-                           f"is torn ({kinds}); its loss would resurrect "
-                           "removed state rather than lose data (#3316) — the "
-                           "graph was NOT rebuilt; repair or truncate the "
-                           "journal, then retry")}
+                           f"is torn ({kinds}) and cannot be reconstructed, so "
+                           "replaying without it could resurrect state its "
+                           "fold would have removed (#3316) — the graph was "
+                           "NOT rebuilt; repair or truncate the journal, "
+                           "then retry")}
 
     torn = log.torn_trailing_count
 

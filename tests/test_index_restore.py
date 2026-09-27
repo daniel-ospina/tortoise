@@ -234,9 +234,13 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
         sdk.index_directory(str(corpus), extract_metadata=False)
         g = sdk._get_proj().g
         n_sources = g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
-        # simulate the SIGKILL mid-append: a torn trailing line
+        # simulate the SIGKILL mid-append: a torn trailing line. #3316: the
+        # torn type is deliberately one whose loss is the data-LOSS direction
+        # (``TORN_TAIL_HARMLESS_EVENT_TYPES``) — a torn removal/terminal record
+        # is REFUSED before the wipe by the separate #3316 pin, so it can no
+        # longer stand in for "a torn line is survivable".
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write('{"type": "EventRecorded", "id": "session_r1", "eventId": "sess')  # torn
+            f.write('{"type": "PointAdded", "point": {"id": "session_r1", "content": "torn')  # torn
         log = EventLog(log_path)
         events = log.read_all()          # must NOT raise
         assert log.torn_trailing_count == 1

@@ -58,10 +58,11 @@ from pathlib import Path
 # reports success (#3316).
 #
 # So the classifier is an ALLOWLIST of record types whose loss is provably the
-# data-LOSS direction: their folds MERGE/SET authoritative state and never
-# delete a node or edge or terminalize a lifecycle (clearing a DERIVED
-# embedding so it is recomputed is a cache clear, not such a removal). A torn
-# tail whose type is legible and wholly inside this set keeps the pre-existing
+# data-LOSS direction: either their folds MERGE/SET authoritative state and
+# never delete a node or edge or terminalize a lifecycle (clearing a DERIVED
+# embedding so it is recomputed is a cache clear, not such a removal), or they
+# have no fold at all, so their loss is a proof-carrying no-op. A torn tail
+# whose type is legible and wholly inside this set keeps the pre-existing
 # tolerance. EVERYTHING ELSE is refused: an unlisted type and an unreadable
 # type cannot be proven harmless, and a silent resurrection is worse than a
 # loud refusal — the refusal touches no graph and leaves the journal for the
@@ -81,10 +82,16 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     "ObjectRegistered", "SubjectAdded", "SessionRecorded",
     # Source lane addition (MERGE + SET only).
     "SourceCreated",
-    # Bookkeeping records (no fold, or an additive edge/prop write) and the
-    # event lane — additive EXCEPT an ``EventRecorded`` carrying connector
-    # metadata, handled conditionally below.
-    "EntityLinked", "BatchIdStamped", "DedupeRecorded", "EventRecorded",
+    # Bookkeeping records: ``_NO_PROJECTION_FOLD`` (projection/__init__.py:
+    # 1868) — recognized and INTENTIONALLY not folded by any dispatcher
+    # (``apply``/``_apply_one``/``rebuild_all`` pass over them), so their loss
+    # is a proof-carrying NO-OP on the graph. Refusing them would be pure
+    # over-refusal on a record that is often the FIRST line of an ingest.
+    "BatchIdStamped", "IngestStarted", "CalibrationRecorded",
+    "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
+    "DirectEdgeCreated",
+    # Additive edge / prop writes (MERGE + SET only).
+    "EntityLinked",
 })
 # Deliberately NOT harmless although the name reads as an addition:
 #   DocumentCreated — ``_upsert_document`` scrubs the RETIRED props
@@ -94,16 +101,24 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                     state the live write removed.
 #   ConfidenceChanged — can carry ``outdated=true``, an EP-terminal flag.
 #   DirectEdgeRepoint — its ``delete_only=true`` leg removes an edge.
+#   EventRecorded — additive ONLY in the common case; see below.
 #
-# ``EventRecorded`` is CONDITIONAL: its fold is additive except when the record
-# carries connector-source metadata, where ``_upsert_event`` →
-# ``_materialize_connector_source`` DELETEs the old
+# ⛔ ``EventRecorded`` IS NOT IN THE SET, although its loss is the data-LOSS
+# direction for most records. ``_upsert_event`` →
+# ``_materialize_connector_source`` DELETEs the superseded
 # ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source`` node
-# (projection/entities.py:2390, :2399). The S15/T12 pin
-# (tests/test_index_restore.py::test_s15_torn_tail_journal_rebuilds_to_crash_free_state)
-# requires a torn ``EventRecorded`` with NO source field to stay tolerable, so
-# the marker is checked on the raw prefix instead of the type alone.
-_EVENT_RECORDED_SOURCE_MARKERS = ('"sourceUrl"', '"sourceKind"')
+# (projection/entities.py:2390, :2399) whenever the record carries a registered
+# connector ``sourceKind`` or an explicit ``sourceUrl``. A torn record is a
+# BYTE PREFIX of the record being written, so the ABSENCE of those keys in it
+# is NOT evidence that the full record lacked them — the tear can land before
+# they would have been written. No prefix-only test can prove such a loss
+# harmless, so the type is refused; a marker-substring exception would fail
+# OPEN, the exact shape the allowlist polarity exists to prevent. The cost is
+# paid deliberately and is bounded: the refusal only blocks a replay, the
+# journal is left intact, and it is reachable on the lost-graph recovery path
+# (``_recover_or_raise``) — where the alternative is a silently resurrected
+# provenance node. Restoring the tolerance requires making that delete leg
+# replay-idempotent — a FOLD change, not a classifier change.
 
 # ``"type"`` is matched anywhere in the partial record (the JSONL envelope is
 # ``event_id`` / ``ts`` / ``type`` / …), so a tear after the type field is
@@ -138,18 +153,16 @@ def torn_record_may_revive_state(raw: str) -> bool:
 
     False only when EVERY legible type is inside
     :data:`TORN_TAIL_HARMLESS_EVENT_TYPES` — the data-LOSS direction the
-    torn-tail tolerance was designed for — and no conditional marker makes one
-    of them destructive. An unreadable type, a type outside the set, and a
-    connector-source ``EventRecorded`` are all True: none can be proven
-    harmless.
+    torn-tail tolerance was designed for. An unreadable type and a type outside
+    the set are both True: neither can be proven harmless. The classification
+    is over the type ALONE, never over the payload bytes: a torn record is a
+    prefix, so a key that is absent from it may still have been present in the
+    record being written (this is why ``EventRecorded`` is not in the set).
     """
     types = record_types_from_partial(raw)
     if not types:
         return True
-    if any(t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types):
-        return True
-    return ("EventRecorded" in types
-            and any(m in raw for m in _EVENT_RECORDED_SOURCE_MARKERS))
+    return any(t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types)
 
 
 def torn_tail_revival_records(raws) -> list[str]:
@@ -196,9 +209,10 @@ def refuse_torn_tail_revival(revival_records) -> None:
     if not revival:
         return
     raise TornTailResurrectionError(
-        "refusing to replay: the journal's torn trailing record is a "
-        f"removal/terminal record ({describe_torn_tail_revival(revival)}); "
-        "replaying without it would resurrect the state it removed (#3316). "
+        "refusing to replay: the journal's torn trailing record cannot be "
+        f"proven harmless (type(s): {describe_torn_tail_revival(revival)}); "
+        "a truncated record cannot be reconstructed, so replaying without it "
+        "could resurrect state its fold would have removed (#3316). "
         "No record was replayed: the graph was NOT rebuilt. Repair or "
         "truncate the journal, then retry."
     )
@@ -261,8 +275,11 @@ class EventLog:
             except ValueError:
                 if idx == len(lines) - 1:
                     self.torn_trailing_count += 1
-                    # Capped: a file with no newline is one "line", and only
-                    # the type-bearing prefix is ever consulted.
+                    # Capped for the retained copy / operator message: a file
+                    # with no newline is one "line". The cap is FAIL-CLOSED for
+                    # classification — a ``type`` that did not survive it reads
+                    # as an unreadable type, which is refused, never assumed
+                    # harmless.
                     self.torn_trailing_raw.append(line[:4096])
                     logging.getLogger(__name__).warning(
                         "EventLog %s: skipping torn trailing line %d "

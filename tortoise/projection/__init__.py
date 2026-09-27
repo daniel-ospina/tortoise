@@ -2331,19 +2331,26 @@ _POINTS_MERGED_LABELS = frozenset({"Point"})
 
 
 def _refuse_revival_torn_tail(revival_records) -> None:
-    """Refuse a replay whose journal dropped a removal/terminal record (#3316).
+    """Refuse a replay whose journal dropped a torn record that cannot be
+    proven harmless (#3316).
 
     ``EventLog.read_all`` tolerates a torn TRAILING line because a crash
     mid-append is expected and a dropped REGISTRATION record is only data
-    LOSS. A dropped removal/terminal record is the opposite: replay rebuilds
-    the graph without the removal, so state a later read serves as current is
-    live again (resurrection). A truncated record cannot be reconstructed, so
-    the only sound behaviour is to not rebuild at all.
+    LOSS. The other direction is not symmetric: a dropped REMOVAL/terminal
+    record (``PointRetracted``, ``EntityMutated`` op=delete, a
+    ``DirectEdgeRepoint`` delete leg, …) rebuilds the graph WITHOUT the
+    removal, so state a later read serves as current is live again
+    (resurrection) — and a dropped ``EventRecorded`` loses the
+    connector-source sweep that deletes a superseded ``:Source``. A truncated
+    record cannot be reconstructed, so the only sound behaviour is to not
+    rebuild at all.
 
     Callers MUST invoke this BEFORE any wipe/replay — a verdict after the
     mutation cannot un-apply it. The classification and the message live in
     :mod:`tortoise.log` so every replay engine (``rebuild`` / ``rebuild_all`` /
-    ``recover_from_log`` / ``backup.restore``) refuses through ONE home.
+    ``InMemoryProjection.rebuild`` / ``recover_from_log`` /
+    ``backup.restore`` / the ``tortoise rebuild`` CLI fallback) refuses through
+    ONE home.
     """
     from tortoise.log import refuse_torn_tail_revival
 
@@ -3454,10 +3461,10 @@ class FalkorProjection(
         # wipe. #2943: verifying only after the wipe turns a durability bug
         # into permanent data loss, so the proof has to precede the mutation.
         events = list(log.read_all())
-        # #3316: refuse BEFORE the wipe when the journal's torn tail dropped a
-        # removal/terminal record — replaying without it resurrects removed
-        # state, and a registry-only/synthetic log object may not expose the
-        # attribute at all (then there is nothing to classify).
+        # #3316: refuse BEFORE the wipe when the journal's torn tail cannot be
+        # proven harmless — replaying without a dropped removal resurrects
+        # removed state, and a registry-only/synthetic log object may not
+        # expose the attribute at all (then there is nothing to classify).
         _refuse_revival_torn_tail(
             getattr(log, "torn_tail_revival_records", lambda: [])())
         episodic_before = self._episodic_point_ids()
