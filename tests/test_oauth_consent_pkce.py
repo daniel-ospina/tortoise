@@ -432,6 +432,33 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     assert both["navs"] == [], f"navigated although no store can be cleaned: {both}"
     assert both["auxVerifierKeys"] == [], both
 
+    # A store that accepts the write and SILENTLY IGNORES removal (no throw) is the
+    # third shape the writer must reject, and it is only reachable in combination
+    # with an item-size cap: with no cap the GUARD refuses the store first (its
+    # 160-byte probe fits, its read-back-null fires), so the writer's own
+    # read-back-null line is never exercised. Measured: with that one line deleted,
+    # `sessionVerifierKeys` goes from [] to the full verifier set and
+    # `localVerifierKeys` from populated to empty — the credential orphaned in the
+    # store that cannot remove it.
+    silent = _run("click", search="", sessionMode="silent-remove", sessionQuota=130)
+    assert silent["navs"], f"the flow did not proceed although localStorage is usable: {silent}"
+    assert silent["errorVisible"] is False, silent
+    assert silent["sessionVerifierKeys"] == [], (
+        f"a verifier was written to a store that silently ignores removal: {silent}"
+    )
+    assert silent["localVerifierKeys"], (
+        f"the verifier reached no store at all — the write was refused, not relocated: {silent}"
+    )
+
+    # …and a silent-remove store is not a way in when no store can be cleaned: the
+    # guard's read-back-null refuses it too (fail closed).
+    both_silent = _run("click", search="", sessionMode="silent-remove",
+                       localMode="silent-remove", sessionQuota=130)
+    assert both_silent["navs"] == [], (
+        f"navigated although no store can be cleaned: {both_silent}"
+    )
+    assert both_silent["auxVerifierKeys"] == [], both_silent
+
 
 def test_inv7_item6_write_path_parity() -> None:
     """Invariant 7: ≤SIZE_GUARD is written byte-identically; over SIZE_GUARD is

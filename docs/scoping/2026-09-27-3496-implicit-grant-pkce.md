@@ -132,7 +132,7 @@ trigger is `_removeSession` from an invalid/expired stored session, reached via
    production components, and the vendored bundle contains **zero** (it writes only through the
    supplied adapter, whose oauth-page call paths are all dominated by the Step-3 guard); and
 3. a **pre-flight capability guard** (Step 3b) so a refusal is observable locally, **plus** the
-   executable agreement tests on the oauth.py side (invariants 3, 4, 10 — **new** code, not a
+   executable agreement tests on the oauth.py side (invariants 3, 4, 12 — **new** code, not a
    pre-existing harness: `tests/test_oauth_mcp.py:439-440` records that this page has no jsdom
    harness today), **plus** a **per-method, polarity-normalised static predicate assertion on both
    copies** with the read path excluded (Step 10(b)) and a method-scoped negative check for a
@@ -539,12 +539,13 @@ store's one leaked probe entry then reads as a credential).
 4. The persisted artifact and the executed artifact agree on the supabase-js version, in both
    modification directions (invariant 8).
 5. No verifier copy reaches the parent-domain cookie, and removed keys are cleared from both aux
-   stores (invariants 3, 4, 10, 12).
+   stores (invariants 3, 4, 12, 13).
 6. All **13** test invariants have a mutation that reddens them (inv 11: an emptied strip list → the
    navigate URL carries the stale `code`; inv 12: an aux `removeItem` that skips one store → the
-   aux-store assertion; inv 13: the writer's cleanability proof removed → the credential lands in the
+   aux-store assertion; inv 13: the writer's cleanability proof removed — and, separately, only its
+   removal read-back, which is what the silent-remove store reaches — → the credential lands in the
    store that cannot remove it; inv 5: an unbounded message **and** a strip-removed message → the
-   bounds assertion). **Verified by execution, 21/21 KILL.** The first round of this plan listed two
+   bounds assertion). **Verified by execution, 22/22 KILL.** The first round of this plan listed two
    rows that could not fail — inv 3's denylist row (the cookie log was filtered by name substring and
    the non-verifier keys were never written, so the assertion was empty) and inv 2's single-origin row
    (the driver echoed the shim's own `location.origin` back). Both are corrected above and re-verified
@@ -600,7 +601,7 @@ better for.
 | `GET /oauth/authorize` (FastAPI, `tortoise/hosted_api.py:28395`) | API endpoint | **this change** (page render only; no route change) | ✅ |
 | CSP `connect-src` for the Supabase token POST | cross-cutting | `tortoise/hosted_api.py:28455-28464` **already** emits `connect-src 'self' <supabase_origin>` — no change | ✅ |
 | Parent-domain session cookie `sb-tortoise-auth-token` write path | data | `tests/test_cross_subdomain_cookie_sync.py` (extended, Step 10(b)); semantics unchanged for normal sessions | ✅ |
-| Verifier storage (aux chain) | data | the router (Step 3) + harness invariants 3, 4, 10 | ✅ |
+| Verifier storage (aux chain) | data | the router (Step 3) + harness invariants 3, 4, 12, 13 | ✅ |
 | `blog-admin` adapter (the ported contract's other copy) | data | static predicate assertion (extended) — **no CI-gated suite of its own** → follow-up filed | ⚠️ (filed) |
 | `website/assets/supabase-session.js` (third copy, unloaded) | data | unloaded; recorded in the contract passage so a re-arm is visible | ⚠️ (recorded) |
 | Session model / `__Host-session` BFF (#3524) | auth | **not this change** — coupling comment posted on #3524 | ✅ (deferred) |
@@ -678,7 +679,21 @@ them a reproduced production gap**:
 |---|---|---|
 | 15 | **The round-2 guard fix did not close A5.** The guard probes with its own key and a 160-byte payload, so it cannot know whether the store the WRITER will pick can be cleaned *for the real key and value*. Reproduced by execution: a first store that rejects the 160-byte probe on size but accepts the ~114-byte verifier **and** refuses removal → the guard skips it and accepts the next store, while `writeAux` writes the credential to the first → the credential is orphaned in the store that cannot remove it (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). The absolute claim in A5/R3/R20 ("a store that refuses REMOVAL is refused by the guard") was therefore false. | The invariant is now enforced **where the real key and value are known**: `writeAux` re-proves writability AND cleanability on each candidate store at write time, with a payload of the REAL length under a throwaway key, and only then writes the credential — so an uncleanable store never receives it. Invariant 13 pins the exact divergence (with a both-un-cleanable control); R21 records the residual (a store that discriminates by key). The doc's A5 row, R3/R20 and the Step 3b sketch now state the guard's true role (early-failure optimisation, never the invariant). |
 | 16 | the doc's Step 3b sketch still showed the **pre-round-2** guard (`padEnd(49) + "-code-verifier"`, a bare `catch` that fell through to the next store) and its comment ("a remove failure is INCAPABLE, never silently skipped") was false of the code below it — a reader copying the sketch would reintroduce the hole | the sketch is replaced with the landed guard and the writer-side proof |
-| 17 | the coverage map cited **inv 10**, which does not exist (the free 10th numbering slot was never written; its content is covered by inv 3 + inv 6) | the two rows now cite the tests that exist |
+| 17 | the coverage map cited **inv 10**, which does not exist (the free 10th numbering slot was never written; its content is covered by inv 3 + inv 6) | the A1/A5 rows now cite the tests that exist |
+
+### diff-time code review ROUND 4 (re-review of `7d8b79a78`)
+One fresh reviewer, covering both the bug scan and admissibility (merge safety). It found **no runtime
+defect** in the writer change — no inverted condition, no off-by-one, no dropped-key regression
+(`writeAux`'s boolean has one caller and is discarded, and `readAux` scans both stores, so relocation
+is read-transparent), no probe collision or misread (the bundle never enumerates storage keys), and no
+reachable orphan path — but three findings, one of them a P1 and one of them a **false claim in the
+previous round's own fix note**:
+
+| # | Finding | Fix |
+|---|---|---|
+| 18 | **The writer's removal read-back was unpinned, and its `silent-remove` companion mode was dead code.** Deleting `if (s.getItem(probeKey) !== null) throw 0;` left all 11 tests green: the store mode the round-3 commit added "for it" was never instantiated by any scenario, and a bare `silent-remove` never reaches the writer at all (the guard refuses that store first — its 160-byte probe fits there and ITS read-back-null fires). The line is load-bearing only with an item-size cap: `sessionMode="silent-remove", sessionQuota=130`. Measured: pristine relocates the verifier to `localStorage`; with the line deleted the credential lands in the silent-remove `sessionStorage` (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). (The reviewer rated it P1 because the mutation survived a suite the round-3 note called 21/21.) | inv 13 now runs that exact scenario, plus a both-`silent-remove` fail-closed control; the mutation reddens it. Count → **22/22 KILL**. |
+| 19 | **R3 and R20 still attributed the A5 invariant to the GUARD** ("a store that refuses REMOVAL is refused by the guard") — the exact confusion round 3 existed to remove — and the round-3 fix note claimed R3/R20 had been updated when the diff shows neither was touched | both reworded: the invariant lives in `writeAux` (prove removal for the real value, per store); the guard only refuses early when the FIRST writable store is uncleanable |
+| 20 | three `inv 10` citations survived at lines 135, 542 and 603 (the round-3 fix reached only the A1/A5 coverage rows) | replaced with the tests that exist (`3, 4, 12`, and `3, 4, 12, 13` for the aux-store criterion) |
 
 Also noted, not defects: the first batch invocation of the router mutation once reported GREEN and was
 not reproducible in 6 further pytest runs plus 8/8 direct driver iterations (all correctly
@@ -785,8 +800,10 @@ WebCrypto ⇒ the pre-flight guard refuses locally and sign-in cannot complete**
 failure after the probe passed (a race) costs a round trip ending in the generic terminal state; a
 store that TRUNCATES the write leaks one `__tt_probe-*` entry per attempt (harmless: the probe key
 deliberately carries no `-code-verifier` suffix, so it cannot be mistaken for a credential, and the
-real verifier is never written there because `writeAux` verifies the read-back); a store that refuses
-REMOVAL is refused by the guard, so no credential is written to it at all. R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
+real verifier is never written there because `writeAux` proves the write and its removal for the
+real value first); a store that refuses removal **never receives a credential** — that is enforced by
+`writeAux` (write → read back → remove → read back null, per store, for the real value), NOT by the
+guard, which only refuses early when the FIRST writable store is uncleanable (inv 6). R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
 the verdict is an open PR on #3524 deleting the inline client. R6 version drift — test-enforced in
 both directions. R7 item 6 changes the shared cookie's write semantics — gated, so normal sessions
 are byte-identical. R8 the parity suite may trip on the refactor — the Step-3 constraint keeps it
@@ -808,8 +825,10 @@ leave older `${KEY}-flow-<id>-code-verifier` copies (or all of them when the ret
 without the code, and are supabase-js's behaviour, not this page's (invariant 12 asserts the page's
 half). R20 the probe's sentinel is LONGER than the longest real verifier key and deliberately carries
 no `-code-verifier` suffix, so an item-size cap cannot slip through while the one entry an
-un-cleanable store leaks cannot be mistaken for a credential; a store that refuses removal is
-refused by the guard (inv 6's `throw-remove` mode), so the verifier is never written there.
+un-cleanable store leaks cannot be mistaken for a credential; the verifier is never written to an
+un-cleanable store because `writeAux` proves removal for the real value first (the guard refuses the
+FIRST uncleanable store early — inv 6's `throw-remove` mode — and inv 13 pins the relocation for the
+size-asymmetric and silent-remove cases the guard cannot see).
 
 ---
 
@@ -832,15 +851,17 @@ Landed files and what each carries. Evidence is stated as a command → observed
 - `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q` → **341 passed, 2 xfailed**.
 - `… pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py test_attribution_actor.py test_control_plane_offload_3498.py test_oauth_redemption_state.py test_user_identity_authority.py -q` → **413 passed**; the 4 reds in that batch (`test_mcp_route_challenge::test_unknown_credential_carries_challenge[tt_deadbeef]`, three in `test_cursor_mcp_exit_evidence.py`) are **reproduced on a clean `origin/main` worktree** — they are the embedded FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), not this diff. Separate failures, different identities on re-run, so not deterministic under this change.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
-- Mutation evidence: **21/21 KILL, 0 survived** (the table is in the PR body). The set now includes
+- Mutation evidence: **22/22 KILL, 0 survived** (the table is in the PR body). The set now includes
   the two invariants the first round could not redden (inv 3's denylist row, inv 2's single-origin
   row), the `boundedText` bound and strip separately, the fragment channel, the #1225
-  provider-token strip, and five rows added by the later review rounds: the pre-flight falling
+  provider-token strip, and six rows added by the later review rounds: the pre-flight falling
   through to a cleaner store instead of refusing (inv 6, `throw-remove`), `removeAux` skipping the
   SECOND store (inv 4's `localStorage` half), the fragment branch without its pure-param-list guard
-  (inv 5's mixed control), the sentinel regaining its `-code-verifier` suffix (inv 6), and the
-  writer's cleanability proof removed (inv 13 — the credential then lands in the store that refuses
-  removal, which no earlier row could see). The strip
+  (inv 5's mixed control), the sentinel regaining its `-code-verifier` suffix (inv 6), the
+  writer's cleanability proof reverted (inv 13 — the credential then lands in the store that refuses
+  removal, which no earlier row could see), and that proof's removal read-back deleted alone, which
+  the SILENT-remove store reaches (inv 13's third scenario — the row the round-4 reviewer found
+  surviving). The strip
   mutation is what surfaced that `strippedWrites` had to be asserted before `strippedHasToken`
   (without it, removing the strip fell through to the refusal and the assertion was vacuous).
 - Wiring: `select(["website/apps/dashboard/public/vendor/supabase-2.112.2.min.js"], "pull_request", manifest)` → `surfaces == ["api"]` (was tier-1 smoke before the entry).
