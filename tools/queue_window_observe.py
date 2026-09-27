@@ -327,9 +327,10 @@ def queue_depth_by_formation(formations_list, queue_runs, now=None):
     """Distinct queue branches with an in-flight run at each formation moment.
 
     M5 asks for the queue depth AT FORMATION, not a momentary sample taken
-    somewhere else. A branch counts when its run had started (or the branch been
-    created) and had not finished at `at`, so the count includes the branch that
-    is itself forming (every formation therefore reads depth >= 1).
+    somewhere else. A branch counts from the moment it ENTERED THE QUEUE
+    (`created_at`) until it finished (or until `now`, if it is still live), so a
+    branch waiting for a runner still counts and a branch is counted at its own
+    formation (every formation therefore reads depth >= 1).
     """
     now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9
     intervals = []
@@ -454,7 +455,8 @@ def configured_max_parallel_checks(config_path=None):
 # ---------------------------------------------------------------------------
 
 def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
-                 conflicted_set=None, resolved_main_sha=None, config_path=None):
+                 conflicted_set=None, resolved_main_sha=None, config_path=None,
+                 corpus_truncated=None):
     """Assemble the observation record from a list of workflow-run dicts."""
     now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9 (see header)
     all_runs = [r for r in runs if isinstance(r, dict)]
@@ -704,7 +706,10 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
             # the committed record and not only from a re-run of the dump.
             "corpus_runs": len(all_runs),
             "corpus_first_run_at": _iso(corpus_first),
-            "truncated": False,
+            # TRI-STATE: True/False are the observer's own `--live` read cap; a
+            # `--from-json` replay did not produce the dump, so its completeness
+            # is UNKNOWN (None) — a `false` there would be an unsupported claim.
+            "truncated": corpus_truncated,
             "main_sha": resolved_main_sha or max(
                 (f["main_sha"] for f in forms if f["main_sha"]), default=None
             ),
@@ -967,6 +972,16 @@ def main(argv=None):
                 "conflicts enumeration did not reconcile to its total: "
                 f"{len(data['items'])} items vs {total!r}"
             )
+        # The instrument invalidates a sweep whose `origin/main` moved mid-read;
+        # its `.conflicts` PROJECTION drops `main_moved` and would leave only
+        # `{total: 0, items: []}`, so both the raw flag and a degenerate
+        # population must refuse (a 0-item conflicts read is never a pass).
+        if data.get("main_moved"):
+            return emit_unknown(
+                "conflicts sweep was invalidated: origin/main moved mid-sweep")
+        if total < 1:
+            return emit_unknown(
+                f"conflicts population is empty or degenerate (total {total!r})")
         # The conflicts read is a POINT-IN-TIME snapshot of currently open PRs:
         # the API keeps no historical conflict state, so it cannot be scoped to
         # the run window. It is stamped so a reader cannot mistake it for one.
@@ -995,6 +1010,7 @@ def main(argv=None):
     record = build_record(
         runs, args.window_hours, confirmed_max_parallel=confirmed,
         conflicted_set=conflicted, resolved_main_sha=resolved_sha, now=as_of,
+        corpus_truncated=(truncated if args.live else None),
     )
     if truncated:
         if record.get("status") == "OK":

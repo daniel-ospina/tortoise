@@ -193,7 +193,7 @@ print({h: round(sum(c._duration_weight(d.get(f if f.endswith('.py') else f+'.py'
 | resolved `origin/main` | `56e2558399e73f9619b817016c92790a97c7b4bc` — passed as `--main-sha` and recorded per record as `window.main_sha` with `main_sha_source` |
 | window (M3/M5/M6) | 8 h |
 | window (M4) | 14 d |
-| corpus | 39 972 unique workflow runs (`2026-08-30T23:00:23Z` → `2026-09-27T19:35:39Z`, 27.9 d) via `gh api /actions/runs`; 8 h window: 501 queue runs / 43 queue branches; 14 d window: 1 917 queue runs / 165 queue branches. The Actions endpoint caps pagination at **400 pages / 40 000 runs** (pages past it return HTTP 422), so the dump is **deduped by run `id`** and non-run error payloads dropped before replay. Both records carry the corpus read itself (`window.corpus_runs`, `window.corpus_first_run_at`, `window.truncated`), so this row is verifiable from the committed artifacts. |
+| corpus | 39 972 unique workflow runs (`2026-08-30T23:00:23Z` → `2026-09-27T19:35:39Z`, 27.9 d) via `gh api /actions/runs`; 8 h window: 501 queue runs / 43 queue branches; 14 d window: 1 917 queue runs / 165 queue branches. The Actions endpoint caps pagination at **400 pages / 40 000 runs** (pages past it return HTTP 422), so the dump is **deduped by run `id`** and non-run error payloads dropped before replay. Both records carry the corpus read itself (`window.corpus_runs`, `window.corpus_first_run_at`, and `window.truncated` — **`null` here, because a `--from-json` replay did not produce the dump and its completeness is UNKNOWN; the field is `true`/`false` only on the observer's own `--live` read**), so this row is verifiable from the committed artifacts. |
 | instrument | `tools/merge_throughput.py` @ #5705 (`74f9f1eaa`) — **owns every exit code**; this lane supplies **records**, it does not judge |
 | observer | `tools/queue_window_observe.py` (added by this lane; read-only, stdlib-only) |
 | committed records | `docs/ci/merge-throughput-m3-m6-records.json` (8 h), `docs/ci/merge-throughput-m4-capacity-records.json` (14 d) |
@@ -260,7 +260,7 @@ python3 tools/merge_throughput.py check capacity --max-oldest-minutes 120 --min-
 | wave sizes, 8 h | `{1: 2, 4: 2, 5: 5, 8: 1}` | 5 recurs 5×, the 4s recur 2×; the 8 is a **one-off** |
 | wave sizes, 14 d | `{1: 12, 2: 1, 4: 2, 5: 22, 8: 1, 10: 1, 15: 1}` | 5 recurs 22×; the 8, 10 and 15 are **one-offs** |
 | max observed batches | 8 (8 h) / 15 (14 d) | one-off bursts — never the effective value |
-| live queue refs at observation | **5** | momentary, recorded as corroboration only |
+| live queue refs at observation | *recorded per cut* (`live_queue_refs_at_observation`) | **momentary** corroboration only — a queue branch is short-lived, so this number is never the effective value and is not pinned as a doc figure |
 
 **Verdict: effective `max_parallel_checks` = 5 — the documented default, now measured.** The plan's
 ⟨C1⟩ is confirmed and strengthened: `#5527` setting `max_parallel_checks: 3` is a **reduction from an
@@ -321,9 +321,10 @@ so the binding failure is the **missing headroom**, not an over-age queue.
 
 **Unit warning for I9 (F4).** I9 compares `configured_max_parallel_checks` (**batches**) with
 `capacity_at_first_failure` (**concurrent workflow runs**) — **different units**, so the predicate's
-verdict flips on normalisation. The record carries `capacity_at_first_failure`,
-`capacity_at_first_failure_batches`, `headroom` and `headroom_batches`, and its
-`headroom_reason` names the mismatch.
+verdict flips on normalisation. The record carries both readings (`capacity_at_first_failure`,
+`capacity_at_first_failure_batches`, `headroom`, `headroom_batches`). Its `headroom_reason` here
+records the **UNKNOWN refusal** (neither window has a localisable sample); the unit-mismatch wording is
+emitted only on the branch where a capacity sample exists.
 
 ## M5 — why batches are size 1
 

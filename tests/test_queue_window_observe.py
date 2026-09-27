@@ -625,7 +625,55 @@ def test_record_carries_the_corpus_read():
     record = _build(_corpus())
     assert record["window"]["corpus_runs"] == len(_corpus())
     assert record["window"]["corpus_first_run_at"]
-    assert record["window"]["truncated"] is False
+    # TRI-STATE: a replay did not produce the dump, so its completeness is
+    # UNKNOWN (None), not a `false` completeness claim.
+    assert record["window"]["truncated"] is None
+
+
+def test_cli_truncated_unknown_keeps_truncation_on_the_emitted_body(tmp_path, monkeypatch):
+    # `emit_unknown`'s own exits must also carry the read-cap provenance.
+    runs = [run("feature/x", "unrelated push run", minutes_ago=5)]
+    monkeypatch.setattr(obs, "fetch_runs", lambda pages=8: (runs, True))
+    monkeypatch.setattr(obs, "live_queue_refs", lambda: None)
+    bad = tmp_path / "conflicts.json"
+    bad.write_text("{not json")
+    out = tmp_path / "record.json"
+    assert obs.main(["--live", "--window-hours", "8",
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    body = json.loads(out.read_text())
+    assert body["status"] == obs.UNKNOWN
+    assert body["truncated"] is True
+
+
+def test_cli_exits_2_on_incomplete_conflicts_results(tmp_path):
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bad = tmp_path / "conflicts.json"
+    bad.write_text(json.dumps({"read_ok": True, "incomplete_results": True,
+                               "items": [{"conflicting": False}],
+                               "total_count": 1}))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
+
+
+def test_cli_exits_2_on_a_degenerate_conflicts_population(tmp_path):
+    # The instrument's `.conflicts` projection drops `main_moved`, leaving
+    # `{total: 0, items: []}` for an invalidated sweep — it must not read as
+    # "checked, none found".
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    for payload in (
+        {"total": 0, "items": []},
+        {"read_ok": True, "main_moved": True, "items": [], "total_count": 0},
+    ):
+        bad = tmp_path / "conflicts.json"
+        bad.write_text(json.dumps(payload))
+        out = tmp_path / "record.json"
+        assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                         "--conflicts-json", str(bad), "--out", str(out)]) == 2
+        assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 
 
 def test_queue_depth_counts_a_branch_still_waiting_for_a_runner():
@@ -741,6 +789,6 @@ def test_committed_records_match_the_doc():
         # the artifact and not only by re-running the dump
         assert rec["window"]["corpus_runs"] == 39972
         assert rec["window"]["corpus_first_run_at"] == "2026-08-30T23:00:23Z"
-        assert rec["window"]["truncated"] is False
+        assert rec["window"]["truncated"] is None
     assert short["batches"]["max_queue_depth_at_formation"] == 10
     assert long_["batches"]["max_queue_depth_at_formation"] == 15
