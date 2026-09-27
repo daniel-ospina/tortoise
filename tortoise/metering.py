@@ -501,12 +501,16 @@ def report_unmetered_increment(lane: str, org_id: str | None,
 # asymmetry is declared in the runbook's ``UNMETERED_INCREMENT`` row. Either
 # way the writer logs and never raises.
 
-#: #4779: the DECLARED blank set shared by the three lanes — this module's
-#: guard, the migration's ``btrim(…, E' \t\r\n')`` and the fake control plane.
-#: ASCII space/TAB/CR/LF only, on purpose: Python's bare ``str.strip()`` also
-#: removes Unicode whitespace, which Postgres ``btrim`` cannot express, so a
+#: #4779: the DECLARED blank set for the ``lane`` key, shared by this module's
+#: guard, the migration's ``btrim(p_lane, E' \t\r\n')`` and the fake control
+#: plane. ASCII space/TAB/CR/LF only, on purpose: Python's bare ``str.strip()``
+#: also removes Unicode whitespace, which Postgres ``btrim`` cannot express, so a
 #: shared EXPLICIT set is what keeps the two deployment modes agreeing on which
 #: records exist (see ``record_unmetered_increment``).
+#:
+#: It applies to ``lane`` ONLY. ``org_id`` is refused by the broad Unicode test
+#: instead — that direction cannot diverge, because the Supabase lane's FK is
+#: the wider authority on whether an org key can name a row at all.
 _BLANK_CHARS = " \t\r\n"
 
 #: #4779: the DECLARED drop vocabulary, mirrored by the CHECK constraint on
@@ -561,20 +565,29 @@ def record_unmetered_increment(lane: str, org_id: str | None,
     not either. A failed representation is logged at WARNING — never silent —
     and the leg-3 alert remains the backstop.
     """
-    # ``org_id``/``lane`` are refused when BLANK, not only when falsy. The three
-    # lanes share ONE DECLARED set — ASCII space, TAB, CR, LF — spelled out here,
-    # in the migration's ``btrim(p_org_id, E' \t\r\n')`` and in the fake, so the
-    # embedded and Supabase lanes cannot disagree about whether a record exists.
+    # ``org_id``/``lane`` are refused when BLANK, not only when falsy — but they
+    # are refused by DIFFERENT tests, because the two keys have different
+    # authorities behind them.
     #
-    # The set is DECLARED rather than approximated because a bare ``str.strip()``
-    # is NOT the same test: it also removes Unicode whitespace (NBSP et al.), for
-    # which there is no exact ``btrim`` equivalent in Postgres. Widening Python
-    # while SQL stayed ASCII would make the embedded lane refuse keys the
-    # Supabase lane accepts — the divergence, pointing the other way. So both
-    # sides refuse exactly ``_BLANK_CHARS``; a key made only of NBSP is accepted
-    # by both (``lane`` is unconstrained by design — see the module docstring —
-    # and the inventory of real lanes is enumerated from source, not from here).
-    if (not org_id or not str(org_id).strip(_BLANK_CHARS)
+    # ORG: the BROAD Unicode test (bare ``strip()``). Stricter than the SQL guard
+    # on purpose, and safe in that direction: a record must name a real org, and
+    # the Supabase lane enforces that with the FK, so a whitespace-only org key
+    # (NBSP included) yields no row there. Being stricter HERE only stops the
+    # EMBEDDED lane from writing a durable node for an org that exists in no
+    # table ("a whitespace-only org would even create a node no reader could join
+    # to ``organizations``"). Narrowing this to the shared set below would reopen
+    # exactly that divergence.
+    #
+    # LANE: the DECLARED ASCII set — space/TAB/CR/LF — shared verbatim with the
+    # migration's ``btrim(p_lane, E' \t\r\n')`` and the fake, because ``lane``
+    # has no FK and no other authority. A bare ``str.strip()`` here removes
+    # Unicode whitespace too, which made the embedded lane REFUSE a TAB-only lane
+    # the Supabase lane WRITES; there is no exact ``btrim`` equivalent of
+    # Python's Unicode ``strip()`` to widen SQL with, so the set is DECLARED
+    # rather than approximated. A lane made only of NBSP is therefore accepted by
+    # all three lanes, which is consistent and harmless (``lane`` is
+    # unconstrained by design; the real inventory is enumerated from source).
+    if (not org_id or not str(org_id).strip()
             or not lane or not str(lane).strip(_BLANK_CHARS)
             or drop_class not in _DROP_CLASSES):
         return None

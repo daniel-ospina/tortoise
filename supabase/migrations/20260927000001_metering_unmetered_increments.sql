@@ -161,12 +161,18 @@ AS $$
 DECLARE v_total integer;
 BEGIN
     -- The BLANK guard uses an EXPLICIT character set shared with the Python lane
-    -- and the fake (``tortoise.metering._BLANK_CHARS``): a bare ``btrim(x)``
-    -- removes ASCII spaces only, while Python's bare ``str.strip()`` also removes
-    -- tabs/newlines and Unicode whitespace — so a TAB-only lane was refused on
-    -- the embedded lane and WRITTEN here. Both sides now refuse exactly
-    -- space/TAB/CR/LF; see the Python guard for why the set is declared rather
-    -- than approximated.
+    -- and the fake for ``lane`` (``tortoise.metering._BLANK_CHARS``): a bare
+    -- ``btrim(x)`` removes ASCII spaces only, while Python's bare ``str.strip()``
+    -- also removes tabs/newlines and Unicode whitespace — so a TAB-only lane was
+    -- refused on the embedded lane and WRITTEN here. Both sides now refuse
+    -- exactly space/TAB/CR/LF for ``lane``; see the Python guard for why that set
+    -- is declared rather than approximated.
+    --
+    -- For ``org_id`` this RPC guard is a LOWER bound, not the authority: the FK
+    -- (here and on ``organizations``) decides whether the key can name a row at
+    -- all, and the Python lane is deliberately STRICTER for ``org_id`` (any
+    -- Unicode whitespace, not just this set) — a direction that cannot diverge,
+    -- since a whitespace-only org id matches no real org.
     IF p_org_id IS NULL OR btrim(p_org_id, E' \t\r\n') = '' THEN
         RAISE EXCEPTION 'metering_record_unmetered: p_org_id is required';
     END IF;

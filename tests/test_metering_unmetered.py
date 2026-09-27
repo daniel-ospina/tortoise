@@ -563,18 +563,22 @@ def test_the_supabase_lane_threads_the_batch_size(sb, monkeypatch):
 
 
 @pytest.mark.parametrize("lane", ["", "   ", "\t", "\n", " \t\r\n"])
-@pytest.mark.parametrize("org", ["   "])
+@pytest.mark.parametrize("org", ["   ", "\t", "\xa0"])
 def test_a_blank_lane_or_org_is_refused_on_the_embedded_lane(
         reg, registry_lane, lane, org):
-    """A blank ``lane``/``org_id`` is refused HERE, exactly as the SQL lane does.
+    """A blank ``lane``/``org_id`` is refused HERE — but by DIFFERENT tests.
 
-    The migration refuses them with ``btrim(…, E' \t\r\n')`` and the fake
-    emulates that, so accepting them on the embedded lane would make the two
-    deployment modes disagree about which records exist — a whitespace-only org
-    would even create a node no reader could join to ``organizations``.
+    ``org_id`` is refused by the BROAD Unicode test (NBSP included): a record must
+    name a real org, the Supabase lane enforces that with the FK, so being
+    stricter on the embedded lane cannot create a row the Supabase lane would not
+    have — it only prevents a durable node for an org that exists in no table.
+    ``lane`` is refused by the DECLARED ASCII set shared with the migration
+    (``btrim(p_lane, E' \t\r\n')``) and the fake, because ``lane`` has no FK and
+    the two modes must agree on whether the row exists.
 
     Mutation caught: guarding only ``not org_id``/``not lane`` (falsy), not the
-    blank string.
+    blank string; and narrowing the ORG test to the shared ASCII set (the NBSP
+    case below then writes a durable org-less node on the embedded lane).
     """
     _sdk, tid = reg
     assert record_unmetered_increment(
@@ -586,30 +590,32 @@ def test_a_blank_lane_or_org_is_refused_on_the_embedded_lane(
     assert get_unmetered_increments(tid) == []
 
 
-def test_the_blank_set_is_the_DECLARED_ascii_set_not_python_whitespace(
+def test_the_lane_blank_set_is_the_DECLARED_ascii_set_not_python_whitespace(
         reg, registry_lane):
-    """The three lanes share ONE declared blank set: space, TAB, CR, LF.
+    """For ``lane``, the three lanes share ONE declared set: space, TAB, CR, LF.
 
     A bare ``str.strip()`` is not the same test as the migration's
     ``btrim(x, E' \t\r\n')``: it also removes Unicode whitespace, so the embedded
-    lane would refuse a key the Supabase lane ACCEPTS — the same divergence this
-    guard exists to close, pointing the other way (Python's bare ``strip()`` is
-    a strict superset, and Postgres ``btrim`` has no Unicode equivalent). The
-    set is therefore declared explicitly on both sides; this test pins both
-    halves of the declaration.
+    lane would refuse a lane the Supabase lane ACCEPTS — the same divergence this
+    guard exists to close, pointing the other way (Python's bare ``strip()`` is a
+    strict superset, and Postgres ``btrim`` has no Unicode equivalent). The set
+    is therefore declared explicitly on both sides; this test pins both halves of
+    the declaration for ``lane`` (the org asymmetry is pinned by the test above).
 
-    Mutation caught: reverting either side to its lenient/native form — a bare
-    ``strip()`` here refuses the NBSP key below, and a bare ``btrim(x)`` in the
-    migration accepts the TAB key (pinned by the SQL suite's probe).
+    Mutation caught: reverting either side to its native form — a bare
+    ``strip()`` here refuses the NBSP LANE below, and a bare ``btrim(x)`` in the
+    migration accepts the TAB lane (pinned by the SQL suite's probe).
     """
     _sdk, tid = reg
     # A member of the declared set is refused...
     assert record_unmetered_increment(
         "\t", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
         QuotaCheckError("x")) is None
-    # ...and a Unicode-space-only key is ACCEPTED, deliberately: it is not in the
-    # declared set, and BOTH lanes accept it (the SQL suite asserts the same for
-    # the RPC, so a future change that widens one side reddens one of the two).
+    # ...and a Unicode-space-only LANE is ACCEPTED, deliberately: it is not in the
+    # declared set, and every lane accepts it (the SQL suite and the fake RPC
+    # assert the same, so a future change that widens one side reddens one of the
+    # three). NOTE the contrast with ``org_id`` above, where NBSP IS refused —
+    # there the FK is the wider authority, so the stricter side cannot diverge.
     assert record_unmetered_increment(
         "\xa0", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
         QuotaCheckError("x")) == 1
@@ -793,12 +799,22 @@ def test_the_fake_refuses_an_explicit_null_p_n_like_the_migration(
         })
 
     # NBSP is Unicode whitespace but NOT in the declared set, so — like the RPC
-    # and the Python guard — the fake accepts this lane.
+    # and the embedded lane — this RPC accepts it as a LANE.
     assert fake.rpc("metering_record_unmetered", {
         "p_org_id": "org-4779", "p_lane": "\xa0",
         "p_drop_class": "window_unresolvable",
         "p_error_type": "QuotaCheckError", "p_n": 1,
     }) == 1
+
+    # ...but NBSP as an ORG ID reaches the FK and is refused there (the RPC's own
+    # ASCII guard is a lower bound for org ids: the FK is the authority, and the
+    # Python pre-flight is stricter still). No org can have a whitespace-only id.
+    with pytest.raises(RuntimeError, match="org FK violation"):
+        fake.rpc("metering_record_unmetered", {
+            "p_org_id": "\xa0", "p_lane": "write_op",
+            "p_drop_class": "window_unresolvable",
+            "p_error_type": "QuotaCheckError", "p_n": 1,
+        })
 
 
 def test_a_negative_or_none_batch_is_floored_at_one(reg, registry_lane):

@@ -165,11 +165,12 @@ BEGIN
         RAISE EXCEPTION 'a blank lane was accepted';
     END IF;
 
-    -- The blank set is EXPLICIT and shared with the Python lane/fake
-    -- (``tortoise.metering._BLANK_CHARS``): space, TAB, CR, LF. A bare
+    -- For ``lane`` the blank set is EXPLICIT and shared with the Python lane and
+    -- the fake (``tortoise.metering._BLANK_CHARS``): space, TAB, CR, LF. A bare
     -- ``btrim(x)`` (ASCII spaces only) used to accept a TAB-only lane here while
     -- the embedded lane refused it — two modes disagreeing about whether the
-    -- record exists.
+    -- record exists. (For ``org_id`` the guard is a lower bound: the FK decides,
+    -- and the Python lane is stricter there on purpose — see the FK probe below.)
     rejected := false;
     BEGIN
         PERFORM public.metering_record_unmetered(
@@ -391,6 +392,21 @@ BEGIN
     END;
     IF NOT rejected THEN
         RAISE EXCEPTION 'the org FK is missing — a row was written for an unknown org';
+    END IF;
+
+    -- ...which is also what refuses a whitespace-only ORG ID that the ASCII blank
+    -- guard above lets through (NBSP is not in ``E' \t\r\n'``). The FK is
+    -- the authority on org keys — the Python lane is stricter still (it refuses
+    -- any Unicode whitespace as an org id), a direction that cannot diverge
+    -- because no org can carry a whitespace-only id.
+    rejected := false;
+    BEGIN
+        PERFORM public.metering_record_unmetered(
+            chr(160), 'write_op', 'window_unresolvable', 'X');
+    EXCEPTION WHEN foreign_key_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a whitespace-only org id was written (the FK should refuse it)';
     END IF;
 
     -- ...and CASCADEs on the org's deletion.

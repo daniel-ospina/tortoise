@@ -338,10 +338,10 @@ class FakeControlPlane:
                     "zero increment is the state this table exists to "
                     "distinguish")
             n = int(p["p_n"]) if p.get("p_n") is not None else 1
-            # The blank set is EXPLICIT and shared with the migration (SQL
-            # ``btrim(…, E' \t\r\n')``) and the Python guard — see
-            # ``tortoise.metering._BLANK_CHARS``. A bare ``.strip()`` here would
-            # silently refuse Unicode-space keys the RPC accepts.
+            # This mirrors the RPC's guard, which is the ASCII set for BOTH keys
+            # (``btrim(…, E' \t\r\n')``) — see ``tortoise.metering._BLANK_CHARS``.
+            # For ``org_id`` the RPC is a lower bound and the FK below is the
+            # authority (the Python lane is deliberately stricter for org ids).
             if org_id is None or not str(org_id).strip(" \t\r\n"):
                 raise RuntimeError(
                     "metering_record_unmetered: p_org_id is required")
