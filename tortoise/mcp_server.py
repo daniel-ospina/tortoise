@@ -3947,36 +3947,57 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 #      reported as an observation because no artifact said which member the
 #      server objected to.
 #
-# On the HOSTED surface (``stateless_http=True``) that receive loop can only
-# raise from ``_receive_request_type.model_validate``: the session starts
-# ``Initialized`` (so ``ServerSession._received_request``'s "before
-# initialization was complete" arm is unreachable), and ``_handle_incoming``
-# cannot race its own writer because it is called FROM the receive loop. So on
-# this surface a ``-32602`` for ``tools/call`` means, and can only mean,
-# "``ClientRequest`` rejected your envelope" -- which is why naming the member
-# is a complete answer rather than a guess.
+# Because a ``tools/call`` rejected here is one the SDK had already admitted at
+# the transport layer, the only way this signature appears is the request
+# reaching the session and being rejected there.
+#
+# WHAT THIS CANNOT REACH (measured, not assumed): the same ``except Exception``
+# has a SECOND arm -- any exception escaping ``ServerSession._handle_incoming``
+# (demonstrated: ``anyio.BrokenResourceError`` when the session's
+# incoming-message stream is already broken) is ALSO answered with this exact
+# ``-32602`` / ``data: ""``, for a perfectly well-formed request, with no
+# validator involved. That arm is reproduced at the SDK-session level (see
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary::
+# test_second_arm_of_the_signature_is_a_broken_incoming_stream), but NOT through
+# the HTTP surface: in that reproduction the error write lands on a write stream
+# that is itself closing, so it is not yet shown to be client-visible. It is
+# therefore reported rather than papered over -- there is no "member" to name
+# in that arm, and inventing one would be a lie. The underlying defect there is
+# the SDK's, not tortoise's: an internal failure is reported as INVALID_PARAMS.
 #
 # The fix runs the SDK's OWN model at the boundary, so there is exactly ONE
 # validator and one reason: no second opinion that could drift from the SDK,
 # nothing accepted that the SDK would reject, nothing refused that it accepts.
-# See tests/test_mcp_http.py::TestToolCallAdmissionBoundary, which asserts that
-# equivalence against ``mcp.types.ClientRequest`` itself.
+# See tests/test_mcp_http.py::TestToolCallAdmissionBoundary, which pins the
+# verdict against the SDK's own live ``ServerSession`` -- not against a copy of
+# the expressions below -- so a drift in either expression fails loudly.
 def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
     """The SDK's own validation errors for a ``tools/call`` envelope, or None.
 
-    The two expressions below are LITERALLY the SDK's two admission checks, in
-    order, so this guard cannot accept or reject anything the SDK would decide
-    differently:
+    This reproduces, in order, the three gates the SDK applies to an incoming
+    POST, so the guard can only speak where the SDK would speak, and with the
+    SDK's own verdict:
 
-    1. ``JSONRPCMessage.model_validate(raw)`` -- what the Streamable-HTTP
-       transport runs before it puts the message on the read stream. On failure
-       the transport owns the answer (``-32700`` / ``-32602`` / ``400``), so this
-       returns None and the request passes through untouched.
-    2. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
+    1. ``JSONRPCMessage.model_validate(raw)`` -- the transport's pure-format
+       check. On failure the transport owns the answer (``-32700`` / ``400``),
+       so this returns None and the request passes through untouched.
+    2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
+       ONLY a request; a notification / response / error body is answered
+       ``202 Accepted`` (`mcp/server/streamable_http.py`). Without this gate a
+       body carrying ``method``/``id`` *and* ``result`` resolves to a response,
+       and the guard would replace the SDK's 202 with a ``-32602`` -- the
+       over-strict direction, which breaks a working caller.
+    3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
        -- what ``BaseSession._receive_loop`` runs, and the sole producer of the
        opaque ``-32602 "Invalid request parameters"`` this guard exists to
-       replace. The re-dump is reproduced exactly; validating the RAW body
-       instead would be a second opinion that could drift on ``exclude_none``.
+       replace.
+
+    Those three gates gate the arm this guard is for: an envelope the SDK
+    rejects. The same SDK ``except`` also answers a well-formed request when
+    ``_handle_incoming`` raises, and there is no member to name in that arm --
+    the caller passes through and the SDK keeps the last word, which is why this
+    guard is a message fix and not a fix for #3656's transient (see the module
+    comment above).
 
     The REASON comes from ``CallToolRequest``, the one variant that
     ``method == "tools/call"`` discriminates to. A union failure reports every
@@ -3986,14 +4007,16 @@ def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
     concrete variant unexpectedly validates anyway, the union's own errors are
     used rather than a fabricated reason.
 
-    Returns None when the envelope is one the SDK accepts -- and ALSO when the
-    model is unavailable or raises something that is not a validation error. A
-    guard that cannot reproduce the SDK's verdict must never invent one; the
-    caller then passes the request through untouched and the SDK stays the
-    authority.
+    Returns None when the envelope is one the SDK admits -- and ALSO whenever
+    the reproduction cannot be made (models unavailable, an unexpected
+    exception). A guard that cannot reproduce the SDK's verdict must never
+    invent one: pass-through is the fail-safe direction, and it is why a stale
+    copy of these expressions can rename an error but can never refuse a
+    request the SDK would have served.
     """
     try:
-        from mcp.types import CallToolRequest, ClientRequest, JSONRPCMessage
+        from mcp.types import (CallToolRequest, ClientRequest,  # noqa: I001
+                               JSONRPCRequest, JSONRPCMessage)
         from pydantic import ValidationError as _PydanticValidationError
     except Exception:  # pragma: no cover - import guard, never a request failure
         return None
@@ -4010,6 +4033,10 @@ def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
 
     try:
         message = JSONRPCMessage.model_validate(raw)
+        # Gate 2: the transport dispatches only a REQUEST. A notification /
+        # response / error body is answered 202, not "invalid params".
+        if not isinstance(message.root, JSONRPCRequest):
+            return None
         dumped = message.root.model_dump(by_alias=True, mode="json",
                                         exclude_none=True)
     except Exception:
@@ -4027,6 +4054,39 @@ def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
     except Exception:  # pragma: no cover - never invent a reason
         return None
     return None
+
+
+def _transport_would_admit_jsonrpc_post(headers: Any) -> bool:
+    """True when the SDK's own header gates would let this POST reach the body.
+
+    Mirrors ``StreamableHTTPServerTransport._check_content_type`` and
+    ``_check_accept_headers`` -- an EXACT media-type part match (not a prefix or
+    substring: ``application/jsonx`` must stay the transport's 415) -- and
+    requires BOTH media types, because this app is built with
+    ``json_response=False`` (SSE responses).
+
+    The guard must only speak about a request the SDK actually parsed and
+    dispatched; a request the transport would refuse for its headers has to
+    reach the transport so it keeps its own status (415 / 406).
+
+    Being STRICTER than the transport is always safe here: the request simply
+    passes through and the SDK answers. So if the response mode is ever flipped
+    to ``json_response=True`` the guard stops intercepting rather than
+    mislabelling a 406 -- and an import failure returns False for the same
+    reason (never pre-empt on a broken assumption).
+    """
+    try:
+        from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
+    except Exception:  # pragma: no cover - never pre-empt on an import failure
+        return False
+    content_type = headers.get("content-type", "")
+    parts = [p.strip() for p in content_type.split(";")[0].split(",")]
+    if not any(p == CONTENT_TYPE_JSON for p in parts):
+        return False
+    accepted = [m.strip() for m in headers.get("accept", "").split(",")]
+    has_json = any(m.startswith(CONTENT_TYPE_JSON) for m in accepted)
+    has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
+    return has_json and has_sse
 
 
 def _tools_call_rejection_message(errors: list[dict[str, Any]]) -> str:
@@ -4159,13 +4219,20 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         narrow, and each narrowing is a case where the SDK does NOT emit the
         opaque signature:
 
-        * ``POST`` + ``application/json`` only.
+        * ``POST`` only.
+        * The SDK's own header gates (exact ``application/json`` content type,
+          ``Accept`` carrying both JSON and SSE) -- see
+          ``_transport_would_admit_jsonrpc_post``. Anything the transport would
+          answer 415/406 stays the transport's answer.
         * ``jsonrpc == "2.0"`` and an ``id`` present -- so a
           ``tools/call`` NOTIFICATION passes through (the SDK only logs those)
           and a body missing ``jsonrpc`` passes through (the transport rejects
           it first, with a different message).
         * ``method == "tools/call"`` only -- every other method is untouched.
         * A JSON object only -- a batch array is left to the transport.
+        * A body ``JSONRPCMessage`` resolves to a REQUEST -- a notification /
+          response / error root is answered 202 by the transport, and this
+          middleware must not turn that into a ``-32602``.
 
         Framing mirrors the transport's: HTTP 200, ``text/event-stream``, one
         ``event: message`` carrying the JSON-RPC error, then close. A client
@@ -4176,7 +4243,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         async def dispatch(self, request, call_next):
             if request.method != "POST":
                 return await call_next(request)
-            if "application/json" not in request.headers.get("content-type", ""):
+            if not _transport_would_admit_jsonrpc_post(request.headers):
                 return await call_next(request)
             try:
                 raw = json.loads(await request.body())
@@ -4193,16 +4260,16 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             if errors is None:
                 return await call_next(request)
             from starlette.responses import Response
-            body = json.dumps({
-                "jsonrpc": "2.0",
-                "id": raw["id"],
-                "error": {
-                    # The SDK's own code for this failure class -- unchanged.
-                    "code": -32602,
-                    "message": _tools_call_rejection_message(errors),
-                    "data": {"method": "tools/call", "errors": errors},
-                },
-            })
+            # The auth plane's one envelope builder (#5281 house primitive),
+            # framed here as the transport's SSE event instead of a JSON
+            # HTTP error. Same code, same shape, one definition.
+            body = json.dumps(_mcp_auth._jsonrpc_error_body(
+                # The SDK's own code for this failure class -- unchanged.
+                -32602,
+                _tools_call_rejection_message(errors),
+                {"method": "tools/call", "errors": errors},
+                request_id=raw["id"],
+            ))
             return Response(f"event: message\ndata: {body}\n\n",
                             status_code=200, media_type="text/event-stream")
 

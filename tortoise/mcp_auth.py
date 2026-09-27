@@ -265,18 +265,34 @@ def _resolve_auth_retry_after_s() -> int:
     return max(1, min(v, 3600))
 
 
+def _jsonrpc_error_body(code: int, message: str,
+                        data: dict | None = None, *,
+                        request_id: Any = None) -> dict[str, Any]:
+    """The auth plane's one JSON-RPC error envelope.
+
+    Split out of ``_jsonrpc_error`` so an error that is framed differently on
+    the wire -- ``mcp_server``'s ``tools/call`` admission guard answers 200 with
+    an SSE frame instead of a JSON HTTP error -- still emits the SAME envelope
+    shape, and the two cannot drift apart. ``request_id`` defaults to null, i.e.
+    the pre-existing behaviour for every auth-plane caller (a rejected request
+    has no trustworthy id to echo).
+    """
+    body: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "error": {"code": code, "message": message},
+        "id": request_id,
+    }
+    if data is not None:
+        body["error"]["data"] = data
+    return body
+
+
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
                    status: int = 400,
                    headers: dict[str, str] | None = None) -> JSONResponse:
     """Build an MCP-compatible JSON-RPC error response with an HTTP status."""
-    body: dict[str, Any] = {
-        "jsonrpc": "2.0",
-        "error": {"code": code, "message": message},
-        "id": None,
-    }
-    if data is not None:
-        body["error"]["data"] = data
-    return JSONResponse(body, status_code=status, headers=headers)
+    return JSONResponse(_jsonrpc_error_body(code, message, data),
+                        status_code=status, headers=headers)
 
 
 def _resource_metadata_url(request: Request) -> str | None:

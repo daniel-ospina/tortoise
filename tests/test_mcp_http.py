@@ -16,6 +16,7 @@ import os
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 import asyncio
+import json
 import tempfile  # noqa: F401
 import threading
 import time
@@ -2059,19 +2060,25 @@ class TestToolCallAdmissionBoundary:
     WHAT THIS PINS, and why it is a boundary test rather than a race test: on the
     hosted surface the SDK session starts ``Initialized`` (``stateless_http`` is
     on), so ``ServerSession._received_request``'s "before initialization was
-    complete" arm cannot fire, and ``_handle_incoming`` cannot race its own
-    writer because it is called from the receive loop itself. The only remaining
-    producer of that signature is ``ClientRequest.model_validate`` in
-    ``mcp/shared/session.py`` -- i.e. the envelope really was rejected. The
-    defect that remains, and that these tests bound, is that the SDK reports it
-    with ``data: ""`` and no member, so a client (and an operator reading the
-    wire) cannot tell WHICH member was wrong -- or tell a params rejection from
-    an internal failure.
+    complete" arm cannot fire. The reported signature has exactly ONE producer --
+    the blanket ``except Exception`` in ``BaseSession._receive_loop`` -- but that
+    ``except`` has TWO arms: (a) ``ClientRequest.model_validate`` rejecting the
+    envelope, and (b) anything escaping ``ServerSession._handle_incoming``, which
+    for a WELL-FORMED request is answered with the identical ``-32602`` /
+    ``data: ""``. Arm (a) is what these tests bound, end to end; arm (b) is
+    pinned at the session level by
+    ``test_second_arm_of_the_signature_is_a_broken_incoming_stream`` and is
+    REPORTED rather than fixed (there is no member to name in it, and the fix
+    for it is the SDK's).
 
     So the invariant is exact, and the oracle is the SDK rather than this code:
     ``/mcp`` answers ``-32602`` for a ``tools/call`` **iff** the SDK's own
-    ``JSONRPCMessage`` + ``ClientRequest`` checks reject it, and when it does the
-    reason names the rejected member. See ``mcp_server._tools_call_rejection``.
+    ``JSONRPCMessage`` + ``JSONRPCRequest`` + ``ClientRequest`` checks reject it,
+    and when it does the reason names the rejected member. The oracle is a REAL
+    ``ServerSession`` driven with the raw body
+    (``_sdk_session_verdict``) -- not a re-statement of the SDK's expressions --
+    so a change to either expression makes these tests disagree with the SDK
+    instead of silently drifting. See ``mcp_server._tools_call_rejection``.
 
     Dispatched calls use ``tortoise_list_namespaces`` deliberately: these tests
     bound ADMISSION, and a tool that computes embeddings would drag the
@@ -2134,14 +2141,168 @@ class TestToolCallAdmissionBoundary:
             assert err["data"]["method"] == "tools/call", body
             assert ["params", "name"] in [e["loc"] for e in err["data"]["errors"]], body
 
-    def test_issue_request_envelope_is_accepted(self, tmp_path, monkeypatch):
-        """#3656's request is well-formed: the SDK's own model accepts it, so the
-        guard passes it through and cannot be the source of the reported
-        ``-32602``. Asserted on the guard directly -- the verbatim payload names
-        a point-creating tool, and dispatching it would drag the embedder into a
-        boundary test."""
+    # ── the oracle: a REAL ServerSession, driven with the raw body ─────────
+
+    @staticmethod
+    def _sdk_session_verdict(raw, *, timeout=0.5):
+        """What a real ``ServerSession`` does with ``raw``.
+
+        Returns the parsed JSON-RPC message the session writes back, or None
+        when it admits the message (nothing is written). The session's incoming
+        consumer is absent, so an ADMITTED request blocks on
+        ``_handle_incoming`` and times out -- which is itself the "admitted"
+        signal; a REJECTED one is written immediately by the receive loop.
+
+        This is the SDK's own code path, not a copy of it: it is what makes the
+        guard's equivalence claim falsifiable rather than self-referential.
+        """
+        import anyio
+        from mcp.server.models import InitializationOptions
+        from mcp.server.session import ServerSession
+        from mcp.shared.message import SessionMessage
+        from mcp.types import JSONRPCMessage, ServerCapabilities
+
+        async def ask():
+            read_send, read_recv = anyio.create_memory_object_stream(8)
+            write_send, write_recv = anyio.create_memory_object_stream(8)
+            session = ServerSession(
+                read_recv, write_send,
+                InitializationOptions(
+                    server_name="admission-oracle", server_version="1",
+                    capabilities=ServerCapabilities(), instructions=None),
+                stateless=True)
+            async with session:
+                await read_send.send(SessionMessage(
+                    message=JSONRPCMessage.model_validate(raw)))
+                try:
+                    with anyio.fail_after(timeout):
+                        return await write_recv.receive()
+                except TimeoutError:
+                    return None
+
+        got = anyio.run(ask)
+        if got is None:
+            return None
+        return json.loads(got.message.model_dump_json(by_alias=True))
+
+    def test_guard_verdict_equals_a_real_sdk_session(self, caplog):
+        """The guard must decide exactly what the SDK's OWN session decides.
+
+        Both directions matter: rejecting a request the SDK serves (over-strict,
+        breaks a working caller) and accepting one it rejects (silently widens
+        what ``/mcp`` admits while the opaque error remains).
+        """
+        import logging
+
+        from tortoise.mcp_server import _tools_call_rejection
+
+        caplog.set_level(logging.ERROR)  # the SDK logs a 30-error dump per reject
+        cheap = self.CHEAP_TOOL
+        shapes = [
+            self.ISSUE_REQUEST,  # #3656's request: admitted (no tool dispatch)
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": {"bogus": 1}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call"},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": None, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": 7, "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": cheap, "arguments": ["x"]}},
+        ]
+        for raw in shapes:
+            live = self._sdk_session_verdict(raw)
+            sdk_rejected = (live is not None
+                            and live.get("error", {}).get("code") == -32602)
+            guard_rejected = _tools_call_rejection(raw) is not None
+            assert guard_rejected == sdk_rejected, (
+                f"guard and the SDK's own session disagree on {raw}: "
+                f"guard={guard_rejected} sdk={sdk_rejected} ({live})")
+
+    def test_second_arm_of_the_signature_is_a_broken_incoming_stream(self):
+        """Measures #3656's OTHER producer -- the one this change does NOT fix.
+
+        The same ``except Exception`` in ``BaseSession._receive_loop`` answers a
+        WELL-FORMED request with the identical ``-32602`` / ``data: ""`` when
+        anything escapes ``_handle_incoming``. Here the session's incoming
+        consumer is gone (the stream is closed) while the session and its write
+        stream are alive, so the request is admitted and the failure is written
+        back to the client as "Invalid request parameters".
+
+        This is why the fix is a MESSAGE fix and not a fix for the reported
+        transient: there is no member to name in this arm, and no request-side
+        guard can reach it (the envelope IS valid -- the envelope is not what
+        failed). Whether the hosted surface can enter this state is not
+        established here; what is established is that the signature has a second,
+        request-agnostic producer, so the module comment says so instead of
+        claiming the parameter case is the only one.
+        """
+        import logging
+
+        import anyio
+        from mcp.server.models import InitializationOptions
+        from mcp.server.session import ServerSession
+        from mcp.shared.message import SessionMessage
+        from mcp.types import JSONRPCMessage, ServerCapabilities
+
+        from tortoise.mcp_server import _tools_call_rejection
+
+        logging.disable(logging.WARNING)
+        raw = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+               "params": {"name": self.CHEAP_TOOL, "arguments": {}}}
+        try:
+            # The request-side guard sees nothing wrong: the envelope is valid.
+            assert _tools_call_rejection(raw) is None, raw
+
+            async def ask():
+                read_send, read_recv = anyio.create_memory_object_stream(8)
+                write_send, write_recv = anyio.create_memory_object_stream(8)
+                session = ServerSession(
+                    read_recv, write_send,
+                    InitializationOptions(
+                        server_name="admission-oracle", server_version="1",
+                        capabilities=ServerCapabilities(), instructions=None),
+                    stateless=True)
+                async with session:
+                    await session.incoming_messages.aclose()
+                    await read_send.send(SessionMessage(
+                        message=JSONRPCMessage.model_validate(raw)))
+                    try:
+                        with anyio.fail_after(2.0):
+                            return await write_recv.receive()
+                    except TimeoutError:
+                        return None
+
+            got = anyio.run(ask)
+            assert got is not None, "expected the SDK to answer"
+            body = json.loads(got.message.model_dump_json(by_alias=True))
+            # #3656's signature verbatim, for a request that is NOT malformed.
+            assert body["error"]["code"] == -32602, body
+            assert body["error"]["message"] == "Invalid request parameters", body
+            assert body["error"]["data"] == "", body
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_issue_request_envelope_is_accepted(self):
+        """#3656's request is well-formed, so no request-side guard can be the
+        source of the reported ``-32602``.
+
+        Asserted against BOTH the guard and a real SDK session, which is what
+        makes it evidence rather than a restatement. No HTTP call: the verbatim
+        payload names a point-creating tool, and dispatching it would drag the
+        embedder into a boundary test.
+        """
         from tortoise.mcp_server import _tools_call_rejection
         assert _tools_call_rejection(self.ISSUE_REQUEST) is None
+        assert self._sdk_session_verdict(self.ISSUE_REQUEST) is None
 
     @pytest.mark.parametrize("params,member", [
         (None, ["params"]),
@@ -2274,6 +2435,52 @@ class TestToolCallAdmissionBoundary:
                     assert not expected, (
                         "the surface accepted a request the SDK rejects "
                         f"(widened): {raw} -> {body}")
+
+    @pytest.mark.parametrize("raw", [
+        # A non-REQUEST root: the transport answers 202, not "invalid params".
+        {"jsonrpc": "2.0", "id": 1, "result": {}},
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": 1, "message": "m"}},
+        # A tools/call NOTIFICATION (no id): the SDK only logs these.
+        {"jsonrpc": "2.0", "method": "tools/call", "params": {}},
+        # A batch array and a non-object body are the transport's business.
+        [{"jsonrpc": "2.0", "id": 1, "method": "tools/call"}],
+        "not-an-object",
+        # Wrong protocol version: the transport rejects it first.
+        {"jsonrpc": "1.0", "id": 1, "method": "tools/call", "params": {}},
+    ])
+    def test_bodies_the_transport_does_not_dispatch_are_never_named(self, raw):
+        """The over-strict direction: a body the transport does NOT dispatch as a
+        request must pass through, never acquire a named ``-32602`` from here.
+
+        The transport answers a non-request root with 202, so answering it with
+        an "invalid params" error would replace the SDK's answer for a working
+        caller.
+        """
+        from tortoise.mcp_server import _tools_call_rejection
+        assert _tools_call_rejection(raw) is None, raw
+
+    @pytest.mark.parametrize("headers,expected_status", [
+        # `application/jsonx` must stay the transport's 415 -- an exact part
+        # match, not a substring (`_check_content_type`).
+        ({"Content-Type": "application/jsonx"}, 415),
+        # SSE mode requires BOTH media types in Accept
+        # (`_validate_accept_header` -> `_check_accept_headers`).
+        ({"Accept": "application/json"}, 406),
+    ])
+    def test_header_gates_are_left_to_the_transport(self, tmp_path, monkeypatch,
+                                                     headers, expected_status):
+        """A request the transport would refuse for its HEADERS must reach it and
+        keep the transport's own status -- the guard speaks only about a request
+        the SDK actually parsed."""
+        tc = self._client(tmp_path, monkeypatch,
+                          name=f"hdr-{expected_status}")
+        with tc:
+            # An envelope that WOULD be named if the header gates allowed it.
+            r = tc.post("/mcp", content=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"arguments": {}}}), headers=headers)
+            assert r.status_code == expected_status, r.text
+            assert "params.name" not in r.text, r.text
 
     def test_other_methods_are_not_intercepted(self, tmp_path, monkeypatch):
         """The guard is scoped to `tools/call` requests: `initialize`,
