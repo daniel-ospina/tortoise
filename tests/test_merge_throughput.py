@@ -70,12 +70,11 @@ def test_empty_enumeration_is_unknown_not_zero():
 
 
 def test_conflicts_requires_a_population_floor():
-    assert run_check(
-        "conflicts",
-        json={"items": [], "total_count": 0, "read_ok": True},
-        max=5,
-        min_population=100,
-    ) == 2
+    # A self-consistent 12-item read below a raised floor must fail (not the
+    # empty-read path, which the total<1 guard already refuses).
+    payload = {"items": [{"number": i, "conflicting": False} for i in range(12)],
+               "total_count": 12, "read_ok": True}
+    assert run_check("conflicts", json=payload, max=5, min_population=100) == 2
 
 
 def test_zero_byte_body_is_unknown():
@@ -415,11 +414,14 @@ def test_queue_eta_partial_read_is_2():
 
 
 def test_batch_size_three_way():
-    ok = {"max_batch_size": 3, "events": 4, "batch_sizes": [2, 3], "verified_at": NOW}
+    ok = {"max_batch_size": 3, "events": 2, "batch_sizes": [2, 3],
+          "verified_at": NOW}
     assert run_check("batch-size", json=ok, min=2, min_depth=1, require_fresh=True) == 0
-    one = {"max_batch_size": 1, "events": 4, "batch_sizes": [1], "verified_at": NOW}
+    one = {"max_batch_size": 1, "events": 1, "batch_sizes": [1],
+           "verified_at": NOW}
     assert run_check("batch-size", json=one, min=2, min_depth=1, require_fresh=True) == 1
-    short = {"max_batch_size": 1, "events": 0, "batch_sizes": [], "verified_at": NOW}
+    short = {"max_batch_size": 1, "events": 0, "batch_sizes": [],
+             "verified_at": NOW}
     assert run_check("batch-size", json=short, min=2, min_depth=1, require_fresh=True) == 2
 
 
@@ -541,14 +543,24 @@ def test_capacity_stale_record_with_require_fresh_is_2():
     assert run_check("capacity", json=payload, min_headroom=1, require_fresh=True) == 2
 
 
+def _cap_records(**overrides):
+    records = {f: {"verified_at": NOW} for f in mt._CAPACITY_FRESH_FIELDS}
+    records.update(overrides)
+    return records
+
+
 def test_parallelism_headroom_three_way():
     ok = {"capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
-          "verified_at": NOW}
+          "records": _cap_records()}
     assert run_check("parallelism-headroom", json=ok, require_fresh=True) == 0
     at_limit = dict(ok, configured_max_parallel_checks=8)
     assert run_check("parallelism-headroom", json=at_limit, require_fresh=True) == 1
     unknown = dict(ok, capacity_at_first_failure="UNKNOWN")
     assert run_check("parallelism-headroom", json=unknown, require_fresh=True) == 2
+    # S11 and S14 must agree: a stale capacity_at_first_failure record is 2.
+    stale = dict(ok, records=_cap_records(
+        capacity_at_first_failure={"verified_at": _iso(30)}))
+    assert run_check("parallelism-headroom", json=stale, require_fresh=True) == 2
 
 
 @pytest.fixture
@@ -749,18 +761,14 @@ def test_assert_queue_head_empty_required_is_2():
 
 
 def test_strict_unresolvable_singleton_success_is_2():
-    payload = {"required": ["a"], "check_runs": [
-        {"name": "a", "status": "completed", "conclusion": "success",
-         "app": {"slug": "g"}, "details_url": None},
-    ]}
+    payload = _gate([{"name": "a", "status": "completed",
+                      "conclusion": "success", "app": {"slug": "g"},
+                      "details_url": None}], ["a"])
     assert run_check("main-gate", json=payload, strict=True) == 2
 
 
 def test_strict_empty_required_is_2():
-    payload = {"required": [], "check_runs": [
-        {"name": "some-other", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
-    ]}
+    payload = _gate([_gcheck("some-other", "success")], [])
     assert run_check("main-gate", json=payload, strict=True) == 2
 
 
@@ -784,8 +792,7 @@ def test_unorderable_group_is_unknown_not_green():
     ]
     assert mt.main_gate(runs) == "UNKNOWN"
     assert mt.verdict_from_check_runs(runs) == "UNKNOWN"
-    assert run_check("main-gate", json={"required": ["a"], "check_runs": runs},
-                     strict=True) == 2
+    assert run_check("main-gate", json=_gate(runs, ["a"]), strict=True) == 2
 
 
 def test_one_orderable_id_does_not_order_an_idless_sibling():
@@ -816,9 +823,7 @@ def test_strict_reports_no_main_signal_contexts(capsys):
 
 
 def test_strict_all_contexts_absent_is_2():
-    payload = {"required": ["a", "b"], "check_runs": [
-        {"name": "other", "status": "completed", "conclusion": "success",
-         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    payload = _gate([_gcheck("other", "success")], ["a", "b"])
     assert run_check("main-gate", json=payload, strict=True) == 2
 
 
@@ -1066,9 +1071,13 @@ def test_min_population_can_only_raise_the_floor():
 
 
 def test_unset_min_population_cannot_reinstate_zero():
-    # --min-population '' must not lower the committed floor.
-    payload = {"items": [], "total_count": 0, "read_ok": True}
-    assert run_check("conflicts", json=payload, max=5, min_population="") == 2
+    # --min-population '' must not lower the committed floor, nor may the floor
+    # be bypassed by an empty read.
+    payload = {"items": [{"number": i, "conflicting": False} for i in range(12)],
+               "total_count": 12, "read_ok": True}
+    assert run_check("conflicts", json=payload, max=5, min_population="") == 0
+    empty = {"items": [], "total_count": 0, "read_ok": True}
+    assert run_check("conflicts", json=empty, max=5, min_population="") == 2
 
 
 def test_conflicts_three_way():
@@ -1548,7 +1557,7 @@ def test_gh_api_retries_then_records_status(monkeypatch, capsys):
 
     monkeypatch.setattr(mt.subprocess, "run", fake_run)
     assert mt._gh_api("repos/o/r") is mt.UNKNOWN
-    assert calls["n"] == mt.GH_API_ATTEMPTS
+    assert calls["n"] == 3  # literal, not the constant under test
     assert "boom" in capsys.readouterr().err
 
 
@@ -1557,8 +1566,8 @@ def test_triage_rows_marks_task5_judgements_unknown(monkeypatch):
                         lambda *a, **k: [{"number": 1, "draft": False}])
     rows = mt._triage_rows()
     assert rows and rows[0]["draft"] is False
-    for field in ("hard_stop", "terminal_decision", "superseded_by", "eligible",
-                  "conflict", "owner", "owner_evidence", "owning_issue"):
+    for field in ("bucket", "hard_stop", "terminal_decision", "superseded_by",
+                  "eligible", "conflict", "owner", "owner_evidence", "owning_issue"):
         assert rows[0][field] == mt.UNKNOWN, field
 
 
@@ -1576,3 +1585,171 @@ def test_cli_numeric_flag_error_names_the_flag():
     out = _run_cli("check", "capacity", "--min-headroom", "abc")
     assert out.returncode == 2
     assert "--min-headroom" in out.stderr
+
+
+# ---------------------------------------------------------------------------
+# Round-6 hardening: sentinels, negative arms, tolerance pinning, live reader.
+# ---------------------------------------------------------------------------
+
+def test_read_ok_sentinel_is_not_a_successful_read():
+    base = {"items": [{"conflicting": False}] * 12, "total_count": 12}
+    assert run_check("conflicts", json={**base, "read_ok": "UNKNOWN"}, max=5) == 2
+    assert run_check("conflicts", json={**base, "read_ok": 1}, max=5) == 2
+    assert run_check("conflicts", json={**base, "read_ok": True}, max=5) == 0
+
+
+def test_durations_map_read_ok_sentinel_is_2():
+    payload = {"durations_map": {"age_days": 3, "sampled_keys": 15, "tolerance": 0.5},
+               "diverged": [], "read_ok": "UNKNOWN"}
+    assert run_check("durations-map", json=payload, max_age_days=14) == 2
+
+
+def test_durations_map_absent_divergence_is_2():
+    payload = {"durations_map": {"age_days": 3, "sampled_keys": 15, "tolerance": 0.5},
+               "read_ok": True}
+    assert run_check("durations-map", json=payload, max_age_days=14) == 2
+
+
+def test_durations_map_negative_age_is_2():
+    payload = {"durations_map": {"age_days": -5, "sampled_keys": 15, "tolerance": 0.5},
+               "diverged": [], "read_ok": True}
+    assert run_check("durations-map", json=payload, max_age_days=14) == 2
+
+
+def test_queue_eta_negative_eta_is_2():
+    payload = {"items": [{"eta_minutes": -1}], "total_count": 1, "read_ok": True}
+    assert run_check("queue-eta", json=payload, max=120, min_depth=1) == 2
+
+
+def test_queue_eta_reconciliation_is_exact():
+    # A 1-minute mismatch must not be waved through by a loose tolerance.
+    payload = {"items": [{"eta_minutes": 1201}], "total_count": 1,
+               "read_ok": True, "max_eta_minutes": 1200}
+    assert run_check("queue-eta", json=payload, max=99999, min_depth=1) == 2
+
+
+def test_batch_size_event_count_must_reconcile():
+    payload = {"events": 100, "batch_sizes": [2], "max_batch_size": 2,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, min_depth=1,
+                     require_fresh=True) == 2
+
+
+def test_batch_size_negative_entry_is_2():
+    payload = {"events": 1, "batch_sizes": [-1], "max_batch_size": -1,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, min_depth=1,
+                     require_fresh=True) == 2
+
+
+@pytest.mark.parametrize("field", [
+    "queued", "in_progress", "oldest_minutes",
+    "capacity_at_first_failure", "configured_max_parallel_checks",
+])
+def test_capacity_each_field_rejects_negative(field):
+    payload = {"queued": 1, "in_progress": 1, "oldest_minutes": 60,
+               "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5}
+    payload[field] = -1
+    assert run_check("capacity", json=payload, max_oldest_minutes=120) == 2
+
+
+def test_shard_balance_negative_imbalance_is_2():
+    payload = {"shard_imbalance_minutes": -5,
+               "legs": {"a": {"conclusion": "success"},
+                        "b": {"conclusion": "success"}}}
+    assert run_check("shard-balance", json=payload, max=3) == 2
+
+
+def test_cycle_negative_duration_is_not_qualifying():
+    runs = [{"duration_minutes": d, "heavy_leg_conclusion": "success"}
+            for d in (100, 1, -100, -100)]
+    assert run_check("cycle", json={"runs": runs}, max=30, min_depth=4) == 2
+
+
+def test_gap_reconciliation_tolerance_is_pinned():
+    # ceiling 350 / observed 100 = 3.5; a value of 2.0 is 43% off ⇒ 2.
+    payload = _gap_payload()
+    payload["gap"]["value"] = 2.0
+    payload["gap"]["terms"]["ceiling"]["value"] = 350
+    payload["gap"]["terms"]["observed"]["value"] = 100
+    assert run_check("gap", json=payload, max=2) == 2
+
+
+def test_gap_non_positive_observed_is_2():
+    payload = _gap_payload()
+    payload["gap"]["terms"]["observed"]["value"] = -50
+    payload["gap"]["value"] = -2
+    assert run_check("gap", json=payload, max=2) == 2
+
+
+def test_gap_every_term_needs_a_source():
+    payload = _gap_payload()
+    del payload["gap"]["terms"]["effective_batch"]["source"]
+    assert run_check("gap", json=payload, max=2) == 2
+
+
+def test_gap_unknown_source_sentinel_is_2():
+    payload = _gap_payload()
+    payload["gap"]["terms"]["effective_batch"]["source"] = mt.UNKNOWN
+    assert run_check("gap", json=payload, max=2) == 2
+
+
+def test_no_languish_unknown_superseded_by_keeps_row_active():
+    items = [{"number": i, "classification": "open", "moved_in_window": False,
+              "superseded_by": mt.UNKNOWN} for i in range(12)]
+    payload = {"items": items, "total_count": 12, "read_ok": True}
+    assert run_check("no-languish", json=payload, exclude=["superseded_by"],
+                     require_complete=True) == 1
+
+
+def test_no_languish_non_string_superseded_by_is_2():
+    items = [{"number": i, "classification": "open", "moved_in_window": True}
+             for i in range(11)]
+    items.append({"number": 11, "moved_in_window": False, "superseded_by": 123})
+    payload = {"items": items, "total_count": 12, "read_ok": True}
+    assert run_check("no-languish", json=payload, exclude=["superseded_by"],
+                     require_complete=True) == 2
+
+
+def test_main_gate_boolean_total_count_is_2():
+    payload = {"required": ["a"], "check_runs": [_gcheck("a", "success")],
+               "total_count": True}
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_assert_queue_head_unknown_sentinel_is_2():
+    payload = {"queue_head": mt.UNKNOWN, "required": ["a"], "names": ["a"]}
+    assert run_check("assert-queue-head-checks", json=payload) == 2
+
+
+def test_payload_from_input_keeps_a_whole_gap_record():
+    record = {"gap": {"value": 2.0, "terms": {}}}
+    assert mt._payload_from_input(record, "gap") == record
+
+
+def test_payload_from_input_unwraps_a_check_map():
+    record = {"drain-rate": {"merges_per_hour": 12.5}}
+    assert mt._payload_from_input(record, "drain-rate") == {"merges_per_hour": 12.5}
+
+
+def test_fast_files_collector_matches_integrity():
+    import sys as _sys
+    _sys.path.insert(0, str(mt.REPO / "tools"))
+    import ci_selection as cs
+    manifest = cs.load_manifest()
+    collect = mt.collect_fast_files_unclassified()
+    assert collect["fast_files_unclassified"] == cs.integrity(manifest)
+
+
+def test_cli_each_numeric_flag_refuses_on_a_real_payload(tmp_path):
+    rec = tmp_path / "rec.json"
+    rec.write_text(_json.dumps({
+        "runs": [{"duration_minutes": 1, "heavy_leg_conclusion": "success"}],
+        "events": 1, "batch_sizes": [2], "max_batch_size": 2,
+        "pr": 5, "entered_queue": True, "trigger": "auto_merge_conditions",
+        "verified_at": NOW}))
+    for flag, value in (("--min-depth", "abc"), ("--pr", "abc"),
+                        ("--max", "abc"), ("--max-oldest-minutes", "abc")):
+        out = _run_cli("check", "cycle", flag, value, "--input", str(rec))
+        assert out.returncode == 2, (flag, out.stdout + out.stderr)
+        assert flag in out.stderr

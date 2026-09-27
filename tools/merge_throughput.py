@@ -725,24 +725,25 @@ def collect_conflicts(bound=None):
 
 
 def collect_fast_files_unclassified():
-    """Files in no manifest classification. Consumes `fast_pool()` — the
+    """Files in no manifest classification. Mirrors `ci_selection.integrity()`.
 
-    single source of truth for the fast subset — so the exclusion set cannot
-    silently disagree with the halves' definition (#5215 cycle 4).
+    Files are classified by their tests/-relative path (not basename) and the
+    `tests/e2e/` prefix is skipped, exactly as the drift trap does (#5215).
     """
     try:
         sys.path.insert(0, str(REPO / "tools"))
         import ci_selection as cs
 
         manifest = cs.load_manifest()
-        on_disk = {p.name for p in (REPO / "tests").rglob("test_*.py")}
-        fast = set(cs.fast_pool(manifest))
-        deliberate = (
-            set(manifest.get("slow_files", []))
-            | cs.carve_out_files(manifest)
-            | set(cs.ENV_BROKEN_FILES)
-        )
-        return {"fast_files_unclassified": sorted(on_disk - (fast | deliberate))}
+        tests_dir = REPO / "tests"
+        unclassified = []
+        for path in sorted(tests_dir.rglob("test_*.py")):
+            rel = path.relative_to(tests_dir)
+            if rel.parts[0] == "e2e":
+                continue
+            if cs.classify_test_file(str(rel), manifest) is None:
+                unclassified.append(str(rel))
+        return {"fast_files_unclassified": unclassified}
     except Exception:
         return {}
 
@@ -1048,7 +1049,7 @@ def _check_queue_entry(payload: dict, opts: dict) -> int:
 
 
 def _check_queue_eta(payload: dict, opts: dict) -> int:
-    if not payload.get("read_ok", True) or payload.get("incomplete_results"):
+    if payload.get("read_ok", True) is not True or payload.get("incomplete_results") is True:
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
@@ -1060,6 +1061,7 @@ def _check_queue_eta(payload: dict, opts: dict) -> int:
         not isinstance(items, list)
         or not _is_num(total)
         or len(items) != total
+        or total < 1
     ):
         print("2: ETA enumeration did not reconcile to its total")
         return 2
@@ -1098,6 +1100,11 @@ def _check_batch_size(payload: dict, opts: dict) -> int:
     events = _as_number(payload.get("events", UNKNOWN))
     sizes = payload.get("batch_sizes")
     if events is None or not isinstance(sizes, list):
+        return 2
+    if events != len(sizes):
+        # The window count and the observed list must reconcile, else the
+        # claimed max is taken over an unobserved subset of events.
+        print(f"2: batch window claims {events} events but carries {len(sizes)} sizes")
         return 2
     if opts.get("require_fresh") and not _age_ok(
         payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
@@ -1196,7 +1203,7 @@ def _check_fast_files_unclassified(payload: dict, opts: dict) -> int:
 
 
 def _check_conflicts(payload: dict, opts: dict) -> int:
-    if not payload.get("read_ok", True) or payload.get("incomplete_results"):
+    if payload.get("read_ok", True) is not True or payload.get("incomplete_results") is True:
         return 2
     if payload.get("main_moved"):
         print("2: origin/main moved between fetch and sweep")
@@ -1330,10 +1337,17 @@ def _check_parallelism_headroom(payload: dict, opts: dict) -> int:
                 or len(items) != total or total < 1):
             print("2: parallelism-headroom enumeration did not reconcile to its total")
             return 2
-    if opts.get("require_fresh") and not _age_ok(
-        payload.get("verified_at"), M4_RECORD_WINDOW_DAYS
-    ):
-        return 2
+    if opts.get("require_fresh"):
+        # S11/S14 must agree on the same headroom: the per-field record rule is
+        # the same one `capacity --require-fresh` applies.
+        records = payload.get("records")
+        if not isinstance(records, dict):
+            print("2: parallelism-headroom --require-fresh needs each field's own record")
+            return 2
+        for field in _CAPACITY_FRESH_FIELDS:
+            if not _fresh_record(records.get(field)):
+                print(f"2: parallelism-headroom field {field!r} has no fresh own record")
+                return 2
     cap = _as_number(payload.get("capacity_at_first_failure"))
     configured = _as_number(payload.get("configured_max_parallel_checks"))
     if cap is None or configured is None:
@@ -1357,7 +1371,7 @@ def _check_gap(payload: dict, opts: dict) -> int:
         if not _is_num(term.get("value")):
             print(f"2: gap term {key!r} is not numeric")
             return 2
-        if not term.get("source"):
+        if not term.get("source") or term.get("source") == UNKNOWN:
             print(f"2: gap term {key!r} carries no source")
             return 2
     parallel = terms.get("effective_parallel")
@@ -1438,7 +1452,7 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         if key not in EXCLUDE_KEYS:
             print(f"2: unknown exclude key {key!r}")
             return 2
-    if not payload.get("read_ok", True) or payload.get("incomplete_results"):
+    if payload.get("read_ok", True) is not True or payload.get("incomplete_results") is True:
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
@@ -1482,7 +1496,7 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         for key in excluded:
             if key == "superseded_by":
                 value = row.get("superseded_by")
-                if value not in (None, "", "null"):
+                if value not in (None, "", "null", UNKNOWN):
                     return True
             elif row.get(key) or label == key:
                 return True
@@ -1516,7 +1530,7 @@ def _check_baseline_fresh(payload: dict, opts: dict) -> int:
 
 def _check_assert_queue_head_checks(payload: dict, opts: dict) -> int:
     head = payload.get("queue_head")
-    if not head:
+    if not head or head is UNKNOWN or not isinstance(head, str):
         print("2: no mergify/merge-queue/* head exists")
         return 2
     required = payload.get("required")
@@ -1534,7 +1548,7 @@ def _check_assert_queue_head_checks(payload: dict, opts: dict) -> int:
 
 
 def _check_durations_map(payload: dict, opts: dict) -> int:
-    if not payload.get("read_ok", True):
+    if payload.get("read_ok", True) is not True:
         print("2: jobs read was empty/0-byte")
         return 2
     dm = payload.get("durations_map")
@@ -1550,11 +1564,16 @@ def _check_durations_map(payload: dict, opts: dict) -> int:
     window = _as_number(opts.get("max_age_days"))
     if window is None:
         return 2
+    diverged = payload.get("diverged")
+    if not isinstance(diverged, list):
+        # An absent comparison is an UNKNOWN, never "no divergence" (#3395).
+        print("2: durations-map divergence comparison was not performed")
+        return 2
     if age > window:
         print(f"1: durations map age {age}d > {window}d")
         return 1
-    if payload.get("diverged"):
-        print(f"1: durations keys diverged: {payload['diverged']}")
+    if diverged:
+        print(f"1: durations keys diverged: {diverged}")
         return 1
     return 0
 
@@ -1841,7 +1860,26 @@ def _read_json_file(path: str):
 
 
 def _payload_from_input(data, name: str):
-    if isinstance(data, dict) and isinstance(data.get(name), dict):
+    """A whole record, or a check-name -> record map.
+
+    A whole record that already carries the check's own top-level key is used
+    as-is (e.g. `gap` reads `payload["gap"]`), so `check gap --input <record>`
+    is reachable; a per-check map otherwise unwraps to its entry.
+    """
+    if not isinstance(data, dict):
+        return data
+    if name == "gap":
+        # A gap record is itself `{"gap": {"value", "terms"}}`; only a
+        # check-map entry that wraps a whole gap record is unwrapped.
+        inner = data.get("gap")
+        if isinstance(inner, dict) and "gap" in inner:
+            return inner
+        return data
+    if (
+        name in data
+        and isinstance(data[name], dict)
+        and not any(key in data for key in ("check_runs", "total_count", "items"))
+    ):
         return data[name]
     return data
 
