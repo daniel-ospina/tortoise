@@ -1188,7 +1188,15 @@ def _scratch_repo(tmp_path: Path) -> Path:
 # Rail parity (operational; skips when agent-infra is unresolvable on a runner).
 # ---------------------------------------------------------------------------
 
-def test_non_red_token_set_matches_the_rail():
+def test_rail_surface_token_sets_match():
+    """The rail is AUTHORITATIVE for the check-surface rules (plan I6).
+
+    THREE token sets drive its probe: the non-red allow-list, the MEASURING
+    predicate (the only conclusions that may set the staleness anchor), and the
+    named in-flight statuses. The instrument OBSERVES that rule, so each set is
+    pinned here — a vendor adding a conclusion must break this test rather than
+    silently widen what the instrument treats as green.
+    """
     candidates = []
     import os
 
@@ -1205,14 +1213,19 @@ def test_non_red_token_set_matches_the_rail():
         except OSError:
             continue
         read_any = True
-        m = re.search(r"^NON_RED_CONC\s*=\s*\{([^}]*)\}", body, re.M)
-        if not m:
-            continue
-        tokens = set(re.findall(r'"([^"]+)"', m.group(1)))
-        assert tokens == set(mt.NON_RED_CONCLUSIONS)
-        return
+        found = {}
+        for name in ("NON_RED_CONC", "MEASURING_CONC", "IN_FLIGHT_STATUS"):
+            match = re.search(rf"^{name}\s*=\s*\{{([^}}]*)\}}", body, re.M)
+            if match:
+                found[name] = set(re.findall(r'"([^"]+)"', match.group(1)))
+        if found:
+            assert found.get("NON_RED_CONC") == set(mt.NON_RED_CONCLUSIONS)
+            assert found.get("MEASURING_CONC") == set(mt.MEASURING_CONCLUSIONS)
+            assert found.get("IN_FLIGHT_STATUS") == set(mt.IN_FLIGHT_STATUSES)
+            return
     if read_any:
-        pytest.fail("rail readable but NON_RED_CONC not found — parity unverifiable")
+        pytest.fail("rail readable but its surface token sets were not found — "
+                    "parity unverifiable")
     pytest.skip("agent-infra rail not resolvable on this host (operational check)")
 
 
@@ -1578,6 +1591,9 @@ def test_triage_rows_classifies_every_pr(monkeypatch):
     monkeypatch.setattr(mt, "collect_triage_conflicts",
                         lambda *a, **k: {1: (False, []), 5136: (True, ["f"]),
                                          2: (True, ["g"])})
+    monkeypatch.setattr(mt, "collect_triage_stale_surface",
+                        lambda *a, **k: {1: FRESH_EVIDENCE, 5136: FRESH_EVIDENCE,
+                                         2: FRESH_EVIDENCE})
     monkeypatch.setattr(mt, "open_pr_total", lambda: 3)
     monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
     rows, total = mt._triage_rows()
@@ -2093,7 +2109,8 @@ def test_no_languish_excludes_task_5_buckets():
                      require_complete=True) == 2
     rows = [{"number": i, "bucket": "eligible", "draft": False,
              "hard_stop": False, "terminal_decision": False,
-             "conflict": False, "moved_in_window": True} for i in range(12)]
+             "conflict": False, "surface_evidence": FRESH_EVIDENCE,
+             "moved_in_window": True} for i in range(12)]
     assert run_check("no-languish", json={"items": rows, "total_count": 12,
                                           "read_ok": True, "window_days": 7},
                      exclude=["hard_stop", "terminal_decision", "draft",
@@ -2161,13 +2178,31 @@ def _pr(number=1, title="a (#2)", draft=False, branch="fix/2-a", body=""):
             "head": {"ref": branch}, "body": body}
 
 
+#: Canonical `surface_evidence` strings, exactly as the live collector emits
+#: them. A row is only clean when its OWN evidence re-derives its bucket.
+FRESH_EVIDENCE = "verdict=GREEN; stale=0; produced=2026-09-27T00:00:00Z"
+STALE_EVIDENCE = ("verdict=GREEN; stale=1; produced=2026-09-25T00:00:00Z; "
+                  "base_red_started=2026-09-27T10:45:26Z; red=test (b)")
+MERGE_REF_EVIDENCE = ("verdict=GREEN; stale=1; produced=2026-09-27T09:00:00Z; "
+                      "merge_ref_base=" + "a" * 40 + "; base_head=" + "b" * 40)
+RED_EVIDENCE = "verdict=RED; reds=python-ci-gate"
+PENDING_EVIDENCE = "verdict=PENDING; pending=2"
+
+
+def _row(pr, *, surface=mt.SURFACE_GREEN, stale=False, evidence=FRESH_EVIDENCE,
+         **kw):
+    """A row with the surface dimension supplied the way the live reader does."""
+    return mt.build_triage_row(pr, surface=surface, stale=stale,
+                               surface_evidence=evidence, **kw)
+
+
 def test_triage_schema_keys_are_exact():
-    row = mt.build_triage_row(_pr(), conflict=False)
+    row = _row(_pr(), conflict=False)
     assert set(row) == set(mt.TRIAGE_SCHEMA_KEYS)
     assert tuple(mt.TRIAGE_SCHEMA_KEYS) == (
         "number", "bucket", "eligible", "conflict", "conflicted_paths",
-        "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
-        "owner_evidence", "owning_issue")
+        "superseded_by", "surface_evidence", "draft", "hard_stop",
+        "terminal_decision", "owner", "owner_evidence", "owning_issue")
 
 
 def test_triage_unobserved_is_unknown_never_eligible():
@@ -2176,6 +2211,15 @@ def test_triage_unobserved_is_unknown_never_eligible():
     assert row["bucket"] == mt.UNKNOWN    # an unobserved conflict cannot read clean
     assert row["eligible"] == mt.UNKNOWN
     assert row["draft"] is False          # an OBSERVED column stays observed
+    # An OBSERVED-clean conflict with an UNOBSERVED surface is also UNKNOWN: a
+    # clean merge is not a green surface, and green alone is not sufficient.
+    assert mt.build_triage_row(_pr(), conflict=False)["bucket"] == mt.UNKNOWN
+    assert mt.classify_bucket(1, draft=False, conflict=False) == mt.UNKNOWN
+    assert mt.classify_bucket(1, draft=False, conflict=False,
+                              surface=mt.SURFACE_GREEN) == mt.UNKNOWN
+    assert mt.classify_bucket(1, draft=False, conflict=False,
+                              surface=mt.SURFACE_GREEN,
+                              stale=mt.UNKNOWN) == mt.UNKNOWN
 
 
 @pytest.mark.parametrize("number,expected", [
@@ -2200,7 +2244,245 @@ def test_named_dispositions_win_the_first_match(number, expected):
 def test_draft_beats_conflicting_and_conflict_beats_eligible():
     assert mt.classify_bucket(9999, draft=True, conflict=True) == "draft"
     assert mt.classify_bucket(9999, draft=False, conflict=True) == "conflicting"
-    assert mt.classify_bucket(9999, draft=False, conflict=False) == "eligible"
+    assert mt.classify_bucket(9999, draft=False, conflict=False,
+                              surface=mt.SURFACE_GREEN,
+                              stale=False) == "eligible"
+
+
+def test_surface_verdict_selects_the_rail_refusal_class():
+    """The rail's three refusal classes map to three buckets, in order.
+
+    (a) ACCEPT -> `eligible`; (b) BLOCK -> `blocked` (the PR's OWN tree fails
+    — the correct refusal, not a bug); (c) RE-MEASURE -> `re_measure` (a GREEN
+    surface a base red started after). The `stale` verdict is what separates
+    (a) from (c), so a green surface without it is never a bucket.
+    """
+    assert mt.classify_bucket(1, draft=False, conflict=False,
+                              surface=mt.SURFACE_GREEN, stale=False) == "eligible"
+    assert mt.classify_bucket(1, draft=False, conflict=False,
+                              surface=mt.SURFACE_GREEN, stale=True) == "re_measure"
+    for verdict in (mt.SURFACE_RED, mt.SURFACE_PENDING):
+        assert mt.classify_bucket(1, draft=False, conflict=False,
+                                  surface=verdict, stale=False) == "blocked"
+        # A `stale` verdict is meaningless for a non-green surface and must not
+        # turn BLOCK into RE-MEASURE.
+        assert mt.classify_bucket(1, draft=False, conflict=False,
+                                  surface=verdict, stale=True) == "blocked"
+    # The named/draft/conflicting dispositions still WIN over the surface.
+    assert mt.classify_bucket(5136, draft=False, conflict=False,
+                              surface=mt.SURFACE_RED, stale=False) == "hard_stop"
+    assert mt.classify_bucket(1, draft=True, conflict=False,
+                              surface=mt.SURFACE_RED, stale=False) == "draft"
+    assert mt.classify_bucket(1, draft=False, conflict=True,
+                              surface=mt.SURFACE_GREEN, stale=True) == "conflicting"
+
+
+# ---------------------------------------------------------------------------
+# The evaluated-tree surface: the rail's §4.5/§4.6/§4.7, observed.
+# ---------------------------------------------------------------------------
+
+def _cr(number, name, conclusion, *, status="completed", app="github-actions",
+        rid=None, started="2026-09-27T10:00:00Z",
+        completed="2026-09-27T10:05:00Z"):
+    return {"id": rid if rid is not None else number, "name": name,
+            "status": status, "conclusion": conclusion, "app": {"slug": app},
+            "started_at": started, "completed_at": completed}
+
+
+def test_surface_probe_newest_attempt_per_app_name_decides():
+    """A re-run leaves the OLD failing run beside the new one: only the newest
+    attempt may decide, or the tool reports a red GitHub itself shows green."""
+    verdict, anchor, reds, pending = mt.classify_surface_runs([
+        _cr(1, "python-ci-gate", "failure"),
+        _cr(2, "python-ci-gate", "success", completed="2026-09-27T10:35:00Z"),
+    ])
+    assert verdict == mt.SURFACE_GREEN
+    assert reds == [] and pending == 0
+    assert anchor == "2026-09-27T10:35:00Z"
+
+
+def test_surface_probe_unknown_conclusion_is_red():
+    verdict, _anchor, reds, _pending = mt.classify_surface_runs([
+        _cr(1, "mystery", "weird_new")])
+    assert verdict == mt.SURFACE_RED
+    assert reds == [("mystery", "2026-09-27T10:00:00Z")]
+
+
+def test_surface_probe_in_flight_is_pending_not_red():
+    verdict, _anchor, reds, pending = mt.classify_surface_runs([
+        _cr(1, "test (a)", None, status="in_progress", completed=None)])
+    assert verdict == mt.SURFACE_PENDING
+    assert reds == [] and pending == 1
+
+
+def test_surface_probe_empty_surface_is_unknown():
+    assert mt.classify_surface_runs([])[0] == mt.UNKNOWN
+    assert mt.classify_surface_runs("not-a-list")[0] == mt.UNKNOWN
+
+
+def test_surface_probe_unorderable_group_is_unknown_not_green():
+    """A partial order is not an order — list order must not decide newest."""
+    assert mt.classify_surface_runs([
+        _cr(1, "x", "failure", rid=0),
+        _cr(2, "x", "success", rid=0)])[0] == mt.UNKNOWN
+    assert mt.classify_surface_runs([
+        _cr(1, "x", "failure", rid=2),
+        {"name": "x", "status": "completed", "conclusion": "success",
+         "app": {"slug": "github-actions"}, "completed_at": None}])[0] == \
+        mt.UNKNOWN
+
+
+def test_surface_probe_non_measuring_check_does_not_set_the_anchor():
+    """`skipped` exercised nothing, so it must not advance the last-production
+    time (the #1353 fail-open where a non-measurement moved the anchor)."""
+    verdict, anchor, _reds, _pending = mt.classify_surface_runs([
+        _cr(1, "test (a)", "skipped", completed="2026-09-27T12:00:00Z"),
+        _cr(2, "test (b)", "success", completed="2026-09-27T09:00:00Z"),
+    ])
+    assert verdict == mt.SURFACE_GREEN
+    assert anchor == "2026-09-27T09:00:00Z"
+
+
+def test_stale_by_clock_refuses_a_red_that_started_after_the_anchor():
+    clock = [(mt._parse_ts("2026-09-27T10:45:26Z"), "test (b)",
+              "2026-09-27T10:45:26Z")]
+    assert mt._stale_by_clock("2026-09-27T09:15:12Z", clock) == (
+        True, "test (b)", "2026-09-27T10:45:26Z")
+    assert mt._stale_by_clock("2026-09-27T11:00:00Z", clock) == (
+        False, None, None)
+
+
+def test_stale_by_clock_refuses_on_an_unreadable_red_start():
+    clock = [(None, "test (b)", "not-a-time")]
+    assert mt._stale_by_clock("2026-09-27T11:00:00Z", clock)[0] is True
+
+
+def test_stale_by_clock_refuses_when_the_surface_has_no_anchor():
+    clock = [(mt._parse_ts("2026-09-27T10:45:26Z"), "test (b)",
+              "2026-09-27T10:45:26Z")]
+    assert mt._stale_by_clock(None, clock)[0] is True
+    # §4.6 is RED-RELATIVE: a GREEN base is a POSITIVE "nothing to measure".
+    assert mt._stale_by_clock(None, []) == (False, None, None)
+
+
+@pytest.mark.parametrize("verdict,stale,evidence", [
+    (mt.SURFACE_GREEN, False, FRESH_EVIDENCE),
+    (mt.SURFACE_GREEN, True, STALE_EVIDENCE),
+    (mt.SURFACE_GREEN, True, MERGE_REF_EVIDENCE),
+    (mt.SURFACE_RED, False, RED_EVIDENCE),
+    (mt.SURFACE_PENDING, False, PENDING_EVIDENCE),
+])
+def test_surface_evidence_round_trips(verdict, stale, evidence):
+    assert mt.surface_from_evidence(evidence) == (verdict, stale)
+
+
+@pytest.mark.parametrize("bad", [
+    "", "   ", "GREEN", "verdict=MAYBE; stale=0",
+    "verdict=GREEN", "verdict=GREEN; stale=maybe",
+    "verdict=GREEN; stale=0",                  # no production time
+    "verdict=GREEN; stale=1",                  # names WHAT it failed to measure
+    "verdict=GREEN; produced=x",               # no stale verdict at all
+    "verdict=GREEN; stale=0; produced=x; verdict=RED",   # duplicate keys
+])
+def test_surface_evidence_hand_written_forms_are_unknown(bad):
+    assert mt.surface_from_evidence(bad) == (mt.UNKNOWN, mt.UNKNOWN)
+
+
+def test_collect_triage_stale_surface_refuses_a_failed_surface(monkeypatch):
+    """An unreadable surface must refuse the read, never pass as fresh."""
+    prs = [{"number": 1, "head": {"sha": "a" * 40}}]
+    monkeypatch.setattr(mt, "surface_probe",
+                        lambda sha: (mt.UNKNOWN, None, [], 0))
+    assert mt.collect_triage_stale_surface(
+        prs, base=("b" * 40, [("test (b)", "2026-09-27T10:45:26Z")])) is None
+
+
+def test_collect_triage_stale_surface_green_base_is_fresh(monkeypatch):
+    prs = [{"number": 1, "head": {"sha": "a" * 40}}]
+    monkeypatch.setattr(mt, "surface_probe",
+                        lambda sha: (mt.SURFACE_GREEN, "2026-09-27T00:00:00Z",
+                                     [], 0))
+    out = mt.collect_triage_stale_surface(prs, base=("b" * 40, []))
+    assert out == {1: FRESH_EVIDENCE}
+
+
+def test_collect_triage_stale_surface_46_fires_and_skips_47(monkeypatch):
+    """§4.6 already refused, so §4.7's extra call must not be spent."""
+    prs = [{"number": 1, "head": {"sha": "a" * 40},
+            "merge_commit_sha": "c" * 40}]
+    monkeypatch.setattr(mt, "surface_probe",
+                        lambda sha: (mt.SURFACE_GREEN, "2026-09-25T00:00:00Z",
+                                     [], 0))
+    called = []
+    monkeypatch.setattr(mt, "merge_ref_base_parent",
+                        lambda pr: called.append(pr["number"]) or mt.UNKNOWN)
+    out = mt.collect_triage_stale_surface(
+        prs, base=("b" * 40, [("test (b)", "2026-09-27T10:45:26Z")]))
+    assert out[1] == STALE_EVIDENCE
+    assert called == []
+
+
+def test_collect_triage_stale_surface_47_catches_a_lagging_merge_ref(monkeypatch):
+    """A green produced AFTER the red, but evaluated against an OLDER base:
+    §4.6's ordering rule cannot see it, so §4.7's parent comparison must."""
+    prs = [{"number": 1, "head": {"sha": "a" * 40},
+            "merge_commit_sha": "c" * 40}]
+    monkeypatch.setattr(mt, "surface_probe",
+                        lambda sha: (mt.SURFACE_GREEN, "2026-09-27T11:00:00Z",
+                                     [], 0))
+    monkeypatch.setattr(mt, "merge_ref_base_parent", lambda pr: "f" * 40)
+    out = mt.collect_triage_stale_surface(
+        prs, base=("b" * 40, [("test (b)", "2026-09-27T10:45:26Z")]))
+    assert out[1] == ("verdict=GREEN; stale=1; produced=2026-09-27T11:00:00Z; "
+                      "merge_ref_base=" + "f" * 40 + "; base_head="
+                      + "b" * 40)
+
+
+def test_collect_triage_stale_surface_records_a_red_surface(monkeypatch):
+    prs = [{"number": 1, "head": {"sha": "a" * 40}}]
+    monkeypatch.setattr(mt, "surface_probe", lambda sha: (
+        mt.SURFACE_RED, "2026-09-27T09:00:00Z",
+        [("python-ci-gate", "2026-09-27T08:00:00Z")], 0))
+    out = mt.collect_triage_stale_surface(prs, base=("b" * 40, []))
+    assert out[1] == RED_EVIDENCE
+
+
+def test_triage_rows_carry_both_new_surface_buckets(monkeypatch):
+    prs = [{"number": 1, "draft": False, "title": "a (#10)",
+            "head": {"ref": "fix/10-a"}},
+           {"number": 2, "draft": False, "title": "b (#11)",
+            "head": {"ref": "fix/11-b"}}]
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
+    monkeypatch.setattr(mt, "collect_triage_conflicts",
+                        lambda *a, **k: {1: (False, []), 2: (False, [])})
+    monkeypatch.setattr(mt, "collect_triage_stale_surface",
+                        lambda *a, **k: {1: STALE_EVIDENCE, 2: RED_EVIDENCE})
+    monkeypatch.setattr(mt, "open_pr_total", lambda: 2)
+    monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
+    rows, total = mt._triage_rows()
+    assert total == 2
+    assert [r["bucket"] for r in rows] == ["re_measure", "blocked"]
+    assert rows[0]["eligible"] is False and rows[1]["eligible"] is False
+    assert mt.validate_triage_rows(rows, total_count=2, min_population=1) == []
+
+
+def test_validate_rejects_a_bucket_that_disagrees_with_its_evidence():
+    """A bucket is re-derived from the row's OWN evidence, not trusted."""
+    row = _row(_pr(9999), conflict=False)
+    row["bucket"] = "re_measure"          # fresh evidence says otherwise
+    row["eligible"] = False
+    assert any("first match" in e for e in
+               mt.validate_triage_rows([row], total_count=1, min_population=1))
+    stale = _row(_pr(9999), conflict=False, surface=mt.SURFACE_GREEN,
+                 stale=True, evidence=STALE_EVIDENCE)
+    assert stale["bucket"] == "re_measure"
+    assert mt.validate_triage_rows([stale], total_count=1,
+                                   min_population=1) == []
+    # A malformed evidence string cannot certify ANY surface-conditioned bucket.
+    broken = _row(_pr(9999), conflict=False)
+    broken["surface_evidence"] = "verdict=GREEN; stale=0"
+    errors = mt.validate_triage_rows([broken], total_count=1, min_population=1)
+    assert any("well-formed" in e for e in errors), errors
 
 
 @pytest.mark.parametrize("draft,conflict", [
@@ -2276,6 +2558,8 @@ def test_validate_rejects_a_null_owner_from_a_null_evidence_field(monkeypatch):
          "head": {"ref": "fix/2-a"}}])
     monkeypatch.setattr(mt, "collect_triage_conflicts",
                         lambda *a, **k: {1: (False, [])})
+    monkeypatch.setattr(mt, "collect_triage_stale_surface",
+                        lambda *a, **k: {1: FRESH_EVIDENCE})
     monkeypatch.setattr(mt, "open_pr_total", lambda: 1)
     monkeypatch.setattr(mt, "load_triage_owner_evidence",
                         lambda *a, **k: {1: {"owner": None,
@@ -2288,7 +2572,7 @@ def test_validate_rejects_a_null_owner_from_a_null_evidence_field(monkeypatch):
 def test_validate_rejects_an_unknown_bucket_as_non_clean():
     row = mt.build_triage_row(_pr(), conflict=mt.UNKNOWN)
     errors = mt.validate_triage_rows([row], total_count=1, min_population=1)
-    assert any("is not one of the six buckets" in e for e in errors), errors
+    assert any("is not one of the buckets" in e for e in errors), errors
 def test_validate_rejects_a_bucket_that_is_not_the_first_match():
     row = mt.build_triage_row(_pr(9999), conflict=True)
     row["bucket"] = "eligible"          # a lie about a conflicted PR
@@ -2316,7 +2600,7 @@ def test_validate_rejects_owner_equal_to_the_shared_author_login():
 
 
 def test_validate_accepts_a_session_owner_and_independent_booleans():
-    row = mt.build_triage_row(
+    row = _row(
         _pr(5136, draft=True), conflict=True, conflicted_paths=["a.txt"],
         owner="session:0123456789ab",
         owner_evidence="branch=fix/20-h; session=0123456789ab; first_msg=...")
@@ -2325,7 +2609,7 @@ def test_validate_accepts_a_session_owner_and_independent_booleans():
 
 
 def test_validate_reconciles_counts_and_enforces_the_population_floor():
-    rows = [mt.build_triage_row(_pr(), conflict=False)]
+    rows = [_row(_pr(), conflict=False)]
     assert any("reconcile" in e
                for e in mt.validate_triage_rows(rows, total_count=5,
                                                 min_population=1))
@@ -2357,6 +2641,8 @@ def test_triage_issues_no_mutating_request(monkeypatch):
 
     monkeypatch.setattr(mt.subprocess, "run", fake_run)
     monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: {})
+    monkeypatch.setattr(mt, "collect_triage_stale_surface",
+                        lambda *a, **k: {i: FRESH_EVIDENCE for i in range(1, 13)})
     monkeypatch.setattr(mt, "open_pr_total", lambda: 12)
     monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
     rows, total = mt._triage_rows()
@@ -2398,8 +2684,8 @@ def test_triage_refuses_a_truncated_enumeration(monkeypatch):
 
 
 def test_validate_binds_dead_weight_evidence_to_the_verified_claim():
-    row = mt.build_triage_row(_pr(5190), conflict=False,
-                              dead_weight={5190: "#3405 (close_failed_at on main)"})
+    row = _row(_pr(5190), conflict=False,
+               dead_weight={5190: "#3405 (close_failed_at on main)"})
     assert mt.validate_triage_rows([row], total_count=1, min_population=1) == []
     row["superseded_by"] = "#9999 (a total lie)"
     assert any("does not match the verified evidence" in e
@@ -2606,10 +2892,41 @@ def test_committed_worklist_findings_are_derivable():
                                 or mt.UNKNOWN)
         assert row["owner_evidence"] == (
             evidence[row["number"]].get("owner_evidence") or mt.UNKNOWN)
+        row_surface, row_stale = mt.surface_from_evidence(
+            row["surface_evidence"])
         assert row["bucket"] == mt.classify_bucket(
             row["number"], draft=row["draft"], conflict=row["conflict"],
+            surface=row_surface, stale=row_stale,
             hard_stop=mt.HARD_STOP_D12, terminal=mt.TERMINAL_D5,
             dead_weight=mt.DEAD_WEIGHT_EVIDENCE)
+
+
+def test_committed_worklist_carries_the_three_rail_classes():
+    """The artifact must bucket the rail's refusal classes, not just the plan's
+    ownership taxonomy: a stale GREEN surface is `re_measure`, a red/pending
+    surface is `blocked`, and only a fresh green is `eligible`."""
+    payload = _json.loads(WORKLIST_JSON.read_text())
+    rows = payload["rows"]
+    for row in rows:
+        surface, stale = mt.surface_from_evidence(row["surface_evidence"])
+        assert surface != mt.UNKNOWN, row["number"]
+        if row["bucket"] == "re_measure":
+            assert surface == mt.SURFACE_GREEN and stale is True, row["number"]
+            assert ("base_red_started=" in row["surface_evidence"]
+                    or "merge_ref_base=" in row["surface_evidence"])
+        if row["bucket"] == "blocked":
+            assert surface in (mt.SURFACE_RED, mt.SURFACE_PENDING)
+        if row["bucket"] == "eligible":
+            assert surface == mt.SURFACE_GREEN and stale is False
+    findings = payload["findings"]
+    assert findings["re_measure_prs"] == sorted(
+        r["number"] for r in rows if r["bucket"] == "re_measure")
+    assert findings["blocked_prs"] == sorted(
+        r["number"] for r in rows if r["bucket"] == "blocked")
+    owned = sum(1 for r in rows
+                if r["bucket"] not in ("re_measure", "blocked", "eligible"))
+    assert (len(findings["re_measure_prs"]) + len(findings["blocked_prs"])
+            + owned == payload["total_count"])
 
 
 def test_committed_no_languish_records_its_window():
@@ -2639,6 +2956,7 @@ def test_no_languish_rejects_a_flag_that_disagrees_with_the_bucket():
     row = {"number": 0, "bucket": "eligible", "draft": False,
            "hard_stop": False, "terminal_decision": False,
            "conflict": False, "superseded_by": mt.UNKNOWN,
+           "surface_evidence": FRESH_EVIDENCE,
            "moved_in_window": True}
     items = [dict(row, number=i) for i in range(10)]
     items.append(dict(row, number=10, moved_in_window=False, draft=True))
@@ -2691,6 +3009,7 @@ def test_no_languish_allows_overlapping_superseded_by_on_a_higher_bucket():
     rows = [{"number": i, "bucket": "eligible", "draft": False,
              "hard_stop": False, "terminal_decision": False,
              "conflict": False, "superseded_by": mt.UNKNOWN,
+             "surface_evidence": FRESH_EVIDENCE,
              "moved_in_window": True} for i in range(1, 11)]
     rows.append({"number": 5136, "bucket": "hard_stop", "draft": False,
                  "hard_stop": True, "terminal_decision": False,
@@ -2809,6 +3128,8 @@ def test_cli_triage_live_emits_the_reconcilable_envelope(monkeypatch, capsys):
     monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
     monkeypatch.setattr(mt, "collect_triage_conflicts",
                         lambda *a, **k: {i: (False, []) for i in range(1, 13)})
+    monkeypatch.setattr(mt, "collect_triage_stale_surface",
+                        lambda *a, **k: {i: FRESH_EVIDENCE for i in range(1, 13)})
     monkeypatch.setattr(mt, "open_pr_total", lambda: 12)
     monkeypatch.setattr(mt, "load_triage_owner_evidence", lambda *a, **k: {})
     assert mt._cli_triage([]) == 0

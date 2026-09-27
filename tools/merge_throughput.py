@@ -65,6 +65,23 @@ STRICT_GREEN = frozenset({"success"})
 IN_FLIGHT_STATUSES = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
+#: The rail's MEASURING predicate (admin-merge.sh MEASURING_CONC). Only a
+#: COMPLETED check run with one of these conclusions actually EXERCISED
+#: something, so only these may set the evaluated surface's last-production
+#: time that §4.6's staleness comparison reads. A `skipped`/`cancelled`/
+#: `neutral`/`stale` run measured NOTHING and must not advance the anchor —
+#: letting one advance it moved the anchor forward past the real evaluation and
+#: made an uncovered base red compare as already-measured (#1353).
+MEASURING_CONCLUSIONS = frozenset(
+    {"success", "failure", "timed_out", "action_required"}
+)
+#: The placeholder identity for an unnamed check run. The rail CLASSIFIES an
+#: unnamed run rather than dropping it (a dropped red could vanish from the
+#: surface), and this keeps the same property here.
+UNNAMED_CHECK = "(unnamed check)"
+#: The evaluated-tree verdict tokens — the rail's three refusal classes.
+SURFACE_GREEN, SURFACE_RED, SURFACE_PENDING = "GREEN", "RED", "PENDING"
+_SURFACE_VERDICTS = (SURFACE_GREEN, SURFACE_RED, SURFACE_PENDING)
 
 # Structural population floor (#5215 cycle 9): a self-consistent 1-item read
 # must fail, so the check derives its own total_count and requires it to clear
@@ -127,14 +144,26 @@ BUCKET_ORDER = (
     "dead_weight",        # E3 — the work already landed; nothing to merge
     "draft",              # E4 — contract-bound verbatim preservation
     "conflicting",        # git merge-tree conflict
-    "eligible",           # can enter the merge queue
+    "blocked",            # rail class (b): the PR's OWN surface is red/pending
+    "re_measure",         # rail class (c): a stale GREEN surface (§4.6/§4.7)
+    "eligible",           # rail class (a) ACCEPT: green, fresh, conflict-free
 )
 
 #: The EXACT row schema. `--exclude` may name only keys from this set.
+#:
+#: `surface_evidence` is the post-spec addition the rail's THREE refusal classes
+#: (ACCEPT / BLOCK / RE-MEASURE) require. The plan's six buckets were an
+#: ownership taxonomy in which `eligible` never asserted the rail would take
+#: the PR; the orchestrator's third class does, so bucketing a stale GREEN
+#: surface cannot be done without also deciding whether the surface is green —
+#: and that decision, with its timestamp evidence, must travel ON the row.
+#: `blocked` (class b, "the correct refusal, not itself a bug") is the other
+#: half: without it a red-surface PR would fall through to `eligible`, which no
+#: longer means what the worklist says it means.
 TRIAGE_SCHEMA_KEYS = (
     "number", "bucket", "eligible", "conflict", "conflicted_paths",
-    "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
-    "owner_evidence", "owning_issue",
+    "superseded_by", "surface_evidence", "draft", "hard_stop",
+    "terminal_decision", "owner", "owner_evidence", "owning_issue",
 )
 
 #: E7 — HARD-STOP surfaces. This is D12's DECISION QUEUE (owner Daniel, by
@@ -1744,9 +1773,12 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         # `bucket:"draft"` (or `classification:"draft"`) with `draft:false`
         # and hide a moveless PR.
         if "bucket" in row:
+            row_surface, row_stale = surface_from_evidence(
+                row.get("surface_evidence"))
             expected = classify_bucket(
                 row.get("number"), draft=row.get("draft"),
-                conflict=row.get("conflict"), hard_stop=HARD_STOP_D12,
+                conflict=row.get("conflict"), surface=row_surface,
+                stale=row_stale, hard_stop=HARD_STOP_D12,
                 terminal=TERMINAL_D5, dead_weight=DEAD_WEIGHT_EVIDENCE)
             if row["bucket"] != expected:
                 print(f"2: no-languish row {row.get('number')} bucket "
@@ -1945,6 +1977,7 @@ _FIXTURE_TRIAGE_ROWS = [{
     "conflict": False,
     "conflicted_paths": [],
     "superseded_by": UNKNOWN,
+    "surface_evidence": "verdict=GREEN; stale=0; produced=2026-09-27T00:00:00Z",
     "draft": False,
     "hard_stop": False,
     "terminal_decision": False,
@@ -2262,8 +2295,26 @@ def _owning_issue(pr: dict) -> str:
     return match.group(1) if match else UNKNOWN
 
 
-def classify_bucket(number, *, draft, conflict, hard_stop=None,
-                    terminal=None, dead_weight=None):
+def _surface_bucket(surface, stale):
+    """The rail's refusal class (a)/(b)/(c) as a bucket, or UNKNOWN.
+
+    Both observations are REQUIRED TOGETHER: a GREEN surface with no staleness
+    verdict is UNKNOWN, never `eligible` — the whole point of the class is that
+    green alone is not sufficient, and an UNOBSERVED surface must not read as
+    "nothing to worry about" (the plan's core discipline).
+    """
+    if surface in (SURFACE_RED, SURFACE_PENDING):
+        return "blocked"
+    if surface == SURFACE_GREEN:
+        if stale is True:
+            return "re_measure"
+        if stale is False:
+            return "eligible"
+    return UNKNOWN
+
+
+def classify_bucket(number, *, draft, conflict, stale=None, surface=None,
+                    hard_stop=None, terminal=None, dead_weight=None):
     """FIRST-MATCH-WINS bucket, in BUCKET_ORDER.
 
     `draft`/`conflict` are tri-state. Only a POSITIVE observation may place a
@@ -2289,15 +2340,16 @@ def classify_bucket(number, *, draft, conflict, hard_stop=None,
     # to `eligible` (the plan's "empty is UNKNOWN, never 0" rule).
     if conflict is True:
         return "conflicting"
-    if conflict is False:
-        return "eligible"
-    return UNKNOWN
+    if conflict is not False:
+        return UNKNOWN
+    return _surface_bucket(surface, stale)
 
 
 def build_triage_row(pr, *, conflict=UNKNOWN, conflicted_paths=None,
                      owner=UNKNOWN, owner_evidence=UNKNOWN,
                      owning_issue=UNKNOWN, hard_stop=None, terminal=None,
-                     dead_weight=None):
+                     dead_weight=None, surface=None, stale=None,
+                     surface_evidence=""):
     """Exactly TRIAGE_SCHEMA_KEYS. A judgement not made is UNKNOWN, not False."""
     number = _as_int(pr.get("number"))
     draft = pr.get("draft")
@@ -2308,6 +2360,7 @@ def build_triage_row(pr, *, conflict=UNKNOWN, conflicted_paths=None,
     term_set = TERMINAL_D5 if terminal is None else terminal
     dead_set = DEAD_WEIGHT_EVIDENCE if dead_weight is None else dead_weight
     bucket = classify_bucket(number, draft=draft_tri, conflict=conflict,
+                             stale=stale, surface=surface,
                              hard_stop=hard_stop, terminal=terminal,
                              dead_weight=dead_weight)
     # `superseded_by` carries the evidence the BUCKET decision used — a caller
@@ -2322,6 +2375,7 @@ def build_triage_row(pr, *, conflict=UNKNOWN, conflicted_paths=None,
         "conflict": conflict,
         "conflicted_paths": list(conflicted_paths or []),
         "superseded_by": superseded,
+        "surface_evidence": surface_evidence,
         "draft": draft_tri,
         "hard_stop": number in hard_set if number is not None else UNKNOWN,
         "terminal_decision": number in term_set if number is not None else UNKNOWN,
@@ -2364,10 +2418,24 @@ def validate_triage_rows(rows, *, total_count=None,
         if row["bucket"] not in BUCKET_ORDER:
             errors.append(
                 f"row {row['number']}: bucket {row['bucket']!r} is not one of "
-                f"the six buckets (an unobserved row is non-clean)"
+                f"the buckets (an unobserved row is non-clean)"
+            )
+        # The surface dimension travels ON the row as `surface_evidence`, and
+        # the bucket is re-derived from what that evidence SAYS — so a bucket
+        # that disagrees with its own evidence is caught here, not trusted.
+        evidence_text = row["surface_evidence"]
+        if not isinstance(evidence_text, str):
+            errors.append(
+                f"row {row['number']}: surface_evidence is not a string")
+        evidence_surface, evidence_stale = surface_from_evidence(evidence_text)
+        if evidence_surface is UNKNOWN:
+            errors.append(
+                f"row {row['number']}: surface_evidence is not a well-formed "
+                f"observation ({evidence_text!r})"
             )
         expected = classify_bucket(
             row["number"], draft=row["draft"], conflict=row["conflict"],
+            surface=evidence_surface, stale=evidence_stale,
             hard_stop=hard_stop, terminal=terminal, dead_weight=dead_weight,
         )
         if expected != row["bucket"]:
@@ -2486,6 +2554,286 @@ def validate_triage_rows(rows, *, total_count=None,
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Task 5 — the evaluated-tree surface (the rail's §4.5/§4.6/§4.7).
+#
+# THE RAIL IS AUTHORITATIVE for these judgements (plan I6). `admin-merge.sh`
+# reads the PR's evaluated-tree surface, refuses at §4.5 when that surface is
+# red, and then refuses at §4.6/§4.7 when the surface is GREEN but a base red
+# began after it was produced (a STALE GREEN), or when the merge ref's base
+# parent lags a red base. These helpers OBSERVE that rule; they never override
+# the rail, and the token sets above are pinned against it by a parity test so
+# the two cannot drift.
+# ---------------------------------------------------------------------------
+
+def classify_surface_runs(runs):
+    """(verdict, anchor_iso, reds, pending) for one check-run surface.
+
+    Mirrors the rail's check-surface probe (#1261), which is the AUTHORITY for
+    the RE-MEASURE class:
+
+    * the newest attempt per `(app.slug, name)` decides — a re-run leaves the
+      OLD failing run in place beside the new one, so an ungrouped read reports
+      a red GitHub itself shows green;
+    * an UNRESOLVED identity (an unorderable multi-attempt group) is UNKNOWN,
+      never GREEN — the fail-closed direction the rail takes for a surface it
+      cannot read;
+    * a COMPLETED run is non-red only for a conclusion in
+      `NON_RED_CONCLUSIONS`; every OTHER spelling, including a null one, is RED;
+    * an in-flight status is PENDING, never red;
+    * only a MEASURING conclusion may set the surface's last-production time,
+      and a run that exercised nothing must not advance it.
+
+    Grouping deliberately mirrors the rail's `(app, name)` rather than the
+    instrument's finer `(app, workflow, name)`: the rail DEFINES this refusal
+    class, and the coarser grouping can only offer a stale surface MORE often,
+    which is the safe direction for a re-measure request.
+    """
+    if not isinstance(runs, list):
+        return UNKNOWN, None, [], 0
+    groups: dict = {}
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        name = str(run.get("name") or "") or UNNAMED_CHECK
+        groups.setdefault((_app_slug(run), name), []).append(run)
+    if not groups:
+        return UNKNOWN, None, [], 0
+    reds = []
+    pending = 0
+    anchor = None
+    for key, group in groups.items():
+        newest = _newest(group)
+        if newest is None:
+            return UNKNOWN, None, [], 0
+        status = str(newest.get("status") or "")
+        concl = str(newest.get("conclusion") or "")
+        if status != "completed":
+            if status in IN_FLIGHT_STATUSES:
+                pending += 1
+            elif concl not in NON_RED_CONCLUSIONS:
+                reds.append((key[1], str(newest.get("started_at") or "")))
+            continue
+        completed = str(newest.get("completed_at") or "")
+        parsed = _parse_ts(completed)
+        if concl in MEASURING_CONCLUSIONS and parsed is not None:
+            if anchor is None or parsed > anchor[0]:
+                anchor = (parsed, completed)
+        if concl not in NON_RED_CONCLUSIONS:
+            reds.append((key[1], str(newest.get("started_at") or "")))
+    if reds:
+        verdict = SURFACE_RED
+    elif pending:
+        verdict = SURFACE_PENDING
+    else:
+        verdict = SURFACE_GREEN
+    return verdict, (anchor[1] if anchor else None), reds, pending
+
+
+def surface_probe(sha: str):
+    """`classify_surface_runs` over the check runs attached to `sha`."""
+    runs, _total = fetch_check_runs(sha)
+    if runs is UNKNOWN:
+        return UNKNOWN, None, [], 0
+    return classify_surface_runs(runs)
+
+
+def base_blocking_reds():
+    """(main_sha, [(job, started_iso)]) — §4.6's clock, or UNKNOWN.
+
+    An EMPTY red list is a POSITIVE observation: §4.6 is RED-RELATIVE, so a
+    green base has nothing a stale surface could have failed to measure (the
+    rail refuses only on a red, because refusing on movement alone would refuse
+    essentially every open PR). UNKNOWN means the read failed and no staleness
+    judgement is possible.
+    """
+    body = _gh_api(f"repos/{OWNER_REPO}/commits/main")
+    if body is UNKNOWN or not isinstance(body, dict):
+        return UNKNOWN
+    sha = body.get("sha")
+    if not _is_sha(sha):
+        return UNKNOWN
+    verdict, _anchor, reds, _pending = surface_probe(sha)
+    if verdict is UNKNOWN:
+        return UNKNOWN
+    return sha, reds
+
+
+def merge_ref_base_parent(pr: dict):
+    """The base commit `refs/pull/<N>/merge` was computed against, or UNKNOWN.
+
+    §4.7's second, independent signal: the merge ref is a merge commit whose
+    FIRST parent is the base it evaluated against. `merge_commit_sha` is NULL
+    for a conflicted PR (there is no computed tree), which is UNKNOWN here —
+    the `conflicting` bucket already owns that row.
+    """
+    merge_sha = pr.get("merge_commit_sha")
+    if not _is_sha(merge_sha):
+        return UNKNOWN
+    body = _gh_api(f"repos/{OWNER_REPO}/commits/{merge_sha}")
+    if body is UNKNOWN or not isinstance(body, dict):
+        return UNKNOWN
+    parents = body.get("parents")
+    if not isinstance(parents, list) or not parents:
+        return UNKNOWN
+    first = parents[0]
+    if not isinstance(first, dict) or not _is_sha(first.get("sha")):
+        return UNKNOWN
+    return first["sha"]
+
+
+def _stale_by_clock(anchor_iso, clock):
+    """(stale, red_job, red_started) for a GREEN surface against base reds.
+
+    `clock` is `[(parsed_start, job, started_iso)]`. §4.6 refuses when ANY
+    base red's run STARTED after the surface was last produced; an UNREADABLE
+    base-red start is a red the rail cannot show the surface measured, so it
+    refuses too (the unreadable-time arm), never passes. An EMPTY surface
+    anchor (no MEASURING completed check) is §4.6's fail-closed arm.
+    """
+    if not clock:
+        return False, None, None
+    anchor = _parse_ts(anchor_iso)
+    if anchor is None:
+        return True, clock[0][1], clock[0][2]
+    for parsed, job, started in clock:
+        if parsed is None or parsed > anchor:
+            return True, job, started
+    return False, None, None
+
+
+def build_surface_evidence(verdict, *, produced=None, stale=None,
+                           base_red_started=None, red=None,
+                           merge_ref_base=None, base_head=None,
+                           reds=(), pending=0):
+    """The canonical `surface_evidence` string for one row.
+
+    The FIRST field is always `verdict=<GREEN|RED|PENDING>` so a reader can
+    re-derive the surface-conditioned bucket; the rest is the timestamp/parent
+    evidence that puts the row in, or out of, `re_measure`/`blocked`. A GREEN
+    surface ALWAYS carries a `stale=0|1` verdict — a green with no staleness
+    verdict is not a state this producer can emit.
+    """
+    parts = [f"verdict={verdict}"]
+    if verdict == SURFACE_GREEN:
+        parts.append(f"stale={1 if stale is True else 0}")
+        parts.append(f"produced={produced}" if produced
+                     else "no_measuring_check=1")
+        if stale is True:
+            if base_red_started:
+                parts.append(f"base_red_started={base_red_started}")
+            if red:
+                parts.append(f"red={red}")
+            if merge_ref_base:
+                parts.append(f"merge_ref_base={merge_ref_base}")
+            if base_head:
+                parts.append(f"base_head={base_head}")
+    else:
+        if reds:
+            parts.append("reds=" + ",".join(sorted(str(r) for r in reds)))
+        if pending:
+            parts.append(f"pending={pending}")
+    return "; ".join(parts)
+
+
+def surface_from_evidence(evidence):
+    """(verdict, stale) parsed from a row's `surface_evidence`, else UNKNOWN.
+
+    Strict on purpose: a hand-written or truncated evidence string cannot
+    validate, and a GREEN with no `stale` field is UNKNOWN — the whole point
+    of the class is that green alone is not sufficient.
+    """
+    if not isinstance(evidence, str) or not evidence.strip():
+        return UNKNOWN, UNKNOWN
+    fields: dict = {}
+    for part in evidence.split(";"):
+        if "=" not in part:
+            return UNKNOWN, UNKNOWN
+        key, value = part.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if not key or key in fields:
+            return UNKNOWN, UNKNOWN
+        fields[key] = value
+    verdict = fields.get("verdict")
+    if verdict not in _SURFACE_VERDICTS:
+        return UNKNOWN, UNKNOWN
+    if verdict != SURFACE_GREEN:
+        return verdict, False
+    stale = fields.get("stale")
+    if stale not in ("0", "1"):
+        return UNKNOWN, UNKNOWN
+    if stale == "0" and not (fields.get("produced")
+                             or fields.get("no_measuring_check") == "1"):
+        return UNKNOWN, UNKNOWN
+    if stale == "1" and not (fields.get("base_red_started")
+                             or fields.get("merge_ref_base")
+                             or fields.get("no_measuring_check") == "1"):
+        return UNKNOWN, UNKNOWN
+    return verdict, stale == "1"
+
+
+def collect_triage_stale_surface(prs, base=None, bound=None):
+    """{number: surface_evidence} for every open PR — §4.6 and §4.7.
+
+    Each value is the canonical `surface_evidence` string; `stale` and the
+    surface verdict are read back from it by `surface_from_evidence`, so the
+    row and its evidence have ONE source of truth. Returns `None` when the
+    base or ANY PR surface could not be read: a partial staleness
+    classification is exactly the stale-green this bucket exists to catch, so
+    the caller refuses rather than emitting a mislabelled row.
+    """
+    if base is None:
+        base = base_blocking_reds()
+    if base is UNKNOWN:
+        return None
+    base_sha, base_reds = base
+    if not isinstance(prs, list) or not _is_sha(base_sha):
+        return None
+    bound = validate_sweep_concurrency(bound)
+    clock = [(_parse_ts(started), job, started) for job, started in base_reds]
+    candidates = [pr for pr in prs if isinstance(pr, dict)]
+
+    def probe(pr):
+        number = _as_int(pr.get("number"))
+        head = (pr.get("head") or {}).get("sha")
+        if number is None or not _is_sha(head):
+            return number, UNKNOWN, None, [], 0, UNKNOWN
+        verdict, anchor, reds, pending = surface_probe(head)
+        parent = UNKNOWN
+        # §4.7 costs a call, so it is probed only when the base is red AND
+        # §4.6 did not already refuse — it is the second, independent signal.
+        if verdict == SURFACE_GREEN and clock:
+            stale_46, _job, _started = _stale_by_clock(anchor, clock)
+            if stale_46 is not True:
+                parent = merge_ref_base_parent(pr)
+        return number, verdict, anchor, reds, pending, parent
+
+    out: dict = {}
+    for number, verdict, anchor, reds, pending, parent in bounded_map(
+            probe, candidates, bound):
+        if number is None or verdict is UNKNOWN:
+            return None
+        if verdict != SURFACE_GREEN:
+            out[number] = build_surface_evidence(
+                verdict, reds=[name for name, _started in reds],
+                pending=pending)
+            continue
+        stale, red_job, red_started = _stale_by_clock(anchor, clock)
+        if (stale is False and _is_sha(parent) and parent != base_sha):
+            # §4.7: the merge ref was computed against a base that does not
+            # contain the current base's red — the green was never measured
+            # against the tree the merge will produce.
+            out[number] = build_surface_evidence(
+                verdict, produced=anchor, stale=True,
+                merge_ref_base=parent, base_head=base_sha)
+            continue
+        out[number] = build_surface_evidence(
+            verdict, produced=anchor, stale=stale,
+            base_red_started=(red_started if stale else None),
+            red=(red_job if stale else None))
+    return out
+
+
 def collect_triage_conflicts(prs=None, bound=None):
     """{pr number: (conflict, conflicted_paths)} over every open PR.
 
@@ -2587,6 +2935,14 @@ def _triage_rows(conflicts=None, owners=None):
     # an unread conflict dimension from validating clean.
     if conflicts is None:
         return None, 0
+    # The surface dimension is swept over the SAME population. A failed read
+    # refuses the whole triage: a partial staleness classification is exactly
+    # the stale-green this bucket exists to catch.
+    surfaces = collect_triage_stale_surface(body)
+    if surfaces is None:
+        print("UNKNOWN: could not classify the evaluated-tree surfaces",
+              file=sys.stderr)
+        return None, 0
     # An independent total, when we are the live reader: a partial enumeration
     # that reconciles only against itself is the silent-truncation failure.
     total = len(body)
@@ -2610,10 +2966,17 @@ def _triage_rows(conflicts=None, owners=None):
         # A JSON `null` must become UNKNOWN, not a `None` that reads as a label.
         owner = evidence.get("owner") or UNKNOWN
         owner_evidence = evidence.get("owner_evidence") or UNKNOWN
+        # The surface verdict and its staleness are read back from the ONE
+        # evidence string, so the row cannot disagree with its own evidence.
+        surface_evidence = surfaces.get(number, "")
+        surface, stale = surface_from_evidence(surface_evidence)
         rows.append(build_triage_row(
             pr,
             conflict=conflict,
             conflicted_paths=paths,
+            surface=surface,
+            stale=stale,
+            surface_evidence=surface_evidence,
             owner=owner,
             owner_evidence=owner_evidence,
         ))
