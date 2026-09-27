@@ -21,30 +21,83 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 ## ⛔ THE STORAGE UNIT IS BYTES — decision, owner, 2026-09-26 (`#4495`)
 
-**Read this before the rest of the document.** The body below is written in the **node** unit (`~25,000 quota nodes`, `140 MB`, `$73/GB`). The owner ruling of 2026-09-26 keeps the *bytes* and retires the **node as the customer-facing unit**:
+**Read this before the rest of the document.** The body below is written in the **node** unit (`~25,000 quota
+nodes`, `140 MB`, `$73/GB`, per-node byte constants). The owner ruling of 2026-09-26 keeps the *bytes* and retires
+the **node as the customer-facing unit**:
 
-- **Storage is billed in MB/GB**, as both our cost input **and** the customer-facing unit — *"migrate away from counting nodes and start counting in mb/gb for storage (both as a cost input for us and customer facing bill them per mb/gb as they understand that)"*.
-- **Exceeding the storage allowance is PURCHASED OVERAGE, not refusal** — consistent with the 22 September ruling that tiers price *features*, never refusal.
-- **Overage is bought with PREPAID CREDITS**, not a postpaid "max spend" approval — the owner's stated reason is cashflow.
+- **Storage is billed in MB/GB**, as both our cost input **and** the customer-facing unit — *"migrate away from
+  counting nodes and start counting in mb/gb for storage (both as a cost input for us and customer facing bill them
+  per mb/gb as they understand that)"*.
+- **Exceeding the storage allowance is PURCHASED OVERAGE, not refusal** — consistent with the 22 September ruling
+  that tiers price *features*, never refusal.
+- **Overage is bought with PREPAID CREDITS**, not a postpaid "max spend" approval — the owner's stated reason is
+  cashflow.
 - The tier carries a **starter amount** of storage and usage; the subscription itself is priced on **features**.
+- **Prices are NOT set by this document or by this ruling.** The owner *"calibrat[es] after the beta launch"*, from
+  measured consumption.
 
-**Why the node unit is not merely deprecated but replaced:** a node count **never shrinks**, so a full customer stayed full permanently (the P0 in `#4495` was 24,978/25,000 with 16 points of headroom and a whole-capture refusal). A byte allowance has the shape of the flow allowance — **consumed, paid for, and reset by purchase** — so it cannot produce a "paid, full and permanently refused" customer. The ruling therefore does **not** extend the never-refusal ruling to the node cap; it **removes the unit the question was about**.
+**⚠️ Why the node unit is not merely deprecated but replaced — and what actually removes the P0.** The stored data
+*"does not shrink back on its own"* (the ruling's own qualifier; a node count does fall when nodes are deleted,
+superseded or purged), so a customer who filled the stock cap stayed full **without doing anything further** — the
+P0 in `#4495` was **24,978 of 25,000, i.e. 22 points of headroom**, and a later capture in the same window was
+refused outright at **24,984 of 25,000 (16 points)** with no partial acceptance.
 
-**Measured basis, unchanged (2026-09-25, live graph — keep these, they are the numbers the allowance must be denominated in):**
+⇒ **What removes the permanent-refusal state is the PURCHASE PATH, not the unit.** A byte allowance with no overage
+— or a customer who declines to buy — refuses exactly as the node cap did. The ruling therefore does **not** extend
+the never-refusal ruling to the node cap; it **removes the unit the question was about**, and pairs the new unit with
+a way to buy more. Keeping those two halves distinct matters: the guarantee comes from the overage path.
+
+**Measured basis (2026-09-25, live graph).** These are the numbers the allowance must be denominated in, and **each
+per-node figure states its base and its denominator**, because that pair is where this document has already erred
+twice:
 
 | quantity | measured | note |
 |---|---|---|
 | resident nodes | **89,701** | `MATCH (n)` |
-| nodes the quota predicate counts | **24,978** | **3.59× divergence** — the denominator trap |
+| nodes the quota predicate counts | **24,978** | **3.59× divergence** from the resident count — the denominator trap |
 | `GRAPH.MEMORY USAGE` | **143 MB** (indices 46 MB) | sampling estimate, `SAMPLES`=100 |
-| per **capped** node | **6,003 B** | against the **1,024 B** the pricing model declares |
-| per **resident** node | **1,594 B** | the figure that sank the earlier 5.6 KB claim |
 
-⚠️ **Every node-denominated figure in this document must carry its denominator.** The 6,003 B and the 1,594 B differ **3.8×** on the *same* graph purely by choice of denominator — that is the error class `§1`'s correction note and `#4333` exist to catch.
+**Per-node figures must not be quoted without a base.** Taking the ruling's headline reading (143 MiB):
 
-**Status of the migration:** the byte meter is built (`tortoise/graph_storage.py`, `#5331`); the byte gate ships **off by default** (no `max_storage_bytes` configured ⇒ the node cap still enforces), and enabling an allowance **requires the byte meter to be wired into the gate first** — the gate is deliberately fail-closed on a missing reading. Prices are **not** set by this document: the owner calibrates from consumption **after** the beta launch.
+- **6,003 B per *capped* node** (143 MiB ÷ 24,978)
+- **1,672 B per *resident* node** (143 MiB ÷ 89,701)
 
-> **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) makes the cap permanent while the number it counts never shrinks, and (c) is a unit customers cannot reason about.
+⚠️ **The ruling records `1,594 B` per resident node, and that figure is on a DIFFERENT base** — it is
+143 **decimal** MB ÷ 89,701. So the ruling's two per-node numbers (`6,003` and `1,594`) differ by **3.77×**, not by
+the **3.59×** the denominators alone imply, precisely because MiB and decimal MB were mixed. **On one base the pair
+is either `6,003 / 1,672` (MiB) or `5,725 / 1,594` (decimal)** — at most two of `{143 MB, 6,003 B, 1,594 B}` can be
+true at once. The *decision* is untouched by this (bytes remain the unit); the *derivation* is corrected here so the
+error is not propagated into the allowance.
+
+⚠️ **This block SUPERSEDES the body's older figures.** §3 and §12 read **141 MB** and **45 MB** of indices where this
+block reads **143 MB / 46 MB**, and §13's issue-map row concludes *"~3 KB per node (140 MB ÷ ~45k total nodes)"* —
+a **third** denominator (~45k, and a different residency set). The **`~3 KB` estimate is superseded by this block's
+`1,672 B` per resident node**; the figures are not interchangeable and the `~45k` node count is not re-measured here.
+§13's row carries the earlier denominator correction (the retracted 5.6 KB claim); **this block, not §1, is the
+precedent for the denominator error class** — §1 corrects a *growth-horizon* error, a different mistake.
+
+**⛔ Status of the implementation — read this as FORWARD-LOOKING, not shipped.** Nothing in the byte path is on
+`main` today:
+
+- `tortoise/graph_storage.py` is **not on `main`** (nor on this document's own revision pin `c79ba1cf2`). It exists
+  only on the **unmerged** branch `feat/5331-graph-byte-meter` (PR #5696). *"Built"* is true of an open PR only.
+- **There is no byte gate on `main`.** The gate — and with it the `max_storage_bytes` allowance key — is the
+  **separate**, also-unmerged branch `feat/5331-node-to-byte-cap`. The key is therefore **absent on `main`** (and
+  absent from the meter branch), but it is **not absent from the repository**: it is written in `tortoise/` on that
+  cap branch.
+- **The meter is measurement-only and FAIL-SOFT** — its own docstring is explicit: *"NOT A DIAL. Nothing here
+  prices, caps, tiers, refuses or throttles. It is the instrument, not the setting (#5331 is measurement only)"*,
+  and *"FAIL-SOFT … never raise"*. Do not describe the meter as fail-closed; the **fail-closed** behaviour belongs to
+  the (unwritten) **gate**, which refuses to enforce a configured allowance it cannot measure.
+
+⇒ **A requirement on the not-yet-written gate, not a shipped default:** the byte meter must be wired into the gate
+**before** any allowance is configured, because a gate that is fail-closed on a missing reading would otherwise 500
+every points-gated write. That ordering is a constraint on the work, not a statement of what exists.
+
+> **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the
+> customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node
+> accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) never shrinks on its
+> own while the number it counts does, and (c) is a unit customers cannot reason about.
 
 ---
 

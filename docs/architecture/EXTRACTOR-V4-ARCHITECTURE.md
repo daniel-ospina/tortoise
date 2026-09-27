@@ -20,20 +20,39 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 
 ## ⛔ USAGE IS DENOMINATED IN TOKENS, AND OVERAGE IS PURCHASED — decision, owner, 2026-09-26 (`#4495`)
 
-**Read this before the rest of the document.** This document is about the *pipeline*; it is silent on **what extraction costs the customer**, and that silence is now filled by a ruling:
+**Read this before the rest of the document.** This document is about the *pipeline*; it is silent on **what
+extraction costs the customer**, and that silence is now filled by a ruling:
 
-- **Extraction usage is counted in TOKENS**, and a tier carries a **starter number of tokens**. *"similar for usage, we give them a number of 'tokens' but if they use too much, they have to purchase extraction overage."*
-- **Extraction overage is PURCHASED**, with **prepaid credits** (the owner's reason is cashflow, in preference to approving a postpaid maximum spend).
-- The subscription is priced on **features**; storage is billed separately in **MB/GB** — see the decision block in `STORAGE-ARCHITECTURE.md`.
-- Prices are **not** set here: the owner *"calibrat[es] after the beta launch"*, from measured consumption.
+- **Extraction usage is counted in TOKENS**, and a tier carries a **starter number of tokens**. *"similar for usage,
+  we give them a number of 'tokens' but if they use too much, they have to purchase extraction overage."*
+- **Extraction overage is PURCHASED**, with **prepaid credits** (the owner's reason is cashflow, in preference to
+  approving a postpaid maximum spend).
+- The subscription is priced on **features**; storage is billed separately in **MB/GB** — see the decision block in
+  `STORAGE-ARCHITECTURE.md`.
+- **Prices are NOT set here.** The owner *"calibrat[es] after the beta launch"*, from measured consumption.
 
-**What this means for this document's own design work.** The tokens are the **extraction** lane's workload — the LLM work this architecture specifies — so any change that alters extraction **volume** (batch size, the S1→S2 step count, the VET pass, per-item vs per-batch judgment) now moves a **customer-visible meter**, not merely a cost. That is a reason to prefer measurable steps over inferred ones: §16.2's rule (a claim must be checkable) is now also a billing surface.
+**What this means for this document's own design work.** The tokens are the **extraction** lane's workload — the LLM
+work this architecture specifies — so any change that alters extraction **volume** (batch size, the S1→S2 step count,
+the VET pass, per-item vs per-batch judgment) now moves a **customer-visible meter**, not merely a cost. That is a
+reason to prefer measurable steps over inferred ones: §16.2's rule (a claim must be checkable) is now also a billing
+surface.
 
-**Where the measurement lives:** `tortoise/metering.py` records `capture_tokens_in`/`capture_tokens_out` on the per-org ledger (`#5045`); the **ask** lane already recorded `ask_tokens_in/out`. **The spend ceiling remains blind to the token columns by construction** — `metering_cohort_spend` and `get_cohort_spend_usd` read **only** `ask_cost_usd` + `capture_cost_usd`, so adding the token counters could not change the cap's behaviour. That is deliberate: this ruling is about the **unit**, and the cap is a separate decision.
+**⛔ Where the measurement is — PLANNED, not present.** The capture lane does **not** record token counters on `main`
+today: the per-org ledger carries `capture_calls` and `capture_cost_usd` only. **`#5045` (PR #5697, unmerged) will
+add `capture_tokens_in`/`capture_tokens_out`**; the **ask** lane already records `ask_tokens_in/out`. When the
+capture columns land, **the spend ceiling stays blind to them by construction** — `metering_cohort_spend` and
+`get_cohort_spend_usd` read **only** `ask_cost_usd` + `capture_cost_usd`, so adding token counters cannot change the
+cap's behaviour. That separation is deliberate: this ruling is about the **unit**, and the cap is a separate decision.
 
-**⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a **post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
+**⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
+seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
+**post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
 
-> **OVERRIDES:** per-node as the customer-facing unit for extraction/usage as well — the extraction dimension is denominated in **tokens** with purchased overage, because per-node accounting cannot express LLM work at all (extraction consumes provider tokens, not graph nodes), and because a unit the customer can reason about is a precondition for selling overage on it.
+> **OVERRIDES:** **prepaid credits** as the overage mechanism, and **`write_ops`** (the current metered-usage unit)
+> as the unit for extraction consumption — replaced by **tokens with purchased extraction overage**, because
+> per-write-op accounting cannot express LLM work at all (extraction consumes provider tokens, not graph writes), and
+> because **prepaid** is against the postpaid metered/auto-billing default the field uses. (Billing LLM work per
+> token is itself the field default, so the marker names the unit we leave *and* the payment shape we depart from.)
 
 ---
 
