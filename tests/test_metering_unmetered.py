@@ -34,8 +34,7 @@ classes so an operator can tell them apart:
     not prove the increment was not written, so the class carries an upper bound
     rather than a false claim made durable.
 
-Most tests NAME the mutation that must make them RED, and each of those was
-verified by reverting the fix in a scratch worktree. A few pin an OUTCOME or a
+Most tests NAME the mutation that must make them RED. A few pin an OUTCOME or a
 layered refusal and SAY SO in place of a mutation clause — where that is the
 case, the layer that owns the mutation is named too.
 """
