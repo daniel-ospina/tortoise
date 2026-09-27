@@ -1765,7 +1765,7 @@ def test_walk_is_judged_edge_only_on_a_wire_complete_org(monkeypatch, tmp_path):
         ("GET", "/api/v1/onboarding/state"): [grandfather] * 40,
     }
     for surface in ("card", "wizard"):
-        obs, ctx, mod = _run_fake_walk(
+        obs, _ctx, mod = _run_fake_walk(
             monkeypatch, tmp_path / surface, plan=plan, surface=surface,
             ui_sequence=[NOT_CONNECTED, NOT_CONNECTED], mcp_tools_call=_MCP_OK)
         by_name = {s.name: s for s in obs.steps}
