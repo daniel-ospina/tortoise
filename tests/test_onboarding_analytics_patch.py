@@ -123,12 +123,13 @@ def test_patch_invalid_harness_or_section_ignored(client, payload):
 
 
 def test_patch_chatgpt_harness_beacon_is_inert(client):
-    """#1701 R2: the wizard's chatgpt tab fires the same copy-attribution
-    PATCH beacon as the other harnesses ({harness:'chatgpt', section:'config'})
-    — the handler accepts it (200) but emits NO artifact_copied event and
-    leaves onboarding state untouched. chatgpt is INTENTIONALLY beacon-less:
-    it has no local skills and never files sessions, so it stays absent from
-    the server analytics vocabulary (_HARNESS_ANALYTICS_VALUES = 6)."""
+    """#1701 R2: the server TOLERATES the chatgpt copy-attribution
+    PATCH beacon ({harness:'chatgpt', section:'config'}) and accepts it (200)
+    while emitting NO artifact_copied event and leaving onboarding state
+    untouched. No client sends it: #4836 removed the last ChatGPT dashboard
+    branch, so there is no ChatGPT copy to attribute. chatgpt stays absent from
+    the server analytics vocabulary (_HARNESS_ANALYTICS_VALUES = 6) and this
+    test now pins the server contract alone — a stray beacon must stay inert."""
     resp = client.patch("/v1/onboarding/state",
                         json={"harness": "chatgpt", "section": "config"})
     assert resp.status_code == 200
