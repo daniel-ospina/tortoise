@@ -53,6 +53,45 @@ def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
 
 
+# #3717: the ingest CLI defaults BOTH output paths relative to the process CWD
+# (tortoise/ingest.py: `--log` events.jsonl, `--out` graph.html). A test that
+# omits one drops an untracked artifact in the CWD (the repo root), dirtying the
+# working tree, racing every other test through one shared path, and risking a
+# swept-up `git add`. Every call site below passes both explicitly into _tmp().
+# This guard fails the offending test if either default name is created or
+# rewritten in the CWD during it, so the leak cannot silently return.
+# (Pass the --out value as a str: argparse scans options before applying
+# type=Path, so a Path value raises TypeError in _parse_optional.)
+_CWD_RELATIVE_DEFAULT_ARTIFACTS = ("graph.html", "events.jsonl")
+
+
+def _artifact_sig(path):
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+@pytest.fixture(autouse=True)
+def _no_cwd_output_default_leak():
+    """#3717 regression guard: no test here may write an ingest CLI default
+    artifact into the CWD instead of an explicit _tmp() path."""
+    cwd = Path.cwd()
+    before = {n: _artifact_sig(cwd / n) for n in _CWD_RELATIVE_DEFAULT_ARTIFACTS}
+    yield
+    after = {n: _artifact_sig(cwd / n) for n in _CWD_RELATIVE_DEFAULT_ARTIFACTS}
+    leaked = sorted(
+        n for n in _CWD_RELATIVE_DEFAULT_ARTIFACTS
+        if after[n] is not None and after[n] != before[n]
+    )
+    assert not leaked, (
+        f"#3717: test leaked ingest CLI default artifact(s) into {cwd}: {leaked}. "
+        "Pass an explicit --out/--log under a temp dir (_tmp(...)) instead of "
+        "relying on the CWD-relative default."
+    )
+
+
 
 def _live_uri(test_graph: str) -> str:
     """The live backend URI with a per-test test-prefixed graph path.
@@ -561,8 +600,10 @@ def test_capture_metadata_creates_document_no_points():
         "---\ntitle: Test\ntopics: licensing, AGPL\nsummary: Compared\n"
         "sessionId: s1\ndoc_status: captured\n---\n\n## User\nDiscuss licensing\n",
         encoding="utf-8")
-    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
-            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--capture-metadata", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     # Verify via live projection
@@ -618,14 +659,17 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
         "---\ntitle: Test2\ntopics: licensing\nsummary: Compared\nsessionId: s2\n---\n\n"
         "## User\nWe should raise B slowly\n## Assistant\nFast raises wreck early buyers\n",
         encoding="utf-8")
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
     # 1. capture-metadata first (should NOT block full later)
     with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log1,
-                            "--capture-metadata", "--point-model", "mock:cheap",
+                            "--out", out, "--capture-metadata",
+                            "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason"]):
         _run_main(None)
     # 2. full ingest on same file → MUST extract (not skipped)
     with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log2,
-                            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]):
+                            "--out", out, "--point-model", "mock:cheap",
+                            "--relation-model", "mock:reason"]):
         _run_main(None)
     # Full ingest should have produced points/events (begin_ingest not blocked)
     lines = [ln for ln in Path(log2).read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -654,8 +698,10 @@ def test_capture_defaults_needs_extraction():
     Path(t).write_text(
         "---\ntitle: CapDefault\ntopics: x\nsummary: y\n---\n\n## User\nhello\n",
         encoding="utf-8")
-    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
-            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--capture-metadata", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     from tortoise.projection import FalkorProjection
@@ -690,8 +736,10 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
         "---\ntitle: NeedsExtract\ntopics: a\n"
         "needs_extraction: true\n---\n\n## User\nImportant decision\n",
         encoding="utf-8")
-    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
-            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--capture-metadata", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     from tortoise.projection import FalkorProjection
@@ -737,7 +785,8 @@ def test_upgrade_on_already_extracted_is_noop():
         )
     finally:
         proj.close()
-    args = ["ingest", str(t), "--db", db, "--log", log, "--upgrade",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out, "--upgrade",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -791,7 +840,8 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     finally:
         proj.close()
     # No positional transcript — the crash path (P0 regression)
-    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -830,7 +880,8 @@ def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
         )
     finally:
         proj.close()
-    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -868,7 +919,8 @@ def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
         )
     finally:
         proj.close()
-    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
