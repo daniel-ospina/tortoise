@@ -1,69 +1,96 @@
 #!/usr/bin/env python3
 """queue_resweep — re-request queue entry for the PRs that are already ready.
 
-WHY THIS EXISTS
-    ``merge_protections_settings.auto_merge_conditions: true`` is supposed to
-    queue finished work with no click (#5424). But a PR's checks are evaluated
-    against ``main ∪ the branch``, so while the required gate is RED on ``main``
-    NO PR can satisfy its entry conditions and auto-queue is SILENTLY
-    SUPPRESSED. Measured 2026-09-26: **0 of 21** newly-opened PRs auto-queued
-    while ``python-ci-gate`` was red on ``main`` — the one that appeared queued
-    had been nudged by hand.
+WHAT THIS DOES
+    Posts ONE ``@mergifyio queue`` comment per open non-draft PR that already
+    satisfies the entry gate, then verifies that the PR actually entered, and
+    reports the specific condition for every PR that did not.
 
-    So ``0 queued`` reads as "nothing is ready" when it means "everything is
-    ready and the gate is stuck". When ``main`` goes green, every ready PR needs
-    exactly one ``@mergifyio queue`` comment — as an earlier 46 did, by hand,
-    one at a time.
+WHY IT EXISTS (MEASURED, not inferred)
+    2026-09-26, on `daniel-ospina/tortoise`:
+      * `0 of 21` newly-opened PRs auto-queued while `check-success=python-ci-gate`
+        was failing on `main`;
+      * a dry run found **28** open PRs whose own six required checks were all
+        ``completed/success`` and which were NOT in the queue (verified by hand on
+        #5600: six green checks, and ``python-ci-gate`` ``completed/failure`` on
+        ``main@877fa52d1``).
+    So ``0 queued`` read as "nothing is ready" when it meant "everything is ready
+    and the entry gate is not open". The recovery is one comment per ready PR, as
+    an earlier 46 were done by hand.
+
+    ⛔ This docstring deliberately records NO mechanism for the suppression.
+    ``auto_merge_conditions`` (#5424) and the injection-mode change in #5384 own
+    that question, and a process narration here would re-stale against them. What
+    this tool assumes is narrow and checkable: the entry conditions live in
+    ``queue_rules[0].queue_conditions`` in ``.mergify.yml``, and it evaluates
+    exactly those, from the copy of the file ``origin/main`` carries.
+
+WHAT IT DOES NOT DO
+    It does not consult the review record. The head-bound review attestation is
+    enforced only by LOCAL tooling (``review-enforcer``, ``scripts/atomic-land.sh``);
+    nothing on the server-side path reads it (#5426, #5433). This tool posts the
+    same comment any human would, so it adds no gate and removes none — and it does
+    not pretend otherwise.
 
 DESIGN CONTRACT
     1. DRY RUN BY DEFAULT. ``--live`` is required before a single comment is
-       posted, and the run prints what it WOULD do. Nothing in this module
-       writes until ``--live`` is passed.
-    2. NEVER TOUCH A PR ALREADY IN THE QUEUE. A PR carrying the ``queued`` label
-       or a Mergify check-run that is not merely "waiting" is skipped before any
-       command is considered, whatever else is true about it.
+       posted, and the run always prints what it would do and which commit it is
+       acting on.
+    2. NEVER TOUCH A PR ALREADY IN THE QUEUE. A PR carrying the ``queued`` label,
+       or whose newest ``Mergify Merge Queue`` check-run shows the queue holds it
+       (any non-``completed`` status, or ``completed/success``), is skipped before
+       any command is considered. A completed run that is neither of those (a
+       failed, cancelled or stale attempt) means the queue does NOT hold the PR,
+       so the PR is a candidate — that is the recovery this tool performs, and
+       ``queue_state`` documents the mapping.
     3. VERIFY THE ARTIFACT, NOT THE SEND. A 2xx from the comment POST means bytes
        were accepted — not that the PR entered the queue. The evidence is a
-       **NEW** ``Mergify Merge Queue`` check-run: ``in_progress`` (the queue took
-       it) or ``completed/success`` (the queue took it and its own check passed)
-       both mean ENTERED, and BOTH require the run to be newer than every run that
-       existed BEFORE the post — an old run is not evidence about a new command.
-       A ``completed/neutral`` result means the PR is WAITING (an entry condition
-       is unmet) and is NOT queued. No new check-run at all is UNKNOWN, and the
-       run exits non-zero rather than calling it success.
-    4. NAME THE UNMET CONDITION. Every PR that did not enter is reported with the
-       specific condition that stopped it (``check-success=docs: completed/failure``,
-       ``check-success=test-isolation: in_progress``, ``draft``, ...), never with
-       a bare "failed". The most important case is the one that looks like "nothing
-       is ready": the PR-side conditions are ALL met and the unmet one is on the
-       BASE branch. That is the state §7 measured — measured 2026-09-26 on #5600:
-       all six required checks ``completed/success`` on the head while ``main``'s
-       ``python-ci-gate`` was ``completed/failure`` — so the tool reports
-       ``SKIP-BASE-RED`` and names the base condition instead of pretending the
-       PR is not ready, and refuses to post live until the base gate is green
+       **NEW** ``Mergify Merge Queue`` check-run (strictly newer by ``id`` than
+       every run that existed before the post): ``in_progress`` (the queue took
+       it) or ``completed/success`` (it took it and its own check passed) both
+       mean ENTERED. ``completed/neutral`` means WAITING — an entry condition is
+       unmet and the PR is NOT queued. No new check-run at all is UNKNOWN. The run
+       exits non-zero for UNKNOWN rather than calling it success.
+    4. NAME THE UNMET CONDITION. Every PR that did not enter carries the specific
+       condition that stopped it (``check-success=docs: completed/failure``,
+       ``check-success=test-isolation: in_progress (in flight)``, ``draft``, ...)
+       and not a bare "failed". The most important case is the one that looks like
+       "nothing is ready": the PR-side conditions are ALL met and the unmet one is
+       on the BASE branch. That is reported as ``SKIP-BASE-RED`` with the base
+       condition named, and live posting is refused while the base gate is red
        (each post would answer ``completed/neutral``) unless ``--allow-red-base``
        is passed deliberately.
-    5. IDEMPOTENT. A ``@mergifyio queue`` comment created AFTER the head commit is
-       a live command; re-posting it is noise and rate-limit spend. A push
-       invalidates it, so the command is re-posted only once the head has moved.
+    5. IDEMPOTENT. A ``@mergifyio queue`` comment created at or after the head
+       commit is a live command, and re-posting it is noise and rate-limit spend.
+       A push invalidates it, so the command is re-posted only once the head has
+       moved. ``--repost-waiting`` relaxes this for the ONE case the default rule
+       cannot distinguish: a command whose attempt already resolved to
+       ``completed/neutral``. The default is off, because whether Mergify still
+       tracks that request is not something this tool can observe.
     6. SPACING. Comments are posted with a delay (``--spacing``, default 3 s) so a
-       ~90-PR sweep does not trip GitHub's secondary rate limit.
-    7. THE ENTRY CONDITIONS COME FROM THE CONFIG, NOT FROM THIS FILE. They are
-       parsed from ``.mergify.yml`` — by default from ``origin/main``, because
-       that is the copy the live queue loaded. An unrecognised condition is a
-       CONFIG ERROR (fail closed): silently ignoring a gate is how this tool
-       would queue something the queue itself would refuse.
+       ~90-PR sweep does not trip GitHub's secondary rate limit, and the total is
+       bounded by ``--post-cap``.
+    7. THE ENTRY CONDITIONS COME FROM THE CONFIG, NOT FROM THIS FILE. An
+       unrecognised condition is a CONFIG ERROR (fail closed): silently ignoring a
+       gate is how this tool would queue something the queue itself would refuse.
+       A config error names the condition and exits 2, and the report says which
+       copy of the config was read.
+    8. THE REPORT NAMES ITS SCOPE. Repo, config source, base ref and head SHA, the
+       command being posted, and any ``--only`` filter all appear in the output —
+       a verdict that does not name what it measured cannot be trusted.
 
 Usage
-    python3 tools/queue_resweep.py                       # dry run, all candidates
-    python3 tools/queue_resweep.py --only 5527 --only 5384
-    python3 tools/queue_resweep.py --live                # ACTUALLY posts comments
-    python3 tools/queue_resweep.py --live --allow-red-base   # post even while the base gate is red
+    python3 tools/queue_resweep.py --repo owner/name             # dry run, all candidates
+    python3 tools/queue_resweep.py --repo owner/name --only 5527
+    python3 tools/queue_resweep.py --repo owner/name --live      # ACTUALLY posts comments
+    ... --live --allow-red-base      # post while the base gate is red (all will WAIT)
+    ... --live --repost-waiting      # re-request for PRs whose last attempt answered neutral
 
 Exit codes
     0  every candidate reached a terminal verdict (dry-run: every PR classified)
-    1  a post failed, or an entry could not be verified (UNKNOWN)
-    2  could not read the queue config, or could not enumerate the open PRs
+    1  a post failed, a PR could not be queried mid-sweep, an entry could not be
+       verified (UNKNOWN), or the post cap was reached (the sweep is incomplete)
+    2  the queue config could not be read, or the open PRs could not be enumerated
 """
 
 from __future__ import annotations
@@ -90,8 +117,16 @@ MERGIFY_APP_SLUG = "mergify"
 #: Mergify's own label on a queued PR.
 QUEUE_LABEL = "queued"
 
+#: A required status context is `(app, name)`; the config names only the name.
+#: The repo's required contexts are all reported by this app, so it is preferred
+#: when resolving one — see `newest_by_name`.
+REQUIRED_CHECK_APP = "github-actions"
+
 #: Safety cap so a bug cannot turn one invocation into a spam run.
 MAX_POSTS_DEFAULT = 200
+
+#: Bound a single `gh` call so a hung network read cannot block a sweep forever.
+GH_TIMEOUT_SECONDS = 60.0
 
 
 class ConfigError(RuntimeError):
@@ -169,49 +204,39 @@ def parse_config(text: str) -> QueueConfig:
     return QueueConfig(queue_name=name, base=base, required_checks=tuple(checks))
 
 
-def load_config_text(config: str | None, main_ref: str = "origin/main") -> str:
-    """Read the queue config.
+def load_config_text(config: str | None, main_ref: str = "origin/main") -> tuple[str, str]:
+    """Read the queue config, and say WHICH COPY was read.
 
     Default source is `origin/main:.mergify.yml` — the copy the live queue loaded —
-    not the working tree, which may be a stale branch. Falls back to the
-    on-disk `.mergify.yml`. `--config -` reads stdin.
+    not the working tree, which may be a stale branch. The fallback to the on-disk
+    file is reported rather than silent: which gate was evaluated is part of the
+    verdict. `--config -` reads stdin.
     """
     if config == "-":
-        return sys.stdin.read()
+        return sys.stdin.read(), "<stdin>"
     if config:
-        return Path(config).read_text(encoding="utf-8")
+        return Path(config).read_text(encoding="utf-8"), config
     try:
         out = subprocess.run(
             ["git", "show", f"{main_ref}:.mergify.yml"],
             capture_output=True,
             text=True,
+            timeout=GH_TIMEOUT_SECONDS,
         )
         if out.returncode == 0 and out.stdout.strip():
-            return out.stdout
-    except OSError:  # pragma: no cover - git absent
+            return out.stdout, f"{main_ref}:.mergify.yml"
+    except (OSError, subprocess.SubprocessError):
         pass
-    return Path(".mergify.yml").read_text(encoding="utf-8")
+    path = Path(".mergify.yml")
+    print(
+        f"⚠️  could not read {main_ref}:.mergify.yml — falling back to {path} "
+        "(this may be an unrelated branch's copy of the gate)",
+        file=sys.stderr,
+    )
+    return path.read_text(encoding="utf-8"), f"{path} (FALLBACK — {main_ref} unreadable)"
 
 
 # ── check-run interpretation ─────────────────────────────────────────────────
-
-
-def newest_by_name(check_runs: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Group check-runs by NAME, keeping the newest attempt.
-
-    Newest is decided by `id`, never by `started_at` (which is nullable), and
-    NOT by `check_suite.id` (each re-run gets its own suite). A re-run ADDS a
-    run; it does not clear one, so the newest is the only one that counts.
-    """
-    newest: dict[str, dict[str, Any]] = {}
-    for run in check_runs:
-        name = str(run.get("name") or "")
-        if not name:
-            continue
-        cur = newest.get(name)
-        if cur is None or _as_int(run.get("id")) > _as_int(cur.get("id")):
-            newest[name] = run
-    return newest
 
 
 def _as_int(value: Any) -> int:
@@ -221,13 +246,57 @@ def _as_int(value: Any) -> int:
         return 0
 
 
+def _app_slug(run: dict[str, Any]) -> str:
+    return str(((run.get("app") or {}).get("slug")) or "")
+
+
+def check_apps(check_runs: Iterable[dict[str, Any]]) -> dict[str, set[str]]:
+    """Which app slugs report each check name — the ambiguity `newest_by_name` resolves."""
+    apps: dict[str, set[str]] = {}
+    for run in check_runs:
+        name = str(run.get("name") or "")
+        if name:
+            apps.setdefault(name, set()).add(_app_slug(run))
+    return apps
+
+
+def newest_by_name(check_runs: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Group check-runs by NAME, keeping the newest attempt.
+
+    Newest is decided by `id`, never by `started_at` (which is nullable), and NOT by
+    `check_suite.id` (each re-run gets its own suite). A re-run ADDS a run; it does
+    not clear one, so the newest is the only one that counts.
+
+    A required status context is `(app, name)` but the config names only the name,
+    so a run from `REQUIRED_CHECK_APP` is preferred over a same-named run from any
+    other app — a PR author who names a job after a required context must not be
+    able to mask it. When no run comes from that app, the newest run from any app is
+    used rather than going dark, and `check_apps` exposes the ambiguity.
+    """
+    newest: dict[str, dict[str, Any]] = {}
+    for run in check_runs:
+        name = str(run.get("name") or "")
+        if not name:
+            continue
+        cur = newest.get(name)
+        if cur is None:
+            newest[name] = run
+            continue
+        run_preferred = _app_slug(run) == REQUIRED_CHECK_APP
+        cur_preferred = _app_slug(cur) == REQUIRED_CHECK_APP
+        if run_preferred != cur_preferred:
+            newest[name] = run if run_preferred else cur
+        elif _as_int(run.get("id")) > _as_int(cur.get("id")):
+            newest[name] = run
+    return newest
+
+
 def newest_mergify_check(check_runs: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     """The newest `Mergify Merge Queue` check-run, or None."""
     candidates = [
         r
         for r in check_runs
-        if str(r.get("name") or "") == QUEUE_CHECK_NAME
-        and str(((r.get("app") or {}).get("slug")) or "") == MERGIFY_APP_SLUG
+        if str(r.get("name") or "") == QUEUE_CHECK_NAME and _app_slug(r) == MERGIFY_APP_SLUG
     ]
     if not candidates:
         return None
@@ -237,9 +306,14 @@ def newest_mergify_check(check_runs: Iterable[dict[str, Any]]) -> dict[str, Any]
 def queue_state(check_runs: Iterable[dict[str, Any]]) -> str:
     """`in_queue` | `waiting` | `absent`, from the newest Mergify check-run.
 
-    `in_queue` is the SAFE side: it means do not touch. It covers a run still in
-    flight and a run that already completed successfully. `waiting` is the state
-    the corpus measured for an unmet entry condition (`completed/neutral`).
+    `in_queue` is the SAFE side — do not touch. It covers a run still in flight (any
+    non-``completed`` status) and a run that already completed successfully.
+
+    `waiting` is every OTHER completed conclusion, and it means only "the queue does
+    not currently hold this PR": `neutral` is the measured state for an unmet entry
+    condition, and `failure`/`cancelled`/`stale`/`timed_out`/null are failed or
+    abandoned attempts. All of them leave the PR a candidate, which is the state the
+    re-sweep exists to recover — `test_queue_state_*` pins the mapping.
     """
     run = newest_mergify_check(check_runs)
     if run is None:
@@ -247,12 +321,7 @@ def queue_state(check_runs: Iterable[dict[str, Any]]) -> str:
     status = str(run.get("status") or "")
     if status != "completed":
         return "in_queue"
-    conclusion = str(run.get("conclusion") or "")
-    if conclusion == "success":
-        return "in_queue"
-    if conclusion == "neutral":
-        return "waiting"
-    return "waiting"
+    return "in_queue" if str(run.get("conclusion") or "") == "success" else "waiting"
 
 
 def unmet_conditions(
@@ -314,12 +383,24 @@ def has_live_command(
 
     A comment posted BEFORE the current head commit was written against a
     different tree, so a push invalidates it and the command is due again. A
-    comment after the head commit is live and re-posting it is noise.
+    comment at or after the head commit is live, and re-posting it is noise.
+
+    The command must stand ALONE on a line, not merely appear in prose. Mergify
+    acts on a comment whose body IS the command; a comment that merely mentions it
+    (an audit note, a lane's write-up) is not a queue request, and treating one as
+    live would silently suppress the re-request this tool exists to make.
+
+    This cannot tell "Mergify is still tracking that request" from "that request
+    already resolved to `completed/neutral` and was never followed up" — the two
+    look identical from here. The default (treat it as live) cannot cause a missed
+    entry through spam, and `--repost-waiting` is the deliberate opt-in for the
+    operator who reads a `neutral` attempt as one that needs re-requesting.
     """
     head_ts = _parse_iso(head_committed_at)
+    wanted = command.strip().casefold()
     for comment in comments:
         body = str(comment.get("body") or "")
-        if command not in body:
+        if not any(line.strip().casefold() == wanted for line in body.splitlines()):
             continue
         created = _parse_iso(comment.get("created_at"))
         if created is None:
@@ -342,7 +423,18 @@ class Github(Protocol):  # pragma: no cover - protocol
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True)
+    """One `gh` invocation, bounded.
+
+    A missing `gh` or a hung network read must surface as `GhError` (the exit-2
+    class), never as an uncaught `FileNotFoundError` traceback and never as an
+    indefinite block.
+    """
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=GH_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise GhError(f"{' '.join(args[:3])} timed out after {GH_TIMEOUT_SECONDS:.0f}s") from exc
+    except OSError as exc:
+        raise GhError(f"could not run {args[0]!r}: {exc}") from exc
 
 
 class GhCli:
@@ -356,6 +448,17 @@ class GhCli:
             return json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
             raise GhError(f"gh api returned non-JSON: {exc}") from exc
+
+    def _text(self, args: list[str]) -> str:
+        """A single RAW jq value. `gh --jq` prints strings unquoted, so the result
+        is not JSON (a date arrives as `2026-09-26T...`, not `"2026-09-26T..."`).
+        Parsing it with `json.loads` failed on char 4 and misreported every such PR
+        as UNKNOWN on the first real dry run.
+        """
+        proc = _run(["gh", "api", *args])
+        if proc.returncode != 0:
+            raise GhError(f"gh api {' '.join(args)} failed: {proc.stderr.strip()[:300]}")
+        return proc.stdout.strip()
 
     def _get_list(self, path: str, params: str = "", select: str = ".[]") -> list[dict[str, Any]]:
         """Every element, across pages. `--paginate` emits one object per page;
@@ -399,17 +502,6 @@ class GhCli:
     def list_comments(self, repo: str, number: int) -> list[dict[str, Any]]:
         return self._get_list(f"repos/{repo}/issues/{number}/comments")
 
-    def _text(self, args: list[str]) -> str:
-        """A single RAW jq value. `gh --jq` prints strings unquoted, so the result
-        is not JSON (a date arrives as `2026-09-26T...`, not `"2026-09-26T..."`).
-        Parsing it with `json.loads` failed on char 4 and misreported every such PR
-        as UNKNOWN on the first real dry run.
-        """
-        proc = _run(["gh", "api", *args])
-        if proc.returncode != 0:
-            raise GhError(f"gh api {' '.join(args)} failed: {proc.stderr.strip()[:300]}")
-        return proc.stdout.strip()
-
     def head_committed_at(self, repo: str, sha: str) -> str:
         return self._text([f"repos/{repo}/commits/{sha}", "--jq", ".commit.committer.date"])
 
@@ -417,6 +509,7 @@ class GhCli:
         return self._text([f"repos/{repo}/branches/{branch}", "--jq", ".commit.sha"])
 
     def post_comment(self, repo: str, number: int, body: str) -> dict[str, Any]:
+        # `-f` (raw field), not `-F` (which would treat a leading @ as a FILE).
         return self._json(
             [
                 "-X",
@@ -433,6 +526,14 @@ class GhCli:
 # ── the sweep ────────────────────────────────────────────────────────────────
 
 
+def _clean(text: Any, limit: int = 58) -> str:
+    """A single printable line: PR titles are remote input and a title carrying
+    control characters or ANSI escapes must not reach the operator's terminal."""
+    flat = "".join(ch if ch.isprintable() else " " for ch in str(text or ""))
+    flat = " ".join(flat.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 @dataclass
 class Outcome:
     number: int
@@ -442,8 +543,7 @@ class Outcome:
     check_id: int | None = None
 
     def line(self, width: int = 58) -> str:
-        title = self.title if len(self.title) <= width else self.title[: width - 1] + "…"
-        return f"#{self.number:<7} {title:<{width}} {self.verdict:<16} {self.detail}"
+        return f"#{self.number:<7} {_clean(self.title, width):<{width}} {self.verdict:<16} {self.detail}"
 
 
 @dataclass
@@ -451,8 +551,12 @@ class SweepReport:
     repo: str
     dry_run: bool
     config: QueueConfig
+    command: str = DEFAULT_COMMAND
+    config_source: str = ""
     base_sha: str = ""
     base_unmet: list[str] = field(default_factory=list)
+    base_observable: bool = True
+    only: Sequence[int] = ()
     outcomes: list[Outcome] = field(default_factory=list)
 
     @property
@@ -465,17 +569,25 @@ class SweepReport:
             counts[o.verdict] = counts.get(o.verdict, 0) + 1
         return counts
 
+    def _gate_line(self) -> str:
+        if not self.base_observable:
+            return (
+                "NOT OBSERVABLE — no required entry check reports a run on "
+                f"{self.config.base} (the gate may be red or green; this tool cannot tell)"
+            )
+        if self.base_green:
+            return "GREEN"
+        return "RED — entry is closed for EVERY PR until it clears: " + "; ".join(self.base_unmet)
+
     def render(self) -> str:
-        gate = (
-            "GREEN"
-            if self.base_green
-            else "RED — entry is closed for EVERY PR until it clears: " + "; ".join(self.base_unmet)
-        )
+        scope = f", scope --only {','.join(str(n) for n in self.only)}" if self.only else ""
         lines = [
             f"queue_resweep — repo {self.repo}, queue rule {self.config.queue_name!r}, "
-            f"base {self.config.base}@{self.base_sha[:9] or '?'}, "
-            f"required checks: {', '.join(self.config.required_checks)}",
-            f"base gate: {gate}",
+            f"base {self.config.base}@{self.base_sha[:9] or '?'}{scope}",
+            f"config: {self.config_source} — required checks: "
+            f"{', '.join(self.config.required_checks)}",
+            f"command: {self.command!r}",
+            f"base gate: {self._gate_line()}",
             "mode: " + ("DRY RUN (nothing posted)" if self.dry_run else "LIVE"),
             "",
         ]
@@ -483,10 +595,10 @@ class SweepReport:
         counts = self.tally()
         lines += [
             "",
-            f"SUMMARY: {len(self.outcomes)} open PR(s) inspected — "
+            f"SUMMARY: {len(self.outcomes)} PR(s) inspected{scope} — "
             + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
         ]
-        if not self.base_green:
+        if self.base_observable and not self.base_green:
             lines.append(
                 f"⚠️  The base gate is RED: {counts.get('SKIP-BASE-RED', 0)} PR(s) are "
                 "PR-side ready but cannot enter. `0 queued` here does NOT mean nothing is ready — "
@@ -495,7 +607,7 @@ class SweepReport:
             )
         if self.dry_run:
             lines.append(
-                f"{counts.get('WOULD-POST', 0)} PR(s) would receive `{DEFAULT_COMMAND}`; "
+                f"{counts.get('WOULD-POST', 0)} PR(s) would receive `{self.command}`; "
                 f"{counts.get('SKIP-IN-QUEUE', 0)} already in the queue (untouched); "
                 f"{counts.get('SKIP-UNMET', 0)} have a PR-side unmet condition (named above)."
             )
@@ -504,35 +616,36 @@ class SweepReport:
                 f"{counts.get('ENTERED', 0)} verified ENTERED (a NEW Mergify check-run "
                 f"confirmed the queue took it); {counts.get('WAITING', 0)} are WAITING (the queue "
                 f"said completed/neutral, which is NOT queued); {counts.get('UNKNOWN', 0)} could "
-                f"not be verified; {counts.get('SKIP-LIVE-COMMAND', 0)} already had a live command."
+                f"not be verified; {counts.get('QUERY-FAILED', 0)} could not be read; "
+                f"{counts.get('SKIP-LIVE-COMMAND', 0)} already had a live command."
             )
         return "\n".join(lines)
 
 
-def base_gate(client: Github, repo: str, cfg: QueueConfig) -> tuple[str, list[str]]:
-    """The base branch's own state against the entry conditions.
-
-    This is the condition §7 measured but nothing reported: while the base gate is
-    red, NO PR can meet its entry conditions, because Mergify evaluates them against
-    `base ∪ branch`. Naming it separately is the difference between "nothing is
-    ready" and "everything is ready and the gate is stuck".
+def base_gate(client: Github, repo: str, cfg: QueueConfig) -> tuple[str, list[str], bool]:
+    """The base branch's own state, and whether it is observable at all.
 
     ONLY checks that actually REPORT a run on the base branch can be a base-side
-    blocker. A required check with no check-run on the base head is one that does not
-    run on a push (most of them run on `pull_request`, where they do report and are
+    blocker. A required check with no check-run on the base head is one that does
+    not run on a push (most run on `pull_request`, where they do report and are
     evaluated PR-side) — reporting it as an unmet BASE condition would make the gate
     permanently red and the tool permanently useless. Measured 2026-09-26 on
     `main@877fa52d1`: `python-ci-gate` `completed/failure`; the other five required
     contexts had no check-run at all.
+
+    `observable` is False when NO required check reports on the base — the honest
+    answer is then "cannot tell", never a bare "GREEN". That is also the regime
+    change #5384 would introduce by moving the heavy check out of
+    `queue_conditions`, and the report names it rather than silently losing the
+    feature.
     """
     sha = client.branch_head_sha(repo, cfg.base)
     checks = client.list_check_runs(repo, sha) if sha else []
     newest = newest_by_name(checks)
+    reported = [name for name in cfg.required_checks if newest.get(name) is not None]
     unmet: list[str] = []
-    for name in cfg.required_checks:
-        run = newest.get(name)
-        if run is None:
-            continue  # does not report on the base branch — not a base-side gate
+    for name in reported:
+        run = newest[name]
         status = str(run.get("status") or "")
         if status != "completed":
             unmet.append(f"check-success={name}: {status or 'unknown'} (in flight on {cfg.base})")
@@ -540,7 +653,7 @@ def base_gate(client: Github, repo: str, cfg: QueueConfig) -> tuple[str, list[st
         conclusion = str(run.get("conclusion") or "")
         if conclusion != "success":
             unmet.append(f"check-success={name}: completed/{conclusion or 'null'}")
-    return sha, unmet
+    return sha, unmet, bool(reported)
 
 
 def run_sweep(
@@ -551,11 +664,13 @@ def run_sweep(
     dry_run: bool = True,
     only: Sequence[int] = (),
     command: str = DEFAULT_COMMAND,
+    config_source: str = "",
     spacing: float = 3.0,
     post_cap: int = MAX_POSTS_DEFAULT,
     poll_timeout: float = 90.0,
     poll_interval: float = 6.0,
     allow_red_base: bool = False,
+    repost_waiting: bool = False,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> SweepReport:
@@ -566,10 +681,20 @@ def run_sweep(
     one of them would answer ``completed/neutral`` (waiting), which is the state the
     re-sweep exists to recover from once the base is green.
     """
-    base_sha, base_unmet = base_gate(client, repo, cfg)
     report = SweepReport(
-        repo=repo, dry_run=dry_run, config=cfg, base_sha=base_sha, base_unmet=base_unmet
+        repo=repo,
+        dry_run=dry_run,
+        config=cfg,
+        command=command,
+        config_source=config_source,
+        only=tuple(only),
     )
+    try:
+        report.base_sha, report.base_unmet, report.base_observable = base_gate(client, repo, cfg)
+    except GhError as exc:
+        report.base_observable = False
+        report.outcomes.append(Outcome(0, "(base branch)", "QUERY-FAILED", f"base gate: {exc}"))
+
     pulls = client.list_pulls(repo, cfg.base)
     if only:
         wanted = set(only)
@@ -581,7 +706,14 @@ def run_sweep(
         title = str(pr.get("title") or "")
         head_sha = str(((pr.get("head") or {}).get("sha")) or "")
         labels = {str((lb or {}).get("name") or "") for lb in (pr.get("labels") or [])}
-        checks = client.list_check_runs(repo, head_sha) if head_sha else []
+
+        # A query failure on ONE PR must not abort the sweep: posting is a side
+        # effect, and aborting would lose the report of what was already posted.
+        try:
+            checks = client.list_check_runs(repo, head_sha) if head_sha else []
+        except GhError as exc:
+            report.outcomes.append(Outcome(number, title, "QUERY-FAILED", f"check-runs: {exc}"))
+            continue
 
         # (2) never touch a PR already in the queue.
         state = queue_state(checks)
@@ -595,30 +727,34 @@ def run_sweep(
         if unmet:
             report.outcomes.append(Outcome(number, title, "SKIP-UNMET", "; ".join(unmet)))
             continue
-        if base_unmet and not allow_red_base:
+        if report.base_observable and report.base_unmet and not allow_red_base:
             report.outcomes.append(
                 Outcome(
                     number,
                     title,
                     "SKIP-BASE-RED",
-                    "PR-side conditions met; base gate unmet: " + "; ".join(base_unmet),
+                    "PR-side conditions met; base gate unmet: " + "; ".join(report.base_unmet),
                 )
             )
             continue
 
         # (5) idempotency — a live command for THIS head already exists.
-        comments = client.list_comments(repo, number)
         try:
+            comments = client.list_comments(repo, number)
             head_ts = client.head_committed_at(repo, head_sha)
         except GhError as exc:
-            report.outcomes.append(
-                Outcome(number, title, "UNKNOWN", f"head commit unreadable: {exc}")
-            )
+            report.outcomes.append(Outcome(number, title, "QUERY-FAILED", f"comments/head: {exc}"))
             continue
-        if has_live_command(comments, head_ts, command):
+        if has_live_command(comments, head_ts, command) and not (
+            repost_waiting and state == "waiting"
+        ):
             report.outcomes.append(
                 Outcome(
-                    number, title, "SKIP-LIVE-COMMAND", f"{command!r} already posted for this head"
+                    number,
+                    title,
+                    "SKIP-LIVE-COMMAND",
+                    f"{command!r} already posted for this head"
+                    + (" (its attempt answered neutral)" if state == "waiting" else ""),
                 )
             )
             continue
@@ -629,7 +765,7 @@ def run_sweep(
                     number,
                     title,
                     "WOULD-POST",
-                    f"all {len(cfg.required_checks)} required checks success",
+                    f"all {len(cfg.required_checks)} required checks success -> {command!r}",
                 )
             )
             continue
@@ -650,9 +786,9 @@ def run_sweep(
             continue
         posted += 1
 
-        # (3) verify the ARTIFACT — a NEW in_progress Mergify check-run.
+        # (3) verify the ARTIFACT — a NEW in_progress/success Mergify check-run.
         def _describe(ch: list[dict[str, Any]], _pr: dict[str, Any] = pr) -> str:
-            return _describe_unmet(_pr, ch, cfg, base_unmet)
+            return _describe_unmet(_pr, ch, cfg, report.base_unmet)
 
         verdict, detail, check_id = _verify_entry(
             client,
@@ -701,7 +837,8 @@ def _verify_entry(
 
     UNKNOWN is a first-class verdict: "the comment was accepted" is not evidence
     that the PR entered, and reporting it as entered is the exact failure this
-    tool exists to avoid.
+    tool exists to avoid. `before_id` is the newest Mergify run at the moment of
+    the post; only a run strictly newer than it counts.
     """
     deadline = now() + timeout
     last: dict[str, Any] | None = None
@@ -764,6 +901,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="post even while the base gate is red (every post will answer completed/neutral until it clears)",
     )
     parser.add_argument(
+        "--repost-waiting",
+        action="store_true",
+        help="re-request entry for a PR whose prior command already resolved to completed/neutral",
+    )
+    parser.add_argument(
         "--only", type=int, action="append", default=[], help="restrict to this PR (repeatable)"
     )
     parser.add_argument(
@@ -786,7 +928,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        cfg = parse_config(load_config_text(args.config))
+        config_text, config_source = load_config_text(args.config)
+        cfg = parse_config(config_text)
     except (ConfigError, OSError) as exc:
         print(f"CONFIG ERROR: {exc}", file=sys.stderr)
         return 2
@@ -799,11 +942,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=not args.live,
             only=args.only,
             command=args.command,
+            config_source=config_source,
             spacing=args.spacing,
             post_cap=args.post_cap,
             poll_timeout=args.poll_timeout,
             poll_interval=args.poll_interval,
             allow_red_base=args.allow_red_base,
+            repost_waiting=args.repost_waiting,
         )
     except GhError as exc:
         print(f"QUERY FAILED: {exc}", file=sys.stderr)
@@ -811,7 +956,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(report.render())
     counts = report.tally()
-    if counts.get("POST-FAILED") or counts.get("UNKNOWN") or counts.get("SKIP-CAP"):
+    if any(counts.get(v) for v in ("POST-FAILED", "UNKNOWN", "QUERY-FAILED", "SKIP-CAP")):
         return 1
     return 0
 

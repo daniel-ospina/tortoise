@@ -584,6 +584,27 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_queue_resweep_tool_change_selects_core_not_tier1():
+    # tools/queue_resweep.py owns tests/test_queue_resweep.py (82 hermetic cases
+    # pinning dry-run-by-default, the never-touch-a-queued-PR rule, and the
+    # artifact-not-the-send verification).
+    #
+    # Before its CORE_ALSO entry this was the #3261 silent-drop class: `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry, so a tools-only change came back with
+    # `changed == []` and took the docs-only early return — `select()` returned
+    # NO surface, and the guard never ran on the file it guards. Measured before
+    # the fix: `_sel(["tools/queue_resweep.py"])` -> surfaces=[], full=False,
+    # test_queue_resweep.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/queue_resweep.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_queue_resweep.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the

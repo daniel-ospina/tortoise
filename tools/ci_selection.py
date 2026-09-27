@@ -572,6 +572,17 @@ SOURCE_PATTERNS = {
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
              "tools/tmpdir_sweep.py",
+             # queue_resweep: `tools/` is in NON_PYTHON_PREFIXES, so a
+             # tools/queue_resweep.py-only change was filtered out BEFORE the
+             # "not matched -> core" fallback and took the docs-only early return —
+             # `select(["tools/queue_resweep.py"])` yielded NO surface, so the guard
+             # registered under `core` never ran on the file it guards (the
+             # #1349/#3332/#3616 silent-drop class, and exactly the false "the core
+             # fallback covers it" claim #3261 removed from this file). The CORE_ALSO
+             # entry makes `_selection_relevant()` keep the path, so `core` (and this
+             # tool's own guard) is selected. Pinned by
+             # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core.
+             "tools/queue_resweep.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
