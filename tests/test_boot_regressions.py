@@ -1146,7 +1146,7 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
     passed when a member was DROPPED from the tuple (exactly the orphan round 3
     fixed). Pin membership so the tuple must cover every lifespan task the
     module arms — the four original ones plus the #3284
-    ``_first_contact_task``.
+    ``_first_contact_task`` and the #3944 ``_analytics_canary_task``.
     """
     tree = ast.parse(
         (TORTOISE_PKG / "hosted_api.py").read_text(), filename="hosted_api.py"
@@ -1170,6 +1170,10 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         "_boot_sweep_task",
         "_event_retention_task",
         "_first_contact_task",
+        # #3944: the analytics canary heartbeat — a process-lifetime periodic
+        # task whose LOSS is the failure the external alarm detects, so a
+        # dropped member here would orphan it on re-entry/shutdown.
+        "_analytics_canary_task",
     }
     attr_tuple: tuple[str, ...] | None = None
     for node in ast.walk(tree):

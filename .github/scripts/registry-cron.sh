@@ -938,6 +938,53 @@ if [ "$ENABLED" = "unknown" ]; then
   exit 1
 fi
 
+# ── 1c. analytics sink ABSENCE (#3944) — NOT gated on the sweep switch ──────
+# The #3820 transition half alerts on a write that DEGRADES. A sink that
+# silently STOPS emitting produces NO write, so it is invisible there: no
+# outcome, no streak, nothing counted. #3944 adds the heartbeat — the app's
+# canary writes through the REAL sink path on a fixed cadence, and /status
+# carries a last-DELIVERED timestamp plus the app's OWN Period+Grace threshold
+# (so the two cannot drift).
+#
+# This check runs on EVERY driver run, BEFORE the enabled gate below: the
+# #3820 D5a decision requires the sink alert never be gated on
+# BACKUP_SWEEP_ENABLED (a deliberate backups pause must not hide a dead sink).
+#
+# `unknown` is NOT `stale`: a missing/malformed block (an older app during a
+# rolling deploy) leaves the incident UNCHANGED, exactly as the watcher block
+# below does. An app with NO sink intended (selfhost/dev) never fires — the
+# local JSONL IS its intended sink. A cold start never fires: "no delivery
+# YET" is measured against uptime and is only an incident past the threshold.
+ANALYTICS_CONFIGURED="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.configured|type)=="boolean" then (.analytics.configured|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_INTENDED="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.intended|type)=="boolean" then (.analytics.intended|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_AGE_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.age_s|type)=="number" then (.analytics.age_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_UPTIME_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.uptime_s|type)=="number" then (.analytics.uptime_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_THRESHOLD_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.silent_threshold_s|type)=="number" then (.analytics.silent_threshold_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_ATTEMPTS="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.canary_attempts|type)=="number" then (.analytics.canary_attempts|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_SILENT=0
+if [ "$ANALYTICS_INTENDED" = "true" ] && [ "$ANALYTICS_THRESHOLD_S" != "unknown" ]; then
+  # Truncate the fraction exactly as the watcher-age arm does; a non-numeric
+  # operand makes the test FAIL (2>/dev/null), which reads as not-stale.
+  if [ "$ANALYTICS_AGE_S" != "unknown" ] \
+     && [ "${ANALYTICS_AGE_S%.*}" -gt "${ANALYTICS_THRESHOLD_S%.*}" ] 2>/dev/null; then
+    ANALYTICS_SILENT=1
+  elif [ "$ANALYTICS_AGE_S" = "unknown" ] && [ "$ANALYTICS_UPTIME_S" != "unknown" ] \
+       && [ "${ANALYTICS_UPTIME_S%.*}" -gt "${ANALYTICS_THRESHOLD_S%.*}" ] 2>/dev/null; then
+    # No delivered write SINCE BOOT, and the process is past the threshold —
+    # not a cold start. This is the "the emitter never ran" arm.
+    ANALYTICS_SILENT=1
+  fi
+  if [ "$ANALYTICS_SILENT" = "1" ]; then
+    log "analytics sink silent (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s attempts=${ANALYTICS_ATTEMPTS} > ${ANALYTICS_THRESHOLD_S}s) — filing ANALYTICS_SINK_DEGRADED (job red)"
+    file_alert ANALYTICS_SINK_DEGRADED "[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered" \
+      "The /status analytics heartbeat has not advanced for longer than the app's own Period+Grace threshold (threshold=${ANALYTICS_THRESHOLD_S}s = 3x the canary period; age=${ANALYTICS_AGE_S}s; uptime=${ANALYTICS_UPTIME_S}s; canary_attempts=${ANALYTICS_ATTEMPTS}; configured=${ANALYTICS_CONFIGURED}). Either the sink is not being written to at all (the emitter never runs, or _track_analytics_event regressed to a bare return) or every write is failing. Treat as a SINK OUTAGE, not a DR outage: check the Fly secrets SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY and the Supabase project status / RLS on analytics_events; check the app log for 'analytics sink degraded'. If canary_attempts is 0 while uptime exceeds the threshold, the CANARY never ran (a refused telemetry-pool offload or a lost task), not the sink. This same kind also covers a write that degrades (see the runbook). Runbook: docs/ops/registry-backup-dr.md" ""
+  else
+    resolve_global ANALYTICS_SINK_DEGRADED "Resolved — the app delivered an analytics write within its Period+Grace threshold (age=${ANALYTICS_AGE_S}s <= ${ANALYTICS_THRESHOLD_S}s)."
+  fi
+else
+  log "analytics heartbeat unknown/unconfigured (configured=${ANALYTICS_CONFIGURED} intended=${ANALYTICS_INTENDED}) — leaving ANALYTICS_SINK_DEGRADED unchanged"
+fi
+
 if [ "$ENABLED" != "true" ]; then
   # #2796: enabled:false conflates four states. Only a genuine deliberate
   # pause (no config error, no storage error, fresh pool) may exit silently.

@@ -488,6 +488,14 @@ status_body() { # enabled config storage [watcher_running] [watcher_age] [last_s
     "$1" "$2" "$3" "${6:-2026-08-09T23:30:00Z}" "${4:-true}" "${5:-1}"
 }
 
+# #3944: a /status body carrying the analytics heartbeat block. `age` and
+# `uptime` accept the literal `null` (jq then reports the `unknown` string, so
+# the "no delivered write yet" and "unmeasurable" arms are reachable).
+analytics_status_body() { # enabled intended configured age uptime [threshold] [attempts]
+  printf '{"enabled":%s,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":true,"age_minutes":1},"analytics":{"configured":%s,"intended":%s,"canary_period_s":300,"silent_threshold_s":%s,"uptime_s":%s,"canary_attempts":%s,"last_delivered_at":null,"age_s":%s}}' \
+    "$1" "$TS_RECENT" "$3" "$2" "${6:-900}" "$5" "${7:-40}" "$4"
+}
+
 echo "registry-cron.test.sh — #2796 taxonomy"
 
 # ── 1. deliberately off (no config error, fresh pool) → silent exit 0 ───────
@@ -1790,6 +1798,130 @@ export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_
 run_driver
 assert_eq "$RC" 0 "81. a run with an object per_team stays healthy"
 assert_contains "$OUT" "orgs=2" "81. an object per_team reports the real org count"
+
+# ── 82. #3944: an ABSENT analytics block leaves the incident unchanged ─────
+# `unknown` is NOT `stale`. An older app during a rolling deploy carries no
+# `.analytics` block; filing on that would manufacture an outage, and resolving
+# on it would erase a real one. This is also the control for every case above:
+# their status bodies carry no analytics block, so none of them gained a
+# GitHub call from the #3944 check.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(status_body true null null)"
+run_driver
+assert_eq "$RC" 0 "82. a status body with no analytics block stays healthy"
+assert_not_match "$(cat "$LOG")" "GH (POST|PATCH) .*/issues(/[0-9]+)? .*ANALYTICS_SINK_DEGRADED" \
+  "82. an absent analytics block files/resolves nothing"
+assert_contains "$OUT" "analytics heartbeat unknown/unconfigured" \
+  "82. the absence is logged as unknown, not stale"
+
+# ── 83. #3944: a STALE heartbeat files the absence incident ─────────────────
+# age_s (1800) exceeds the app's own Period+Grace threshold (900): no write has
+# been DELIVERED for three canary periods. This is the D5b absence half — the
+# shape the #3820 transition alert cannot see, because there is no write.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 1800 10000)"
+run_driver
+assert_eq "$RC" 1 "83. a silent sink reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "83. a stale heartbeat files ANALYTICS_SINK_DEGRADED"
+assert_contains "$OUT" "analytics sink silent (age=1800s" \
+  "83. the log names the age and the threshold"
+assert_contains "$OUT" "attempts=40" "83. the log carries the canary attempt count"
+
+# ── 84. #3944: a FRESH heartbeat resolves the incident ─────────────────────
+# The driver's self-heal is the backstop the app's in-process gate cannot be:
+# the app's resolve flag can be CLEAN while an incident is open, and it only
+# revisits that on a delivered write. `unknown`/unmeasurable must NOT resolve.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 120 10000)"
+run_driver
+assert_eq "$RC" 0 "84. a fresh heartbeat stays green"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "84. a fresh heartbeat files nothing"
+assert_contains "$(cat "$LOG")" \
+  "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
+  "84. a fresh heartbeat self-heals the open incident"
+
+# ── 85. #3944: cold start is NOT an incident ────────────────────────────────
+# No delivered write YET (age_s null) but the process is 5 s old: the canary has
+# not had its first period. A fabricated boot seed would hide this state; the
+# uptime comparison is what keeps a deploy from paging.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true null 5)"
+run_driver
+assert_eq "$RC" 0 "85. a cold-started app stays green"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "85. a cold start files nothing"
+
+# ── 86. #3944: the EMITTER NEVER RAN (age null, uptime past threshold) ──────
+# The other absence shape: the canary never delivered anything since boot and
+# the process is old. `unknown` age is not freshness here — uptime supplies the
+# disambiguation.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true null 10000)"
+run_driver
+assert_eq "$RC" 1 "86. no delivery since boot past the threshold reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "86. the emitter-never-ran arm files ANALYTICS_SINK_DEGRADED"
+
+# ── 87. #3944: an UNCONFIGURED deployment never fires ───────────────────────
+# selfhost/dev: the local JSONL IS the intended sink. Even with an arbitrary
+# age, `intended` false must keep the kind untouched — the #3820 D5a principle
+# that a sink which was never configured is not a degradation.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true false false 99999 99999)"
+run_driver
+assert_eq "$RC" 0 "87. an unconfigured deployment stays green"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "87. an unconfigured deployment files nothing"
+
+# ── 88. #3944: the HALF-CONFIGURED shape (#3677) DOES fire ──────────────────
+# URL set, key resolving to "": `configured` false but `intended` true. This is
+# the shape that created #3820, and the reason the absence gate is `intended`.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true false 1800 10000)"
+run_driver
+assert_eq "$RC" 1 "88. a half-configured sink reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "88. a half-configured deployment files ANALYTICS_SINK_DEGRADED"
+
+# ── 89. #3944 x #3820 D5a: a stale heartbeat fires with the sweep OFF ───────
+# The D5a decision: the sink alert must NOT ride BACKUP_SWEEP_ENABLED. The
+# deliberate-pause path (enabled=false, fresh pool) exits silently; the #3944
+# check runs BEFORE that gate, so a disabled sweep cannot hide a dead sink.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body false true true 1800 10000)"
+run_driver
+assert_eq "$RC" 1 "89. a stale heartbeat reds a deliberately-paused sweep"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "89. the sink check is NOT gated on BACKUP_SWEEP_ENABLED (D5a)"
+assert_contains "$OUT" "backups deliberately disabled" \
+  "89. the sweep-side deliberate pause still took its own path"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
