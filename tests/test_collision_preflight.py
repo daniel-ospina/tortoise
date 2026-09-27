@@ -469,6 +469,16 @@ class CollisionPreflightTest(unittest.TestCase):
         if closed_prs is not None:
             (self.gh_dir / "closed_prs.json").write_text(json.dumps(closed_prs))
         if issue is not None:
+            # AND BOTH KEYS ARE NORMALIZED IN, HERE. `gh issue view --json
+            # ...,assignees,comments,...` ALWAYS returns them, as lists (often
+            # empty), so a fixture omitting either models a payload the real CLI
+            # cannot produce — the same rule as `closingIssuesReferences` above,
+            # for the same reason: a missing key is a malformed payload, and
+            # reading it as "no claims" would DROP one. A test that wants the
+            # missing-key path DELETES the key explicitly.
+            issue = dict(issue)
+            issue.setdefault("comments", [])
+            issue.setdefault("assignees", [])
             (self.gh_dir / "issue.json").write_text(json.dumps(issue))
 
     def clear_fixtures(self) -> None:
@@ -688,6 +698,73 @@ class CollisionPreflightTest(unittest.TestCase):
                 # reference is a STRONG hit, so the run must not be CLEAN.
                 self.assertIn("#3061", out)
                 self.assertIn("closing", out)
+
+    def _write_issue_payload(self, payload: dict) -> None:
+        """Write the issue fixture DIRECTLY, bypassing `gh_fixtures`' normalizer.
+
+        That normalizer adds `comments`/`assignees` because the real
+        `gh issue view --json` always returns them — so a test for the
+        MISSING-key path has to bypass it, which is the point of these tests.
+        """
+        (self.gh_dir / "issue.json").write_text(json.dumps(payload))
+
+    def test_issue_payload_missing_key_is_incomplete_not_clean(self):
+        # ⛔ THE FAIL-OPEN DIRECTION. `gh issue view --json ...,assignees,comments`
+        # ALWAYS returns both keys, so a missing one means a malformed payload —
+        # and reading it as "no comments, no assignees" DROPS a claim comment or a
+        # different-account assignee. Absence looks exactly like emptiness, which
+        # is why the check is on PRESENCE. Same reasoning that already makes an
+        # absent `closingIssuesReferences` INCOMPLETE.
+        for missing in ("comments", "assignees"):
+            payload = {"number": ISSUE, "title": "t", "state": "OPEN",
+                       "comments": [], "assignees": []}
+            del payload[missing]
+            self._write_issue_payload(payload)
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"missing={missing}\n{out}")
+            self.assertIn("VERDICT: INCOMPLETE", out)
+            self.assertIn(f"has no '{missing}' key", out)
+            self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_malformed_element_is_incomplete_not_a_traceback(self):
+        # ⛔ A non-object ELEMENT reached `.get` and raised `AttributeError`, which
+        # is neither `SurfaceError` nor `RuntimeError` — so it escaped as a
+        # traceback with NO `VERDICT` line and exit 1, the code this module
+        # documents as COLLISION. `_require_pr_dicts` closed that for the PR
+        # lists; the issue payload had no contract at all.
+        for key in ("comments", "assignees"):
+            payload = {"number": ISSUE, "title": "t", "state": "OPEN",
+                       "comments": [], "assignees": []}
+            payload[key] = [None]
+            self._write_issue_payload(payload)
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"key={key}\n{out}")
+            self.assertIn("VERDICT: INCOMPLETE", out)
+            self.assertIn(f"non-object element in '{key}' at index 0", out)
+            self.assertNotIn("Traceback", out)
+
+    def test_issue_payload_non_string_login_is_incomplete_not_a_traceback(self):
+        # A non-string `login` crashed inside `assignee_attribution`'s
+        # `.strip()`, giving the same verdict-less traceback and exit 1.
+        for bad in (5, True, {"nested": 1}):
+            self._write_issue_payload({
+                "number": ISSUE, "title": "t", "state": "OPEN",
+                "comments": [], "assignees": [{"login": bad}],
+            })
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"login={bad!r}\n{out}")
+            self.assertIn("non-string assignee login", out)
+            self.assertNotIn("Traceback", out)
+
+    def test_issue_payload_non_string_comment_body_is_incomplete(self):
+        self._write_issue_payload({
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "assignees": [], "comments": [{"body": 5}],
+        })
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("non-string comment body", out)
+        self.assertNotIn("Traceback", out)
 
     def test_malformed_open_pr_element_is_incomplete_not_a_traceback(self):
         # ⛔ A list holding a non-object used to CRASH with no VERDICT line and
@@ -1711,6 +1788,52 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("merged into origin/main", out)
 
+    def test_fresh_branch_at_a_PREVIOUS_merged_head_still_blocks(self):
+        # ⛔ THE CYCLE-6 P0 GUARD, and it is the SAME defect cycle 5 fixed on
+        # predicate 2 — left behind on predicate 1. `sha != main_tip` is ONE COMMIT
+        # DEEP: it refuses to call a fresh branch landed only while its tip is
+        # exactly the CURRENT tip. As soon as main advances past a commit that is
+        # also a merged PR's `head.sha` (a fast-forward / rebase landing, or an
+        # empty-diff PR), a fresh branch sitting on that commit satisfies
+        # `sha != main_tip`, matches the merged-PR record, and is read as
+        # "squash-merged" — CLEAN on a lane that has already claimed the issue by
+        # creating the branch.
+        #
+        # The two states are indistinguishable from the SHAs alone, so the
+        # discriminator is the same one predicate 2 uses: a tip on main's own
+        # FIRST-PARENT chain is a commit main already contains (exactly what a
+        # fresh branch points at), NOT an absorbed branch head, which entered main
+        # as a MERGE parent.
+        ref = f"fix/{ISSUE}-prev-merged-head"
+        _git(self.repo, "branch", ref)                      # branch at H
+        head_sha = self._git_out("rev-parse", ref)
+        (self.repo / "later.txt").write_text("later\n")
+        _git(self.repo, "add", "later.txt")
+        _git(self.repo, "commit", "-qm", "main advances past the merged head")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        # Preconditions, so this cannot pass for the wrong reason: H is now
+        # STRICTLY BEHIND main's tip (so `sha != main_tip` is satisfied), and H IS
+        # on main's first-parent chain (so only the first-parent exclusion can
+        # refuse the demotion).
+        tip = self._git_out("rev-parse", "origin/main")
+        self.assertNotEqual(head_sha, tip)
+        self.assertIn(head_sha, self._git_out(
+            "rev-list", "--first-parent", "origin/main").splitlines())
+
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "the earlier landing", "body": "",
+            "state": "closed", "url": "https://example.invalid/4242",
+            "headRefName": "fix/earlier",
+            # H is the merged PR's head, so predicate 1 would fire on it.
+            "headSha": head_sha,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+
     def test_fresh_branch_left_behind_by_main_still_blocks(self):
         # ⛔ THE CYCLE-5 P0 GUARD, and the defect it closes was the WIDE window,
         # not an exotic edge. `sha != main_tip` protected a fresh branch only
@@ -2159,10 +2282,37 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("6/6 surfaces queried", out)
         self.assertIn("advisory surface(s) partial or unqueried", out)
 
-    def test_advisory_demotion_is_scoped_to_the_advisory_surface(self):
-        # The OVERRIDE must not weaken the blocking surfaces. (a) An advisory
-        # failure alongside an OPEN-PR hit is still a COLLISION. (b) An advisory
-        # failure alongside an unqueryable BLOCKING surface is still INCOMPLETE.
+    def test_advisory_failure_coexists_with_a_collision_without_escalating(self):
+        # The #5251 OVERRIDE: a surface that can never produce a blocking hit has
+        # no ability to prevent a duplicate, so its failure must not escalate the
+        # run. This pins the COEXISTENCE — an ADVISORY surface can be unqueryable
+        # while a BLOCKING surface collides, the advisory failure is still
+        # REPORTED, and the verdict stays COLLISION (exit 1) rather than becoming
+        # INCOMPLETE (exit 2). The pre-#5251 behaviour escalated it.
+        #
+        # ⛔ THE PREVIOUS VERSION OF THIS TEST COULD NOT FAIL FOR THE PROPERTY IT
+        # NAMED. It asserted "COLLISION despite an advisory failure" (decided by
+        # the strong open-PR hit alone) and "INCOMPLETE despite an advisory
+        # failure" (decided by the unqueryable BLOCKING surface alone), so a
+        # verifier deleted the advisory/blocking split entirely
+        # (`ADVISORY_SURFACES = frozenset()`) and the test still PASSED. The
+        # distinguishing facts are that the advisory failure was PRESENT and did
+        # NOT escalate — so both are asserted here: the advisory surface IS named
+        # as failed, and the exit code is 1.
+        #
+        # ⛔ WHAT THIS TEST DOES *NOT* CATCH, stated because an earlier version of
+        # this comment claimed it did and a verifier disproved it by mutation: it
+        # does NOT catch a regression that puts advisory surfaces into the
+        # INCOMPLETE list (`for s in blocking` -> `for s in ordered`). Here the
+        # verdict is COLLISION, decided by `if strong:` BEFORE the incomplete list
+        # is consulted, so that regression cannot escalate this run. The test that
+        # catches it is
+        # `test_closed_pr_failure_is_reported_but_does_not_force_incomplete`,
+        # which has an advisory failure and nothing else.
+        #
+        # What THIS test is non-inert for is the advisory TIER itself: with
+        # `ADVISORY_SURFACES = frozenset()` the surface stops being labelled
+        # ADVISORY and the ADVISORY SURFACES section disappears (mutation-verified).
         self.gh_fixtures(open_prs=[{
             "number": 9999, "title": "fix: guard retrieval (#3061)",
             "body": "closes it", "headRefName": "fix/guard",
@@ -2172,8 +2322,27 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[open PRs]", out)
         self.assertIn("do NOT dispatch", out)
+        # (a) the advisory surface really WAS unqueryable in this run. The
+        # ADVISORY SURFACES section carries it AND the note that states the rule
+        # this test exists to pin — "partial or unqueryable is NOT an INCOMPLETE
+        # run". (The `advisory surface(s) partial or unqueried` phrasing lives on
+        # the CLEAN path's counted line, which a COLLISION run does not reach, so
+        # asserting it here would have been asserting a string the run cannot
+        # produce.)
+        self.assertIn("ADVISORY SURFACES", out)
+        self.assertIn(
+            "an advisory surface being partial or unqueryable is NOT an "
+            "INCOMPLETE run", out,
+        )
+        self.assertIn("gh-unavailable", out)
+        # (b) it did not escalate the verdict to INCOMPLETE.
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
 
-        # Drop the (blocking) open-PR hit so INCOMPLETE can surface.
+    def test_blocking_surface_incomplete_coexists_with_a_collision(self):
+        # The complementary half, unchanged in intent: a BLOCKING surface that
+        # could not be queried is REPORTED alongside the COLLISION rather than
+        # suppressed by it. Drop the (blocking) open-PR hit so INCOMPLETE
+        # surfaces on its own.
         self.gh_fixtures(open_prs=[])
         rc, out = self.run_tool(env_extra={
             "GH_STUB_API_FAIL_AFTER_OUTPUT": "1",

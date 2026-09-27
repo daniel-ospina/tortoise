@@ -215,10 +215,17 @@ sibling repos before any verdict is issued.
 
 Exit codes
 ----------
-    0  CLEAN        every surface queried and no hit (weak prose-only
-                    cross-references may be listed; they are non-blocking)
-    1  COLLISION    >= 1 hit on >= 1 surface (do NOT dispatch)
-    2  INCOMPLETE   >= 1 surface could not be queried (NOT clean)
+    0  CLEAN        every BLOCKING surface queried and no STRONG hit. Non-blocking
+                    hits are still LISTED (the caller's own branch/worktree, a
+                    terminal branch or PR, the shared fleet account as assignee, a
+                    prose cross-reference, and every hit on an advisory surface)
+    1  COLLISION    >= 1 STRONG hit on a >= 1 BLOCKING surface (do NOT dispatch).
+                    A weak hit never decides this, and a hit on an ADVISORY
+                    surface never decides it, however it is shaped
+    2  INCOMPLETE   >= 1 BLOCKING surface could not be queried (NOT clean).
+                    A surface that can never produce a blocking hit is EXEMPT and
+                    its failure is only REPORTED: it has no ability to prevent a
+                    duplicate, so its failure cannot conceal one (#5251)
     3  usage / internal error
 
 Env seams (tests point these at stubs; production defaults are the real tools)
@@ -1633,38 +1640,57 @@ def _branch_terminal_state(
         # which is the fail-closed direction — and the local branch, if it still
         # exists, is judged on its own merits by this same call.
         return None
-    if sha and sha in merged_head_shas and sha != main_tip:
-        # ⛔ THE `sha != main_tip` EXCLUSION BELONGS ON *BOTH* PREDICATES, and
-        # leaving it off this one re-opened the whole P1-B fail-open through the
-        # PRIMARY arm. A branch created at `origin/main`'s tip with no commits of
-        # its own has exactly main's SHA — and whenever main's tip happens to be
-        # a merged PR's `head.sha` (a fast-forward / rebase landing, or an
-        # empty-diff PR), this predicate matched it and returned "squash-merged".
-        # That demoted a lane that had merely CLAIMED the issue by creating the
-        # branch: CLEAN on real in-flight work, which is the worst thing this
-        # tool can do. The two SHAs are indistinguishable, so the safe reading of
-        # "cannot tell" is to leave the ref BLOCKING — a false COLLISION costs a
-        # re-check, a false CLEAN costs a duplicated dispatch.
+    if (
+        sha
+        and sha in merged_head_shas
+        # `sha != main_tip` still matters HERE, unlike in predicate 2 (which
+        # REQUIRES a readable `first_parent`): this arm runs even when
+        # `first_parent` is unavailable, and then the exact-tip comparison is the
+        # only guard left.
+        and sha != main_tip
+        # ⛔ THE EXCLUSION BELONGS ON *BOTH* PREDICATES, AND `sha != main_tip`
+        # ALONE IS NOT ENOUGH ON EITHER — it is ONE COMMIT DEEP. A branch created
+        # at `origin/main`'s tip with no commits of its own has exactly main's
+        # SHA, and whenever that SHA is also a merged PR's `head.sha` (a
+        # fast-forward / rebase landing, or an empty-diff PR) this predicate
+        # returned "squash-merged" and demoted a lane that had merely CLAIMED the
+        # issue by creating the branch. Comparing against the CURRENT tip only
+        # closed that while main had not moved; as soon as main advanced, the
+        # fresh branch was strictly behind the tip, `sha != main_tip` was
+        # satisfied, and the same fail-open returned through the PRIMARY arm —
+        # which is the defect cycle 5 closed on predicate 2 and left here. The
+        # discriminator is the same one: a tip on main's own first-parent chain is
+        # a commit main already contains (exactly what a fresh branch points at),
+        # NOT an absorbed branch head, which entered main as a MERGE parent. When
+        # `first_parent` is unreadable the exact-tip comparison still applies, and
+        # the merged-PR record is treated as the exact evidence D4 says it is.
+        and not (first_parent is not None and sha in first_parent)
+    ):
         return ("squash-merged — its tip SHA is a merged PR's head, so its content "
                 "already landed even though its commits are not ancestors of main")
     if (
         # Every condition guards a DOWNGRADE, so an unreadable witness leaves the
-        # ref BLOCKING. `first_parent is not None` is the load-bearing one: once
-        # main advances, ancestry alone cannot tell a fresh branch from an
-        # absorbed branch head, and `sha != main_tip` only covers the exact-tip
-        # case.
+        # ref BLOCKING.
+        #
+        # `main_tip is not None` is an INDEPENDENT WITNESS, not a leftover of the
+        # exact-tip comparison it used to guard: `main_tip` and `first_parent`
+        # come from separate git calls, so `first_parent` can be readable while
+        # `main_tip` is not (a stub failing only `rev-parse` reproduces exactly
+        # that), and requiring BOTH is the fail-closed posture for this
+        # approximate arm.
         main_tip is not None
         and first_parent is not None
         and ancestor_merged is not None
         and ref in ancestor_merged
-        # ⛔ THIS SUPERSEDES THE OLDER `sha != main_tip` GUARD, which was
-        # REMOVED rather than kept alongside it. `rev-list --first-parent
-        # origin/main` always contains main's own tip, so `sha not in first_parent`
-        # already implies `sha != main_tip` — the exact-tip guard was strictly
-        # redundant, and a mutation test is what proved it: deleting `sha !=
-        # main_tip` changed no behaviour and broke no test. Two conditions that
-        # look like independent protection but are not is worse than one, because
-        # the next reader cannot tell which is load-bearing.
+        # ⛔ `sha not in first_parent` SUPERSEDES the `sha != main_tip` guard that
+        # used to sit here, and that guard was DELETED rather than kept alongside
+        # it: `rev-list --first-parent origin/main` always contains main's own
+        # tip, so this condition already implies it (a mutation test proved it —
+        # deleting `sha != main_tip` changed no behaviour and broke no test). Two
+        # conditions that LOOK like independent protection but are not is worse
+        # than one, because the next reader cannot tell which is load-bearing.
+        # It is NOT redundant over in predicate 1, which must also work when
+        # `first_parent` is unreadable.
         and sha not in first_parent
     ):
         return "merged into origin/main (its tip is a branch head main absorbed)"
@@ -1731,12 +1757,18 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
             cur.setdefault("branch", "(detached)")
         elif cur is not None and line.startswith("HEAD "):
             # The worktree's checked-out commit, carried free by --porcelain.
-            # It reaches ONLY `_branch_terminal_state`'s tip-SHA predicate. It
-            # does NOT unlock the ancestor predicate for a detached worktree:
-            # that one tests `ref in ancestor_merged`, a set of REF NAMES, and a
-            # detached worktree's ref is the literal "(detached)". So a detached
-            # worktree at an ancestor-of-main commit is still reported as a hit
-            # (fail-closed). An earlier comment here implied otherwise.
+            #
+            # ⛔ IT REACHES NEITHER TERMINAL PREDICATE when the worktree is
+            # DETACHED. `_branch_terminal_state` refuses every ref that does not
+            # start with `refs/heads/`, and a detached worktree's branch is the
+            # literal `"(detached)"` — so the tip-SHA predicate is refused BEFORE
+            # it is ever compared, and the ancestor predicate tests
+            # `ref in ancestor_merged`, a set of REF NAMES, which `"(detached)"`
+            # cannot be in. A detached worktree is therefore reported as a hit
+            # even at a squash-merged head: fail-closed, and deliberate — with no
+            # branch name there is no ref to name a landing. An earlier version of
+            # this comment claimed the HEAD reached the tip-SHA predicate, which
+            # is false for exactly the detached case it was describing.
             cur["head"] = line[len("HEAD "):].strip()
     if cur is not None:
         blocks.append(cur)
@@ -1786,6 +1818,66 @@ def scan_worktree_surface(
 
 
 # ── GitHub surfaces ──────────────────────────────────────────────────────────
+
+def _require_issue_payload(data: dict, where: str) -> None:
+    """The issue payload's own contract: `comments` and `assignees` must be
+    present, must be lists, and must hold OBJECTS.
+
+    ⛔ TWO FAILURE MODES IN OPPOSITE DIRECTIONS, from the same omission.
+    `gh issue view --json number,title,state,assignees,comments,url` ALWAYS
+    returns both keys (as arrays, often empty), so:
+
+      * a MISSING key is a malformed payload, and reading it as "no comments, no
+        assignees" DROPS a claim comment or a different-account assignee — the
+        fail-OPEN direction, because absence looks exactly like emptiness. Same
+        reasoning that already makes an absent `closingIssuesReferences`
+        INCOMPLETE rather than "closes nothing".
+      * a non-object ELEMENT (`[null]`) reached `.get` and raised
+        `AttributeError`, which is neither `SurfaceError` nor `RuntimeError` — so
+        it escaped as a TRACEBACK with no `VERDICT` line and exit 1, the code
+        this module documents as COLLISION. `_require_pr_dicts` closed that for
+        the PR lists; this closes it for the issue surface, and additionally
+        rejects a non-STRING `login`/`body`, which crashed inside
+        `assignee_attribution`'s `.strip()` and `_strip_control_sequences`.
+
+    Raising `SurfaceError` routes both cases through the existing handler, which
+    NAMES the reason and marks this surface INCOMPLETE.
+    """
+    for key in ("comments", "assignees"):
+        if key not in data:
+            raise SurfaceError(
+                f"{where} has no {key!r} key — `gh issue view --json` always "
+                "returns it, so absence means a malformed payload, not an empty "
+                "list; reading it as empty would DROP a claim (NOT clean)"
+            )
+        value = data[key]
+        if not isinstance(value, list):
+            raise SurfaceError(
+                f"{where} has a non-list {key!r} ({type(value).__name__}) — "
+                "refusing (NOT clean)"
+            )
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise SurfaceError(
+                    f"{where} has a non-object element in {key!r} at index "
+                    f"{index} ({type(item).__name__}) — refusing to read a "
+                    "malformed issue payload as if it were empty (NOT clean)"
+                )
+    for index, assignee in enumerate(data["assignees"]):
+        login = assignee.get("login")
+        if login is not None and not isinstance(login, str):
+            raise SurfaceError(
+                f"{where} has a non-string assignee login at index {index} "
+                f"({type(login).__name__}) — refusing (NOT clean)"
+            )
+    for index, comment in enumerate(data["comments"]):
+        body = comment.get("body")
+        if body is not None and not isinstance(body, str):
+            raise SurfaceError(
+                f"{where} has a non-string comment body at index {index} "
+                f"({type(body).__name__}) — refusing (NOT clean)"
+            )
+
 
 def _require_pr_dicts(prs: list, where: str) -> None:
     """Every element of a PR list must be a JSON object.
@@ -1847,9 +1939,12 @@ def _closed_pr_sample(gh_bin: str, slug: str | None, cwd: str,
 
     ``partial`` is decided by EVIDENCE, never by whether a parse succeeded: it is
     True when more pages provably exist (a ``rel="next"``, or a ``rel="last"``
-    total larger than the page) and False only when the response carries no
-    ``Link`` header at all. Any ``Link`` header the parser cannot read is treated
-    as partial with a floor total rather than as completeness.
+    total larger than the page). It is False when no ``Link`` header is present
+    at all, OR when the advertised last page contains the whole list — so a
+    ``Link`` header CAN be present on a ``partial=False`` response, and "no Link
+    header" is not the only way to reach completeness. Any ``Link`` header the
+    parser cannot read is treated as partial with a floor total rather than as
+    completeness.
 
     ``--paginate`` is deliberately absent. Following the ``rel="next"`` chain
     to exhaustion cost ~19 requests on this repo (measured ``Link: rel="last"``
@@ -2545,6 +2640,10 @@ def run_preflight(
                 cwd, timeout,
             )
             if isinstance(data, dict):
+                # Before anything reads it: a malformed payload must become a
+                # NAMED INCOMPLETE, never a traceback (exit 1 == COLLISION) and
+                # never a silent empty read (fail-open).
+                _require_issue_payload(data, f"gh issue view #{issue} in {slug}")
                 issue_data = data
                 title = data.get("title") or None
             else:
