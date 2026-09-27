@@ -672,6 +672,39 @@ def test_slow_files_never_in_fast_gate_selections():
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
+def test_expensive_eval_integration_stays_slow():
+    """#4711/#4712: the suite's single most expensive file must stay in slow_files.
+
+    MEASURED from the junit artifact of green main run 35779482728 (`45aa52f70`):
+    `eval/retrieval/test_integration.py` cost **1465.9s = 24.4 min**, 1.71x its
+    stale declared 855.2s, and it ran in the FAST lane (half_a). That alone put
+    half_a at 2956.5s (49.3 min) against the 55-minute watchdog — 5.7 minutes of
+    headroom — while half_b sat at 1357.5s (22.6 min): a real 2.18:1 split that
+    the placeholder-symmetric durations map concealed. Moving it to slow_files
+    restored a real 1.05:1 balance (half_a 1392.3s / half_b 1455.7s) with ~31
+    minutes of headroom, WITHOUT raising any timeout.
+
+    `test_slow_files_never_in_fast_gate_selections` cannot catch a revert that
+    ALSO drops the slow_files entry — the generic assertion would still pass.
+    This pin names the file so the regression is loud.
+    """
+    m = load_manifest()
+    f = "eval/retrieval/test_integration.py"
+    assert f in set(m["slow_files"]), (
+        f"{f} must stay in slow_files — it is 24.4 min of the fast lane's "
+        "55-minute budget (#4711)"
+    )
+    for changed in (["tortoise/graph.py"], ["docs/README.md"],
+                    ["tortoise/ranking.py"]):
+        got = set(_sel(changed)["test_files"])
+        assert f not in got, f"{f} leaked into the fast gate for {changed}"
+    # Deliberately NOT asserting `f not in m["durations"]`: a slow-lane key
+    # carries its measured cost there on purpose, so a cost regression in a lane
+    # that exists *because* it is expensive stays visible
+    # (ci_selection.validate_durations). It cannot re-pack the file into the fast
+    # gate — split_fast_gate subtracts slow_files first (`files -= slow`).
+
+
 def test_slow_files_emitted_on_every_return_path():
     # #1371: the changes job reads slow_files from every selection mode — a
     # missing key would KeyError the nightly/schedule run or empty test-slow.
