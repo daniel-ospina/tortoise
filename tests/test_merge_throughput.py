@@ -16,6 +16,7 @@ polarity token set) skips when the agent-infra symlink is unresolvable.
 from __future__ import annotations
 
 import json as _json
+import os
 import re
 import subprocess
 import sys
@@ -471,7 +472,7 @@ def test_attribution_pr_scoping():
 def test_capacity_three_way():
     ok = {"queued": 10, "in_progress": 3, "oldest_minutes": 60,
           "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
-          "verified_at": NOW}
+          "verified_at": NOW, "items": [{"id": 1}], "total_count": 1}
     assert run_check("capacity", json=ok, max_oldest_minutes=120, min_headroom=1,
                      require_complete=True, require_fresh=True) == 0
     slow = dict(ok, oldest_minutes=200)
@@ -481,6 +482,10 @@ def test_capacity_three_way():
     assert run_check("capacity", json=at_capacity, max_oldest_minutes=120,
                      min_headroom=1, require_complete=True, require_fresh=True) == 1
     assert run_check("capacity", json={}) == 2
+    incomplete = dict(ok)
+    incomplete.pop("items")
+    assert run_check("capacity", json=incomplete, min_headroom=1,
+                     require_complete=True) == 2
 
 
 def test_capacity_headroom_unknown_is_2():
@@ -641,6 +646,68 @@ def test_assert_queue_head_checks_three_way():
 def test_assert_queue_head_empty_required_is_2():
     assert run_check("assert-queue-head-checks",
                      json={"queue_head": "sha1", "required": [], "names": []}) == 2
+
+
+def test_strict_unresolvable_singleton_success_is_2():
+    payload = {"required": ["a"], "check_runs": [
+        {"name": "a", "status": "completed", "conclusion": "success",
+         "app": {"slug": "g"}, "details_url": None},
+    ]}
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_strict_empty_required_is_2():
+    payload = {"required": [], "check_runs": [
+        {"name": "some-other", "status": "completed", "conclusion": "success",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"},
+    ]}
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_main_gate_require_fresh_head_binding():
+    run = {"name": "a", "status": "completed", "conclusion": "success",
+           "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}
+    matched = {"required": ["a"], "check_runs": [run],
+               "sha": "abc", "live_main_sha": "abc"}
+    assert run_check("main-gate", json=matched, strict=True, require_fresh=True) == 0
+    moved = dict(matched, live_main_sha="def")
+    assert run_check("main-gate", json=moved, strict=True, require_fresh=True) == 2
+    missing = {"required": ["a"], "check_runs": [run]}
+    assert run_check("main-gate", json=missing, strict=True, require_fresh=True) == 2
+
+
+def test_main_gate_sentinel_shim_removed():
+    assert run_check("main-gate", json={"main_gate": "GREEN"}) == 2
+    assert run_check("main-gate", json={"mergify_mergeable": "MERGEABLE"},
+                     strict=True) == 2
+
+
+def test_verdict_from_check_runs_non_red_is_not_green():
+    run = {"name": "x", "status": "completed", "conclusion": "cancelled",
+           "details_url": "x/1", "workflow": "w"}
+    assert mt.verdict_from_check_runs([run]) == "NON_RED"
+    assert mt.main_gate([run]) == "NON_RED"
+
+
+def test_merge_pages_object_and_list_streams():
+    assert mt._merge_pages([["a"], ["b"]]) == ["a", "b"]
+    merged = mt._merge_pages([
+        {"total_count": 2, "check_runs": [1]},
+        {"total_count": 2, "check_runs": [2]},
+    ])
+    assert merged == {"total_count": 2, "check_runs": [1, 2]}
+    assert mt._merge_pages([]) == []
+
+
+def test_queue_eta_claimed_total_without_items_is_2():
+    assert run_check("queue-eta", json={"total_count": 5000, "max_eta_minutes": 1},
+                     max=120, min_depth=50) == 2
+
+
+def test_gap_record_path_escape_is_2():
+    p = _gap_payload()
+    p["gap"]["terms"]["effective_parallel"]["record"] = "/etc/hosts"
+    assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
 def test_durations_map_three_way():
@@ -969,57 +1036,63 @@ def test_non_red_token_set_matches_the_rail():
 # CLI surface — the full declared grammar is parseable.
 # ---------------------------------------------------------------------------
 
+def _run_cli(*args):
+    env = {**os.environ, "MERGE_THROUGHPUT_ALLOW_FIXTURE": "1"}
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"), *args],
+        capture_output=True, text=True, cwd=str(ROOT), env=env)
+
+
 def test_cli_json_emits_fields_without_threshold_judgement():
-    out = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "--json", "--fixture", "empty"],
-        capture_output=True, text=True, cwd=str(ROOT))
+    out = _run_cli("--json", "--fixture", "empty")
     assert out.returncode == 0, out.stderr
     payload = _json.loads(out.stdout)
-    assert payload["main_sha"] == mt.UNKNOWN or isinstance(payload["main_sha"], str)
+    assert payload["main_sha"] == mt.UNKNOWN
     assert "gap" in payload
 
 
 def test_cli_check_unknown_input_exits_2():
-    out = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "check", "conflicts", "--max", "5", "--fixture", "empty"],
-        capture_output=True, text=True, cwd=str(ROOT))
+    out = _run_cli("check", "conflicts", "--max", "5", "--fixture", "empty")
     assert out.returncode == 2, out.stdout + out.stderr
 
 
-def test_cli_conjunct_mixed_miss_is_1():
+def test_cli_fixture_is_refused_without_the_test_optin():
+    env = {k: v for k, v in os.environ.items()
+           if k != "MERGE_THROUGHPUT_ALLOW_FIXTURE"}
     out = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "check", "gap", "--max", "2", "--fixture", "conjunct_mixed",
-         "--and", "fast-files-unclassified", "--max", "0"],
-        capture_output=True, text=True, cwd=str(ROOT))
+         "check", "gap", "--max", "2", "--fixture", "gap_ok"],
+        capture_output=True, text=True, cwd=str(ROOT), env=env)
+    assert out.returncode == 2
+
+
+def test_cli_conjunct_mixed_miss_is_1():
+    out = _run_cli("check", "gap", "--max", "2", "--fixture", "conjunct_mixed",
+                   "--and", "fast-files-unclassified", "--max", "0")
     assert out.returncode == 1, out.stdout + out.stderr
 
 
 def test_cli_conjunct_unknown_beats_miss():
-    out = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "check", "gap", "--max", "2", "--fixture", "conjunct_unknown",
-         "--and", "fast-files-unclassified", "--max", "0"],
-        capture_output=True, text=True, cwd=str(ROOT))
+    out = _run_cli("check", "gap", "--max", "2", "--fixture", "conjunct_unknown",
+                   "--and", "fast-files-unclassified", "--max", "0")
     assert out.returncode == 2, out.stdout + out.stderr
 
 
 def test_cli_json_check_name_maps_to_field():
-    out = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "--json", "main-gate", "--fixture", "empty"],
-        capture_output=True, text=True, cwd=str(ROOT))
+    # fast-files-unclassified maps to an EMITTED field ([] under gap_ok); an
+    # unmapped/path-only implementation returned "UNKNOWN".
+    out = _run_cli("--json", "fast-files-unclassified", "--fixture", "gap_ok")
     assert out.returncode == 0, out.stderr
-    assert _json.loads(out.stdout) == mt.UNKNOWN
+    assert _json.loads(out.stdout) == []
+
+
+def test_cli_json_unmapped_check_name_exits_2():
+    out = _run_cli("--json", "drain-rate", "--fixture", "empty")
+    assert out.returncode == 2
 
 
 def test_cli_exclude_unknown_key_is_2():
-    out = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "merge_throughput.py"),
-         "check", "no-languish", "--exclude", "bogus", "--fixture", "empty"],
-        capture_output=True, text=True, cwd=str(ROOT))
+    out = _run_cli("check", "no-languish", "--exclude", "bogus", "--fixture", "empty")
     assert out.returncode == 2
 
 
@@ -1029,3 +1102,33 @@ def test_cli_sweep_concurrency_flag_exists():
         capture_output=True, text=True, cwd=str(ROOT))
     assert out.returncode == 0
     assert "--sweep-concurrency" in out.stdout
+
+
+def test_cli_input_record_reaches_0_and_1(tmp_path):
+    rec = tmp_path / "drain.json"
+    rec.write_text(_json.dumps({"merges_per_hour": 15.0, "merges": 300,
+                                "window_hours": 24, "verified_at": NOW}))
+    good = _run_cli("check", "drain-rate", "--min", "12", "--input", str(rec),
+                    "--require-fresh")
+    assert good.returncode == 0, good.stdout + good.stderr
+    rec.write_text(_json.dumps({"merges_per_hour": 2.0, "merges": 300,
+                                "window_hours": 24, "verified_at": NOW}))
+    miss = _run_cli("check", "drain-rate", "--min", "12", "--input", str(rec),
+                    "--require-fresh")
+    assert miss.returncode == 1, miss.stdout + miss.stderr
+
+
+def test_cli_input_missing_file_is_2(tmp_path):
+    out = _run_cli("check", "drain-rate", "--min", "12",
+                   "--input", str(tmp_path / "nope.json"))
+    assert out.returncode == 2
+
+
+def test_cli_triage_fixture_row_shape():
+    out = _run_cli("--triage", "--emit", "rows", "--fixture", "empty")
+    assert out.returncode == 0, out.stderr
+    rows = _json.loads(out.stdout)
+    assert rows and set(rows[0]) == {
+        "number", "bucket", "eligible", "conflict", "conflicted_paths",
+        "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
+        "owner_evidence", "owning_issue"}

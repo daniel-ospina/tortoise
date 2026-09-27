@@ -32,6 +32,7 @@ Stdlib only (Python 3.12).
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import json as jsonlib
 import os
 import re
@@ -113,6 +114,10 @@ merge_throughput.py --json [<name>|<field-path>]   # emit all fields, never a ju
 merge_throughput.py --triage [--emit rows]         # never issues a mutating request
 merge_throughput.py --watch-queue | --observe-capacity
 merge_throughput.py --sweep-concurrency N          # bounded merge-tree sweep
+
+Record input (all checks): --input PATH.json  (a whole-record object, or a
+check-name -> record map). Fixtures are test-only and require
+MERGE_THROUGHPUT_ALLOW_FIXTURE=1.
 """
 
 
@@ -291,16 +296,20 @@ def _token_verdict(token) -> str:
 
 def _group_verdict(group: list[dict], workflow_key) -> str:
     newest = _newest(group)
+    if workflow_key is None:
+        # The workflow cannot be resolved. A multi-attempt group CANNOT be
+        # ordered by id — a newer non-red attempt must never shadow an older
+        # red — so it is UNKNOWN. A singleton still reports a RED/NON_RED
+        # token, but a GREEN is unprovable and is UNKNOWN, never GREEN.
+        if len(group) > 1:
+            return "UNKNOWN"
+        if newest.get("status") != "completed":
+            return "UNKNOWN"
+        verdict = _token_verdict(newest.get("conclusion"))
+        return "UNKNOWN" if verdict == "GREEN" else verdict
     if newest.get("status") != "completed":
         return "UNKNOWN"
-    verdict = _token_verdict(newest.get("conclusion"))
-    # An unresolvable workflow means the newest attempt cannot be PROVEN to
-    # belong to the same group as any other, so it must never read GREEN — an
-    # older red in another workflow would be shadowed. A RED/NON_RED token
-    # still reports itself (a null/unknown conclusion is RED regardless).
-    if workflow_key is None and verdict == "GREEN":
-        return "UNKNOWN"
-    return verdict
+    return _token_verdict(newest.get("conclusion"))
 
 
 def _verdicts(runs, workflow_of=None) -> list[tuple]:
@@ -457,7 +466,11 @@ def assert_main_unchanged(before: str, after: str):
 def _gh_api(path: str, paginate: bool = False):
     cmd = ["gh", "api", "-H", "Accept: application/vnd.github+json"]
     if paginate:
-        cmd.append("--paginate")
+        # `--paginate` alone emits ONE JSON DOCUMENT PER PAGE for object
+        # endpoints, which a single json.loads reads as "Extra data" -> UNKNOWN.
+        # `--slurp` wraps the pages in one array; _merge_pages then concatenates
+        # the page lists.
+        cmd += ["--paginate", "--slurp"]
     cmd.append(path)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
@@ -465,7 +478,35 @@ def _gh_api(path: str, paginate: bool = False):
         return UNKNOWN
     if proc.returncode != 0:
         return UNKNOWN
-    return parse_api_body(proc.stdout.encode())
+    body = parse_api_body(proc.stdout.encode())
+    if body is UNKNOWN:
+        return UNKNOWN
+    if paginate:
+        body = _merge_pages(body)
+    return body
+
+
+def _merge_pages(pages):
+    """Merge `gh api --paginate --slurp` page objects into one document."""
+    if not isinstance(pages, list) or not pages:
+        return pages
+    if all(isinstance(page, list) for page in pages):
+        merged = []
+        for page in pages:
+            merged.extend(page)
+        return merged
+    if all(isinstance(page, dict) for page in pages):
+        merged = dict(pages[0])
+        for page in pages[1:]:
+            for key, value in page.items():
+                if isinstance(value, list) and isinstance(merged.get(key), list):
+                    merged[key] = merged[key] + value
+                elif key == "total_count" and _is_num(value) and _is_num(merged.get(key)):
+                    merged[key] = max(merged[key], value)
+                else:
+                    merged[key] = value
+        return merged
+    return pages
 
 
 def live_main_sha():
@@ -575,7 +616,7 @@ def _ensure_object(sha: str) -> bool:
     return fetch.returncode == 0
 
 
-def collect_conflicts():
+def collect_conflicts(bound=None):
     """Enumerate open PRs (complete) and sweep conflicts with git merge-tree."""
     body = _gh_api(
         f"repos/{OWNER_REPO}/pulls?state=open&per_page=100&sort=created&direction=asc",
@@ -585,12 +626,10 @@ def collect_conflicts():
         return {}
     if not isinstance(body, list):
         return {}
-    if body and isinstance(body[0], dict) and body[0].get("incomplete_results"):
-        return {"items": [], "total_count": 0, "read_ok": True, "incomplete_results": True}
     main_sha = live_main_sha()
     if main_sha is UNKNOWN:
         return {}
-    bound = validate_sweep_concurrency(None)
+    bound = validate_sweep_concurrency(bound)
     refs = [
         (p, p.get("head", {}).get("sha"))
         for p in body
@@ -644,7 +683,7 @@ def collect_payload(name: str, opts: dict):
     """Live read for a check when no fixture is injected."""
     try:
         if name == "conflicts":
-            return collect_conflicts()
+            return collect_conflicts(opts.get("sweep_concurrency"))
         if name == "fast-files-unclassified":
             return collect_fast_files_unclassified()
         if name == "main-gate":
@@ -658,7 +697,14 @@ def collect_payload(name: str, opts: dict):
             if required is UNKNOWN:
                 # The required set is unreadable ⇒ the gate cannot be asserted.
                 return {}
-            return {"check_runs": runs, "required": required}
+            resolver = workflow_of_for_sha(sha)
+            if resolver is not None:
+                for run in runs:
+                    if isinstance(run, dict) and not run.get("workflow"):
+                        with contextlib.suppress(Exception):
+                            run["workflow"] = resolver(run)
+            return {"check_runs": runs, "required": required, "sha": sha,
+                    "live_main_sha": api_main_sha()}
     except Exception:
         return {}
     return {}
@@ -676,9 +722,11 @@ def _strict_main_gate(runs, required) -> int:
     contexts is the non-vacuity guard. When `required` is supplied the verdict
     is scoped to it, so a non-required red does not false-red the gate.
     """
-    if required:
-        wanted = {str(name) for name in required}
-        runs = [run for run in runs if str(run.get("name")) in wanted]
+    if not required:
+        print("2: required context set is empty/unreadable (nothing to assert)")
+        return 2
+    wanted = {str(name) for name in required}
+    runs = [run for run in runs if str(run.get("name")) in wanted]
     if not runs:
         print("2: no required context observed success (all NO_MAIN_SIGNAL)")
         return 2
@@ -687,7 +735,11 @@ def _strict_main_gate(runs, required) -> int:
     observed = 0
     for key, group in _group_runs(runs).items():
         newest = _newest(group)
-        if newest.get("status") == "completed" and newest.get("conclusion") in STRICT_GREEN:
+        if (
+            newest.get("status") == "completed"
+            and newest.get("conclusion") in STRICT_GREEN
+            and key[1] is not None
+        ):
             observed += 1
             continue
         token = _conclusion_token(newest)
@@ -710,8 +762,8 @@ def _check_main_gate(payload: dict, opts: dict) -> int:
         return 2
     if opts.get("require_fresh"):
         record_sha = payload.get("sha")
-        live_sha = payload.get("live_main_sha") or payload.get("main_sha")
-        if record_sha and live_sha and record_sha != live_sha:
+        live_sha = payload.get("live_main_sha")
+        if not record_sha or not live_sha or record_sha != live_sha:
             print("2: main-gate evidence is not bound to the live main sha")
             return 2
     if opts.get("strict"):
@@ -897,20 +949,19 @@ def _check_queue_eta(payload: dict, opts: dict) -> int:
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
-    if items is not None and not isinstance(items, list):
-        return 2
-    if isinstance(items, list) and isinstance(total, int) and len(items) != total:
-        return 2
-    if opts.get("require_complete"):
-        if not isinstance(items, list) or not isinstance(total, int):
-            return 2
-        if len(items) != total:
-            return 2
     min_depth = _as_int(opts.get("min_depth"))
+    needs_population = min_depth is not None or opts.get("require_complete")
+    # The population floor must be backed by a reconciled read: a claimed
+    # total_count with no items is not an observation.
+    if needs_population and (
+        not isinstance(items, list)
+        or not isinstance(total, int)
+        or len(items) != total
+    ):
+        print("2: ETA enumeration did not reconcile to its total")
+        return 2
     if min_depth is not None:
-        population = total if isinstance(total, int) else (
-            len(items) if isinstance(items, list) else None
-        )
+        population = total if isinstance(total, int) else None
         if population is None or population < min_depth:
             print("2: ETA population below --min-depth")
             return 2
@@ -1095,6 +1146,12 @@ def _check_capacity(payload: dict, opts: dict) -> int:
         if not _is_num(payload.get(key)):
             print(f"2: capacity field {key!r} is missing or not numeric")
             return 2
+    if opts.get("require_complete"):
+        items = payload.get("items")
+        total = payload.get("total_count")
+        if not isinstance(items, list) or not isinstance(total, int) or len(items) != total or total < 1:
+            print("2: capacity enumeration did not reconcile to its total")
+            return 2
     if opts.get("require_fresh") and not _age_ok(
         payload.get("verified_at"), M4_RECORD_WINDOW_DAYS
     ):
@@ -1167,9 +1224,24 @@ def _check_gap(payload: dict, opts: dict) -> int:
                 record.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
             ):
                 return 2
-        elif not (REPO / record_path).exists():
-            print(f"2: M3 record {record_path!r} is not on disk")
-            return 2
+        else:
+            try:
+                resolved = (REPO / str(record_path)).resolve()
+                resolved.relative_to(REPO.resolve())
+            except (ValueError, OSError):
+                print("2: M3 record path escapes the repo")
+                return 2
+            if not resolved.is_file():
+                print(f"2: M3 record {record_path!r} is not on disk")
+                return 2
+            try:
+                record = jsonlib.loads(resolved.read_text())
+            except (OSError, ValueError):
+                return 2
+            if not isinstance(record, dict) or not _age_ok(
+                record.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+            ):
+                return 2
     value = _as_number(gap.get("value", UNKNOWN))
     if value is None:
         return 2
@@ -1328,7 +1400,11 @@ def run_check(name: str, json=None, **opts) -> int:
     if not isinstance(payload, dict):
         print(f"2: {name}: no parsable data (UNKNOWN)")
         return 2
-    return _DISPATCH[name](payload, opts)
+    try:
+        return _DISPATCH[name](payload, opts)
+    except Exception as exc:  # fail closed: a crash is UNKNOWN, never a miss
+        print(f"2: {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
 
 
 # ---------------------------------------------------------------------------
@@ -1367,10 +1443,25 @@ _FIXTURES = {
         "fast-files-unclassified": {"fast_files_unclassified": []},
     },
     "conjunct_unknown": {
-        "gap": _fixture_gap(),
+        "gap": _fixture_gap(3.0),
         "fast-files-unclassified": {},
     },
 }
+
+_FIXTURE_TRIAGE_ROWS = [{
+    "number": 1,
+    "bucket": "eligible",
+    "eligible": True,
+    "conflict": False,
+    "conflicted_paths": [],
+    "superseded_by": None,
+    "draft": False,
+    "hard_stop": False,
+    "terminal_decision": False,
+    "owner": UNKNOWN,
+    "owner_evidence": UNKNOWN,
+    "owning_issue": UNKNOWN,
+}]
 
 
 def _fixture_payload(fixture: str, name: str):
@@ -1459,6 +1550,7 @@ _VALUE_FLAGS = {
     "--min-headroom": "min_headroom",
     "--max-age-days": "max_age_days",
     "--fixture": "fixture",
+    "--input": "input",
     "--sweep-concurrency": "sweep_concurrency",
 }
 _BOOL_FLAGS = {
@@ -1473,6 +1565,7 @@ def _parse_check_argv(argv):
     current_name = None
     current_opts: dict = {}
     fixture = None
+    input_path = None
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -1492,6 +1585,8 @@ def _parse_check_argv(argv):
             key = _VALUE_FLAGS[token]
             if key == "fixture":
                 fixture = value
+            elif key == "input":
+                input_path = value
             else:
                 current_opts[key] = value
             i += 2
@@ -1510,7 +1605,26 @@ def _parse_check_argv(argv):
         segments.append((current_name, current_opts))
     if not segments:
         return None, 2
-    return (segments, fixture), None
+    return (segments, fixture, input_path), None
+
+
+def _fixture_allowed() -> bool:
+    """Fixtures are hardcoded passing data — test-only, opt-in by env."""
+    return os.environ.get("MERGE_THROUGHPUT_ALLOW_FIXTURE") == "1"
+
+
+def _read_json_file(path: str):
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return UNKNOWN
+    return parse_api_body(data)
+
+
+def _payload_from_input(data, name: str):
+    if isinstance(data, dict) and isinstance(data.get(name), dict):
+        return data[name]
+    return data
 
 
 def _cli_check(argv) -> int:
@@ -1518,35 +1632,38 @@ def _cli_check(argv) -> int:
     if error is not None:
         print(USAGE, file=sys.stderr)
         return error
-    segments, fixture = parsed
+    segments, fixture, input_path = parsed
+    if fixture is not None and not _fixture_allowed():
+        print("2: --fixture is test-only; set MERGE_THROUGHPUT_ALLOW_FIXTURE=1",
+              file=sys.stderr)
+        return 2
+    input_data = _read_json_file(input_path) if input_path else None
     codes = []
     for name, opts in segments:
         opts = dict(opts)
         opts.pop("fixture", None)
-        payload = _fixture_payload(fixture, name) if fixture is not None else None
+        opts.pop("input", None)
+        if fixture is not None:
+            payload = _fixture_payload(fixture, name)
+        elif input_data is not None:
+            payload = _payload_from_input(input_data, name)
+        else:
+            payload = None
         codes.append(run_check(name, json=payload, **opts))
     return aggregate(codes)
 
 
 # check name → the top-level report field it names, for `--json <name>`.
+# Only fields build_report actually emits are listed; an unmapped check name
+# exits 2 rather than printing UNKNOWN indistinguishably from a real read.
 _CHECK_FIELD = {
     "main-gate": "main_gate",
-    "drain-rate": "drain_rate",
-    "prs-per-day": "prs_per_day",
-    "queue-entry": "queue_entry",
-    "queue-eta": "queue_eta",
     "batch-size": "max_batch_size",
-    "cycle": "cycle",
     "shard-balance": "shard_imbalance_minutes",
     "fast-files-unclassified": "fast_files_unclassified",
     "conflicts": "conflicts",
-    "attribution": "attribution",
     "capacity": "capacity",
-    "parallelism-headroom": "parallelism_headroom",
     "gap": "gap",
-    "no-languish": "no_languish",
-    "baseline-fresh": "baseline_fresh",
-    "assert-queue-head-checks": "assert_queue_head_checks",
     "durations-map": "durations_map",
 }
 
@@ -1566,9 +1683,17 @@ def _cli_json(argv) -> int:
             i += 1
             continue
         i += 1
+    if fixture is not None and not _fixture_allowed():
+        print("2: --fixture is test-only; set MERGE_THROUGHPUT_ALLOW_FIXTURE=1",
+              file=sys.stderr)
+        return 2
     report = build_report(fixture=fixture)
     if path in _CHECK_FIELD:
         path = _CHECK_FIELD[path]
+    elif path in CHECK_NAMES:
+        print(jsonlib.dumps({"error": f"no emitted field for check {path!r}"},
+                            indent=2))
+        return 2
     print(jsonlib.dumps(_extract_path(report, path), indent=2, default=str))
     return 0
 
@@ -1604,10 +1729,19 @@ def _triage_rows():
 
 def _cli_triage(argv) -> int:
     emit_rows = "--emit" in argv and "rows" in argv
-    rows = _triage_rows()
-    if rows is None:
-        print("2: could not enumerate open PRs", file=sys.stderr)
-        return 2
+    fixture = None
+    for i, token in enumerate(argv):
+        if token == "--fixture" and i + 1 < len(argv):
+            fixture = argv[i + 1]
+    if fixture is not None:
+        if not _fixture_allowed():
+            return 2
+        rows = _FIXTURES.get(fixture, {}).get("triage", _FIXTURE_TRIAGE_ROWS)
+    else:
+        rows = _triage_rows()
+        if rows is None:
+            print("2: could not enumerate open PRs", file=sys.stderr)
+            return 2
     print(jsonlib.dumps(rows if emit_rows else {"rows": rows}, indent=2, default=str))
     return 0
 
@@ -1634,6 +1768,8 @@ def _cli_observe(mode: str, argv) -> int:
         if token == "--fixture" and i + 1 < len(argv):
             fixture = argv[i + 1]
     if fixture is not None:
+        if not _fixture_allowed():
+            return 2
         print(jsonlib.dumps({"mode": mode.lstrip("-"), "samples": []}, indent=2))
         return 0
     sample = _capacity_sample()
