@@ -29,8 +29,15 @@ resolved:
   workflow apart (a possible false red), but it can never let a newer green mask
   an older red (a false green) — and a false green is the failure the whole
   refactor exists to remove.
-* NO run id was resolved (a non-Actions check) -> the workflow dimension is
-  empty and the group is keyed by its app and job name.
+* NO run id was resolved **and** the check is provably not an Actions check (a
+  real vendor app whose URL carries no ``/actions/runs/`` path) -> the workflow
+  dimension is empty and the group is keyed by its app and job name.
+* NO run id was resolved but the check **is** Actions (its app is
+  ``github-actions``, or its ``details_url`` carries ``/actions/runs/``) -> the
+  check is grouped **per entry**. With no stable identity it must not share the
+  ``(app, None, job)`` fallback group: two workflows — or two runs — sharing a
+  job name would collapse there and a newer green would mask an older red, the
+  exact fail-open this module exists to close.
 
 Attempt order is the check-run **``id``** — a re-run adds a new check-run and
 never replaces the old one, so ordering by ``started_at`` alone loses the
@@ -152,8 +159,17 @@ NEGATIVE_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required", "st
 #: dropped: a red this module cannot name is still a red.
 UNNAMED_JOB = "(unnamed check)"
 
-#: ``.../actions/runs/<run_id>/job/<job_id>`` (or without the ``/job`` part).
-RUN_ID_RE = re.compile(r"/actions/runs/(\d+)(?:/|$)")
+#: ``.../actions/runs/<run_id>/job/<job_id>`` (or without the ``/job`` part,
+#: or with a ``?query``). A run id not followed by ``/``, ``?``, ``#`` or the
+#: end of the URL is NOT resolved (fail-closed: an unknown identity is grouped
+#: per entry, never collapsed by name).
+RUN_ID_RE = re.compile(r"/actions/runs/(\d+)(?=[/?#]|$)")
+
+#: The app slug GitHub Actions uses, and the path segment every Actions
+#: check-run carries. Together they PROVE a check is an Actions check even when
+#: its run id could not be parsed.
+ACTIONS_APP = "github-actions"
+ACTIONS_RUN_PATH = "/actions/runs/"
 
 #: A ref we can bind to a verdict. A short sha is NOT acceptable: the
 #: ``actions/runs?head_sha=`` filter matches only the full sha, so a prefix
@@ -315,6 +331,19 @@ def _workflow_identity(
     return f"run:{run_id}", None
 
 
+def _is_provably_non_actions(app: str, details_url: str) -> bool:
+    """True only when a check is PROVABLY not an Actions check.
+
+    The workflow-identity fallback key is ``(app, None, job)``. Sharing it is
+    safe only for a genuine non-Actions check, where the app IS the identity.
+    An Actions check whose run id failed to resolve has no stable identity, so
+    it must be grouped per entry instead of sharing that fallback group —
+    otherwise two same-named workflow files (or two runs) collapse and one can
+    mask the other.
+    """
+    return app not in ("unknown", ACTIONS_APP) and ACTIONS_RUN_PATH not in details_url
+
+
 def group_latest_attempts(
     check_runs: Iterable[Mapping[str, Any]],
     run_workflow_map: Mapping[str, tuple[str | None, str | None]] | None = None,
@@ -364,14 +393,17 @@ def group_latest_attempts(
         base_key: tuple[Any, ...] = (app, workflow_key, job)
         # A per-entry group is used whenever the check has no stable identity:
         # unnamed, placeholder-named, id-less, an id already seen in its group,
-        # or an app-less check with NO resolved workflow (there is then nothing
-        # at all to distinguish two checks by job name).
+        # or a check whose workflow identity did not resolve and which is not
+        # provably a non-Actions check. The last case is load-bearing: an
+        # Actions check with an unparseable/absent run id would otherwise share
+        # the (app, None, job) fallback group, letting two workflows that share
+        # a job name collapse and a newer green mask an older red.
         per_entry = (
             not raw_name
             or job == UNNAMED_JOB
-            or (app == "unknown" and workflow_key is None)
             or check_id is None
             or (base_key, check_id) in seen_ids
+            or (workflow_key is None and not _is_provably_non_actions(app, details_url))
         )
         key: tuple[Any, ...] = (*base_key, "entry", index) if per_entry else base_key
         if check_id is not None:
@@ -451,7 +483,15 @@ def compute_verdict(
     runs: Iterable[Mapping[str, Any]] = (),
     repo: str | None = None,
 ) -> Verdict:
-    """Compute the verdict for ``sha`` from already-fetched payloads (pure)."""
+    """Compute the verdict for ``sha`` from already-fetched payloads (pure).
+
+    The full-40-hex sha invariant is enforced HERE, not only in the fetch
+    layer: the offline CLI seam (``--check-runs-json``/``--runs-json``) and the
+    merge rail that will feed its already-fetched payload through it call this
+    function directly, and a short sha silently yields a zero-run ``head_sha``
+    listing.
+    """
+    _require_full_sha(sha)
     run_workflow_map = build_run_workflow_map(runs)
     groups = group_latest_attempts(check_runs, run_workflow_map)
     return Verdict(sha=sha, repo=repo, verdict=aggregate(groups), groups=groups)

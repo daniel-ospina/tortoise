@@ -1,3 +1,14 @@
+---
+title: "One authoritative per-commit CI verdict — Implementation Plan"
+type: engineering
+domain: platform
+doc_status: live
+created: 2026-09-26
+subjects.team: organisation-design-team
+ownedBy: organisation-design-team
+aboutSubjects: organisation-design-team
+---
+
 <!-- research-path: none (no research brief — the finding is entirely in-repo: #4877's measured payload) -->
 
 # One authoritative per-commit CI verdict — Implementation Plan
@@ -83,7 +94,7 @@ inline parser (concatenated `--paginate` JSON decoding, latest-attempt selection
 | `GET /repos/{o}/{r}/commits/{sha}/check-runs?filter=all&per_page=100` | External API (read) | Concatenated pages; every attempt; `name` is the JOB name; `details_url` → `…/actions/runs/<id>/job/<id>`. Failures: network/auth error (loud, exit 2); **pagination shortfall vs `total_count`** (read failure); empty body (read failure); non-object page (read failure) | Unit + CLI via `collect_items`; `_gh_api` seams monkeypatched; live smoke |
 | `GET /repos/{o}/{r}/actions/runs?head_sha={sha}&per_page=100` | External API (read) | `id → (workflow_id, name)`. Failures: run absent / listing empty (fall back to `run:<id>` identity — closed by `test_unresolved_workflow_does_not_collapse_two_runs`); partial read (the second read failing is a loud exit 2) | Unit + CLI; live smoke |
 | `GET /repos/{o}/{r}/commits/{sha}/status` (legacy) | External API (read) | **Not read by the verdict.** The rail reads it today with `NON_RED_STATE={success}`. Task 5 decides: ingest into the verdict or record a consumer refusal — never a silent drop | Rail harness (Task 5) |
-| `compute_verdict(sha, check_runs, runs, repo)` | Pure logic | Grouping key `(app.slug, workflow identity, job)`; workflow identity is `workflow_id`, else the run id (never the display name); latest by check-run `id`; per-entry (unique per occurrence) for unnamed/placeholder/id-less/duplicate-id; voided-red for a red superseded by absence. Failures: non-Mapping payload, null id, duplicate names, empty surface, short sha | Unit — 41 named cases |
+| `compute_verdict(sha, check_runs, runs, repo)` | Pure logic | Grouping key `(app.slug, workflow identity, job)`; workflow identity is `workflow_id`, else the run id (never the display name); latest by check-run `id`; per-entry (unique per occurrence) for unnamed/placeholder/id-less/duplicate-id and for an Actions check whose run id did not resolve; voided-red for a red superseded by absence. Failures: non-Mapping payload, null id, duplicate names, empty surface, short sha (enforced at the compute entry point, so the offline seam cannot bypass it) | Unit — 58 named cases |
 | Verdict CLI (`gh` fetch + render) | Process boundary | Exit `0` green, `1` red, `2` unreadable, `3` in-flight, `4` no-verdict (loud, no verdict on 2). Offline mode warns when Actions check-runs are present but no runs listing was supplied | CLI tests via `--check-runs-json`/`--runs-json` + monkeypatched seams |
 | `scripts/admin-merge.sh` `check_surface_probe` | Consumer | **No harness exists today** (`scripts/admin-merge.test.sh` is absent; nothing in `tests/` invokes the rail). Task 5 must create or name one before its acceptance can pass. Failure modes: partial read → PARTIAL refusal, both endpoints unreadable, unresolved event → blocks, empty surface = unmeasured ≠ green, per-entry identity for unnamed checks | Rail harness (created in Task 5) |
 | `scripts/admin-merge.sh` lane-tested precondition (`LANE_RUN_JQ`, "EXECUTED = success/failure/timed_out") | Consumer | A coverage-parity question ("did this head's lane execute the shard main executes?") the four-state verdict does not answer. Disposition: `keep separate` with that reason, and Task 9 enumerates it | Rail harness (Task 5) |
@@ -176,23 +187,29 @@ failure and truncation; the CLI exits 2 (never a verdict) when the surface canno
 - Create: `tests/test_ci_verdict.py`
 - Create: `docs/plans/2026-09-26-5042-per-commit-ci-verdict.md` (this file)
 
-**Implemented invariants (all named tests, 41 cases):** red-then-green → green; cancelled-only →
-no-verdict; in-flight → in-flight; red outranks in-flight; empty surface → no-verdict; unknown
-completed conclusion → red; unknown status with a negative conclusion → red; named in-flight status →
-in-flight; all-skipped → green; **an absent group with no earlier red alongside a green reads green**
-(recorded policy); **red-then-cancelled in the same group → RED (voided red)**; **a voided red is not
-cleared by an unrelated green group**; red→cancelled→green → green; two workflows sharing a job name
-stay separate (workflow id); a run without a workflow id does not collapse by name (run id); an
-unresolved workflow keeps runs separate; non-Actions checks separate by job name; latest attempt by
-id, not `started_at`; unnamed and placeholder-named checks per-entry; id-less checks per-entry;
-duplicate-id checks per-entry; sha+repo binding; short sha → read failure; pagination shortfall →
-read failure; missing `total_count` → read failure; empty body → read failure; partial read → exit 2;
-CLI exit codes 0/1/2/3/4.
+**Implemented invariants (all named tests, 58 cases):** red-then-green → green; cancelled-only →
+no-verdict; stale-only → no-verdict; in-flight → in-flight; red outranks in-flight; empty surface →
+no-verdict; unknown completed conclusion → red; unknown status with a negative conclusion → red;
+named in-flight status → in-flight; all-skipped → green; **an absent group with no earlier red
+alongside a green reads green** (recorded policy); **red-then-cancelled (or -stale) in the same group
+→ RED (voided red)**; **a voided red is not cleared by an unrelated green group**;
+red→cancelled→green → green; two workflows sharing a job name stay separate (workflow id); a run
+without a workflow id does not collapse by name (run id); an unresolved workflow keeps runs separate;
+two apps sharing a job name stay separate (app axis); non-Actions checks separate by job name; an
+Actions check whose run id cannot be resolved is per-entry (an unresolved URL never joins the
+`(app, None, job)` fallback group, where two workflows could collapse); a run id followed by
+`?`/`#`/end still resolves; latest attempt by id, not `started_at`; unnamed and placeholder-named
+checks per-entry; id-less checks per-entry; duplicate-id checks per-entry; sha+repo binding; short
+sha → read failure **at the compute entry point as well as the fetch layer** (so the offline CLI
+seam is covered); pagination shortfall → read failure; missing `total_count` → read failure; empty
+body → read failure; partial read → exit 2; CLI exit codes 0/1/2/3/4.
 
-**Step 4 smoke (recorded 2026-09-26):**
-`python3 tools/ci_verdict.py --repo daniel-ospina/tortoise <sha>` — `main@99a98ddc5` → `red`
-(24 groups, 2 red — a real pre-existing `Post-merge validation / lint` base red); PR 5406 head → `red`
-(48 groups).
+**Step 4 smoke (recorded 2026-09-26; sha corrected 2026-09-26 review):**
+`python3 tools/ci_verdict.py --repo daniel-ospina/tortoise <full-40-hex-sha>` —
+`main@99a98ddc5a37304b80232ba61d1a0a70f4fcf026` → `red` (24 groups, 2 red — a real pre-existing
+`Post-merge validation / lint` base red); PR 5406 head → `red` (48 groups). A **short** sha
+(e.g. `99a98ddc5`) is refused with exit 2 (`_require_full_sha`) — the earlier record quoted the
+abbreviated sha, which the tool had not yet begun refusing.
 
 ---
 
@@ -370,7 +387,7 @@ Cap 2 cycles; acceptance = every declared threat class covered by a named test +
 | Cycle | Reviewers | Issues found | Resolution |
 |-------|-----------|--------------|------------|
 | 1 | structural, integration, failure-mode, duplication | P0: group collapse when the runs map is empty (fail-open — an unresolved workflow collapsed distinct runs). P1: red→cancelled erased the red; truncation not reconciled against `total_count`; polarity divergence from rail #1353; plan Task-ordering and member-traceability contradictions; Task 5's "one fetch" impossible; short-sha false reds | Code: workflow identity from `workflow_id`→else run id; `voided_red` rule; `collect_items` requires a non-empty page list AND an int `total_count`; unrecognised status classified by conclusion; `_require_full_sha`. Plan: Task Dependencies serialized; member table reconciled; Task 5 acceptance rewritten. Tests added per class |
-| 2 | fresh instances of all four + adversarial acceptance | P0: red→cancelled in one group was dropped from the state set, so ANY unrelated green group flipped the commit green. P1: `workflow_id`-less runs collapsed by name; unrecognised non-completed status with a negative conclusion; missing `total_count`; duplicate-id per-entry uniqueness; member-table contradictions (#4279/#4339, #4819); Task 5 run map lacked `workflowDatabaseId` and was red-only; short-sha → false no-verdict; rail/verdict shared-vocabulary divergence unrecorded | Code: per-entry grouping for unnamed/placeholder/id-less/duplicate-id; `group_state` fail-closed on unknown conclusion; `build_run_workflow_map` → `(workflow_id_or_None, name)`; `voided_red` + `test_voided_red_with_another_green_group_is_not_green`; short-sha assertion strengthened. Plan: this section + the Acceptance/Decisions/Integration/Threat edits above. **Threat classes T1–T7 now each covered by at least one named test; the 41-case suite is green and ruff-clean; a 7-mutation sabotage run failed 12 tests (none survived).** |
+| 2 | fresh instances of all four + adversarial acceptance | P0: red→cancelled in one group was dropped from the state set, so ANY unrelated green group flipped the commit green. P1: `workflow_id`-less runs collapsed by name; unrecognised non-completed status with a negative conclusion; missing `total_count`; duplicate-id per-entry uniqueness; member-table contradictions (#4279/#4339, #4819); Task 5 run map lacked `workflowDatabaseId` and was red-only; short-sha → false no-verdict; rail/verdict shared-vocabulary divergence unrecorded | Code: per-entry grouping for unnamed/placeholder/id-less/duplicate-id; `group_state` fail-closed on unknown conclusion; `build_run_workflow_map` → `(workflow_id_or_None, name)`; `voided_red` + `test_voided_red_with_another_green_group_is_not_green`; short-sha assertion strengthened. Plan: this section + the Acceptance/Decisions/Integration/Threat edits above. **Threat classes T1–T7 now each covered by at least one named test; the 58-case suite is green and ruff-clean; a 7-mutation sabotage run failed 12 tests (none survived).** |
 
 Residuals (not chased — out of increment scope, enumerated for later tasks): the rail's cancelled-only →
 GREEN vs the verdict's `no-verdict` (Task 5); the `atomic-land.sh` unpaginated `check-runs` read (Task 9
@@ -381,3 +398,19 @@ junit/log signal no attempt-level verdict carries) — kept separate rather than
 
 > plan-review: gate=adversarial; domains=adversarial,integration,structure,duplication; cycles=2; cap=2; acceptance=THREAT SURFACE COVERED (T1–T7 each test-covered, no in-scope bypass reproduced); status=clean
 > Reviewed-by: plan-review (4 fresh-context reviewers × 2 cycles + adversarial acceptance)
+
+---
+
+## Review Cycle Log (increment-1 code review — 2026-09-26 crash-recovery session)
+
+Fresh-context `task` reviewers on the exact diff (`tools/ci_verdict.py`, `tests/test_ci_verdict.py`,
+this plan) against the increment's declared contract and the T1–T7 threat surface. Cap 2 cycles
+(adversarial-domain bound).
+
+| Cycle | Reviewers | Issues found | Resolution |
+|-------|-----------|--------------|------------|
+| 1 | 2 fresh-context (adversarial fail-open hunter; contract/test-integrity) | **P1 fail-open**: an Actions check whose `details_url` did not parse (`run_id=None`, `workflow_key=None`) shared the `(app, None, job)` fallback group, so two same-named workflows collapsed and a newer green masked an older red — an unpatched T1 member. **P1 test-integrity**: the `app` axis was untested (dropping `app` from the group key survived all 53 tests). **P2 test-integrity**: `stale` never exercised (removing it from `ABSENT_CONCLUSIONS` survived). **P2 contract**: the full-40-hex sha invariant lived only in the fetch layer, so the offline CLI seam accepted a short sha and emitted a verdict. **P2 plan-drift**: the smoke record quoted a short sha the tool now refuses, and the "41 cases" count was stale | Code: `_is_provably_non_actions` + per-entry for an unresolved **Actions** check; `RUN_ID_RE` boundary relaxed to `[/?#]`/end; `_require_full_sha` moved into `compute_verdict` (the single entry point for online + offline). Tests: `test_unresolved_actions_url_does_not_collapse_two_workflows`, `test_two_apps_with_the_same_job_name_do_not_collapse`, `test_stale_only_reads_no_verdict`, `test_red_then_stale_in_the_same_group_reads_red`, `test_cli_offline_refuses_a_short_sha` (58 total). Plan: smoke sha corrected, counts updated. **Each new test was sabotage-verified: reverting its fix fails that test (5/5 mutations killed).** |
+| 1 (rejected) | as above | **P2 over-engineering**: collapse `group_state`'s non-completed branch to `else: return GROUP_IN_FLIGHT` and delete `IN_FLIGHT_STATUSES`/`NEGATIVE_CONCLUSIONS`, on the grounds that GitHub never emits a non-completed status with a conclusion | **Rejected.** That branch is a *recorded polarity decision* (the table above: an unrecognised status is classified by its conclusion; a present negative conclusion is RED) added in plan-review cycle 2, and it is the fail-closed guard for an unrecognised-vocabulary schema drift — the class #4877/#4831 are. Adopting it would silently reverse a recorded decision; the route would be a reopen, not a review nit. The branch costs ~4 lines; the module keeps it. |
+| 2 | fresh-context adversarial acceptance pass on the FIXED diff | **P1 test-integrity**: the unnamed/placeholder and id-less per-entry guards were not load-bearing in their own tests — `check_run()`'s default `details_url` is an unresolvable Actions URL, so the per-entry routing came from the cycle-1 unresolved-workflow clause; deleting either guard left the suite fully green while a payload with a RESOLVABLE run id flipped red→green | Tests: all three cases given a resolvable run id + runs map, so each guard is now the sole reason the test passes. **Mutation-verified: removing the unnamed/placeholder guard fails 2 tests; removing the id-less guard fails 1.** No new in-scope fail-open reproduced; the review bound (2) was reached, so the fix was closed out by a final fresh-context verification rather than a further cycle. |
+
+> increment-1-code-review: gate=adversarial; cycles=2; cap=2; final acceptance=THREAT SURFACE COVERED (fresh-context verification of the cycle-2 fix: 58 green; every T1–T7 class test-covered and mutation-killed); rejected=1 (a recorded polarity decision, not an open defect); status=clean.
