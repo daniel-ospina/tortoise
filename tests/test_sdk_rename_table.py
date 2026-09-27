@@ -57,7 +57,15 @@ def _render_doc() -> Path:
     if _DOC_PATH is None:
         import tempfile
 
-        out = Path(tempfile.mkdtemp(prefix="sdk-rename-table-")) / "sdk-rename-table.md"
+        from tests._embedded import register_session_tmpdir
+
+        tmpdir = tempfile.mkdtemp(prefix="sdk-rename-table-")
+        # #4096: the tree is session-scoped (this is a once-per-session cache), so it
+        # is reclaimed by the session reclaimer, not by a local finalizer that would
+        # run before the session's own teardown. Same primitive as `conftest.py`'s
+        # `_shared_embedded_path`.
+        register_session_tmpdir(tmpdir)
+        out = Path(tmpdir) / "sdk-rename-table.md"
         proc = subprocess.run(
             [sys.executable, str(GENERATOR), "--out", str(out)],
             cwd=ROOT, capture_output=True, text=True,
