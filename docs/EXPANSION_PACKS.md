@@ -69,13 +69,15 @@ The brief is compiled **per graph**: pass `installed_namespaces` and only the na
 | stage | what it reads |
 |---|---|
 | **S1 NARRATE** | the brief's `memory_granularity` only — one pack-authored input, rendered by `_granularity_text()` |
-| **S2 MAP / S4 REVIEW** | the master list: the brief's pack `kindDefs` (description + `nearMisses`), the core sections, `memory_granularity`, and the engine-side chains |
+| **S2 MAP / S4 REVIEW** | the master list: the brief's pack `kindDefs` **description only**, the core sections, `memory_granularity`, and the engine-side chains |
 | **S3 SEARCH** | nothing pack-authored — it derives FTS queries from the S2 embed list and the story, and carries no kind vocabulary |
-| **the closed-kind gate** | `master_kind_forms()` — the same master the prompt was built from, so the gate cannot offer one vocabulary and accept another |
+| **the closed-kind gate** | `_object_kind_forms()` / `_event_kind_forms()` — the master's kind forms **plus** the packs' declared `objectKinds`/`documentKinds`/`eventKinds` |
+
+⚠️ **The gate is therefore WIDER than the prompt, not the same vocabulary.** A manifest may declare a kind in `objectKinds` with no `kindDef` (`dev` declares `api`, `database`, `software`, `infrastructure` and `deployment` that way; `marketing` declares `keyword` and `competitorContent`; `project-management` declares `kanbanBoard` and `milestone`). Such a kind is never rendered into the brief, yet the gate accepts it and it is written. This is the gap `compile_value_brief`'s own docstring records — a gated graph's prompt offers a **narrower** vocabulary than the system will accept or classify into.
 
 With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2/S4 prompt entirely (`_render_master_core_only`); the post-extraction kind classifier then assigns the pack kind.
 
-**Pack kinds reach the master list by namespace, not by an allowlist.** Every brief key that is neither `core:`-namespaced nor `memory_granularity` is a pack kind (`_build_master_from_brief()`). #5165 removed the hardcoded `PACK_NS` tuple that had to be edited before a new pack could install — the brief's own key set is the authority.
+**Pack kinds reach the master list by namespace, not by an allowlist.** Every brief key that is neither `core:`-namespaced nor `memory_granularity` is a pack kind (`_build_master_from_brief()`). #5165 removed the hardcoded `PACK_NS` tuple that had to be edited before a new pack could install — the brief's own key set is the authority. `nearMisses` are carried on the brief but are **not** rendered into the S2/S4 prompt — they are consumed by the post-extraction kind index (`kind_index.py`, `kind_classifier.py`).
 
 **Two engine-side enumerations remain. They are the exceptions to "no domain in the engine", and they are named here rather than left implicit:**
 
