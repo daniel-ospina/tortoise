@@ -25,7 +25,16 @@ exit_reason: >-
   artifact cannot be read as clean. All P0s found in cycles 4–9 were fixed; the residuals below
   remain open and must be acknowledged by a human before the plan is executed.
 
-also_reached: adversarial-cap-exceeded   # cap is 2; reached 10 (cycles 4-9 all ISSUES)
+also_reached: adversarial-cap-exceeded   # cap is 2; reached 10 (cycles 4-10 ALL returned ISSUES / NOT COVERED)
+terminal_state: >-
+  HONEST-STUCK. Seven consecutive adversarial reviews (cycles 4-10) each reproduced a bypass of
+  whatever static detector I10 then was (base-ref sha -> full-condition-list -> whole-file +
+  emitter-map -> head-computed gate_digest). Cycle 10's reviewer named the ROOT: a static detector
+  lives in the diff the attacker controls, so no in-repo clause can cover TH6. The two complete
+  controls are a server-side rule (owner-REJECTED on #4282) and the live admin read (I1/D14, which
+  cannot be in the required path without deadlocking every PR). The loop is therefore STOPPED at
+  cycle 10 and escalated: TH6 and TH2-gut are re-classified OUT OF BOUND, with the owner decision
+  recorded, rather than patched an eighth time.
 cycles: 10
 reviewers_per_cycle: [5, 5, 5, 5, 3, 6, 6, 4, 4, 4]   # c5/c8/c9/c10 = adversarial gate + vacuity + failure-mode + contract
 plan_modified_per_cycle: [true, true, true, true, true, true, true, true, true, true]
@@ -167,8 +176,30 @@ cycles_log:
     applied: >-
       See cycle 10 below — the mechanism was REPLACED rather than patched again.
   - cycle: 10
-    verdict: DISPATCHED (adversarial gate + vacuity + failure-mode + contract) — verdict NOT YET RETURNED
+    verdict: 4 × ISSUES (adversarial gate + contract) — adversarial returned ISSUES, NOT `THREAT SURFACE COVERED`, for the SEVENTH consecutive cycle
+    findings_of_note: >-
+      The head-computed `gate_digest` was DEFEATED too, in four in-bound ways: (i) the emitter map
+      keyed on JOB ID, but a check-run's name is the job's `name:` field when set — a second job with
+      `name: docs` is invisible to both the digest and clause (vi) (`python-ci.yml:102` warns
+      `python-ci-gate` must carry no `name:`); (ii) a required-context job can be given
+      `needs:`/`if:`/`continue-on-error` and a SKIPPED required job reports Success (`ci.yml:14-20`,
+      #2055) — green without running, digest unchanged; (iii) `canonical()` was undefined, so a
+      `queue_rules` reorder changes the first-match-wins gate with an unchanged digest; (iv) the
+      queue-head digest still mismatches when a batch holds two gate PRs. Clause (vii) was bypassable
+      inside a quoted payload (`sh -c "exit 0" --paths <real set>`). Also: `.github/settings.yml` was
+      excluded from the projection, so the declaration home could change with no signal (fail-open by
+      default), and I10 had no `verified_at` window.
+      TERMINAL: the root is structural — a static detector lives in the diff the attacker controls.
     applied: >-
+      Fixed anyway (right on either bound): `canonical` DEFINED with `queue_rules` in FILE ORDER;
+      the emitter map re-keyed to the EFFECTIVE check-run name (`name:` when set, else job id);
+      `.github/settings.yml` folded INTO the digest; clause (vii) given (d) — `argv[0]` must be the
+      tool (no `sh -c`/`python -c` payload) and no shadowing `env:`; I10 given a 7-day window; and
+      TH2-gut declared OUT OF BOUND alongside TH6. **No cycle 11:** the loop is stopped at the
+      honest-stuck detector and escalated.
+      (The cycle-10 REDESIGN itself — replacing the base-ref apparatus with the head-computed
+      digest — is retained; it removed the queue-head deadlock and the content-free re-stamp even
+      though it did not close TH6.)
       REDESIGN: I10's entire diff/base-ref apparatus is DELETED and replaced by a HEAD-COMPUTED
       `gate_digest = sha256(canonical(entry-gate projection))` over all `queue_rules[*]` (names AND
       full condition lists), `merge_conditions`, the effective `branch_protection_injection_mode`,
@@ -194,18 +225,19 @@ cycles_log:
 residuals:
   - id: R1
     severity: high
-    threat: TH6
+    threat: TH6 + TH2-gut
     issue: >-
-      TH6 (silent entry-gate change) is claimed COVERED by I10's cycle-10 `gate_digest`, but that
-      claim has NOT been re-reviewed to `THREAT SURFACE COVERED` — cycles 6-9 each returned a
-      substantive bypass of the then-current I10. Cycle 10's re-review is dispatched and its verdict
-      is unknown. If the fresh adversarial reviewer does NOT return `THREAT SURFACE COVERED`, TH6
-      has no accepted in-bound cover and must either be re-classified OUT OF BOUND (the only
-      complete detector is the live admin read, I1/D14, which the required path cannot run without
-      deadlocking every PR) or the owner must decide how to cover it. Note the owner already
-      REJECTED a server-side rule / CODEOWNERS direction on #4282; do not re-propose it silently.
+      TH6 (silent entry-gate change) and the TH2-GUT vector (a required-context job that still
+      reports its name but no longer runs) are now declared OUT OF BOUND, with the reason recorded in
+      plan §7 and the owner decision pending. Seven consecutive adversarial reviews (cycles 4-10)
+      each bypassed whatever static detector I10 then was; cycle 10 identified the root — a static
+      detector lives in the diff the attacker controls. I10 survives only as a SILENCE detector of
+      stated scope (a change to the gate's DEFINITION forces a re-cut record). The two complete
+      controls are (a) a server-side rule, REJECTED by the owner on #4282 (do not re-propose), and
+      (b) the live admin read I1/D14, which cannot be in the required path without deadlocking every
+      PR. **Owner decision required:** accept the out-of-bound declaration, or choose a control.
     owner: Daniel
-    artifact: comment on #5215
+    artifact: comment on #5215 (decision requested)
   - id: R2
     severity: medium
     threat: TH4(b)
@@ -268,5 +300,5 @@ residuals:
 #                                    is DELETED (replaced by the head-computed gate_digest).
 # Remaining residuals above are NOT verified-closed; they are open by design and disclosed.
 disclosure: >-
-  [ADVERSARIAL-BOUND] cycles=10 cap=2 threats=7 vectors=8 covered=4 out-of-bound=4
-  residuals=#5433,#5570,#5649,D14
+  [ADVERSARIAL-BOUND] cycles=10 cap=2 threats=7 vectors=8 covered=2 out-of-bound=6
+  residuals=#5433,#5570,#5649,#5215-decision,D14
