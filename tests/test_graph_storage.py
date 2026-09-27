@@ -262,6 +262,35 @@ def test_measure_rejects_a_non_integer_samples():
     assert r.ok is False and "SAMPLES" in (r.error or "")
 
 
+def test_a_non_finite_sample_count_fails_soft_and_never_raises():
+    """GUARD (review finding): a NON-FINITE count must not escape as a raise.
+
+    ``int(float("inf"))`` raises **OverflowError**, not ValueError, so the
+    resolver's ``(TypeError, ValueError)`` let it through and
+    ``measure_graph_storage`` raised — contradicting its own load-bearing
+    contract ("a measurement fault must never fail a request or a write"), and
+    ``samples``/``repeats`` are public arguments a caller may feed from config,
+    where a non-finite value is a plausible parse. NaN arrives as ValueError;
+    +-inf as OverflowError, which is the case that was untested.
+    """
+    for bad in (float("inf"), float("-inf")):
+        r = measure_graph_storage(_FakeClient([]), "org_x", samples=bad)
+        assert r.ok is False, (
+            f"samples={bad!r} must FAIL SOFT, not raise or measure: {r!r}")
+        assert "SAMPLES" in (r.error or ""), r.error
+        r = measure_graph_storage(_FakeClient([]), "org_x", repeats=bad)
+        assert r.ok is False, (
+            f"repeats={bad!r} must FAIL SOFT, not raise or measure: {r!r}")
+        assert "repeats" in (r.error or ""), r.error
+
+
+def test_a_huge_whole_sample_count_is_clamped_not_raised():
+    """CONTROL: clamping an out-of-range WHOLE number still works."""
+    r = measure_graph_storage(_FakeClient([_reply(4)]), "org_x", samples=10**9)
+    assert r.ok is True
+    assert r.samples == SAMPLES_MAX
+
+
 # ── fail-soft ─────────────────────────────────────────────────────────────
 
 def test_measure_fails_soft_on_engine_error():
