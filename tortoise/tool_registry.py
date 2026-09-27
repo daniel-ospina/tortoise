@@ -446,6 +446,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_dream",
         id="surface.dream",
+        writes=True,
         description="Run EP stabilization (dreaming, #85). "
                     "Default: incremental dirty subgraph. Set full=True for whole-graph. "
                     "mode (epic 903): explicit strategy override "
@@ -750,6 +751,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_ingest_corpus",
         id="surface.ingest_corpus",
+        writes=True,
         description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update Document nodes. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -875,6 +877,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_org_create",
         id="surface.org_create",
+        writes=True,
         description="Create isolated team graph via FalkorDB select_graph. "
                     "EXCLUDED from tenant HTTP — provisioning belongs to "
                     "/internal/provision behind FASTAPI_INTERNAL_KEY.",
@@ -929,6 +932,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_index_sessions",
         id="surface.index_sessions",
+        writes=True,
         description="DEPRECATED — use tortoise_index_files. Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -1139,6 +1143,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_backfill_v25",
         id="surface.backfill_v25",
+        writes=True,
         description="Backfill database to ONTOLOGY v2.5 schema. "
                     "EXCLUDED from tenant HTTP — schema-level migration (operator-only).",
         annotations=_rw(),
