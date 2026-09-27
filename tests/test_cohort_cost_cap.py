@@ -851,8 +851,11 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
     spend ceiling must not be able to see them — BY CONSTRUCTION, not by
     convention.
 
-    Enumerates EVERY definition of ``metering_cohort_spend`` in EVERY migration
-    file and asserts NONE reads a token column. This is deliberately not a
+    Scans for definitions of ``metering_cohort_spend`` across the migration
+    files and asserts NONE reads a token column. NOT a claim of exhaustiveness:
+    the scan is opener-driven, so a definition whose opener does not match is
+    skipped — see the enumeration's own comment for what is and is not covered.
+    This is deliberately not a
     single-file read: the function is defined in 20260917000001 and
     **DROPPED/replaced** by the LIVE body in 20260918000001, and a guard that
     reads only the first file is blind to the deployed body — a trap already
@@ -872,40 +875,55 @@ def test_spend_ceiling_is_blind_to_the_capture_token_columns():
               / "migrations")
     files = sorted(migdir.glob("*.sql"))
     defs: list[tuple[str, str]] = []
-    # ⛔ ACCEPT EVERY SHAPE, THEN FAIL CLOSED ON ANYTHING UNPARSED. The original
-    # pattern required an unquoted ``public.``, the literal name, and the
-    # ``$$`` tag — so a re-issue written as ``CREATE FUNCTION "public".…``,
-    # unqualified, or with a named dollar tag (``AS $fn$ … $fn$``) was
-    # INVISIBLE to this scan. That is the silent-narrowing failure the
-    # ``len(defs) > 1`` floor below believes it prevents and cannot, because
-    # the floor is already satisfied by the two HISTORICAL definitions: a
-    # third, LIVE one could be missed with no alarm raised. So match broadly,
-    # and assert PER FILE that a file mentioning the identifier yielded at
-    # least one parsed body — an unseeable definition then fails loudly instead
-    # of shrinking the evidence set.
     _IDENT = "metering_cohort_spend"
-    # The definition OPENER, deliberately excluding the dollar-quoted tail.
+    # ⛔ MATCH THE SHAPES THAT CAN OCCUR, AND FAIL CLOSED ON A MATCHED OPENER
+    # WHOSE BODY CANNOT BE BOUND. Stated at the strength the code supports — a
+    # heading claiming it accepts EVERY shape would be false, because the
+    # enumeration is still driven by an opener: a shape that produces NO opener
+    # (e.g. a block comment between FUNCTION and the name) is skipped silently.
+    # What IS guaranteed is the part that was broken:
+    #
+    #   (a) BODY NOT BOUND TO ITS OPENER. The old pattern was
+    #       ``opener + ".*?AS\s+\$(...)\$(.*?)\$\1;"``. With ``re.S`` and a
+    #       non-greedy ``.*?``, a definition whose body is NOT written as
+    #       ``AS $tag$ … $tag$;`` (e.g. the modern ``LANGUAGE sql RETURN (…)``
+    #       short form) ran PAST the end of its own definition and captured the
+    #       NEXT function's body — so ``len(parsed) == openers`` held and the
+    #       token assertion inspected the wrong function.
+    #   (b) A MATCHED OPENER THAT IS STILL INVISIBLE. The old opener required a
+    #       BARE identifier, so a definition written as
+    #       ``public."metering_cohort_spend"(...)`` yielded ZERO matches, hit
+    #       ``continue``, and was never enumerated. (Measured: the SPACED form
+    #       ``public . metering_cohort_spend`` ALSO matched the old opener via
+    #       its empty-qualifier branch — so it was not a second instance of this
+    #       shape; only the quoted name was.)
+    #
+    # So: match the qualifier and the name LOOSELY (quoted or not, spaced or
+    # not), bind each body to its OWN opener bounded by the next definition of
+    # ANY name, and make an unbindable body a hard failure rather than a skip.
     _OPENER = (
         r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
-        r'(?:(?:"public")\.|public\.)?' + _IDENT + r"\s*\("
+        r'(?:(?:"?[A-Za-z_][A-Za-z_0-9]*"?)\s*\.\s*)?"?' + _IDENT + r'"?\s*\('
     )
-    _PATTERN = (
-        _OPENER +
-        r".*?AS\s+\$(\$|[A-Za-z_][A-Za-z_0-9]*\$)(.*?)\$\1;"
-    )
+    _ANY_DEF = r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+    _BODY = r"\bAS\s+\$(\$|[A-Za-z_][A-Za-z_0-9]*\$)(.*?)\$\1;"
     for f in files:
         text = f.read_text()
         # Count OPENERS, not mere mentions: a migration that only names the
         # function in a comment defines nothing and must not trip this.
-        openers = len(re.findall(_OPENER, text))
-        if openers == 0:
+        starts = [m.start() for m in re.finditer(_OPENER, text)]
+        if not starts:
             continue
-        parsed = list(re.finditer(_PATTERN, text, re.S))
-        assert len(parsed) == openers, (
-            f"{f.name} opens {openers} definition(s) of {_IDENT} but the scan "
-            f"parsed {len(parsed)} — a definition in this file is invisible to "
-            f"the guard, so every assertion below is blind to it")
-        for m in parsed:
+        bounds = [m.start() for m in re.finditer(_ANY_DEF, text)]
+        for start in starts:
+            # Bound this definition's window at the NEXT definition of any
+            # name, so a body can never be borrowed from a following function.
+            end = next((b for b in bounds if b > start), len(text))
+            m = re.search(_BODY, text[start:end], re.S)
+            assert m is not None, (
+                f"{f.name}: an opener for {_IDENT} at offset {start} has no "
+                f"parseable 'AS $$ … $$;' body before the next definition — "
+                f"the scan cannot bind a body to it, so it cannot clear it")
             defs.append((f.name, " ".join(m.group(2).split())))
 
     # The ceiling's definition is re-issued at least once. If this ever fails,
