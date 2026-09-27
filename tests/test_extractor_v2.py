@@ -972,10 +972,13 @@ class TestS3:
     def test_projection_without_the_flag_fails_closed(self, monkeypatch):
         """#3679 review P3: the ``_is_embedded`` read defaults to embedded.
 
-        ``True`` is the default every other reader in the tree uses
-        (``sdk.py:11205``, ``sdk.py:15011``, ``pack_state.py:175``); a
-        ``False`` default would make a projection lacking the flag read as a
-        searchable real graph."""
+        ``True`` is the fail-closed default (a projection lacking the flag is
+        not proven searchable), which is also what the product package's
+        readers of a foreign projection use — ``sdk.py:11205``,
+        ``sdk.py:15011``, ``pack_state.py:175``. It is not a universal:
+        ``projection/__init__.py:5795`` reads its own flag with a ``False``
+        default. A ``False`` default here would make a projection lacking the
+        flag read as a searchable real graph."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
 

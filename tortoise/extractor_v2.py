@@ -1818,9 +1818,13 @@ def _sdk_backend_is_embedded(sdk) -> bool | None:
     caches ``_proj`` on success only, so a transient failure retries and
     succeeds), and the query path calls it again — so treating a raise as
     "unknown" falls back to the env label, re-opens the gate, and S3 then
-    reads the embedded store this exists to exclude. Defaulting the attribute
-    read to ``True`` matches every other reader in the tree (``sdk.py:11205``,
-    ``sdk.py:15011``, ``pack_state.py:175``)."""
+    reads the embedded store this exists to exclude. ``True`` is therefore the
+    fail-closed default — for the reason just stated, not by convention. It
+    happens to match the product package's readers of a FOREIGN projection
+    (``sdk.py:11205``, ``sdk.py:15011``, ``pack_state.py:175``), but it is not
+    a universal: several readers default to ``False``
+    (``projection/__init__.py:5795`` reads its OWN flag;
+    ``graph-scripts/backfill_is_operator.py:155``)."""
     get_proj = getattr(sdk, "_get_proj", None)
     if not callable(get_proj):
         return None
