@@ -1788,6 +1788,8 @@ class TestDistinguishingDifference:
                 # either span is what this call-out exists to catch.
                 ("in staging the alpha engine processed the delta record",
                  "the alpha engine processed the delta record in staging"),
+                ("from the depot the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record from the depot"),
                 ("we shipped the crate from the depot to the store",
                  "we shipped the crate to the store from the depot")):
             assert (v2.distinguishing_difference(a, b)
@@ -1813,16 +1815,24 @@ class TestDistinguishingDifference:
                  "we ship the client, the server"),
                 ("the cat the dog chased", "the dog the cat chased"),
                 # A reorder that leaves a token strictly between the two
-                # content blocks is refused — FAIL-CLOSED, both claims kept,
-                # pinned so the class is a recorded boundary rather than a
-                # surprise.  The crate pair qualifies because `from`/`to` are
-                # FRAME; the same shape headed by a CONTENT token leaves the
-                # blocks adjacent and folds (pinned in
+                # content blocks in EACH claim is refused — FAIL-CLOSED, both
+                # claims kept, pinned so the class is a recorded boundary
+                # rather than a surprise.  The condition is the PAIR's own gap,
+                # not the moved phrase: the same shape folds when the gap
+                # closes on either side (pinned in
                 # `test_a_role_reading_that_is_not_an_exchange_stays_foldable`).
                 ("in staging the alpha engine processed the delta record",
                  "the alpha engine processed the delta record in staging"),
                 ("the deploy succeeded as the build completed",
                  "as the build completed the deploy succeeded"),
+                # The decisive contrast for the adjacency condition: this pair
+                # carries the SAME moved phrase and the SAME frame head as
+                # `from the depot we shipped the crate` (pinned as FOLDING in
+                # `test_a_role_reading_that_is_not_an_exchange_stays_foldable`)
+                # and is refused only because the following block's determiner
+                # supplies the gap here and not there.
+                ("from the depot the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record from the depot"),
                 ("we shipped the crate from the depot to the store",
                  "we shipped the crate to the store from the depot")):
             assert v2.distinguishing_difference(a, b) == "substituted_content", \
@@ -1875,10 +1885,11 @@ class TestDistinguishingDifference:
                 # A reorder whose moved phrase leaves the two content blocks
                 # ADJACENT is a RE-FLOW and keeps folding.  This is the other
                 # side of the pair pinned in
-                # `test_the_fail_closed_residuals_keep_both_claims`: the crate
-                # pair there is refused because `from`/`to` are FRAME and leave
-                # a token between the blocks, while the same shape headed by a
-                # CONTENT token (`on`) leaves none and folds.
+                # `test_the_fail_closed_residuals_keep_both_claims`: the same
+                # moved phrase is refused there and folds here, because the
+                # following block supplies a gap in one pair and not the other
+                # — the verdict is read from the pair's spans, not from the
+                # phrase.
                 ("from the depot we shipped the crate",
                  "we shipped the crate from the depot"),
                 ("she drove the car to the office on tuesday",

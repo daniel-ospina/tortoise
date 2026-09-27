@@ -4245,12 +4245,14 @@ _BLOCK_EXCHANGE_BUDGET = 5000
 # bound and not a similarity threshold, and a change to it is a deliberate
 # act, not a tuning knob —
 # `test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up` pins the
-# literal so it cannot drift.  The two bounds form a PRODUCT (the budget bounds
-# the number of decompositions, this the length of each), so removing either
-# one re-opens the ≈n^4.4 blow-up: measured on the fixture box at the ceiling
-# the scan itself is ≈5 ms and the whole `fold_allowed` call ≈80 ms, while with
-# BOTH removed the same shape runs 0.19 s at 60 content tokens, 1.74 s at 100
-# and 7.74 s at 140 — minutes at a few hundred.
+# literal so it cannot drift.  Each bound is INDEPENDENTLY sufficient to keep
+# the scan finite — the budget caps the number of decompositions at any length,
+# the ceiling caps the length (and so the per-attempt cost) when the budget is
+# absent — so only removing BOTH re-opens the ≈n^4.4 blow-up: measured on the
+# fixture box at the ceiling the scan itself is ≈5 ms and the whole
+# `fold_allowed` call ≈80 ms, while with BOTH bounds removed the same shape runs
+# 0.19 s at 60 content tokens, 1.74 s at 100 and 7.74 s at 140 — minutes at a
+# few hundred.
 _BLOCK_EXCHANGE_MAX_TOKENS = 200
 _EXCHANGE_BUDGET_EXCEEDED = (-1, -1, -1, -1)
 
@@ -4440,32 +4442,29 @@ def _role_inversion(a: str, b: str) -> bool:
     so they cannot go silent — an enumeration of the KNOWN ones, not a
     completeness claim (see the closing note below):
 
-      * the ADJACENCY condition decides the whole REORDER family, in BOTH
-        directions, and it is the only thing that does — ``_block_exchange``
-        accepts a decomposition only when a token sits strictly BETWEEN the two
-        content blocks in EACH claim.  So the class is not "a phrase moved"
-        (which is what this bullet used to say, wrongly): it is whether the
-        moved phrase's head leaves a token between the blocks, which depends on
-        whether that head is a FRAME or a CONTENT token.  Read the pair, not
-        the phrase name:
-
-        - blocks ADJACENT ⇒ a RE-FLOW, which keeps FOLDING (FAIL-OPEN in the
-          delete direction): ``alice quickly shipped the order`` against
-          ``alice shipped the order quickly``; ``the build failed silently``
-          against ``silently the build failed``; ``from the depot we shipped
-          the crate`` against ``we shipped the crate from the depot``;
-          ``she drove the car to the office on tuesday`` against ``she drove
-          the car on tuesday to the office`` (``on`` is a CONTENT token, so
-          that phrase's head lands beside the next block);
-        - a token BETWEEN the blocks ⇒ REFUSED (FAIL-CLOSED, both claims
-          kept): ``in staging the alpha engine processed the delta record``
-          against ``the alpha engine processed the delta record in staging``
-          (``in`` is FRAME); ``we shipped the crate from the depot to the
-          store`` against ``we shipped the crate to the store from the depot``
-          (``from``/``to`` are FRAME).  A dedicated check for the moved
-          phrase's SPAN would separate the two sides; this walk does not keep
-          it, so a reorder that does leave a gap is refused at the cost of a
-          dedup;
+      * a REORDER is decided by the ADJACENCY condition and by nothing else —
+        ``_block_exchange`` accepts a decomposition only when a token sits
+        strictly BETWEEN the two content blocks in EACH claim.  Where the
+        blocks are adjacent on either side the reorder is a RE-FLOW and keeps
+        FOLDING (FAIL-OPEN in the delete direction): ``alice quickly shipped
+        the order`` against ``alice shipped the order quickly``; ``the build
+        failed silently`` against ``silently the build failed``; ``from the
+        depot we shipped the crate`` against ``we shipped the crate from the
+        depot``; ``she drove the car to the office on tuesday`` against ``she
+        drove the car on tuesday to the office``.  Where the gap holds on BOTH
+        sides the same surface shape is REFUSED (FAIL-CLOSED, both claims
+        kept): ``in staging the alpha engine processed the delta record``
+        against ``the alpha engine processed the delta record in staging``;
+        ``we shipped the crate from the depot to the store`` against ``we
+        shipped the crate to the store from the depot``.  The verdict is read
+        from the PAIR's own spans, never from what the moved phrase is called
+        or what its head token classifies as: ``from the depot we shipped the
+        crate`` FOLDS while ``from the depot the alpha engine processed the
+        delta record`` is REFUSED — same moved phrase, same frame head, and the
+        opposite verdict, because the following block's determiner supplies the
+        gap in one and not in the other.  A dedicated check for the moved
+        phrase's SPAN would separate the two sides; this walk does not keep it,
+        so a reorder that does leave a gap is refused at the cost of a dedup;
       * an exchange a COORDINATION straddles stays foldable — ``the cat and
         the dog`` against ``the dog and the cat``, and ``the flag is on and
         the gate is off`` against its mirror, the attachment residual the
