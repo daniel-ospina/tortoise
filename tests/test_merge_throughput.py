@@ -1,6 +1,6 @@
 """Tests for tools/merge_throughput.py — the merge-throughput instrument (#5215).
 
-Spec: docs/plans/2026-09-26-5215-merge-throughput.md §10 Task 1 (owns the
+Spec: the #5215 merge-throughput plan §10 Task 1 (owns the
 pass/fail contract), §3 (protection invariants I4/I6b), §5 (measurement plan),
 §11 (exit-code criteria).
 
@@ -282,6 +282,28 @@ def test_main_gate_three_way():
     assert run_check("main-gate", json={}) == 2
 
 
+def test_main_gate_lax_is_diagnostic_and_pins_its_polarity(capsys):
+    """Without --strict the lax allow-list applies (diagnostic only)."""
+    cancelled = {"required": ["a"], "check_runs": [
+        {"name": "a", "status": "completed", "conclusion": "cancelled",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    assert run_check("main-gate", json=cancelled) == 0
+    assert "NON_RED" in capsys.readouterr().out
+    red = {"required": ["a"], "check_runs": [
+        {"name": "a", "status": "completed", "conclusion": "failure",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    assert run_check("main-gate", json=red) == 1
+
+
+@pytest.mark.parametrize("status", sorted(mt.IN_FLIGHT_STATUSES))
+def test_every_in_flight_status_is_unknown(status):
+    run = {"name": "a", "status": status, "conclusion": None,
+           "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}
+    assert mt.main_gate([run]) == "UNKNOWN"
+    assert mt.verdict_from_check_runs([run]) == "UNKNOWN"
+    assert mt.mergify_mergeable([run]) == "UNKNOWN"
+
+
 def test_main_gate_s1_no_main_signal_arithmetic():
     # 1 observed success + NO_MAIN_SIGNAL contexts ⇒ 0 (they are reported and
     # excluded, not a completeness failure).
@@ -332,17 +354,23 @@ def test_main_gate_strict_scopes_to_required_contexts():
 
 def test_drain_rate_three_way():
     assert run_check("drain-rate", json={
-        "merges_per_hour": 15.0, "merges": 300, "window_hours": 24}, min=12) == 0
+        "merges_per_hour": 12.5, "merges": 300, "window_hours": 24}, min=12) == 0
     assert run_check("drain-rate", json={
-        "merges_per_hour": 2.1, "merges": 50, "window_hours": 24}, min=12) == 1
+        "merges_per_hour": 2.0, "merges": 48, "window_hours": 24}, min=12) == 1
     assert run_check("drain-rate", json={
-        "merges_per_hour": 20.0, "merges": 3, "window_hours": 24}, min=12) == 2
+        "merges_per_hour": 0.125, "merges": 3, "window_hours": 24}, min=12) == 2
     assert run_check("drain-rate", json={
-        "merges_per_hour": 20.0, "merges": 300, "window_hours": 6}, min=12) == 2
+        "merges_per_hour": 50.0, "merges": 300, "window_hours": 6}, min=12) == 2
+
+
+def test_drain_rate_self_set_rate_must_reconcile():
+    # 15/hr with 300 merges over 24h is not a 15/hr window.
+    assert run_check("drain-rate", json={
+        "merges_per_hour": 15.0, "merges": 300, "window_hours": 24}, min=12) == 2
 
 
 def test_drain_rate_stale_record_is_2():
-    payload = {"merges_per_hour": 15.0, "merges": 300, "window_hours": 24,
+    payload = {"merges_per_hour": 12.5, "merges": 300, "window_hours": 24,
                "verified_at": _iso(30)}
     assert run_check("drain-rate", json=payload, min=12, require_fresh=True) == 2
 
@@ -472,7 +500,9 @@ def test_attribution_pr_scoping():
 def test_capacity_three_way():
     ok = {"queued": 10, "in_progress": 3, "oldest_minutes": 60,
           "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
-          "verified_at": NOW, "items": [{"id": 1}], "total_count": 1}
+          "verified_at": NOW, "items": [{"id": 1}], "total_count": 1,
+          "records": {f: {"verified_at": NOW}
+                      for f in mt._CAPACITY_FRESH_FIELDS}}
     assert run_check("capacity", json=ok, max_oldest_minutes=120, min_headroom=1,
                      require_complete=True, require_fresh=True) == 0
     slow = dict(ok, oldest_minutes=200)
@@ -486,6 +516,18 @@ def test_capacity_three_way():
     incomplete.pop("items")
     assert run_check("capacity", json=incomplete, min_headroom=1,
                      require_complete=True) == 2
+
+
+def test_capacity_require_fresh_needs_per_field_records():
+    base = {"queued": 1, "in_progress": 1, "oldest_minutes": 5,
+            "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+            "verified_at": NOW}
+    # One fresh envelope record cannot vouch for the three measurements.
+    assert run_check("capacity", json=base, min_headroom=1, require_fresh=True) == 2
+    stale = dict(base, records={f: {"verified_at": NOW}
+                                for f in mt._CAPACITY_FRESH_FIELDS})
+    stale["records"]["capacity_at_first_failure"] = {"verified_at": _iso(30)}
+    assert run_check("capacity", json=stale, min_headroom=1, require_fresh=True) == 2
 
 
 def test_capacity_headroom_unknown_is_2():
@@ -505,7 +547,9 @@ def test_capacity_unknown_placeholders_are_2():
 def test_capacity_stale_record_with_require_fresh_is_2():
     payload = {"queued": 1, "in_progress": 1, "oldest_minutes": 5,
                "capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
-               "verified_at": _iso(30)}
+               "verified_at": _iso(30),
+               "records": {f: {"verified_at": _iso(30)}
+                           for f in mt._CAPACITY_FRESH_FIELDS}}
     assert run_check("capacity", json=payload, min_headroom=1, require_fresh=True) == 2
 
 
@@ -519,50 +563,71 @@ def test_parallelism_headroom_three_way():
     assert run_check("parallelism-headroom", json=unknown, require_fresh=True) == 2
 
 
-def _gap_payload(value=1.5):
+@pytest.fixture
+def gap_repo(tmp_path, monkeypatch):
+    """Write the M3 record on disk and point REPO at the temp root."""
+    docs = tmp_path / "docs" / "ci"
+    docs.mkdir(parents=True)
+    (docs / "measurements.json").write_text(_json.dumps({"verified_at": NOW}))
+    monkeypatch.setattr(mt, "REPO", tmp_path)
+    return tmp_path
+
+
+def _gap_payload(value=1.5, record_verified_at=NOW):
     terms = {
         "ceiling": {"value": 100, "source": "S4"},
         "observed": {"value": 50, "source": "M1"},
         "effective_parallel": {"value": 3, "source": "M3",
                                "record": "docs/ci/measurements.json",
-                               "verified_at": NOW},
+                               "verified_at": record_verified_at},
         "effective_batch": {"value": 2, "source": "M5"},
         "cycle_minutes": {"value": 37, "source": "M2"},
         "wait": {"value": 1, "source": "M6"},
     }
-    return {"gap": {"value": value, "terms": terms},
-            "records": {"docs/ci/measurements.json": {"verified_at": NOW}}}
+    return {"gap": {"value": value, "terms": terms}}
 
 
-def test_gap_three_way():
+def test_gap_three_way(gap_repo):
     assert run_check("gap", json=_gap_payload(1.5), max=2, require_fresh=True) == 0
     assert run_check("gap", json=_gap_payload(3.0), max=2, require_fresh=True) == 1
     assert run_check("gap", json={"gap": {"value": "UNKNOWN"}}) == 2
 
 
-def test_gap_requires_m3_provenance():
+def test_gap_requires_m3_provenance(gap_repo):
     p = _gap_payload()
     p["gap"]["terms"]["effective_parallel"]["source"] = "config-default"
     assert run_check("gap", json=p, max=2) == 2
 
 
-def test_gap_source_without_record_is_2():
+def test_gap_source_without_record_is_2(gap_repo):
     p = _gap_payload()
     del p["gap"]["terms"]["effective_parallel"]["record"]
     assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
-def test_gap_stale_effective_parallel_record_is_2():
-    p = _gap_payload()
-    p["gap"]["terms"]["effective_parallel"]["verified_at"] = None
-    p["records"]["docs/ci/measurements.json"]["verified_at"] = _iso(30)
+def test_gap_stale_parallel_verified_at_is_2(gap_repo):
+    p = _gap_payload(record_verified_at=_iso(30))
     assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
-def test_gap_missing_record_on_disk_is_2():
+def test_gap_stale_disk_record_is_2(tmp_path, monkeypatch):
+    docs = tmp_path / "docs" / "ci"
+    docs.mkdir(parents=True)
+    (docs / "measurements.json").write_text(_json.dumps({"verified_at": _iso(30)}))
+    monkeypatch.setattr(mt, "REPO", tmp_path)
+    assert run_check("gap", json=_gap_payload(), max=2, require_fresh=True) == 2
+
+
+def test_gap_missing_record_on_disk_is_2(tmp_path, monkeypatch):
+    monkeypatch.setattr(mt, "REPO", tmp_path)
+    assert run_check("gap", json=_gap_payload(), max=2, require_fresh=True) == 2
+
+
+def test_gap_inline_records_cannot_substitute_for_the_file(tmp_path, monkeypatch):
+    """S13: an inline copy is not the persisted record on disk."""
+    monkeypatch.setattr(mt, "REPO", tmp_path)
     p = _gap_payload()
-    p.pop("records")
-    p["gap"]["terms"]["effective_parallel"]["record"] = "docs/ci/does-not-exist.json"
+    p["records"] = {"docs/ci/measurements.json": {"verified_at": NOW}}
     assert run_check("gap", json=p, max=2, require_fresh=True) == 2
 
 
@@ -634,6 +699,45 @@ def test_future_verified_at_is_not_fresh():
                      max_age_days=7) == 2
 
 
+def test_queue_entry_non_boolean_is_2():
+    payload = {"pr": 5, "entered_queue": "false",
+               "trigger": "auto_merge_conditions"}
+    assert run_check("queue-entry", json=payload, pr=5) == 2
+
+
+def test_boolean_is_not_a_number():
+    assert mt._as_number(True) is None
+    assert run_check("queue-eta", json={"max_eta_minutes": True}, max=120) == 2
+
+
+def test_queue_eta_self_set_max_must_reconcile():
+    payload = {"items": [{"eta_minutes": 10}], "total_count": 1,
+               "read_ok": True, "max_eta_minutes": 9999}
+    assert run_check("queue-eta", json=payload, max=120, min_depth=1) == 2
+
+
+def test_batch_size_self_set_max_must_reconcile():
+    payload = {"events": 5, "batch_sizes": [1], "max_batch_size": 3,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, min_depth=1,
+                     require_fresh=True) == 2
+
+
+def test_cycle_self_set_median_must_reconcile():
+    runs = [{"duration_minutes": 37, "heavy_leg_conclusion": "success"}
+            for _ in range(5)]
+    assert run_check("cycle", json={"runs": runs, "median_minutes": 20},
+                     max=30, min_depth=5) == 2
+
+
+def test_parallelism_headroom_require_complete_reconciles():
+    ok = {"capacity_at_first_failure": 8, "configured_max_parallel_checks": 5,
+          "items": [{"id": 1}], "total_count": 1}
+    assert run_check("parallelism-headroom", json=ok, require_complete=True) == 0
+    partia = dict(ok, total_count=3)
+    assert run_check("parallelism-headroom", json=partia, require_complete=True) == 2
+
+
 def test_assert_queue_head_checks_three_way():
     ok = {"queue_head": "sha1", "names": ["python-ci-gate"],
           "required": ["python-ci-gate"]}
@@ -674,6 +778,63 @@ def test_main_gate_require_fresh_head_binding():
     assert run_check("main-gate", json=moved, strict=True, require_fresh=True) == 2
     missing = {"required": ["a"], "check_runs": [run]}
     assert run_check("main-gate", json=missing, strict=True, require_fresh=True) == 2
+
+
+def test_unorderable_group_is_unknown_not_green():
+    """Two attempts with no usable ids must not be ordered by list position."""
+    runs = [
+        {"app": {"slug": "g"}, "name": "a", "status": "completed",
+         "conclusion": "success", "workflow": "w"},
+        {"app": {"slug": "g"}, "name": "a", "status": "completed",
+         "conclusion": "failure", "workflow": "w"},
+    ]
+    assert mt.main_gate(runs) == "UNKNOWN"
+    assert mt.verdict_from_check_runs(runs) == "UNKNOWN"
+    assert run_check("main-gate", json={"required": ["a"], "check_runs": runs},
+                     strict=True) == 2
+
+
+def test_one_orderable_id_does_not_order_an_idless_sibling():
+    runs = [
+        {"app": {"slug": "g"}, "name": "a", "status": "completed",
+         "conclusion": "failure", "workflow": "w"},
+        {"app": {"slug": "g"}, "name": "a", "id": 5, "status": "completed",
+         "conclusion": "success", "workflow": "w"},
+    ]
+    assert mt.mergify_mergeable(runs) == "UNKNOWN"
+
+
+def test_newest_by_id_supersedes_older_red_when_ids_are_present():
+    runs = [
+        {"app": {"slug": "g"}, "name": "a", "id": 2, "status": "completed",
+         "conclusion": "failure", "workflow": "w"},
+        {"app": {"slug": "g"}, "name": "a", "id": 3, "status": "completed",
+         "conclusion": "success", "workflow": "w"},
+    ]
+    assert mt.mergify_mergeable(runs) == "MERGEABLE"
+
+
+def test_strict_reports_no_main_signal_contexts(capsys):
+    payload = {"required": ["a", "b"], "check_runs": [
+        {"name": "a", "status": "completed", "conclusion": "success",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    assert run_check("main-gate", json=payload, strict=True) == 0
+    out = capsys.readouterr().out
+    assert "NO_MAIN_SIGNAL" in out and "b" in out
+
+
+def test_strict_all_contexts_absent_is_2():
+    payload = {"required": ["a", "b"], "check_runs": [
+        {"name": "other", "status": "completed", "conclusion": "success",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_main_gate_partial_pagination_is_2():
+    payload = {"required": ["a"], "total_count": 3, "check_runs": [
+        {"name": "a", "status": "completed", "conclusion": "success",
+         "details_url": "x/1", "app": {"slug": "g"}, "workflow": "w"}]}
+    assert run_check("main-gate", json=payload, strict=True) == 2
 
 
 def test_main_gate_sentinel_shim_removed():
@@ -761,14 +922,22 @@ def _artifact(tmp_path, text: str) -> str:
 
 
 def test_read_ok_zero_is_a_failed_read():
-    payload = {"items": [{"number": i} for i in range(12)],
+    payload = {"items": [{"number": i, "conflicting": False} for i in range(12)],
                "total_count": 12, "read_ok": 0}
     assert run_check("conflicts", json=payload, max=5) == 2
 
 
 def test_conflicts_unprobed_branch_is_2():
-    items = [{"number": i} for i in range(12)]
+    items = [{"number": i, "conflicting": False} for i in range(12)]
     items[0] = {"number": 0, "unknown": True}
+    assert run_check("conflicts",
+                     json={"items": items, "total_count": 12, "read_ok": True},
+                     max=5) == 2
+
+
+def test_conflicts_misshaped_item_is_2():
+    """An item with no probe verdict is not "no conflict"."""
+    items = [{"number": i} for i in range(12)]
     assert run_check("conflicts",
                      json={"items": items, "total_count": 12, "read_ok": True},
                      max=5) == 2
@@ -887,12 +1056,13 @@ def test_partial_pagination_is_unconditional_nonzero():
 
 
 def test_conflicts_self_consistent_one_item_read_is_2():
-    payload = {"items": [{"number": 1}], "total_count": 1, "read_ok": True}
+    payload = {"items": [{"number": 1, "conflicting": False}],
+               "total_count": 1, "read_ok": True}
     assert run_check("conflicts", json=payload, max=5) == 2
 
 
 def test_min_population_can_only_raise_the_floor():
-    payload = {"items": [{"number": i} for i in range(12)],
+    payload = {"items": [{"number": i, "conflicting": False} for i in range(12)],
                "total_count": 12, "read_ok": True}
     assert run_check("conflicts", json=payload, max=5) == 0
     assert run_check("conflicts", json=payload, max=5, min_population=100) == 2
@@ -905,7 +1075,7 @@ def test_unset_min_population_cannot_reinstate_zero():
 
 
 def test_conflicts_three_way():
-    clean = {"items": [{"number": i} for i in range(12)],
+    clean = {"items": [{"number": i, "conflicting": False} for i in range(12)],
              "total_count": 12, "read_ok": True}
     dirty = {"total_count": 12, "read_ok": True,
              "items": [{"number": i, "conflicting": i < 7} for i in range(12)]}
@@ -1106,12 +1276,12 @@ def test_cli_sweep_concurrency_flag_exists():
 
 def test_cli_input_record_reaches_0_and_1(tmp_path):
     rec = tmp_path / "drain.json"
-    rec.write_text(_json.dumps({"merges_per_hour": 15.0, "merges": 300,
+    rec.write_text(_json.dumps({"merges_per_hour": 12.5, "merges": 300,
                                 "window_hours": 24, "verified_at": NOW}))
     good = _run_cli("check", "drain-rate", "--min", "12", "--input", str(rec),
                     "--require-fresh")
     assert good.returncode == 0, good.stdout + good.stderr
-    rec.write_text(_json.dumps({"merges_per_hour": 2.0, "merges": 300,
+    rec.write_text(_json.dumps({"merges_per_hour": 2.0, "merges": 48,
                                 "window_hours": 24, "verified_at": NOW}))
     miss = _run_cli("check", "drain-rate", "--min", "12", "--input", str(rec),
                     "--require-fresh")
@@ -1132,3 +1302,34 @@ def test_cli_triage_fixture_row_shape():
         "number", "bucket", "eligible", "conflict", "conflicted_paths",
         "superseded_by", "draft", "hard_stop", "terminal_decision", "owner",
         "owner_evidence", "owning_issue"}
+    # Task-5-owned judgements are UNKNOWN in Task 1, never a hardcoded False.
+    assert rows[0]["hard_stop"] == mt.UNKNOWN
+    assert rows[0]["terminal_decision"] == mt.UNKNOWN
+    assert rows[0]["superseded_by"] == mt.UNKNOWN
+
+
+def test_cli_json_missing_field_path_exits_2():
+    out = _run_cli("--json", ".gap.nope.deep", "--fixture", "empty")
+    assert out.returncode == 2
+
+
+def test_cli_json_accepts_an_input_record(tmp_path):
+    """`--json <path>` must be feedable a record (M1 reads `.gap`)."""
+    rec = tmp_path / "gap.json"
+    rec.write_text(_json.dumps({"gap": {"value": 1.5, "terms": {}}}))
+    out = _run_cli("--json", ".gap.value", "--input", str(rec))
+    assert out.returncode == 0, out.stderr
+    assert _json.loads(out.stdout) == 1.5
+
+
+def test_cli_json_unparsable_input_is_2(tmp_path):
+    rec = tmp_path / "bad.json"
+    rec.write_text("not json")
+    out = _run_cli("--json", ".gap", "--input", str(rec))
+    assert out.returncode == 2
+
+
+def test_cli_json_bare_form_exits_0():
+    out = _run_cli("--json", "--fixture", "empty")
+    assert out.returncode == 0, out.stderr
+    assert "gap" in _json.loads(out.stdout)
