@@ -1566,19 +1566,30 @@ def get_current_usage(org_id: str) -> dict:
 
 
 def _finite_or(value, default: float) -> float:
-    """Coerce to a finite float, else *default* — one NaN guard per float."""
+    """Coerce to a finite float, else *default* — one NaN guard per float.
+
+    Catches ``OverflowError`` as well as ``(TypeError, ValueError)``: a helper
+    whose whole job is to answer "is this finite" must not raise before it can
+    answer, and ``float(10**400)`` raises ``OverflowError: int too large to
+    convert to float`` rather than returning a non-finite value.
+    """
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return v if math.isfinite(v) else default
 
 
 def _is_finite(value) -> bool:
-    """True only for a value that coerces to a finite float."""
+    """True only for a value that coerces to a finite float.
+
+    ``OverflowError`` is caught for the same reason as in ``_finite_or``: an
+    un-coercible magnitude is not finite, and must answer ``False`` rather than
+    propagate a raise out of the fail-soft ledger write.
+    """
     try:
         return math.isfinite(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -1636,7 +1647,13 @@ def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
     try:
         samples = int(samples)
         repeats = int(repeats)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # ``OverflowError`` for parity with ``graph_storage._resolve_*``:
+        # ``int(float("inf"))`` raises it, and this boundary's own docstring
+        # promises a non-integer count is DROPPED the same way. Catching only
+        # (TypeError, ValueError) let a non-finite count escape as a raise out
+        # of a fail-soft ledger write — the same defect this PR fixed at the
+        # sibling site, so the class is closed on BOTH paths.
         _logger.warning(
             "graph storage metering dropped a non-integer samples/repeats "
             "(team=%s samples=%r repeats=%r) — not writing a figure that "
