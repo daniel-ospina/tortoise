@@ -5890,10 +5890,13 @@ class TestCaptureSpeakerParity:
             "conversation": [{"role": "user", "content": content}]})
         assert r.status_code == 200, r.text[:300]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
+        from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _clip_capture_turn_content
         rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
         ).result_set
-        assert rows and rows[0][0] == "[user] " + content[:5000], rows
+        assert rows and rows[0][0] == "[user] " + _clip_capture_turn_content(content), rows
+        assert _CAPTURE_TRUNCATION_SENTINEL in rows[0][0], (
+            "the hosted path must mark the cut too (#4897)")
 
 
 class TestCaptureStoredTurnParity:

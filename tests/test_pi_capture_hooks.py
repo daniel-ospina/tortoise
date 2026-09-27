@@ -117,6 +117,47 @@ def test_extension_turn_cap_matches_the_server_handler_cap():
     )
 
 
+def test_extension_turn_max_chars_matches_the_sdk_stored_window():
+    """#4897 criterion 4: the per-turn cap is ONE number.
+
+    The shipped extension is a standalone TypeScript artifact — it CANNOT
+    import the Python constant (``tortoise/sdk.py::_CAPTURE_TURN_CAP``), which
+    is the source of truth for the server's stored window. Without this pin the
+    two declarations drift SILENTLY: the client would clip to one width and the
+    server cap to another, and a turn between them would be cut by whichever
+    ran second. This is the same shape as the ``MAX_TURNS`` parity guard above,
+    for the same reason (a shipped artifact cannot import Python).
+
+    The truncation sentinel is pinned too: the server stores a client-clipped
+    turn VERBATIM, so a reader on either side must recognise the other's marker
+    (#4897).
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_truncation_marker,
+    )
+
+    m = re.search(r"^export const TURN_MAX_CHARS = (\d+);", _src(), re.M)
+    assert m, "extension must export a literal TURN_MAX_CHARS"
+    assert int(m.group(1)) == _CAPTURE_TURN_CAP, (
+        f"extension TURN_MAX_CHARS={m.group(1)} != sdk._CAPTURE_TURN_CAP="
+        f"{_CAPTURE_TURN_CAP} — the client and the server would store "
+        "different windows")
+
+    # The marker vocabulary must match: the sentinel literal and the marker's
+    # fixed wording both live in the TS source, exactly as Python builds them.
+    assert f'"{_CAPTURE_TRUNCATION_SENTINEL}"' in _src(), (
+        "the extension's TRUNCATION_SENTINEL literal diverged from "
+        "sdk._CAPTURE_TRUNCATION_SENTINEL — a reader could no longer detect a "
+        "cut turn written by the other side")
+    sample = _capture_truncation_marker(12345)
+    assert "original length 12345 chars]" in sample  # sanity on the wording
+    assert "${total}" in _src() and "original length" in _src(), (
+        "the extension's marker template diverged from "
+        "sdk._capture_truncation_marker")
+
+
 def test_extension_posts_both_capture_endpoints():
     src = _src()
     # install-probe on load (server-visible install signal) …
@@ -451,3 +492,61 @@ def test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained():
         assert proc.returncode != 0, combined
         assert "ERR_MODULE_NOT_FOUND" in combined, combined
         assert "helper.ts" in combined, combined
+
+
+# ── #4897: the two-language truncation-marker contract ────────────────────
+#
+# The number pin above is source-level (it catches a changed literal even if
+# nothing runs the TS). This one is BEHAVIORAL: it runs the shipped TS clip and
+# compares its output, character for character, with the Python marker the
+# server writes into the same stored turn. A source regex cannot see a template
+# that renders differently (a swapped word, a wrong separator), and the marker
+# is the only thing that lets a reader on either side detect the other's cut.
+
+_MARKER_PROBE = r'''
+import { clipTurnContent, truncationMarker } from {{EXT_URI}};
+const total = Number(process.env.PROBE_TOTAL);
+const clipped = clipTurnContent("a".repeat(total));
+console.log("PROBE_JSON:" + JSON.stringify({
+  marker: truncationMarker(total),
+  length: Array.from(clipped).length,
+  tail: Array.from(clipped).slice(-64).join(""),
+  sentinelIn: clipped.includes("\u2026[truncated:"),
+}));
+'''
+
+
+def test_extension_marker_output_matches_the_python_marker(tmp_path):
+    """The client's marker and the server's marker must be the SAME string.
+
+    The server stores a client-clipped turn verbatim (it does not re-mark a
+    turn already at or under the cap), so a reader has to recognise a marker
+    the OTHER language wrote. A template that renders differently is invisible
+    to the source-level pin above — this executes both and compares.
+    """
+    node = _require_node()
+    from tortoise.sdk import _CAPTURE_TURN_CAP, _capture_truncation_marker
+
+    total = _CAPTURE_TURN_CAP + 1234
+    probe = tmp_path / "marker-probe.mjs"
+    probe.write_text(
+        _MARKER_PROBE.replace("{{EXT_URI}}", json.dumps(EXTENSION.as_uri())),
+        encoding="utf-8",
+    )
+    env = _scrubbed_env(str(tmp_path))
+    env["PROBE_TOTAL"] = str(total)
+    proc = subprocess.run(
+        [node, "marker-probe.mjs"],
+        capture_output=True, text=True, cwd=str(tmp_path), timeout=120,
+        env=env,
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    line = [ln for ln in proc.stdout.splitlines() if ln.startswith("PROBE_JSON:")][-1]
+    out = json.loads(line[len("PROBE_JSON:"):])
+    expected_marker = _capture_truncation_marker(total)
+    assert out["marker"] == expected_marker, (
+        f"TS marker {out['marker']!r} != Python marker {expected_marker!r} — a "
+        "reader could not detect a cut written by the other side")
+    assert out["length"] == _CAPTURE_TURN_CAP
+    assert out["sentinelIn"] is True
+    assert out["tail"].endswith(expected_marker)

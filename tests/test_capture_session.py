@@ -1158,9 +1158,10 @@ def test_capture_session_non_string_content_coerced(sdk):
 def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
     """#721 provenance: extraction scans the STORED (truncated) turn text.
-    A turn > 5000 chars stores content[:5000]; a phrase past the cut must NOT
-    be extracted — its source text exists in no stored turn. Every extracted
-    phrase must be present in the stored turn text."""
+    A turn over the cap stores a MARKED window (#4897); a phrase past the cut
+    must NOT be extracted — its source text exists in no stored turn. Every
+    extracted phrase must be present in the stored turn text."""
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _clip_capture_turn_content
     # One claim inside the 5000-char window (positive control) + trigger-free
     # padding to push a second claim past the cut. Padding must not match any
     # decision/claim regex so the past-cut claim is the only candidate for the
@@ -1177,8 +1178,12 @@ def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     turn = proj.g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
     ).result_set[0][0]
-    assert turn == "[user] " + content[:5000], \
-        "stored turn text is the truncated 5000 chars"
+    assert turn == "[user] " + _clip_capture_turn_content(content), \
+        "stored turn text is the MARKED window, not a silent 5000-char cut"
+    assert _CAPTURE_TRUNCATION_SENTINEL in turn, \
+        "a cut turn must carry the truncation marker (#4897)"
+    assert f"original length {len(content)}" in turn, \
+        "the marker must record the turn's TRUE length (#4897)"
     # Extraction still runs on the stored window (positive control).
     assert any("root cause is known" in p["text"] for p in res["points"]), \
         "claims inside the 5000-char window must still be extracted"
@@ -3888,11 +3893,19 @@ def test_recapture_prune_spares_claims_and_other_sessions(sdk):
 # ── #1532 P4: capture-path parity (window / role / quota / MITIGATES / id) ──
 
 def test_capture_turn_window_truncates_content(sdk):
-    from tortoise.sdk import _capture_turn_window
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_truncation_marker,
+        _capture_turn_window,
+    )
     conv = [{"role": "user", "content": "x" * 6000}]
     out = _capture_turn_window(conv)
     assert len(out[0]["content"]) == 5000
-    assert out[0]["content"] == "x" * 5000
+    # #4897: the cut is VISIBLE — the body is the first 5,000-char-worth of
+    # prefix plus a marker carrying the true length, never a bare `[:5000]`.
+    assert out[0]["content"].endswith(_capture_truncation_marker(6000))
+    assert out[0]["content"] != "x" * 5000
+    assert _CAPTURE_TRUNCATION_SENTINEL in out[0]["content"]
     assert len(conv[0]["content"]) == 6000, "input list is never mutated"
 
 
@@ -3909,7 +3922,7 @@ def test_capture_turn_window_preserves_short_and_absent(sdk):
 
 def test_capture_turn_window_idempotent_when_pre_truncated(sdk):
     """#1532 D1: running the window over an already-windowed conversation is
-    a no-op — the SDK loop's [:5000] and the extraction call can both apply
+    a no-op — the SDK loop's clip and the extraction call can both apply
     it without double-truncating."""
     from tortoise.sdk import _capture_turn_window
     conv = [{"role": "user", "content": "y" * 5000}]
@@ -4016,6 +4029,148 @@ def test_capture_session_hands_both_lanes_the_shared_extraction_window(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id",
     ).result_set
     assert rows[1][0] == "[user] " + ("X" + " " * 6000)[:5000]
+
+
+# ── #4897: a cut turn is MARKED, never silently shortened ──────────────────
+#
+# The READER's contract, stated as a literal rather than imported: this is what
+# a consumer of a stored turn matches on, and the assertion must be able to fail
+# on a tree where the writer emits no marker — importing the SDK sentinel here
+# would turn a missing marker into a collection error instead of a failed
+# assertion. `test_the_test_sentinel_literal_matches_the_sdk_contract` pins it
+# to the SDK so this copy cannot drift.
+_TRUNCATION_SENTINEL = "…[truncated:"
+
+
+def test_the_test_sentinel_literal_matches_the_sdk_contract():
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL
+    assert _TRUNCATION_SENTINEL == _CAPTURE_TRUNCATION_SENTINEL
+
+
+def test_clip_capture_turn_content_marks_only_an_actual_cut():
+    """A turn that FITS is complete and must never be marked; only a real cut
+    marks, and the marker carries the true length (#4897)."""
+    from tortoise.sdk import _CAPTURE_TURN_CAP, _clip_capture_turn_content
+    cap = _CAPTURE_TURN_CAP
+    for n in (0, 1, cap - 1, cap):
+        content = "a" * n
+        assert _clip_capture_turn_content(content) == content, (
+            f"a {n}-char turn fits the cap and must be returned verbatim")
+        assert _TRUNCATION_SENTINEL not in _clip_capture_turn_content(content), (
+            "only an ACTUAL cut is truncation — cap is complete, not cut")
+
+    over = cap + 1
+    clipped = _clip_capture_turn_content("a" * over)
+    assert len(clipped) == cap, "a clipped turn fills the window exactly"
+    assert clipped.startswith("a" * 10)
+    assert clipped.endswith(
+        f" {_TRUNCATION_SENTINEL} original length {over} chars]")
+    assert f"original length {over}" in clipped
+
+    # STABLE under re-application: the server re-applies the window to the
+    # stored body, and the clip reserved the marker inside the cap, so the
+    # second application is a true no-op (this is what keeps the marker alive).
+    assert _clip_capture_turn_content(clipped) == clipped
+
+
+def test_clip_capture_turn_content_cuts_mid_word_without_splitting_a_character():
+    from tortoise.sdk import _CAPTURE_TURN_CAP, _clip_capture_turn_content
+    cap = _CAPTURE_TURN_CAP
+    # The cut lands MID-WORD: the marker is what makes that visible.
+    content = "design " * 1000                       # 7000 chars
+    clipped = _clip_capture_turn_content(content)
+    assert _TRUNCATION_SENTINEL in clipped
+    assert f"original length {len(content)}" in clipped
+    body = clipped[: clipped.index(_TRUNCATION_SENTINEL) - 1]
+    assert content.startswith(body), "the body must be a prefix of the turn"
+
+    # A multi-byte character straddling the cut: code-point slicing cannot
+    # produce a lone surrogate, and the count is CODE POINTS (matching the
+    # server's len()), so the recorded length is the true character count.
+    emoji = "\U0001f600" * 6000
+    clipped = _clip_capture_turn_content(emoji)
+    assert len(clipped) == cap
+    assert not any(0xD800 <= ord(ch) <= 0xDFFF for ch in clipped), \
+        "a cut must never split a character into a lone surrogate"
+    assert _TRUNCATION_SENTINEL in clipped
+    assert f"original length {len(emoji)}" in clipped
+
+
+def test_capture_stores_a_truncation_marker_with_the_true_length(sdk):
+    """#4897 END-TO-END: capture -> store -> read-back.
+
+    A turn over the cap used to be stored as ``content[:cap]`` — invisible in
+    the graph, so a reader could not tell a complete turn from a cut one. It
+    must now be stored with a marker carrying the TRUE length. On unmodified
+    ``main`` this test fails on the ``_TRUNCATION_SENTINEL in body`` assertion
+    (no marker exists), which is exactly the silence the issue is about.
+    """
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+    content = "design discussion " * 500              # 8500 chars > 5000
+    assert len(content) > _CAPTURE_TURN_CAP
+    sdk.capture_session([{"role": "user", "content": content}])
+    stored = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+    ).result_set[0][0]
+    assert stored.startswith("[user] ")
+    body = stored[len("[user] "):]
+    assert _TRUNCATION_SENTINEL in body, (
+        "a cut turn reached storage with NO marker — the silent truncation "
+        "#4897 is about is still present")
+    assert f"original length {len(content)}" in body, (
+        "the marker must record the turn's TRUE length, not the window width")
+    assert len(body) == _CAPTURE_TURN_CAP, (
+        "the marker must live INSIDE the window, so the server's re-application "
+        "of the cap cannot cut it off")
+    assert content.startswith(body[: body.index(_TRUNCATION_SENTINEL) - 1]), \
+        "the stored body must be the turn's own prefix"
+
+
+def test_capture_extraction_input_and_stored_turn_agree_with_the_marker(
+        sdk, monkeypatch):
+    """#721 stored-source parity survives the marker: the LLM sees the SAME
+    marked window the node stores — the marker is a phrase with a home in the
+    stored turn, so nothing the model reads is absent from storage."""
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+    seen: list = []
+    orig = sdk_mod.TortoiseSDK._extract_session_v2
+
+    def spy(self, conversation, session_id, now):
+        seen.append([t["content"] for t in conversation])
+        return orig(self, conversation, session_id, now)
+
+    monkeypatch.setattr(sdk_mod.TortoiseSDK, "_extract_session_v2", spy)
+    content = "reasoning about the storage redesign. " * 400   # ~14,800 chars
+    assert len(content) > _CAPTURE_TURN_CAP
+    sdk.capture_session([{"role": "user", "content": content}])
+    stored = sdk._get_proj().g.query(
+        "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+    ).result_set[0][0]
+    assert seen and len(seen[0]) == 1
+    assert stored == "[user] " + seen[0][0], (
+        "the extraction input and the stored turn must be the same marked text")
+    assert _TRUNCATION_SENTINEL in seen[0][0], (
+        "the LLM must be told the turn was cut — otherwise it reasons about a "
+        "sentence whose ending was deleted")
+
+
+def test_the_marker_survives_the_servers_cap_reapplication():
+    """The critical stability property (#4897 review): the server re-applies
+    the cap to the stored body (``_capture_turn_texts``) and the client has
+    already clipped, so a marker appended AFTER the cut would be destroyed. It
+    lives INSIDE the cap, which makes every re-application a no-op."""
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _capture_turn_texts, _capture_turn_window
+    content = "z" * 6000
+    once = _capture_turn_window([{"role": "user", "content": content}])
+    assert _CAPTURE_TRUNCATION_SENTINEL in once[0]["content"]
+    twice = _capture_turn_window([dict(t) for t in once])
+    assert twice == once, "a re-applied window must not change the marked turn"
+    stored = _capture_turn_texts(once)[0]
+    assert stored == "[user] " + once[0]["content"]
+    assert stored.endswith(
+        f" {_CAPTURE_TRUNCATION_SENTINEL} original length 6000 chars]"), \
+        "the marker must survive the stored-text re-application"
 
 
 def test_normalize_turn_role_matches_sdk_loop(sdk):

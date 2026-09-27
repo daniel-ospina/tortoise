@@ -388,6 +388,38 @@ def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
         "the whole credential survived the cut, so this test proves nothing")
 
 
+def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
+        sdk, monkeypatch):
+    """#4911 and #4897 COMPOSE: a turn that is both cut AND carrying a
+    credential must (a) still have the credential redacted and counted, and
+    (b) still carry the truncation marker — neither control may eat the other.
+
+    The cut and the scrub are separate passes over the same window; a marker
+    appended after the cut must not be removed by the scrubber, and the
+    scrubber's replacement must not sit where the marker's length reservation
+    assumed text — so the two markers coexist and the count is still recorded.
+    """
+    _keyless(monkeypatch)
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
+    secret = "sk-proj-" + _fill(64)
+    # The credential sits INSIDE the kept window; the turn is long enough that
+    # a marker must also be appended.
+    content = f"My key is {secret} and here is why. " + "context " * 800
+    assert len(content) > _CAPTURE_TURN_CAP
+    sid = "sess-4897-4911-compose"
+    res = sdk.capture_session([{"role": "user", "content": content}],
+                              session_id=sid)
+    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
+    assert secret not in stored, "the credential survived the combined cut+scrub"
+    assert "[REDACTED:openai_api_key]" in stored, (
+        "the credential must be MARKED redacted, not silently dropped")
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        "the truncation marker must survive alongside the redaction marker")
+    assert f"original length {len(content)}" in stored, (
+        "the marker's true length must be the turn as POSTed (pre-scrub)")
+    assert res["capture_redactions"] == 1
+
+
 def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     """The Source scrub is bounded, and a non-str content cannot dodge it.
 

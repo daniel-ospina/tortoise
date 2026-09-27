@@ -1,4 +1,4 @@
-// tortoise-hook-version: 1
+// tortoise-hook-version: 2
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -9,6 +9,12 @@
 // capturing with the old logic: `session verify` called it UNVERIFIABLE-IN-CI
 // rather than STALE, and `tortoise doctor` printed no freshness row for it at
 // all. Generation 1 is the first contract for this seam.
+//
+// Generation 2 (#4897): `extractTurns` no longer cuts a >TURN_MAX_CHARS turn
+// SILENTLY. A clipped turn now carries a truncation marker with its true
+// length (see `clipTurnContent`), so the bytes this seam POSTs changed and
+// every already-installed generation-1 copy must read as stale and be
+// reinstalled — an old copy would keep storing an unmarked 5,000-char wall.
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -75,8 +81,62 @@ export const CONFIG_PATH = join(homedir(), ".pi", "agent", "tortoise-config.json
  * pins this literal to it so the two legs cannot drift.
  */
 export const MAX_TURNS = 500;
-/** Hosted per-turn stored window (tortoise _capture_turn_window). */
+/** Hosted per-turn stored window (tortoise sdk._CAPTURE_TURN_CAP).
+ *
+ * ⛔ ONE number, owned by Python. The extension is shipped standalone (it
+ * cannot import a Python constant), so this literal is the client's copy and
+ * `tests/test_pi_capture_hooks.py` pins it to `sdk._CAPTURE_TURN_CAP` — a
+ * divergence reds a test instead of storing a different window per lane. */
 export const TURN_MAX_CHARS = 5000;
+/**
+ * Sentinel prefix of the truncation marker appended when a turn is clipped at
+ * `TURN_MAX_CHARS` (#4897). MUST stay identical to the Python sentinel
+ * (`sdk._CAPTURE_TRUNCATION_SENTINEL`): the server stores a client-clipped
+ * turn verbatim, so a reader on either side has to recognise the other's
+ * marker. Pinned by `tests/test_pi_capture_hooks.py`.
+ */
+export const TRUNCATION_SENTINEL = "…[truncated:";
+
+/** The marker appended INSIDE the window when a turn is cut (#4897). */
+export function truncationMarker(total: number): string {
+  return ` ${TRUNCATION_SENTINEL} original length ${total} chars]`;
+}
+
+/**
+ * `content` unchanged when it fits `cap`; otherwise cut AND marked (#4897).
+ *
+ * Code-point safe on purpose: iteration is over `Array.from(content)`, so a
+ * multi-byte character (a surrogate pair) straddling the cut is never split
+ * into a lone surrogate, and counting CODE POINTS (not UTF-16 units) matches
+ * the server, whose `len()` counts code points — so a client-clipped turn is
+ * always `<= cap` on the server and the server's own cap re-application is a
+ * no-op.
+ *
+ * The marker is reserved INSIDE the cap, so the result is `<= cap` code points
+ * and `clip(clip(x)) === clip(x)`: a marker appended after a full-width cut
+ * would be destroyed by the server's second application.
+ */
+export function clipTurnContent(
+  content: string,
+  cap: number = TURN_MAX_CHARS,
+): string {
+  const points = Array.from(content);
+  if (points.length <= cap) return content;
+  let marker = truncationMarker(points.length);
+  let keep = cap - Array.from(marker).length;
+  if (keep < 0) {
+    // `cap` too small to carry the full marker (never the production 5000).
+    // Fall back to the bare sentinel so the cut stays VISIBLE.
+    marker = TRUNCATION_SENTINEL;
+    keep = Math.max(cap - Array.from(marker).length, 0);
+  }
+  const out = points.slice(0, keep).join("") + marker;
+  // The degenerate branch can still exceed the cap by the sentinel's own
+  // width; trim by code points (never a UTF-16 slice, which could split a
+  // surrogate).
+  const outPoints = Array.from(out);
+  return outPoints.length <= cap ? out : outPoints.slice(0, cap).join("");
+}
 /** Bounded network budget — Pi must never be blocked by a capture. */
 export const REQUEST_TIMEOUT_MS = 10_000;
 /**
@@ -204,7 +264,10 @@ export function extractTurns(entries: Array<Record<string, unknown>>): Turn[] {
     if (role !== "user" && role !== "assistant") continue;
     const text = flattenContent(message.content).trim();
     if (!text) continue;
-    turns.push({ role, content: text.slice(0, TURN_MAX_CHARS) });
+    // #4897: clip WITH a marker rather than `slice(0, TURN_MAX_CHARS)`. A cut
+    // turn now records its true length, so a reader can tell "the user said
+    // this much" from "we cut it here" — the silent mid-word cut is the defect.
+    turns.push({ role, content: clipTurnContent(text) });
     // Keep the MOST RECENT turns — matching the backfill leg's
     // `window_turns` (`turns[-MAX_TURNS:]`). Dropping the oldest is the
     // whole point: recent context is what memory wants. An early `break`

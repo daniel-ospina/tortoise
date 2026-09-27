@@ -425,8 +425,9 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         turn_id = f"{session_id}_t{i}"
-        # `_capture_turn_window` already truncated to the cap; the [:5000]
-        # mirrors the live store loop's explicit (idempotent) window.
+        # `_capture_turn_window` already truncated to the cap; the shared
+        # `_capture_turn_texts` clip mirrors the live store loop's explicit
+        # (idempotent, marker-preserving) window.
         turn_text = turn_texts[i]
         # Node MERGE BEFORE the edge MERGE — capture's #490 ordering rule: a
         # full-path MERGE whose edge is missing makes FalkorDB create the
