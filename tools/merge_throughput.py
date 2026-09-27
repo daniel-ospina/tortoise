@@ -163,6 +163,16 @@ def _age_days(value: object):
     return (datetime.now(UTC) - dt).total_seconds() / 86400.0
 
 
+def _age_ok(verified_at: object, window_days: float) -> bool:
+    """A record is fresh only if its age is in [0, window].
+
+    A far-future `verified_at` yields a negative age, which must NOT pass a
+    freshness test (the primitive `baseline-fresh` is built on).
+    """
+    age = _age_days(verified_at)
+    return age is not None and 0 <= age <= window_days
+
+
 def _median(values: list[float]) -> float:
     return float(statistics.median(values))
 
@@ -281,13 +291,16 @@ def _token_verdict(token) -> str:
 
 def _group_verdict(group: list[dict], workflow_key) -> str:
     newest = _newest(group)
-    # Two attempts we cannot prove share a workflow: the newest-by-id choice is
-    # unsound, so the group is UNKNOWN — never GREEN.
-    if workflow_key is None and len(group) > 1:
-        return "UNKNOWN"
     if newest.get("status") != "completed":
         return "UNKNOWN"
-    return _token_verdict(newest.get("conclusion"))
+    verdict = _token_verdict(newest.get("conclusion"))
+    # An unresolvable workflow means the newest attempt cannot be PROVEN to
+    # belong to the same group as any other, so it must never read GREEN — an
+    # older red in another workflow would be shadowed. A RED/NON_RED token
+    # still reports itself (a null/unknown conclusion is RED regardless).
+    if workflow_key is None and verdict == "GREEN":
+        return "UNKNOWN"
+    return verdict
 
 
 def _verdicts(runs, workflow_of=None) -> list[tuple]:
@@ -322,15 +335,20 @@ def mergify_mergeable(runs, workflow_of=None) -> str:
         newest = _newest(group)
         if newest.get("status") != "completed":
             return "UNKNOWN"
-        if key[1] is None and len(group) > 1:
-            return "BLOCKED"
         if newest.get("conclusion") not in STRICT_GREEN:
             return "BLOCKED"
+        if key[1] is None:
+            # A green whose workflow cannot be resolved is not provably this
+            # group: never report it MERGEABLE.
+            return "UNKNOWN"
     return "MERGEABLE"
 
 
 def verdict_from_check_runs(runs, workflow_of=None) -> str:
-    """Aggregate verdict. RED wins; then UNKNOWN; then GREEN only if non-empty."""
+    """Lax surface verdict. RED wins; then UNKNOWN; NON_RED is not GREEN.
+
+    GREEN only when the surface is non-empty and EVERY group is GREEN.
+    """
     if not runs:
         return "UNKNOWN"
     verdicts = [v for _, v in _verdicts(runs, workflow_of)]
@@ -338,6 +356,8 @@ def verdict_from_check_runs(runs, workflow_of=None) -> str:
         return "RED"
     if "UNKNOWN" in verdicts:
         return "UNKNOWN"
+    if "NON_RED" in verdicts:
+        return "NON_RED"
     return "GREEN"
 
 
@@ -649,46 +669,53 @@ def collect_payload(name: str, opts: dict):
 # ---------------------------------------------------------------------------
 
 def _strict_main_gate(runs, required) -> int:
-    """STRICT polarity (S1). Failure ⇒ 1; cancelled/neutral/skipped/unknown ⇒
-    2 with the token named; at least one OBSERVED success is the non-vacuity
-    guard (an all-NO_MAIN_SIGNAL read never passes).
+    """STRICT polarity (S1): ONLY `success` is green.
+
+    `neutral`/`skipped`/`cancelled`/`stale`/unknown/in-flight ⇒ 2 with the
+    token named; a RED ⇒ 1; at least one OBSERVED `success` among the REQUIRED
+    contexts is the non-vacuity guard. When `required` is supplied the verdict
+    is scoped to it, so a non-required red does not false-red the gate.
     """
+    if required:
+        wanted = {str(name) for name in required}
+        runs = [run for run in runs if str(run.get("name")) in wanted]
+    if not runs:
+        print("2: no required context observed success (all NO_MAIN_SIGNAL)")
+        return 2
     hard: list[str] = []
     soft: list[str] = []
     observed = 0
     for key, group in _group_runs(runs).items():
-        verdict = _group_verdict(group, key[1])
-        if verdict == "GREEN":
+        newest = _newest(group)
+        if newest.get("status") == "completed" and newest.get("conclusion") in STRICT_GREEN:
             observed += 1
-        elif verdict == "RED":
-            hard.append(f"{key[2]}={_conclusion_token(_newest(group))}")
+            continue
+        token = _conclusion_token(newest)
+        if _group_verdict(group, key[1]) == "RED":
+            hard.append(f"{key[2]}={token}")
         else:
-            soft.append(f"{key[2]}={_conclusion_token(_newest(group))}")
+            soft.append(f"{key[2]}={token}")
     if hard:
         print("1: required gate has a failing check: " + ", ".join(hard))
         return 1
     if soft:
         print("2: strict polarity (only success is green): " + ", ".join(soft))
         return 2
-    if observed >= 1:
-        return 0
-    print("2: no required context observed success (all NO_MAIN_SIGNAL)")
-    return 2
+    return 0 if observed >= 1 else 2
 
 
 def _check_main_gate(payload: dict, opts: dict) -> int:
     runs = payload.get("check_runs")
-    required = payload.get("required")
-    if runs is None:
-        pre = payload.get("mergify_mergeable") if opts.get("strict") else payload.get("main_gate")
-        if pre in ("MERGEABLE", "GREEN"):
-            return 0
-        if pre in ("BLOCKED", "RED"):
-            return 1
-        return 2
     if not isinstance(runs, list) or not runs:
         return 2
+    if opts.get("require_fresh"):
+        record_sha = payload.get("sha")
+        live_sha = payload.get("live_main_sha") or payload.get("main_sha")
+        if record_sha and live_sha and record_sha != live_sha:
+            print("2: main-gate evidence is not bound to the live main sha")
+            return 2
     if opts.get("strict"):
+        required = payload.get("required")
         return _strict_main_gate(runs, required if isinstance(required, list) else [])
     verdict = main_gate(runs)
     if verdict == "RED":
@@ -707,6 +734,11 @@ def _check_drain_rate(payload: dict, opts: dict) -> int:
     window = _as_number(payload.get("window_hours", UNKNOWN))
     if merges is None or window is None:
         return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+    ):
+        print("2: drain window record is missing or stale")
+        return 2
     if window < DRAIN_WINDOW_MIN_HOURS or merges < DRAIN_MIN_MERGES:
         print(f"2: drain window too weak (window={window}h, merges={merges})")
         return 2
@@ -719,11 +751,14 @@ def _check_drain_rate(payload: dict, opts: dict) -> int:
 def _check_prs_per_day(payload: dict, opts: dict) -> int:
     measured = _as_number(payload.get("prs_per_day", UNKNOWN))
     spec = opts.get("or_artifact")
+    if measured is None:
+        print("2: prs_per_day is UNKNOWN (a ceiling artifact does not measure it)")
+        return 2
     if spec:
         code, ceiling = _evaluate_ceiling(spec, payload)
         if code is not None:
             return code
-        if measured is not None and measured > ceiling:
+        if measured > ceiling:
             print(f"1: measured {measured}/day exceeds the documented ceiling {ceiling}")
             return 1
         return 0
@@ -737,7 +772,6 @@ def _check_prs_per_day(payload: dict, opts: dict) -> int:
 
 _CEILING_RE = re.compile(r"^\s*ceiling_prs_per_day\s*:\s*(.*?)\s*$", re.M)
 _SOURCE_RE = re.compile(r"^\s*ceiling_source\s*:\s*(.*?)\s*$", re.M)
-_TERM_RE = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*:\s*(.*?)\s*$", re.M)
 
 
 def _evaluate_ceiling(spec: str, payload: dict):
@@ -773,23 +807,17 @@ def _evaluate_ceiling(spec: str, payload: dict):
         print("2: ceiling_source must name the .gap.terms keys")
         return 2, None
     sources = [s.strip() for s in source_matches[0].split(",") if s.strip()]
-    section_terms = {
-        k: _as_number(v) for k, v in _TERM_RE.findall(section) if k != "ceiling_prs_per_day"
-    }
     emitted = _emitted_terms(payload)
+    if emitted is None:
+        print("2: --or-artifact requires the emitted .gap.terms "
+              "(a self-set integer is not a derived ceiling)")
+        return 2, None
     values = {}
     for key in sources:
-        if emitted is not None:
-            if key not in emitted or not _is_num(emitted[key]):
-                print(f"2: ceiling_source names {key!r} absent from .gap.terms")
-                return 2, None
-            values[key] = emitted[key]
-        else:
-            value = section_terms.get(key)
-            if value is None:
-                print(f"2: ceiling_source names {key!r} with no resolvable value")
-                return 2, None
-            values[key] = value
+        if key not in emitted or not _is_num(emitted[key]):
+            print(f"2: ceiling_source names {key!r} absent from .gap.terms")
+            return 2, None
+        values[key] = emitted[key]
     for needed in ("effective_parallel", "effective_batch", "cycle_minutes"):
         if needed not in values:
             print(f"2: ceiling is not derivable — missing {needed!r}")
@@ -839,6 +867,10 @@ def _section(text: str, anchor: str):
 
 
 def _check_queue_entry(payload: dict, opts: dict) -> int:
+    want = _as_int(opts.get("pr"))
+    if want is not None and _as_int(payload.get("pr")) != want:
+        print("2: queue-entry evidence is for a different PR (--pr scoping)")
+        return 2
     entered = payload.get("entered_queue")
     trigger = payload.get("trigger")
     if entered is None or trigger is None:
@@ -855,14 +887,13 @@ def _check_queue_entry(payload: dict, opts: dict) -> int:
         if not head or not run_sha or head != run_sha:
             print("2: queue-entry evidence is not on the PR's current head")
             return 2
-        age = _age_days(payload.get("verified_at"))
-        if age is None or age > DEFAULT_RECORD_WINDOW_DAYS:
+        if not _age_ok(payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS):
             return 2
     return 0
 
 
 def _check_queue_eta(payload: dict, opts: dict) -> int:
-    if payload.get("read_ok") is False or payload.get("incomplete_results"):
+    if not payload.get("read_ok", True) or payload.get("incomplete_results"):
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
@@ -902,10 +933,10 @@ def _check_batch_size(payload: dict, opts: dict) -> int:
     sizes = payload.get("batch_sizes")
     if events is None or not isinstance(sizes, list):
         return 2
-    if opts.get("require_fresh"):
-        age = _age_days(payload.get("verified_at"))
-        if age is None or age > DEFAULT_RECORD_WINDOW_DAYS:
-            return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+    ):
+        return 2
     min_depth = _as_int(opts.get("min_depth"))
     if min_depth is not None and events < min_depth:
         print("2: batch window holds too few batch events")
@@ -946,10 +977,10 @@ def _check_cycle(payload: dict, opts: dict) -> int:
     threshold = _as_number(opts.get("max"))
     if threshold is None:
         return 2
-    if opts.get("require_fresh"):
-        age = _age_days(payload.get("verified_at"))
-        if age is None or age > DEFAULT_RECORD_WINDOW_DAYS:
-            return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+    ):
+        return 2
     return 0 if value <= threshold else 1
 
 
@@ -982,7 +1013,7 @@ def _check_fast_files_unclassified(payload: dict, opts: dict) -> int:
 
 
 def _check_conflicts(payload: dict, opts: dict) -> int:
-    if payload.get("read_ok") is False or payload.get("incomplete_results"):
+    if not payload.get("read_ok", True) or payload.get("incomplete_results"):
         return 2
     if payload.get("main_moved"):
         print("2: origin/main moved between fetch and sweep")
@@ -1022,6 +1053,10 @@ def _check_conflicts(payload: dict, opts: dict) -> int:
 
 
 def _check_attribution(payload: dict, opts: dict) -> int:
+    want = _as_int(opts.get("pr"))
+    if want is not None and _as_int(payload.get("pr")) != want:
+        print("2: attribution evidence is for a different PR (--pr scoping)")
+        return 2
     if not isinstance(payload.get("main_red"), bool):
         return 2
     if not payload["main_red"]:
@@ -1034,10 +1069,10 @@ def _check_attribution(payload: dict, opts: dict) -> int:
     delta = (recorded - first).total_seconds() / 60.0
     if delta < 0:
         return 2
-    if opts.get("require_fresh"):
-        age = _age_days(payload.get("verified_at"))
-        if age is None or age > DEFAULT_RECORD_WINDOW_DAYS:
-            return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+    ):
+        return 2
     threshold = _as_number(opts.get("max"))
     if threshold is None:
         return 2
@@ -1053,19 +1088,17 @@ def _headroom(payload: dict):
 
 
 def _check_capacity(payload: dict, opts: dict) -> int:
-    needed = (
-        "queued",
-        "in_progress",
-        "oldest_minutes",
-        "capacity_at_first_failure",
-        "configured_max_parallel_checks",
-    )
-    if not payload or any(key not in payload for key in needed):
+    if not payload:
         return 2
-    if opts.get("require_fresh"):
-        age = _age_days(payload.get("verified_at"))
-        if age is None or age > M4_RECORD_WINDOW_DAYS:
+    for key in ("queued", "in_progress", "oldest_minutes",
+                "capacity_at_first_failure", "configured_max_parallel_checks"):
+        if not _is_num(payload.get(key)):
+            print(f"2: capacity field {key!r} is missing or not numeric")
             return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), M4_RECORD_WINDOW_DAYS
+    ):
+        return 2
     oldest = _as_number(payload.get("oldest_minutes"))
     if oldest is None:
         return 2
@@ -1086,10 +1119,10 @@ def _check_capacity(payload: dict, opts: dict) -> int:
 
 
 def _check_parallelism_headroom(payload: dict, opts: dict) -> int:
-    if opts.get("require_fresh"):
-        age = _age_days(payload.get("verified_at"))
-        if age is None or age > M4_RECORD_WINDOW_DAYS:
-            return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), M4_RECORD_WINDOW_DAYS
+    ):
+        return 2
     cap = _as_number(payload.get("capacity_at_first_failure"))
     configured = _as_number(payload.get("configured_max_parallel_checks"))
     if cap is None or configured is None:
@@ -1125,16 +1158,18 @@ def _check_gap(payload: dict, opts: dict) -> int:
         if not record_path:
             print("2: effective_parallel has no named persisted record")
             return 2
-        age = _age_days(parallel.get("verified_at"))
-        if age is None or age > DEFAULT_RECORD_WINDOW_DAYS:
+        if not _age_ok(parallel.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS):
             return 2
         records = payload.get("records")
         if isinstance(records, dict) and record_path in records:
             record = records[record_path]
-            if isinstance(record, dict):
-                rec_age = _age_days(record.get("verified_at"))
-                if rec_age is None or rec_age > DEFAULT_RECORD_WINDOW_DAYS:
-                    return 2
+            if not isinstance(record, dict) or not _age_ok(
+                record.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+            ):
+                return 2
+        elif not (REPO / record_path).exists():
+            print(f"2: M3 record {record_path!r} is not on disk")
+            return 2
     value = _as_number(gap.get("value", UNKNOWN))
     if value is None:
         return 2
@@ -1154,13 +1189,18 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         if key not in EXCLUDE_KEYS:
             print(f"2: unknown exclude key {key!r}")
             return 2
-    if payload.get("read_ok") is False or payload.get("incomplete_results"):
+    if not payload.get("read_ok", True) or payload.get("incomplete_results"):
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
     if not isinstance(items, list) or not isinstance(total, int):
         return 2
     if len(items) != total or total < 1:
+        return 2
+    if opts.get("require_fresh") and not _age_ok(
+        payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
+    ):
+        print("2: triage snapshot is missing or stale")
         return 2
     floor = MIN_OPEN_PR_POPULATION
     raised = opts.get("min_population")
@@ -1175,10 +1215,19 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
     if opts.get("require_complete") and len(items) != total:
         return 2
     excluded = set(excludes)
-    active = [
-        row for row in items
-        if isinstance(row, dict) and str(row.get("classification", "open")) not in excluded
-    ]
+
+    def _excluded(row: dict) -> bool:
+        label = str(row.get("classification", ""))
+        for key in excluded:
+            if key == "superseded_by":
+                value = row.get("superseded_by")
+                if value not in (None, "", "null"):
+                    return True
+            elif row.get(key) or label == key:
+                return True
+        return False
+
+    active = [row for row in items if isinstance(row, dict) and not _excluded(row)]
     if not active:
         print("2: every row is in an excluded state")
         return 2
@@ -1190,13 +1239,15 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
 
 
 def _check_baseline_fresh(payload: dict, opts: dict) -> int:
-    age = _age_days(payload.get("verified_at", UNKNOWN))
-    if age is None:
-        return 2
     window = _as_number(opts.get("max_age_days"))
     if window is None:
         window = DEFAULT_RECORD_WINDOW_DAYS
-    return 0 if age <= window else 1
+    if _age_ok(payload.get("verified_at", UNKNOWN), window):
+        return 0
+    age = _age_days(payload.get("verified_at", UNKNOWN))
+    if age is None or age < 0:
+        return 2
+    return 1
 
 
 def _check_assert_queue_head_checks(payload: dict, opts: dict) -> int:
@@ -1208,6 +1259,9 @@ def _check_assert_queue_head_checks(payload: dict, opts: dict) -> int:
     names = payload.get("names")
     if not isinstance(required, list) or not isinstance(names, list):
         return 2
+    if not required:
+        print("2: required context set is empty (nothing to assert)")
+        return 2
     missing = [name for name in required if name not in names]
     if missing:
         print(f"1: queue head is missing check(s): {missing}")
@@ -1216,7 +1270,7 @@ def _check_assert_queue_head_checks(payload: dict, opts: dict) -> int:
 
 
 def _check_durations_map(payload: dict, opts: dict) -> int:
-    if payload.get("read_ok") is False:
+    if not payload.get("read_ok", True):
         print("2: jobs read was empty/0-byte")
         return 2
     dm = payload.get("durations_map")
@@ -1227,7 +1281,7 @@ def _check_durations_map(payload: dict, opts: dict) -> int:
         print("2: durations projection is empty (sampled_keys < 1)")
         return 2
     age = _as_number(dm.get("age_days", UNKNOWN))
-    if age is None:
+    if age is None or age < 0:
         return 2
     window = _as_number(opts.get("max_age_days"))
     if window is None:
@@ -1281,11 +1335,11 @@ def run_check(name: str, json=None, **opts) -> int:
 # --json report — emit fields, never a judgement.
 # ---------------------------------------------------------------------------
 
-def _fixture_gap():
+def _fixture_gap(value: float = 1.5):
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "gap": {
-            "value": 1.5,
+            "value": value,
             "terms": {
                 "ceiling": {"value": 100, "source": "S4"},
                 "observed": {"value": 50, "source": "M1"},
@@ -1307,6 +1361,14 @@ _FIXTURES = {
     "gap_ok": {
         "gap": _fixture_gap(),
         "fast-files-unclassified": {"fast_files_unclassified": []},
+    },
+    "conjunct_mixed": {
+        "gap": _fixture_gap(3.0),
+        "fast-files-unclassified": {"fast_files_unclassified": []},
+    },
+    "conjunct_unknown": {
+        "gap": _fixture_gap(),
+        "fast-files-unclassified": {},
     },
 }
 
@@ -1466,6 +1528,29 @@ def _cli_check(argv) -> int:
     return aggregate(codes)
 
 
+# check name → the top-level report field it names, for `--json <name>`.
+_CHECK_FIELD = {
+    "main-gate": "main_gate",
+    "drain-rate": "drain_rate",
+    "prs-per-day": "prs_per_day",
+    "queue-entry": "queue_entry",
+    "queue-eta": "queue_eta",
+    "batch-size": "max_batch_size",
+    "cycle": "cycle",
+    "shard-balance": "shard_imbalance_minutes",
+    "fast-files-unclassified": "fast_files_unclassified",
+    "conflicts": "conflicts",
+    "attribution": "attribution",
+    "capacity": "capacity",
+    "parallelism-headroom": "parallelism_headroom",
+    "gap": "gap",
+    "no-languish": "no_languish",
+    "baseline-fresh": "baseline_fresh",
+    "assert-queue-head-checks": "assert_queue_head_checks",
+    "durations-map": "durations_map",
+}
+
+
 def _cli_json(argv) -> int:
     fixture = None
     path = None
@@ -1482,17 +1567,65 @@ def _cli_json(argv) -> int:
             continue
         i += 1
     report = build_report(fixture=fixture)
+    if path in _CHECK_FIELD:
+        path = _CHECK_FIELD[path]
     print(jsonlib.dumps(_extract_path(report, path), indent=2, default=str))
     return 0
 
 
+def _triage_rows():
+    """One Task-5-shaped row per open PR. NEVER mutates anything."""
+    body = _gh_api(
+        f"repos/{OWNER_REPO}/pulls?state=open&per_page=100&sort=created&direction=asc",
+        paginate=True,
+    )
+    if body is UNKNOWN or not isinstance(body, list):
+        return None
+    rows = []
+    for pr in body:
+        if not isinstance(pr, dict):
+            continue
+        rows.append({
+            "number": pr.get("number"),
+            "bucket": "draft" if pr.get("draft") else "eligible",
+            "eligible": not pr.get("draft"),
+            "conflict": UNKNOWN,
+            "conflicted_paths": [],
+            "superseded_by": None,
+            "draft": bool(pr.get("draft")),
+            "hard_stop": False,
+            "terminal_decision": False,
+            "owner": UNKNOWN,
+            "owner_evidence": UNKNOWN,
+            "owning_issue": UNKNOWN,
+        })
+    return rows
+
+
 def _cli_triage(argv) -> int:
     emit_rows = "--emit" in argv and "rows" in argv
-    if emit_rows:
-        print(jsonlib.dumps([], indent=2))
-    else:
-        print(jsonlib.dumps({"triage": "no mutating request issued"}, indent=2))
+    rows = _triage_rows()
+    if rows is None:
+        print("2: could not enumerate open PRs", file=sys.stderr)
+        return 2
+    print(jsonlib.dumps(rows if emit_rows else {"rows": rows}, indent=2, default=str))
     return 0
+
+
+def _capacity_sample():
+    runs = _gh_api(
+        f"repos/{OWNER_REPO}/actions/runs?per_page=100", paginate=True
+    )
+    if runs is UNKNOWN or not isinstance(runs, dict):
+        return None
+    active = [
+        run for run in runs.get("workflow_runs", []) or []
+        if isinstance(run, dict) and run.get("status") in ("queued", "in_progress")
+    ]
+    return {
+        "queued": sum(1 for run in active if run.get("status") == "queued"),
+        "in_progress": sum(1 for run in active if run.get("status") == "in_progress"),
+    }
 
 
 def _cli_observe(mode: str, argv) -> int:
@@ -1501,10 +1634,14 @@ def _cli_observe(mode: str, argv) -> int:
         if token == "--fixture" and i + 1 < len(argv):
             fixture = argv[i + 1]
     if fixture is not None:
-        print(jsonlib.dumps({"mode": mode, "samples": []}, indent=2))
+        print(jsonlib.dumps({"mode": mode.lstrip("-"), "samples": []}, indent=2))
         return 0
-    print(jsonlib.dumps({"mode": mode.lstrip("-"), "samples": [], "status": UNKNOWN},
-                        indent=2))
+    sample = _capacity_sample()
+    if sample is None:
+        print(jsonlib.dumps({"mode": mode.lstrip("-"), "samples": [],
+                             "status": UNKNOWN}, indent=2))
+        return 2
+    print(jsonlib.dumps({"mode": mode.lstrip("-"), "samples": [sample]}, indent=2))
     return 0
 
 
