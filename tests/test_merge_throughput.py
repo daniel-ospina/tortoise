@@ -568,7 +568,8 @@ def gap_repo(tmp_path, monkeypatch):
     """Write the M3 record on disk and point REPO at the temp root."""
     docs = tmp_path / "docs" / "ci"
     docs.mkdir(parents=True)
-    (docs / "measurements.json").write_text(_json.dumps({"verified_at": NOW}))
+    (docs / "measurements.json").write_text(
+        _json.dumps({"verified_at": NOW, "value": 3}))
     monkeypatch.setattr(mt, "REPO", tmp_path)
     return tmp_path
 
@@ -613,7 +614,8 @@ def test_gap_stale_parallel_verified_at_is_2(gap_repo):
 def test_gap_stale_disk_record_is_2(tmp_path, monkeypatch):
     docs = tmp_path / "docs" / "ci"
     docs.mkdir(parents=True)
-    (docs / "measurements.json").write_text(_json.dumps({"verified_at": _iso(30)}))
+    (docs / "measurements.json").write_text(
+        _json.dumps({"verified_at": _iso(30), "value": 3}))
     monkeypatch.setattr(mt, "REPO", tmp_path)
     assert run_check("gap", json=_gap_payload(), max=2, require_fresh=True) == 2
 
@@ -852,11 +854,12 @@ def test_verdict_from_check_runs_non_red_is_not_green():
 
 def test_merge_pages_object_and_list_streams():
     assert mt._merge_pages([["a"], ["b"]]) == ["a", "b"]
+    # A differing scalar must not be silently clobbered by a later page.
     merged = mt._merge_pages([
-        {"total_count": 2, "check_runs": [1]},
-        {"total_count": 2, "check_runs": [2]},
+        {"total_count": 100, "check_runs": [1]},
+        {"total_count": 5, "check_runs": [2]},
     ])
-    assert merged == {"total_count": 2, "check_runs": [1, 2]}
+    assert merged == {"total_count": 100, "check_runs": [1, 2]}
     assert mt._merge_pages([]) == []
 
 
@@ -929,7 +932,9 @@ def test_read_ok_zero_is_a_failed_read():
 
 def test_conflicts_unprobed_branch_is_2():
     items = [{"number": i, "conflicting": False} for i in range(12)]
-    items[0] = {"number": 0, "unknown": True}
+    # The production shape carries BOTH keys: conflicting False + unknown True.
+    items[0] = {"number": 0, "branch": "b", "conflicting": False,
+                "unknown": True}
     assert run_check("conflicts",
                      json={"items": items, "total_count": 12, "read_ok": True},
                      max=5) == 2
@@ -944,7 +949,9 @@ def test_conflicts_misshaped_item_is_2():
 
 
 def test_conflicts_main_moved_is_2():
-    payload = {"items": [], "total_count": 0, "read_ok": True, "main_moved": True}
+    payload = {"items": [{"number": i, "conflicting": False}
+                          for i in range(12)],
+               "total_count": 12, "read_ok": True, "main_moved": True}
     assert run_check("conflicts", json=payload, max=5) == 2
 
 
@@ -1333,3 +1340,111 @@ def test_cli_json_bare_form_exits_0():
     out = _run_cli("--json", "--fixture", "empty")
     assert out.returncode == 0, out.stderr
     assert "gap" in _json.loads(out.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Round-4 hardening: fail-closed on unvalidated flags and unobserved elements.
+# ---------------------------------------------------------------------------
+
+def test_cli_numeric_flags_reject_empty_and_garbage():
+    for flag in ("--min-headroom", "--min-depth", "--pr", "--min-population"):
+        empty = _run_cli("check", "capacity", flag, "")
+        assert empty.returncode == 2, (flag, empty.stdout + empty.stderr)
+        garbage = _run_cli("check", "capacity", flag, "abc")
+        assert garbage.returncode == 2, (flag, garbage.stdout + garbage.stderr)
+
+
+def test_cli_numeric_flag_may_not_swallow_the_next_flag():
+    out = _run_cli("check", "capacity", "--min-headroom", "--require-fresh")
+    assert out.returncode == 2
+
+
+def test_cli_or_artifact_empty_is_2():
+    out = _run_cli("check", "prs-per-day", "--min", "200", "--or-artifact", "")
+    assert out.returncode == 2
+
+
+def test_or_artifact_empty_string_is_2():
+    assert run_check("prs-per-day", json={"prs_per_day": 250}, min=200,
+                     or_artifact="") == 2
+
+
+def test_non_finite_numbers_are_not_measurements():
+    assert mt._is_num(float("inf")) is False
+    assert mt._is_num(float("nan")) is False
+    assert mt._as_number(float("inf")) is None
+    assert mt._as_number("nan") is None
+    assert run_check("prs-per-day", json={"prs_per_day": float("inf")},
+                     min=200) == 2
+
+
+def test_queue_eta_non_empty_population_without_etas_is_2():
+    payload = {"items": [{"eta_minutes": "UNKNOWN"}], "total_count": 1,
+               "read_ok": True, "max_eta_minutes": 60}
+    assert run_check("queue-eta", json=payload, max=120, min_depth=1) == 2
+
+
+def test_batch_size_self_set_max_without_events_is_2():
+    payload = {"events": 5, "batch_sizes": [], "max_batch_size": 3,
+               "verified_at": NOW}
+    assert run_check("batch-size", json=payload, min=2, min_depth=1,
+                     require_fresh=True) == 2
+
+
+def test_gap_value_must_match_the_m3_record(gap_repo):
+    p = _gap_payload()
+    p["gap"]["terms"]["effective_parallel"]["value"] = 99
+    assert run_check("gap", json=p, max=2, require_fresh=True) == 2
+
+
+def test_gap_fewer_than_six_terms_is_2(gap_repo):
+    p = _gap_payload()
+    p["gap"]["terms"].pop("wait")
+    assert run_check("gap", json=p, max=2, require_fresh=True) == 2
+
+
+def test_gap_unknown_value_with_valid_terms_is_2(gap_repo):
+    assert run_check("gap", json=_gap_payload("UNKNOWN"), max=2,
+                     require_fresh=True) == 2
+
+
+def test_no_languish_non_boolean_movement_is_2():
+    payload = {"total_count": 12, "read_ok": True,
+               "items": [{"number": i, "classification": "open",
+                          "moved_in_window": "false"} for i in range(12)]}
+    assert run_check("no-languish", json=payload, exclude=[],
+                     require_complete=True) == 2
+
+
+def test_no_languish_unset_superseded_by_keeps_the_row_active():
+    items = [{"number": i, "classification": "open", "moved_in_window": False,
+              "superseded_by": ""} for i in range(12)]
+    payload = {"items": items, "total_count": 12, "read_ok": True}
+    assert run_check("no-languish", json=payload, exclude=["superseded_by"],
+                     require_complete=True) == 1
+
+
+def test_attribution_backwards_clock_is_2():
+    payload = {"pr": 5, "main_red": True, "verified_at": NOW,
+               "red_first_observed": "2026-09-26T10:10:00Z",
+               "attribution_recorded": "2026-09-26T10:00:00Z"}
+    assert run_check("attribution", json=payload, pr=5, max=5) == 2
+
+
+def test_parse_api_body_invalid_utf8_is_unknown():
+    assert mt.parse_api_body(b"\xff\xfe\x00") is mt.UNKNOWN
+
+
+def test_cli_json_parsable_non_dict_input_is_2(tmp_path):
+    rec = tmp_path / "list.json"
+    rec.write_text("[1, 2, 3]")
+    out = _run_cli("--json", "--input", str(rec))
+    assert out.returncode == 2
+
+
+def test_or_artifact_plus_signed_integer_is_2(tmp_path):
+    text = ARTIFACT.replace("ceiling_prs_per_day: 234",
+                            "ceiling_prs_per_day: +234")
+    path = _artifact(tmp_path, text)
+    assert run_check("prs-per-day", json=_ceiling_payload(100), min=200,
+                     or_artifact=f"{path}#ceiling") == 2
