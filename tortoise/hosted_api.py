@@ -23002,8 +23002,10 @@ def _analytics_http_key(url: str, key: str) -> tuple:
     ``_track_analytics_event``), so ``url``/``key`` do not parameterize the
     instance. They are part of the key anyway, as the conservative choice: a
     change to the configured sink forces a fresh pool rather than reusing one
-    warmed against the old configuration. Production is a stable key, so the
-    client is built once.
+    warmed against the old configuration. ``_ANALYTICS_POST_TIMEOUT_S`` is in
+    the key because it genuinely parameterizes the instance — it is baked into
+    the client at construction, unlike ``url``/``key``. Production is a stable
+    key, so the client is built once.
     """
     return (url, key, _ANALYTICS_POST_TIMEOUT_S)
 

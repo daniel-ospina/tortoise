@@ -795,7 +795,8 @@ def test_pooled_client_rebuilds_on_cache_key_change_without_closing_the_supersed
     instead of four (a pool warmed for the old configuration serves the new).
     Mutation B: drop ``url``, ``key`` OR the timeout from
     ``_analytics_http_key`` → that element no longer forces a rebuild.
-    Mutation C: close the superseded client → ``closes`` is 1.
+    Mutation C: close the superseded client → ``closes`` is 3 (one per
+    supersession), not 0.
     """
     _prod_env(monkeypatch)
     rec = _record_pooled_client(monkeypatch)
