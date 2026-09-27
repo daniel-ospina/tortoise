@@ -234,11 +234,50 @@ def apply_payload_operators(proj, sdk, operators: list, *,
 
     ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
     dict is the MITIGATES same-call lookup and is keyed on
-    ``(src, dst, op_type)``, while ``create_operator`` mints unconditionally
-    (#4971) — two payload records that re-key onto the SAME graph triple each
-    create their own node, and a dict keyed on the triple would silently drop
-    the earlier node's id from the provenance set, leaving it unstamped and
-    invisible (the very #4936 defect this return exists to close).
+    ``(src, dst, op_type)``; it must never double as the provenance set
+    (#4936). Before #4971 the two could differ — ``create_operator`` mints
+    unconditionally, so two payload records that re-keyed onto the SAME
+    graph triple each created their own node, and a dict keyed on the triple
+    would silently drop the earlier node's id from the provenance set,
+    leaving it unstamped and invisible. #4971's guard (below) now makes the
+    repeat a no-op, so a triple is unique within a call and the two agree
+    again — but the LIST stays the caller's contract: it is the ordered set
+    of ids this call CREATED, which is what a provenance stamp needs and what
+    a caller must never widen by looking at the MITIGATES dict.
+
+    ⛔ #4971 — IDEMPOTENCY GUARD, keyed on the RESOLVED ``(op_type, src,
+    dst)`` triple. ``create_operator`` mints a fresh ULID on every call with
+    no existence probe, so a commit (or a failed-capture retry) that reaches
+    this pass twice mints a SECOND operator Point for one bridge — and each
+    duplicate is a separately weighted edge (``weights.py::
+    compute_operator_weight`` is per op id), so EP propagates the same link
+    twice (silent belief inflation). The probe below is the eval lane's
+    dup-edge probe (``tools/longmem_eval/ingest_v2.py``, #1369 review P2)
+    hoisted here so the hosted (``hosted_api._execute_commit_writes`` §7) and
+    capture (``sdk._extract_session_v2``) paths share one discipline — the
+    eval lane keeps its own inline copy (it does NOT call this helper).
+
+    ⚠️ The key is the RESOLVED triple, NEVER the payload id: on a re-keyed
+    endpoint the payload id names nothing in the graph (it resolved to a
+    pre-existing node under a DIFFERENT id), so a payload-keyed probe would
+    never match and the duplicate would survive — the identical reasoning the
+    event probe in ``ingest_v2.py`` records ("the key ... NEVER the payload
+    ``id``: extractor_v2's prior-graph search REUSES a prior ... so the
+    payload ``id`` is NOT a stable idempotency key"). It is exactly why the
+    ID-SPACE PRECONDITION above is a precondition: this helper can only be
+    idempotent if its caller handed it graph ids.
+
+    ``direction`` is deliberately NOT part of the key — the acceptance is
+    ONE node per ``(op_type, src, dst)`` triple, matching the eval lane's
+    probe. On a repeat the guard ``continue``s (the eval lane's semantics),
+    so the node is neither re-created NOR added to the returned list: the
+    return contract is CREATED ids only, and a caller stamping provenance
+    must never claim a node a prior commit created (the #4936 rule above).
+    Because the guard probes the GRAPH, a duplicate triple WITHIN one payload
+    collapses too, exactly as it does in the eval lane — the same belief
+    inflation otherwise survives as a within-call duplicate (and that is why
+    #4936's ``test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats``
+    now pins the collapsed count instead of the old two-node one).
     """
     target_op_ids: dict[tuple, str] = {}
     created_ids: list[str] = []
@@ -250,6 +289,26 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         if not op_type or not src or not dst:
             _logger.warning(
                 "operator write skipped (inputs missing?): %r", op)
+            continue
+        # #4971 — (op_type, src, dst) idempotency probe, on the RESOLVED
+        # triple (see the docstring; a payload-keyed probe never fires on a
+        # re-key). The relation type is mapped exactly as ``create_operator``
+        # maps it for the edge it writes (part/whole ops use ``hasPart``), so
+        # the probe reads the same edge the write would have created rather
+        # than inlining a raw op_type that would make it miss on those ops.
+        _edge_type = ("hasPart" if op_type not in ("IMPL", "NAND")
+                      else op_type)
+        _dup = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
+            f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
+            f"MATCH (o)-[:{_edge_type} {{idx:1}}]->(d) WHERE d.id = $dst "
+            "RETURN count(*) LIMIT 1",
+            params={"t": op_type, "src": src, "dst": dst}).result_set
+        if _dup and _dup[0][0]:
+            # Already bridged by an earlier commit/retry — a no-op. Do NOT
+            # record it in target_op_ids: the MITIGATES second pass falls
+            # back to its own Cypher probe and finds the pre-existing operator
+            # (whose ``mitigate_operator`` is itself idempotent).
             continue
         try:
             result = sdk.create_operator(
