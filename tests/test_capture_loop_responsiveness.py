@@ -1661,9 +1661,27 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
     copy is therefore pinned against the REAL `_get_proj` here — driven with a
     recording projection stub, so this does NO graph I/O and cannot depend on
     the test-redirect/lane in which the file runs.
+
+    The probe corpus is GENERATED, not hand-listed. A five-literal spot-check
+    was GREEN against an added `_get_proj` branch (`startswith("01")` →
+    `tenant_{ns}`) because none of its literals was ULID-shaped — exactly the
+    "mirror that is nearly right" this guard exists to catch. See the corpus
+    construction below.
     """
+    import inspect
+    import random
+    import re
+
+    import tortoise.embeddings as emb_mod
     import tortoise.hosted_api as ha_mod
     import tortoise.sdk as sdk_mod
+
+    # `_get_proj` warms the embedder on first open (#2952, default ON) — a
+    # network/model-bound daemon load the namespace→graph-name mapping cannot
+    # depend on. Stub it so the (now much larger) corpus stays cheap: un-stubbed
+    # this test cost ~447 s under fleet load, stubbed ~20 s.
+    monkeypatch.setattr(emb_mod.EmbeddingModel, "start_warm_up",
+                        lambda **kw: None)
 
     seen: list[str | None] = []
 
@@ -1685,9 +1703,57 @@ def test_capture_graph_name_mirrors_the_sdk_mapping(monkeypatch):
         sdk._get_proj()
         return seen[-1]
 
-    for ns in ("team-001", "test_x", "tortoise_testing", "test-x",
-               "registry"):
-        assert _opened(namespace=ns) == ha_mod._graph_name_for_namespace(ns), ns
+    # ── probe corpus ──────────────────────────────────────────────────────
+    # (a) PREDICATE-DERIVED: every `==`/`startswith` string literal in
+    #     `_get_proj`'s OWN source becomes a probe, so a new literal-bearing
+    #     branch is exercised BY CONSTRUCTION — a mirror that does not restate
+    #     it then fails the parity loop below. The pinned predicate-set
+    #     assertion after the loop makes any NEW predicate an explicit test
+    #     edit (and catches one the probes happen to satisfy).
+    src = inspect.getsource(sdk_mod.TortoiseSDK._get_proj)
+    eq_lits = set(re.findall(r'(?:==|!=)\s*"([^"]*)"', src))
+    prefix_lits: set[str] = set()
+    for _m in re.finditer(r"startswith\((.*?)\)", src, re.S):
+        prefix_lits.update(re.findall(r'"([^"]*)"', _m.group(1)))
+    # (b) REAL-CREDENTIAL SHAPES: a production `org_id` is a ULID
+    #     ("01"-prefixed Crockford base32) — the shape the old spot-check
+    #     lacked — plus the named shapes it carried and a seeded fuzz over the
+    #     namespace alphabet.
+    corpus: list[str] = ["team-001", "test_x", "tortoise_testing", "test-x",
+                         "registry",
+                         "01J8ZZK4M7HQ3X9Z8R2K6VWPB",
+                         "01HZX9K4M7HQ3X9Z8R2K6VWPC", "01ULID"]
+    corpus += sorted(eq_lits)
+    corpus += sorted(prefix_lits)
+    corpus += [f"{p}{sfx}" for p in sorted(prefix_lits)
+               for sfx in ("x", "01J8ZZK4M7HQ3X9Z8R2K6VWPB")]
+    _rng = random.Random(3365)
+    _ns_alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+    corpus += ["".join(_rng.choice(_ns_alphabet)
+                       for _ in range(_rng.randint(1, 30)))
+               for _ in range(48)]
+    corpus = list(dict.fromkeys(corpus))
+
+    for ns in corpus:
+        opened = _opened(namespace=ns)
+        mirrored = ha_mod._graph_name_for_namespace(ns)
+        assert opened == mirrored, (
+            f"namespace {ns!r}: `_get_proj` opens {opened!r} but the "
+            f"admission mirror resolves {mirrored!r} — the gate would bucket "
+            f"the request by a graph it never opens (#3365)")
+
+    # Structural half: a NEW predicate in `_get_proj` must be a deliberate
+    # test edit, not silent corpus drift. `_get_proj`'s only predicate shape
+    # today is a string literal in `==`/`startswith`, so this pins the set.
+    # (Residual, stated: a branch whose predicate carries NO string literal
+    # and that no probe shape satisfies — e.g. `len(ns) == 7` — is not
+    # derivable from source; the fuzz over the id alphabet is the guard for
+    # real shapes there.)
+    assert eq_lits == {"registry"} and prefix_lits == {
+        "test_", "tortoise_test", "test-"}, (
+            "_get_proj's namespace predicates changed (eq="
+            f"{sorted(eq_lits)}, startswith={sorted(prefix_lits)}): re-verify "
+            "_graph_name_for_namespace and extend this guard's corpus")
     # explicit graph_name: verbatim, and it wins over the namespace family
     assert _opened(namespace="team-001", graph_name="org_x_g_1") \
         == ha_mod._graph_name_for_namespace("team-001", graph_name="org_x_g_1") \

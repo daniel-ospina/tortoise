@@ -543,7 +543,9 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     #3129: the same reasoning for a SECOND request carrying a ``session_id``
     that is already being captured — it is refused (409) here, before any
     write, instead of racing the first capture's `capture_ok` write. The
-    caller passes an already tenant-scoped key (`_capture_session_key`).
+    caller passes a key already scoped by TENANT AND RESOLVED GRAPH
+    (`_capture_session_key`, whose graph component is `_data_graph_name` —
+    the graph the request will actually open, #3365).
     """
     global _CAPTURE_IN_FLIGHT
     session_key = session_key or None
