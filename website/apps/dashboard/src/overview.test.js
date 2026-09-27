@@ -218,6 +218,41 @@ test('#4646 (A): card and wizard step-3 state the SAME fact for the grandfathere
     'the card and the step-3 heading must state the SAME observed fact')
 })
 
+/**
+ * The argument text of every `wizardStageLabel(...)` / `wizardStepSub(...)` call,
+ * found by balanced parentheses from the opening `(`.
+ *
+ * The CALL is judged, never a line: a widened argument can be pushed onto a
+ * continuation line, and two calls can share one line — either defeats a
+ * line-shaped proxy. `\s*` before the `(` so a call spelled `wizardStageLabel (`
+ * is still found. Quotes are skipped so a `)` inside a string cannot close the
+ * call early.
+ */
+function wizardCallArgs(src) {
+  const out = []
+  const opener = /wizard(?:StageLabel|StepSub)\s*\(/g
+  for (let m; (m = opener.exec(src)) !== null; ) {
+    const i = m.index + m[0].length - 1
+    let depth = 0
+    let end = -1
+    for (let j = i; j < src.length; j++) {
+      const ch = src[j]
+      if (ch === '"' || ch === "'" || ch === '`') {
+        for (j++; j < src.length && src[j] !== ch; j++) {
+          if (src[j] === '\\') j++
+        }
+        continue
+      }
+      if (ch === '(') depth++
+      else if (ch === ')' && --depth === 0) { end = j + 1; break }
+    }
+    assert.notEqual(end, -1, `unbalanced parentheses in a wizard call at index ${m.index}`)
+    out.push(src.slice(i, end))
+    opener.lastIndex = end
+  }
+  return out
+}
+
 test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared helper', async () => {
   // BINDING (review cycle 1, mutation M7): injecting the predicate as the
   // `new Function` parameter only proves the statement calls SOMETHING by that
@@ -264,42 +299,37 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // a second, widened variable). Every wizard heading must pass the BARE
   // identifier (round 4, P1).
   //
-  // Checked per CALL, not as an exact total. An exact total could never see a
-  // NEWLY ADDED widened site — widening one of them leaves the bare count
-  // unchanged, so a count of 3 stays green while a fourth, widened heading ships.
+  // Checked per CALL, not as an exact total and not per line.
   //
-  // Checking the LINE alone is not enough either: a widened wizard call can borrow
-  // a bare `connected:` from a second call, an unrelated object literal, or even a
-  // string on the same line. So both the call count and the `connected:` count are
-  // pinned to exactly one before the argument is judged. That also means a call
-  // reformatted across several lines fails LOUDLY, with a message saying to keep it
-  // on one line, rather than being misread as a widening.
+  // An exact total could never see a NEWLY ADDED widened site — widening one of
+  // them leaves the bare count unchanged, so a count of 3 stays green while a
+  // fourth, widened heading ships. And a line-shaped check is only a PROXY for the
+  // call, which two review rounds walked through: a widened call passed it by
+  // borrowing a bare `connected:` from a sibling call, an unrelated object literal,
+  // or even a string on the same line; and a call whose argument was widened on a
+  // CONTINUATION line escaped it entirely — verified, that shape left the whole
+  // suite green while the rendered label read "connected" for a disconnected
+  // harness, the #2914 class this guard exists for. So the call's own parentheses
+  // are scanned and the ARGUMENT is judged.
   //
   // The old expectation of 2 was simply behind the source: #5496 added
   // `wizardStepSub`'s call site BEFORE #5413 wrote this assertion, so it was born
   // red on a tree that already had three — and stayed invisible for days because
   // ci.yml is pull_request-only, so nothing grades main on this surface.
   //
-  // The floor below is a sanity check on the SCAN, not a pin on the source: it
-  // exists so a predicate that stops matching cannot pass vacuously. It is
-  // deliberately NOT an exact equality — that exactness is what let the count sit
-  // one behind the source for days — so a genuine removal lowers it on purpose.
-  const wizardRenderLines = code
-    .split('\n')
-    .filter((line) => /wizard(?:StageLabel|StepSub)\(/.test(line))
-  assert.ok(wizardRenderLines.length >= 3,
-    `expected at least three wizard render sites, found ${wizardRenderLines.length} — either the scan ` +
+  // The floor is a sanity check on the SCAN, not a pin on the source: it exists so
+  // a predicate that stops matching cannot pass vacuously. It is deliberately NOT
+  // an exact equality — that exactness is what let the count sit one behind the
+  // source for days — so a genuine removal lowers it on purpose.
+  const wizardCalls = wizardCallArgs(code)
+  assert.ok(wizardCalls.length >= 3,
+    `expected at least three wizard render sites, found ${wizardCalls.length} — either the scan ` +
       'is broken, or a render site was removed: if the removal is intended, lower this floor')
-  for (const line of wizardRenderLines) {
-    assert.equal((line.match(/wizard(?:StageLabel|StepSub)\(/g) ?? []).length, 1,
-      'expected exactly one wizard render call on this line — a second call here lets a widened one '
-      + 'borrow the bare argument, and a call split across lines cannot be judged at all. Keep each '
-      + `call, with its \`connected:\`, on one line: ${line.trim()}`)
-    assert.equal((line.match(/connected:\s*/g) ?? []).length, 1,
-      'expected exactly one `connected:` on this wizard call\'s line — a second one here can satisfy '
-      + 'this check for a widened heading, and a call split across lines cannot be judged at all. '
-      + `Keep one full call per line: ${line.trim()}`)
-    assert.match(line, /connected:\s*serverHarnessConnected\s*[,}]/,
+  for (const call of wizardCalls) {
+    assert.equal((call.match(/connected:\s*/g) ?? []).length, 1,
+      'expected exactly one `connected:` argument in this wizard call — a second one can satisfy this '
+      + `check for a widened argument. One call, one \`connected:\`: ${call.replace(/\s+/g, ' ').trim()}`)
+    assert.match(call, /connected:\s*serverHarnessConnected\s*[,}]/,
       'every wizard render site must pass the bare serverHarnessConnected as `connected` — '
         + 'no inline widening at the render site')
   }
