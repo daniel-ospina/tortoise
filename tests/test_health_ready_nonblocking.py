@@ -162,14 +162,19 @@ _ROUTED_SESSION_SEAMS = frozenset({
 
 #: Blocking ``supabase_control`` helpers that are STILL called directly
 #: (un-offloaded) from an async body. This is the DECLARED residual of #4350
-#: plus the in-lock mint calls in ``_session_key_supabase`` (which cannot await
-#: under the synchronous ``_org_mint_lock``). It is deliberately explicit and
-#: reviewed: a NEW on-loop call to a helper outside this set fails
+#: plus ``_session_key_supabase``'s mint call: #1879 collapsed that lane's
+#: critical section (which used to make several on-loop calls —
+#: ``active_api_keys`` / ``revoke_api_key`` / ``insert_api_key``) into ONE
+#: ``mint_session_key`` RPC, which runs synchronously because the surrounding
+#: per-org ``threading.Lock`` cannot be held across an await. The DB-side lock
+#: now does the serialization; the on-loop call is a single short round trip
+#: instead of ~5. It is deliberately explicit and reviewed: a NEW on-loop call
+#: to a helper outside this set fails
 #: ``test_no_new_on_loop_control_plane_helper_calls`` — which is the design's
 #: "fail on the next call site" guard, with the residual named rather than
 #: implied. Burn it down in #4350.
 _KNOWN_ON_LOOP_RESIDUAL = frozenset({
-    "active_api_keys", "claim_membership", "consume_link_intent",
+    "claim_membership", "consume_link_intent",
     "consume_unlink_permit", "count_active_free_memberships",
     "count_graph_keys", "decline_invitation_by_email",
     "expired_bootstrap_keys", "graph_key_ids", "insert_api_key",
@@ -177,6 +182,7 @@ _KNOWN_ON_LOOP_RESIDUAL = frozenset({
     "invitation_mint", "invitation_rescind",
     "invitation_resend", "invitation_row_by_token", "is_anon_org",
     "membership_by_identity", "membership_count_since", "membership_role",
+    "mint_session_key",
     "mint_target_user_for_key", "org_api_keys", "org_by_email",
     "org_by_name", "org_members", "org_tier", "owned_free_org_ids",
     "pending_invitations", "pending_invitations_for_email",
