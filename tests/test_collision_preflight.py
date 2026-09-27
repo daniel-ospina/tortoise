@@ -190,6 +190,22 @@ fi
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 """
 
+# Fails ONLY `rev-list --first-parent`. This is the ONE combination in which
+# `_first_parent_shas` returns None while `main_tip` (a separate `rev-parse`
+# call) and `for-each-ref --merged` are both READABLE. `GIT_STUB_NO_MAIN_TIP`
+# above is the opposite case, so neither stub covers the other's guard.
+GIT_STUB_NO_FIRST_PARENT = r"""#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "rev-list" ]; then
+  for a in "$@"; do
+    if [ "$a" = "--first-parent" ]; then
+      exit 1
+    fi
+  done
+fi
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+"""
+
 SURFACE_ROWS = (
     "open PRs",
     "recently-closed PRs",
@@ -765,6 +781,105 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("non-string comment body", out)
         self.assertNotIn("Traceback", out)
+
+    def test_issue_payload_non_list_container_is_incomplete(self):
+        # ⛔ The per-ELEMENT check cannot cover a malformed CONTAINER, and the
+        # mutation `if not isinstance(value, list): value = []` passed every
+        # test. Treating a malformed container as empty is the same fail-open the
+        # presence check exists for — it DROPS every claim comment, or every
+        # assignee. No fixture supplied a non-list `comments`/`assignees`.
+        for key in ("comments", "assignees"):
+            payload = {"number": ISSUE, "title": "t", "state": "OPEN",
+                       "comments": [], "assignees": []}
+            payload[key] = {"body": "I'll claim this."}
+            self._write_issue_payload(payload)
+            rc, out = self.run_tool()
+            self.assertEqual(rc, 2, f"key={key}\n{out}")
+            self.assertIn("VERDICT: INCOMPLETE", out)
+            self.assertIn(f"non-list '{key}'", out)
+            self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_issue_payload_unvalidated_reader_fields_are_incomplete(self):
+        # ⛔ THE FIRST VERSION OF `_require_issue_payload` REPRODUCED ITS OWN
+        # DEFECT ONE READER OVER: it validated `assignees[*].login` but not the
+        # COMMENT AUTHOR's login, nor `comments[*].url`, nor `title`/`state`/
+        # `number`. A wrong type there did not produce a verdict at all.
+        #
+        # The rule the contract follows is that it covers every field a reader
+        # touches; the reader set is a `grep` of the call sites, not a list kept
+        # here — such a list is a claim about the whole call graph and it goes
+        # stale on the next edit.
+        #
+        # Every case is built on a payload that is otherwise a LIVE CLAIM, so a
+        # regression cannot pass by returning CLEAN for an unrelated reason.
+        base = {
+            "number": ISSUE, "title": "t", "state": "OPEN",
+            "url": "https://example.invalid/issues/3061",
+            "assignees": [],
+            "comments": [{"body": "I'll claim this.", "author": {"login": "test-agent"},
+                          "url": "https://example.invalid/issues/3061#issuecomment-1"}],
+        }
+        cases = [
+            ("comment author login", ("comments", 0, "author"),
+             lambda c: c["comments"][0].__setitem__("author", {"login": 5})),
+            ("comment url", ("comments", 0, "url"),
+             lambda c: c["comments"][0].__setitem__("url", 5)),
+            ("title", ("title",), lambda c: c.__setitem__("title", 5)),
+            ("state", ("state",), lambda c: c.__setitem__("state", 5)),
+            ("number", ("number",), lambda c: c.__setitem__("number", "3061")),
+            ("number bool", ("number",), lambda c: c.__setitem__("number", True)),
+        ]
+        for label, path, mutate in cases:
+            with self.subTest(field=path):
+                payload = json.loads(json.dumps(base))
+                mutate(payload)
+                self._write_issue_payload(payload)
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"{label}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_pr_payload_non_string_field_is_incomplete_not_a_traceback(self):
+        # The PR side of the same rule: `_require_pr_dicts` checked that an
+        # element was an OBJECT and left its STRING fields untouched, so a
+        # non-string value in one of them produced a traceback with no VERDICT
+        # line and exit 1 — read by callers as COLLISION. `title`/`headRefName`
+        # are required and must be strings; `body`/`state` may legitimately be
+        # null. `state` is covered here because it is one of those fields, and a
+        # contract has to cover the whole set rather than the three that came
+        # first to mind.
+        for key, bad in (("title", 5), ("headRefName", 5), ("body", 5),
+                         ("state", 5)):
+            with self.subTest(field=key):
+                pr = {"number": 5150, "title": "unrelated", "body": "",
+                      "headRefName": "feat/9999-other", "state": "open"}
+                pr[key] = bad
+                self.gh_fixtures(open_prs=[pr])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"key={key}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn(f"non-string '{key}'", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_non_list_closing_reference_container_is_incomplete(self):
+        # ⛔ `_closing_ref_numbers`'s non-list guard was verified by nothing: the
+        # fixtures supplied the field absent, `[]`, or a list of bad elements —
+        # never a bad CONTAINER. Replacing the guard with `return []` passed all
+        # four closing-reference tests, and that mutation is a genuine FAIL-OPEN:
+        # a field GitHub returned in an unreadable shape would be read as
+        # "closes nothing" and the surface would report CLEAN on real work.
+        for bad in ("3061", {}, 5, True):
+            with self.subTest(container=bad):
+                self.gh_fixtures(open_prs=[{
+                    "number": 5150, "title": "unrelated", "body": "",
+                    "headRefName": "feat/9999-other", "state": "open",
+                    "closingIssuesReferences": bad,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, f"container={bad!r}\n{out}")
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn("closing-reference-source-unavailable", out)
+                self.assertNotIn("VERDICT: CLEAN", out)
 
     def test_malformed_open_pr_element_is_incomplete_not_a_traceback(self):
         # ⛔ A list holding a non-object used to CRASH with no VERDICT line and
@@ -1894,6 +2009,77 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("merged into origin/main", out)
+
+    def test_unresolvable_first_parent_never_downgrades(self):
+        # ⛔ THE `first_parent is not None` GUARD AND `_first_parent_shas`'s
+        # `return None`, both of which were unfalsifiable before this stub: no
+        # test could make `first_parent` None while `main_tip` was readable, so
+        # deleting the guard broke nothing. Deleting it yields
+        # `TypeError: argument of type 'NoneType' is not iterable` at
+        # `sha not in first_parent` — a traceback, exit 1, NO `VERDICT` line,
+        # which a caller reads as COLLISION.
+        #
+        # ⛔ Making `_first_parent_shas` return an empty SET instead of None is
+        # NOT the harmless half, and an earlier version of this comment said it
+        # was ("would do nothing"). A mutation disproved that: an empty set
+        # satisfies `first_parent is not None`, so predicate 2 FIRES, an absorbed
+        # branch is called landed ("merged into origin/main"), the hit is
+        # demoted, and the run ends CLEAN (exit 0) on work the caller owns. That
+        # is why this test fails on the mutation at `assertNotEqual(rc, 0)`,
+        # rather than merely reporting a read that could not be trusted.
+        #
+        # The branch is genuinely absorbed (a real `--no-ff` merge put it on main
+        # as a merge parent), and `closed_prs=[]` removes predicate 1, so
+        # predicate 2 is the ONLY arm that could downgrade — and it must decline.
+        ref = f"fix/{ISSUE}-absorbed"
+        _git(self.repo, "checkout", "-q", "-b", ref)
+        (self.repo / f"{ISSUE}.txt").write_text("work\n")
+        _git(self.repo, "add", f"{ISSUE}.txt")
+        _git(self.repo, "commit", "-q", "-m", f"work on {ISSUE}")
+        _git(self.repo, "checkout", "-q", "main")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "land it", ref)
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+        self.gh_fixtures(closed_prs=[])
+        git_stub = _write_exec(self.tmp / "git-stub-no-fp",
+                               GIT_STUB_NO_FIRST_PARENT)
+        rc, out = self.run_tool(git_bin=git_stub, issue=ISSUE,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("merged into origin/main", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_branch_at_main_tip_matching_a_merged_head_blocks_without_first_parent(self):
+        # ⛔ THE `sha != main_tip` GUARD ON PREDICATE 1, which the review found was
+        # called "the only guard left" in a comment and verified by nothing.
+        #
+        # With `first_parent` UNREADABLE the first-parent exclusion cannot fire,
+        # so predicate 1 falls back to the exact-tip comparison — and this is
+        # exactly the payload that needs it: a branch created at origin/main's tip
+        # (no commits) whose SHA happens to equal a merged PR's `head.sha`. Without
+        # `sha != main_tip` this is called "squash-merged", demoted, and the lane
+        # that owns the branch is told CLEAN on an issue it has already claimed.
+        #
+        # `test_fresh_branch_at_a_PREVIOUS_merged_head_still_blocks` cannot reach
+        # this: there `first_parent` IS readable, so the other exclusion covers it.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        tip = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-fresh")
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "an unrelated landing",
+            "body": "", "state": "closed",
+            "headRefName": "feat/9999-other", "headSha": tip,
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        git_stub = _write_exec(self.tmp / "git-stub-no-fp",
+                               GIT_STUB_NO_FIRST_PARENT)
+        rc, out = self.run_tool(git_bin=git_stub, issue=ISSUE,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+        self.assertNotIn("Traceback", out)
 
     def test_unmerged_branch_off_main_still_blocks(self):
         # ...and here the only difference is that the branch carries a commit

@@ -1840,7 +1840,17 @@ def _require_issue_payload(data: dict, where: str) -> None:
         rejects a non-STRING `login`/`body`, which crashed inside
         `assignee_attribution`'s `.strip()` and `_strip_control_sequences`.
 
-    Raising `SurfaceError` routes both cases through the existing handler, which
+    ⛔ AND THE FIRST VERSION OF THIS FUNCTION STOPPED THERE, reproducing its own
+    defect one reader over: it validated the ASSIGNEE's login and left the
+    COMMENT AUTHOR's, and several other fields of this payload, to raise inside
+    whatever read them.
+
+    THE RULE: the contract covers every field a reader touches, and the reader
+    set comes from grepping the call sites. Do not restate that set here — a
+    list of readers is a claim about the whole call graph, and it goes stale on
+    the next edit, including an edit made to correct it.
+
+    Raising `SurfaceError` routes every case through the existing handler, which
     NAMES the reason and marks this surface INCOMPLETE.
     """
     for key in ("comments", "assignees"):
@@ -1877,6 +1887,53 @@ def _require_issue_payload(data: dict, where: str) -> None:
                 f"{where} has a non-string comment body at index {index} "
                 f"({type(body).__name__}) — refusing (NOT clean)"
             )
+        # The comment AUTHOR login goes through the SAME `.strip()` as the
+        # assignee login, one branch over, and `_comment_ref` feeds `url` to
+        # `re.search`. Both were unguarded.
+        author = comment.get("author")
+        if isinstance(author, dict):
+            author_login = author.get("login")
+            if author_login is not None and not isinstance(author_login, str):
+                raise SurfaceError(
+                    f"{where} has a non-string comment AUTHOR login at index "
+                    f"{index} ({type(author_login).__name__}) — refusing (NOT clean)"
+                )
+        url = comment.get("url")
+        if url is not None and not isinstance(url, str):
+            raise SurfaceError(
+                f"{where} has a non-string comment url at index {index} "
+                f"({type(url).__name__}) — refusing (NOT clean)"
+            )
+    # Top-level scalars. `gh` types `title`/`state`/`url` as STRING and `number`
+    # as an integer, so anything else is a malformed payload. They are checked
+    # because the contract describes the PAYLOAD: a payload that does not match
+    # its documented shape is not one whose remaining fields can be trusted. It
+    # is deliberately NOT justified by which of them some function reads — that
+    # is a claim about the whole call graph, and it goes stale on the next edit.
+    for key in ("title", "state", "url"):
+        if key not in data:
+            raise SurfaceError(
+                f"{where} has no {key!r} key — `gh issue view --json` always "
+                "returns it, so absence means a malformed payload (NOT clean)"
+            )
+        value = data[key]
+        if not isinstance(value, str):
+            raise SurfaceError(
+                f"{where} has a non-string {key!r} ({type(value).__name__}) — "
+                "refusing (NOT clean)"
+            )
+    # `number` is an INTEGER on the wire, not a string, so it is checked with the
+    # shared predicate (which also rejects `bool`) rather than against `str`.
+    if "number" not in data:
+        raise SurfaceError(
+            f"{where} has no 'number' key — `gh issue view --json` always "
+            "returns it, so absence means a malformed payload (NOT clean)"
+        )
+    if not _is_issue_number(data["number"]):
+        raise SurfaceError(
+            f"{where} has a non-integer 'number' "
+            f"({type(data['number']).__name__}) — refusing (NOT clean)"
+        )
 
 
 def _require_pr_dicts(prs: list, where: str) -> None:
@@ -1899,6 +1956,34 @@ def _require_pr_dicts(prs: list, where: str) -> None:
                 f"({type(pr).__name__}) — refusing to read a malformed PR list "
                 "as if it were empty (NOT clean)"
             )
+        # Checking only that the element was an object left the string fields it
+        # carries (title / body / headRefName / state) to raise inside whatever
+        # read them — a traceback with no VERDICT line and exit 1, which callers
+        # read as COLLISION.
+        #
+        # `title`/`headRefName` are required and must be strings; `body`/`state`
+        # are optional and may be null. The requiredness rule is about whether
+        # absence LOSES INFORMATION, not about tidiness: the issue payload's
+        # `comments`/`assignees` are required because a missing one silently
+        # drops a claim, whereas a missing `body`/`state` does not.
+        for key in ("title", "headRefName"):
+            if key not in pr:
+                raise SurfaceError(
+                    f"{where} returned an element with no {key!r} at index "
+                    f"{index} — refusing a malformed PR list (NOT clean)"
+                )
+            if not isinstance(pr[key], str):
+                raise SurfaceError(
+                    f"{where} returned a non-string {key!r} at index {index} "
+                    f"({type(pr[key]).__name__}) — refusing (NOT clean)"
+                )
+        for key in ("body", "state"):
+            value = pr.get(key)
+            if value is not None and not isinstance(value, str):
+                raise SurfaceError(
+                    f"{where} returned a non-string {key!r} at index {index} "
+                    f"({type(value).__name__}) — refusing (NOT clean)"
+                )
 
 
 def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
@@ -3400,7 +3485,12 @@ def main(argv: list[str] | None = None) -> int:
         "--self-branch", action="append", default=[], metavar="REF",
         help="a branch this session OWNS (repeatable). A hit on it is reported "
              "as your own work and cannot block. The target checkout's current "
-             "branch is added automatically.",
+             "branch is added automatically UNLESS it is recognised as the "
+             "repository's default branch. (Recognition seeds main/master and "
+             "resolves origin/HEAD; with origin/HEAD unresolvable, a default "
+             "branch outside the seed set — trunk, develop — is NOT recognised "
+             "and IS auto-declared. A known gap, pinned by a test rather than "
+             "hidden.)",
     )
     parser.add_argument(
         "--self-worktree", action="append", default=[], metavar="PATH",
