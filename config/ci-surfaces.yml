@@ -724,6 +724,10 @@ surfaces:
   # M3/M4/M5/M6 records to the instrument. Hermetic (no DB, no network) — it
   # pins tools/queue_window_observe.py, which `core` runs on engine-wide changes.
   - test_queue_window_observe.py
+  # #5215 (merge-throughput plan, Task 1): the instrument's exit-code contract.
+  # Hermetic (no DB, no network) — it pins tools/merge_throughput.py, which
+  # `core` runs on engine-wide changes.
+  - test_merge_throughput.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py
