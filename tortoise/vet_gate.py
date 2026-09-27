@@ -205,27 +205,40 @@ def _as_items(value: object) -> Sequence[Any]:
 
 
 #: The embedder truncates point/event content AND minted endpoint refs to this
-#: many characters before keying them (the ``str(...).strip()[:1000]`` sites in
-#: ``execute_embed`` — event content, point content, minted refs) — cited
-#: symbolically, not by line number, because line numbers move as the module is
-#: edited.
+#: many characters before keying them (``extractor_v2._MAX_CONTENT``, the
+#: ``str(...).strip()[:1000]`` sites in ``execute_embed``) — cited symbolically,
+#: not by line number, because line numbers move as the module is edited.
 _MAX_CONTENT = 1000
 
 
 def _norm_variants(text: object) -> set[str]:
     """Normalized forms the embedder can key an endpoint on.
 
-    Both the FULL text and its :data:`_MAX_CONTENT`-char prefix: ``execute_embed``
-    keys a point/event id on the truncated content, while an operator's ref is
-    also probed untruncated (a minted endpoint registers the untruncated key
-    only when the truncated form did not already resolve). A removed item must
-    therefore be recognised under EITHER form, or an operator on its content
-    escapes the prune and the text is re-materialised as a Point.
+    The mint transform ``_norm(x.strip()[:_MAX_CONTENT])`` applied to the raw
+    string and to its whitespace-collapsed form — plus the UNTRUNCATED
+    ``_norm(raw)`` alias the mint registers whenever truncation changed the key
+    (``_full`` in ``_mint_endpoint``; ``_resolve`` probes that spelling). A
+    removed item must be recognised under every form, or an operator on its
+    content escapes the prune and the text is re-materialised as a Point.
+
+    This is a SUPERSET of ``extractor_v2._endpoint_keys`` — that set is
+    the mint's ENTITY guard (the two spellings, not every truncation of them);
+    this one additionally carries the resolution alias, because the prune must
+    match what the mint would key, not only what its guard refuses. The two are
+    equal whenever the untruncated alias is ALREADY one of the guard's two arms
+    — equivalently, whenever the whitespace-collapsed form is at most
+    ``_MAX_CONTENT`` characters, which covers every short input and every long
+    input whose whitespace collapses it under the cap; the alias is a genuinely
+    new key only when ``len(_norm(raw)) > _MAX_CONTENT``.
+    ``test_endpoint_key_set_matches_extractor`` pins the containment and the
+    exact difference.
     """
     raw = str(text or "").strip()
     if not raw:
         return set()
-    return {_norm(raw), _norm(raw[:_MAX_CONTENT])}
+    return {_norm(raw),
+            _norm(raw[:_MAX_CONTENT]),
+            _norm(_norm(raw)[:_MAX_CONTENT])}
 
 
 def _item_text(section: str, item: Mapping[str, Any]) -> str:
@@ -847,7 +860,15 @@ def apply_vet(embed_list: Mapping[str, Any],
                     kept.append(item)
                     continue
                 if name:
-                    removed_entity_names.add(name)
+                    # #5069: THIS PASS's gone-set entry carries every form the
+                    # mint keys a SPELLING of the name under, not just the full
+                    # normalised name. A truncated spelling of a discarded
+                    # >1000-char name otherwise escapes ``gone`` — and the mint
+                    # cannot see a discarded entity (it is in neither the
+                    # emitted set nor the S3 index), so it would fabricate a
+                    # Point from it. (The pool stores the full name; the
+                    # cross-pass leg expands it from the raw item below.)
+                    removed_entity_names |= _norm_variants(item.get("name"))
             else:
                 removed_context |= _item_text_variants(section, item)
             warnings.append(
@@ -897,23 +918,40 @@ def apply_vet(embed_list: Mapping[str, Any],
     # same-pass discard of a duplicate-name entity — pruned an operator whose
     # endpoint was present, with a warning claiming it "was discarded".
     #
-    # The shield has to key EXACTLY as the mint does, or it un-prunes an
-    # endpoint the mint will fabricate. ``_mint_endpoint`` TRUNCATES the
-    # reference and then normalises — ``_norm(str(ref).strip()[:1000])`` — and
-    # compares that against ``emitted_entity_names``, which holds the FULL name
-    # normalised. So a name is shielded only when truncating it does not change
-    # what normalisation yields: a name longer than ``_MAX_CONTENT``, and one
-    # whose 1000th character falls inside a whitespace run that ``_norm`` would
-    # collapse (verified: a 1,150-char name normalising to 951 characters
-    # shields under the normalise-then-truncate test, while the mint keys it at
-    # 900 and fabricates a Point). Computed from the RAW name for that reason.
+    # The shield must key AT LEAST as broadly as the mint's refusal set: a
+    # narrower shield prunes an entity-named endpoint and mis-reports it as
+    # "whose endpoint was discarded". Keying broader is safe here, because every
+    # extra alias the shield carries is matched by the mint's guard for that same
+    # ref (the mint re-keys the ref through the truncated arms below), so nothing
+    # it shields can be fabricated. #5069 canonicalised the guard key on BOTH
+    # sides:
+    # ``extractor_v2._endpoint_keys`` is the mint transform
+    # ``_norm(x.strip()[:_MAX_CONTENT])`` applied to the raw and to the
+    # whitespace-collapsed spelling of x, the mint's entity sets are built with
+    # it, and the mint's guard is a set intersection against it — so
+    # ``_norm_variants`` here (the same two forms PLUS the untruncated
+    # resolution alias, i.e. a superset) covers the mint's own key set, and a
+    # present entity shields its name in either spelling at ANY length.
+    # The former ``_norm(raw[:1000]) == name`` test shielded only when
+    # truncation left the normalised name unchanged, so it pruned operators
+    # naming a present entity — the false "whose endpoint was discarded"
+    # warning this shield exists to prevent.
     present_entity_names: set[str] = set()
-    for name, item in _entity_map(out).items():
-        raw = str(item.get("name") or "")
-        if _norm(raw.strip()[:_MAX_CONTENT]) == name:
-            present_entity_names.add(name)
+    for _ent in _section_items(out, "entities"):
+        if isinstance(_ent, Mapping):
+            present_entity_names |= _norm_variants(_ent.get("name"))
+    # #5069: the pool stores a removed entity under its FULL normalised name
+    # (``_entity_map`` keys it that way for Rule 4's restore lookup), but
+    # ``gone`` is matched against ``_operator_endpoint_text``, which is keyed
+    # ``_norm_variants``. Expand from the stored ITEM's raw name — expanding the
+    # already-collapsed KEY would lose the raw arm and leave a cap-truncated
+    # raw-prefix ref unpruned on this leg alone. That is what lets a
+    # >1000-char entity discarded in an earlier pass still be pruned when a
+    # later pass re-names it — the cross-pass leg of the guard.
+    prior_entity_keys = {k for _item in prior_entities.values()
+                         for k in _norm_variants(_item.get("name"))}
     gone = (removed_context | prior_texts | removed_entity_names
-            | set(prior_entities)) - surviving_texts - set(canonical) \
+            | prior_entity_keys) - surviving_texts - set(canonical) \
         - present_entity_names
     if gone:
         ops = _as_items(out.get("operators"))

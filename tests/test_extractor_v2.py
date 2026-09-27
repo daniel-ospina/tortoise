@@ -1927,6 +1927,170 @@ class TestS5:
         assert len(minted) == 1
         assert len(minted[0]["content"]) == 1000
 
+    def test_over_long_entity_name_is_never_minted_as_a_claim_point(self):
+        """#5069: the entity guard keyed ``emitted_entity_names`` on the FULL
+        name while ``_mint_endpoint`` keyed the ref on its 1000-char prefix,
+        so a >1000-char entity name was NOT recognised as an entity and the
+        mint fabricated a claim Point out of the truncated participant name —
+        exactly what the OPERATOR REFERENCING hard rule forbids. The bound
+        observable is the PAYLOAD: no fabricated Point, no operator, and the
+        guard's own refusal warning.
+        """
+        long_name = "A" * 1100
+        embed = {"entities": [{"name": long_name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": long_name, "dst": "K",
+                                "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "no Point may be fabricated from the truncated participant name")
+        assert r["stats"]["operator_endpoints_minted"] == 0
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_entity_name_in_collapsed_spelling_is_never_minted(self):
+        """#5069 code-review (P1): an entity name longer than ``_MAX_CONTENT``
+        whose first 1000 chars contain a whitespace run normalises SHORTER
+        than the raw name, so the ref the model writes may be the COLLAPSED
+        spelling. The full-name key caught that (main does); the
+        truncated-prefix key alone does not, because the collapsed ref's key
+        is the collapsed name, not the truncated prefix — and the mint then
+        fabricates a Point out of the participant name. The guard must key
+        BOTH forms.
+        """
+        name = "a" * 900 + " " * 200 + "b" * 50
+        ref = v2._norm(name)
+        assert ref != name and len(ref) <= v2._MAX_CONTENT < len(name)
+        embed = {"entities": [{"name": name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": ref, "dst": "K",
+                                "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from its collapsed spelling")
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_respelled_long_entity_name_is_never_minted_via_the_other_key_arm(self):
+        """#5069 code-review (P2): the guard is a set INTERSECTION, not a
+        membership test on the mint's own resolution key — and the difference
+        is load-bearing exactly when the ref is a whitespace RE-SPELLING of a
+        >1000-char name whose raw cap-truncation cuts inside a whitespace run.
+        There the ref's collapsed arm matches the entity's key set while its
+        resolution key does not, so the pre-#5069 membership form fabricates a
+        degenerate ``"a"*500`` Point and only the intersection refuses. Every
+        other fixture uses the literal raw or literal collapsed name, where
+        both arms coincide — this is the case that pins the intersection.
+        """
+        name = "a" * 500 + " " * 100 + "a" * 500 + " " * 100 + "b"
+        ref = "a" * 500 + " " * 5000 + "a" * 500 + " " * 100 + "b"
+        # the two spellings name the same entity ...
+        assert v2._norm(name) == v2._norm(ref)
+        # ... the resolution key does NOT match ...
+        assert v2._norm(ref[:v2._MAX_CONTENT]) not in v2._endpoint_keys(name)
+        # ... but the key sets still intersect, which is what refuses it.
+        assert v2._endpoint_keys(ref) & v2._endpoint_keys(name)
+        embed = {"entities": [{"name": name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": ref, "dst": "K",
+                                 "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from a re-spelling of itself")
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_endpoint_content_cap_matches_vet_gate(self):
+        """#5069: the mint's key, the emit-path content keys and
+        ``vet_gate._MAX_CONTENT`` all truncate at the same boundary. The two
+        modules deliberately duplicate the value (vet_gate must not import
+        extractor_v2), so the mirror is pinned here or it rots silently.
+        """
+        from tortoise import vet_gate
+        assert v2._MAX_CONTENT == vet_gate._MAX_CONTENT
+
+    def test_entity_name_at_and_over_the_truncation_boundary_is_never_minted(self):
+        """#5069 boundary: the guard's key and the mint's key are the same
+        transform, so the boundary is exact — a name of exactly the key
+        length (1000) and one character past it both refuse. Both are asserted
+        because 1000 was already refused by the pre-#5069 code (no truncation
+        to hide behind) while 1001 is the case the mismatch opened.
+        """
+        for length in (1000, 1001):
+            name = "B" * length
+            embed = {"entities": [{"name": name, "kind": "core:tool"}],
+                     "events": [], "points": [],
+                     "operators": [{"src": name, "dst": "K",
+                                    "op_type": "IMPL"}]}
+            r = v2.execute_embed(embed, {}, session_id="s1")
+            assert r["payload"]["operators"] == [], length
+            assert r["payload"]["points"] == [], length
+
+    def test_over_long_duplicate_name_entity_is_never_minted(self):
+        """#5069 same-name duplicate: two emitted entities sharing a
+        >1000-char name collapse to one key in ``emitted_entity_keys`` (a set)
+        and must still shield it — the guard keys the NAME, so a same-pass
+        duplicate cannot re-open the mint.
+        """
+        long_name = "C" * 1100
+        embed = {"entities": [{"name": long_name, "kind": "core:tool"},
+                              {"name": long_name, "kind": "core:tool"}],
+                 "events": [], "points": [],
+                 "operators": [{"src": long_name, "dst": "K",
+                                "op_type": "IMPL"}]}
+        r = v2.execute_embed(embed, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+
+    def test_over_long_graph_index_entity_name_is_never_minted(self):
+        """#5069: the #4716 graph-index leg of the guard carried the SAME
+        mismatch — an Object already in the graph but not re-emitted this
+        session, whose name exceeds 1000 chars, was minted as a claim Point.
+        A fix that canonicalised only ``emitted_entity_names`` would leave
+        this leg fabricating.
+        """
+        long_name = "D" * 1100
+        embed = {"entities": [], "events": [], "points": [],
+                 "operators": [{"src": long_name, "dst": "K",
+                                "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_long", "name": long_name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == []
+        assert any("NOT minted" in w and "ENTITY" in w for w in r["warnings"])
+
+    def test_entity_name_whose_collapsed_form_exceeds_the_cap_is_never_minted(self):
+        """#5069 code-review (P2): the guard's key set must be CLOSED under the
+        mint's identity ``_norm(x[:_MAX_CONTENT])``. When the name's
+        whitespace-collapsed form is itself longer than the cap, the ref a
+        model writes can be that collapsed form truncated at the cap — a key in
+        NEITHER the raw-prefix form nor the full name, so the pre-closure key
+        set missed it and the mint fabricated a Point on BOTH the emitted and
+        the #4716 graph-index leg.
+        """
+        name = "a" * 500 + " " * 900 + "b" * 600     # raw 2000, collapsed 1101
+        ref = v2._norm(name)[:v2._MAX_CONTENT]
+        assert len(v2._norm(name)) > v2._MAX_CONTENT
+        emitted = {"entities": [{"name": name, "kind": "core:tool"}],
+                   "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        r = v2.execute_embed(emitted, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from its truncated collapsed form")
+        indexed = {"entities": [], "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_c", "name": name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r2 = v2.execute_embed(indexed, search, session_id="s1")
+        assert r2["payload"]["points"] == [], (
+            "the graph-index leg re-opened with the same ref")
+
     def test_minted_endpoint_is_pruned_when_its_operator_drops(self):
         """#2552 code-review (P2): the mint runs BEFORE the operator is known
         to survive. A MITIGATES that declares no target edge is still dropped
