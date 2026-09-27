@@ -262,10 +262,13 @@ def _session_llm_mock_enabled() -> bool:
 class _SessionLLMCallCounter:
     """#3824: a transparent pass-through that counts model completions.
 
-    The M2 session lane discards its usage block wholesale, so by the time
-    its capture reaches the cost emitter there is no in-hand evidence that a
-    provider call happened — "made billed calls" and "made none" are the
-    same shape (an empty ``stats``). The emitter cannot recover that fact
+    Calls the M2 session lane issues that produced no surviving USAGE
+    (a failed request, or a model with no #2185 seam) leave no evidence at
+    the cost emitter that a provider call happened — "made billed calls" and
+    "made none" are the same shape (an empty ``stats``). #3747 gives the
+    lane a real cost roll-up for the calls that DO report usage; this
+    counter remains the disclosure for the ones that do not. The emitter
+    cannot recover that fact
     from the roll-up, because the roll-up is exactly what is missing; it has
     to come from the CALL site. This wrapper is that call site:
     ``complete()`` is invoked once per provider request by ``_PointStage`` /
@@ -309,21 +312,80 @@ class _SessionLLMCallCounter:
         return self._model.complete(*args, **kwargs)
 
 
-def _session_llm_extractor(point_model, relation_model):
-    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters.
+def _session_llm_usage_sink(stats: dict):
+    """#3747: the #2185 usage sink for the M2 session lane.
+
+    The lane's real provider calls go through ``OpenAICompatModel.complete``,
+    which fires ``usage_sink`` with the response-local usage block
+    (``models._emit_usage_sink``) — but nothing ever bound a sink on this
+    path, so the tokens/charge were dropped and the #3359 ``capture_cost``
+    row could only DISCLOSE the calls (#3824 ``unattributed``), never price
+    them. This sink accumulates each call into the SAME stage-shaped cost
+    accumulator the v2 lane's ``_accumulate_call_cost`` / ``_rollup_llm``
+    consume, so the emitted row is priced by the existing report path with
+    no new cost concept and no change to ``hosted_api``.
+
+    ``attempts`` rides alongside ``cost`` because ``_rollup_llm`` reads the
+    call COUNT from ``stage_stats["attempts"]`` (the cost accumulator's own
+    ``calls`` key stays in ``by_stage``); a sink fire IS a completed provider
+    call, so the two increment together. ``usage`` may be ``None``/``{}``
+    when the provider sent none — ``_accumulate_call_cost`` then discloses
+    ``calls_without_usage`` instead of inventing tokens.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    def _sink(*, provider, model_id, usage, usage_present):
+        u = usage if isinstance(usage, dict) else {}
+        stats["attempts"] = int(stats.get("attempts", 0)) + 1
+        _accumulate_call_cost(
+            stats,
+            prompt_tokens=u.get("prompt_tokens"),
+            completion_tokens=u.get("completion_tokens"),
+            cost_usd=u.get("cost"),
+            provider=provider, model=model_id)
+
+    return _sink
+
+
+def _session_llm_extractor(point_model, relation_model, *, provider=None):
+    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters and
+    the #3747 usage sink.
 
     The counters ride on the extractor (``_call_counters``) because that is
     the object ``_extract_session_llm`` holds; a fresh pair is built per
     call to this helper, so a capture's count can never leak into the next
     one (the extractor is built inside ``_extract_session_llm``, once per
-    capture).
+    capture). The SAME lifetime rule gives the cost accumulator
+    (``_cost_stats``): one per capture, never shared across captures.
+
+    The sink is assigned through the counters, whose ``__setattr__``
+    forwards public writes to the wrapped model (that forwarding exists
+    precisely for this seam). A model with no ``usage_sink`` attribute
+    (``MockModel`` — the offline seam) simply never fires it, so the lane
+    degrades to the #3824 call-count disclosure rather than a fake roll-up.
+
+    ``provider`` is the configured provider id, stamped on both models: the
+    ``(provider, model)`` route is what ``_capture_cost_props``' ``by_stage``
+    envelope is repriced from at report time (#3359), and
+    ``OpenAICompatModel`` does not carry one of its own (the eval harness
+    binds it at registration — no such step exists on this lane), so without
+    it a cost-SILENT provider (deepseek-direct reports no ``usage.cost``)
+    would land under ``unknown`` and never reprice from the versioned map.
     """
     from tortoise.extractor import LLMExtractor
 
+    if provider is not None:
+        point_model.provider = provider
+        relation_model.provider = provider
     counters = [_SessionLLMCallCounter(point_model),
                 _SessionLLMCallCounter(relation_model)]
     extractor = LLMExtractor(counters[0], counters[1])
     extractor._call_counters = counters
+    cost_stats: dict = {}
+    sink = _session_llm_usage_sink(cost_stats)
+    counters[0].usage_sink = sink
+    counters[1].usage_sink = sink
+    extractor._cost_stats = cost_stats
     return extractor
 
 
@@ -371,6 +433,7 @@ def _build_session_llm_extractor():
     return _session_llm_extractor(
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
+        provider=provider,
     )
 
 
@@ -5016,10 +5079,14 @@ class TortoiseSDK:
             # P1 #1529 (D2): the internal defense-in-depth empty guard must be
             # self-consistent — mode="empty" WITH an error entry, so a caller
             # mapping empty→ok=False can never compute ok=True on this path.
+            # #2335 WI-1a: ``stats`` is part of the shared meta contract and
+            # is ALWAYS present — no extraction ran, so it is the empty gate's
+            # legitimate {} (the same shape the response assembly would
+            # normalize it to).
             return [], {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": ["no extractable content — empty or blank conversation"],
-                "warnings": [], "mode": "empty",
+                "warnings": [], "mode": "empty", "stats": {},
             }
 
         from tortoise.api import EventAPI
@@ -5129,25 +5196,53 @@ class TortoiseSDK:
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
         # #3824: the call-level evidence — how many model completions this
-        # capture actually issued. Carried OUTSIDE the (empty on this lane)
-        # roll-up so the cost emitter can tell "billed calls, no roll-up"
-        # (F2) from "no calls at all" (F1) instead of collapsing both to
-        # None. Counted at the model boundary above, so it holds even when
-        # ``extractor.run`` raised after the first request.
+        # capture actually issued. Carried OUTSIDE the roll-up so the cost
+        # emitter can tell "billed calls, no roll-up" (F2) from "no calls at
+        # all" (F1) instead of collapsing both to None — #3747 gives this
+        # lane a real roll-up for priced calls, and the residual (calls the
+        # sink did not account for) still needs a home outside it. Counted at
+        # the model boundary above, so it holds even when ``extractor.run``
+        # raised after the first request.
         calls_made = sum(
             int(getattr(c, "count", 0) or 0)
             for c in getattr(extractor, "_call_counters", ()) or ())
+        # #3747: roll the #2185 usage sink's per-call accumulation into the
+        # session's llm telemetry, so a REAL M2 capture's tokens/charge reach
+        # ``_capture_cost_props`` instead of being dropped — the #3359 blind
+        # spot #3824 could only DISCLOSE. The accumulator is read AFTER the
+        # try/except above, so a run() that raised after a successful request
+        # still reports the spend it actually incurred.
+        llm_stats: dict = {
+            "calls": 0, "retries": 0, "truncated": 0, "deadline_aborts": 0,
+            "by_stage": {},
+        }
+        cost_stats = getattr(extractor, "_cost_stats", None) or {}
+        if cost_stats:
+            from tortoise.extractor_v2 import _rollup_llm
+
+            _rollup_llm(llm_stats, cost_stats, "m2")
+        # #3824: calls the sink did NOT account for — a request that failed
+        # before its response parsed, or a model with no #2185 seam (the
+        # offline ``MockModel``). Kept OUT of ``llm`` so it survives exactly
+        # the case the roll-up does not; the residual (never the raw count)
+        # keeps the report's attempt total — ``calls + unattributed`` — from
+        # double-counting a call the roll-up already priced.
+        unattributed = max(0, calls_made - int(llm_stats["calls"] or 0))
+        stats: dict = {}
+        if llm_stats["by_stage"]:
+            stats["llm"] = llm_stats
+        if unattributed:
+            stats["unattributed"] = unattributed
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
-            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats — the
-            # key is ALWAYS present, but its value is not always empty.
-            # #3824: the ONE extractor fact this lane can state without a
-            # roll-up is that it reached the provider, so ``stats`` is
-            # {"unattributed": N} when N completions were issued and {} when
-            # none were — a genuine zero-call path stays a clean no-row.
-            "stats": ({"unattributed": calls_made} if calls_made else {}),
+            # #2335 WI-1a: ``stats`` is ALWAYS present, but its value is not
+            # always empty — a priced roll-up (``llm``) when the sink saw
+            # usage, and/or the #3824 call-evidence disclosure
+            # (``unattributed``) when calls went unaccounted. A genuine
+            # zero-call path stays a clean no-row ({}).
+            "stats": stats,
         }
         return extracted, meta
 

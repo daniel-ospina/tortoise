@@ -1469,15 +1469,233 @@ def test_counter_proxy_forwards_public_writes_but_keeps_its_own_count():
     assert proxy.count == 2 and not hasattr(model, "count")
 
 
+class _UsageReportingSessionModel:
+    """An M2-stage model that fires the REAL #2185 usage seam exactly like
+    ``models.OpenAICompatModel`` does (``_emit_usage_sink`` with the
+    response-local usage block), over deterministic offline content.
+
+    ``send_usage=False`` models a provider response with NO usage block at
+    all — the shape that must be disclosed with zeros, never priced with
+    invented tokens.
+    """
+
+    provider = _PROVIDER
+
+    def __init__(self, model_id, *, prompt_tokens=100, completion_tokens=10,
+                 cost_usd=0.001, ledger=None, send_usage=True):
+        from tortoise.extractor import MockModel
+
+        self.id = model_id
+        self.usage_sink = None
+        self._pt = prompt_tokens
+        self._ct = completion_tokens
+        self._cost = cost_usd
+        self._ledger = [] if ledger is None else ledger
+        self._send_usage = send_usage
+        self._inner = MockModel(model_id)
+
+    def complete(self, *, system, user):
+        from tortoise.models import _emit_usage_sink
+
+        out = self._inner.complete(system=system, user=user)
+        usage = None
+        if self._send_usage:
+            usage = {"prompt_tokens": self._pt,
+                     "completion_tokens": self._ct}
+            if self._cost is not None:
+                usage["cost"] = self._cost
+        self._ledger.append(usage)
+        _emit_usage_sink(self, usage)
+        return out
+
+
+def _m2_meta(tmp_path, monkeypatch, *, send_usage=True, cost_usd=0.001):
+    """Drive the REAL ``_extract_session_llm`` on the M2 lane with stub
+    models that fire the REAL usage seam (no network, no provider).
+
+    Returns ``(ledger, extracted, meta)``; ``ledger`` records what each
+    served call reported (``None`` = no usage block).
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import TortoiseSDK, _session_llm_extractor
+
+    ledger: list = []
+    point = _UsageReportingSessionModel(
+        "point-model", prompt_tokens=100, completion_tokens=10,
+        cost_usd=cost_usd, ledger=ledger, send_usage=send_usage)
+    relation = _UsageReportingSessionModel(
+        "rel-model", prompt_tokens=200, completion_tokens=20,
+        cost_usd=cost_usd, ledger=ledger, send_usage=send_usage)
+    extractor = _session_llm_extractor(point, relation)
+    monkeypatch.setattr(sdk_mod, "_build_session_llm_extractor",
+                        lambda: extractor)
+    sdk_obj = TortoiseSDK(db_path=str(tmp_path / "m2-cost.db"))
+    extracted, meta = sdk_obj._extract_session_llm(
+        _conv(), "sess-m2-cost", "2026-09-27T00:00:00+00:00")
+    return ledger, extracted, meta
+
+
+def test_m2_usage_sink_prices_the_spend_the_lane_incurred(tmp_path, monkeypatch):
+    """#3747: the M2 lane makes real billed calls, and before this fix it
+    dropped their usage — so the #3359 row could only DISCLOSE the calls
+    (#3824 ``unattributed``), never price them. With the #2185 sink bound on
+    the lane's models, the tokens/charge reach ``meta["stats"]["llm"]`` and
+    the emitted row carries them.
+
+    REDs on: removing the sink attachment (``stats`` collapses back to the
+    unpriced disclosure) and on any dropped/zeroed measured field.
+    """
+    from tortoise import hosted_api as ha
+
+    ledger, extracted, meta = _m2_meta(tmp_path, monkeypatch)
+    assert extracted, "the M2 lane must really have run"
+    assert len(ledger) == 2, "point + relation stage, one call each"
+    assert all(u is not None for u in ledger), "the stub reported usage"
+
+    expected_cost = round(sum(u.get("cost") or 0.0 for u in ledger), 6)
+    llm = meta["stats"]["llm"]
+    assert llm["calls"] == len(ledger)
+    assert llm["prompt_tokens"] == sum(u["prompt_tokens"] for u in ledger)
+    assert llm["completion_tokens"] == sum(
+        u["completion_tokens"] for u in ledger)
+    assert llm["cost_usd"] == pytest.approx(expected_cost, abs=1e-9)
+    # a fully-metered capture attributes every call — no residual disclosure
+    assert "unattributed" not in meta["stats"]
+
+    props = ha._capture_cost_props("sess-m2-cost", meta)
+    assert props is not None
+    assert props["calls"] == len(ledger)
+    assert props["prompt_tokens"] == 300
+    assert props["completion_tokens"] == 30
+    assert props["cost_usd"] == pytest.approx(expected_cost, abs=1e-9)
+    assert props["calls_without_usage"] == 0
+    assert props["unattributed"] == 0
+    assert set(props["by_stage"]) == {"m2"}
+
+
+def test_m2_missing_usage_block_is_disclosed_never_fabricated(
+        tmp_path, monkeypatch):
+    """A provider response with NO usage block must not be turned into a
+    measurement: the lane reports ZERO tokens/charge and DISCLOSES the calls
+    (``calls_without_usage``), so the row is excluded from the priced
+    distribution rather than reading as a fabricated $0 sample.
+
+    REDs on: a sink that invents tokens/charge when ``usage`` is ``None``
+    (the fabricated block would both raise ``prompt_tokens`` and drop
+    ``calls_without_usage`` to 0, putting the row INTO the distribution).
+    """
+    from tortoise import hosted_api as ha
+
+    ledger, extracted, meta = _m2_meta(tmp_path, monkeypatch, send_usage=False)
+    assert extracted and len(ledger) == 2
+    assert all(u is None for u in ledger)
+
+    llm = meta["stats"]["llm"]
+    assert llm["calls"] == 2            # the calls really happened
+    assert llm["prompt_tokens"] == 0    # and no token was invented
+    assert llm["completion_tokens"] == 0
+    assert llm["cost_usd"] == 0.0
+    assert llm["calls_without_usage"] == 2
+    assert llm["calls_without_cost"] == 2
+    assert all(bucket["usage_present"] is False
+               for providers in llm["by_stage"].values()
+               for models_ in providers.values()
+               for bucket in models_.values())
+
+    props = ha._capture_cost_props("sess-m2-cost", meta)
+    assert props is not None
+    assert props["prompt_tokens"] == 0 and props["cost_usd"] == 0.0
+
+    dist = costing.cost_per_session_distribution([{"properties": props}])
+    assert dist["n"] == 0                       # NOT priced as a $0 session
+    assert dist["excluded_unmeasured"] == 1      # disclosed, never measured
+    assert dist["calls_without_usage"] == 2
+
+
+def test_m2_failed_extraction_still_reports_the_spend_it_incurred(
+        tmp_path, monkeypatch):
+    """A ``run()`` that raises AFTER a successful billed call must still
+    report that call's usage: the spend is real whether or not the extraction
+    succeeded. The roll-up is read after the fail-closed try/except, so the
+    accumulator survives a provider 500 — the same reason the #3824 call
+    counter is read there."""
+    from tortoise import hosted_api as ha
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import TortoiseSDK, _session_llm_extractor
+
+    ledger: list = []
+    extractor = _session_llm_extractor(
+        _UsageReportingSessionModel("point-model", ledger=ledger),
+        _UsageReportingSessionModel("rel-model", ledger=ledger))
+
+    class _CallThenBoom:
+        version = extractor.version
+        _call_counters = extractor._call_counters
+        _cost_stats = extractor._cost_stats
+
+        def run(self, transcript, source_id, api):
+            extractor.points.model.complete(
+                system="extract_points json",
+                user=json.dumps({"utterances": {}}))
+            raise RuntimeError("provider 500 after the first billed call")
+
+    monkeypatch.setattr(sdk_mod, "_build_session_llm_extractor",
+                        lambda: _CallThenBoom())
+    sdk_obj = TortoiseSDK(db_path=str(tmp_path / "m2-boom.db"))
+    extracted, meta = sdk_obj._extract_session_llm(
+        _conv(), "sess-m2-boom", "2026-09-27T00:00:00+00:00")
+
+    assert extracted == []
+    assert meta["mode"] == "error"
+    assert any("RuntimeError" in e for e in meta["errors"])
+    llm = meta["stats"]["llm"]
+    assert llm["calls"] == 1                 # the one call that landed
+    assert llm["prompt_tokens"] == 100
+    props = ha._capture_cost_props("sess-m2-boom", meta)
+    assert props is not None and props["calls"] == 1
+    assert props["prompt_tokens"] == 100
+
+
+def test_m2_real_extractor_stamps_the_configured_provider(monkeypatch):
+    """The REAL M2 model build must carry its provider id, or the emitted
+    row's ``(provider, model)`` lane is ``unknown`` and a cost-SILENT
+    provider (deepseek-direct reports no ``usage.cost``) can never be
+    repriced from the versioned map — the #3359 report path's whole point.
+
+    Builds models only (no call, no network): ``OpenAICompatModel`` carries
+    no provider of its own, so this is the only place it is known.
+    """
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MODEL", raising=False)
+    for env_name in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-no-call")
+
+    from tortoise.sdk import _build_session_llm_extractor
+
+    extractor = _build_session_llm_extractor()
+    assert extractor is not None
+    assert extractor.points.model.provider == "openrouter"
+    assert extractor.relations.model.provider == "openrouter"
+
+
 def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         tmp_path, monkeypatch, _b7_capture_client):
     """#3824 — THE EMISSION ACCEPTANCE. An M2 capture issues real provider
-    calls and discards their usage (``sdk.py:_extract_session_llm`` offers no
-    ``llm`` roll-up at all). Driving the REAL REST handler, the row handed to
-    the REAL analytics writer must EXIST and deep-equal the payload the
-    capture implies, with ``unattributed >= 1`` — never be absent. Absence is
-    what made billed spend and a clean $0 the same shape, and #3780's
-    cohort-cap denominator was set from that undercount.
+    calls; under this fixture's offline mock seam (``TORTOISE_SESSION_LLM_MOCK``)
+    the model exposes NO #2185 usage seam, so the lane produces no PRICED
+    ``llm`` roll-up — only the #3824 call-evidence disclosure. Driving the
+    REAL REST handler, the row handed to the REAL analytics writer must EXIST
+    and deep-equal the payload the capture implies, with ``unattributed >= 1``
+    — never be absent. Absence is what made billed spend and a clean $0 the
+    same shape, and #3780's cohort-cap denominator was set from that
+    undercount.
+
+    NOTE (updated by #3747): the absence of ``llm`` HERE is a property of the
+    mock's model, not of the lane — the real-provider M2 path now DOES price
+    its spend (``test_m2_usage_sink_prices_the_spend_the_lane_incurred``). The
+    F2 invariant this test protects is unchanged: an unaccounted-for call is
+    disclosed on a row, never erased.
 
     REDs on: restoring ``return None`` for a ``stats`` with no ``llm``
     roll-up (the collapse), or dropping the producer's call evidence at the
@@ -1489,8 +1707,8 @@ def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         "conversation": _conv(), "harness": "pi",
         "session_id": "sess-b7-unattributed"})
     assert resp.status_code == 200, resp.text
-    # Pin the premise: the M2 lane really extracted (extracted > 0) and
-    # really produced NO ``llm`` roll-up — this is F2, not F1.
+    # Pin the premise: the M2 lane really extracted (extracted > 0) and its
+    # mock model produced no PRICED roll-up — this is F2, not F1.
     assert resp.json()["extracted"] > 0
     assert "llm" not in (resp.json()["stats"] or {})
 
