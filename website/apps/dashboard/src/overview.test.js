@@ -264,15 +264,26 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // a second, widened variable). Every wizard heading must pass the BARE
   // identifier (round 4, P1).
   //
-  // The count is 3, not 2: #5496 added `wizardStepSub`'s call site, which this
-  // assertion predated (it was written in #5413 against a tree that already had
-  // three) — so it read 2 while the source read 3 and the whole suite was red on
-  // main, invisible because ci.yml is pull_request-only. The count is exact on
-  // purpose (it also catches a call site being REMOVED, which the widening
-  // check alone would not), so a fourth heading must bump it deliberately.
-  assert.equal((code.match(/connected:\s*serverHarnessConnected\s*[,}]/g) ?? []).length, 3,
-    'every wizard heading must pass the bare serverHarnessConnected as `connected` — '
-    + 'no inline widening at the render site (wizardStageLabel ×2, wizardStepSub)')
+  // Checked per LINE and phrased as "no wizard line is missing the bare
+  // identifier" rather than as an exact total. An exact total could never see a
+  // NEWLY ADDED widened site — widening one of them leaves the bare count
+  // unchanged, so a count of 3 stays green while a fourth, widened heading ships.
+  // The floor below keeps the scan from passing vacuously.
+  //
+  // The old expectation of 2 was simply behind the source: #5496 added
+  // `wizardStepSub`'s call site BEFORE #5413 wrote this assertion, so it was born
+  // red on a tree that already had three — and stayed invisible for days because
+  // ci.yml is pull_request-only, so nothing grades main on this surface.
+  const wizardRenderLines = code
+    .split('\n')
+    .filter((line) => /wizard(?:StageLabel|StepSub)\(/.test(line))
+  assert.ok(wizardRenderLines.length >= 3,
+    `expected at least three wizard render sites, found ${wizardRenderLines.length} — the scan is broken`)
+  assert.deepEqual(
+    wizardRenderLines.filter((line) => !/connected:\s*serverHarnessConnected\s*[,}]/.test(line)),
+    [],
+    'every wizard render site must pass the bare serverHarnessConnected as `connected` — '
+      + 'no inline widening at the render site')
   // ... and then that the import resolves to the shared module's own export.
   const mod = await import('./connectionObservation.js')
   assert.equal(typeof mod.harnessConnectionObserved, 'function')
