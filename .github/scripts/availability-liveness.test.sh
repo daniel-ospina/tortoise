@@ -657,6 +657,7 @@ assert_not_contains "$(created_json)" "FlyV1 abcDEF123" "41: …and the BODY"
 assert_contains "$(created_json)" "<redacted>" "41: …and the scrub is applied"
 LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; update_issue_body 500 "b fm2_abcdefghijklmnopqrstuvwxyz" >/dev/null' _ "$CHECKER"
 assert_not_contains "$(patched_all)" "fm2_abcdefghijklmnopqrstuvwxyz" "41: update_issue_body redacts at the boundary"
+assert_contains "$(patched_all)" "<redacted>" "41: …and the update payload is the REDACTED text, not emptied"
 LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; comment_issue 500 "c 123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >/dev/null' _ "$CHECKER"
 assert_not_contains "$(cat "$STUB_TMP/comments.log" 2>/dev/null || echo '')" "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" "41: comment_issue redacts at the boundary"
 
@@ -667,6 +668,36 @@ seed_heartbeat 5
 export LIVENESS_NOW_EPOCH="0$NOW"   # the same instant, leading-zero form
 run_checker
 assert_eq "$RC" "0" "42: a leading-zero clock is normalized (same instant, not an octal abort)"
+
+# 43. the BOOTSTRAP epoch is normalized too — the sibling of 35/36 for the
+# workflow created_at (a non-ISO `created_at` that iso_to_epoch accepts).
+reset_case
+export STUB_WF_CREATED_AT="epoch:000000000009"
+run_checker
+assert_eq "$RC" "1" "43: a leading-zero workflow created_at → exit 1 (decimal-normalized, not an octal abort)"
+assert_contains "$(created_json)" "reason=no-heartbeat-record" "43: …the record reaches the STALE path"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "43: …and the durable alert is filed"
+
+# 44. a USELESS clock pin (all-zero) must not read LIVE. The fallback is the REAL
+# wall clock, so the heartbeat is seeded 120 min before *that* (the harness's pin
+# is a fixed instant, so a fixture relative to it would be in the future and
+# clamp to fresh). Without the guard NOW="" → the age goes negative → LIVE.
+reset_case
+REAL_NOW="$(date -u +%s)"
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=%s\\n"}' "$HEARTBEAT_MARKER_FIXTURE" "$((REAL_NOW - 7200))")"
+export LIVENESS_NOW_EPOCH=0
+run_checker
+assert_eq "$RC" "1" "44: an all-zero clock pin falls back to the real clock (a 120-min heartbeat is STALE, not LIVE)"
+assert_contains "$OUT" "ignoring the pin" "44: …and it says the pin was ignored"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "44: …and the alert is filed"
+
+# 45. an OVER-INTMAX clock pin (would wrap in $(( ))) is likewise unusable.
+reset_case
+REAL_NOW="$(date -u +%s)"
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=%s\\n"}' "$HEARTBEAT_MARKER_FIXTURE" "$((REAL_NOW - 7200))")"
+export LIVENESS_NOW_EPOCH=18446744073709551616
+run_checker
+assert_eq "$RC" "1" "45: an over-intmax clock pin falls back to the real clock (STALE, not LIVE)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

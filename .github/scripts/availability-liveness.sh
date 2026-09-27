@@ -116,19 +116,27 @@ else
 fi
 
 now_epoch() {
-  # The clock is an ARITHMETIC operand too, so normalize it the same way: a
-  # leading-zero value would abort `$(( ))` exactly as an epoch would. In
-  # production this is `date -u +%s` (unpadded decimal); the seam is not wired to
-  # any workflow, so this is hardening, not a live path — but "normalize before
-  # any arithmetic" should hold for every operand, not all-but-one.
+  # The clock is an ARITHMETIC operand too, so a seam pin is treated like every
+  # other epoch: DECIMAL and BOUNDED. bash's `$(( ))` reads a leading-zero value
+  # as OCTAL — a SILENTLY WRONG number when every digit is 0-7, an abort when a
+  # digit is 8/9 — and an over-intmax value wraps. An unusable seam is NOT a
+  # clock: fall back to the real one rather than return "" or 0, either of which
+  # would make the age NEGATIVE and read as LIVE, a fail-open on this checker's
+  # own fail-closed surface.
+  local v
   if [ -n "$LIVENESS_NOW_EPOCH" ]; then
     case "$LIVENESS_NOW_EPOCH" in
-      ''|*[!0-9]*) date -u +%s ;;
-      *) dec_strip_zeros "$LIVENESS_NOW_EPOCH" ;;
+      ''|*[!0-9]*) : ;;
+      *)
+        v="$(dec_strip_zeros "$LIVENESS_NOW_EPOCH")"
+        if [ -n "$v" ] && [ "${#v}" -le 12 ]; then
+          printf '%s' "$v"; return 0
+        fi
+        warn "LIVENESS_NOW_EPOCH='[${LIVENESS_NOW_EPOCH}]' is not a usable epoch — ignoring the pin"
+        ;;
     esac
-  else
-    date -u +%s
   fi
+  date -u +%s
 }
 
 # epoch -> ISO-8601 Z (GNU date first, BSD fallback — the harness runs on both).
@@ -213,9 +221,10 @@ urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 # parses base-10 and returns TRUE for `000000000009` — but relying on that would
 # leave the arithmetic to abort, so the value is normalized at the extraction.
 # The threshold validator already normalizes this way; the epoch paths must too.)
-# An all-zero input collapses to "", which is handled as unparseable by the
-# heartbeat caller (STALE) and as an unreadable feature age by the bootstrap
-# caller (also STALE) — both fail closed.
+# An all-zero input collapses to "", which each caller handles fail-closed: the
+# heartbeat caller treats it as unparseable (STALE), the bootstrap caller as an
+# unreadable feature age (also STALE), and `now_epoch` rejects it as an unusable
+# pin and falls back to the real clock.
 dec_strip_zeros() { printf '%s' "${1:-}" | sed 's/^0*//'; }
 
 # Publication-boundary scrub, mirroring the watchdog's redact_text. This script
