@@ -247,7 +247,7 @@ const WIZARD_RENDER_CALLEES = new Set(['wizardStageLabel', 'wizardStepSub'])
  * SPREAD, a computed `['connected']` key, a `connected :` with a space before the
  * colon, or a duplicate key that wins by coming LAST all leave exactly one
  * `connected: serverHarnessConnected` in the text while the resolved value is
- * widened. Each of those shipped a heading that disagreed with the h1 — the #2914
+ * widened. Each of those shipped a heading that disagreed with the h1 — the #4646
  * class this guard exists for — with the whole suite green.
  *
  * So the question is not which characters appear, but WHICH PROPERTY BINDS
@@ -283,7 +283,7 @@ function wizardRenderSites(src, relPath = 'main.jsx') {
  * Keys are normalized through their LITERAL name: `connected`, `'connected'`,
  * `"connected"` and `['connected']` all resolve to the same name here, which is
  * what the text checks kept missing. A computed key this cannot resolve to a
- * literal (`[SOME_VAR]`, `['con' + 'nected']`, ``[`connected`]``) is returned as a
+ * literal (`[SOME_VAR]`, `['con' + 'nected']`, ``[`con${x}ected`]``) is returned as a
  * BINDING, not skipped: it can evaluate to `connected` at run time and override the
  * bare property, so it is refused rather than assumed inert — the same fail-closed
  * rule as an argument the guard cannot read.
@@ -397,14 +397,24 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
       + 'binding of the key is the one that wins, so a duplicate, a conditional, or a spread overrides '
       + `the bare property. Found: ${shown}`)
   }
-  // The CALL is only half of it: the announcement RENDERS this label, so widening
-  // at the USE site tells the same lie while leaving every `connected:` argument
-  // untouched — verified shipping "You're all set" for a disconnected harness with
-  // the whole suite green.
+  // The TEMPLATE that renders the announcement is pinned to interpolate `label`
+  // verbatim. That is deliberately all this asserts, and the boundary is worth
+  // stating because a review round took the earlier wording here as a claim of
+  // end-to-end coherence and disproved it three ways, each with the suite green:
+  // the announcement can re-bind `label` to a widened expression; the `<h1>` can be
+  // widened AROUND its call (the guarded call survives as a substring); and the two
+  // ends can disagree through a different option set (`paused: false` against
+  // `paused: effectivelyPaused`).
+  //
+  // So: what is proven HERE is the CALL SITE's argument binding — that each render
+  // site passes the bare identifier, and that this template renders `label`. That
+  // the two RENDERED ends actually agree is a behavioural property, and it is
+  // tracked in #5820 rather than half-asserted here: an instrument that claims it
+  // without proving it is worse than one that names its edge.
   assert.match(code,
     /setWizardStepAnnounce\(\s*`Step \$\{wizardStep \+ 1\} of 4: \$\{label\}`\s*\)/,
-    'the step announcement must render the guarded `label` verbatim — a widened expression at the '
-      + 'USE site bypasses the call-level check entirely')
+    'the step announcement must interpolate the guarded `label` verbatim — this pins the TEMPLATE, '
+      + 'not that `label` is itself bound to the guarded call')
   // ... and then that the import resolves to the shared module's own export.
   const mod = await import('./connectionObservation.js')
   assert.equal(typeof mod.harnessConnectionObserved, 'function')
