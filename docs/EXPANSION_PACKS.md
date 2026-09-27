@@ -6,7 +6,7 @@
 
 An expansion pack extends Tortoise's core ontology with a **domain vocabulary** plus the **business logic** that governs it. Packs are declarative YAML (`manifest.yaml`) — no code runs on load. They give the extractor the kinds it can mint, the chains it must respect, and the `memory_granularity` guidance for what to keep vs strip.
 
-The four starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
+The five starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
 
 ## When to write a pack (vs using core kinds)
 
@@ -73,7 +73,9 @@ The brief is compiled **per graph**: pass `installed_namespaces` and only the na
 | **S3 SEARCH** | nothing pack-authored — it derives FTS queries from the S2 embed list and the story, and carries no kind vocabulary |
 | **the closed-kind gate** | `_object_kind_forms()` / `_event_kind_forms()` — the master's kind forms **plus** the packs' declared `objectKinds`/`documentKinds`/`eventKinds` |
 
-⚠️ **The gate is therefore WIDER than the prompt, not the same vocabulary.** A manifest may declare a kind in `objectKinds` with no `kindDef` (`dev` declares `api`, `database`, `software`, `infrastructure` and `deployment` that way; `marketing` declares `keyword` and `competitorContent`; `project-management` declares `kanbanBoard` and `milestone`). Such a kind is never rendered into the brief, yet the gate accepts it and it is written. This is the gap `compile_value_brief`'s own docstring records — a gated graph's prompt offers a **narrower** vocabulary than the system will accept or classify into.
+⚠️ **For the shared filesystem catalog the gate is therefore WIDER than the prompt, not the same vocabulary.** A manifest may declare a kind in `objectKinds`/`documentKinds` with no `kindDef` (`dev` declares `api`, `database`, `software`, `infrastructure` and `deployment` in `objectKinds`, and `apiSpec` in `documentKinds`, all without a `kindDef`; `marketing` declares `keyword` and `competitorContent`; `project-management` declares `kanbanBoard` and `milestone`). `_object_kind_forms()`/`_event_kind_forms()` union those in through `_PACK_OBJECT_FORMS`/`_PACK_EVENT_FORMS`, so such a kind is accepted and written although the shared-catalog brief renders no semantics for it.
+
+**This asymmetry does not arise on the hosted overlay path.** `compile_value_brief` synthesizes an empty description for every declared-but-kindDefs-less kind, so the kind does reach the brief there — `_PACK_*_FORMS` serve the shared catalog only, never tenant packs. The narrow-prompt gap is thus specific to the shared catalog, and that is what `compile_value_brief`'s own docstring records: a gated graph's prompt offers a **narrower** vocabulary than the system will accept or classify into.
 
 With `TORTOISE_CLASSIFY_LATER=1` the pack vocabulary and the chains leave the S2/S4 prompt entirely (`_render_master_core_only`); the post-extraction kind classifier then assigns the pack kind.
 
