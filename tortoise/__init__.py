@@ -220,19 +220,22 @@ if _OriginalFalkorDB is not None:
             sock = getattr(self, "_t_socket_file", None) or owner_socket_of(self)
             # #3630 F1: publish this release as IN FLIGHT before the flag is
             # set and before the count moves. A `fork()` from another thread
-            # can land between the two, and the child inherits no threads, so
-            # that release can never complete there — without the marker the
-            # child would inherit this client's claim with no way to ever
-            # decrement it (a leak: the server is never reaped). The marker
-            # also covers the flag-set side: the child's adoption hook sets
-            # `_t_owner_released` on any client it subtracts.
+            # can land on either side of the flag-set, and the child inherits
+            # no threads, so the marker is what lets the adoption hook tell the
+            # two apart: a marker whose flag is already True belongs to a
+            # release the child can never complete (drop the claim), while a
+            # marker whose flag is still False belongs to a release the
+            # child's own `_t_release_owner` will still perform (keep it).
+            # Without the marker the flag-set side would leak (a claim that can
+            # never be decremented → the server is never reaped).
             #
-            # `forget_owner` consumes the marker itself; `end_owner_release`
-            # is the cleanup net for a `forget_owner` that never ran.
+            # `forget_owner` consumes THIS client's marker itself (by identity —
+            # #3630 P1); `end_owner_release` is the cleanup net for a
+            # `forget_owner` that never ran.
             release_key = begin_owner_release(self, sock)
             try:
                 self._t_owner_released = True
-                forget_owner(sock)
+                forget_owner(sock, self)
             finally:
                 end_owner_release(release_key, self)
 
