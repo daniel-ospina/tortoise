@@ -2071,14 +2071,16 @@ class TestToolCallAdmissionBoundary:
     REPORTED rather than fixed (there is no member to name in it, and the fix
     for it is the SDK's).
 
-    So the invariant is exact, and the oracle is the SDK rather than this code:
-    ``/mcp`` answers ``-32602`` for a ``tools/call`` **iff** the SDK's own
-    ``JSONRPCMessage`` + ``JSONRPCRequest`` + ``ClientRequest`` checks reject it,
-    and when it does the reason names the rejected member. The oracle is a REAL
-    ``ServerSession`` driven with the raw body
+    So the invariant is exact: ``/mcp`` answers ``-32602`` for a ``tools/call``
+    **iff the transport would dispatch it AND** the SDK's own ``JSONRPCMessage``
+    + ``JSONRPCRequest`` + ``ClientRequest`` checks reject it -- and when it does,
+    the reason names the rejected member. The equivalence is pinned against a
+    REAL ``ServerSession`` driven with the raw body
     (``_sdk_session_verdict``) -- not a re-statement of the SDK's expressions --
-    so a change to either expression makes these tests disagree with the SDK
-    instead of silently drifting. See ``mcp_server._tools_call_rejection``.
+    so a change to either expression makes that test disagree with the SDK
+    instead of silently drifting. The HTTP-level decision matrix separately
+    asserts the middleware fires where those same expressions reject. See
+    ``mcp_server._tools_call_rejection``.
 
     Dispatched calls use ``tortoise_list_namespaces`` deliberately: these tests
     bound ADMISSION, and a tool that computes embeddings would drag the
@@ -2376,14 +2378,18 @@ class TestToolCallAdmissionBoundary:
                 assert r.status_code == 200, r.text
                 assert body["error"]["code"] == -32602, body
 
-    def test_admission_decision_equals_the_sdk_admission_decision(
+    def test_http_admission_decision_tracks_the_sdk_expressions(
             self, tmp_path, monkeypatch):
-        """The anti-widening guard, with the SDK as the oracle.
+        """The anti-widening matrix, at the HTTP boundary.
 
-        For every shape below, the surface's accept/reject decision must equal
-        the SDK's own two admission expressions, run here explicitly. A future
-        change that widens what `/mcp` accepts (the naive "fix" for #3656), or
-        one that narrows it, fails here.
+        For every shape below, the surface's accept/reject decision must match
+        the SDK's two admission expressions, evaluated here. This is an
+        INTEGRATION check against a re-statement of those expressions -- it pins
+        that the middleware fires where they reject, and cannot detect the guard
+        drifting from the SDK (both sides run the same models). That drift is
+        what the real-``ServerSession`` oracle above is for; this matrix exists
+        to cover the many shapes at the wire level, including the naive
+        "widen the validator" fix for #3656.
         """
         from mcp.types import ClientRequest, JSONRPCMessage
 
@@ -2445,7 +2451,9 @@ class TestToolCallAdmissionBoundary:
         # A batch array and a non-object body are the transport's business.
         [{"jsonrpc": "2.0", "id": 1, "method": "tools/call"}],
         "not-an-object",
-        # Wrong protocol version: the transport rejects it first.
+        # A malformed ``jsonrpc`` field: gate-1 JSONRPCMessage rejection, and the
+        # transport's own 400 -32602 -- not the MCP-Protocol-Version header,
+        # which has its own row below.
         {"jsonrpc": "1.0", "id": 1, "method": "tools/call", "params": {}},
     ])
     def test_bodies_the_transport_does_not_dispatch_are_never_named(self, raw):
@@ -2472,8 +2480,10 @@ class TestToolCallAdmissionBoundary:
         ({"Accept": "application/json"}, 406),
         # An unsupported protocol version is `_validate_protocol_version`'s 400.
         ({"MCP-Protocol-Version": "1999-01-01"}, 400),
-        # A declared body over the SDK's own limit is its 413 -- the guard must
-        # not buffer it and answer for it instead.
+        # A declared body over the app's cap: the OUTER
+        # `mcp_auth.RequestBodySizeMiddleware` (1 MB) owns this 413, and the
+        # guard must neither buffer it nor answer for it. The SDK's own 4 MiB
+        # limit is behind that and unreachable here.
         ({"Content-Length": str(8 * 1024 * 1024)}, 413),
     ])
     def test_gates_the_transport_owns_are_not_pre_empted(self, tmp_path,
@@ -2484,7 +2494,10 @@ class TestToolCallAdmissionBoundary:
         the SDK actually parsed and dispatched.
 
         Each case here was a real divergence: the guard answered ``200`` with a
-        named ``-32602`` where the transport answers 400/406/413/415.
+        named ``-32602`` where the transport answers 400/406/413/415. The status
+        is the assertion; the body is asserted only to be free of the guard's
+        named message, because WHICH layer produces 400/413 differs by case and
+        that layering is not this test's subject.
         """
         tc = self._client(tmp_path, monkeypatch,
                           name=f"gate-{expected_status}")
@@ -2589,11 +2602,15 @@ class TestToolCallAdmissionBoundary:
                                       "method": "notifications/initialized"})
             assert r.status_code in (200, 202), r.text
 
-    def test_concurrent_calls_and_listings_never_produce_invalid_params(
+    def test_interleaved_calls_and_listings_keep_the_admission_boundary(
             self, tmp_path, monkeypatch):
-        """#3656's transient was reported under concurrency. Pin that concurrent
-        `tools/call` traffic interleaved with the gated `tools/list` cannot
-        produce the signature."""
+        """#3656's transient was reported under concurrency. What this
+        demonstrates is narrow and stated as such: a 4-thread interleaving of
+        valid `tools/call` traffic with the gated `tools/list` yields a result
+        for every call and no error envelope. It is not evidence about the
+        unreproduced transient, and a single-`TestClient` smoke test cannot
+        establish a concurrency property.
+        """
         import threading
 
         tc = self._client(tmp_path, monkeypatch)

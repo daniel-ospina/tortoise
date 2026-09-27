@@ -3974,13 +3974,16 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
     """The SDK's own validation errors for a ``tools/call`` envelope, or None.
 
-    This reproduces, in order, the three gates the SDK applies to an incoming
-    POST, so the guard can only speak where the SDK would speak, and with the
-    SDK's own verdict:
+    Gate 3 is the producer of the arm this guard names (the receive loop is the
+    one exception SITE, and it has a second arm this guard cannot reach -- see
+    the module comment above). These are the SDK's own expressions, in the
+    order the SDK runs them:
 
     1. ``JSONRPCMessage.model_validate(raw)`` -- the transport's pure-format
-       check. On failure the transport owns the answer (``-32700`` / ``400``),
-       so this returns None and the request passes through untouched.
+       check. On failure the transport owns the answer (its 400 carrying
+       ``-32602 Validation error: ...``; ``-32700`` is the earlier
+       ``json.loads`` failure), so this returns None and the request passes
+       through untouched.
     2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
        ONLY a request; a notification / response / error body is answered
        ``202 Accepted`` (`mcp/server/streamable_http.py`). Without this gate a
@@ -3988,7 +3991,7 @@ def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
        and the guard would replace the SDK's 202 with a ``-32602`` -- the
        over-strict direction, which breaks a working caller.
     3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
-       -- what ``BaseSession._receive_loop`` runs, and the sole producer of the
+       -- what ``BaseSession._receive_loop`` runs, and the producer of the
        opaque ``-32602 "Invalid request parameters"`` this guard exists to
        replace.
 
@@ -4078,11 +4081,10 @@ def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
                                           headers: Any) -> bool:
     """True when the SDK's transport would DISPATCH this POST to the session.
 
-    Every gate the transport applies BEFORE the session parses the body is
-    reproduced here, in order, because the guard's whole claim is that it speaks
-    only where the SDK speaks. The middleware wraps the ROUTER, so without this
-    predicate it can answer ``200 -32602`` for a request no part of the SDK ever
-    saw. Each clause below closes a MEASURED divergence of that kind:
+    Every gate listed below is reproduced from the transport, so the guard
+    speaks only where the SDK speaks. The middleware wraps the ROUTER, so
+    without this predicate it can answer ``200 -32602`` for a request no part of
+    the SDK ever saw. Each clause closes a MEASURED divergence of that kind:
 
     * ``endpoint`` -- the route. A POST to a path this app does not route is a
       404; the caller passes the same string it gives ``mcp.http_app(path=...)``
@@ -4102,21 +4104,37 @@ def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
     * ``_validate_protocol_version`` -- absent means the negotiated default, an
       unsupported value is the transport's 400 ``-32600``.
     * ``RequestBodyLimitMiddleware`` -- a DECLARED length within
-      ``DEFAULT_MAX_REQUEST_BODY_SIZE``. The transport counts bytes while
-      streaming and answers 413; this guard runs outside it, so without the
-      bound it would buffer an unbounded body in memory and then replace the
-      413. A chunked POST declares no length, so it is passed straight through
-      to the limiter that actually counts.
+      ``DEFAULT_MAX_REQUEST_BODY_SIZE``; without the bound this middleware would
+      buffer an unbounded body and then replace that limit's 413. In THIS app
+      ``mcp_auth.RequestBodySizeMiddleware`` (1 MB) binds first, so this clause
+      is the belt to that braces: it keeps the guard's own memory bounded if
+      that cap is ever reordered or removed. A chunked POST declares no length,
+      so it is passed straight through to the limiter that counts bytes.
 
-    The guard must only speak about a request the SDK actually parsed and
-    dispatched; anything the transport would refuse has to reach the transport
-    so it keeps its own status.
+    NOT reproduced, deliberately, because each is answered before this
+    middleware or is a no-op here -- named rather than silently assumed:
+
+    * ``TransportSecurityMiddleware``'s **Host** (421) and **Origin** (403)
+      checks: ``HostOriginGuardMiddleware`` sits OUTSIDE this middleware with
+      the same allowlists and answers both
+      (``test_origin_and_host_refusals_still_precede_the_guard``).
+    * ``_validate_session``: a no-op under ``stateless_http=True``
+      (``mcp_session_id`` is None), and the initialize-only session-id 404
+      cannot apply to ``tools/call``.
+
+    The order of the header clauses here is this function's, not the SDK's
+    (the transport checks accept before content-type); each is independently
+    decisive, so the order cannot admit a request the SDK refuses.
 
     Being STRICTER than the transport is always safe here: the request simply
-    passes through and the SDK answers, so a future change to the response mode
-    or the limits makes the guard stop intercepting rather than mislabel -- and
-    an import failure returns False for the same reason (never pre-empt on a
-    broken assumption).
+    passes through and the SDK answers, so relaxing a gate, changing the
+    response mode or raising a limit makes the guard stop intercepting rather
+    than mislabel -- and an import failure returns False for the same reason
+    (never pre-empt on a broken assumption). The converse does NOT hold, and is
+    this design's known edge: a gate the SDK ADDS, or one narrowed here by
+    mistake, makes the guard LOOSER and it would answer for a request the
+    transport refuses. The tests pin the gates enumerated below; a new upstream
+    gate is not detectable from here.
     """
     try:
         from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
@@ -4284,9 +4302,9 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         """Answer a rejected ``tools/call`` with the SDK's OWN reason (#3656).
 
         See ``_tools_call_rejection`` above for why this surface has exactly one
-        producer of ``-32602`` and exactly one validator. Scope is deliberately
-        narrow, and each narrowing is a case where the SDK does NOT emit the
-        opaque signature:
+        producer SITE of ``-32602`` and exactly one validator. Scope is
+        deliberately narrow, and each narrowing is a case where the SDK does NOT
+        emit the opaque signature:
 
         * ``POST`` only, and only to the transport's own endpoint
           (``mcp_path``), and only when the SDK's own gates would let the body

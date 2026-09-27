@@ -272,10 +272,11 @@ def _jsonrpc_error_body(code: int, message: str,
 
     Split out of ``_jsonrpc_error`` so an error that is framed differently on
     the wire -- ``mcp_server``'s ``tools/call`` admission guard answers 200 with
-    an SSE frame instead of a JSON HTTP error -- still emits the SAME envelope
-    shape, and the two cannot drift apart. ``request_id`` defaults to null, i.e.
-    the pre-existing behaviour for every auth-plane caller (a rejected request
-    has no trustworthy id to echo).
+    an SSE frame instead of a JSON HTTP error -- shares the SAME envelope
+    definition rather than hand-building a second one. (The SSE framing around
+    it is still the guard's own.) ``request_id`` defaults to null, i.e. the
+    pre-existing behaviour for every auth-plane caller (a rejected request has
+    no trustworthy id to echo).
     """
     body: dict[str, Any] = {
         "jsonrpc": "2.0",
