@@ -211,10 +211,30 @@ if _OriginalFalkorDB is not None:
             """
             if getattr(self, "_t_owner_released", False):
                 return
-            self._t_owner_released = True
-            from tortoise.embedded_lifecycle import forget_owner, owner_socket_of
+            from tortoise.embedded_lifecycle import (
+                begin_owner_release,
+                end_owner_release,
+                forget_owner,
+                owner_socket_of,
+            )
             sock = getattr(self, "_t_socket_file", None) or owner_socket_of(self)
-            forget_owner(sock)
+            # #3630 F1: publish this release as IN FLIGHT before the flag is
+            # set and before the count moves. A `fork()` from another thread
+            # can land between the two, and the child inherits no threads, so
+            # that release can never complete there — without the marker the
+            # child would inherit this client's claim with no way to ever
+            # decrement it (a leak: the server is never reaped). The marker
+            # also covers the flag-set side: the child's adoption hook sets
+            # `_t_owner_released` on any client it subtracts.
+            #
+            # `forget_owner` consumes the marker itself; `end_owner_release`
+            # is the cleanup net for a `forget_owner` that never ran.
+            release_key = begin_owner_release(self, sock)
+            try:
+                self._t_owner_released = True
+                forget_owner(sock)
+            finally:
+                end_owner_release(release_key, self)
 
         def close(self, *args, **kwargs):
             """#3599: release the owner-record claim on the PUBLIC close seam.

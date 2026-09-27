@@ -1301,6 +1301,31 @@ _owner_refcounts: dict[str, int] = {}
 #: hook re-acquires fresh descriptors, see `_adopt_owner_records_after_fork`).
 _owner_lock_fds: dict[str, int] = {}
 
+#: #3630 F1: guarded clients whose owner-record release is IN FLIGHT in this
+#: process, keyed by the same abspath as `_owner_refcounts`, each entry a list
+#: of the clients mid-release. `_t_release_owner` publishes its client here
+#: (`begin_owner_release`) BEFORE it sets `_t_owner_released` and before it
+#: calls `forget_owner`; `forget_owner` consumes one entry and the at-fork
+#: adoption hook consumes the rest. A `fork()` from another thread can land
+#: BETWEEN the flag-set and the decrement, and the child inherits no threads —
+#: so that release can NEVER complete in the child. Without this ledger the
+#: child would inherit the client's claim with no way to ever decrement it,
+#: the count could never reach 0, and the child's own record would keep naming
+#: a LIVE owner for a child with no live client: the server is then never
+#: reaped (a leak — the opposite polarity to the #1557 kill, but the same
+#: never-reaped outcome).
+_owner_releases_in_flight: dict[str, list] = {}
+
+#: #3630 F2: sockets whose THIS-process owner record is known to be MISSING
+#: even though `_owner_refcounts` holds a claim for them. The at-fork adoption
+#: writes the child's own record outside `record_owner`; when that write fails
+#: the inherited claim is kept (fail loud, never drop a live owner), and
+#: without this ledger every later `record_owner` would short-circuit on the
+#: count and never retry — leaving the child's record absent for the rest of
+#: its life even after the cause cleared. `record_owner` retries the write
+#: while the key is here, and the key is dropped as soon as the file exists.
+_owner_record_pending: set[str] = set()
+
 
 def _acquire_owner_lock(socket_file: str) -> int | None:
     """Take and HOLD a shared ``flock`` on the owner dir's ``.lock`` (#4577).
@@ -1453,6 +1478,81 @@ def _write_owner_record_file(socket_file: str) -> bool:
     return True
 
 
+def _write_owner_record_file_tracked(socket_file: str) -> bool:
+    """`_write_owner_record_file` plus the #3630 F2 retry ledger.
+
+    Records whether THIS process's ``<pid>-<start>`` record for the socket is
+    still MISSING (`_owner_record_pending`), so the next `record_owner` claim
+    can retry the write instead of short-circuiting on the inherited refcount
+    forever. A transient failure — an owner dir unwritable at the fork, a peer
+    mid-unlink — therefore HEALS on the next claim; the ledger entry is
+    dropped the moment the file exists (or the claim is forgotten).
+    """
+    key = os.path.abspath(socket_file)
+    ok = _write_owner_record_file(socket_file)
+    if ok:
+        _owner_record_pending.discard(key)
+    else:
+        _owner_record_pending.add(key)
+    return ok
+
+
+def begin_owner_release(client, socket_file: str | None) -> str | None:
+    """Publish a guarded client's owner-record release as IN FLIGHT (#3630 F1).
+
+    MUST run BEFORE the caller sets ``client._t_owner_released``. A `fork()`
+    landing after this call is corrected by the child's adoption hook — it
+    subtracts one inherited claim per marker and sets the flag on the marked
+    client, so a later close in the child cannot decrement twice. A `fork()`
+    landing before it is safe by construction: the flag is still unset, so the
+    child reads the client as live and releases it itself.
+
+    Returns the socket key to hand back to `end_owner_release`, or None when
+    there is no socket to key on (nothing was published).
+    """
+    if not socket_file:
+        return None
+    key = os.path.abspath(socket_file)
+    _owner_releases_in_flight.setdefault(key, []).append(client)
+    return key
+
+
+def end_owner_release(key: str | None, client) -> None:
+    """Retract a release published by `begin_owner_release` (#3630 F1).
+
+    Only removes ``client``'s OWN entry (never another client's), so it is
+    safe to call unconditionally in a `finally`: a concurrent release on the
+    same socket keeps its marker. `forget_owner` retracts one marker itself
+    (see `_retract_one_owner_release`); this is the cleanup net for the path
+    where the caller never reaches `forget_owner`.
+    """
+    if key is None:
+        return
+    entries = _owner_releases_in_flight.get(key)
+    if not entries:
+        return
+    with contextlib.suppress(ValueError):
+        entries.remove(client)
+    if not entries:
+        _owner_releases_in_flight.pop(key, None)
+
+
+def _retract_one_owner_release(key: str) -> None:
+    """Drop ONE in-flight release marker for ``key`` (#3630 F1).
+
+    Called by `forget_owner` BEFORE it moves the refcount: each forget
+    decrements exactly one client's claim, so it consumes exactly one pending
+    release. Which entry is dropped is immaterial — only the COUNT of pending
+    decrements is load-bearing for the at-fork subtraction.
+    """
+    entries = _owner_releases_in_flight.get(key)
+    if not entries:
+        return
+    entries.pop()
+    if not entries:
+        _owner_releases_in_flight.pop(key, None)
+
+
 def _adopt_owner_records_after_fork() -> None:
     """Re-establish owner records for inherited clients in a forked child.
 
@@ -1489,6 +1589,42 @@ def _adopt_owner_records_after_fork() -> None:
     _own_start_cache.clear()
     # #3630: snapshot the inherited counts (do NOT clear them — see above).
     inherited = dict(_owner_refcounts)
+    # #3630 F1: subtract every release that was IN FLIGHT when the fork
+    # landed. A guarded client's `_t_release_owner` publishes its release in
+    # `_owner_releases_in_flight` (via `begin_owner_release`) BEFORE it sets
+    # `_t_owner_released`, so a fork on EITHER side of that flag leaves the
+    # child correctly counted. The child inherits no THREADS, so the release
+    # that was mid-flight in the parent can never complete here: without this
+    # subtraction its claim would be inherited but unreleasable, `forget_owner`
+    # could never drive the count to 0, and this child's record would keep
+    # naming a LIVE owner for a child with no live client — the server is then
+    # never reaped (`after_both_closed=1`; a leak, the opposite polarity to
+    # the #1557 kill, but the same never-reaped outcome). Set the flag on each
+    # marked client too: the parent may have forked BEFORE the flag-set, and
+    # the child must not decrement the same client a second time when it
+    # closes it.
+    stale: set[str] = set()
+    for key, clients in list(_owner_releases_in_flight.items()):
+        remaining = inherited.get(key, 0) - len(clients)
+        if remaining > 0:
+            inherited[key] = remaining
+        else:
+            stale.add(key)
+            inherited.pop(key, None)
+        for client in clients:
+            with contextlib.suppress(Exception):
+                client._t_owner_released = True
+    # The child has no release of its OWN in flight — the parent's call stacks
+    # were not cloned. Drop the inherited markers.
+    _owner_releases_in_flight.clear()
+    # The child's live-claim map must be the CORRECTED map, not the raw
+    # inherited one: `forget_owner` reads it to decide the last claim.
+    _owner_refcounts.clear()
+    _owner_refcounts.update(inherited)
+    # #3630 F2: a pending (unwritten) record for a socket this child no longer
+    # claims is meaningless — drop it so a later construction starts clean.
+    for _pending_key in [k for k in _owner_record_pending if k not in inherited]:
+        _owner_record_pending.discard(_pending_key)
     # #4879: a forked child inherits no THREADS, so no in-flight replay claim
     # can belong to it. `_in_flight_replays` is copied into the child by the
     # fork, but the thread that registered a claim (one still inside
@@ -1529,24 +1665,39 @@ def _adopt_owner_records_after_fork() -> None:
     # drop a lock it inherited without replacing it.
     for sock in dict.fromkeys([*inherited, *inherited_locks]):
         key = os.path.abspath(sock)
-        # #3630: write the child's own record WITHOUT a count (the inherited
-        # refcount above is kept). A write failure is the fail-OPEN state
-        # #3599 exists to prevent — a live owner invisible to the reaper — so
-        # it fails LOUDLY rather than silently.
-        try:
-            if not _write_owner_record_file(sock):
+        # #3630 F1: a socket whose inherited count was reduced to ZERO by an
+        # in-flight release has no live client in this child. It must not be
+        # recorded as an owner and must not keep a lock — the record (and the
+        # held lock, #4577's primary liveness signal) would otherwise keep
+        # naming a live owner and the dead child's server would never be
+        # reaped.
+        live = inherited.get(key, 0) > 0
+        if live:
+            # #3630: write the child's own record WITHOUT a count (the
+            # inherited refcount above is kept). A write failure is the
+            # fail-OPEN state #3599 exists to prevent — a live owner invisible
+            # to the reaper — so it fails LOUDLY, and it is RETRYABLE (#3630
+            # F2): the ledger below makes the next `record_owner` claim retry
+            # the write, so a transient failure heals instead of leaving the
+            # child unrecorded for the rest of its life.
+            try:
+                if not _write_owner_record_file_tracked(sock):
+                    logger.error(
+                        "#3630: forked child %s could NOT write its owner "
+                        "record for the inherited socket %s (inherited client "
+                        "count=%s) — until a later record_owner claim retries "
+                        "the write this live owner is invisible to the reaper "
+                        "and its server can be read as orphaned; NOT silently "
+                        "ignored",
+                        os.getpid(), key, inherited.get(key))
+            except Exception:
                 logger.error(
-                    "#3630: forked child %s could NOT write its owner record "
-                    "for the inherited socket %s (inherited client count=%s) "
-                    "— a live owner is now invisible to the reaper and its "
-                    "server can be read as orphaned; NOT silently ignored",
-                    os.getpid(), key, inherited.get(key))
-        except Exception:
-            logger.error(
-                "#3630: forked child %s raised while adopting the inherited "
-                "owner record for %s — the child is a live owner with no "
-                "record (fail-open); re-check the socket dir",
-                os.getpid(), key)
+                    "#3630: forked child %s raised while adopting the inherited "
+                    "owner record for %s — the child is a live owner with no "
+                    "record (fail-open); re-check the socket dir",
+                    os.getpid(), key)
+        if key in stale:
+            continue  # no live client here: do not re-acquire its lock
         if key not in _owner_lock_fds:
             with contextlib.suppress(Exception):
                 fd = _acquire_owner_lock(sock)
@@ -1606,12 +1757,23 @@ def record_owner(socket_file: str | None) -> bool:
     key = os.path.abspath(socket_file)
     if _owner_refcounts.get(key, 0) > 0:
         _owner_refcounts[key] += 1  # this process already owns the record
+        # #3630 F2: a claim can be held while THIS process's record file is
+        # MISSING — the at-fork adoption's write failed, or a first
+        # construction hit an unwritable owner dir. Short-circuiting on the
+        # count alone would never retry, so a transient failure would leave
+        # this live owner invisible to the reaper forever. Retry only while
+        # the ledger says a write is missing, so the common path stays a pure
+        # dict update. The return value is unchanged (this claim did not
+        # CREATE the record), and the write is never-raise.
+        if key in _owner_record_pending:
+            with contextlib.suppress(Exception):
+                _write_owner_record_file_tracked(socket_file)
         return False
     # #4487: this process's own start time is invariant — resolved once in
     # `_owner_record_stamp` (see `_own_start_time`), not a `ps` fork on every
     # construction. #3630: the record write is split out so the at-fork
     # adoption can reuse it without moving the refcount.
-    if not _write_owner_record_file(socket_file):
+    if not _write_owner_record_file_tracked(socket_file):
         return False
     _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
     # #4577: hold the shared liveness lock alongside the record file. The
@@ -1637,11 +1799,22 @@ def forget_owner(socket_file: str | None) -> bool:
     if not socket_file:
         return False
     key = os.path.abspath(socket_file)
+    # #3630 F1: consume ONE in-flight release marker for this socket BEFORE
+    # the count moves. Each `forget_owner` retracts exactly one claim, so the
+    # marker ledger stays in lockstep with the pending decrements, and the
+    # at-fork subtraction reads the same number of claims the parent is about
+    # to drop. Consuming it HERE (not after the decrement) keeps the only
+    # residual fork window on the SAFE side: a `fork()` landing in the few
+    # bytecodes between this retraction and the decrement leaves the child
+    # counting a client that will never be released there — a LEAK, never a
+    # claim dropped while a client is live (the kill polarity).
+    _retract_one_owner_release(key)
     held = _owner_refcounts.get(key, 0)
     if held > 1:
         _owner_refcounts[key] = held - 1
         return False  # another client in this process still owns it
     _owner_refcounts.pop(key, None)
+    _owner_record_pending.discard(key)
     # #4577: the LAST client in this process drops this process's shared
     # lock — the kernel-visible signal that this owner is gone. Released
     # here (after the count, before the record unlink) so the migration of
