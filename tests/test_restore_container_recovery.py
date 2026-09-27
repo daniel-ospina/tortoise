@@ -65,6 +65,10 @@ def _auth_replies(args: list[str], env: dict[str, str]) -> tuple[str, int]:
     if not env.get("REDISCLI_AUTH"):
         return "NOAUTH Authentication required.\n", 0
     rest = tuple(args[args.index("redis-cli") + 1:])
+    if rest[:1] == ("--user",):
+        # #3089: a named-user call carries `--user <name>` before the command;
+        # strip it so the table lookup sees the real CONFIG/BGSAVE/LASTSAVE verb.
+        rest = rest[2:]
     table = {
         ("CONFIG", "GET", "dir"): "dir\n/data\n",
         ("CONFIG", "GET", "dbfilename"): "dbfilename\ndump.rdb\n",
@@ -380,6 +384,50 @@ def _auth_enforcing_docker(record: list):
     return _docker
 
 
+def _acl_docker(record: list, *, user: str = "alice",
+                password: str = "s3cr3t"):
+    """A `_docker` stand-in emulating a real ACL user on a requirepass server.
+
+    Measured against falkordb/falkordb with ``ACL SETUSER alice on >pw
+    allcommands allkeys``: the server replies with DATA only when redis-cli
+    supplies BOTH the named ``--user alice`` AND the matching REDISCLI_AUTH. A
+    wrong password, a non-existent user and a disabled user are
+    indistinguishable — all three answer ``NOAUTH Authentication required.`` on
+    stdout with ``AUTH failed: WRONGPASS …`` on stderr. This fake reproduces
+    exactly that, so it is the strongest faithful stand-in short of a
+    Docker-dependent test (which cannot run in CI); the live path is verified
+    out-of-band against a throwaway container.
+    """
+    def _docker(args, timeout=30, env=None):
+        record.append((list(args), dict(env or {})))
+        if "redis-cli" in args:
+            child_env = dict(env or {})
+            supplied_user = (args[args.index("--user") + 1]
+                             if "--user" in args else None)
+            authenticated = (supplied_user == user
+                             and child_env.get("REDISCLI_AUTH") == password)
+            if authenticated:
+                stdout, rc = _auth_replies(args, child_env)
+                return subprocess.CompletedProcess(args, rc, stdout=stdout,
+                                                   stderr="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout="NOAUTH Authentication required.\n",
+                stderr=("AUTH failed: WRONGPASS invalid username-password "
+                        "pair or user is disabled.\n"))
+        if args[:1] == ["cp"]:
+            if "NOAUTH" in " ".join(args) or "WRONGPASS" in " ".join(args):
+                return subprocess.CompletedProcess(
+                    args, 1, stdout="",
+                    stderr="Could not find the file NOAUTH in container")
+            dest = args[-1]
+            if ":" not in dest:  # host-side destination (snapshot's cp out)
+                with open(dest, "w", encoding="utf-8") as fh:
+                    fh.write("REDIS0009-fake-rdb")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    return _docker
+
+
 def test_restore_authenticates_to_requirepass_instance(monkeypatch):
     """#3089: restore() must drive an authenticated redis-cli transport."""
     monkeypatch.setattr(
@@ -406,14 +454,16 @@ def test_restore_authenticates_to_requirepass_instance(monkeypatch):
 
 
 def test_snapshot_authenticates_to_requirepass_instance(monkeypatch, tmp_path):
-    """#3089: snapshot() must drive an authenticated redis-cli transport."""
+    """#3089: snapshot() must drive an authenticated redis-cli transport.
+
+    The BGSAVE/LASTSAVE path is deliberately NOT stubbed: a regression that
+    dropped the credential from ``_bgsave_and_wait`` alone must fail this test,
+    not slip through (the fake rejects every unauthenticated call, so the pin
+    is the real path, not a stub's default).
+    """
     monkeypatch.setattr(
         rdb_snapshot_restore, "graph_stats_for",
         lambda _u: {"by_label": {"Point": 2}}, raising=False)
-    monkeypatch.setattr(
-        rdb_snapshot_restore, "_bgsave_and_wait",
-        lambda c, start_ts, password="", username="", timeout_s=120:
-        {"ok": True, "lastsave": 1}, raising=False)
     record: list[tuple[list[str], dict[str, str]]] = []
 
     def _docker(args, timeout=30, env=None):
@@ -440,6 +490,11 @@ def test_snapshot_authenticates_to_requirepass_instance(monkeypatch, tmp_path):
     assert result["uri"] == "docker://:****@localhost:16379/tortoise"
     cli = [(a, e) for a, e in record if "redis-cli" in a]
     assert cli, "snapshot never invoked redis-cli"
+    # The save-and-wait path must have ACTUALLY run (not been stubbed away) and
+    # carried the credential — otherwise dropping creds from _bgsave_and_wait
+    # would not be caught.
+    assert any(a[-1] == "BGSAVE" for a, _ in cli), cli
+    assert any(a[-1] == "LASTSAVE" for a, _ in cli), cli
     assert all(e.get("REDISCLI_AUTH") == "falkordb" for _, e in cli), cli
     assert all("falkordb" not in a for a, _ in cli)
 
@@ -487,3 +542,101 @@ def test_redis_cli_uses_env_not_argv(monkeypatch):
     assert "--user" not in seen["args"]
     assert "REDISCLI_AUTH" not in seen["args"]
     assert seen["env"] == {}
+
+
+def test_named_user_uri_authenticates_end_to_end(monkeypatch, tmp_path):
+    """#3089: a URI naming an ACL user drives ``--user`` through BOTH phases.
+
+    ``NAMED_USER_URI`` (``redis://alice:s3cr3t@…``) must reach redis-cli as
+    ``--user alice`` plus the ``REDISCLI_AUTH`` secret — proven end-to-end
+    through ``snapshot()`` THEN ``restore()``, not just the ``_redis_cli`` unit
+    call. The ACL fake rejects any call missing either half, exactly as the live
+    server does (see ``_acl_docker``).
+    """
+    monkeypatch.setattr(
+        rdb_snapshot_restore, "graph_stats_for",
+        lambda _u: {"by_label": {"Point": 2}}, raising=False)
+    record: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _acl_docker(record))
+
+    snap = rdb_snapshot_restore.snapshot(NAMED_USER_URI, str(tmp_path),
+                                         CONTAINER)
+    assert snap["ok"] is True, snap
+
+    with tempfile.NamedTemporaryFile(suffix=".rdb") as fh:
+        rest = rdb_snapshot_restore.restore(NAMED_USER_URI, fh.name, CONTAINER,
+                                            yes=True)
+    assert rest["ok"] is True, rest
+
+    cli = [(a, e) for a, e in record if "redis-cli" in a]
+    assert cli, "no redis-cli call was made"
+    assert any(a[-1] == "BGSAVE" for a, _ in cli), cli
+    assert any("appendonly" in a for a, _ in cli), cli
+    for args, env in cli:
+        assert "--user" in args, args
+        assert args[args.index("--user") + 1] == "alice", args
+        assert env.get("REDISCLI_AUTH") == "s3cr3t", env
+    assert all("s3cr3t" not in a for a, _ in cli), (
+        "the named-user password leaked into redis-cli argv")
+
+
+def test_auth_rejection_message_includes_stderr_acl_detail(monkeypatch):
+    """#3089 F3: the client's stderr reason is surfaced, not just stdout.
+
+    Measured live: a rejected credential yields ``NOAUTH Authentication
+    required.`` on stdout but the precise ``AUTH failed: WRONGPASS …`` on
+    stderr. Building the message from stdout alone loses that detail — and, when
+    the URI named a user, misdiagnoses a wrong/disabled ACL user as a missing
+    password.
+    """
+    def _docker(args, timeout=30, env=None):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="NOAUTH Authentication required.\n",
+            stderr=("AUTH failed: WRONGPASS invalid username-password pair "
+                    "or user is disabled.\n"))
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with pytest.raises(RuntimeError) as excinfo:
+        rdb_snapshot_restore._redis_cli("c", "CONFIG", "GET", "dir",
+                                        password="s3cr3t", username="alice")
+    message = str(excinfo.value)
+    assert "WRONGPASS" in message, message
+    assert "alice" in message, message
+    assert "supply the password" not in message, (
+        "the password WAS supplied — a wrong/disabled USER is misdiagnosed as "
+        f"a missing password: {message}")
+    assert "s3cr3t" not in message, "the credential leaked into the error"
+
+
+def test_auth_rejection_message_asks_for_password_when_none_supplied(monkeypatch):
+    """#3089 F3: with no credential at all, the hint asks for the password."""
+    def _docker(args, timeout=30, env=None):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="NOAUTH Authentication required.\n", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    with pytest.raises(RuntimeError) as excinfo:
+        rdb_snapshot_restore._redis_cli("c", "CONFIG", "GET", "dir")
+    assert "no password was supplied" in str(excinfo.value)
+
+
+def test_marker_inside_config_value_is_not_a_rejection(monkeypatch):
+    """#3089 F4: a value CONTAINING a marker is data, not an auth error.
+
+    ``CONFIG GET dir`` legitimately returns ``/data/NOAUTH-backups`` and a
+    dbfilename may carry ``WRONGPASS``; the old whole-reply substring test
+    raised on both. The predicate is shape-keyed, so the values pass through.
+    """
+    def _docker(args, timeout=30, env=None):
+        if "dir" in args:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="dir\n/data/NOAUTH-backups\n", stderr="")
+        if "dbfilename" in args:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="dbfilename\ndump-WRONGPASS.rdb\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(rdb_snapshot_restore, "_docker", _docker)
+    info = rdb_snapshot_restore._container_rdb_info("c", password="pw")
+    assert info == {"dir": "/data/NOAUTH-backups",
+                    "dbfilename": "dump-WRONGPASS.rdb"}

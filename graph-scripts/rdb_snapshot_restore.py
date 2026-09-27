@@ -143,7 +143,91 @@ def _docker(args: list[str], timeout: int = 30,
 # credential is indistinguishable from data at the CompletedProcess level. Left
 # unchecked, "NOAUTH Authentication required." became the RDB directory name and
 # restore failed with "Could not find the file NOAUTH ..." (#3089).
-_AUTH_ERROR_MARKERS = ("NOAUTH", "WRONGPASS")
+#
+# The rejection test is keyed on the REPLY SHAPE — the leading token of the
+# first line (or redis-cli's own ``AUTH failed:`` stderr line) — never on the
+# marker appearing anywhere in the output: a legitimately configured ``dir`` of
+# ``/data/NOAUTH-backups`` (or a dbfilename carrying ``WRONGPASS``) is a VALUE,
+# and a whole-reply substring test would raise on it (#3089 F4).
+_AUTH_ERROR_TOKENS = ("NOAUTH", "WRONGPASS")
+_AUTH_FAILED_PREFIX = "AUTH FAILED"
+
+
+def _first_line(stream: str | None) -> str:
+    """First non-blank line of a captured stream, stripped (``""`` if none).
+
+    Exists so the marker checks below are anchored to the start of the reply:
+    ``NOAUTH`` in the *value* of ``CONFIG GET dir`` must not read as a rejection.
+    """
+    for line in (stream or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _auth_rejection(proc: subprocess.CompletedProcess) -> str | None:
+    """The server's credential rejection, or None when the reply is data.
+
+    Shape-keyed (#3089 F4): a real rejection is either the first stdout line
+    being an error reply whose LEADING TOKEN is ``NOAUTH``/``WRONGPASS``, or
+    redis-cli's own auto-AUTH failure line on stderr (``AUTH failed: WRONGPASS
+    …``). The stderr line is the only place the precise ACL reason appears —
+    the stdout reply is always ``NOAUTH Authentication required.`` — so both
+    error lines are returned when present (a stdout DATA line is never folded
+    into the message). ``returncode`` is reported for diagnosis but is not the
+    trigger: the measured rejection exits 0, so the shape check is what has to
+    carry the verdict (a marker buried in a value never matches it).
+    """
+    stdout_head = _first_line(proc.stdout)
+    stderr_head = _first_line(proc.stderr)
+    stdout_token = (stdout_head.split(None, 1)[0].rstrip(":").upper()
+                    if stdout_head else "")
+    stderr_token = (stderr_head.split(None, 1)[0].rstrip(":").upper()
+                    if stderr_head else "")
+    stdout_is_auth_error = stdout_token in _AUTH_ERROR_TOKENS
+    stderr_is_auth_failure = (
+        stderr_head.upper().startswith(_AUTH_FAILED_PREFIX)
+        or stderr_token in _AUTH_ERROR_TOKENS)
+    if not stdout_is_auth_error and not stderr_is_auth_failure:
+        return None
+    parts = [stdout_head] if stdout_is_auth_error else []
+    if stderr_is_auth_failure and stderr_head not in parts:
+        parts.append(stderr_head)
+    return " ".join(parts)
+
+
+def _rejection_message(container: str, cmd: tuple[str, ...], rejection: str,
+                       password: str, username: str, returncode: int) -> str:
+    """Diagnose a credential rejection WITHOUT ever echoing the credential.
+
+    The hint keys on WHAT the URI supplied, because the server cannot
+    distinguish a wrong password from a wrong/disabled user — measured against
+    falkordb/falkordb, all three reply ``NOAUTH Authentication required.`` with
+    ``AUTH failed: WRONGPASS invalid username-password pair or user is
+    disabled.`` on stderr. Telling a named-user operator to "supply the
+    password" when they already did (and the username was the typo) is the F3
+    misdiagnosis this replaces.
+    """
+    detail = rejection
+    if password:
+        # No known redis-cli/server message carries the credential, but the
+        # raised text must never be able to leak it.
+        detail = detail.replace(password, "****")
+    if not password:
+        hint = ("no password was supplied — pass it in the URI "
+                "(docker://:PASSWORD@host:port/graph) for a requirepass "
+                "instance.")
+    elif username:
+        hint = (f"the credential for user {username!r} was supplied and "
+                "rejected — check that the ACL user exists and is enabled and "
+                "that its password is correct (the server does not say which "
+                "of the two is wrong).")
+    else:
+        hint = ("a password was supplied and rejected — check it, or name the "
+                "ACL user if the server requires one "
+                "(redis://USER:PASSWORD@host:port/graph).")
+    return (f"redis-cli {' '.join(cmd)} was rejected by {container!r}: "
+            f"{detail} (redis-cli exit status {returncode}) — {hint}")
 
 
 def _redis_cli(container: str, *cmd: str, password: str = "",
@@ -172,13 +256,10 @@ def _redis_cli(container: str, *cmd: str, password: str = "",
     args += list(cmd)
 
     r = _docker(args, timeout=timeout, env=env)
-    reply = (r.stdout or "").strip()
-    if any(marker in reply for marker in _AUTH_ERROR_MARKERS):
-        raise RuntimeError(
-            f"redis-cli {' '.join(cmd)} was rejected by {container!r}: "
-            f"{reply} — supply the password in the URI "
-            "(docker://:PASSWORD@host:port/graph) for a requirepass instance."
-        )
+    rejection = _auth_rejection(r)
+    if rejection is not None:
+        raise RuntimeError(_rejection_message(container, cmd, rejection,
+                                              password, username, r.returncode))
     return r
 
 
