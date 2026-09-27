@@ -119,8 +119,8 @@ END $$;
 DO $$
 DECLARE rejected boolean; v_n integer;
 BEGIN
-    -- This probe org exists only for the blank-set and DEFAULT probes below, and
-    -- is removed with the records (the surface is FK-keyed to ``organizations``,
+    -- This probe org exists only for the two DEFAULT probes below, and is
+    -- removed with those records (the surface is FK-keyed to ``organizations``,
     -- so neither can be written without the other).
     INSERT INTO public.organizations (id, name, graph_name)
     VALUES ('4779-default-probe', '4779-default-probe', 'org_4779-default-probe')
@@ -212,6 +212,32 @@ BEGIN
     END;
     IF NOT rejected THEN
         RAISE EXCEPTION 'a whitespace-only org_id was accepted';
+    END IF;
+
+    -- p_n OMITTED -> ONE increment (the FUNCTION's ``p_n DEFAULT 1``); it is not
+    -- "zero", which is the state this whole surface exists to distinguish from
+    -- a drop.
+    PERFORM public.metering_record_unmetered(
+        '4779-default-probe', 'write_op', 'window_unresolvable', 'X');
+    SELECT m.increments INTO v_n
+      FROM public.metering_unmetered_increments AS m
+     WHERE m.org_id = '4779-default-probe' AND m.lane = 'write_op';
+    IF v_n IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'an omitted p_n recorded % instead of the DEFAULT 1', v_n;
+    END IF;
+
+    -- ...and the COLUMN's ``DEFAULT 1``, which the RPC never exercises (it always
+    -- passes p_n explicitly), asserted by a DIRECT insert that omits
+    -- ``increments``. Reverted to ``DEFAULT 0`` this INSERT trips the positive
+    -- CHECK — a column default that contradicts the table's own constraint.
+    INSERT INTO public.metering_unmetered_increments
+        (org_id, lane, drop_class, last_error_type)
+    VALUES ('4779-default-probe', 'direct_insert', 'window_unresolvable', 'X');
+    SELECT m.increments INTO v_n
+      FROM public.metering_unmetered_increments AS m
+     WHERE m.org_id = '4779-default-probe' AND m.lane = 'direct_insert';
+    IF v_n IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'the column DEFAULT recorded % instead of 1', v_n;
     END IF;
 
     DELETE FROM public.metering_unmetered_increments

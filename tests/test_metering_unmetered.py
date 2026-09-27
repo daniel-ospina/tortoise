@@ -642,6 +642,147 @@ def test_a_unicode_whitespace_lane_is_refused_like_the_sql_lane(
     assert get_unmetered_increments(tid) == []
 
 
+def test_a_batch_that_cannot_be_counted_never_makes_the_writer_raise(
+        reg, registry_lane):
+    """``n`` is floored from ANY value, and the floor never raises.
+
+    ``int(float('inf'))`` raises ``OverflowError``, and the three writers pass
+    caller-supplied ``n``/``calls`` (``record_capture_usage(calls=…)``) into
+    this function. The floor sits OUTSIDE the write ``try``, so an uncaught
+    OverflowError would escape a function whose whole contract is that it never
+    raises — from a best-effort metering writer, i.e. into a request path.
+
+    Mutation caught: catching only ``(TypeError, ValueError)`` at the floor.
+    """
+    _sdk, tid = reg
+    counts = [
+        record_unmetered_increment(
+            "write_op", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
+            QuotaCheckError("x"), bad)
+        for bad in (float("inf"), float("-inf"), float("nan"), object())
+    ]
+    # Four calls, each floored to ONE (cumulative 1,2,3,4) — i.e. not one of
+    # them raised, and none recorded a nonsense count.
+    assert counts == [1, 2, 3, 4], counts
+
+    # ...and a writer whose caller supplied a non-finite batch still records the
+    # drop instead of raising out of the handler.
+    assert record_unmetered_increment(
+        "capture_ledger", tid, DROP_CLASS_INCREMENT_WRITE_UNCONFIRMED,
+        QuotaCheckError("x"), float("inf")) == 1
+    assert get_unmetered_increment_total([tid]) == 5
+
+
+def test_a_failed_read_back_is_not_a_dropped_increment(
+        reg, registry_lane, monkeypatch):
+    """#925 parity on the embedded lane: only the READ-BACK failed.
+
+    The ``MERGE`` committed, so the increment LANDED; a read-back blip must not
+    be represented as an unmeterable increment. This is the same guard #925
+    established on the Supabase lane
+    (``supabase_control.metering_increment`` returns the known delta ``n``
+    rather than raising), and #4779 is what would have made the false claim
+    DURABLE.
+
+    Mutation caught: keeping the read-back inside the increment's ``try`` — the
+    represented count then includes increments that are on the ledger.
+    """
+    sdk, tid = reg
+    real_reg = sdk._get_registry()
+
+    class _ReadBackBrokenRegistry:
+        def query(self, cypher, *args, **kwargs):
+            if "RETURN m.write_ops, m.nodes_written" in cypher:
+                raise RuntimeError("read-back blip")
+            return real_reg.query(cypher, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_reg, name)
+
+    class _StubSDK:
+        def _get_registry(self):
+            return _ReadBackBrokenRegistry()
+
+    monkeypatch.setattr(metering_mod, "_reg_sdk", lambda: _StubSDK())
+    result = record_write_ops(tid, tier="pro", n=2)
+    assert result is not None, "a landed increment was reported as a drop"
+    assert result["write_ops"] == 2, (
+        "the known delta is the fallback when the read-back fails"
+    )
+    assert get_unmetered_increments(tid) == [], (
+        "an increment that LANDED was represented as unmeterable"
+    )
+    # ...and the increment really is on the ledger (the MERGE committed).
+    on_ledger = real_reg.query(
+        "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+        "RETURN m.write_ops",
+        params={"tid": tid, "pstart": _current_period(tid).start_iso},
+    ).result_set
+    assert on_ledger and int(on_ledger[0][0]) == 2
+
+
+def test_the_alert_is_dispatched_even_when_the_representation_raises(
+        reg, registry_lane, monkeypatch):
+    """The leg-3 alert must not be gated on the leg-2 write.
+
+    Their channels are independent by design (the alert is R2 + GitHub +
+    Telegram, not the control plane), and the control plane is the usual cause
+    of a window-unresolvable drop — so a failure of the representation must not
+    be able to swallow the alert.
+
+    Mutation caught: calling ``record_unmetered_increment`` INSIDE the
+    ``contextlib.suppress`` ahead of the alert — an exception there then skips
+    the ERROR log and the alert entirely.
+
+    The pair of assertions pins the ORDER two ways: a representation moved
+    inside the ``suppress`` is swallowed (no raise → ``pytest.raises`` fails),
+    and one moved bare ahead of the alert skips it (``sent`` stays empty).
+    """
+    import tortoise.operator_alert as operator_alert
+
+    sent: list[tuple] = []
+    monkeypatch.setattr(
+        operator_alert, "alert_unmetered_increment",
+        lambda lane, org_id, error: sent.append((lane, org_id, error)))
+    monkeypatch.setattr(
+        metering_mod, "record_unmetered_increment",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("cp down")))
+
+    # ``record_unmetered_increment`` never raises by contract; this monkeypatch
+    # breaks that contract to prove the alert does not depend on it.
+    with pytest.raises(RuntimeError, match="cp down"):
+        report_unmetered_increment("write_op", "org-4779", QuotaCheckError("x"))
+    assert len(sent) == 1, "the representation's failure swallowed the alert"
+
+
+def test_the_drop_is_represented_after_the_per_org_lock_is_released(
+        reg, registry_lane, monkeypatch):
+    """The representation write happens OUTSIDE the per-org increment lock.
+
+    The lock serializes the ask/capture lanes for one org. Doing a blocking
+    control-plane round trip inside it would hold every other increment for that
+    org behind a control plane that is already failing — and that is exactly the
+    state that produced the failure being represented.
+
+    Mutation caught: recording the drop inside ``_record_*_usage_locked`` (the
+    pre-review shape).
+    """
+    sdk, tid = reg
+    _break_increment_only(monkeypatch, sdk)
+    seen: list[bool] = []
+
+    def _probe(lane, org_id, drop_class, error, n=1):
+        seen.append(metering_mod._ask_meter_lock(org_id).locked())
+        return None
+
+    monkeypatch.setattr(metering_mod, "record_unmetered_increment", _probe)
+    assert record_ask_usage(tid, calls=2, cost_usd=0.5) is None
+    assert record_capture_usage(tid, calls=2, cost_usd=0.5) is None
+    assert seen == [False, False], (
+        "the representation was written while the per-org lock was held"
+    )
+
+
 def test_the_fake_refuses_an_explicit_null_p_n_like_the_migration(
         sb, monkeypatch):
     """Parity contract with the RPC: an OMITTED ``p_n`` defaults to 1; an explicit
