@@ -324,6 +324,19 @@ def measure_graph_storage(client: Any, graph_name: Any, *,
             raise ValueError(
                 "GRAPH.MEMORY USAGE returned a non-finite total_graph_sz_mb: "
                 f"{totals!r}")
+        # The DERIVED spread needs the same guard, and the per-total check above
+        # does NOT cover it: subtracting two finite extremes can overflow to inf
+        # (e.g. 1e308 and -1e308), which is the identical failure this
+        # sanitisation exists to prevent — an un-serialisable field reaching a
+        # strict JSON encoder. ``json.dumps(..., allow_nan=False)`` raises, so a
+        # consumer gets a 500 instead of a measurement. A total so large it
+        # cannot be ranged is a malformed reply, so this FAILS the reading
+        # rather than publishing an infinite spread.
+        spread = max(totals) - min(totals)
+        if not math.isfinite(spread):
+            raise ValueError(
+                "GRAPH.MEMORY USAGE totals span a non-finite range: "
+                f"min={min(totals)!r} max={max(totals)!r} -> spread={spread!r}")
         # NEAREST-RANK median (lower-middle for an even count), not
         # ``statistics.median``: the point estimate and the breakdown MUST come
         # from the SAME repeat, or an averaged total can contradict its own
@@ -332,10 +345,31 @@ def measure_graph_storage(client: Any, graph_name: Any, *,
         chosen = order[(len(totals) - 1) // 2]
         point = totals[chosen]
         source = parses[chosen]
+        # ⛔ SANITISE AT THE SOURCE, not only at the ledger boundary. A
+        # non-finite index share must be ABSENT, never NaN: NaN is a THIRD state
+        # the nullable column's contract does not admit (it means "the engine
+        # did not report an index share", and the ledger stores NULL), it
+        # violates the module's own invariant (``nan <= total`` is False, so
+        # "the index share never exceeds the total" stops holding), and it makes
+        # the reading un-serialisable — ``json.dumps(as_dict(),
+        # allow_nan=False)`` raises, so the first consumer that returns this dict
+        # as JSON yields a 500 instead of a measurement. The TOTAL and the
+        # DERIVED spread are both held to this standard above; the index share
+        # must not be weaker.
         indices = source.get("indices_sz_mb")
-        indices = float(indices) if indices is not None else None
+        if indices is not None:
+            indices = float(indices)
+            if not math.isfinite(indices):
+                indices = None
         raw_attrs = source.get("amortized_node_attributes_by_label_sz_mb") or {}
-        attrs = {str(k): float(v) for k, v in raw_attrs.items()}
+        # Same standard per label: a non-finite value is NOT a measurement, so
+        # the label is absent from the breakdown rather than reported as NaN or
+        # as a fabricated 0.0 (which would claim an exactly-zero attribute cost).
+        attrs: dict[str, float] = {}
+        for label, value in raw_attrs.items():
+            share = float(value)
+            if math.isfinite(share):
+                attrs[str(label)] = share
         return GraphStorageReading(
             graph_name=gname,
             total_mb=point,
@@ -344,7 +378,7 @@ def measure_graph_storage(client: Any, graph_name: Any, *,
             readings_mb=totals,
             min_mb=min(totals),
             max_mb=max(totals),
-            spread_mb=max(totals) - min(totals),
+            spread_mb=spread,
             indices_mb=indices,
             node_attributes_mb=attrs,
             ok=True,

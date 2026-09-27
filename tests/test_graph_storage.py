@@ -18,6 +18,8 @@ real-projection test is backend-aware via the shared ``sdk_factory`` fixture.
 """
 from __future__ import annotations
 
+import json
+import math
 import os
 
 import pytest
@@ -154,6 +156,73 @@ def test_measure_takes_the_breakdown_from_the_reading():
     assert r.total_mb == 4.0
     assert r.indices_mb == 0.0
     assert r.node_attributes_mb == {"Point": 3.0, "Object": 1.0}
+
+
+def test_measure_never_emits_nan_for_a_non_finite_field():
+    """GUARD (review finding): a non-finite field must not reach the READING.
+
+    The ledger already sanitised a non-finite index share, but
+    ``measure_graph_storage`` did ``float(indices)`` with no finiteness check, so
+    the reading itself carried ``NaN``. That is a third state the nullable
+    column's contract does not admit (it means "the engine did not report it"),
+    it breaks the module's own invariant (``nan <= total`` is False, so "the
+    index share never exceeds the total" stops holding), and it is
+    un-serialisable: ``json.dumps(as_dict(), allow_nan=False)`` raises, so the
+    first consumer returning this dict as JSON gets a 500, not a measurement.
+
+    Non-finite attribute values are dropped for the same reason — reporting NaN
+    would publish it, and a fabricated 0.0 would claim an exactly-zero
+    attribute cost.
+    """
+    client = _FakeClient([[
+        b"total_graph_sz_mb", 4.0,
+        b"indices_sz_mb", float("nan"),
+        b"amortized_node_attributes_by_label_sz_mb",
+        [b"Point", float("nan"), b"Object", 1.0],
+    ]])
+    r = measure_graph_storage(client, "org_x")
+    assert r.ok is True
+    assert r.indices_mb is None, (
+        f"a non-finite index share must be ABSENT on the reading, not NaN: {r.indices_mb!r}")
+    assert r.node_attributes_mb == {"Object": 1.0}, (
+        f"a non-finite per-label share must be dropped, not NaN: {r.node_attributes_mb!r}")
+    # The property that actually bit a consumer: the reading must be strictly
+    # JSON-serialisable. ``allow_nan=False`` is what a strict encoder (e.g.
+    # Starlette's JSONResponse) uses.
+    json.dumps(r.as_dict(), allow_nan=False)
+
+
+def test_measure_keeps_a_finite_index_share():
+    """CONTROL for the guard above: sanitising must not discard real values."""
+    client = _FakeClient([[
+        b"total_graph_sz_mb", 4.0,
+        b"indices_sz_mb", 1.5,
+        b"amortized_node_attributes_by_label_sz_mb", [b"Point", 3.0],
+    ]])
+    r = measure_graph_storage(client, "org_x")
+    assert r.indices_mb == 1.5
+    assert r.node_attributes_mb == {"Point": 3.0}
+
+
+def test_measure_fails_on_a_non_finite_derived_spread():
+    """GUARD: the DERIVED spread needs its own check, and the per-total one
+    does not provide it. Two totals can each be finite and their difference can
+    still overflow to ``inf``; the same un-serialisable-field failure the index
+    sanitisation above prevents would then reach ``as_dict()``'s
+    ``graph_storage_spread_mb``, which is a plain ``float`` with no ``None``
+    state to fall back to. A total so large it cannot be ranged is a malformed
+    reply, so the reading must FAIL closed rather than publish ``inf``.
+    """
+    client = _FakeClient([
+        [b"total_graph_sz_mb", 1e308],
+        [b"total_graph_sz_mb", -1e308],
+    ])
+    r = measure_graph_storage(client, "org_x", repeats=2)
+    assert r.ok is False, (
+        f"a non-finite spread must fail the reading, not be published: {r.spread_mb!r}")
+    assert math.isfinite(r.spread_mb), (
+        f"even a FAILED reading must not carry a non-finite spread: {r.spread_mb!r}")
+    json.dumps(r.as_dict(), allow_nan=False)
 
 
 def test_measure_sends_the_samples_it_reports():
