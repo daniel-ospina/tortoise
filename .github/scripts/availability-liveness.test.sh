@@ -34,6 +34,7 @@
 #   Fail-closed / security
 #     14. a human-authored look-alike heartbeat → NOT adopted (treated as no record)
 #     15. heartbeat search fails                → exit 1, NO alert filed (not a false page)
+#         (all-or-nothing; case 47 isolates the heartbeat arm with a targeted knob)
 #     16. alert search fails                    → exit 1, no create/close
 #     17. missing GH_TOKEN                       → exit 1 before any gh call
 #     18. HEARTBEAT_MAX_AGE_MIN garbage/0        → normalized to the measured default
@@ -65,6 +66,7 @@
 #     42/44/45/46. the clock pin is bounded      → normalized / unusable pins warn
 #         and fall back to the real clock
 #     43. a leading-zero workflow created_at     → STALE + the alert IS filed
+#     47. a failed heartbeat search IN ISOLATION → exit 1 + NO false page
 #   Parity
 #     20. the heartbeat TITLE + MARKER match the watchdog's byte-for-byte
 #         (a rename on one side would otherwise alarm forever)
@@ -130,7 +132,9 @@ case "$path" in
       *LIVENESS*)
         [ "${STUB_ALERT_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: alert search failed" >&2; exit 1; }
         printf '%s' "${STUB_ALERT_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
-      *heartbeat*) printf '%s' "${STUB_HB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
+      *heartbeat*)
+        [ "${STUB_HB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: heartbeat search failed" >&2; exit 1; }
+        printf '%s' "${STUB_HB_SEARCH_JSON:-$DEFAULT_ITEMS_JSON}" ;;
       *) printf '%s' "$DEFAULT_ITEMS_JSON" ;;
     esac ;;
   */comments)
@@ -183,7 +187,7 @@ reset_case() {
         "$STUB_TMP/heartbeat-issue.json" "$STUB_TMP/alert-issue.json"
   unset STUB_SEARCH_FAIL STUB_HB_SEARCH_JSON STUB_ALERT_SEARCH_JSON STUB_ALERT_SEARCH_FAIL \
         STUB_ALERT_CREATE_FAIL STUB_NEW_ALERT STUB_ALERT_ISSUE STUB_HB_ISSUE \
-        STUB_GET_BODY_FAIL STUB_ALERT_PATCH_FAIL STUB_COMMENT_FAIL \
+        STUB_HB_SEARCH_FAIL STUB_GET_BODY_FAIL STUB_ALERT_PATCH_FAIL STUB_COMMENT_FAIL \
         STUB_WF_FAIL STUB_WF_CREATED_AT HEARTBEAT_MAX_AGE_MIN 2>/dev/null || true
   export GH_TOKEN="test-token"
   export LIVENESS_NOW_EPOCH="$NOW"
@@ -552,6 +556,7 @@ export STUB_WF_CREATED_AT="$WF_RECENT"
 run_checker
 assert_eq "$RC" "1" "29: an unparseable heartbeat search → exit 1 (NOT downgraded to no-record)"
 assert_contains "$OUT" "heartbeat search failed" "29: …and names the search failure"
+assert_eq "$(count_calls 'GH POST')" "0" "29: …and files NO false page (the arm is an EXIT, not a fall-through)"
 
 # 30. a search result whose issue NUMBER is not numeric is a search failure, not
 # an adoptable alert.
@@ -725,6 +730,18 @@ run_checker
 assert_eq "$RC" "1" "46: a non-numeric clock pin falls back to the real clock (STALE, not an abort that loses the alert)"
 assert_contains "$OUT" "ignoring the pin" "46: …and it is rejected loudly, not silently repaired"
 assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "46: …and the durable alert is filed"
+
+# 47. the heartbeat-search failure arm in ISOLATION. STUB_SEARCH_FAIL (case 15) is
+# all-or-nothing, so a mutation that turns the heartbeat arm's exit into a
+# fall-through would reach the ALERT-search failure later and still exit 1 — the
+# false page it would file stays invisible. The targeted knob pins it alone.
+reset_case
+export STUB_HB_SEARCH_FAIL=1
+export STUB_WF_CREATED_AT="2026-09-13T03:34:06Z"
+run_checker
+assert_eq "$RC" "1" "47: a failed HEARTBEAT search alone → exit 1"
+assert_contains "$OUT" "heartbeat search failed" "47: …and names it"
+assert_eq "$(count_calls 'GH POST')" "0" "47: …and files NO alert (a fall-through would file a false page)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
