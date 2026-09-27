@@ -24158,6 +24158,12 @@ def _analytics_heartbeat_block() -> dict:
         last = _ANALYTICS_LAST_DELIVERED_AT
         attempts = _ANALYTICS_CANARY_ATTEMPTS
         counts = dict(_ANALYTICS_COUNTS)
+        # Stamp `now` INSIDE the lock: a delivery landing between the read of
+        # `now` and the read of `last` would produce a negative age, which the
+        # driver reads as "not yet established" and therefore never resolves a
+        # resolved incident for one cadence. Clamping keeps the published age
+        # non-negative whatever the interleaving.
+        age_s = max(0.0, (datetime.now(UTC) - last).total_seconds()) if last is not None else None
     period = _ANALYTICS_CANARY_PERIOD_S
     # The sink probe reads the LIVE env. A read that raises must not 500 a
     # liveness endpoint, so the exception is contained and the block reports
@@ -24175,7 +24181,7 @@ def _analytics_heartbeat_block() -> dict:
         "uptime_s": (now - _ANALYTICS_BOOT_AT).total_seconds(),
         "canary_attempts": attempts,
         "last_delivered_at": last.isoformat() if last is not None else None,
-        "age_s": (now - last).total_seconds() if last is not None else None,
+        "age_s": age_s,
         "outcomes": counts,
     }
 

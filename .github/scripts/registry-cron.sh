@@ -1039,20 +1039,39 @@ ANALYTICS_THRESHOLD_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.silent_th
 ANALYTICS_ATTEMPTS="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.canary_attempts|type)=="number" then (.analytics.canary_attempts|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
 ANALYTICS_SILENT=0
 ANALYTICS_FRESH=0
-if [ "$ANALYTICS_INTENDED" = "true" ] && [ "$ANALYTICS_THRESHOLD_S" != "unknown" ]; then
-  # Truncate the fraction exactly as the watcher-age arm does; a non-numeric
-  # operand makes the test FAIL (2>/dev/null), which reads as not-stale.
-  if [ "$ANALYTICS_AGE_S" != "unknown" ]; then
-    if [ "${ANALYTICS_AGE_S%.*}" -gt "${ANALYTICS_THRESHOLD_S%.*}" ] 2>/dev/null; then
+# R2 (bug-scan P3): `${x%.*}` TRUNCATES, and truncation of a non-plain-decimal
+# operand is not a parse. jq prints 1.2e16 as `1.2E+16`, whose integer part
+# truncates to `1` — which compares under any threshold and would resolve an
+# open incident on a grossly STALE age (fail-open). So the shape is validated
+# explicitly: only `digits[.digits]` is comparable, everything else (empty,
+# sign, exponent, hex, whitespace, a second dot) is unmeasurable and leaves the
+# kind untouched. Leading zeros cannot occur: jq never emits them.
+ANALYTICS_AGE_INT=""
+case "$ANALYTICS_AGE_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *) ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}" ;;
+esac
+ANALYTICS_UPTIME_INT=""
+case "$ANALYTICS_UPTIME_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *) ANALYTICS_UPTIME_INT="${ANALYTICS_UPTIME_S%%.*}" ;;
+esac
+ANALYTICS_THRESHOLD_INT=""
+case "$ANALYTICS_THRESHOLD_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *) ANALYTICS_THRESHOLD_INT="${ANALYTICS_THRESHOLD_S%%.*}" ;;
+esac
+if [ "$ANALYTICS_INTENDED" = "true" ] && [ -n "$ANALYTICS_THRESHOLD_INT" ]; then
+  if [ -n "$ANALYTICS_AGE_INT" ]; then
+    if [ "$ANALYTICS_AGE_INT" -gt "$ANALYTICS_THRESHOLD_INT" ]; then
       ANALYTICS_SILENT=1
-    elif [ "${ANALYTICS_AGE_S%.*}" -ge 0 ] 2>/dev/null; then
-      # A measured age at or under the threshold — the ONLY shape that proves
-      # a delivered write. The `-ge 0` probe is what makes "parsed as a number"
-      # explicit: garbage fails BOTH comparisons and resolves nothing.
+    else
+      # A MEASURED age at or under the threshold — the only shape that proves
+      # a delivered write.
       ANALYTICS_FRESH=1
     fi
-  elif [ "$ANALYTICS_UPTIME_S" != "unknown" ] \
-       && [ "${ANALYTICS_UPTIME_S%.*}" -gt "${ANALYTICS_THRESHOLD_S%.*}" ] 2>/dev/null; then
+  elif [ -n "$ANALYTICS_UPTIME_INT" ] \
+       && [ "$ANALYTICS_UPTIME_INT" -gt "$ANALYTICS_THRESHOLD_INT" ]; then
     # No delivered write SINCE BOOT, and the process is past the threshold —
     # not a cold start. This is the "the emitter never ran" arm.
     ANALYTICS_SILENT=1
@@ -1060,7 +1079,7 @@ if [ "$ANALYTICS_INTENDED" = "true" ] && [ "$ANALYTICS_THRESHOLD_S" != "unknown"
   if [ "$ANALYTICS_SILENT" = "1" ]; then
     log "analytics sink silent (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s attempts=${ANALYTICS_ATTEMPTS} > ${ANALYTICS_THRESHOLD_S}s) — filing ANALYTICS_SINK_DEGRADED (job red)"
     file_alert ANALYTICS_SINK_DEGRADED "[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered" \
-      "The /status analytics heartbeat has not advanced for longer than the app's own Period+Grace threshold (threshold=${ANALYTICS_THRESHOLD_S}s = 3x the canary period; age=${ANALYTICS_AGE_S}s; uptime=${ANALYTICS_UPTIME_S}s; canary_attempts=${ANALYTICS_ATTEMPTS}; configured=${ANALYTICS_CONFIGURED}). Either the sink is not being written to at all (the emitter never runs, or _track_analytics_event regressed to a bare return) or every write is failing. Treat as a SINK OUTAGE, not a DR outage: check the Fly secrets SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY and the Supabase project status / RLS on analytics_events; check the app log for 'analytics sink degraded'. If canary_attempts is 0 while uptime exceeds the threshold, the CANARY never ran (a refused telemetry-pool offload or a lost task), not the sink. This same kind also covers a write that degrades (see the runbook). Runbook: docs/ops/registry-backup-dr.md" ""
+      "The /status analytics heartbeat has not advanced for longer than the app's own Period+Grace threshold (threshold=${ANALYTICS_THRESHOLD_S}s = 3x the canary period; age=${ANALYTICS_AGE_S}s; uptime=${ANALYTICS_UPTIME_S}s; canary_attempts=${ANALYTICS_ATTEMPTS}; configured=${ANALYTICS_CONFIGURED}). Either the sink is not being written to at all (the emitter never runs, or _track_analytics_event regressed to a bare return) or every write is failing. Treat as a SINK OUTAGE, not a DR outage: check the Fly secrets SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY and the Supabase project status / RLS on analytics_events; check the app log for 'analytics sink degraded'. If canary_attempts is 0 while uptime exceeds the threshold, the CANARY never ran (a lost heartbeat task or a loop that never started) — the instrument is dead, not the sink. If canary_attempts is NON-zero but no write landed, the canary RAN and nothing was delivered: a saturated/refused telemetry-pool offload, a real sink outage, or a half-configured env. This same kind also covers a write that degrades (see the runbook). Runbook: docs/ops/registry-backup-dr.md" ""
   elif [ "$ANALYTICS_FRESH" = "1" ]; then
     resolve_global ANALYTICS_SINK_DEGRADED "Resolved — the app delivered an analytics write within its Period+Grace threshold (age=${ANALYTICS_AGE_S}s <= ${ANALYTICS_THRESHOLD_S}s)."
   else
