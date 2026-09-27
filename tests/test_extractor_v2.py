@@ -866,16 +866,26 @@ class TestS3:
         assert v2.resolve_backend_mode() == "real"
 
     def test_hosted_posture_searches_the_graph(self, monkeypatch):
-        """#3679: ``TORTOISE_API_URL`` set and no DB URI must NOT skip S3.
+        """#3679: a client WITHOUT a projection falls back to the env label.
 
-        The pre-fix gate (``if mode != "real":``) returned the degraded
-        "S3 skipped ... 'hosted'" shape and NEVER called the client — the
-        hosted posture was silently treated as "everything is new". The
-        client here exposes no projection, so searchability falls back to the
-        env label (the documented mock path). Asserting ``degraded is False``
-        alone is NOT enough: a change that returns an empty non-degraded
-        shape would satisfy it, so this asserts the query path was actually
-        invoked."""
+        This pins the documented **mock** path (the client exposes no
+        ``_get_proj``), where searchability is decided by the env label: with
+        ``TORTOISE_API_URL`` set and no DB URI, S3 must NOT be skipped. The
+        pre-fix gate (``if mode != "real":``) returned the degraded
+        "S3 skipped ... 'hosted'" shape and NEVER called the client.
+
+        ⚠️ SCOPE — this does NOT mean the hosted posture searches in
+        production. A real ``TortoiseSDK`` with no DB URI holds the EMBEDDED
+        store and must still skip, pinned by
+        ``test_hosted_label_does_not_override_an_embedded_store`` and
+        ``test_unresolvable_projection_fails_closed``. The genuine production
+        change is the REVERSE divergence: a DB URI in the env plus an embedded
+        client, which the old gate searched and this one correctly skips
+        (#3679 review P3).
+
+        Asserting ``degraded is False`` alone is NOT enough: a change that
+        returns an empty non-degraded shape would satisfy it, so this asserts
+        the query path was actually invoked."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
 
@@ -928,6 +938,65 @@ class TestS3:
         assert res["degraded"] is True
         assert "FalkorDBLite" in (res["reason"] or "")
         assert sdk.calls == 0, "the embedded store must never be queried"
+
+    def test_unresolvable_projection_fails_closed(self, monkeypatch):
+        """#3679 review P1: a projection that cannot be RESOLVED is embedded.
+
+        ``_get_proj`` is not guaranteed to raise deterministically — the SDK
+        caches ``_proj`` on success only, so a transient open failure retries
+        and succeeds. If a raise fell back to the env label, the gate would
+        re-open and the query path's second ``_get_proj()`` call would read
+        the embedded store this gate exists to exclude. The label here says
+        "hosted" precisely so a fallback would show up as a search."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class FlakySDK:
+            def __init__(self):
+                self.calls = 0
+
+            def _get_proj(self):
+                raise RuntimeError("transient open failure")
+
+            def tortoise_fts_query(self, *args, **kwargs):
+                self.calls += 1
+                return []
+
+        sdk = FlakySDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY")
+        assert res["degraded"] is True
+        assert sdk.calls == 0, (
+            "an unresolvable projection must fail CLOSED — the env label "
+            "('hosted') must not re-open the gate")
+
+    def test_projection_without_the_flag_fails_closed(self, monkeypatch):
+        """#3679 review P3: the ``_is_embedded`` read defaults to embedded.
+
+        ``True`` is the default every other reader in the tree uses
+        (``sdk.py:11205``, ``sdk.py:15011``, ``pack_state.py:175``); a
+        ``False`` default would make a projection lacking the flag read as a
+        searchable real graph."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class FlaglessProjection:
+            pass  # deliberately carries no _is_embedded
+
+        class FlaglessSDK:
+            def __init__(self):
+                self.calls = 0
+
+            def _get_proj(self):
+                return FlaglessProjection()
+
+            def tortoise_fts_query(self, *args, **kwargs):
+                self.calls += 1
+                return []
+
+        sdk = FlaglessSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY")
+        assert res["degraded"] is True
+        assert sdk.calls == 0
 
     def test_degrades_when_embedded(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
