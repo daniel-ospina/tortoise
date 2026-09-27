@@ -4242,15 +4242,15 @@ _BLOCK_EXCHANGE_BUDGET = 5000
 # candidates perform, so the two together bound the product.  Above it the
 # scan is not attempted and the sentinel is returned — the same FAIL-CLOSED
 # direction as the budget, and for the same reason.  The value is a SAFETY
-# bound and not a similarity threshold: the two bounds form a PRODUCT (the
-# budget bounds the number of decompositions, this bounds the length of each,
-# so dropping either one re-opens the blow-up), and a change to it is a
-# deliberate act, not a tuning knob —
+# bound and not a similarity threshold, and a change to it is a deliberate
+# act, not a tuning knob —
 # `test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up` pins the
-# literal so it cannot drift.  Measured on the fixture box: the scan itself is
-# ≈5 ms at the ceiling and the whole `fold_allowed` call ≈80 ms; with BOTH
-# bounds removed the same shape grows as ≈n^4.4 (0.19 s at 60 content tokens,
-# 1.74 s at 100, 7.74 s at 140), so it reaches minutes at a few hundred.
+# literal so it cannot drift.  The two bounds form a PRODUCT (the budget bounds
+# the number of decompositions, this the length of each), so removing either
+# one re-opens the ≈n^4.4 blow-up: measured on the fixture box at the ceiling
+# the scan itself is ≈5 ms and the whole `fold_allowed` call ≈80 ms, while with
+# BOTH removed the same shape runs 0.19 s at 60 content tokens, 1.74 s at 100
+# and 7.74 s at 140 — minutes at a few hundred.
 _BLOCK_EXCHANGE_MAX_TOKENS = 200
 _EXCHANGE_BUDGET_EXCEEDED = (-1, -1, -1, -1)
 
@@ -4440,11 +4440,32 @@ def _role_inversion(a: str, b: str) -> bool:
     so they cannot go silent — an enumeration of the KNOWN ones, not a
     completeness claim (see the closing note below):
 
-      * an exchange whose two blocks are ADJACENT in the raw stream has no
-        relator between them and stays foldable — that shape is a RE-FLOW (an
-        adverb, an object, or a whole clause moving), not a re-assignment of
-        slots (``alice quickly shipped the order`` against ``alice shipped the
-        order quickly``);
+      * the ADJACENCY condition decides the whole REORDER family, in BOTH
+        directions, and it is the only thing that does — ``_block_exchange``
+        accepts a decomposition only when a token sits strictly BETWEEN the two
+        content blocks in EACH claim.  So the class is not "a phrase moved"
+        (which is what this bullet used to say, wrongly): it is whether the
+        moved phrase's head leaves a token between the blocks, which depends on
+        whether that head is a FRAME or a CONTENT token.  Read the pair, not
+        the phrase name:
+
+        - blocks ADJACENT ⇒ a RE-FLOW, which keeps FOLDING (FAIL-OPEN in the
+          delete direction): ``alice quickly shipped the order`` against
+          ``alice shipped the order quickly``; ``the build failed silently``
+          against ``silently the build failed``; ``from the depot we shipped
+          the crate`` against ``we shipped the crate from the depot``;
+          ``she drove the car to the office on tuesday`` against ``she drove
+          the car on tuesday to the office`` (``on`` is a CONTENT token, so
+          that phrase's head lands beside the next block);
+        - a token BETWEEN the blocks ⇒ REFUSED (FAIL-CLOSED, both claims
+          kept): ``in staging the alpha engine processed the delta record``
+          against ``the alpha engine processed the delta record in staging``
+          (``in`` is FRAME); ``we shipped the crate from the depot to the
+          store`` against ``we shipped the crate to the store from the depot``
+          (``from``/``to`` are FRAME).  A dedicated check for the moved
+          phrase's SPAN would separate the two sides; this walk does not keep
+          it, so a reorder that does leave a gap is refused at the cost of a
+          dedup;
       * an exchange a COORDINATION straddles stays foldable — ``the cat and
         the dog`` against ``the dog and the cat``, and ``the flag is on and
         the gate is off`` against its mirror, the attachment residual the
@@ -4502,29 +4523,16 @@ def _role_inversion(a: str, b: str) -> bool:
         bounds exist so one comparison cannot run away on the capture path
         (the seam runs the boundary once per retrieved candidate), and an
         undecided pair must not delete a rival.  Both claims are kept;
-      * a whole-clause or phrase/adjunct REORDER — the phrase moving to the
-        FRONT (``in staging the alpha engine processed the delta record``
-        against ``the alpha engine processed the delta record in staging``, or
-        ``as the build completed the deploy succeeded`` against its mirror) OR
-        the two phrases trading places IN SITU around a relator (``we shipped
-        the crate from the depot to the store`` against ``we shipped the crate
-        to the store from the depot``) — is refused: FAIL-CLOSED, both claims
-        kept.  The reordered phrase moved as a UNIT, so the pair is a
-        legitimate reorder, but the token walk sees only that a block crossed
-        another and cannot tell a moved phrase from a re-assigned argument; a
-        dedicated check needs the phrase's span, which this walk does not keep.
-        A BARE adverb or adjunct with no relator between the blocks is NOT
-        this class — it keeps folding as the RE-FLOW of the first bullet.
-
     The list above is the residuals FOUND SO FAR, each pinned in
     ``tests/test_never_across_fold_5080.py``.  It is an enumeration of the
     KNOWN ones, NOT a proof of completeness: the rule is a token-level reading
     of a structural shape, so a construction the reading cannot distinguish
     from a re-assigned slot is refused (FAIL-CLOSED, both claims kept) while a
-    construction covered by a declared exemption above — the coordination
-    straddle, a FAIL-OPEN in the DELETE direction — still folds and can lose a
-    rival.  A newly found shape must be pinned and added here, and it can land
-    on EITHER side; "not listed" must not be read as "safe".
+    construction covered by a declared exemption above — the adjacency
+    RE-FLOW, the multi-token block, or the coordination straddle, all of them
+    FAIL-OPEN in the DELETE direction — still folds and can lose a rival.  A
+    newly found shape must be pinned and added here, and it can land on EITHER
+    side; "not listed" must not be read as "safe".
     """
     # Orientation-invariant.  The in-capture seam calls
     # `fold_allowed(prior, candidate)`, so which claim is first must not change

@@ -1812,11 +1812,13 @@ class TestDistinguishingDifference:
                 ("we ship the server, the client",
                  "we ship the client, the server"),
                 ("the cat the dog chased", "the dog the cat chased"),
-                # A whole CLAUSE or phrase/adjunct that reorders — fronted, or
-                # trading places IN SITU around a relator — is a legitimate
-                # reorder, but the token walk sees only a block crossing another
-                # and refuses it — FAIL-CLOSED, both claims kept, pinned so the
-                # class is a recorded boundary rather than a surprise.
+                # A reorder that leaves a token strictly between the two
+                # content blocks is refused — FAIL-CLOSED, both claims kept,
+                # pinned so the class is a recorded boundary rather than a
+                # surprise.  The crate pair qualifies because `from`/`to` are
+                # FRAME; the same shape headed by a CONTENT token leaves the
+                # blocks adjacent and folds (pinned in
+                # `test_a_role_reading_that_is_not_an_exchange_stays_foldable`).
                 ("in staging the alpha engine processed the delta record",
                  "the alpha engine processed the delta record in staging"),
                 ("the deploy succeeded as the build completed",
@@ -1870,6 +1872,17 @@ class TestDistinguishingDifference:
                 ("the build failed silently", "silently the build failed"),
                 ("alice quickly shipped the order",
                  "alice shipped the order quickly"),
+                # A reorder whose moved phrase leaves the two content blocks
+                # ADJACENT is a RE-FLOW and keeps folding.  This is the other
+                # side of the pair pinned in
+                # `test_the_fail_closed_residuals_keep_both_claims`: the crate
+                # pair there is refused because `from`/`to` are FRAME and leave
+                # a token between the blocks, while the same shape headed by a
+                # CONTENT token (`on`) leaves none and folds.
+                ("from the depot we shipped the crate",
+                 "we shipped the crate from the depot"),
+                ("she drove the car to the office on tuesday",
+                 "she drove the car on tuesday to the office"),
                 ("the server is up and the db is down",
                  "the db is down and the server is up"),
                 ("alice and bob and carol shipped",
@@ -1956,7 +1969,6 @@ class TestDistinguishingDifference:
         # head/tail search, so only the attempt counter can stop it.
         inside = tuple((i, f"t{i}")
                        for i in range(v2._BLOCK_EXCHANGE_MAX_TOKENS))
-        assert len(inside) == v2._BLOCK_EXCHANGE_MAX_TOKENS
         assert v2._block_exchange(inside, inside) \
             == v2._EXCHANGE_BUDGET_EXCEEDED
         assert v2._role_inversion_is_unscannable(
