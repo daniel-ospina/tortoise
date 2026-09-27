@@ -2208,7 +2208,13 @@ class InMemoryProjection:
         _apply_one(self.points, event)
 
     def rebuild(self, log) -> None:
-        self.points = fold(log.read_all())
+        # #3316: the same refusal as the Falkor engines — a dropped torn
+        # trailing removal record must not be folded away into a projection
+        # that serves the removed state as current.
+        events = log.read_all()
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
+        self.points = fold(events)
 
 
 def _validate_uri_scheme(scheme: str) -> str:

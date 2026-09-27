@@ -58,12 +58,14 @@ from pathlib import Path
 # reports success (#3316).
 #
 # So the classifier is an ALLOWLIST of record types whose loss is provably the
-# data-LOSS direction: their folds only ADD or UPDATE state, and none removes,
-# tombstones or terminalizes. A torn tail whose type is legible and wholly
-# inside this set keeps the pre-existing tolerance. EVERYTHING ELSE is refused:
-# an unlisted type and an unreadable type cannot be proven harmless, and a
-# silent resurrection is worse than a loud refusal — the refusal touches no
-# graph and leaves the journal for the operator.
+# data-LOSS direction: their folds MERGE/SET authoritative state and never
+# delete a node or edge or terminalize a lifecycle (clearing a DERIVED
+# embedding so it is recomputed is a cache clear, not such a removal). A torn
+# tail whose type is legible and wholly inside this set keeps the pre-existing
+# tolerance. EVERYTHING ELSE is refused: an unlisted type and an unreadable
+# type cannot be proven harmless, and a silent resurrection is worse than a
+# loud refusal — the refusal touches no graph and leaves the journal for the
+# operator.
 #
 # ⛔ THE POLARITY IS DELIBERATE: a NEW event type defaults to REFUSED, not
 # tolerated. Adding one here is the claim that its loss cannot revive state —
@@ -71,15 +73,37 @@ from pathlib import Path
 # removal types instead) fails OPEN: a new terminal type would silently
 # resurrect, which is exactly the defect class this exists to close.
 TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
-    # Point / operator lifecycle additions and updates.
+    # Point / operator lifecycle additions and updates (MERGE + SET only).
     "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
     "PointPromoted", "OperatorPromoted",
-    # Object / document / session lane additions.
-    "ObjectRegistered", "DocumentCreated", "SourceCreated",
-    "SessionRecorded", "EventRecorded", "SubjectAdded",
-    # Bookkeeping records (no fold, or an additive edge/prop write).
-    "EntityLinked", "BatchIdStamped", "DedupeRecorded",
+    # Object / subject / session lane additions (MERGE + SET; an object or
+    # subject upsert clears the DERIVED embedding so it is recomputed).
+    "ObjectRegistered", "SubjectAdded", "SessionRecorded",
+    # Source lane addition (MERGE + SET only).
+    "SourceCreated",
+    # Bookkeeping records (no fold, or an additive edge/prop write) and the
+    # event lane — additive EXCEPT an ``EventRecorded`` carrying connector
+    # metadata, handled conditionally below.
+    "EntityLinked", "BatchIdStamped", "DedupeRecorded", "EventRecorded",
 })
+# Deliberately NOT harmless although the name reads as an addition:
+#   DocumentCreated — ``_upsert_document`` scrubs the RETIRED props
+#                     ``content`` / ``doc_status`` / ``docStatus`` /
+#                     ``objectKind`` / ``object_kind``
+#                     (projection/entities.py:1989), so a dropped tear leaves
+#                     state the live write removed.
+#   ConfidenceChanged — can carry ``outdated=true``, an EP-terminal flag.
+#   DirectEdgeRepoint — its ``delete_only=true`` leg removes an edge.
+#
+# ``EventRecorded`` is CONDITIONAL: its fold is additive except when the record
+# carries connector-source metadata, where ``_upsert_event`` →
+# ``_materialize_connector_source`` DELETEs the old
+# ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source`` node
+# (projection/entities.py:2390, :2399). The S15/T12 pin
+# (tests/test_index_restore.py::test_s15_torn_tail_journal_rebuilds_to_crash_free_state)
+# requires a torn ``EventRecorded`` with NO source field to stay tolerable, so
+# the marker is checked on the raw prefix instead of the type alone.
+_EVENT_RECORDED_SOURCE_MARKERS = ('"sourceUrl"', '"sourceKind"')
 
 # ``"type"`` is matched anywhere in the partial record (the JSONL envelope is
 # ``event_id`` / ``ts`` / ``type`` / …), so a tear after the type field is
@@ -114,13 +138,18 @@ def torn_record_may_revive_state(raw: str) -> bool:
 
     False only when EVERY legible type is inside
     :data:`TORN_TAIL_HARMLESS_EVENT_TYPES` — the data-LOSS direction the
-    torn-tail tolerance was designed for. An unreadable type, and a record
-    naming any type outside the set, are both True: neither can be proven
+    torn-tail tolerance was designed for — and no conditional marker makes one
+    of them destructive. An unreadable type, a type outside the set, and a
+    connector-source ``EventRecorded`` are all True: none can be proven
     harmless.
     """
     types = record_types_from_partial(raw)
-    return not types or any(
-        t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types)
+    if not types:
+        return True
+    if any(t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types):
+        return True
+    return ("EventRecorded" in types
+            and any(m in raw for m in _EVENT_RECORDED_SOURCE_MARKERS))
 
 
 def torn_tail_revival_records(raws) -> list[str]:
@@ -131,14 +160,17 @@ def torn_tail_revival_records(raws) -> list[str]:
 def describe_torn_tail_revival(revival_records) -> str:
     """The legible record types of *revival_records*, for an operator message.
 
-    A tear before the ``type`` field is named ``<unreadable>`` — the state it
-    dropped cannot even be identified, so it is reported as such rather than
-    omitted.
+    EVERY legible type per record, not just the first: classification refuses
+    when ANY legible type is outside the allowlist, so a message naming only
+    the first could contradict the decision it reports (an allowlisted envelope
+    type beside a non-allowlisted nested one). A tear before the ``type`` field
+    is named ``<unreadable>`` — the state it dropped cannot even be identified,
+    so it is reported as such rather than omitted.
     """
-    return ", ".join(sorted({
-        record_type_from_partial(r) or "<unreadable>"
-        for r in (revival_records or [])
-    }))
+    kinds: set[str] = set()
+    for raw in (revival_records or []):
+        kinds.update(record_types_from_partial(raw) or ["<unreadable>"])
+    return ", ".join(sorted(kinds))
 
 
 class TornTailResurrectionError(RuntimeError):
@@ -167,8 +199,8 @@ def refuse_torn_tail_revival(revival_records) -> None:
         "refusing to replay: the journal's torn trailing record is a "
         f"removal/terminal record ({describe_torn_tail_revival(revival)}); "
         "replaying without it would resurrect the state it removed (#3316). "
-        "The graph was NOT touched — repair or truncate the journal, then "
-        "retry."
+        "No record was replayed: the graph was NOT rebuilt. Repair or "
+        "truncate the journal, then retry."
     )
 
 
@@ -211,7 +243,15 @@ class EventLog:
         if not self.path.exists():
             return []
         out = []
-        lines = self.path.read_text(encoding="utf-8").split("\n")
+        text = self.path.read_text(encoding="utf-8")
+        if text.endswith("\n"):
+            # Exactly one terminator: the byte `append` writes. Dropping it
+            # keeps the torn-tail rule identical whether or not the last
+            # record's newline survived the crash (a malformed final line is a
+            # torn tail either way), WITHOUT the U+2028/U+2029/U+0085 splits
+            # `str.splitlines()` would introduce below.
+            text = text[:-1]
+        lines = text.split("\n")
         for idx, raw in enumerate(lines):
             line = raw.strip()
             if not line:

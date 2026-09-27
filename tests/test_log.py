@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.log import EventLog, torn_record_may_revive_state  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -306,6 +306,91 @@ def test_append_read_all_roundtrips_line_separator_unicode():
     assert log.read_all() == [event]
     assert log.torn_trailing_count == 0
     print("PASS test_append_read_all_roundtrips_line_separator_unicode")
+
+
+def test_torn_record_may_revive_state_is_conservative_over_all_types():
+    """Classification uses EVERY legible ``"type"``, not the first one.
+
+    The envelope carries ``type`` before any payload, but ``append`` is public
+    and ``read_all`` parses arbitrary bytes: a nested payload dict can carry a
+    ``type`` too. A first-match classifier would let a nested
+    ``"type": "PointAdded"`` mask the envelope's ``EntityMutated`` and replay a
+    hard delete away.
+    """
+    # A nested HARMLESS type before the envelope's REMOVAL type → refuse.
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded"}, "type": "EntityMutated", '
+        '"op": "del')
+    # The mirror (a nested removal type) also refuses — over-refusal is safe.
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "EntityMutated"}, "type": "PointAdded", "po')
+    # A wholly-harmless record keeps the tolerance.
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "t')
+    # An unreadable type can never be proven harmless.
+    assert torn_record_may_revive_state(
+        '{"event_id": "01JTORN", "ts": "2026-09-11T00:00:0')
+    print("PASS test_torn_record_may_revive_state_is_conservative_over_all_types")
+
+
+def test_event_recorded_with_connector_metadata_is_not_harmless():
+    """``EventRecorded`` folds additively EXCEPT when it carries
+    connector-source metadata: ``_upsert_event`` →
+    ``_materialize_connector_source`` then DELETEs the old
+    ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source``.
+    The S15/T12 pin needs a plain torn ``EventRecorded`` to stay tolerable, so
+    the marker is checked on the raw prefix.
+    """
+    assert not torn_record_may_revive_state(
+        '{"type": "EventRecorded", "id": "e1", "eventId": "s1"}')
+    assert torn_record_may_revive_state(
+        '{"type": "EventRecorded", "id": "e1", "sourceUrl": "https://x')
+    assert torn_record_may_revive_state(
+        '{"type": "EventRecorded", "id": "e1", "sourceKind": "github')
+    print("PASS test_event_recorded_with_connector_metadata_is_not_harmless")
+
+
+def test_read_all_resets_torn_state_across_calls():
+    """A reused ``EventLog`` must never report a previous call's tear.
+
+    ``torn_trailing_raw`` is the state a replay engine consults before
+    refusing, so a stale list is a rewrite of another journal's verdict.
+    """
+    p = _tmp("events.jsonl")
+    log = EventLog(p)
+    log.append({"type": "PointAdded", "point": {"id": "a"}})
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write('{"type": "EntityMutated", "op": "del')  # torn, unterminated
+    log.read_all()
+    assert log.torn_trailing_count == 1
+    assert len(log.torn_trailing_raw) == 1
+    assert len(log.torn_tail_revival_records()) == 1
+
+    clean = _tmp("events.jsonl")
+    EventLog(clean).append({"type": "PointAdded", "point": {"id": "b"}})
+    log.path = Path(clean)
+    assert log.read_all() == [{"type": "PointAdded", "point": {"id": "b"}}]
+    assert log.torn_trailing_count == 0
+    assert log.torn_trailing_raw == []
+    assert log.torn_tail_revival_records() == []
+    print("PASS test_read_all_resets_torn_state_across_calls")
+
+
+def test_read_all_tolerates_a_malformed_newline_terminated_final_line():
+    """The S15 tolerance covers a malformed LAST line whether or not its
+    terminator survived the crash. ``read_all`` drops exactly one terminator
+    before splitting, so both byte shapes take the torn-tail branch — while
+    the split still honours ``"\n"`` only (U+2028 in content is not a line)."""
+    p = _tmp("events.jsonl")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "PointAdded",
+                             "point": {"id": "a"}}) + "\n")
+        fh.write("{not json" + "\n")  # malformed but TERMINATED
+    log = EventLog(p)
+    events = log.read_all()
+    assert len(events) == 1 and events[0]["point"]["id"] == "a"
+    assert log.torn_trailing_count == 1
+    print("PASS test_read_all_tolerates_a_malformed_newline_terminated_final_line")
 
 
 def _run_all():

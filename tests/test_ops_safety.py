@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -30,21 +29,10 @@ from tortoise.projection import FalkorProjection
 
 
 def _mk_tmp() -> str:
-    d = tempfile.mkdtemp(prefix="tortoise_ops_safety_")
-    _TMP_DIRS.append(d)
-    return d
-
-
-# Every temp dir this module mints is removed after the test that made it —
-# otherwise each run leaks a redislite file set per test (there are ~20).
-_TMP_DIRS: list[str] = []
-
-
-@pytest.fixture(autouse=True)
-def _cleanup_module_tmp_dirs():
-    yield
-    while _TMP_DIRS:
-        shutil.rmtree(_TMP_DIRS.pop(), ignore_errors=True)
+    # The suite's own autouse `track_tempfile_artifacts` (tests/_tmpdir_hygiene)
+    # already removes these at teardown, and it fails closed on a live
+    # `redis.pid` — a module-local rmtree here would defeat that guard.
+    return tempfile.mkdtemp(prefix="tortoise_ops_safety_")
 
 
 def _point_event(i: int) -> dict:
@@ -298,15 +286,18 @@ def test_rebuild_cli_bypasses_health_gate():
 # the `tortoise rebuild` CLI turns the refusal into a message, not a traceback.
 
 
-def _write_journal(path: str, *lines: str) -> None:
-    """Write journal lines verbatim, with ``append``'s own shape.
+def _write_journal(path: str, *lines: str, torn_last: bool = False) -> None:
+    """Write journal lines, in ``append``'s own byte shape.
 
-    No trailing newline after the LAST line: ``append`` writes
-    ``json + "\\n"`` in one syscall, so a physically torn record is an
-    unterminated fragment — the fixture must be byte-identical to that.
+    ``append`` writes ``json + "\\n"`` in ONE syscall, so: a COMPLETE journal
+    ends with the terminator, and a physically torn final record is an
+    UNTERMINATED fragment. ``torn_last=True`` writes the last line in that torn
+    shape; the default writes a normal, terminated journal.
     """
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
+        if not torn_last:
+            fh.write("\n")
 
 
 def _point_added(pid: str) -> str:
@@ -332,7 +323,8 @@ def test_torn_removal_record_is_not_replayed_into_a_resurrection():
     })
     # A SIGKILL mid-append: truncated inside the record, after its type field.
     torn = full[:full.index('"op"')]
-    _write_journal(os.path.join(tmp, "events.jsonl"), _point_added("gone-1"), torn)
+    _write_journal(os.path.join(tmp, "events.jsonl"), _point_added("gone-1"), torn,
+                   torn_last=True)
 
     proj = FalkorProjection(db_path)
     try:
@@ -357,6 +349,7 @@ def test_torn_registration_record_keeps_its_tolerance():
         os.path.join(tmp, "events.jsonl"),
         _point_added("kept-1"),
         '{"type": "PointAdded", "point": {"id": "torn-2", "content": ',
+        torn_last=True,
     )
     proj = FalkorProjection(db_path)
     try:
@@ -380,6 +373,7 @@ def test_torn_record_with_no_legible_type_fails_closed():
         os.path.join(tmp, "events.jsonl"),
         _point_added("maybe-1"),
         '{"event_id": "01JTORN", "ts": "2026-09-11T00:00:0',
+        torn_last=True,
     )
     proj = FalkorProjection(db_path)
     try:
@@ -447,7 +441,8 @@ def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
         "op": "delete", "seq": 2,
     })
     _write_journal(os.path.join(log_dir, "events.jsonl"),
-                   _point_added("sentinel"), full[:full.index('"op"')])
+                   _point_added("sentinel"), full[:full.index('"op"')],
+                   torn_last=True)
 
     proj = FalkorProjection(db_path, skip_health_check=True)
     try:
@@ -473,7 +468,8 @@ def test_rebuild_refuses_a_torn_removal_tail_before_the_wipe():
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
         "op": "delete", "seq": 2,
     })
-    _write_journal(journal, _point_added("gone-1"), full[:full.index('"op"')])
+    _write_journal(journal, _point_added("gone-1"), full[:full.index('"op"')],
+                   torn_last=True)
 
     proj = FalkorProjection(db_path, skip_health_check=True)
     try:
@@ -488,6 +484,54 @@ def test_rebuild_refuses_a_torn_removal_tail_before_the_wipe():
         assert applied == 0, "the journal was replayed despite the refusal"
     finally:
         proj.close()
+
+
+def test_rebuild_keeps_tolerance_for_a_harmless_torn_tail():
+    """No over-correction in the apply-only engine either: a torn trailing
+    ``PointAdded`` is still skipped and the earlier records replay through
+    ``rebuild``."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "rebuild_harmless.db")
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    journal = os.path.join(log_dir, "events.jsonl")
+    _write_journal(
+        journal,
+        _point_added("kept-1"),
+        '{"type": "PointAdded", "point": {"id": "torn-2", "content": ',
+        torn_last=True,
+    )
+
+    proj = FalkorProjection(db_path, skip_health_check=True)
+    try:
+        proj.rebuild(EventLog(journal))
+        kept = proj.g.query(
+            "MATCH (n:Point {id:'kept-1'}) WHERE n.status = 'live' "
+            "RETURN count(n)").result_set[0][0]
+        assert kept == 1, "the complete records before the tear must replay"
+    finally:
+        proj.close()
+
+
+def test_inmemory_rebuild_refuses_a_torn_removal_tail():
+    """``InMemoryProjection.rebuild`` is the fifth whole-journal replay engine
+    (``fold(log.read_all())``) and refuses the same journal; ``_apply_one``
+    pops a hard-deleted Point, so the fold would resurrect it."""
+    from tortoise.projection import InMemoryProjection
+
+    tmp = _mk_tmp()
+    journal = os.path.join(tmp, "events.jsonl")
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(journal, _point_added("gone-1"), full[:full.index('"op"')],
+                   torn_last=True)
+
+    proj = InMemoryProjection()
+    with pytest.raises(RuntimeError, match="resurrect"):
+        proj.rebuild(EventLog(journal))
+    assert proj.points == {}, "the fold ran despite the refusal"
 
 
 def test_recover_from_log_refuses_mid_file_corruption():
@@ -533,7 +577,7 @@ def test_torn_retraction_tail_leaves_no_live_point():
     # A SIGKILL mid-append: truncated after the type field, inside the payload.
     torn = '{"type": "PointRetracted", "id": "go'
     _write_journal(os.path.join(tmp, "events.jsonl"),
-                   _point_added("gone-1"), torn)
+                   _point_added("gone-1"), torn, torn_last=True)
 
     proj = FalkorProjection(db_path)
     try:
@@ -597,7 +641,8 @@ def test_backup_restore_refuses_a_torn_removal_tail():
         "op": "delete", "seq": 2,
     })
     _write_journal(os.path.join(backup_dir, "events.jsonl"),
-                   _point_added("gone-1"), full[:full.index('"op"')])
+                   _point_added("gone-1"), full[:full.index('"op"')],
+                   torn_last=True)
     dest_events = os.path.join(work, "events.jsonl")
     db_path = os.path.join(work, "restored.db")
 
@@ -631,7 +676,8 @@ def test_rebuild_cli_reports_the_refusal_as_a_message(capsys):
         "op": "delete", "seq": 2,
     })
     _write_journal(os.path.join(log_dir, "events.jsonl"),
-                   _point_added("sentinel"), full[:full.index('"op"')])
+                   _point_added("sentinel"), full[:full.index('"op"')],
+                   torn_last=True)
 
     rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=db_path))
     assert rc == 1, "the refusal must exit non-zero"

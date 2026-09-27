@@ -67,6 +67,7 @@ def _cmd_rebuild(args):
     from tortoise.log import TornTailResurrectionError
 
     print(f"Rebuilding from {args.dir} → {args.db}")
+    proj = None
     try:
         from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
@@ -124,13 +125,24 @@ def _cmd_rebuild(args):
         return 1
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
-        from tortoise.log import EventLog  # noqa: I001
+        from tortoise.log import EventLog, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import fold
         import os
         events = []
-        for f in sorted(os.listdir(args.dir)):
-            if f.endswith('.jsonl'):
-                events.extend(EventLog(os.path.join(args.dir, f)).read_all())
+        try:
+            for f in sorted(os.listdir(args.dir)):
+                if f.endswith('.jsonl'):
+                    file_log = EventLog(os.path.join(args.dir, f))
+                    chunk = file_log.read_all()
+                    # #3316: the in-memory fallback is a replay engine too — a
+                    # dropped torn trailing removal record must not be folded
+                    # into an in-memory "success".
+                    refuse_torn_tail_revival(
+                        file_log.torn_tail_revival_records())
+                    events.extend(chunk)
+        except TornTailResurrectionError as refusal:
+            print(f"Refused: {refusal}", file=sys.stderr)
+            return 1
         points = fold(events)
         statements, ops = 0, 0
         for p in points.values():
@@ -139,6 +151,11 @@ def _cmd_rebuild(args):
             else:
                 statements += 1
         print(f"Done: {len(points)} total ({statements} statements, {ops} operators) [in-memory, no DB]")
+    finally:
+        # #3316: close the embedded projection on EVERY exit path (the refusal
+        # paths too) so a refusal cannot leave a redislite server behind.
+        if proj is not None:
+            proj.close()
 
 def _cmd_demo(args):
     from pathlib import Path  # noqa: I001
@@ -8449,15 +8466,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "restore":
         from tortoise.backup import restore
-        from tortoise.log import TornTailResurrectionError
-        try:
-            result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
-        except TornTailResurrectionError as e:
-            # #3316: the same operator contract as `tortoise rebuild` — the
-            # refusal is an intended outcome for this journal, so surface it as
-            # a message and exit non-zero rather than as a traceback.
-            print(f"Refused: {e}", file=sys.stderr)
-            return 1
+        # No refusal handler here: the CLI's restore does not replay the
+        # journal (`into_falkor` defaults to False, so it only copies files),
+        # so it cannot resurrect removed state. The refusal lives in
+        # `backup.restore`'s JSONL fallback for programmatic replay callers.
+        result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
         print(f"Restored {result['events']} events — {result['status']}")
         return 0
     elif args.cmd == "serve":
