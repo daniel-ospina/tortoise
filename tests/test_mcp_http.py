@@ -2142,10 +2142,29 @@ class TestToolCallAdmissionBoundary:
             assert r.status_code == 200, r.text
             err = body["error"]
             assert err["code"] == -32602, body
+            # The client matches the reply to its request by id; a null here
+            # would leave a real SDK client waiting forever.
+            assert body["id"] == 1, body
             # The member the SDK rejected is named, on the wire.
             assert "params.name" in err["message"], body
             assert err["data"]["method"] == "tools/call", body
             assert ["params", "name"] in [e["loc"] for e in err["data"]["errors"]], body
+
+    @pytest.mark.parametrize("request_id", [1, "abc-def", 9007199254740993])
+    def test_the_error_frame_echoes_the_request_id(self, tmp_path, monkeypatch,
+                                                   request_id):
+        """The id is copied from the request, not defaulted: an error a client
+        cannot match to its request is the failure this whole surface avoids.
+        """
+        tc = self._client(tmp_path, monkeypatch,
+                          name=f"id-{str(request_id)[:6]}")
+        with tc:
+            r, body = _mcp_post(tc, {
+                "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                "params": {"arguments": {}}})
+            assert r.status_code == 200, r.text
+            assert body["error"]["code"] == -32602, body
+            assert body["id"] == request_id, body
 
     # ── the oracle: a REAL ServerSession, driven with the raw body ─────────
 
@@ -2253,8 +2272,10 @@ class TestToolCallAdmissionBoundary:
 
         The wire form asserted below is the SDK's, not ours. An upstream release
         that reports this arm correctly must not redden this repo, so the exact
-        form is pinned only while it holds: the test xfails (with the reason) at
-        runtime rather than failing, and the properties that ARE ours stay hard.
+        code/message/data form is pinned only while it holds: the test xfails
+        (with the reason) at runtime rather than failing. A change of SHAPE --
+        the arm no longer answering with an error at all -- still fails, and
+        that is deliberate: it would invalidate the claim in mcp_server.
         """
         import logging
 
@@ -2335,6 +2356,10 @@ class TestToolCallAdmissionBoundary:
                 "params": {"arguments": {}}})
             assert r.status_code == 200, r.text
             assert body["error"]["code"] == -32602, body
+            # A real MCP client dispatches on the media type; a JSON body here
+            # would take its "unexpected content type" path.
+            assert r.headers["content-type"].startswith("text/event-stream"), \
+                dict(r.headers)
             assert r.headers.get("cache-control") == "no-cache, no-transform", \
                 dict(r.headers)
             assert r.headers.get("x-accel-buffering") == "no", dict(r.headers)
