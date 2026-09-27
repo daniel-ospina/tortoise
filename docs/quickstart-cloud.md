@@ -92,10 +92,20 @@ tortoise context                                    # memory digest for session-
 
 ### Session capture requires explicit consent
 
-Filing a transcript to Tortoise Cloud is **off by default** and is never
-inferred from the presence of an API key — exporting `TORTOISE_API_KEY` for the
-MCP `Authorization` header (section 2) only authenticates the connection. To
-let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
+Filing a transcript to Tortoise Cloud is **off by default**, and what gates it
+is **per-surface**, not uniform (#3615):
+
+- **The in-repo paths** fail closed on the explicit `TORTOISE_CAPTURE=1` opt-in
+  (`tortoise/capture_consent.py`), which is credential-independent — exporting
+  `TORTOISE_API_KEY` for the MCP `Authorization` header (section 2) does **not**
+  enable capture there; it only authenticates the connection.
+- **The Pi agent-harness `reflect-hook` is not gated that way.** It lives in
+  `agent-infra` and starts hosted capture on **credential presence**, never
+  reading `TORTOISE_CAPTURE` — so on a Pi host, exporting `TORTOISE_API_KEY` is
+  a **data-sharing opt-in**, not a credential-only change. Open dependency:
+  **agent-infra#1117**.
+
+To let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
 `tortoise sessions import`) file sessions:
 
 ```bash
