@@ -90,13 +90,16 @@ def _script_after(html: str, marker: str) -> str:
     assert end != -1, f"unterminated <script> after marker {marker!r}"
     body = html[start + len("<script>") : end]
     # A duplicated <script> BODY (same marker, one count) is not covered by the
-    # count above. Judged on the COMMENT-STRIPPED page: a copy inside `<!-- -->`
-    # is inert (the browser never runs it), so counting it would be a false red
-    # (cycle-8 review).
-    assert _strip_comments(html).count(body) == 1, (
-        f"the script body after marker {marker!r} appears more than once in the "
-        "live page — the browser would execute the LATER copy, so a pin on this "
-        "one would be pinning dead code"
+    # count above. Counted on the RAW page, deliberately: `<!-- -->` inside a
+    # LIVE <script> is a JS line comment (Annex B), so lines between the markers
+    # DO execute — stripping HTML comments first would hide exactly that
+    # duplicate (cycle-9 review). The cost is that a copy parked in a real HTML
+    # comment is also rejected; that is the fail-loud direction, and the remedy is
+    # to delete the dead copy rather than to keep it.
+    assert html.count(body) == 1, (
+        f"the script body after marker {marker!r} appears more than once in "
+        "signup.html — delete the duplicate (a copy inside `<!-- -->` within a "
+        "live <script> is a JS line comment and still executes)"
     )
     return body
 
@@ -1183,16 +1186,8 @@ def test_console_return_to_outranks_claim_but_other_routes_do_not() -> None:
 def test_the_anon_team_funnel_prefers_the_console_return_to() -> None:
     """The ANON_TEAM_NO_OWNER funnel destination, EXECUTED.
 
-    That call site sits inside the big script, which no harness extracts — so the
-    expression could be reverted to the pre-#3930
-    `window.location.href = window.__ADMIN_RETURN_TO || (window.__DASHBOARD_BASE_URL + "/?claim=1")`
-    with every test still green. What that actually broke is the NON-console rows:
-    for a console visitor the old expression returned the truthy `/admin` (so the
-    console was fine), while a `/team` or `/welcome` visitor was sent to
-    `DASHBOARD_URL + "?claim=1"` — i.e. to `/team/?claim=1`, where the SPA mount
-    gate bounces them straight back to `/auth`. The claim card was only the
-    no-return-to fallback. It is a NAMED helper (`claimFunnelUrl`) precisely so it
-    can be driven here; the pre-#3930 expression reds rows 4-5 of this test.
+    The call site sits inside the big script, which no harness extracts, so it is
+    the NAMED helper `claimFunnelUrl` precisely so it can be driven here.
     """
     rows = _run({"funnel": [
         ["/admin", "", None],
