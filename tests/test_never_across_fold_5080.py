@@ -8,7 +8,9 @@ whose role changes across the pair (``#5139``), or a role inversion read from
 the pair (``#5131``).  The authoritative predicate is
 ``extractor_v2._boundary`` — the connective class is enumerated by
 ``_CONNECTIVE_SLOTS``/``_CONNECTIVE_MEMBERS``, the role-inversion class by
-``_frame_and_content``/``_block_exchange``/``_coordination_between``, and the
+``_frame_and_content``/``_block_exchange``/``_coordination_between`` (whose
+exemption is enumerated by ``_COORDINATION_MEMBERS``, NOT by the clause-relation
+slot, which is a different and smaller set), and the
 labels it can report by ``distinguishing_difference``; the prose below is a
 reading aid.  Both
 write-path fold sites enforce that boundary from ONE implementation
@@ -1834,10 +1836,113 @@ class TestDistinguishingDifference:
                 ("the server is up and the db is down",
                  "the db is down and the server is up"),
                 ("alice and bob and carol shipped",
-                 "carol and bob and alice shipped")):
+                 "carol and bob and alice shipped"),
+                # The multi-token-block residual, pinned because the docstring
+                # claims every residual is: an adjective inside one noun phrase
+                # is not one exchange, so the pair keeps folding even though the
+                # two claims differ (which car hit which).
+                ("the red car hit the truck",
+                 "the car hit the red truck"),
+                # A conjunction joining two CLAUSES rather than two commuting
+                # members is exempt too, and the exemption is deliberately
+                # broad — this pair DOES differ (which clause failed), so it is
+                # a pinned FAIL-OPEN in the delete direction.
+                ("the build failed but the test passed",
+                 "the test passed but the build failed")):
             assert v2.distinguishing_difference(prior, candidate) is None, \
                 (prior, candidate)
             assert v2.fold_allowed(prior, candidate), (prior, candidate)
+
+    def test_a_symmetric_relation_pair_is_refused_not_folded(self):
+        """The FAIL-CLOSED cost beyond the copula, declared and pinned.
+
+        The copula is the shape the exchange rule sees most often, not the
+        only one: ANY relator with no structural direction makes an exchanged
+        pair look like a re-assignment of slots.  A symmetric relation is the
+        clearest case — `alice is married to bob` and `bob is married to alice`
+        really do assert one thing, and the boundary refuses them anyway.
+
+        This is the same safe direction as the copula residual (both claims
+        kept, at the cost of a dedup), and it is pinned so that the class is a
+        recorded boundary rather than an undeclared side effect of the rule.
+        Telling a symmetric relator from a directional one needs semantics the
+        token walk does not have, so the refusal is the whole honest answer.
+        """
+        for prior, candidate in (
+                ("the addon pairs with the plugin",
+                 "the plugin pairs with the addon"),
+                ("alice is married to bob", "bob is married to alice"),
+                ("the file matches the pattern",
+                 "the pattern matches the file")):
+            assert v2.distinguishing_difference(prior, candidate) \
+                == "substituted_content", (prior, candidate)
+            assert not v2.fold_allowed(prior, candidate), (prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate), (prior, candidate)
+
+    def test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up(
+            self):
+        """The scan cannot run away, and giving up REFUSES rather than folds.
+
+        `_block_exchange` is a nested search whose work grows with the fourth
+        power of the content-token count, and it runs on the negative path too.
+        The claim text is model output, so without a bound a long pair sharing
+        an opening and a close made ONE comparison run for minutes — on the
+        capture path, once per retrieved candidate.  The bound is what makes
+        that impossible; this pins that the bound EXISTS, that it is reached,
+        and that reaching it is read as REFUSE (both claims kept) rather than as
+        "no exchange" (which would let the seam delete the rival).
+
+        The last two assertions are the pair that must never be caught by the
+        bound: two LONG, byte-equal claims.  On them the maximal head/tail
+        search is the budget's first casualty, so without the exact-equality
+        short circuit in `_role_inversion` a re-captured claim would read as a
+        rival and be duplicated — i.e. the bound would break idempotency.
+        """
+        assert isinstance(v2._BLOCK_EXCHANGE_BUDGET, int)
+        assert v2._BLOCK_EXCHANGE_BUDGET > 0
+        assert isinstance(v2._BLOCK_EXCHANGE_MAX_TOKENS, int)
+        assert v2._BLOCK_EXCHANGE_MAX_TOKENS > 0
+        # An unmatchable, long, same-content pair: the scan runs out of budget.
+        n = v2._BLOCK_EXCHANGE_MAX_TOKENS + 40
+        seq = tuple((i, f"t{i}") for i in range(n))
+        flipped = tuple((i, t) for i, (_, t) in enumerate(reversed(seq)))
+        assert v2._block_exchange(seq, flipped) \
+            is v2._EXCHANGE_BUDGET_EXCEEDED
+        # ...and the BUDGET trips on its own, not only the length ceiling: the
+        # same sequence against itself is under the ceiling and has the maximal
+        # head/tail search, so only the attempt counter can stop it.
+        inside = tuple((i, f"t{i}")
+                       for i in range(v2._BLOCK_EXCHANGE_MAX_TOKENS))
+        assert len(inside) <= v2._BLOCK_EXCHANGE_MAX_TOKENS
+        assert v2._block_exchange(inside, inside) \
+            is v2._EXCHANGE_BUDGET_EXCEEDED
+        assert v2._role_inversion_is_unscannable(
+            v2._EXCHANGE_BUDGET_EXCEEDED)
+        assert not v2._role_inversion_is_unscannable((0, 2, 0, 2))
+        # Every long pair is refused, whatever the two claims say...
+        long_a = "the " + " ".join(f"w{i}" for i in range(n))
+        long_b = "the " + " ".join(f"w{i}" for i in range(n - 1, -1, -1))
+        assert not v2.fold_allowed(long_a, long_b)
+        # ...EXCEPT the pair where nothing changed at all, which must still
+        # read as the same claim rather than as a rival.
+        assert v2.distinguishing_difference(long_a, long_a) is None
+        assert v2.fold_allowed(long_a, long_a)
+
+    def test_the_coordination_vocabulary_is_pinned_literally(self):
+        """The exemption's members are an enumeration, so pin them.
+
+        The exemption set is deliberately NARROWER than the clause-relation
+        slot: `so` is a slot member and is NOT coordinating here.  A reader
+        following only `_CONNECTIVE_SLOTS` would conclude the opposite, so the
+        literal set is pinned — and the import-time subset check that keeps the
+        two from drifting is asserted to be a real check, not a stripped
+        `assert`.
+        """
+        assert frozenset(
+            {"and", "or", "nor", "but", "yet"}) == v2._COORDINATION_MEMBERS
+        assert "so" in v2._CONNECTIVE_SLOTS[0]
+        assert "so" not in v2._COORDINATION_MEMBERS
+        assert v2._CONNECTIVE_SLOTS[0] >= v2._COORDINATION_MEMBERS
 
     def test_a_month_used_as_a_name_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent.
