@@ -865,6 +865,70 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
         assert v2.resolve_backend_mode() == "real"
 
+    def test_hosted_posture_searches_the_graph(self, monkeypatch):
+        """#3679: ``TORTOISE_API_URL`` set and no DB URI must NOT skip S3.
+
+        The pre-fix gate (``if mode != "real":``) returned the degraded
+        "S3 skipped ... 'hosted'" shape and NEVER called the client — the
+        hosted posture was silently treated as "everything is new". The
+        client here exposes no projection, so searchability falls back to the
+        env label (the documented mock path). Asserting ``degraded is False``
+        alone is NOT enough: a change that returns an empty non-degraded
+        shape would satisfy it, so this asserts the query path was actually
+        invoked."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class RecordingSDK:
+            def __init__(self):
+                self.calls = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.calls.append((query, entity_type))
+                if entity_type == "object":
+                    return [{"id": "obj-1", "content": "single-flash pipeline",
+                             "point_kind": "core:plan"}]
+                return []
+
+        sdk = RecordingSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "The story. First para.")
+        assert res["mode"] == "hosted"
+        assert res["degraded"] is False
+        assert res["reason"] is None
+        # the query path ACTUALLY ran — not just a non-degraded empty result
+        assert sdk.calls, "the hosted posture must reach tortoise_fts_query"
+        assert "object" in {t for _, t in sdk.calls}
+
+    def test_hosted_label_does_not_override_an_embedded_store(self, monkeypatch):
+        """#3679 owner ruling: the env label must not re-admit FalkorDBLite.
+
+        ``TORTOISE_API_URL`` set while the client's projection is the embedded
+        test/eval store: S3 must STILL skip and must never query it. A naive
+        ``mode in ("real", "hosted")`` flip would search the embedded store —
+        exactly what the gate exists to exclude."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+        class EmbeddedProjection:
+            _is_embedded = True
+
+        class EmbeddedSDK:
+            def __init__(self):
+                self.calls = 0
+
+            def _get_proj(self):
+                return EmbeddedProjection()
+
+            def tortoise_fts_query(self, *args, **kwargs):
+                self.calls += 1
+                return []
+
+        sdk = EmbeddedSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY")
+        assert res["degraded"] is True
+        assert "FalkorDBLite" in (res["reason"] or "")
+        assert sdk.calls == 0, "the embedded store must never be queried"
+
     def test_degrades_when_embedded(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.delenv("TORTOISE_API_URL", raising=False)

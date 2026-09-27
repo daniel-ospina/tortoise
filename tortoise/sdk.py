@@ -4102,12 +4102,12 @@ class TortoiseSDK:
         Supersession records are REAL-BACKEND-ONLY, by construction: the v2
         extractor forms conversation-driven supersessions only when its S3
         search resolves against the real graph — extractor_v2 skips the search
-        entirely when the active backend is not "real" (the ``mode != "real"``
-        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
-        docker/redis URI or hosted API, is required), so capture over
-        embedded/FalkorDBLite produces ZERO supersession records (structurally
-        — the supersedes refs never resolve). Not a bug; do not debug it as
-        one.
+        when the CLIENT's actual backend is the embedded store
+        (``_is_searchable_backend``: FalkorDBLite is not searched; the real
+        graph, FalkorDB via docker/redis URI or hosted API, is), so capture
+        over embedded/FalkorDBLite produces ZERO supersession records
+        (structurally — the supersedes refs never resolve). Not a bug; do not
+        debug it as one.
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
