@@ -713,6 +713,17 @@ def test_queue_wait_fields_are_unknown_when_no_run_ever_started():
     rec = _build([r])
     assert rec["capacity"]["oldest_minutes"] == obs.UNKNOWN
     assert rec["capacity"]["max_queue_wait_minutes"] == obs.UNKNOWN
+    assert rec["capacity"]["runs_delayed_over_60min"] == obs.UNKNOWN
+
+
+def test_queue_depth_counts_a_run_with_no_end_evidence():
+    # A completed run with no `updated_at` must still count at its own formation
+    # (the function's depth>=1 invariant), not read "the queue was empty".
+    r = run("mergify/merge-queue/x", "merge queue: checking #1 on main (abc1234)",
+            minutes_ago=5, wait_min=0)
+    r["updated_at"] = None
+    rec = _build([r])
+    assert rec["batches"]["max_queue_depth_at_formation"] >= 1
 
 
 def test_cli_records_a_caller_supplied_main_sha_verbatim(tmp_path):

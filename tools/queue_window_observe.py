@@ -361,8 +361,13 @@ def queue_depth_by_formation(formations_list, queue_runs, now=None):
             # the same bias `running_intervals` guards against.
             end = now
         else:
-            end = _ts(r.get("updated_at"))
-        if end is not None and end >= start:
+            # A completed run with NO `updated_at` has no evidence it ever LEFT
+            # the queue: dropping the interval would read depth 0 — "the queue was
+            # empty" — at its own formation, contradicting this function's
+            # invariant. Hold it open to `now`, the same rule the live branch
+            # uses.
+            end = _ts(r.get("updated_at")) or now
+        if end >= start:
             intervals.append((branch, start, end))
     return [
         len({b for b, s, e in intervals if s <= f["at"] <= e})
@@ -680,7 +685,8 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         "capacity_at_first_failure_reason": capacity_reason,
         "capacity_at_first_failure_candidates": starvation_candidates,
         "max_queue_wait_minutes": num_or_unknown(max_queue_wait),
-        "runs_delayed_over_60min": delayed_over_60,
+        "runs_delayed_over_60min": num_or_unknown(
+            delayed_over_60 if waits else None),
         "configured_max_parallel_checks": configured,
         "configured_source": configured_source,
         "samples": {"queued": num_or_unknown(max_queued),
