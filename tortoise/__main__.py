@@ -64,6 +64,8 @@ def _markdown_files(root: Path | str) -> list[Path]:
 
 
 def _cmd_rebuild(args):
+    from tortoise.log import TornTailResurrectionError
+
     print(f"Rebuilding from {args.dir} → {args.db}")
     try:
         from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
@@ -111,6 +113,13 @@ def _cmd_rebuild(args):
         # reach the operator as the message it was written to be — not as a
         # traceback on a supported ops path. Nothing was wiped; exit non-zero
         # so a scripted caller cannot read the refusal as success.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
+    except TornTailResurrectionError as e:
+        # #3316: same contract as the episodic refusal above — a journal whose
+        # torn trailing record dropped a removal must NOT be rebuilt (replaying
+        # without it resurrects the state it removed), and the operator must
+        # see the refusal as a message, not a traceback. Nothing was wiped.
         print(f"Refused: {e}", file=sys.stderr)
         return 1
     except ImportError as e:

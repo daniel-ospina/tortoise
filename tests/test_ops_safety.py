@@ -254,8 +254,16 @@ def test_rebuild_cli_bypasses_health_gate():
 # direction is not symmetric: a torn REMOVAL/terminal line means
 # RESURRECTION — the replay rebuilds the graph without the removal and the
 # state that was removed is served as current again, while recovery reports
-# success. A truncated record cannot be reconstructed, so a replay that drops
-# one is refused; a torn registration line keeps its tolerance.
+# success.
+#
+# POLICY (all four whole-journal replay engines): a torn trailing record whose
+# loss would REVIVE state is refused before any mutation — the graph is NOT
+# touched and the operator is told to repair or truncate the journal. That is
+# the only faithful replay: a truncated record cannot be reconstructed, so the
+# retraction survives by not being contradicted, rather than the whole journal
+# being rejected as corrupt. A torn trailing record whose loss is the data-LOSS
+# direction keeps its pre-existing tolerance (S15/T12, cycle-21), and a
+# COMPLETE journal folds identically in both directions.
 #
 # The classification is by RECORD TYPE, read from the raw (possibly
 # truncated) bytes — the signal `EventLog.read_all` now exposes as
@@ -263,6 +271,10 @@ def test_rebuild_cli_bypasses_health_gate():
 # this tree (its implementation, PR #3326, was closed unmerged); the records
 # that reach the same outcome here are the hard-delete `EntityMutated`
 # (op=delete) and `PointRetracted`, and both are covered by the same set.
+#
+# The engines covered are `FalkorProjection.rebuild`, `FalkorProjection.
+# rebuild_all`, `recover_from_log`, and `backup.restore`'s JSONL fallback;
+# the `tortoise rebuild` CLI turns the refusal into a message, not a traceback.
 
 
 def _write_journal(path: str, *lines: str) -> None:
@@ -407,3 +419,128 @@ def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
         assert count == 1, "the graph was wiped despite the refusal"
     finally:
         proj.close()
+
+
+def _point_retracted(pid: str) -> str:
+    return json.dumps({"type": "PointRetracted", "id": pid})
+
+
+def test_torn_retraction_tail_leaves_no_live_point():
+    """The issue's literal scenario at Point scale: a Point is retracted and
+    the retraction write is torn. The replay must not serve the Point as live.
+
+    Before the fix ``read_all`` dropped the torn retraction, ``recover_from_log``
+    folded the ``PointAdded`` alone, the Point came back ``live`` and
+    ``recovered`` was True. The assertion is on the FINAL STATUS — a raised
+    parse error would not prove the resurrection was prevented.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "torn_retraction.db")
+    # A SIGKILL mid-append: truncated after the type field, inside the payload.
+    torn = '{"type": "PointRetracted", "id": "go'
+    _write_journal(os.path.join(tmp, "events.jsonl"),
+                   _point_added("gone-1"), torn)
+
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")   # the 0-node "lost DB" case
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is False, result
+        assert "PointRetracted" in result["reason"], result
+        # FINAL STATUS, hard-coded: the Point must not be alive in any shape.
+        live = proj.g.query(
+            "MATCH (n:Point {id:'gone-1'}) WHERE n.status = 'live' "
+            "RETURN count(n)").result_set[0][0]
+        assert live == 0, "the retracted Point came back live"
+    finally:
+        proj.close()
+
+
+def test_complete_retraction_folds_to_a_tombstone_not_a_resurrection():
+    """No over-correction: a COMPLETE journal ending in the same retraction
+    folds exactly as before — the tombstone is written, the Point is not live,
+    and the sibling Point is untouched."""
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "complete_retraction.db")
+    _write_journal(
+        os.path.join(tmp, "events.jsonl"),
+        _point_added("gone-1"),
+        _point_added("kept-1"),
+        _point_retracted("gone-1"),
+    )
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is True, result
+        assert result["log_points"] == 3, result
+        # FINAL STATUS, hard-coded: the retraction must have folded, and the
+        # complete log must be reconstructed rather than refused.
+        retracted = proj.g.query(
+            "MATCH (n:Point {id:'gone-1'}) RETURN n.status").result_set
+        assert retracted and retracted[0][0] == "retracted", retracted
+        kept = proj.g.query(
+            "MATCH (n:Point {id:'kept-1'}) WHERE n.status = 'live' "
+            "RETURN count(n)").result_set[0][0]
+        assert kept == 1, "the complete log must still be replayed"
+    finally:
+        proj.close()
+
+
+def test_backup_restore_refuses_a_torn_removal_tail():
+    """The FOURTH whole-journal replay engine (``backup.restore``'s JSONL
+    fallback) refuses the same journal rather than resurrect the deleted
+    Point."""
+    from tortoise.backup import restore
+
+    tmp = _mk_tmp()
+    backup_dir = os.path.join(tmp, "backup")
+    work = os.path.join(tmp, "work")
+    os.makedirs(backup_dir, exist_ok=True)
+    os.makedirs(work, exist_ok=True)
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(backup_dir, "events.jsonl"),
+                   _point_added("gone-1"), full[:full.index('"op"')])
+    dest_events = os.path.join(work, "events.jsonl")
+    db_path = os.path.join(work, "restored.db")
+
+    with pytest.raises(RuntimeError, match="resurrect"):
+        restore(backup_dir, db_path, events_path=dest_events,
+                into_falkor=True)
+
+    proj = FalkorProjection(db_path)
+    try:
+        live = proj.g.query(
+            "MATCH (n:Point {id:'gone-1'}) RETURN count(n)").result_set[0][0]
+        assert live == 0, "the restore resurrected the hard-deleted Point"
+    finally:
+        proj.close()
+
+
+def test_rebuild_cli_reports_the_refusal_as_a_message(capsys):
+    """The operator surface: ``tortoise rebuild`` exits non-zero and prints the
+    refusal as a message (the same contract as the episodic refusal) instead of
+    dumping a traceback for an outcome the tool was designed to produce."""
+    import argparse
+
+    from tortoise.__main__ import _cmd_rebuild
+
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "cli_refuse.db")
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "sentinel",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(log_dir, "events.jsonl"),
+                   _point_added("sentinel"), full[:full.index('"op"')])
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=db_path))
+    assert rc == 1, "the refusal must exit non-zero"
+    err = capsys.readouterr().err
+    assert "Refused:" in err, err
+    assert "resurrect" in err, err

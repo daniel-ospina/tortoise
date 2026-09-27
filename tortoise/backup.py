@@ -137,7 +137,7 @@ def restore(backup_dir: str, db_path: str,
             FalkorProjection,
             journal_hard_delete_seqs,
         )
-        from tortoise.log import EventLog
+        from tortoise.log import EventLog, refuse_torn_tail_revival
         # RDB-first: open the snapshot directly — it holds the full graph
         # incl. SDK-created points that never made it into events.jsonl.
         if db_file.exists():
@@ -163,7 +163,16 @@ def restore(backup_dir: str, db_path: str,
             # HARD-DELETED afterwards (#3722 review P2). A fold failure is
             # logged, never raised: restore must not abort on one unreplayable
             # link.
-            records = EventLog(events_path).read_all()
+            log = EventLog(events_path)
+            records = log.read_all()
+            # #3316: the JSONL fallback is the FOURTH whole-journal replay
+            # engine, so it refuses the same journal the other three do. A
+            # torn trailing removal record was dropped by ``read_all`` and the
+            # state it removed would come back live on the replay below, so
+            # refuse BEFORE the fold — the RDB path above already returned
+            # when the snapshot itself carried the graph, and nothing has been
+            # applied yet here.
+            refuse_torn_tail_revival(log.torn_tail_revival_records())
             hard_delete_seqs = journal_hard_delete_seqs(records)
             deferred_links: list[tuple[int, dict]] = []
             for seq, ev in enumerate(records):

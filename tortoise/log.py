@@ -98,6 +98,50 @@ def torn_tail_revival_records(raws) -> list[str]:
     return [r for r in raws if torn_record_may_revive_state(r)]
 
 
+def describe_torn_tail_revival(revival_records) -> str:
+    """The legible record types of *revival_records*, for an operator message.
+
+    A tear before the ``type`` field is named ``<unreadable>`` — the state it
+    dropped cannot even be identified, so it is reported as such rather than
+    omitted.
+    """
+    return ", ".join(sorted({
+        record_type_from_partial(r) or "<unreadable>"
+        for r in (revival_records or [])
+    }))
+
+
+class TornTailResurrectionError(RuntimeError):
+    """A replay was refused because its journal had dropped a removal record.
+
+    Subclasses :exc:`RuntimeError` so existing ``except RuntimeError`` callers
+    keep their contract; it is a distinct type so the operator surfaces can
+    turn it into a message instead of a traceback (``tortoise rebuild``).
+    """
+
+
+def refuse_torn_tail_revival(revival_records) -> None:
+    """Raise when dropping a torn tail would RESURRECT removed state (#3316).
+
+    *revival_records* is the already-classified output of
+    :func:`torn_tail_revival_records` / :meth:`EventLog.torn_tail_revival_records`.
+    A truncated record cannot be reconstructed, so the only faithful replay is
+    no replay at all: the caller MUST invoke this BEFORE any wipe or fold — a
+    verdict after the mutation cannot un-apply it. The raise is the intended
+    outcome for such a journal, not a crash; nothing is changed on disk.
+    """
+    revival = list(revival_records or [])
+    if not revival:
+        return
+    raise TornTailResurrectionError(
+        "refusing to replay: the journal's torn trailing record is a "
+        f"removal/terminal record ({describe_torn_tail_revival(revival)}); "
+        "replaying without it would resurrect the state it removed (#3316). "
+        "The graph was NOT touched — repair or truncate the journal, then "
+        "retry."
+    )
+
+
 class EventLog:
     def __init__(self, path: str | Path):
         self.path = Path(path)

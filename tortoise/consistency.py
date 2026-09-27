@@ -1088,7 +1088,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
     from tortoise.log import (
         TORN_TAIL_REVIVAL_EVENT_TYPES,
         EventLog,
-        record_type_from_partial,
+        describe_torn_tail_revival,
     )
 
     log = EventLog(log_path)
@@ -1116,8 +1116,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # rather than rebuilding a graph that serves removed state as current.
     revival = log.torn_tail_revival_records()
     if revival:
-        kinds = ", ".join(sorted({record_type_from_partial(r) or "<unreadable>"
-                                 for r in revival}))
+        kinds = describe_torn_tail_revival(revival)
         return {"recovered": False, "log_points": len(events), "db_points": 0,
                 "reason": (f"refusing to replay {files[0]}: the trailing record "
                            f"is torn ({kinds}); its loss would resurrect "

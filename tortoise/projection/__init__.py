@@ -2335,21 +2335,13 @@ def _refuse_revival_torn_tail(revival_records) -> None:
     the only sound behaviour is to not rebuild at all.
 
     Callers MUST invoke this BEFORE any wipe/replay — a verdict after the
-    mutation cannot un-apply it.
+    mutation cannot un-apply it. The classification and the message live in
+    :mod:`tortoise.log` so every replay engine (``rebuild`` / ``rebuild_all`` /
+    ``recover_from_log`` / ``backup.restore``) refuses through ONE home.
     """
-    revival_records = list(revival_records or [])
-    if not revival_records:
-        return
-    from tortoise.log import record_type_from_partial
+    from tortoise.log import refuse_torn_tail_revival
 
-    kinds = ", ".join(sorted({record_type_from_partial(r) or "<unreadable>"
-                              for r in revival_records}))
-    raise RuntimeError(
-        f"refusing to rebuild: the journal's torn trailing record is a "
-        f"removal/terminal record ({kinds}); replaying without it would "
-        f"resurrect the state it removed (#3316). The graph was NOT "
-        f"touched — repair or truncate the journal, then retry."
-    )
+    refuse_torn_tail_revival(revival_records)
 
 
 def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
