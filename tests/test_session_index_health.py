@@ -200,31 +200,44 @@ def test_reconcile_converges_on_crlf_files(env, sdk):
     assert rep2["reindex"] == {}
 
 
-def test_doctor_includes_session_indexing(env, capsys, monkeypatch):
-    """doctor surfaces the session-indexing check (corpus empty → warn)."""
+def test_doctor_includes_session_indexing(env, capsys, monkeypatch, tmp_path):
+    """doctor surfaces the session-indexing check (corpus empty → warn).
+
+    Hermetic on the GRAPH-AWARE branch (#5815): TORTOISE_DB_PATH pins a seeded
+    embedded target so the row is rendered from the live projection regardless
+    of the host. The test previously read the ambient DB — it passed on a
+    developer host that owned one and failed on CI, which is why the row's
+    absence looked like a flake.
+    """
     from tortoise.__main__ import main
+    from tortoise.sdk import TortoiseSDK
+
+    db_path = tmp_path / "doctor_indexing.db"
+    # `_get_proj()` is enough to create the DB FILE the #2204 guard tests for,
+    # and costs ~1s — `create_point` costs ~60s here (it loads embedding
+    # weights), so do not use it merely to materialize the file.
+    sdk = TortoiseSDK(db_path=str(db_path))
+    sdk._get_proj()
+    sdk.close()
+    assert db_path.is_file()
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(db_path))
 
     rc = main(["doctor"])
     out = capsys.readouterr().out
+
+    assert "not set up yet" not in out  # the GRAPH-AWARE branch really ran
     assert "Session indexing" in out
     assert "corpus empty" in out
     assert rc in (0, 1)
 
 
-def test_doctor_surfaces_session_indexing_before_init(
-        env, capsys, monkeypatch, tmp_path):
-    """PIN (#5815): the session-index row must render on a NEVER-INITIALIZED
-    machine — no Tortoise DB file at the resolved target.
+def _isolate_uninitialized(monkeypatch, tmp_path):
+    """Force doctor onto the #2204 pre-init path, deterministically.
 
-    The row nested inside the graph-health `else:` under the #2204 pre-init
-    guard, so on a no-DB host (CI, or a fresh machine — exactly where `doctor`
-    is first run) the check silently vanished and its contract went unmet.
-    HOME + the canonical default are isolated so the pre-init path is taken
-    deterministically, and #2204's side-effect-free rule is asserted: doctor
-    must not create the state it only inspects.
+    Clears every DB env var, isolates HOME, and patches the canonical default
+    so the resolved target has no DB file no matter what the host owns.
     """
     from tortoise import config as _config
-    from tortoise.__main__ import main
 
     for var in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FALKORDB_HOST",
                 "FALKORDB_PORT", "FALKORDB_PASSWORD"):
@@ -233,6 +246,23 @@ def test_doctor_surfaces_session_indexing_before_init(
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / ".tortoise" / "tortoise.db"))
 
+
+def test_doctor_surfaces_session_indexing_before_init(
+        env, capsys, monkeypatch, tmp_path):
+    """PIN (#5815): the session-index row must render on a NEVER-INITIALIZED
+    machine — no Tortoise DB file at the resolved target.
+
+    The row nested inside the graph-health block under the #2204 pre-init
+    guard, so on a no-DB host (CI, or a fresh machine — exactly where `doctor`
+    is first run) the check silently vanished and its contract went unmet. The
+    isolation keeps the pre-init path deterministic, and #2204's
+    side-effect-free rule is asserted: doctor must not create the DB it only
+    inspects.
+    """
+    from tortoise.__main__ import main
+
+    _isolate_uninitialized(monkeypatch, tmp_path)
+
     rc = main(["doctor"])
     out = capsys.readouterr().out
 
@@ -240,7 +270,105 @@ def test_doctor_surfaces_session_indexing_before_init(
     assert "corpus empty" in out, out
     assert "not set up yet" in out  # the pre-init branch really was taken
     assert rc == 0  # #2204: a missing DEFAULT target is the expected first run
-    assert not (tmp_path / ".tortoise").exists()  # no state created
+    # The DB artifact the #2204 guard is about. The whole `~/.tortoise` dir is
+    # NOT a valid assertion: `tortoise.hosted_api`'s module-level AuditLogger
+    # creates it under HOME at import (audit_events.AuditLogger.__init__), which
+    # doctor triggers via an import — so the dir's absence only proves the
+    # import was cached.
+    assert not (tmp_path / ".tortoise" / "tortoise.db").exists()
+
+
+def test_doctor_session_indexing_before_init_reports_unindexed_corpus(
+        env, capsys, monkeypatch, tmp_path):
+    """PIN (#5815): a POPULATED corpus on a never-initialized target warns —
+    it must not fail.
+
+    With no graph every corpus file is unindexed BY CONSTRUCTION, so grading
+    the delta would fail `doctor` on every fresh machine the #2204 contract
+    says must pass (rc 0) — reintroducing the false alarm this check exists to
+    avoid. That is a deliberate departure from #280/#793's "delta > 0 → fail",
+    recorded as an `OVERRIDES:` ruling on #5815; this test pins the ruling so a
+    future lane cannot "restore" the ❌ and re-break the fresh-install case.
+    """
+    from tortoise.__main__ import main
+
+    _isolate_uninitialized(monkeypatch, tmp_path)
+    _write_session(env, "sess-a")  # one corpus file, no graph to index it
+
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Session indexing" in line)
+
+    assert "1 corpus file," in row, row  # singular, not "1 corpus files"
+    assert "none indexed" in row, row
+    assert "⚠️" in row and "❌" not in row, row
+    assert rc == 0, out  # a never-initialized target must not fail doctor
+    assert not (tmp_path / ".tortoise" / "tortoise.db").exists()
+
+
+def test_doctor_session_indexing_check_unavailable_is_a_warning(
+        env, capsys, monkeypatch, tmp_path):
+    """A corpus that cannot be scanned degrades to ⚠️, never a traceback and
+    never rc 1 (the fallback row's own error path)."""
+    import tortoise.session_indexer as _si
+    from tortoise.__main__ import main
+
+    _isolate_uninitialized(monkeypatch, tmp_path)
+
+    def _boom(*_a, **_k):
+        raise OSError("corpus unreadable")
+
+    monkeypatch.setattr(_si, "corpus_files", _boom)
+
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+
+    assert "Session indexing" in out, out
+    assert "check unavailable" in out, out
+    assert "corpus unreadable" in out, out
+    assert rc == 0, out
+
+
+def test_doctor_session_indexing_renders_when_target_unresolved(
+        env, capsys, monkeypatch, tmp_path):
+    """PIN (#5815): the row renders even when the target never RESOLVES.
+
+    An unsupported-scheme --db makes step 3 unreachable (`target is None`).
+    Before the single-seam fix the row existed only inside step 3, so its
+    presence was coupled to a different check's execution — the #5815 defect
+    class in a second state. The corpus needs no graph, so it is reported.
+    """
+    from tortoise.__main__ import main
+
+    _isolate_uninitialized(monkeypatch, tmp_path)
+
+    rc = main(["doctor", "--db", "bolt://user:sup3rsekrit@host:7687/g"])
+    out = capsys.readouterr().out
+
+    assert "Session indexing" in out, out
+    assert "graph unavailable" in out, out
+    assert "sup3rsekrit" not in out  # credentials still never reach stdout
+    assert rc == 1  # the unresolved target is the config error, not this row
+
+
+def test_doctor_session_indexing_renders_when_graph_unreachable(
+        env, capsys, monkeypatch, tmp_path):
+    """PIN (#5815): the row renders when an EXISTING target cannot be opened
+    (here a docker:// URI on a dead port — the routine operator case).
+
+    Step 3 raises before it can append the graph-aware row; the single seam
+    still renders the corpus state instead of dropping the check.
+    """
+    from tortoise.__main__ import main
+
+    _isolate_uninitialized(monkeypatch, tmp_path)
+
+    rc = main(["doctor", "--db", "docker://:@127.0.0.1:59999/test_doctor"])
+    out = capsys.readouterr().out
+
+    assert "Session indexing" in out, out
+    assert "graph unavailable" in out, out
+    assert rc == 1
 
 
 # ── duplicate sessionIds (#280 review P2) ────────────────────────────

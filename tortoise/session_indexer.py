@@ -491,7 +491,24 @@ def session_corpus_dir() -> Path:
     return Path.home() / ".tortoise" / "docs" / "conversations"
 
 
+def corpus_files(directory: str | Path | None = None) -> list[Path]:
+    """Canonical session-corpus ``*.md`` listing (#5815).
 
+    ONE definition of "what the session corpus is". The enumeration used to be
+    duplicated — ``TortoiseSDK.session_index_health`` and `doctor`'s
+    corpus-only fallback row each did their own ``session_corpus_dir()`` +
+    ``rglob("*.md")`` — and two owners of this definition is the drift class
+    PR #793 spent six review rounds killing (a new filter, subtree exclusion,
+    or corpus env var would make the two counts disagree with no test able to
+    catch it). Both callers now share this function.
+
+    Returns the sorted listing, or an empty list when the directory does not
+    exist (a missing corpus is an empty corpus, never an error).
+    """
+    dir_path = Path(directory) if directory is not None else session_corpus_dir()
+    if not dir_path.is_dir():
+        return []
+    return sorted(dir_path.rglob("*.md"))
 
 
 def extract_session_id(file_path: str) -> str | None:

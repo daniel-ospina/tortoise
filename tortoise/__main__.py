@@ -6475,44 +6475,86 @@ def _cmd_index_github(args):
         indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
-#: #280 check 4 — the session-index row, rendered from the SAME literal in
-#: both graph states so the pre-init and live verdicts can never drift.
+#: #280 check 4 — the empty-corpus detail. Rendered from this ONE literal by
+#: both the graph-aware branch and the corpus-only fallback (#5815), so the
+#: empty-corpus verdict cannot drift between them. The corpus ENUMERATION is
+#: shared the same way, via `session_indexer.corpus_files`. Only the non-empty
+#: verdicts differ, deliberately: a corpus-only row cannot grade an index that
+#: does not exist yet, so it warns while the graph-aware row may fail.
 _SESSION_INDEX_EMPTY_DETAIL = (
     "corpus empty — nothing indexed (expected for new setups)"
 )
 
+#: Why the graph-aware session-index verdict is unavailable, when it is. Set
+#: by `_cmd_doctor` and consumed by `_session_index_rows_without_graph`.
+_SESSION_INDEX_REASONS = ("pre-init-default", "pre-init-configured",
+                          "graph-unavailable")
 
-def _session_index_rows_without_graph() -> list[tuple[str, str, str]]:
-    """Session-indexing rows for a NEVER-INITIALIZED target (#5815).
 
-    The check lives in the graph-health `else:` branch, which the #2204
-    pre-init guard SKIPS when no Tortoise DB file exists. That made the row
-    vanish on exactly the machines `doctor` is built for — a fresh install and
-    CI — while a developer host with a DB rendered it, so the gap read as a
-    flake. The corpus is reachable without a graph, so the row is rendered
-    from a corpus-only scan here.
+def _session_index_rows_without_graph(
+        reason: str = "graph-unavailable") -> list[tuple[str, str, str]]:
+    """Session-indexing row when no graph-aware verdict was produced (#5815).
 
-    Verdict is ⚠️, never ❌: with no graph every corpus file is unindexed BY
-    CONSTRUCTION, so the pre-init row reports the corpus state rather than
-    grading an index that cannot exist yet — this keeps the #2204 contract
-    (a missing DEFAULT target is the expected first-run state, rc 0) intact.
-    No SDK / projection is constructed: the #2204 guard exists so doctor never
+    `doctor` rendered the row inside the graph-health block, so the row's
+    EXISTENCE was coupled to a different check's execution and it vanished in
+    every state where that block did not run or raised: no Tortoise DB file
+    (fresh install, CI — the #5815 bug), an unresolved target, an unopenable
+    embedded DB, an unreachable URI. The caller renders this row from ONE
+    post-graph seam instead, so the row is structurally exactly-once in every
+    target state rather than branch-locally present.
+
+    `reason` selects wording only, never polarity — every row here is ⚠️:
+
+    * ``pre-init-default`` — the canonical DEFAULT target has no DB file, the
+      expected first-run state (#2204, rc 0). Keeps the shared empty-corpus
+      detail and the `tortoise init` remediation.
+    * ``pre-init-configured`` — an EXPLICITLY CONFIGURED target has no DB file.
+      #2204's verdict split grades that a config error (❌ + rc 1 on the
+      `Graph: health` row), so this row must not narrate it as a first run nor
+      advise `tortoise init` at a path the user did not choose.
+    * ``graph-unavailable`` — the target did not resolve, or the projection /
+      status call raised. The corpus is reported, never graded.
+
+    ⚠️-not-❌ on a NON-empty corpus is a deliberate departure from #280/#793's
+    "delta > 0 → fail" contract, and it is deliberate for one reason: on a
+    never-initialized target every corpus file is unindexed BY CONSTRUCTION, so
+    failing here would fail every `doctor` run on the fresh machines #2204
+    rules must pass (rc 0) — reintroducing the false alarm this check exists to
+    avoid. Recorded as an `OVERRIDES:` ruling on issue #5815. Do not "restore"
+    the ❌ without reopening that decision.
+
+    No SDK or projection is constructed: the #2204 guard exists so doctor never
     creates state on a target it only inspects.
     """
-    from pathlib import Path
-
-    from tortoise.session_indexer import session_corpus_dir
+    from tortoise.session_indexer import corpus_files
     try:
-        corpus = Path(session_corpus_dir())
-        files = sorted(corpus.rglob("*.md")) if corpus.is_dir() else []
+        files = corpus_files()
     except Exception as e:
         return [("Session indexing", "⚠️", f"check unavailable: {str(e)[:60]}")]
-    if not files:
-        return [("Session indexing", "⚠️", _SESSION_INDEX_EMPTY_DETAIL)]
+    n = len(files)
+    plural = "" if n == 1 else "s"
+    if reason == "pre-init-default":
+        if n == 0:
+            return [("Session indexing", "⚠️", _SESSION_INDEX_EMPTY_DETAIL)]
+        return [("Session indexing", "⚠️",
+                 f"{n} corpus file{plural}, none indexed — no graph at the "
+                 "resolved target yet (run `tortoise init`, then `tortoise "
+                 "index sessions`)")]
+    if reason == "pre-init-configured":
+        if n == 0:
+            return [("Session indexing", "⚠️",
+                     "corpus empty — nothing indexed "
+                     "(no graph at the configured target)")]
+        return [("Session indexing", "⚠️",
+                 f"{n} corpus file{plural}, none indexed — no graph at the "
+                 "configured target (fix the configured target, or run "
+                 "`tortoise init`)")]
+    if n == 0:
+        return [("Session indexing", "⚠️",
+                 "corpus empty — nothing indexed (graph unavailable)")]
     return [("Session indexing", "⚠️",
-             f"{len(files)} corpus files, none indexed — no graph at the "
-             "resolved target yet (run `tortoise init`, then `tortoise index "
-             "sessions`)")]
+             f"{n} corpus file{plural}, not graded — graph unavailable "
+             "(see the `Graph: health` row)")]
 
 
 def _cmd_doctor(args):
@@ -6622,6 +6664,12 @@ def _cmd_doctor(args):
     # 3. Graph health — verify the SAME resolved target above (probe + check
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
+    #
+    # #5815: WHY the graph-aware session-index verdict may not appear. Set
+    # below and consumed by ONE post-graph seam after this block, so the row
+    # renders in every target state instead of only the states in which this
+    # block happens to complete.
+    _session_index_reason = "graph-unavailable"
     if target is not None:
         # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
         # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
@@ -6669,6 +6717,12 @@ def _cmd_doctor(args):
         if not _initialized:
             from tortoise.config import DEFAULT_DB_PATH, _abs
             _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            # #5815: grade the corpus against the #2204 verdict split — a
+            # missing DEFAULT target is the expected first run, a missing
+            # configured target is a config error and must not be narrated as
+            # a first run.
+            _session_index_reason = ("pre-init-default" if _is_default_target
+                                     else "pre-init-configured")
             _icon = "⚠️" if _is_default_target else "❌"
             _detail = (
                 f"not set up yet — no Tortoise DB at {target}"
@@ -6678,11 +6732,6 @@ def _cmd_doctor(args):
                 "TORTOISE_DB_PATH / --db."
             )
             results.append(("Graph: health", _icon, _detail))
-            # #280 check 4 / #5815: the session-index row MUST also render here.
-            # It sits in the `else:` below (it needs the open projection to
-            # read indexed Events), so before this call the row was skipped
-            # ENTIRELY on a no-DB machine — the fresh-install / CI case.
-            results.extend(_session_index_rows_without_graph())
         else:
             try:
                 from tortoise.sdk import TortoiseSDK
@@ -6729,6 +6778,17 @@ def _cmd_doctor(args):
                         sdk._proj.close()
             except Exception as e:
                 results.append(("Graph: health", "❌", str(e)[:60]))
+
+    # #280 check 4 / #5815 — ONE seam, exactly once. The session-index row used
+    # to be appended inside the graph-health block, so its EXISTENCE was
+    # coupled to a different check's execution: it disappeared whenever that
+    # block did not run or raised (no DB file → the #5815 fresh-install/CI
+    # case; `target is None`; an existing-but-unopenable embedded DB; an
+    # unreachable URI). The graph-aware verdict is authoritative when it ran;
+    # this corpus-only row speaks whenever it did not, from every target
+    # state. #2204 still holds — no projection is constructed to say this.
+    if not any(r[0] == "Session indexing" for r in results):
+        results.extend(_session_index_rows_without_graph(_session_index_reason))
 
     # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
     # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer
