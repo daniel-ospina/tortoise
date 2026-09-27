@@ -319,15 +319,17 @@ def _sha256(value: str) -> str:
 def _unsupported_scope(scope: str) -> list[str]:
     """Scope tokens this AS does not accept (empty ⇒ every token is accepted).
 
-    The ONE membership test against ``SCOPES_ACCEPTED``, shared by the DCR
-    gate (``register_client``) and the authorize/consent/mint gate
-    (``validate_scope``) so the two can never drift from the advertised set
-    (#3128).
+    The one membership test shared by the DCR gate (``register_client``) and
+    the authorize/consent/mint gate (``validate_scope``), so those two can
+    never drift from the advertised ``SCOPES_ACCEPTED`` set (#3128). The CIMD
+    document validator (``tortoise/cimd.py``) applies the same test through
+    its own ``supported_scopes`` argument, which is wired to this same
+    constant.
     """
     return [s for s in scope.split() if s not in SCOPES_ACCEPTED]
 
 
-def validate_scope(scope, *, default: str | None = None) -> str:
+def validate_scope(scope) -> str:
     """The authorize/consent/mint scope gate (#3128).
 
     Returns the canonical (space-delimited, single-spaced) scope string, or
@@ -342,18 +344,14 @@ def validate_scope(scope, *, default: str | None = None) -> str:
     default ``mcp`` registration would otherwise be silently narrowed — a
     user-visible revocation of a scope the AS advertises.
 
-    A blank/absent scope falls back to ``default`` and then to
-    ``SCOPES_SUPPORTED`` (RFC 6749 §3.3 pre-defined default). A non-string
-    scope is malformed ⇒ ``invalid_scope``.
+    A blank/absent scope falls back to ``SCOPES_SUPPORTED`` (RFC 6749 §3.3
+    pre-defined default). A non-string scope is malformed ⇒ ``invalid_scope``.
     """
     blank = scope is None or (isinstance(scope, str) and not scope.split())
-    resolved = default if blank else scope
-    if resolved is None or (isinstance(resolved, str) and not resolved.split()):
-        resolved = " ".join(SCOPES_SUPPORTED)
+    resolved = " ".join(SCOPES_SUPPORTED) if blank else scope
     if not isinstance(resolved, str):
         raise OAuthError(400, "invalid_scope", "scope must be a string.")
-    unknown = _unsupported_scope(resolved)
-    if unknown:
+    if _unsupported_scope(resolved):
         # Deliberately does NOT echo the requested tokens: the value is
         # attacker-controlled and lands in a redirect query string.
         raise OAuthError(400, "invalid_scope",
@@ -1735,6 +1733,24 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
         _log_and_capture(exc, where="refresh_grant pre-mint")
         raise OAuthTemporarilyUnavailable(
             "Temporary control-plane failure before token rotation — retry.") from None
+    # #3128: a refresh row minted before the scope gate (or made stale by a
+    # future narrowing of SCOPES_ACCEPTED) carries a scope the AS no longer
+    # accepts. The mint refuses it — but left as-is the presented token would
+    # be refused forever with no recovery signal. Revoke the poisoned
+    # credential and report terminal invalid_grant so the client re-authorizes
+    # (mirrors the lapsed-membership branch above).
+    try:
+        validate_scope(row.get("scope") or " ".join(SCOPES_SUPPORTED))
+    except OAuthError:
+        try:
+            cp.query("oauth_refresh_tokens", method="PATCH",
+                     filters=[("id", "eq", row["id"])],
+                     json_body={"revoked_at": _now_iso()})
+        except Exception as exc:  # correction #8: the single capture for this path
+            _log_and_capture(exc, where="poisoned-scope revoke")
+        raise OAuthError(400, "invalid_grant",
+                         "The refresh token's scope is no longer supported — "
+                         "re-run authorization.") from None
     try:
         out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
                             org_id=row["org_id"], scope=row.get("scope")

@@ -28095,8 +28095,7 @@ async def webhooks_stripe(request: Request):
 # operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
 # filings from this work: #3124 (the shared per-IP primitive + the generic
 # middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
-# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
-# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# keys on the proxy IP), #3134 (dated measurement of real DCR volume —
 # the 600/1200 aggregates are not load-validated). #3036 already covers
 # oauth_* token-table retention/GC.
 #

@@ -3146,6 +3146,8 @@ class TestScopeAllowList:
         assert r.status_code == 307, r.text
         assert "error=invalid_scope" in r.headers["location"]
         assert "state=st-3128" in r.headers["location"]
+        # the requested tokens are not reflected into the redirect query string
+        assert "admin" not in r.headers["location"]
 
     def test_consent_refuses_scope_outside_allow_list_and_mints_no_code(
             self, api_client, session_user):
@@ -3163,6 +3165,21 @@ class TestScopeAllowList:
         assert cp.tables.get("oauth_codes", []) == []
         assert cp.tables.get("oauth_access_tokens", []) == []
         assert cp.tables.get("oauth_refresh_tokens", []) == []
+
+    def test_consent_refuses_a_mixed_scope_not_just_an_unknown_one(
+            self, api_client, session_user):
+        """A request mixing a valid and an unknown token ('mcp admin') is
+        rejected whole, never narrowed to 'mcp' — an all/any inversion of the
+        membership test and the RFC 6749 §3.3 partial-ignore branch must both
+        fail this."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = self._consent(tc, reg, challenge, "mcp admin")
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert cp.tables.get("oauth_codes", []) == []
 
     def test_consent_refuses_a_non_string_scope(
             self, api_client, session_user):
@@ -3184,10 +3201,13 @@ class TestScopeAllowList:
         one — even from a caller that bypasses the request doors."""
         from tortoise.oauth import OAuthError, _issue_tokens
         _, cp = api_client
-        with pytest.raises(OAuthError) as exc:
-            _issue_tokens(cp, client_id="ct_3128", user_id=_U1,
-                          org_id="team-free-001", scope="admin", resource=None)
-        assert exc.value.error == "invalid_scope"
+        # A single unknown token AND a mixed one: the gate rejects the whole
+        # request rather than narrowing to the accepted subset.
+        for bad in ("admin", "mcp admin"):
+            with pytest.raises(OAuthError) as exc:
+                _issue_tokens(cp, client_id="ct_3128", user_id=_U1,
+                              org_id="team-free-001", scope=bad, resource=None)
+            assert exc.value.error == "invalid_scope"
         assert cp.tables.get("oauth_access_tokens", []) == []
         assert cp.tables.get("oauth_refresh_tokens", []) == []
 
@@ -3207,6 +3227,29 @@ class TestScopeAllowList:
         assert r.json()["error"] == "invalid_scope"
         assert [t["scope"] for t in cp.tables.get("oauth_access_tokens", [])] == []
         assert [t["scope"] for t in cp.tables.get("oauth_refresh_tokens", [])] == []
+
+    def test_a_legacy_refresh_row_is_revoked_not_looped(
+            self, api_client, session_user):
+        """A refresh row poisoned with an unadvertised scope is revoked and
+        refused as terminal invalid_grant — the client is told to re-authorize
+        instead of looping forever on an un-refreshable credential."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        tok = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                        verifier=flow["verifier"])
+        assert tok.status_code == 200, tok.text
+        for row in cp.tables["oauth_refresh_tokens"]:
+            row["scope"] = "admin"          # model the pre-gate stored value
+        rr = tc.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "refresh_token": tok.json()["refresh_token"],
+            "client_id": flow["client_id"]})
+        assert rr.status_code == 400, rr.text
+        assert rr.json()["error"] == "invalid_grant"
+        ref_rows = cp.tables["oauth_refresh_tokens"]
+        assert len(ref_rows) == 1                       # no rotation minted
+        assert ref_rows[0]["revoked_at"] is not None    # poisoned row is dead
 
     def test_allow_listed_scope_still_mints_the_expected_claim(
             self, api_client, session_user):
@@ -3250,4 +3293,7 @@ class TestScopeAllowList:
         assert tok.json()["scope"] == "mcp"
         acc = [t for t in cp.tables["oauth_access_tokens"]
                if t["revoked_at"] is None]
+        ref = [t for t in cp.tables["oauth_refresh_tokens"]
+               if t["revoked_at"] is None]
         assert [t["scope"] for t in acc] == ["mcp"]
+        assert [t["scope"] for t in ref] == ["mcp"]
