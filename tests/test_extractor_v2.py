@@ -1957,6 +1957,11 @@ class TestS5:
         is the collapsed name, not the truncated prefix — and the mint then
         fabricates a Point out of the participant name. The guard must key
         BOTH forms.
+
+        This is a PARTIAL-FIX guard, not a base-vs-head discriminator: `main`'s
+        full-name key already refuses this spelling (as the sentence above
+        says). It pins that the canonicalisation does not LOSE the collapsed
+        arm while gaining the truncated one.
         """
         name = "a" * 900 + " " * 200 + "b" * 50
         ref = v2._norm(name)
@@ -2027,20 +2032,64 @@ class TestS5:
             assert r["payload"]["points"] == [], length
 
     def test_over_long_duplicate_name_entity_is_never_minted(self):
-        """#5069 same-name duplicate: two emitted entities sharing a
-        >1000-char name collapse to one key in ``emitted_entity_keys`` (a set)
-        and must still shield it — the guard keys the NAME, so a same-pass
-        duplicate cannot re-open the mint.
+        """#5069 same-name duplicate: two entities that BOTH survive the
+        extractor's pre-existing ``(name, kind)`` dedup — the same >1000-char
+        name under DIFFERENT kinds — must still shield that name. The guard
+        keys the NAME, so a second emitted spelling cannot re-open the mint.
+
+        The kinds must differ: with an identical kind the extractor's own
+        ``(name, kind)`` dedup drops the second entity before the guard is
+        built, and the fixture then exercises only the single-entity path —
+        the inert-fixture defect the #5069 review caught. The assertions below
+        pin that BOTH entities were emitted.
         """
         long_name = "C" * 1100
         embed = {"entities": [{"name": long_name, "kind": "core:tool"},
-                              {"name": long_name, "kind": "core:tool"}],
+                              {"name": long_name, "kind": "core:concept"}],
                  "events": [], "points": [],
                  "operators": [{"src": long_name, "dst": "K",
                                 "op_type": "IMPL"}]}
         r = v2.execute_embed(embed, {}, session_id="s1")
+        assert len(r["payload"]["entities"]) == 2, (
+            "the fixture must emit BOTH entities or it cannot exercise the "
+            "duplicate-key guard")
         assert r["payload"]["operators"] == []
         assert r["payload"]["points"] == []
+
+    def test_raw_prefix_of_a_whitespace_straddling_name_is_never_minted(self):
+        """#5069 review (P1): the RAW ``_MAX_CONTENT`` prefix of a
+        whitespace-straddling name (``name[:1000]``) is the ONE input the raw
+        arm of ``emitted_entity_names`` is load-bearing for — the mint keys a
+        ref as ``_norm(ref[:1000])``, so this ref's key IS the name's raw arm.
+        Every other long-name fixture uses the full raw name or the collapsed
+        spelling, where the two arms coincide; a regression that built the
+        entity sets from the closure arm alone would leave those green. Driven
+        on BOTH the emitted and the #4716 graph-index legs.
+        """
+        name = "a" * 900 + " " * 200 + "b" * 50   # raw 1150, collapsed 951
+        ref = name[:v2._MAX_CONTENT]
+        # the fixture straddles: the RAW arm carries the ref, the closure arm
+        # does not — so this test discriminates the raw arm specifically.
+        assert v2._norm(ref) == v2._norm(name[:v2._MAX_CONTENT])
+        assert v2._norm(ref) != v2._norm(v2._norm(name)[:v2._MAX_CONTENT])
+        emitted = {"entities": [{"name": name, "kind": "core:tool"}],
+                   "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        r = v2.execute_embed(emitted, {}, session_id="s1")
+        assert r["payload"]["operators"] == []
+        assert r["payload"]["points"] == [], (
+            "a participant name was minted from the raw cap prefix")
+        indexed = {"entities": [], "events": [], "points": [],
+                   "operators": [{"src": ref, "dst": "K",
+                                  "op_type": "IMPL"}]}
+        search = {"entities": [{"id": "obj_r", "name": name,
+                                "kind": "core:plan"}],
+                  "events": [], "points": []}
+        r2 = v2.execute_embed(indexed, search, session_id="s1")
+        assert r2["payload"]["operators"] == []
+        assert r2["payload"]["points"] == [], (
+            "the graph-index leg re-opened with the raw cap prefix")
 
     def test_over_long_graph_index_entity_name_is_never_minted(self):
         """#5069: the #4716 graph-index leg of the guard carried the SAME

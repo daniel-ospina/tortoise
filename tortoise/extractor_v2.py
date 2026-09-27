@@ -2556,10 +2556,13 @@ def _endpoint_keys(ref: object) -> frozenset[str]:
     boundary is bidirectional. A sub-cap prefix of a name whose ``_norm`` window
     is NOT that name's own ``_MAX_CONTENT`` window keys apart and would still be
     minted; closing that needs prefix matching, which would refuse legitimate
-    edges whose text merely STARTS with an entity name. Conversely a ref equal to
-    the name's own truncated window collapses onto the same key and IS refused —
-    correctly, since its content is a truncation of the entity name. The residual
-    is recorded on #5069. Keying the
+    edges whose text merely STARTS with an entity name. Conversely a ref that
+    merely COINCIDES with the name's own truncated window while naming something
+    else is refused — e.g. entity ``"pytest" + " "*1200 + "suffix"`` with ref
+    ``"pytest"`` (the window ``_norm(name[:_MAX_CONTENT])`` is ``"pytest"``):
+    a legitimate edge ``main`` kept, now dropped. That is the accepted trade-off
+    of a finite key set pending prefix matching, NOT a correctness claim — the
+    residual is recorded on #5069. Keying the
     entity-name sets on the FULL name while ``_mint_endpoint`` keyed the
     truncated ref let a >1000-char participant name be minted as a claim Point
     (the OPERATOR REFERENCING hard rule's own failure mode); keying them on the

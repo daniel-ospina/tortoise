@@ -901,14 +901,19 @@ def test_cross_pass_discarded_entity_name_is_still_pruned():
 
 
 def test_discarded_over_long_point_content_is_pruned_on_both_legs():
-    """#5069 code-review (P1): ``_norm_variants`` must carry the UNTRUNCATED
-    ``_norm(raw)`` arm as well as the two truncated arms — the mint registers
-    that spelling as a resolution alias (``_full`` in ``_mint_endpoint``), so a
-    discarded >cap point whose full key is the only spelling the operator names
-    must still be pruned. Dropping the arm lets the operator survive and the mint
-    re-materialise the discarded content as a claim Point. Driven on BOTH legs
-    with an event that shares the point's truncated key (the collision that made
-    the missing arm reachable).
+    """#5069 code-review (P1): ``_resolution_variants`` must carry the
+    UNTRUNCATED ``_norm(raw)`` arm as well as the truncated key — the mint
+    registers that spelling as a resolution alias (``_full`` in
+    ``_mint_endpoint``), so a discarded >cap point whose full key is the only
+    spelling the operator names must still be pruned. Dropping the arm lets the
+    operator survive and the mint re-materialise the discarded content as a
+    claim Point. Driven on BOTH legs with an event that shares the point's
+    truncated key (the collision that made the missing arm reachable).
+
+    Note: the fixture's closure arm collapses onto the truncated key (the
+    content is whitespace-free), so this test pins arm 1, NOT the entity
+    closure arm — that arm must not exist on this surface at all (see
+    ``test_surviving_long_point_does_not_shield_a_discarded_prefix_point``).
     """
     long_point = "a" * 1000 + "Y"
     colliding_event = "a" * 1000 + "X"
@@ -937,6 +942,43 @@ def test_discarded_over_long_point_content_is_pruned_on_both_legs():
         assert [p["content"] for p in payload["points"]] == ["D"], (
             cross_pass, "the discarded point's content was re-materialised")
         assert payload["operators"] == []
+
+
+def test_surviving_long_point_does_not_shield_a_discarded_prefix_point():
+    """#5069 review (P1): the ENTITY closure arm of ``_norm_variants`` must NOT
+    leak onto the point/event SURVIVOR surface. A regular point's resolution
+    key is ``_norm(content[:_MAX_CONTENT])`` only — it never registers the
+    closure arm (``_full`` belongs to a MINTED endpoint). While
+    ``surviving_texts`` was built from ``_norm_variants``, a surviving >cap
+    point whose collapsed form truncates to exactly a DISCARDED point's content
+    shielded that content: the operator escaped ``gone`` and the mint
+    re-materialised the discarded text as a claim Point — the ``#2552``
+    resurrection the prune exists to prevent. Verified RED before the
+    entity/content key split (the operator survived and a 1000-char Point was
+    fabricated); GREEN once ``_content_texts``/``_item_text_variants`` key with
+    ``_resolution_variants``.
+    """
+    from tortoise import extractor_v2 as v2
+    survivor = "a" * 500 + " " * 900 + "b" * 600   # raw 2000, collapsed 1101
+    closure = v2._norm(survivor)[:v2._MAX_CONTENT]
+    assert len(v2._norm(survivor)) > v2._MAX_CONTENT
+    assert closure not in vg._content_texts(
+        {"entities": [], "events": [],
+         "points": [{"content": survivor, "pointKind": "statement"}]}), (
+        "a surviving point must not shield the closure arm of its own content")
+    el = {"entities": [],
+          "events": [],
+          "points": [{"content": survivor, "pointKind": "statement"},
+                     {"content": closure, "pointKind": "statement"}],
+          "operators": [{"src": closure, "dst": "K", "op_type": "IMPL"}]}
+    first = vg._item_id("points", 1, el["points"][1])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert out["operators"] == [], warnings
+    assert any("pruned" in w for w in warnings), warnings
+    payload, _res = _payload_of(out)
+    assert not any(p["content"] == closure for p in payload["points"]), (
+        "the discarded closure-arm content was re-materialised as a Point")
+    assert len(payload["points"]) == 1
 
 
 def test_a_genuinely_removed_item_still_fills_the_pool():

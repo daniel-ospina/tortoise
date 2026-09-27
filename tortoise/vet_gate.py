@@ -212,26 +212,33 @@ _MAX_CONTENT = 1000
 
 
 def _norm_variants(text: object) -> set[str]:
-    """Normalized forms the embedder can key an endpoint on.
+    """Normalized keys for an ENTITY-name identity — the mint's guard SUPERSET.
 
-    The mint transform ``_norm(x.strip()[:_MAX_CONTENT])`` applied to the raw
-    string and to its whitespace-collapsed form — plus the UNTRUNCATED
-    ``_norm(raw)`` alias the mint registers whenever truncation changed the key
-    (``_full`` in ``_mint_endpoint``; ``_resolve`` probes that spelling). A
-    removed item must be recognised under every form, or an operator on its
-    content escapes the prune and the text is re-materialised as a Point.
+    The mint transform ``M(x) = _norm(x.strip()[:_MAX_CONTENT])`` applied to the
+    raw string and to its whitespace-collapsed form — ``_endpoint_keys(x) = {M(x),
+    M(_norm(x))}``, the entity guard's own set ("the two SPELLINGS, not every
+    truncation") — PLUS the untruncated ``_norm(x)`` alias the mint registers for
+    a minted endpoint (``_full``; ``_resolve`` probes that spelling). So
+    ``_norm_variants(x) == _endpoint_keys(x) | {_norm(x)}``: a strict SUPERSET,
+    whose difference is exactly ``{_norm(x)}`` whenever that key is not already
+    one of the two guard arms.
 
-    This is a SUPERSET of ``extractor_v2._endpoint_keys`` — that set is
-    the mint's ENTITY guard (the two spellings, not every truncation of them);
-    this one additionally carries the resolution alias, because the prune must
-    match what the mint would key, not only what its guard refuses. The two are
-    equal whenever the untruncated alias is ALREADY one of the guard's two arms
-    — equivalently, whenever the whitespace-collapsed form is at most
-    ``_MAX_CONTENT`` characters, which covers every short input and every long
-    input whose whitespace collapses it under the cap; the alias is a genuinely
-    new key only when ``len(_norm(raw)) > _MAX_CONTENT``.
-    ``test_endpoint_key_set_matches_extractor`` pins the containment and the
-    exact difference.
+    Use this for **entity-name key sets only** (``removed_entity_names``,
+    ``present_entity_names``, ``prior_entity_keys``). Point/event/operator
+    CONTENT is keyed with :func:`_resolution_variants` (``{_norm(x), M(x)}``)
+    instead: relative to IT, the extra arm here is the ENTITY guard's
+    collapsed-closure ``M(_norm(x))``, which a regular point/event never
+    registers. Carrying it on a content SURVIVOR surface lets a surviving long
+    point shield an operator endpoint the mint cannot resolve — and the mint
+    then re-materialises a DISCARDED item as a claim Point (#5069 review, P1).
+
+    The two sets are equal only while the untruncated alias ``_norm(raw)`` is
+    ALREADY one of the guard's two arms; the difference is exactly
+    ``{_norm(raw)}`` otherwise. Do NOT decide that by length: ``.lower()`` can
+    LENGTHEN (``"İ"`` lowercases to two code points), so a raw string at or
+    under the cap can still normalise past it — compare the SETS, not the
+    lengths. ``test_endpoint_key_set_matches_extractor`` pins the containment
+    and the exact difference.
     """
     raw = str(text or "").strip()
     if not raw:
@@ -239,6 +246,25 @@ def _norm_variants(text: object) -> set[str]:
     return {_norm(raw),
             _norm(raw[:_MAX_CONTENT]),
             _norm(_norm(raw)[:_MAX_CONTENT])}
+
+
+def _resolution_variants(text: object) -> set[str]:
+    """The keys ``execute_embed`` RESOLVES point/event/operator CONTENT on.
+
+    ``_norm(x.strip()[:_MAX_CONTENT])`` — the mint's resolution key — plus the
+    UNTRUNCATED ``_norm(x)`` alias a minted endpoint registers (``_full`` in
+    ``_mint_endpoint``; ``_resolve`` probes that spelling). Deliberately NOT
+    :func:`_norm_variants`: that set additionally carries the ENTITY guard's
+    collapsed-closure arm, which a regular point/event never registers. On a
+    SURVIVOR surface that extra arm lets a surviving >cap point shield an
+    operator endpoint the mint cannot resolve, and the mint then fabricates a
+    claim Point from the DISCARDED text — the ``#2552`` failure the prune
+    exists to prevent (#5069 review, P1).
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return set()
+    return {_norm(raw), _norm(raw[:_MAX_CONTENT])}
 
 
 def _item_text(section: str, item: Mapping[str, Any]) -> str:
@@ -566,9 +592,12 @@ def _item_text_variants(section: str, item: Mapping[str, Any]) -> set[str]:
     materializes whatever text the operator wrote — so a point carrying both keys
     can be re-materialised from either. Only a survivor's CONTENT shields an
     endpoint; its name does not resolve in ``execute_embed``, so it must not.
+    Keyed with :func:`_resolution_variants` (the mint's RESOLUTION keys), never
+    :func:`_norm_variants` — see that helper for why the entity-closure arm must
+    not leak onto a content surface.
     """
-    return (_norm_variants(_item_text(section, item))
-            | _norm_variants(_item_content(section, item)))
+    return (_resolution_variants(_item_text(section, item))
+            | _resolution_variants(_item_content(section, item)))
 
 
 def _content_texts(embed_list: object) -> set[str]:
@@ -576,7 +605,7 @@ def _content_texts(embed_list: object) -> set[str]:
     surface (``_resolve`` keys ``point_ids``/``event_ids`` by content)."""
     out: set[str] = set()
     for section, _index, item in _iter_items(embed_list):
-        out |= _norm_variants(_item_content(section, item))
+        out |= _resolution_variants(_item_content(section, item))
     return out
 
 
@@ -641,14 +670,14 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     for key in ("src", "dst"):
         v = op.get(key)
         if v and str(v).strip():
-            out |= _norm_variants(v)
+            out |= _resolution_variants(v)
     if str(op.get("op_type", "")).upper() == "MITIGATES":
         target = op.get("target") or op.get("target_edge")
         if isinstance(target, dict):
             for key in ("src", "dst"):
                 v = target.get(key)
                 if v and str(v).strip():
-                    out |= _norm_variants(v)
+                    out |= _resolution_variants(v)
     return out
 
 
@@ -668,7 +697,10 @@ def removal_pool(before: object, after: object) -> dict:
     **A removal is an absent ITEM, not a text missing from a surface.** Every
     collected text is the identity *and* content of an item with no value-equal
     counterpart in ``after``, because the #2552 mint materialises whichever form
-    an operator wrote. Deriving the set from a surface difference would invent
+    an operator wrote. Each text is keyed with :func:`_resolution_variants` (the
+    mint's RESOLUTION keys); the ENTITY-closure arm belongs to
+    :func:`_norm_variants` and must not leak onto this CONTENT surface. Deriving
+    the set from a surface difference would invent
     removals for every surviving item that carries a ``name`` — a name is in the
     identity surface and not in the content surface — and prune operators naming
     a survivor.
@@ -681,8 +713,10 @@ def removal_pool(before: object, after: object) -> dict:
     does not resolve an endpoint on it. A present ENTITY's name does, for a
     different reason — the embedder drops an entity-named endpoint rather than
     minting a Point for it, so pruning would only mis-attribute the drop. That
-    shield covers only the names the mint's guard can match — see
-    :func:`apply_vet` for the exact criterion.
+    shield is keyed with :func:`_norm_variants`, a SUPERSET of the mint's guard
+    set (it also carries the mint's untruncated resolution alias), so it is
+    never NARROWER than the guard — see :func:`apply_vet` for the exact
+    criterion.
     """
     before_entities = _entity_map(before)
     after_entities = _entity_map(after)
