@@ -4,8 +4,10 @@ The slots let a pack shape extraction for its own domain while the engine stays
 pack-agnostic. Two rules from the #1026 ruling are load-bearing here and are
 tested as first-class behaviour rather than left implicit:
 
-  * ``entityCues`` is DECLARATIVE — its keys must name a kind this pack or core
-    already declares.
+  * ``entityCues`` is DECLARATIVE — its keys must be a kind REFERENCE that
+    RESOLVES: this pack's own kind, a core kind (bare), a bare kind declared by
+    exactly one other loaded pack, or ``namespace:kind`` / ``core:kind`` of a
+    loaded pack. See ``TestCrossPackResolution``.
   * ``entityPatterns``/``excludePatterns`` are REFUSED — "no name patterns;
     nothing is dropped at mint". The refusal carries its REASON, so an author
     arriving from a pattern-filtering design is told why at the point of
@@ -14,8 +16,8 @@ tested as first-class behaviour rather than left implicit:
 Mutation check (each assertion below must stay true): deleting the refusal
 branch in ``_validate`` turns the two ``TestUnknownAndRefusedKeys`` refusal
 tests from the named reason into a bare unknown-key error; deleting the shape
-check lets ``":kind"``, ``"ns:"`` and ``"a:b:c"`` pass unexamined by every
-pass.
+check makes ``":kind"``, ``"ns:"`` and ``"a:b:c"`` report only the generic
+"does not resolve", naming nothing about the malformation.
 
 Kind refs are checked at TWO levels, and the tests are split the same way:
 SHAPE in ``_validate`` (per-manifest — all it can decide alone), and
@@ -132,10 +134,11 @@ class TestEntityCues:
         assert _extraction_errors(entityCues={"Object": ["a thing"]}) == []
 
     def test_a_malformed_namespaced_ref_is_rejected(self):
-        """`":kind"`, `"ns:"` and `"a:b:c"` are not names any pack can
-        declare, so NO resolver will ever report them — this shape check is the
-        only thing that can. Returning True for "contains a colon" left all
-        three unchecked by every pass (review of PR #5647)."""
+        """`":kind"`, `"ns:"` and `"a:b:c"` are malformed as REFS. The
+        cross-pack resolver would report them only as the generic "does not
+        resolve to any known kind", which names nothing about the
+        malformation — this check names it, at the layer that drops the pack
+        first (review of PR #5647)."""
         for bad in (":kind", "ns:", "a:b:c", "   "):
             errors = _extraction_errors(entityCues={bad: ["a cue"]})
             assert errors, f"{bad!r} was accepted"

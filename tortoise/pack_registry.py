@@ -301,10 +301,11 @@ def _kind_ref_shape_error(ref: Any) -> str | None:
     every pack is loaded — the same division ``relations`` already uses, and
     the reason an unknown BARE name must NOT be rejected here.
 
-    What it does catch is the class no resolver can ever report: a malformed
-    namespaced ref (``":kind"``, ``"ns:"``, ``"a:b:c"``) is not a name
-    anything can declare, so returning True for "contains a colon" left it
-    unchecked by every pass (review of PR #5647).
+    What it catches is the MALFORMATION itself. ``_resolve_kind_ref`` would
+    report ``":kind"``, ``"ns:"`` and ``"a:b:c"`` only as the generic "does
+    not resolve to any known kind", which does not say what is wrong with them;
+    this check names it, at the per-manifest layer that drops the pack first
+    (review of PR #5647).
     """
     if not isinstance(ref, str) or not ref.strip():
         return "must be a non-empty string"
@@ -1117,9 +1118,9 @@ class PackRegistry:
                 # deliberately NOT `CORE_PREDICATES`. That set still carries
                 # MITIGATES, which ONTOLOGY v3.17 (#4937, the F1 ruling on
                 # #2552) RETIRED: `sdk.create_operator` refuses it, and the
-                # ontology's own changelog says that where the document and the
-                # code disagree, the DOCUMENT is right. Accepting it here would
-                # advertise, on the author-facing template, an edge the engine
+                # ontology's own PREAMBLE states that where the document and
+                # the code disagree, the DOCUMENT is right. Accepting it here
+                # would advertise, on the author-facing template, an edge the engine
                 # cannot build — and would make this slot BROADER than its own
                 # sibling. `CORE_PREDICATES` still admitting MITIGATES is a
                 # separate, pre-existing defect: #5322.
