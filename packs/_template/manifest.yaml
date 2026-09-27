@@ -192,33 +192,41 @@ extraction:
 #
 #   entityCues:        {kind: [surface cue, ...]} — the surface forms YOUR
 #                      domain writes this kind in (dev: "the .py module";
-#                      product-strategy: "our pricing page"). Every key MUST be
-#                      a kind this pack or core already declares — that is what
-#                      makes the slot declarative rather than a pattern filter.
+#                      product-strategy: "our pricing page"). The key must be a
+#                      kind reference that RESOLVES: this pack's own kind, a
+#                      core kind, a kind declared by exactly ONE other pack
+#                      (bare), or `namespace:kind` of a loaded pack. That is
+#                      what makes the slot declarative rather than a filter.
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
 #                      the domain's IMPL/NAND/MITIGATES phrasings.
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND | MITIGATES (closed set)
-#                        fromKind/toKind:  declared kinds
+#                        fromKind/toKind:  kind references, resolved as above
 #                        description:      one line of what the shape captures
 #   valueGate:         {keep: [...], drop: [...]} — what a VALUABLE utterance
 #                      looks like in this domain. Hints for the value brief: it
 #                      judges utterances and never removes an artefact.
-#   promptFragments:   ["..."] — pack-authored instruction snippets compiled
-#                      into the value brief. Capped at ~120 words per fragment
-#                      and ~600 total (a whitespace-word proxy, not a tokenizer).
+#   promptFragments:   ["..."] — pack-authored instruction snippets DECLARED
+#                      for the value brief. NOTE: no consumer reads the v3.1
+#                      slots yet — they validate and normalize, nothing more.
+#                      Capped on BOTH words and characters: ~120 words / 480
+#                      chars each, ~600 words / 2400 chars in total. The word
+#                      count is a proxy, not a tokenizer, which is why the
+#                      character bound exists alongside it.
 #
-# Example:
+# Example (the kinds are CORE, so this snippet validates as written — a pack's
+# own kinds must be declared in its *Kinds lists, and an `ns:kind` ref must
+# resolve to a loaded pack):
 #   extraction:
 #     entityCues:
-#       concept: ["the <domain> concept", "our <domain> approach"]
-#       artifact: ["the .py module", "the migration file"]
+#       Project: ["the <domain> initiative", "our <domain> rollout"]
+#       Document: ["the .py module", "the migration file"]
 #     relationTemplates:
 #       - predicate: addresses
 #         mechanism: IMPL
-#         fromKind: concept
-#         toKind: artifact
-#         description: "a concept implemented by an artefact"
+#         fromKind: Project
+#         toKind: Document
+#         description: "an initiative served by an artefact"
 #     valueGate:
 #       keep: ["design rationale", "a trade-off stated with its reason"]
 #       drop: ["logistics", "tool mechanics"]

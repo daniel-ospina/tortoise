@@ -205,8 +205,11 @@ CORE_PREDICATES = frozenset({"IMPL", "NAND", "MITIGATES"})
 # engine stays pack-agnostic: the pack drives the extractor, the extractor holds
 # no domain behaviour.
 #
-# ``entityCues`` is the DECLARATIVE slot — keyed by a kind the pack (or core)
-# already declares, so a cue can never name a kind the pack does not own.
+# ``entityCues`` is the DECLARATIVE slot — keyed by a KIND from the pack's
+# vocabulary (its own, core, or a kind that resolves to exactly one other
+# loaded pack), so a cue names a kind rather than a name pattern. SHAPE is
+# checked per-manifest; RESOLUTION is checked across packs after load_all(),
+# because a bare name is not decidable from one manifest alone.
 VALID_EXTRACTION_KEYS = frozenset({
     "active", "sourceTypes", "enforcement",
     "entityCues", "relationTemplates", "valueGate", "promptFragments",
@@ -243,14 +246,28 @@ REFUSED_EXTRACTION_KEYS = {
 MAX_PROMPT_FRAGMENT_TOKENS = 120
 MAX_PROMPT_FRAGMENTS_TOKENS = 600
 
+# Character bounds ALONGSIDE the word proxy. The proxy counts whitespace
+# tokens, so a whitespace-free blob of any size costs 1 — a minified payload or
+# a long single-line code fragment would sail through both word caps. These
+# bounds are what make the guard non-evadable by deleting the spaces.
+MAX_PROMPT_FRAGMENT_CHARS = 4 * MAX_PROMPT_FRAGMENT_TOKENS
+MAX_PROMPT_FRAGMENTS_CHARS = 4 * MAX_PROMPT_FRAGMENTS_TOKENS
+
+#: `valueGate` keys the template documents. A mistyped gate key is silent dead
+#: config of exactly the species the unknown-key rule exists to catch, so the
+#: neighbouring slot's strictness is matched here (review of PR #5647).
+VALID_VALUE_GATE_KEYS = frozenset({"keep", "drop"})
+
 
 def prompt_token_proxy(text: str) -> int:
     """Whitespace-word count as a PROXY for a token count.
 
-    Named "proxy" so no caller mistakes it for a token-accurate count: an
-    approximate cap is the right trade at manifest-load time, and the accurate
-    count belongs with the brief compiler (#954), which is where the budget is
-    actually spent.
+    Named "proxy" so no caller mistakes it for a token-accurate count. No
+    tokenizer is loaded at manifest-load time, and the cap is a guard against a
+    pack shipping a wall of prose into every brief it activates — not a budget
+    that must be exact. Pair it with a CHARACTER bound (see
+    ``MAX_PROMPT_FRAGMENT_CHARS``): a word count alone is evaded by removing
+    the spaces.
     """
     return len(text.split())
 
@@ -268,24 +285,34 @@ def _as_map(value: Any) -> dict:
 def _as_list(value: Any) -> list:
     """``value`` as a list, else ``[]`` — never raises, never splits a string.
 
-    ``list("abc")`` would silently become ``['a','b','c']``, which validation
-    would then report as three one-character cues; the isinstance guard keeps
-    the malformed input visible as a shape error instead.
+    ``list("abc")`` would silently become ``['a','b','c']``: the isinstance
+    guard keeps malformed input visible as the shape error validation already
+    reports for it, instead of manufacturing data the manifest never expressed.
     """
     return list(value) if isinstance(value, list) else []
 
 
-def _is_declared_kind_ref(ref: Any, pack_kinds: set[str]) -> bool:
-    """Is ``ref`` a bare kind declared here or in core, or an ``ns:kind`` ref?
+def _kind_ref_shape_error(ref: Any) -> str | None:
+    """Why ``ref`` is not a well-formed kind reference, else ``None``.
 
-    Namespaced refs are resolved by ``_validate_cross_pack_refs``, which owns
-    the "declared by exactly ONE other pack" rule — so this check must not
-    duplicate it, and must not pre-empt it by rejecting the prefix here.
+    SHAPE ONLY — deliberately not a resolution check. Whether a reference
+    RESOLVES is a cross-pack question (a bare name may belong to exactly one
+    other loaded pack), so it is decided by ``_validate_cross_pack_refs`` once
+    every pack is loaded — the same division ``relations`` already uses, and
+    the reason an unknown BARE name must NOT be rejected here.
+
+    What it does catch is the class no resolver can ever report: a malformed
+    namespaced ref (``":kind"``, ``"ns:"``, ``"a:b:c"``) is not a name
+    anything can declare, so returning True for "contains a colon" left it
+    unchecked by every pass (review of PR #5647).
     """
-    return (
-        (isinstance(ref, str) and (ref in pack_kinds or ref in CORE_KINDS))
-        or (isinstance(ref, str) and ":" in ref)
-    )
+    if not isinstance(ref, str) or not ref.strip():
+        return "must be a non-empty string"
+    if ":" in ref:
+        ns, _, kind = ref.partition(":")
+        if not ns.strip() or not kind.strip() or ":" in kind:
+            return "is not a well-formed 'namespace:kind' reference"
+    return None
 
 
 # ── Pack data model ───────────────────────────────────────────────────────
@@ -330,6 +357,14 @@ class PackManifest:
                 "relations": {},
                 "chains": {},
             },
+            # v3.1 slots (#1026): present here too, so a manifest constructed
+            # directly (tests, tooling) has the SAME shape _normalize_extraction
+            # produces — a consumer indexing a slot must not KeyError on one of
+            # the two paths. Pinned by test_dataclass_default_matches_normalize.
+            "entityCues": {},
+            "relationTemplates": [],
+            "valueGate": {},
+            "promptFragments": [],
         }
     )
 
@@ -1038,21 +1073,18 @@ class PackRegistry:
                     f"{', '.join(sorted(VALID_EXTRACTION_KEYS))})"
                 )
 
-        # entityCues: {kind: [surface cue, ...]} — the DECLARATIVE slot. Every
-        # key must be a kind this pack or core already declares, which is what
-        # makes the slot declarative rather than a name-pattern filter.
+        # entityCues: {kind: [surface cue, ...]} — the DECLARATIVE slot. The
+        # key must be a WELL-FORMED kind reference; whether it RESOLVES is a
+        # cross-pack question, answered in _validate_cross_pack_refs.
         entity_cues = extraction.get("entityCues")
         if entity_cues is not None and not isinstance(entity_cues, dict):
             errors.append(
                 "extraction.entityCues must be a map of kind -> [cue, ...]")
         elif isinstance(entity_cues, dict):
             for kind, cues in entity_cues.items():
-                if not _is_declared_kind_ref(kind, all_pack_kinds):
-                    errors.append(
-                        f"extraction.entityCues: '{kind}' is not a declared kind "
-                        f"in this pack — entityCues keys must name a kind this "
-                        f"pack (or core) declares"
-                    )
+                shape = _kind_ref_shape_error(kind)
+                if shape:
+                    errors.append(f"extraction.entityCues: '{kind}' {shape}")
                 if not isinstance(cues, list) or not all(
                         isinstance(c, str) and c.strip() for c in cues):
                     errors.append(
@@ -1089,23 +1121,29 @@ class PackRegistry:
                     )
                 for side in ("fromKind", "toKind"):
                     ref = tpl.get(side)
-                    if ref is not None and not _is_declared_kind_ref(
-                            ref, all_pack_kinds):
+                    if ref is None:
+                        continue
+                    shape = _kind_ref_shape_error(ref)
+                    if shape:
                         errors.append(
-                            f"extraction.relationTemplates[{i}].{side}: '{ref}' is "
-                            f"not a declared kind in this pack"
+                            f"extraction.relationTemplates[{i}].{side}: "
+                            f"'{ref}' {shape}"
                         )
 
         # valueGate: this pack's keep/drop HINTS for the value brief — what a
-        # valuable utterance looks like in this domain. Shape only is checked
-        # here; the sub-vocabulary belongs to the brief compiler (#954), which
-        # is the consumer. It is NOT a mint-time drop rule: no hint can remove
-        # an artefact, only inform the utterance-level value gate.
+        # valuable utterance looks like in this domain. It is NOT a mint-time
+        # drop rule: no hint can remove an artefact, only inform the
+        # utterance-level value gate.
         value_gate = extraction.get("valueGate")
         if value_gate is not None and not isinstance(value_gate, dict):
             errors.append("extraction.valueGate must be a map")
         elif isinstance(value_gate, dict):
             for gkey, gval in value_gate.items():
+                if gkey not in VALID_VALUE_GATE_KEYS:
+                    errors.append(
+                        f"extraction.valueGate: unknown key '{gkey}' (allowed: "
+                        f"{', '.join(sorted(VALID_VALUE_GATE_KEYS))})"
+                    )
                 if not isinstance(gval, list) or not all(
                         isinstance(g, str) and g.strip() for g in gval):
                     errors.append(
@@ -1113,13 +1151,16 @@ class PackRegistry:
                         f"non-empty strings"
                     )
 
-        # promptFragments: pack-authored instruction snippets compiled into the
-        # value brief. Capped so a pack cannot inflate every brief it activates.
+        # promptFragments: pack-authored instruction snippets declared for the
+        # value brief. Capped on BOTH words and characters so a pack cannot
+        # inflate every brief it activates — and cannot evade the word cap by
+        # shipping one whitespace-free blob.
         fragments = extraction.get("promptFragments")
         if fragments is not None and not isinstance(fragments, list):
             errors.append("extraction.promptFragments must be a list")
         elif isinstance(fragments, list):
             total = 0
+            total_chars = 0
             for i, frag in enumerate(fragments):
                 if not isinstance(frag, str) or not frag.strip():
                     errors.append(
@@ -1128,16 +1169,22 @@ class PackRegistry:
                     )
                     continue
                 cost = prompt_token_proxy(frag)
+                chars = len(frag)
                 total += cost
-                if cost > MAX_PROMPT_FRAGMENT_TOKENS:
+                total_chars += chars
+                if (cost > MAX_PROMPT_FRAGMENT_TOKENS
+                        or chars > MAX_PROMPT_FRAGMENT_CHARS):
                     errors.append(
-                        f"extraction.promptFragments[{i}] is ~{cost} tokens "
-                        f"(cap {MAX_PROMPT_FRAGMENT_TOKENS})"
+                        f"extraction.promptFragments[{i}] is ~{cost} words / "
+                        f"{chars} chars (caps {MAX_PROMPT_FRAGMENT_TOKENS} "
+                        f"words, {MAX_PROMPT_FRAGMENT_CHARS} chars)"
                     )
-            if total > MAX_PROMPT_FRAGMENTS_TOKENS:
+            if (total > MAX_PROMPT_FRAGMENTS_TOKENS
+                    or total_chars > MAX_PROMPT_FRAGMENTS_CHARS):
                 errors.append(
-                    f"extraction.promptFragments total ~{total} tokens "
-                    f"(cap {MAX_PROMPT_FRAGMENTS_TOKENS})"
+                    f"extraction.promptFragments total ~{total} words / "
+                    f"{total_chars} chars (caps {MAX_PROMPT_FRAGMENTS_TOKENS} "
+                    f"words, {MAX_PROMPT_FRAGMENTS_CHARS} chars)"
                 )
 
         # Validate connectors
@@ -1289,6 +1336,41 @@ class PackRegistry:
                             f"(core or loaded pack)"
                         )
                         self.errors.setdefault(ns, []).append(msg)
+
+            # Manifest v3.1 (#1026): resolve every kind reference the v3.1
+            # extraction slots declare. SHAPE was checked per-manifest in
+            # _validate; RESOLUTION needs every pack loaded, which is why it
+            # happens here — the same split `relations` uses. Without this the
+            # slots were the one place a ref was accepted and handed to nobody,
+            # so a dangling `ns:kind` validated clean (review of PR #5647).
+            v31_kinds = self._pack_kind_set(pack)
+            v31_extraction = pack.extraction or {}
+            v31_refs: list[tuple[str, str]] = [
+                (f"extraction.entityCues: '{kind}'", kind)
+                for kind in (v31_extraction.get("entityCues") or {})
+            ]
+            for idx, tpl in enumerate(
+                    v31_extraction.get("relationTemplates") or []):
+                if not isinstance(tpl, dict):
+                    continue
+                for side in ("fromKind", "toKind"):
+                    ref = tpl.get(side)
+                    if isinstance(ref, str) and ref.strip():
+                        v31_refs.append(
+                            (f"extraction.relationTemplates[{idx}].{side}", ref))
+            for label, ref in v31_refs:
+                status = self._resolve_kind_ref(
+                    ref, v31_kinds, all_known, bare_index)
+                if status == "unknown":
+                    self.errors.setdefault(ns, []).append(
+                        f"{label} does not resolve to any known kind "
+                        f"(core or loaded pack)"
+                    )
+                elif status == "ambiguous":
+                    self.errors.setdefault(ns, []).append(
+                        f"{label} is ambiguous — declared by multiple packs; "
+                        f"use 'namespace:kind'"
+                    )
 
             # Manifest v3 (R6 §3.1/§3.5): every nearMisses target resolves
             pack_kinds = self._pack_kind_set(pack)
