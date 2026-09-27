@@ -521,7 +521,8 @@ cannot pass; the **per-store** verifier scan (`sessionVerifierKeys` / `localVeri
 
 **Mutation check:** each must go red when the production change is reverted (revert `flowType` →
 #1; suffix router → #3; aux-leg-reaching `removeItem` → #4; drop the transient discriminator → #5;
-remove the pre-flight guard → #6 and #9; restore the aux cookie leg → #10; bump the vendored file
+remove the pre-flight guard → #6 and #9; restore the aux cookie leg → #3 (and inv 12 — there is no
+invariant 10); bump the vendored file
 without the specifier → #8; empty the strip list / stop calling `authorizeReturnTo` → #11; an aux
 `removeItem` that skips a store → #12; a pre-flight that falls through to a cleaner store instead
 of refusing → #6 with the `throw-remove` store; a fragment branch without the pure-param-list guard
@@ -545,15 +546,20 @@ store's one leaked probe entry then reads as a credential).
    aux-store assertion; inv 13: the writer's cleanability proof removed — and, separately, only its
    removal read-back, which is what the silent-remove store reaches — → the credential lands in the
    store that cannot remove it; inv 5: an unbounded message **and** a strip-removed message → the
-   bounds assertion). **Verified by execution, 22/22 KILL.** The first round of this plan listed two
-   rows that could not fail — inv 3's denylist row (the cookie log was filtered by name substring and
-   the non-verifier keys were never written, so the assertion was empty) and inv 2's single-origin row
-   (the driver echoed the shim's own `location.origin` back). Both are corrected above and re-verified
-   by mutation; the rows are kept in this record because the *claim* was false, and a claim about a
-   test's strength is only checkable against the test. The second review round added four rows for
-   behaviours that were still unpinned (the refusal store that cannot be cleaned, `removeAux`
-   skipping the SECOND store, the fragment branch without its pure-param-list guard, and the
-   sentinel's suffix); the third added the writer-side cleanability proof.
+   bounds assertion). **Every row of the union table in the PR body was observed red.** That table is
+   the single enumeration: it is the UNION of every round's runs — each round re-ran its own rows, and
+   the rows added after round 2 were re-run independently by the VGATE verifier and by the
+   adversarial-coverage reviewer. It supersedes the running subtotals earlier revisions of this record
+   printed (those were per-round counts, which is why they moved). The first round of this plan
+   listed two rows that could not fail — inv 3's denylist row (the cookie log was filtered by name
+   substring and the non-verifier keys were never written, so the assertion was empty) and inv 2's
+   single-origin row (the driver echoed the shim's own `location.origin` back). Both are corrected
+   above and re-verified by mutation; the rows are kept in this record because the *claim* was false,
+   and a claim about a test's strength is only checkable against the test. The second review round
+   added four rows for behaviours that were still unpinned (the refusal store that cannot be cleaned,
+   `removeAux` skipping the SECOND store, the fragment branch without its pure-param-list guard, and
+   the sentinel's suffix); the third added the writer-side cleanability proof; the fourth added its
+   removal read-back as a separate row.
 
 ---
 
@@ -691,9 +697,28 @@ previous round's own fix note**:
 
 | # | Finding | Fix |
 |---|---|---|
-| 18 | **The writer's removal read-back was unpinned, and its `silent-remove` companion mode was dead code.** Deleting `if (s.getItem(probeKey) !== null) throw 0;` left all 11 tests green: the store mode the round-3 commit added "for it" was never instantiated by any scenario, and a bare `silent-remove` never reaches the writer at all (the guard refuses that store first — its 160-byte probe fits there and ITS read-back-null fires). The line is load-bearing only with an item-size cap: `sessionMode="silent-remove", sessionQuota=130`. Measured: pristine relocates the verifier to `localStorage`; with the line deleted the credential lands in the silent-remove `sessionStorage` (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). (The reviewer rated it P1 because the mutation survived a suite the round-3 note called 21/21.) | inv 13 now runs that exact scenario, plus a both-`silent-remove` fail-closed control; the mutation reddens it. Count → **22/22 KILL**. |
+| 18 | **The writer's removal read-back was unpinned, and its `silent-remove` companion mode was dead code.** Deleting `if (s.getItem(probeKey) !== null) throw 0;` left all 11 tests green: the store mode the round-3 commit added "for it" was never instantiated by any scenario, and a bare `silent-remove` never reaches the writer at all (the guard refuses that store first — its 160-byte probe fits there and ITS read-back-null fires). The line is load-bearing only with an item-size cap: `sessionMode="silent-remove", sessionQuota=130`. Measured: pristine relocates the verifier to `localStorage`; with the line deleted the credential lands in the silent-remove `sessionStorage` (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). (The reviewer rated it P1 because the mutation survived a suite the round-3 note called 21/21.) | inv 13 now runs that exact scenario, plus a both-`silent-remove` fail-closed control; the mutation reddens it. |
 | 19 | **R3 and R20 still attributed the A5 invariant to the GUARD** ("a store that refuses REMOVAL is refused by the guard") — the exact confusion round 3 existed to remove — and the round-3 fix note claimed R3/R20 had been updated when the diff shows neither was touched | both reworded: the invariant lives in `writeAux` (prove removal for the real value, per store); the guard only refuses early when the FIRST writable store is uncleanable |
-| 20 | three `inv 10` citations survived at lines 135, 542 and 603 (the round-3 fix reached only the A1/A5 coverage rows) | replaced with the tests that exist (`3, 4, 12`, and `3, 4, 12, 13` for the aux-store criterion) |
+| 20 | **four** `inv 10` citations survived the round-3 fix (lines 135, 542, 603 — reached then — and 524, missed): the round-3 row below claims three were replaced, which was true only of the ones it listed | all four replaced with the tests that exist (`3, 4, 12`, and `3, 4, 12, 13` for the aux-store criterion) |
+
+### diff-time code review ROUND 5 (re-review of `61e8ad2a7`)
+One fresh reviewer on the round-4 fix. It reproduced the P1 premise verbatim (the read-back mutation
+SURVIVES at `7d8b79a78` and DIES at `61e8ad2a7`), confirmed the new `silent-remove` scenario reaches the
+WRITER rather than the guard (the raw run shows `navs` non-empty with the credential relocated to
+`localStorage`, `sessionVerifierKeys == []`), and confirmed the both-`silent-remove` control is not a
+control that passes either way (deleting the GUARD's read-back-null reddens it; so does
+`pkceIncapable() → null`). Two findings, both record-level, both fixed:
+
+| # | Finding | Fix |
+|---|---|---|
+| 21 | the mutation total was not reconcilable with the table it pointed at: the PR body at that head still said `20/20` with no invariant-13 row, so "22/22 (the table is in the PR body)" was unsupported in both directions — the same class of self-referential count that had already moved `16 → 20 → 21 → 22` | the PR body carries **the single enumeration** (29 rows, every one observed red, marked with whether the later rounds re-ran it independently) and the doc no longer prints an aggregate subtotal; the historical numbers are kept only as history, with the reason they moved |
+| 22 | a FOURTH `inv 10` citation (`restore the aux cookie leg → #10`) had survived the previous round, so that round's "three citations" claim was false by omission | `→ #3 (and inv 12)`, and the round-4 row now says four |
+
+No P0/P1 remained at the end of the round: the two findings were P2 record defects. The reviewer
+also judged non-defects, with evidence: the A5/A1 coverage rows under-cite (they do not spell out the
+`silent-remove` shape) but their requirement text is satisfied by the code; R3/R20 are now accurate
+against the landed script; and the harness module docstring's "Invariants pinned here" list is
+pre-existing non-exhaustive.
 
 Also noted, not defects: the first batch invocation of the router mutation once reported GREEN and was
 not reproducible in 6 further pytest runs plus 8/8 direct driver iterations (all correctly
@@ -851,7 +876,7 @@ Landed files and what each carries. Evidence is stated as a command → observed
 - `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q` → **341 passed, 2 xfailed**.
 - `… pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py test_attribution_actor.py test_control_plane_offload_3498.py test_oauth_redemption_state.py test_user_identity_authority.py -q` → **413 passed**; the 4 reds in that batch (`test_mcp_route_challenge::test_unknown_credential_carries_challenge[tt_deadbeef]`, three in `test_cursor_mcp_exit_evidence.py`) are **reproduced on a clean `origin/main` worktree** — they are the embedded FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), not this diff. Separate failures, different identities on re-run, so not deterministic under this change.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
-- Mutation evidence: **22/22 KILL, 0 survived** (the table is in the PR body). The set now includes
+- Mutation evidence: **the union table in the PR body — every row observed red, 0 survived.** The set now includes
   the two invariants the first round could not redden (inv 3's denylist row, inv 2's single-origin
   row), the `boundedText` bound and strip separately, the fragment channel, the #1225
   provider-token strip, and six rows added by the later review rounds: the pre-flight falling
@@ -861,7 +886,9 @@ Landed files and what each carries. Evidence is stated as a command → observed
   writer's cleanability proof reverted (inv 13 — the credential then lands in the store that refuses
   removal, which no earlier row could see), and that proof's removal read-back deleted alone, which
   the SILENT-remove store reaches (inv 13's third scenario — the row the round-4 reviewer found
-  surviving). The strip
+  surviving). Earlier revisions of this line printed a running subtotal (`16/16`, `21/21`, `22/22`);
+  those were per-round counts of a table that grew, which is exactly the kind of self-referential
+  number that re-stales, so the count is now defined only as the PR-body table's own row count. The strip
   mutation is what surfaced that `strippedWrites` had to be asserted before `strippedHasToken`
   (without it, removing the strip fell through to the refusal and the assertion was vacuous).
 - Wiring: `select(["website/apps/dashboard/public/vendor/supabase-2.112.2.min.js"], "pull_request", manifest)` → `surfaces == ["api"]` (was tier-1 smoke before the entry).
