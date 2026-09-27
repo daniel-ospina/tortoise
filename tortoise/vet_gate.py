@@ -236,13 +236,14 @@ def _norm_variants(text: object) -> set[str]:
     endpoint the mint cannot resolve — and the mint then re-materialises a
     DISCARDED item as a claim Point (#5069 review, P1).
 
-    The two sets are equal only while the untruncated alias ``_norm(raw)`` is
-    ALREADY one of the guard's two arms; the difference is exactly
-    ``{_norm(raw)}`` otherwise. Do NOT decide that by length: ``.lower()`` can
-    LENGTHEN (``"İ"`` lowercases to two code points), so a raw string at or
-    under the cap can still normalise past it — compare the SETS, not the
-    lengths. ``test_endpoint_key_set_matches_extractor`` pins the containment
-    and the exact difference.
+    The two sets are equal only for non-empty ``raw``, and only while the
+    untruncated alias ``_norm(raw)`` is ALREADY one of the guard's two arms; the
+    difference is exactly ``{_norm(raw)}`` otherwise (for empty/whitespace-only
+    input both helpers return the empty set). Do NOT decide that by length:
+    ``.lower()`` can LENGTHEN (``"İ"`` lowercases to two code points), so a raw
+    string at or under the cap can still normalise past it — compare the SETS,
+    not the lengths. ``test_endpoint_key_set_matches_extractor`` pins the
+    containment and the exact difference.
     """
     raw = str(text or "").strip()
     if not raw:
@@ -654,24 +655,26 @@ def _entity_map(embed_list: object) -> dict[str, Mapping[str, Any]]:
     return out
 
 
-def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
-    """Normalized texts an operator endpoint names.
+def _operator_endpoint_key_sets(
+        op: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """``(content_keys, entity_keys)`` an operator endpoint names.
 
-    Keyed with :func:`_norm_variants` — the UNION of the mint's RESOLUTION keys
-    (``_resolution_variants``) and its ENTITY-GUARD ref keys — because the prune
-    compares this set against ``gone``, which itself unions the CONTENT keys
-    (2-arm) with the ENTITY-name keys (3-arm). Keying only the resolution arms
-    drops the entity guard's collapsed-closure ``M(_norm(x))``, so a ref naming a
-    DISCARDED >cap entity through that arm alone escapes the prune — and a
-    discarded entity is in neither ``emitted_entity_names`` nor the S3 index, so
-    the prune is the only control and the mint fabricates a claim Point from the
-    participant name (#5069 re-review, P1).
+    The prune matches each half against its OWN provenance of ``gone`` —
+    ``content_keys`` (:func:`_resolution_variants`, the mint's RESOLUTION keys)
+    against the removed point/event CONTENT keys, and ``entity_keys``
+    (:func:`_norm_variants`, which ALSO covers the mint's ENTITY-GUARD ref keys)
+    against the removed ENTITY keys. Matching one MERGED set against the union
+    is wrong in both directions: drop the entity half and a ref naming a
+    DISCARDED >cap entity through its collapsed-closure arm escapes the prune,
+    so the mint fabricates a claim Point from the participant name (#5069
+    re-review, P1a); keep it merged and the same closure arm can coincide with a
+    removed CONTENT key, dropping an operator the mint would have kept, with a
+    false "whose endpoint was discarded" warning (#5069 re-review, P1b).
 
-    Otherwise mirrors ``execute_embed``'s resolution surface: ``src``/``dst``
-    whichever ``op_type`` an operator carries (the embedder reads them
-    unconditionally), and the target — read as
+    ``src``/``dst`` are read whichever ``op_type`` an operator carries (the
+    embedder reads them unconditionally). The target — read as
     ``op.get("target") or op.get("target_edge")``, the **first present, not a
-    union** — **only for a MITIGATES**, which is the only ``op_type`` the
+    union** — is read **only for a MITIGATES**, the only ``op_type`` the
     embedder reads a target for (``if _op_type == "MITIGATES"``). Reading it for
     every operator would drop a valid edge on a field the embedder never looks
     at — an IMPL carrying a stray ``target`` naming a discarded point would be
@@ -680,19 +683,37 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     skipped and left to be re-minted, and a target is honoured only when it is a
     ``dict``, exactly as the embedder requires.
     """
-    out: set[str] = set()
+    content: set[str] = set()
+    entity: set[str] = set()
+
+    def _add(v: object) -> None:
+        content.update(_resolution_variants(v))
+        entity.update(_norm_variants(v))
+
     for key in ("src", "dst"):
         v = op.get(key)
         if v and str(v).strip():
-            out |= _norm_variants(v)
+            _add(v)
     if str(op.get("op_type", "")).upper() == "MITIGATES":
         target = op.get("target") or op.get("target_edge")
         if isinstance(target, dict):
             for key in ("src", "dst"):
                 v = target.get(key)
                 if v and str(v).strip():
-                    out |= _norm_variants(v)
-    return out
+                    _add(v)
+    return content, entity
+
+
+def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
+    """Every text an operator endpoint names, both provenances UNIONed.
+
+    Convenience for callers that only need the union (and the drift test that
+    pins the MITIGATES-target read). :func:`apply_vet` uses
+    :func:`_operator_endpoint_key_sets` to match each provenance against its own
+    ``gone`` half.
+    """
+    content, entity = _operator_endpoint_key_sets(op)
+    return content | entity
 
 
 def removal_pool(before: object, after: object) -> dict:
@@ -989,27 +1010,35 @@ def apply_vet(embed_list: Mapping[str, Any],
         if isinstance(_ent, Mapping):
             present_entity_names |= _norm_variants(_ent.get("name"))
     # #5069: the pool stores a removed entity under its FULL normalised name
-    # (``_entity_map`` keys it that way for Rule 4's restore lookup), but
-    # ``gone`` is matched against ``_operator_endpoint_text``, which is keyed
-    # ``_norm_variants``. Expand from the stored ITEM's raw name — expanding the
-    # already-collapsed KEY would lose the raw arm and leave a cap-truncated
+    # (``_entity_map`` keys it that way for Rule 4's restore lookup), but the
+    # ENTITY half of the prune is matched against the endpoint's
+    # ``_norm_variants`` keys. Expand from the stored ITEM's raw name — expanding
+    # the already-collapsed KEY would lose the raw arm and leave a cap-truncated
     # raw-prefix ref unpruned on this leg alone. That is what lets a
     # >1000-char entity discarded in an earlier pass still be pruned when a
     # later pass re-names it — the cross-pass leg of the guard.
     prior_entity_keys = {k for _item in prior_entities.values()
                          for k in _norm_variants(_item.get("name"))}
-    gone = (removed_context | prior_texts | removed_entity_names
-            | prior_entity_keys) - surviving_texts - set(canonical) \
-        - present_entity_names
-    if gone:
+    # Match each endpoint provenance against its OWN ``gone`` half (#5069
+    # re-review, P1b): a removed point/event contributes the mint's RESOLUTION
+    # keys, a removed entity contributes its mint-GUARD keys. One MERGED set
+    # over-prunes when an endpoint's entity-closure arm coincides with a removed
+    # CONTENT key (an operator the mint would have kept, dropped with a false
+    # "whose endpoint was discarded" warning). The shields subtract from BOTH
+    # halves, exactly as the single `gone` did.
+    _shield = surviving_texts | set(canonical) | present_entity_names
+    content_gone = (removed_context | prior_texts) - _shield
+    entity_gone = (removed_entity_names | prior_entity_keys) - _shield
+    if content_gone or entity_gone:
         ops = _as_items(out.get("operators"))
         kept_ops: list[Any] = []
         pruned = 0
         for op in ops:
-            if isinstance(op, Mapping) and (
-                    _operator_endpoint_text(op) & gone):
-                pruned += 1
-                continue
+            if isinstance(op, Mapping):
+                content_keys, entity_keys = _operator_endpoint_key_sets(op)
+                if (content_keys & content_gone) or (entity_keys & entity_gone):
+                    pruned += 1
+                    continue
             kept_ops.append(op)
         if pruned:
             out["operators"] = kept_ops

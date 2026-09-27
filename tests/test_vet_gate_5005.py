@@ -913,7 +913,7 @@ def test_respelled_discarded_entity_matched_only_by_the_closure_arm_is_pruned():
     """
     from tortoise import extractor_v2 as v2
     name = "a" * 500 + " " * 900 + "b" * 600         # raw 2000, collapsed 1101
-    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"  # raw 1055
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"  # raw 1054
     closure = v2._norm(name)[:v2._MAX_CONTENT]
     # the ref is a spelling of the name only through its OWN closure arm ...
     assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == closure
@@ -966,6 +966,57 @@ def test_discarded_point_closure_arm_does_not_enter_gone():
     assert v2._norm(content[:v2._MAX_CONTENT]) in variants   # the mint key
     assert v2._norm(v2._norm(content)[:v2._MAX_CONTENT]) not in variants, (
         "the entity-closure arm must not reach the content surface")
+
+
+def test_content_only_closure_collision_does_not_over_prune():
+    """#5069 re-review (P1b): an endpoint's entity-closure arm must be matched
+    only against REMOVED-ENTITY keys, never against removed CONTENT keys. The
+    merged-set form pruned this operator because the ref's closure arm happened
+    to coincide with a DISCARDED POINT's content — but the mint's resolution key
+    for the ref is distinct, so it would have minted the ref as its own new
+    endpoint; the operator was dropped with a false "whose endpoint was
+    discarded" warning (edge loss). The provenance split keeps it.
+    """
+    from tortoise import extractor_v2 as v2
+    content = "a" * 500 + " " + "b" * 499            # 1000 chars, discarded
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"  # raw 1054
+    assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == v2._norm(content)
+    assert v2._norm(ref[:v2._MAX_CONTENT]) != v2._norm(content)
+    el = {"entities": [],
+          "events": [],
+          "points": [{"content": content, "pointKind": "statement"},
+                     {"content": "K", "pointKind": "statement"}],
+          "operators": [{"src": ref, "dst": "K", "op_type": "IMPL"}]}
+    first = vg._item_id("points", 0, el["points"][0])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert out["operators"] == el["operators"], (
+        "the ref resolves as its own endpoint, not as the discarded content")
+    assert not any("pruned" in w for w in warnings), warnings
+
+
+def test_respelled_discarded_entity_in_a_mitigates_target_is_pruned():
+    """#5069 re-review (P2): the entity closure arm must be covered on the
+    MITIGATES ``target`` endpoint too, not only ``src``/``dst`` — reverting that
+    one read re-opens the same fabrication through the target leg.
+    """
+    from tortoise import extractor_v2 as v2
+    name = "a" * 500 + " " * 900 + "b" * 600
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"
+    assert v2._norm(v2._norm(ref)[:v2._MAX_CONTENT]) == \
+        v2._norm(name)[:v2._MAX_CONTENT]
+    el = {"entities": [{"name": name, "kind": "core:tool"}],
+          "events": [],
+          "points": [{"content": "K", "pointKind": "statement"},
+                     {"content": "K2", "pointKind": "statement"}],
+          "operators": [{"src": "K", "dst": "K2", "op_type": "MITIGATES",
+                         "target": {"src": ref, "dst": "K2"}}]}
+    first = vg._item_id("entities", 0, el["entities"][0])
+    out, warnings = vg.apply_vet(el, {first: {"outcome": vg.DISCARD}})
+    assert out["operators"] == [], warnings
+    assert any("pruned" in w for w in warnings), warnings
+    payload, _res = _payload_of(out)
+    assert [p["content"] for p in payload["points"]] == ["K", "K2"], (
+        "the discarded participant name was re-materialised via the target")
 
 
 def test_discarded_over_long_point_content_is_pruned_on_both_legs():
