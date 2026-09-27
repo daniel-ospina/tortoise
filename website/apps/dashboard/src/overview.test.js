@@ -261,11 +261,18 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // The RENDER SITE, not just the declaration: everything above runs the sliced
   // STATEMENT, so nothing notices a heading re-deriving the inference
   // (`connected: serverHarnessConnected || onboarding?.status === 'complete'`, or
-  // a second, widened variable). Both wizard headings must pass the BARE
+  // a second, widened variable). Every wizard heading must pass the BARE
   // identifier (round 4, P1).
-  assert.equal((code.match(/connected:\s*serverHarnessConnected\s*[,}]/g) ?? []).length, 2,
-    'both wizard headings must pass the bare serverHarnessConnected as `connected` — '
-    + 'no inline widening at the render site')
+  //
+  // The count is 3, not 2: #5496 added `wizardStepSub`'s call site, which this
+  // assertion predated (it was written in #5413 against a tree that already had
+  // three) — so it read 2 while the source read 3 and the whole suite was red on
+  // main, invisible because ci.yml is pull_request-only. The count is exact on
+  // purpose (it also catches a call site being REMOVED, which the widening
+  // check alone would not), so a fourth heading must bump it deliberately.
+  assert.equal((code.match(/connected:\s*serverHarnessConnected\s*[,}]/g) ?? []).length, 3,
+    'every wizard heading must pass the bare serverHarnessConnected as `connected` — '
+    + 'no inline widening at the render site (wizardStageLabel ×2, wizardStepSub)')
   // ... and then that the import resolves to the shared module's own export.
   const mod = await import('./connectionObservation.js')
   assert.equal(typeof mod.harnessConnectionObserved, 'function')

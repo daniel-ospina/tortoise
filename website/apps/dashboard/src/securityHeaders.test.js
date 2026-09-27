@@ -1462,6 +1462,12 @@ test('every file that emits or serves HTML is in the guarded site list', () => {
       'website/functions/blog/api/generate-cover.ts',
       '`mime` comes from the cover image format (png/jpeg/webp), never html',
     ],
+    [
+      'website/functions/contact/submit.ts',
+      'the non-literal Content-Type is on an INTERNAL `Response` built only to drive ' +
+        '`.formData()` for a multipart body — it is never handed back to the caller ' +
+        '(every response from this endpoint is JSON), so no html can reach a client',
+    ],
   ])
   const unreadableCt = (rel) => nonLiteralContentTypes(rel).length > 0
   assert.deepEqual(
