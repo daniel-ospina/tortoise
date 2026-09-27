@@ -480,10 +480,32 @@ class CollisionPreflightTest(unittest.TestCase):
             for pr in open_prs:
                 pr = dict(pr)
                 pr.setdefault("closingIssuesReferences", [])
+                # See the closed-PR normalizer below for why these two are
+                # normalized in rather than left to each call site.
+                pr.setdefault("state", "open")
+                pr.setdefault("body", "")
                 normalized.append(pr)
             (self.gh_dir / "open_prs.json").write_text(json.dumps(normalized))
         if closed_prs is not None:
-            (self.gh_dir / "closed_prs.json").write_text(json.dumps(closed_prs))
+            # `state` and `body` are normalized in for the same reason as
+            # `closingIssuesReferences` above: `gh pr list --json` and the REST
+            # `/pulls` projection in `_closed_pr_sample` BOTH always send them, so
+            # a fixture that omits one models a payload neither can produce.
+            #
+            # A test that wants a payload the tool must REFUSE deletes the key
+            # explicitly (see the missing-`state` / missing-`body` tests); a test
+            # that wants a NON-TERMINAL payload sets a state the tool does not
+            # read as terminal rather than deleting the key — `gh pr list --json
+            # state` returns the GRAPHQL casing ("OPEN"), which `_pr_terminal_state`
+            # does not match, so that is a real shape as well as a non-terminal
+            # one.
+            normalized = []
+            for pr in closed_prs:
+                pr = dict(pr)
+                pr.setdefault("state", "closed")
+                pr.setdefault("body", "")
+                normalized.append(pr)
+            (self.gh_dir / "closed_prs.json").write_text(json.dumps(normalized))
         if issue is not None:
             # AND BOTH KEYS ARE NORMALIZED IN, HERE. `gh issue view --json
             # ...,assignees,comments,...` ALWAYS returns them, as lists (often
@@ -613,9 +635,16 @@ class CollisionPreflightTest(unittest.TestCase):
         # separately because GitHub's REST `/pulls` reports `state: "closed"`
         # for merged AND unmerged PRs alike — a rule keyed on
         # `state == "merged"` would silently never fire (the #5052 F10 trap).
+        # ⛔ The third shape used to omit `state`, which the normalizer now
+        # supplies — and must SUPPLY, because REST `/pulls` always sends it. This
+        # is the pair the comment above is about: `state: "closed"` is true of
+        # merged and unmerged PRs alike, so `mergedAt` is what separates them.
+        # Both read as terminal here, so this pins that the `mergedAt` arm is
+        # present and does not disturb a terminal read — not that it is what
+        # decided the verdict.
         for terminal in ({"state": "closed"},
                          {"state": "CLOSED", "mergedAt": "2026-09-23T03:45:47Z"},
-                         {"mergedAt": "2026-09-23T03:45:47Z"}):
+                         {"state": "closed", "mergedAt": "2026-09-23T03:45:47Z"}):
             with self.subTest(terminal=terminal):
                 self.gh_fixtures(closed_prs=[{
                     "number": 4356,
@@ -860,6 +889,118 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: INCOMPLETE", out)
                 self.assertIn(f"non-string '{key}'", out)
                 self.assertNotIn("Traceback", out)
+
+    def test_pr_payload_missing_state_is_incomplete_not_clean(self):
+        # ⛔ THE VERIFIED FAIL-OPEN. `state` is what `_pr_terminal_state` reads to
+        # decide a PR is still LIVE: `state in ("open", "opened")` returns None
+        # (not terminal) before `mergedAt` is consulted. So a payload with NO
+        # `state` and any truthy `mergedAt` was read as MERGED, and every match on
+        # the BLOCKING open-PR surface went out as `weak` → CLEAN. Both transports
+        # always send `state`, so its absence is malformation and must be a
+        # refusal, not an accidental non-terminal read.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"guard retrieval ({ISSUE})",
+            "body": "", "headRefName": "feat/9999-other", "state": "open",
+        }])
+        # DELETED AFTER the fixture is written, because the normalizer supplies
+        # the key — writing it through `gh_fixtures` and deleting from the tmp
+        # profile is the same shape the missing-`closingIssuesReferences` test
+        # uses, and the only way to model a payload that omits it.
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["state"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("no 'state'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_open_pr_with_null_state_and_truthy_merged_at_is_incomplete(self):
+        # The exact payload the review reproduced: a VALID-looking open PR whose
+        # `state` is null and whose `mergedAt` is truthy. It must be REFUSED, not
+        # demoted — `mergedAt` is only trustworthy once `state` has said the PR is
+        # not open, and a null `state` cannot say that.
+        # A null `state` is not a string, so the type check refuses it whatever
+        # `mergedAt` says — which is the point: `mergedAt` is only meaningful
+        # once `state` has said the PR is not open, and null cannot say that.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"guard retrieval ({ISSUE})",
+            "body": "", "headRefName": "feat/9999-other",
+            "state": "open", "mergedAt": None,
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        prs[0]["state"] = None
+        prs[0]["mergedAt"] = "2026-09-01T00:00:00Z"   # well-formed, and truthy
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("non-string 'state'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # `mergedAt` gates a DOWNGRADE, so a non-string one (all of these are
+        # truthy) must be refused rather than read as a merge timestamp.
+        for merged in (1, {"any": "object"}, ["x"], True):
+            with self.subTest(merged_at=merged):
+                self.gh_fixtures(open_prs=[{
+                    "number": 5150, "title": f"guard retrieval ({ISSUE})",
+                    "body": "", "headRefName": "feat/9999-other",
+                    "state": "open", "mergedAt": merged,
+                }])
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 2, out)
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_pr_payload_missing_body_is_incomplete_not_clean(self):
+        # ⛔ `body` is READ on the blocking open-PR surface: the body-regex union
+        # exists precisely because GitHub's `closingIssuesReferences` can miss a
+        # reference the body states plainly. Reading a MISSING body as "no body"
+        # drops that leg silently, which is the absence-as-emptiness drop the
+        # contract exists to prevent. An unrelated title/branch plus a reference
+        # only in the body is how it fails open.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated title",
+            "body": f"Closes #{ISSUE}.",   # the ONLY reference is in the body
+            "headRefName": "feat/9999-other", "state": "open",
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["body"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("no 'body'", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_worktree_porcelain_with_a_newline_in_the_path_is_refused(self):
+        # ⛔ THE PARSER SILENTLY TRUNCATED. `git worktree list --porcelain` does
+        # not C-quote a newline in a path — it writes the raw byte — so a worktree
+        # at `<tmp>/wt/fix\n3061-mine` arrives as `worktree <tmp>/wt/fix` plus a
+        # bare `3061-mine`. The old parser ignored the second line, the path was
+        # truncated BEFORE the issue number, the worktree stopped matching, and
+        # the surface silently reported one fewer worktree with no error at all.
+        # The call-site guard could not catch it: it compared `len(blocks)` with
+        # the number of `worktree ` lines, and the parser created one block per
+        # such line, so the two were equal by construction.
+        mod = _tool_module()
+        good = (
+            "worktree /tmp/wt/fix-3061-mine\n"
+            "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+            "branch refs/heads/fix/3061-mine\n\n"
+            "worktree /tmp/wt/other\n"
+            "HEAD abcdef0123456789abcdef0123456789abcdef01\n"
+            "detached\n\n"
+        )
+        self.assertEqual(len(mod._worktree_blocks(good)), 2)
+        # The SAME input with a newline inside the first path.
+        bad = good.replace("/tmp/wt/fix-3061-mine",
+                           "/tmp/wt/fix\n3061-mine")
+        with self.assertRaises(mod.SurfaceError):
+            mod._worktree_blocks(bad)
+        # And a record that parses to no HEAD at all is refused too, so the
+        # "profitable" truncation cannot simply drop the field.
+        with self.assertRaises(mod.SurfaceError):
+            mod._worktree_blocks("worktree /tmp/wt/x\nbranch refs/heads/x\n")
 
     def test_non_list_closing_reference_container_is_incomplete(self):
         # ⛔ `_closing_ref_numbers`'s non-list guard was verified by nothing: the
@@ -2081,6 +2222,46 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("squash-merged", out)
         self.assertNotIn("Traceback", out)
 
+    def test_fresh_branch_behind_main_at_a_merged_head_blocks_without_first_parent(self):
+        # ⛔ THE CROSS-PRODUCT CYCLE 7 LEFT OPEN. Its stub — `rev-list
+        # --first-parent` failing while `rev-parse` and the `--merged` walk both
+        # succeed — was the right instrument, but it was pointed only at the
+        # CURRENT-TIP variant, where `sha != main_tip` happens to refuse the
+        # demotion. One commit further back that guard is satisfied and the
+        # exclusion degrades to exactly the one-commit-deep test cycle 6
+        # replaced, so a branch created at main's tip and left behind by ONE
+        # commit was demoted to CLEAN on an issue it had already claimed.
+        #
+        # The fallback discriminator is the `--merged` walk: a ref merged into
+        # main has a tip main already contains, which is what a fresh branch
+        # points at, so it must NOT be called landed.
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        behind = self._git_out("rev-parse", "HEAD")
+        _git(self.repo, "branch", f"fix/{ISSUE}-behind")
+        # Advance main by ONE commit, so `sha != main_tip` no longer protects.
+        (self.repo / "advance.txt").write_text("later work\n")
+        _git(self.repo, "add", "advance.txt")
+        _git(self.repo, "commit", "-q", "-m", "unrelated later work")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertNotEqual(
+            self._git_out("rev-parse", "HEAD"), behind,
+            "precondition: main must have MOVED, or this test collapses into "
+            "the current-tip variant it exists to go beyond",
+        )
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "an unrelated landing", "body": "",
+            "state": "closed", "headRefName": "feat/9999-other",
+            "headSha": behind, "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        git_stub = _write_exec(self.tmp / "git-stub-no-fp",
+                               GIT_STUB_NO_FIRST_PARENT)
+        rc, out = self.run_tool(git_bin=git_stub, issue=ISSUE,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("squash-merged", out)
+        self.assertNotIn("Traceback", out)
+
     def test_unmerged_branch_off_main_still_blocks(self):
         # ...and here the only difference is that the branch carries a commit
         # `origin/main` does NOT have, so it is genuinely in flight.
@@ -2409,9 +2590,18 @@ class CollisionPreflightTest(unittest.TestCase):
         # single page is still found and reported. `--paginate` is asserted
         # absent from the argv and the stub's per-invocation call log must hold
         # exactly one line — a regressed pagination would append one per page.
+        # Written DIRECTLY rather than through `gh_fixtures`, because this test
+        # controls the `Link` header, so the normalizer does not supply `state` —
+        # and `state` is now REQUIRED. `"OPEN"` is the GraphQL casing `gh pr list
+        # --json state` returns and `_pr_terminal_state` does not read as
+        # terminal, so the hit keeps its non-terminal detail, which is what the
+        # assertion below is about. A missing `state` would be a REFUSAL, and the
+        # surface would report no hit at all.
         (self.gh_dir / "closed_prs.json").write_text(json.dumps([
-            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},
-            {"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2"},
+            {"number": 1, "title": "a", "body": "", "headRefName": "chore/a",
+             "state": "OPEN"},
+            {"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2",
+             "state": "OPEN"},
         ]))
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)  # advisory: reported, never blocking
@@ -2426,14 +2616,24 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
 
     def test_advisory_closed_pr_strong_shape_cannot_block_but_is_reported(self):
-        # #5251, the STRUCTURAL guarantee. A payload whose `state` is ABSENT is
-        # NOT terminal by `_pr_terminal_state`, so its branch match would be
-        # `strong` — the demotion must come from the SURFACE's authority, not
-        # from a payload field (#5129's data-dependent shape is exactly what
-        # that cannot give). It must be CLEAN (exit 0) with the match reported.
+        # #5251, the STRUCTURAL guarantee. A payload that is NOT terminal by
+        # `_pr_terminal_state` has a `strong`-shaped branch match, so the
+        # demotion must come from the SURFACE's authority and not from a payload
+        # field (#5129's data-dependent shape is exactly what that cannot give).
+        # It must be CLEAN (exit 0) with the match reported.
+        #
+        # ⛔ NON-TERMINAL IS NOW EXPRESSED BY A STATE, NOT BY ITS ABSENCE. This
+        # fixture used to omit `state` entirely, which got the non-terminal read
+        # by accident: a payload missing `state` is REFUSED now (it was the
+        # fail-open where a truthy `mergedAt` plus no `state` demoted a live
+        # open PR). `"OPEN"` is the GraphQL casing `gh pr list --json state`
+        # actually returns and `_pr_terminal_state` does not read as terminal, so
+        # this is both a real shape and a non-terminal one — the property the
+        # test needs, obtained deliberately rather than from malformation.
         self.gh_fixtures(closed_prs=[{
             "number": 9998, "title": "time-dependent ranking",
             "body": "", "headRefName": "fix/3061-fts-determinism",
+            "state": "OPEN",
         }])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)

@@ -1643,10 +1643,20 @@ def _branch_terminal_state(
     if (
         sha
         and sha in merged_head_shas
-        # `sha != main_tip` still matters HERE, unlike in predicate 2 (which
-        # REQUIRES a readable `first_parent`): this arm runs even when
-        # `first_parent` is unavailable, and then the exact-tip comparison is the
-        # only guard left.
+        # ⛔ `sha != main_tip` IS NOT "the only guard left" when `first_parent`
+        # is unavailable — an earlier version of this comment said so, and the
+        # `--merged` fallback added below guards that same state. In every state a
+        # test can construct the fallback SUPERSEDES this comparison (a mutation
+        # deleting this line breaks no test).
+        #
+        # IT IS KEPT ANYWAY, and the reason is specific rather than caution in
+        # general: `main_tip` and `ancestor_merged` come from SEPARATE git calls
+        # (`rev-parse origin/main`, then `for-each-ref --merged=origin/main`). If
+        # they disagree — a force-push landing between them — a ref can point at
+        # `main_tip` and still be absent from the `--merged` set, and in exactly
+        # that state this comparison is the only thing refusing the demotion.
+        # Narrow, unreachable by any stub, and fail-CLOSED, which is why it stays
+        # rather than being deleted on the strength of a green suite.
         and sha != main_tip
         # ⛔ THE EXCLUSION BELONGS ON *BOTH* PREDICATES, AND `sha != main_tip`
         # ALONE IS NOT ENOUGH ON EITHER — it is ONE COMMIT DEEP. A branch created
@@ -1665,6 +1675,27 @@ def _branch_terminal_state(
         # `first_parent` is unreadable the exact-tip comparison still applies, and
         # the merged-PR record is treated as the exact evidence D4 says it is.
         and not (first_parent is not None and sha in first_parent)
+        # ⛔ THE FIRST-PARENT WITNESS CAN GO MISSING WHILE MAIN'S TIP IS KNOWN,
+        # and then `sha != main_tip` is the ONLY guard left — which is one commit
+        # deep, i.e. exactly the window cycle 6 closed. A branch created at
+        # main's tip and left behind by ONE commit is "indistinguishable from
+        # just created" in the same sense, and it was demoted to CLEAN whenever
+        # `rev-list --first-parent` failed while `rev-parse` and the `--merged`
+        # walk both succeeded.
+        #
+        # THE FALLBACK DISCRIMINATOR IS THE `--merged` WALK, which answers the
+        # same question from a different git command: a ref that IS merged into
+        # main has a tip main already CONTAINS — which is what a fresh branch
+        # points at — so it must not be called landed; a squash-merge residue is
+        # NOT merged, because squash discards the commits, so it still demotes.
+        # With neither witness available the downgrade is refused, and with main's
+        # tip unresolved this clause is inert (`test_squash_merged_branch_is_
+        # terminal_and_cannot_block` runs in a repo with no `origin/main`).
+        and not (
+            main_tip is not None
+            and first_parent is None
+            and (ancestor_merged is None or ref in ancestor_merged)
+        )
     ):
         return ("squash-merged — its tip SHA is a merged PR's head, so its content "
                 "already landed even though its commits are not ancestors of main")
@@ -1743,19 +1774,52 @@ def scan_branch_surface(
         surface.add(ref, f"matched issue-number ({issue})", "strong")
 
 
+# The only line kinds `git worktree list --porcelain` emits inside a record.
+# Anything else means the parse is not reading the format it thinks it is.
+_WORKTREE_LINE_KINDS = ("worktree ", "HEAD ", "branch ")
+
+
 def _worktree_blocks(porcelain: str) -> list[dict]:
+    """Parse `git worktree list --porcelain`, REFUSING anything it cannot read.
+
+    ⛔ A PATH CONTAINING A NEWLINE SPLITS A RECORD, AND THE OLD PARSER SILENTLY
+    TRUNCATED IT. `--porcelain` does not C-quote a newline; it emits the raw
+    byte, so a worktree whose path is `<tmp>/wt/fix\n3061-mine` arrives as
+    `worktree <tmp>/wt/fix` followed by a bare `3061-mine`. The second line
+    matched no prefix and was DROPPED, the path was truncated at the newline, and
+    the issue number — which sat after it — stopped matching, so the live
+    worktree vanished from the surface with no error at all. Fail-OPEN, on the
+    surface #3061 exists to make untruncated.
+
+    The call-site guard could not catch it: it compared `len(blocks)` against the
+    number of `"worktree "` lines, and this function starts exactly one block per
+    such line, so the two were equal by construction and the guard was
+    unreachable. Validate the SHAPE instead — an unreadable line is a parse loss,
+    and a parse loss is a REFUSAL, never a silently smaller answer.
+    """
     blocks: list[dict] = []
     cur: dict | None = None
     for line in porcelain.splitlines():
+        if not line.strip():
+            continue
         if line.startswith("worktree "):
             if cur is not None:
                 blocks.append(cur)
             cur = {"path": line[len("worktree "):].strip()}
-        elif cur is not None and line.startswith("branch "):
+        elif cur is None:
+            raise SurfaceError(
+                f"worktree porcelain: content before any 'worktree ' record "
+                f"({line[:80]!r}) — refusing a partial scan"
+            )
+        elif line.startswith("branch "):
             cur["branch"] = line[len("branch "):].strip()
-        elif cur is not None and line.startswith("detached"):
-            cur.setdefault("branch", "(detached)")
-        elif cur is not None and line.startswith("HEAD "):
+        elif line == "detached":
+            cur["branch"] = "(detached)"
+        elif line == "bare":
+            cur["bare"] = True
+        elif line.startswith("locked") or line.startswith("prunable"):
+            pass
+        elif line.startswith("HEAD "):
             # The worktree's checked-out commit, carried free by --porcelain.
             #
             # ⛔ IT REACHES NEITHER TERMINAL PREDICATE when the worktree is
@@ -1770,8 +1834,38 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
             # this comment claimed the HEAD reached the tip-SHA predicate, which
             # is false for exactly the detached case it was describing.
             cur["head"] = line[len("HEAD "):].strip()
+        else:
+            # Reachable exactly when a record did not parse as the format
+            # documents. A truncated (not-porcelain) read and a newline inside a
+            # path both land here as an unrecognised continuation line.
+            raise SurfaceError(
+                f"worktree porcelain: unrecognised line {line[:80]!r} — the "
+                "parse LOST part of a record (a path containing a newline "
+                "splits one), so the answer would be silently smaller than the "
+                "truth; refusing (NOT clean)"
+            )
     if cur is not None:
         blocks.append(cur)
+    if porcelain.strip() and not blocks:
+        raise SurfaceError(
+            "worktree porcelain: non-empty output parsed to zero records — "
+            "refusing a partial scan"
+        )
+    for record in blocks:
+        # `--porcelain` emits HEAD for every record except a `bare` one, so a
+        # record without either is one the parse could not actually see. This is
+        # checked HERE, where the record is built, because the call site can no
+        # longer tell a missing field from a worktree that genuinely has none.
+        if not record.get("path"):
+            raise SurfaceError(
+                "worktree porcelain: a record has no path — refusing a partial "
+                "scan"
+            )
+        if not record.get("head") and not record.get("bare"):
+            raise SurfaceError(
+                "worktree porcelain: a record has neither HEAD nor 'bare' — "
+                "refusing a partial scan"
+            )
     return blocks
 
 
@@ -1961,12 +2055,24 @@ def _require_pr_dicts(prs: list, where: str) -> None:
         # read them — a traceback with no VERDICT line and exit 1, which callers
         # read as COLLISION.
         #
-        # `title`/`headRefName` are required and must be strings; `body`/`state`
-        # are optional and may be null. The requiredness rule is about whether
-        # absence LOSES INFORMATION, not about tidiness: the issue payload's
-        # `comments`/`assignees` are required because a missing one silently
-        # drops a claim, whereas a missing `body`/`state` does not.
-        for key in ("title", "headRefName"):
+        # REQUIRED AND A STRING: `title`, `headRefName`, `state`. REQUIRED AND
+        # NULLABLE: `body` and `mergedAt`/`merged_at` (GitHub types those string
+        # or null, and both are present on every payload this reads).
+        #
+        # The requiredness rule is whether ABSENCE LOSES INFORMATION, and it is
+        # not obvious, so it is stated where it bites:
+        #
+        #   ⛔ `state` — REQUIRED. Its absence removes the `state in ("open",
+        #   "opened")` short-circuit, which is the ONLY thing keeping a live open
+        #   PR from being demoted: a payload with no `state` and a truthy
+        #   `mergedAt` was read as MERGED, and every match on the BLOCKING open-PR
+        #   surface went out as `weak` → CLEAN. An earlier version of this comment
+        #   called `state` optional because absence loses nothing; it loses the
+        #   liveness signal, which is the whole difference between COLLISION and
+        #   CLEAN.
+        #   ⛔ `mergedAt`/`merged_at` — it GATES A DOWNGRADE, so a non-string
+        #   (e.g. `1`, which is truthy) silently demoted a live PR.
+        for key in ("title", "headRefName", "state"):
             if key not in pr:
                 raise SurfaceError(
                     f"{where} returned an element with no {key!r} at index "
@@ -1977,12 +2083,18 @@ def _require_pr_dicts(prs: list, where: str) -> None:
                     f"{where} returned a non-string {key!r} at index {index} "
                     f"({type(pr[key]).__name__}) — refusing (NOT clean)"
                 )
-        for key in ("body", "state"):
-            value = pr.get(key)
-            if value is not None and not isinstance(value, str):
+        for key in ("body",):
+            if key not in pr:
+                raise SurfaceError(
+                    f"{where} returned an element with no {key!r} at index "
+                    f"{index} — a reader consumes it on a BLOCKING surface, so "
+                    "absence would silently drop that signal (NOT clean)"
+                )
+        for key in ("body", "mergedAt", "merged_at"):
+            if key in pr and pr[key] is not None and not isinstance(pr[key], str):
                 raise SurfaceError(
                     f"{where} returned a non-string {key!r} at index {index} "
-                    f"({type(value).__name__}) — refusing (NOT clean)"
+                    f"({type(pr[key]).__name__}) — refusing (NOT clean)"
                 )
 
 
@@ -2977,11 +3089,13 @@ def run_preflight(
             if rc != 0:
                 why = "timeout" if timed_out else f"exit {rc}"
                 raise SurfaceError(f"git worktree list failed ({why}): {_one_line(err)}")
+            # `_worktree_blocks` REFUSES an unreadable record, an unrecognised
+            # continuation line, and a record missing its path or HEAD, so a
+            # parse loss is a NAMED INCOMPLETE rather than a silently smaller
+            # answer. The count guard that used to sit here could never fire: it
+            # compared `len(blocks)` with the number of `worktree ` lines, and
+            # the parser built one block per such line.
             blocks = _worktree_blocks(out)
-            if out.strip() and len(blocks) != sum(
-                1 for ln in out.splitlines() if ln.startswith("worktree ")
-            ):
-                raise SurfaceError("worktree porcelain parse lost an entry (refusing partial scan)")
             # Reuse the LOCAL-BRANCH walk instead of repeating the identical
             # `for-each-ref --merged=origin/main refs/heads` query, and carry
             # its availability through: when the walk could not run, the
