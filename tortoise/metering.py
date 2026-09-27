@@ -1641,34 +1641,76 @@ def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
             "than writing a fabricated 0.0", org_id, total_mb)
         return None
     total = float(total_mb)
+    # ⛔ DELEGATE to the meter's own validators, so the two paths CANNOT drift.
+    # A round-6 review found this boundary still flooring a finite non-integer
+    # (``int(5.9) == 5``) and applying NO bounds (a stored ``samples=0``, a huge
+    # unclamped count) — the identical defect the same PR had just fixed in
+    # ``graph_storage._resolve_samples/_resolve_repeats``, and exactly the
+    # source/ledger asymmetry its own commit set out to close. Re-implementing
+    # the rule here is what let them diverge, so this calls the ONE
+    # implementation: it rejects a non-finite or fractional count, rejects a
+    # non-integer, and clamps to [1, MAX] with a warning.
+    from tortoise.graph_storage import (
+        REPEATS_MAX,
+        SAMPLES_DEFAULT,
+        SAMPLES_MAX,
+        _resolve_repeats,
+        _resolve_samples,
+    )
     if samples is None:
-        from tortoise.graph_storage import SAMPLES_DEFAULT
         samples = SAMPLES_DEFAULT
     try:
-        samples = int(samples)
-        repeats = int(repeats)
-    except (TypeError, ValueError, OverflowError):
-        # ``OverflowError`` for parity with ``graph_storage._resolve_*``:
-        # ``int(float("inf"))`` raises it, and this boundary's own docstring
-        # promises a non-integer count is DROPPED the same way. Catching only
-        # (TypeError, ValueError) let a non-finite count escape as a raise out
-        # of a fail-soft ledger write — the same defect this PR fixed at the
-        # sibling site, so the class is closed on BOTH paths.
+        # Distinct messages per parameter, because the two have different
+        # documented ranges (SAMPLES is the engine's knob with an engine max;
+        # repeats is this module's own bound).
+        samples = _resolve_samples(samples)
+    except ValueError as e:
         _logger.warning(
-            "graph storage metering dropped a non-integer samples/repeats "
-            "(team=%s samples=%r repeats=%r) — not writing a figure that "
-            "misstates its own precision", org_id, samples, repeats)
+            "graph storage metering dropped an unusable samples (team=%s "
+            "samples=%r) — not writing a figure that misstates its own "
+            "precision: %s", org_id, samples, e)
         return None
+    try:
+        repeats = _resolve_repeats(repeats)
+    except ValueError as e:
+        _logger.warning(
+            "graph storage metering dropped an unusable repeats (team=%s "
+            "repeats=%r) — not writing a figure that misstates its own "
+            "precision: %s", org_id, repeats, e)
+        return None
+    assert 1 <= samples <= SAMPLES_MAX and 1 <= repeats <= REPEATS_MAX
+    # Repair the RELATIONAL invariants at the boundary, mirroring the source:
+    # the migration defines ``graph_storage_spread_mb`` as "max_mb - min_mb — the
+    # OBSERVED spread" and the reader relies on ``min <= total <= max``, so a
+    # caller passing a contradictory trio must not have it persisted verbatim.
+    # Measured before this: ``min=9, total=5, max=1`` was written as-is.
     safe_min = _finite_or(min_mb, total) if min_mb is not None else total
     safe_max = _finite_or(max_mb, total) if max_mb is not None else total
+    safe_min, safe_max = min(safe_min, total), max(safe_max, total)
+    # ``spread`` is COMPUTED, not trusted: a caller-supplied spread that does not
+    # equal ``max - min`` would contradict the row it is stored beside. The
+    # parameter is still READ, as a cross-check, so a disagreeing caller is told
+    # rather than silently overridden.
+    safe_spread = safe_max - safe_min
+    if spread_mb is not None and _is_finite(spread_mb):
+        supplied = float(spread_mb)
+        if abs(supplied - safe_spread) > 1e-9:
+            _logger.warning(
+                "graph storage metering: supplied spread %r disagrees with "
+                "max-min (%r) for team=%s — storing the DERIVED value, so the "
+                "row cannot contradict itself", supplied, safe_spread, org_id)
     # A non-finite index share is ABSENT, not zero (review finding):
     # ``graph_storage_indices_mb`` is nullable precisely so "the engine did not
     # report an index share" stays distinguishable from "reported as 0" — the
     # distinction this meter exists to keep. Defaulting a NaN to 0.0 would write
     # a fabricated clean figure, which is the one thing a measurement must not do.
+    # A share LARGER than the total is dropped for the same reason: it is not a
+    # usable part-of-whole, and the source drops it too.
     safe_indices = None
     if indices_mb is not None and _is_finite(indices_mb):
-        safe_indices = float(indices_mb)
+        candidate = float(indices_mb)
+        if candidate <= total:
+            safe_indices = candidate
     period = _require_period(org_id, "graph storage metering")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     with _ask_meter_lock(org_id):
@@ -1680,7 +1722,7 @@ def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
             repeats=repeats,
             min_mb=safe_min,
             max_mb=safe_max,
-            spread=_finite_or(spread_mb, 0.0),
+            spread=safe_spread,
             measured_at=measured_at,
         )
 
