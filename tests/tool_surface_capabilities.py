@@ -908,7 +908,14 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
             elif not handler_self_guards(e.name, mcp_src):
                 out.append(
                     f"{e.name}: HTTP-excluded writer whose handler does not self-guard")
-        # 2b — writer-annotated must be write-classified or self-guarded
+        # 2b — writer-annotated must be write-classified or self-guarded.
+        # The self-guard branch is deliberate and stays (#4474's issue comment
+        # pins it; `test_T1_exempted_tool_without_self_guard_fails` exercises
+        # it): an HTTP-excluded graph writer must self-guard. On a coherent
+        # registry the branch is reached only by a writer-annotated entry
+        # OUTSIDE WRITE_TOOL_NAMES — empty since #4474, and that class is caught
+        # by `exemption_set_violations` — so this arm remains the handler-side
+        # cross-check plus the synthetic-probe path, not the primary guard.
         writer_annotated = (
             e.annotations is not None and e.annotations.readOnlyHint is False
         )

@@ -1242,9 +1242,10 @@ def get_write_tool_names() -> frozenset[str]:
 
     Covers the SERVED set (#3883): a retired name still answers through the
     warning shim, so a write served under a retired name must not be recorded as
-    a read. No retired entry is a writer today, so the census is unchanged — the
-    derivation is stated over the served set so it cannot silently shrink when
-    one is."""
+    a read. Since #4474 two retired shims ARE writers (`tortoise_ingest_corpus`,
+    `tortoise_index_sessions`), so the served census (47) exceeds the live census
+    (45) — the derivation over the served set is what keeps them counted, and it
+    stops the census from silently shrinking when a live writer is retired."""
     return frozenset(
         t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
     )

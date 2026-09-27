@@ -1203,9 +1203,10 @@ class TestToolIdentity:
 
         Derived over the SERVED set (#3883), exactly like `get_write_tool_names`:
         a retired name still answers, so a write under a retired name must still
-        count as a write. No retired entry is a writer today, so stating it over
-        the served set changes no number — it stops the census from silently
-        shrinking when one is retired."""
+        count as a write. Since #4474 two retired shims are writers, so the
+        served census (47) differs from the live census (45) — the served-set
+        derivation is what keeps a retired writer from being recorded as a
+        read."""
         from tortoise.mcp_server import WRITE_TOOL_NAMES
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
         derived = frozenset(
