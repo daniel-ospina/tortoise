@@ -354,9 +354,14 @@ def _corpus():
     return runs
 
 
+MERGIFY_NO_MAX = REPO / "tests" / "fixtures" / "mergify-no-max-parallel.yml"
+
+
 def _build(runs, **kw):
-    # inject the config so the test does not depend on the repo's live
-    # `.mergify.yml` (PR #5527 sets `max_parallel_checks: 3` there)
+    # Hermetic: pin the config reader to a fixture with no `max_parallel_checks`,
+    # so the record does not depend on the repo's live `.mergify.yml` (PR #5527
+    # would set `max_parallel_checks: 3` there and silently change this record).
+    kw.setdefault("config_path", MERGIFY_NO_MAX)
     return obs.build_record(runs, kw.pop("window_hours", 24), now=NOW, **kw)
 
 
@@ -522,6 +527,85 @@ def test_cli_writes_a_json_record(tmp_path):
     assert record["parallelism"]["effective_max_parallel_checks"] == 5
 
 
+def test_cli_exits_2_on_an_unreadable_conflicts_input(tmp_path):
+    # A REQUESTED conflicts read that cannot be read is UNKNOWN (exit 2), never
+    # `conflicted_set: null` at exit 0 (which reads as "checked, none found").
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bad = tmp_path / "conflicts.json"
+    bad.write_text("{not json")
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
+
+
+def test_as_of_pins_the_window_end(tmp_path):
+    # `--as-of` makes a replay reproducible AND keeps the window end inside the
+    # corpus's coverage, so runs created after the dump was taken cannot read as
+    # absent demand.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW), "--out", str(out)]) == 0
+    assert json.loads(out.read_text())["window"]["end"] == _iso(NOW)
+
+
+def test_from_json_replay_does_not_shell_out_for_a_main_sha(tmp_path, monkeypatch):
+    # `--from-json` must stay hermetic: resolving origin/main shells out to `git
+    # ls-remote`, so it is only done on `--live` (or when `--main-sha` is given).
+    def _boom(*_a, **_k):
+        raise AssertionError("resolve_origin_main must not run on a --from-json replay")
+
+    monkeypatch.setattr(obs, "resolve_origin_main", _boom)
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--out", str(out)]) == 0
+    record = json.loads(out.read_text())
+    assert record["window"]["main_sha_source"].startswith("unresolved")
+
+
+def test_cli_truncated_unknown_is_exit_2_not_a_crash(tmp_path, monkeypatch):
+    # A capped read whose window holds no queue runs returns an UNKNOWN body with
+    # no `window` key. Stamping truncation must not raise KeyError (exit 1, no
+    # record written, stale --out left on disk) — it must be a clean exit-2
+    # UNKNOWN that is still written.
+    runs = [run("feature/x", "unrelated push run", minutes_ago=5)]
+    monkeypatch.setattr(obs, "fetch_runs", lambda pages=8: (runs, True))
+    monkeypatch.setattr(obs, "live_queue_refs", lambda: None)
+    monkeypatch.setattr(obs, "resolve_origin_main", lambda: "0" * 40)
+    out = tmp_path / "record.json"
+    code = obs.main(["--live", "--window-hours", "8", "--out", str(out)])
+    assert code == 2
+    body = json.loads(out.read_text())
+    assert body["status"] == obs.UNKNOWN
+    assert body["truncated"] is True
+
+
+def test_queue_intervals_exclude_a_completed_run_with_no_start():
+    # `startup_failure` is completed with no `run_started_at` but NEVER queued.
+    # Counting it as "queued until now" inflates queued/oldest/capacity (fail-OPEN).
+    never_queued = [{
+        "head_branch": "feature/x", "name": "Python CI", "status": "completed",
+        "conclusion": "startup_failure",
+        "created_at": _iso(NOW - timedelta(hours=40)),
+        "run_started_at": None, "updated_at": _iso(NOW - timedelta(hours=40)),
+    }]
+    assert obs.queue_intervals(never_queued, now=NOW) == []
+
+
+def test_record_reports_queue_depth_at_each_formation():
+    # M5: the queue depth AT FORMATION, not a momentary sample elsewhere.
+    record = _build(_corpus())
+    formed = [f for f in record["batches"]["formations"] if not f["bisection"]]
+    assert formed
+    assert all(f["queue_depth_at_formation"] >= 1 for f in formed)
+    assert record["batches"]["max_queue_depth_at_formation"] >= 1
+
+
 # ---------------------------------------------------------------------------
 # The committed evidence must agree with the doc that cites it. A reviewer
 # caught the doc's M5/M6 numbers drifting from the JSON it referenced, so the
@@ -534,8 +618,11 @@ M4_CAP = REPO / "docs" / "ci" / "merge-throughput-m4-capacity-records.json"
 
 
 def test_committed_records_match_the_doc():
-    if not (DOC.exists() and M3_M6.exists() and M4_CAP.exists()):
-        pytest.skip("measurement records not committed in this checkout")
+    # A MISSING artifact must fail, not skip: skipping here makes the "doc cannot
+    # drift from the records" pin vacuous exactly when a record is deleted.
+    assert DOC.exists(), f"missing {DOC}"
+    assert M3_M6.exists(), f"missing {M3_M6}"
+    assert M4_CAP.exists(), f"missing {M4_CAP}"
     doc = DOC.read_text()
     short = json.loads(M3_M6.read_text())
     long_ = json.loads(M4_CAP.read_text())
@@ -548,16 +635,23 @@ def test_committed_records_match_the_doc():
     # M5: the fresh window is all pairs; the 14 d window keeps its singles
     fresh_sizes = set(short["batches"]["batch_sizes"])
     assert fresh_sizes == {2}, fresh_sizes
-    assert short["batches"]["bisection_singles"] == 5
+    assert short["batches"]["bisection_singles"] == 6
     dist_long = long_["parallelism"]["formation_size_distribution"]
-    assert dist_long == {"1": 10, "2": 101}, dist_long
-    assert "`{1: 10, 2: 101}`" in doc
-    assert "`{2: 30}`" in doc
+    assert dist_long == {"1": 10, "2": 155}, dist_long
+    assert "`{1: 10, 2: 155}`" in doc
+    assert "`{2: 43}`" in doc
+
+    # M5: queue depth at formation is windowed and recorded per formation, and
+    # the conflicted set is stamped as a NON-windowed snapshot (F10)
+    assert short["batches"]["max_queue_depth_at_formation"] >= 1
+    assert all(f["queue_depth_at_formation"] >= 1
+               for f in short["batches"]["formations"])
+    assert short["batches"]["conflicted_set"]["window_scope"].startswith("point-in-time")
 
     # M6: discarded speculative batches
-    assert short["invalidations"]["discarded_speculative"] == 20
-    assert long_["invalidations"]["discarded_speculative"] == 48
-    assert "**20**" in doc and "**48**" in doc
+    assert short["invalidations"]["discarded_speculative"] == 17
+    assert long_["invalidations"]["discarded_speculative"] == 73
+    assert "**17**" in doc and "**73**" in doc
     assert short["invalidations"]["unobserved_waves"] == 1
 
     # M4: capacity is UNKNOWN in both windows, and headroom is never invented

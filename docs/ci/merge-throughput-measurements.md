@@ -189,11 +189,11 @@ print({h: round(sum(c._duration_weight(d.get(f if f.endswith('.py') else f+'.py'
 
 | field | value |
 |---|---|
-| capture timestamp (UTC) | M3/M5/M6 record `end` = `2026-09-27T10:48:28Z`; M4 record `end` = `2026-09-27T10:49:51Z` |
-| resolved `origin/main` | `74a88cf8382dd4fef08c25bbeba49baa7f05d3f6` — from `git ls-remote origin refs/heads/main` at capture, recorded per record as `window.main_sha` with `main_sha_source` |
+| capture timestamp (UTC) | both records `end` = `2026-09-27T19:35:39Z` — the newest run in the corpus, pinned with `--as-of` so the window end sits **inside** the corpus's coverage (rather than in the gap between the dump and the run) |
+| resolved `origin/main` | `56e2558399e73f9619b817016c92790a97c7b4bc` — passed as `--main-sha` and recorded per record as `window.main_sha` with `main_sha_source` |
 | window (M3/M5/M6) | 8 h |
 | window (M4) | 14 d |
-| corpus | 40 000 workflow runs (`2026-08-28` → `2026-09-27`) via `gh api /actions/runs --paginate`; 8 h window: 358 queue runs / 30 queue branches; 14 d window: 1 268 queue runs / 111 queue branches |
+| corpus | 39 972 unique workflow runs (`2026-08-30T23:00Z` → `2026-09-27T19:35Z`, 27.9 d) via `gh api /actions/runs`; 8 h window: 501 queue runs / 43 queue branches; 14 d window: 1 917 queue runs / 165 queue branches. The Actions endpoint caps pagination at **400 pages / 40 000 runs** (pages past it return HTTP 422), so the dump is **deduped by run `id`** and non-run error payloads dropped before replay. |
 | instrument | `tools/merge_throughput.py` @ #5705 (`74f9f1eaa`) — **owns every exit code**; this lane supplies **records**, it does not judge |
 | observer | `tools/queue_window_observe.py` (added by this lane; read-only, stdlib-only) |
 | committed records | `docs/ci/merge-throughput-m3-m6-records.json` (8 h), `docs/ci/merge-throughput-m4-capacity-records.json` (14 d) |
@@ -214,13 +214,31 @@ truncation of the corpus.
 **Reproduce:**
 
 ```bash
+# newest-first dump; the Actions endpoint caps pagination at 400 pages, so pages
+# past it return HTTP 422 — dedupe by run id and drop the error payloads.
 gh api repos/daniel-ospina/tortoise/actions/runs?per_page=100 --paginate \
-    --jq '.workflow_runs[]' > runs.jsonl
+    --jq '.workflow_runs[]' > runs.raw.jsonl
+python3 - <<'PY'
+import json
+seen = set()
+with open("runs.raw.jsonl") as src, open("runs.jsonl", "w") as out:
+    for line in src:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue                      # HTTP-422 pagination error payload
+        if isinstance(r, dict) and "id" in r and r["id"] not in seen:
+            seen.add(r["id"])
+            out.write(json.dumps(r) + "\n")
+PY
 python3 tools/merge_throughput.py --json .conflicts > conflicts.json
+MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
 python3 tools/queue_window_observe.py --from-json runs.jsonl --window-hours 8 \
+    --as-of 2026-09-27T19:35:39Z --main-sha "$MAIN" \
     --confirm-refs --conflicts-json conflicts.json \
     --out docs/ci/merge-throughput-m3-m6-records.json
 python3 tools/queue_window_observe.py --from-json runs.jsonl --window-hours 336 \
+    --as-of 2026-09-27T19:35:39Z --main-sha "$MAIN" \
     --conflicts-json conflicts.json \
     --out docs/ci/merge-throughput-m4-capacity-records.json
 # then, with the instrument present (#5705), the exact S-criteria flags:
@@ -239,18 +257,16 @@ python3 tools/merge_throughput.py check capacity --max-oldest-minutes 120 --min-
 |---|---|---|
 | **configured** | **5** | `configured_source = "documented-default (not set in .mergify.yml)"` |
 | **effective** | **5** | largest wave size observed in **≥ 2 waves** |
-| wave sizes, 8 h | `{5: 6}` | 5 branches form together, six times |
-| wave sizes, 14 d | `{1: 9, 2: 1, 5: 15, 10: 1, 15: 1}` | 5 recurs 15×; the 10 and 15 are **one-offs** |
-| max observed batches | 5 (8 h) / 15 (14 d) | one-off bursts — never the effective value |
+| wave sizes, 8 h | `{1: 2, 4: 2, 5: 5, 8: 1}` | 5 recurs 5×, the 4s recur 2×; the 8 is a **one-off** |
+| wave sizes, 14 d | `{1: 12, 2: 1, 4: 2, 5: 22, 8: 1, 10: 1, 15: 1}` | 5 recurs 22×; the 8, 10 and 15 are **one-offs** |
+| max observed batches | 8 (8 h) / 15 (14 d) | one-off bursts — never the effective value |
 | live queue refs at observation | **5** | momentary, recorded as corroboration only |
 
 **Verdict: effective `max_parallel_checks` = 5 — the documented default, now measured.** The plan's
 ⟨C1⟩ is confirmed and strengthened: `#5527` setting `max_parallel_checks: 3` is a **reduction from an
 effective 5, not a 3× gain** (F3). Any claim that it is a gain must be withdrawn.
 
-**A max-observed reading would have been wrong.** The 14-day window contains a one-off **15**-branch
-wave and a one-off **10**; the 8-hour window's 5-minute concurrency sweep also sees **bisection
-re-runs** (`batches.bisection_singles` = 5) layered on top of the speculative wave. The recurrence rule
+**A max-observed reading would have been wrong.** The 14-day window contains one-off **15**-, **10**- and **8**-branch waves; the 8-hour window's sweep also sees **bisection re-runs** (`batches.bisection_singles` = 6) layered on top of the speculative wave. The recurrence rule
 ("seen in ≥ 2 waves") excludes all of them. This is the error M3 exists to prevent, and it is pinned by
 a **discriminating test** (`test_record_effective_parallelism_ignores_a_one_off_larger_wave`: a 7-wave
 plus two 5-waves must yield `effective == 5` with `max_observed_batches == 7`).
@@ -265,12 +281,12 @@ size-1 re-run cannot inflate a wave.
 
 | reading | 8 h window | 14 d window |
 |---|---|---|
-| max concurrent **queued** runs | 2 | 32 |
-| max concurrent **in-progress** runs | 38 | 125 |
-| max concurrent **queued + in-progress** | 39 | 139 |
-| max **oldest-queued** age (`oldest_minutes`) | **181.9 min** | 12 693.5 min (a stale entry; not a steady state) |
-| max per-run queue wait (`max_queue_wait_minutes`) | 181.9 min | 12 693.5 min |
-| runs **delayed** ≥ 60 min | 1 | 174 |
+| max concurrent **queued** runs | 7 | 43 |
+| max concurrent **in-progress** runs | 56 | 125 |
+| max concurrent **queued + in-progress** | 56 | 139 |
+| max **oldest-queued** age (`oldest_minutes`) | **52.8 min** | 12 693.5 min (a stale entry; not a steady state) |
+| max per-run queue wait (`max_queue_wait_minutes`) | 52.8 min | 12 693.5 min |
+| runs **delayed** ≥ 60 min | 0 | 189 |
 | **`capacity_at_first_failure`** | **UNKNOWN** | **UNKNOWN** |
 | **`headroom`** | **UNKNOWN** | **UNKNOWN** |
 
@@ -278,13 +294,16 @@ size-1 re-run cannot inflate a wave.
 one sample is not localisable.** The plan's I9 defines it as *"the concurrency at which a run
 **demonstrably failed to acquire a runner**"*. The observed API signal for that is exactly one
 `startup_failure` (a run whose workflow created **zero jobs**), `Python CI` run `35776476728` at
-`2026-09-22T19:51:30Z`, whose `run_started_at` is two days later. Its creation and its failure are
+`2026-09-22T19:51:30Z`, whose recorded queue wait is **2 410.3 min (~1.7 d)** — far above the 360-min
+stale bound. The candidate is named in the record's `capacity_at_first_failure_candidates`, so this
+claim is verifiable from the committed artifact, not only from prose. Its creation and its failure are
 therefore in **different windows**, so no single concurrency can be read from it; the record's
 `capacity_at_first_failure_reason` states this verbatim (the 8 h record: *"no run in the window failed
 to acquire a runner"*; the 14 d record: *"all 1 failed-to-start candidate(s) … unlocalizable wait …
-above the 360-min stale bound"*). Long waits (63–182 min) are **delays**, not starvation: those runs
-*did* acquire a runner and completed, and are recorded separately in `max_queue_wait_minutes` /
-`runs_delayed_over_60min`. Counting them would manufacture a capacity number out of ordinary pressure.
+above the 360-min stale bound"*). Long waits are **delays**, not starvation: those runs *did* acquire a
+runner and completed (8 h: none ≥ 60 min, max 52.8; 14 d: 189 runs ≥ 60 min, max a stale 12 693.5),
+and are recorded separately in `max_queue_wait_minutes` / `runs_delayed_over_60min`. Counting them
+would manufacture a capacity number out of ordinary pressure.
 
 **I9 therefore refuses (exit 2), and no parallelism value is authorised by this window** (F6). This is
 the plan's required behaviour — an unmeasured headroom must never read as a pass.
@@ -295,9 +314,10 @@ run-slots**. On that reading the plan's T-G premise — *runner capacity is the 
 supported in this window** (F5): the queue is nowhere near the observed runner ceiling, and what binds
 is the CI load itself.
 
-**S11's oldest-age threshold is independently failing.** `oldest_minutes` reached **181.9 min**, above
-S11's `--max-oldest-minutes 120` — so even once headroom becomes measurable, capacity is still over the
-plan's bound.
+**S11's oldest-age threshold.** On the fresh 8 h record `oldest_minutes` is **52.8 min**, *below*
+S11's `--max-oldest-minutes 120`; on the 14 d record it is a stale **12 693.5 min**, far above it.
+S11 still exits 2 — because `capacity_at_first_failure` is UNKNOWN, not because of the age threshold —
+so the binding failure is the **missing headroom**, not an over-age queue.
 
 **Unit warning for I9 (F4).** I9 compares `configured_max_parallel_checks` (**batches**) with
 `capacity_at_first_failure` (**concurrent workflow runs**) — **different units**, so the predicate's
@@ -311,21 +331,22 @@ verdict flips on normalisation. The record carries `capacity_at_first_failure`,
 
 | evidence | 8 h | 14 d |
 |---|---|---|
-| batch formations (bisections excluded) | **30** | **111** |
-| — of size 2 | **30** | **101** |
+| batch formations (bisections excluded) | **43** | **165** |
+| — of size 2 | **43** | **155** |
 | — genuinely size 1 | **0** | **10** |
-| bisection re-runs (excluded from formations) | 5 | 15 |
-| `formation_size_distribution` | `{2: 30}` | `{1: 10, 2: 101}` |
-| conflicted set, same window | 166 enumerated, **21 conflicting**, 1 unknown | same read |
+| bisection re-runs (excluded from formations) | 6 | 24 |
+| `formation_size_distribution` | `{2: 43}` | `{1: 10, 2: 155}` |
+| **queue depth at formation** (`max_queue_depth_at_formation`) | **10** | **15** |
+| conflicted set (point-in-time snapshot) | 177 enumerated, **23 conflicting**, 1 unknown | same snapshot |
 
-**The fresh window has ZERO single-PR formations.** Every one of the 30 formations in the last 8 h is a
-pair. The size-1 branches are **bisection re-runs** after a red — `#5356 + #5343` formed at 06:37Z, then
-`#5356` alone at 07:11Z and `#5343` alone at 07:58Z. The plan's own cite (`Merge of #5397` 21:44Z) is a
-**merge** event, which is exactly what a two-PR batch produces *after* a bisection. The regime also
-changed: every formation up to `2026-09-25T22:41Z` was size 1, and every one from `2026-09-26T12:01Z`
-on is a pair, so a baseline captured before that switch is stale.
+**The fresh window has ZERO single-PR formations.** Every one of the 43 formations in the last 8 h is a
+pair (155 of 165 over 14 d). The size-1 branches are **bisection re-runs** after a red (6 in 8 h, 24 in
+14 d). The plan's own cite (`Merge of #5397` 21:44Z) is a **merge** event, which is exactly what a
+two-PR batch produces *after* a bisection. The regime also changed: every formation up to
+`2026-09-25T22:41Z` was size 1, and every one from `2026-09-26T12:01Z` on is a multiple, so a baseline
+captured before that switch is stale.
 
-**The 14-day residue is 10 of 111 (9 %) genuine singles** — a real but small minority, not "batch size
+**The 14-day residue is 10 of 165 (6.1 %) genuine singles** — a real but small minority, not "batch size
 is 1". Those are PRs that were conflict-capped or demand-starved individually; they are the honest
 remainder, and they are why the E1b decision is stated as *"pairing works"*, not *"pairing is
 universal"*.
@@ -335,8 +356,15 @@ universal"*.
 1. **`batch_max_wait_time: 5 min`** — **not** capping. 5-branch waves form in 1–2 min, well inside the
    window.
 2. **Demand starvation** — **not** the modal cause. A 5-wave pairs 10 distinct PRs simultaneously.
-3. **Conflicts** — real but not the modal cap: **21 of 166** PRs conflict (12.7 %), while paired
-   formations dominate.
+3. **Conflicts** — real but not the modal cap: **23 of 177** open PRs conflict (13.0 %) in the snapshot,
+   while paired formations dominate.
+
+**Queue depth at formation** is the number of distinct `mergify/merge-queue/*` branches whose run was
+**in flight at the formation timestamp** (`batches.max_queue_depth_at_formation`, with a per-formation
+`queue_depth_at_formation`) — it separates "the queue was empty" from "the pair did not form". **The
+conflicted set is a point-in-time snapshot of the currently open PRs**, stamped
+`window_scope: "point-in-time snapshot at capture (NOT window-scoped)"`: the PR API keeps no historical
+conflict state, so it **cannot** be scoped to the 14-day window (F10).
 
 **Decision unblocked:** **E1b (`batch_size: 2 → 4`) is not gated on a pairing failure.** M5's blocking
 role (plan §4.3) is discharged: the remaining question for E1b is the **latency / red-rate** one
@@ -346,27 +374,29 @@ role (plan §4.3) is discharged: the remaining question for E1b is the **latency
 
 | reading | 8 h | 14 d |
 |---|---|---|
-| waves | 6 | 27 |
-| batch waves (size ≥ 2) | 6 | 18 |
-| red batch waves | **5** | 12 |
+| waves | 10 | 40 |
+| batch waves (size ≥ 2) | 8 | 28 |
+| red batch waves | **4** | 18 |
 | unobserved wave heads (`red: null`) | 1 | 1 |
-| **discarded speculative batches** | **20** | **48** |
-| waste ratio (per batch wave) | 3.33 | 2.67 |
-| `Python CI` on queue heads | **`{failure: 30}` — 0 success** | `{failure: 91, success: 30}` |
+| **discarded speculative batches** | **17** | **73** |
+| waste ratio (per batch wave) | 2.12 | 2.61 |
+| `Python CI` on queue heads | `{failure: 33, success: 7, cancelled: 4}` | `{failure: 140, success: 40, cancelled: 4}` |
 
-**The ⟨C3⟩ term-iii waste is real and at its maximum.** In serial mode a red invalidates the speculative
+**The ⟨C3⟩ term-iii waste is real and large.** In serial mode a red invalidates the speculative
 batches above it, so a red head of an N-branch wave wastes **N − 1** validations. Measured: each red
-5-wave discards **4** speculative batches — the `max_parallel_checks − 1` term the plan said to measure
-rather than assume. **20 speculative batch validations were discarded in 8 h.**
+5-wave discards **4** speculative batches (the `max_parallel_checks − 1` term the plan said to measure
+rather than assume), and the one-off **8**-branch wave discarded **7**. **17 speculative batch
+validations were discarded in 8 h** (73 over 14 d).
 
 A wave head whose heavy leg was never observed is recorded as `red: null` and **excluded** from the red
 count, so its waste is a **floor**, not a verified zero — an unobserved head must not read as "clean".
 
-**The cause is not the queue.** Over the fresh 8 h **every** `Python CI` run on a queue head failed
-(30/30). Main's required gate reads `exit 2` under S1 (see below). So the queue is not draining slowly
-because of its own configuration — **the heavy leg is red on the tree that would land**, which is ⟨C4⟩
-/ #5597, and it makes the speculative machinery pure waste until it is fixed. **This reorders the plan's
-own lever list: no P2 throughput work pays while the batch head cannot pass.**
+**The queue is dominated by red, but the heavy leg is not universally failing.** Over the fresh 8 h the
+`Python CI` heavy leg on queue heads is `{failure: 33, success: 7, cancelled: 4}` — **7 successes**, so
+an earlier reading of *every* queue head failing (30/30) is **superseded** by this window. The failure
+rate is 33 of 44 concluded runs (75 %), which still makes most speculative work waste and still points
+at **the heavy leg being red on the tree that would land** (⟨C4⟩ / #5597) as the dominant term. The
+honest statement is "mostly red", not "always red": measured, not assumed.
 
 ## Records consumed by the instrument (exit codes)
 
@@ -374,7 +404,7 @@ Run with the instrument at `74f9f1eaa`; each command was executed and its code r
 
 | criterion | command | result |
 |---|---|---|
-| **S6** | `check batch-size --min 2 --min-depth 1 --require-fresh --input docs/ci/merge-throughput-m3-m6-records.json` | **0** (30 events, all size 2) |
+| **S6** | `check batch-size --min 2 --min-depth 1 --require-fresh --input docs/ci/merge-throughput-m3-m6-records.json` | **0** (43 events, all size 2) |
 | **S14** | `check parallelism-headroom --require-fresh --input docs/ci/merge-throughput-m4-capacity-records.json` | **2** — `2: capacity_at_first_failure is UNKNOWN (refuse, never pass)` (I9) |
 | **S11** | `check capacity --max-oldest-minutes 120 --min-headroom 1 --require-complete --require-fresh --input docs/ci/merge-throughput-m4-capacity-records.json` | **2** — `2: capacity field 'capacity_at_first_failure' is missing or not numeric` |
 | **S1** | `check main-gate --strict --require-fresh` | **2** — all six required contexts `NO_MAIN_SIGNAL` |
@@ -383,7 +413,7 @@ Both `capacity` and `parallelism-headroom` exit **2**, not `1`: the instrument's
 precedes the threshold check, so UNKNOWN dominates a threshold miss. I9's refusal must never read as
 "merely below threshold".
 
-**S1's six-context reading, recorded precisely.** At main `74a88cf83…`, `check-runs?filter=all` returns
+**S1's six-context reading, recorded precisely.** At main `56e255839…`, `check-runs?filter=all` returns
 **zero** check-runs for **all six** required names, so the strict read is `NO_MAIN_SIGNAL` for each and
 the criterion is `2`. Five of those are D13's permanent gap (the `pull_request`-only contexts);
 `python-ci-gate` **is** push-triggered (`python-ci.yml: push:[main]`), so its absence at a
@@ -395,11 +425,12 @@ instrument cannot make and this record therefore states (F8).
 | # | finding | owner / route |
 |---|---|---|
 | **F1** | `--watch-queue` / `--observe-capacity` are single-sample: the plan's M3/M5/M6 cannot be produced by the instrument as delivered | Task 1 lane (#5705) |
-| **F2** | The plan's "observed batch size is 1" baseline conflates **bisection re-runs** and **merge events** with **batch formations**: the fresh window has 30/30 pairs and **zero** single formations; the 14 d residue is 10/111 | plan §1.1 / §5 M5 |
+| **F2** | The plan's "observed batch size is 1" baseline conflates **bisection re-runs** and **merge events** with **batch formations**: the fresh window has 43/43 pairs and **zero** single formations; the 14 d residue is 10/165 (6.1 %) | plan §1.1 / §5 M5 |
 | **F3** | `#5527`'s `max_parallel_checks: 3` is a **reduction from an effective 5** (⟨C1⟩ confirmed) | #5527, before it is described as a gain |
 | **F4** | I9 compares `capacity_at_first_failure` (**runs**) with `configured_max_parallel_checks` (**batches**) — **different units**, so the predicate's verdict flips on normalisation | plan §3 I9 / Task 4b's guard |
 | **F5** | Runner capacity is **not** demonstrated to be the binding ceiling (peak 125–139 concurrent runs absorbed; queue footprint ≈ 35 run-slots) | plan T-G / D4 |
 | **F6** | No localisable `capacity_at_first_failure` sample exists in a 14-day window ⇒ I9 refuses; "headroom" stays UNKNOWN until a genuine acquisition failure is observed | D4 (trigger-only, still gated) |
 | **F7** | S11/S14 carry `--require-complete`, but a capacity record is a set of **scalar** measurements with no `items`/`total_count`, so `parallelism-headroom --require-complete` exits 2 for a **shape** reason rather than I9's refusal — the criterion cannot distinguish them | plan §11 S11/S14 |
 | **F8** | S1 cannot distinguish a required context that **never** emits on main (D13's five) from one whose push run **has not completed** (`python-ci-gate`); both read `NO_MAIN_SIGNAL` | plan §11 S1 / D13 |
+| **F10** | M5 asks for the conflicted set *in the same window*. The PR API keeps **no historical conflict state**, so the read is a **point-in-time snapshot** (stamped `window_scope` on the record) reused for both windows — the item is **not retrospectively observable** as windowed. Batch-arrival timestamps and **queue depth at formation** ARE windowed and recorded per formation | plan §5 M5 — limitation stated, never silently claimed |
 | **F9** | **Resolved by reconciliation.** Plan Task 3's Files line says *"modify the measurement doc (created by Task 2 — it must land first)"*. Task 2 had **not** landed when this lane created the doc; it landed (#5874, M2) while this PR was open, so the two versions are **merged into one file** — M2 (weight-driven 38/28 split) preserved verbatim, M3–M6 appended. The earlier UNKNOWN M2 placeholder is superseded | plan §10 Task 3 / §4.1 wave map — **RESOLVED** |

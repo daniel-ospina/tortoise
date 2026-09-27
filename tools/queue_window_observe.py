@@ -271,8 +271,14 @@ def queue_intervals(runs, now=None):
             # Keeping it would let `sweep_max_concurrency` read 0 — the
             # fail-open this function's guard exists to prevent.
             out.append((created, started))
-        elif started is None and (r.get("status") in pending or not r.get("run_started_at")) \
-                and now >= created:
+        elif started is None and r.get("status") in pending and now >= created:
+            # ONLY a run that is still QUEUED. A completed run with no
+            # `run_started_at` (`startup_failure`, cancelled-while-queued) never
+            # held a queue slot; treating it as "queued until now" would inflate
+            # `queued` / `oldest_minutes` / `capacity_at_first_failure` — and
+            # I9's headroom is computed from the last of those, so the bias is
+            # fail-OPEN (a higher capacity reads as more headroom). A run whose
+            # `status` is absent is not classified as queued either: fail closed.
             out.append((created, now))
     return out
 
@@ -315,6 +321,32 @@ def oldest_queued_minutes(intervals, now):
     if best_at is None:
         return None, None
     return best, best_at
+
+
+def queue_depth_by_formation(formations_list, queue_runs, now=None):
+    """Distinct queue branches with an in-flight run at each formation moment.
+
+    M5 asks for the queue depth AT FORMATION, not a momentary sample taken
+    somewhere else. A branch counts when its run had started (or the branch been
+    created) and had not finished at `at`, so the count includes the branch that
+    is itself forming (every formation therefore reads depth >= 1).
+    """
+    now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9
+    intervals = []
+    for r in queue_runs:
+        branch = r.get("head_branch")
+        if not branch:
+            continue
+        start = _ts(r.get("run_started_at")) or _ts(r.get("created_at"))
+        end = _ts(r.get("updated_at"))
+        if end is None and r.get("status") in {"in_progress", "queued"}:
+            end = now
+        if start is not None and end is not None and end >= start:
+            intervals.append((branch, start, end))
+    return [
+        len({b for b, s, e in intervals if s <= f["at"] <= e})
+        for f in formations_list
+    ]
 
 
 def bisection_singles(formations_list):
@@ -450,6 +482,10 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
     bisection_branches = {f["branch"] for f in bisections}
     formed = [f for f in forms if f["branch"] not in bisection_branches]
     formed_sizes = [f["size"] for f in formed]
+    # M5's "queue depth at formation": built BEFORE clustering so a formation's
+    # depth is read at its own timestamp, not at its wave's.
+    depths = queue_depth_by_formation(forms, in_window, now)
+    depth_by_branch = {f["branch"]: depths[i] for i, f in enumerate(forms)}
 
     waves = cluster_waves(formed)
     wave_size, wave_counts = repeatable_wave_size(waves)
@@ -495,6 +531,23 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         # API signal for that. A run that waited and then RAN was DELAYED, not
         # starved; a `cancelled` run was interrupted, not starved.
         if r.get("conclusion") == "startup_failure"
+    ]
+    # The candidates are recorded so the doc's specific-run claim is verifiable
+    # from the committed artifact, not only from prose (a P2 review finding).
+    starvation_candidates = [
+        {
+            "run_id": r.get("id"),
+            "name": r.get("name"),
+            "created_at": _iso(_ts(r.get("created_at"))),
+            "conclusion": r.get("conclusion"),
+            "wait_minutes": (
+                None if _minutes(_ts(r.get("created_at")),
+                                 _ts(r.get("run_started_at"))) is None
+                else round(_minutes(_ts(r.get("created_at")),
+                                    _ts(r.get("run_started_at"))), 1)
+            ),
+        }
+        for r in starvation
     ]
     # Delays are reported separately from acquisition failures (M4's own split).
     waits = [
@@ -597,6 +650,7 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         "capacity_at_first_failure": capacity_at_first_failure,
         "capacity_at_first_failure_batches": capacity_at_first_failure_batches,
         "capacity_at_first_failure_reason": capacity_reason,
+        "capacity_at_first_failure_candidates": starvation_candidates,
         "max_queue_wait_minutes": max_queue_wait,
         "runs_delayed_over_60min": delayed_over_60,
         "configured_max_parallel_checks": configured,
@@ -664,12 +718,16 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
         "batches": {
             **batch_size_payload,
             "bisection_prs": [f["batch_prs"][0] for f in bisections],
+            "max_queue_depth_at_formation": (
+                max(depth_by_branch.values()) if depth_by_branch else None
+            ),
             "formations": [
                 {
                     "at": _iso(f["at"]), "branch": f["branch"], "size": f["size"],
                     "batch_prs": f["batch_prs"], "stacked_prs": f["stacked_prs"],
                     "main_sha": f["main_sha"],
                     "bisection": f["branch"] in bisection_branches,
+                    "queue_depth_at_formation": depth_by_branch.get(f["branch"]),
                 }
                 for f in forms
             ],
@@ -821,6 +879,13 @@ def main(argv=None):
                         help="confirm the effective parallelism against the merge-queue "
                              "refs that exist right now (git ls-remote, read-only)")
     parser.add_argument("--conflicts-json", help="the instrument's --json .conflicts")
+    parser.add_argument("--main-sha", help="the resolved origin/main sha for provenance "
+                                            "(a --from-json replay is hermetic and does not "
+                                            "shell out unless this is given)")
+    parser.add_argument("--as-of", help="ISO timestamp to treat as 'now' — pins the window end "
+                                        "to the corpus's coverage so a replay is reproducible "
+                                        "and recent runs missing from the dump cannot look "
+                                        "like absent demand (default: the current time)")
     args = parser.parse_args(argv)
 
     truncated = False
@@ -846,35 +911,58 @@ def main(argv=None):
         return emit_unknown("empty run enumeration")
 
     conflicted = None
+    as_of = _ts(args.as_of) if args.as_of else None
     if args.conflicts_json:
         try:
             data = jsonlib.loads(Path(args.conflicts_json).read_text(encoding="utf-8"))
-            if isinstance(data, dict) and isinstance(data.get("items"), list):
-                conflicted = {
-                    "total": data.get("total"),
-                    "conflicting": sum(
-                        1 for i in data["items"]
-                        if isinstance(i, dict) and i.get("conflicting")
-                    ),
-                    "unknown": sum(
-                        1 for i in data["items"]
-                        if isinstance(i, dict) and i.get("unknown")
-                    ),
-                }
         except (OSError, ValueError):
-            conflicted = None
+            # A requested conflicts read that cannot be read is UNKNOWN (exit 2),
+            # never `conflicted_set: null` at exit 0 — that would read as
+            # "conflicts were checked and there were none".
+            return emit_unknown("conflicts input unreadable or malformed")
+        if not (isinstance(data, dict) and isinstance(data.get("items"), list)):
+            return emit_unknown("conflicts input carries no `items` list")
+        # The conflicts read is a POINT-IN-TIME snapshot of currently open PRs:
+        # the API keeps no historical conflict state, so it cannot be scoped to
+        # the run window. It is stamped so a reader cannot mistake it for one.
+        conflicted = {
+            "total": data.get("total", data.get("total_count")),
+            "conflicting": sum(
+                1 for i in data["items"]
+                if isinstance(i, dict) and i.get("conflicting")
+            ),
+            "unknown": sum(
+                1 for i in data["items"]
+                if isinstance(i, dict) and i.get("unknown")
+            ),
+            "window_scope": "point-in-time snapshot at capture (NOT window-scoped)",
+            "verified_at": _iso(as_of or datetime.now(timezone.utc)),  # noqa: UP017
+            "source": "--conflicts-json (the instrument's --json .conflicts)",
+        }
 
     refs = live_queue_refs() if (args.live or args.confirm_refs) else None
     confirmed = len(refs) if refs is not None else None
+    # Provenance: resolve origin/main only on a LIVE read (it shells out to `git
+    # ls-remote`). A `--from-json` replay stays hermetic unless the caller passes
+    # `--main-sha`, so an offline replay never silently depends on the network —
+    # and the test suite's `--from-json` cases perform no network I/O.
+    resolved_sha = args.main_sha or (resolve_origin_main() if args.live else None)
     record = build_record(
         runs, args.window_hours, confirmed_max_parallel=confirmed,
-        conflicted_set=conflicted, resolved_main_sha=resolve_origin_main(),
+        conflicted_set=conflicted, resolved_main_sha=resolved_sha, now=as_of,
     )
     if truncated:
-        record["window"]["truncated"] = True
-        record["window"]["truncated_note"] = (
-            "the run read hit its page cap: capacity readings are a LOWER bound"
-        )
+        if record.get("status") == "OK":
+            record["window"]["truncated"] = True
+            record["window"]["truncated_note"] = (
+                "the run read hit its page cap: capacity readings are a LOWER bound"
+            )
+        else:
+            # The read hit its page cap AND the window held no usable runs. The
+            # UNKNOWN body has no `window` key: stamping truncation onto it must
+            # not replace a clean exit-2 UNKNOWN with an uncaught KeyError (exit
+            # 1, and no record written — leaving a stale OK on disk).
+            record["truncated"] = True
     text = jsonlib.dumps(record, indent=2, sort_keys=False)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
