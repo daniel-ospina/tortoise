@@ -11667,13 +11667,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     prior_turn_count = 0
     if session_existed:
         # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
-        # meter, and it sits AFTER the Session MERGE that already committed —
-        # a transient graph error here must never 500 a committed capture
-        # (the file's posture, and every sibling bookkeeping read in this
-        # function). On failure 0 makes the meter OVER-count
-        # (`len(windowed) > 0`), the documented conservative posture, never a
-        # blind spot. It also must not abort the keyless→keyed upgrade this
-        # PR exists to enable.
+        # meter. Before #3551 it sat AFTER the Session MERGE that had already
+        # committed; the MERGE now runs LATER, inside the pooled
+        # _write_session_and_turns submission below, so nothing is committed
+        # at this point yet. It stays best-effort regardless — a transient
+        # graph error here must never 500 a capture (the file's posture, and
+        # every sibling bookkeeping read in this function), and the Session
+        # node is guaranteed to pre-exist by `session_existed`. On failure 0
+        # makes the meter OVER-count (`len(windowed) > 0`), the documented
+        # conservative posture, never a blind spot. It also must not abort the
+        # keyless→keyed upgrade this PR exists to enable.
         try:
             _prior_turns = proj.g.query(
                 "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "

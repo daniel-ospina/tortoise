@@ -231,16 +231,40 @@ def test_turn_id_derivation_is_offset_aware_and_pre_refactor_identical():
 
 def test_turn_offset_shifts_the_written_ids(tmp_path):
     """End-to-end: an offset write mints the shifted ids and does NOT touch the
-    ids below its window."""
+    ids below its window.
+
+    The prefix is seeded first ON PURPOSE.  Without a populated prefix the stale
+    sweep below has nothing to sweep, so the test passes even if the offset
+    protection is deleted and asserts only id derivation.  Verified: the mutant
+    ``_first_live = 0`` (offset protection removed) PASSED the earlier version of
+    this test and hard-deletes ``off_t0``/``off_t1`` at step 2 here.
+    """
     sdk = TortoiseSDK(db_path=str(tmp_path / "offset.db"))
     proj = sdk._get_proj()
+
+    # 1. Seed the prefix window at offset 0.
     sdk_mod._write_session_and_turns(
         proj, sdk, "off", _CONV[:2], now="2026-01-01T00:00:00+00:00",
-        turn_offset=4)
-    rows = proj.g.query(
-        "MATCH (s:Session {id:'off'})-[:CONTAINS]->(t:Point) "
-        "RETURN t.id ORDER BY t.id").result_set
-    assert [r[0] for r in rows] == ["off_t4", "off_t5"]
+        turn_offset=0)
+    assert sorted(sdk_mod._capture_turn_ids(proj, "off")) == [
+        "off_t0", "off_t1"]
+
+    # 2. APPEND at offset 2: the minted ids shift AND the prefix must SURVIVE.
+    #    This is the assertion the offset protection exists for.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, "off", _CONV[2:4], now="2026-01-01T00:01:00+00:00",
+        turn_offset=2, session_existed=True)
+    assert sorted(sdk_mod._capture_turn_ids(proj, "off")) == [
+        "off_t0", "off_t1", "off_t2", "off_t3"]
+
+    # 3. A SHORTER re-capture of the same window must still sweep it: the bound
+    #    is "at or beyond the window", not "never sweep".  ``off_t3`` is above
+    #    the new window's end so it goes; the prefix still stands.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, "off", _CONV[2:3], now="2026-01-01T00:02:00+00:00",
+        turn_offset=2, session_existed=True)
+    assert sorted(sdk_mod._capture_turn_ids(proj, "off")) == [
+        "off_t0", "off_t1", "off_t2"]
 
 
 # ── neither caller holds independent MERGE text ────────────────────────────
