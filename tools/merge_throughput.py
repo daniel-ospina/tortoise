@@ -94,6 +94,7 @@ _GAP_TERMS = frozenset({
 _FRESHNESS_CHECKS = frozenset({
     "main-gate", "queue-entry", "batch-size", "cycle", "attribution",
     "capacity", "parallelism-headroom", "gap", "no-languish", "drain-rate",
+    "prs-per-day",
 })
 # S13: `.gap.value` is independently measured as ceiling / observed, so the
 # reconciliation can fail. Tolerance stated numerically (±10%).
@@ -943,36 +944,53 @@ def _check_drain_rate(payload: dict, opts: dict) -> int:
 def _check_prs_per_day(payload: dict, opts: dict) -> int:
     measured = _as_number(payload.get("prs_per_day", UNKNOWN))
     spec = opts.get("or_artifact")
+    threshold = _as_number(opts.get("min"))
+    fresh = opts.get("require_fresh")
     if measured is None:
         print("2: prs_per_day is UNKNOWN (a ceiling artifact does not measure it)")
         return 2
     if spec is not None and not spec:
         print("2: --or-artifact requires a PATH#ANCHOR value")
         return 2
+    # S4 is a disjunction: "passes on the threshold OR a typed INTEGER ceiling".
+    # The threshold branch must be evaluated first, or `--min` in the plan's own
+    # S4 command is dead and the outcome S4 exists to certify reports a miss.
+    if threshold is not None and measured >= threshold:
+        if fresh and not _age_ok(payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS):
+            print("2: prs-per-day snapshot is missing or stale")
+            return 2
+        return 0
     if spec:
-        code, ceiling = _evaluate_ceiling(spec, payload)
+        code, ceiling, section = _evaluate_ceiling(spec, payload)
         if code is not None:
             return code
+        if fresh:
+            stamps = _VERIFIED_RE.findall(section or "")
+            stamp = stamps[0] if len(stamps) == 1 else payload.get("verified_at")
+            if not _age_ok(stamp, DEFAULT_RECORD_WINDOW_DAYS):
+                print("2: ceiling artifact is missing a fresh verified_at")
+                return 2
         if measured > ceiling:
             print(f"1: measured {measured}/day exceeds the documented ceiling {ceiling}")
             return 1
         return 0
-    if measured is None:
-        return 2
-    threshold = _as_number(opts.get("min"))
     if threshold is None:
         return 2
-    return 0 if measured >= threshold else 1
+    if fresh and not _age_ok(payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS):
+        print("2: prs-per-day snapshot is missing or stale")
+        return 2
+    return 1
 
 
 _CEILING_RE = re.compile(r"^\s*ceiling_prs_per_day\s*:\s*(.*?)\s*$", re.M)
 _SOURCE_RE = re.compile(r"^\s*ceiling_source\s*:\s*(.*?)\s*$", re.M)
+_VERIFIED_RE = re.compile(r"^\s*verified_at\s*:\s*(.*?)\s*$", re.M)
 
 
 def _evaluate_ceiling(spec: str, payload: dict):
-    """Typed INTEGER ceiling from an anchored section. `(None, value)` on ok."""
+    """Typed INTEGER ceiling from an anchored section. `(None, value, section)` on ok."""
     if "#" not in spec:
-        return 2, None
+        return 2, None, None
     path_part, anchor = spec.rsplit("#", 1)
     path = Path(path_part)
     if not path.is_absolute():
@@ -981,58 +999,58 @@ def _evaluate_ceiling(spec: str, payload: dict):
         text = path.read_text()
     except OSError:
         print(f"2: artifact unreadable: {path}")
-        return 2, None
+        return 2, None, None
     section = _section(text, anchor)
     if section is None:
         print(f"2: anchor #{anchor} not found in {path}")
-        return 2, None
+        return 2, None, None
     ceiling_matches = _CEILING_RE.findall(section)
     if len(ceiling_matches) != 1:
         print(f"2: ceiling_prs_per_day must appear exactly once ({len(ceiling_matches)})")
-        return 2, None
+        return 2, None, None
     raw = ceiling_matches[0]
     if not re.fullmatch(r"\d+", raw):
         print(f"2: ceiling_prs_per_day must be a typed integer, got {raw!r}")
-        return 2, None
+        return 2, None, None
     ceiling = int(raw)
     if not (0 < ceiling <= CEILING_MAX):
-        return 2, None
+        return 2, None, None
     source_matches = _SOURCE_RE.findall(section)
     if len(source_matches) != 1 or not source_matches[0]:
         print("2: ceiling_source must name the .gap.terms keys")
-        return 2, None
+        return 2, None, None
     sources = [s.strip() for s in source_matches[0].split(",") if s.strip()]
     emitted = _emitted_terms(payload)
     if emitted is None:
         print("2: --or-artifact requires the emitted .gap.terms "
               "(a self-set integer is not a derived ceiling)")
-        return 2, None
+        return 2, None, None
     values = {}
     for key in sources:
         if key not in emitted or not _is_num(emitted[key]):
             print(f"2: ceiling_source names {key!r} absent from .gap.terms")
-            return 2, None
+            return 2, None, None
         values[key] = emitted[key]
     for needed in ("effective_parallel", "effective_batch", "cycle_minutes"):
         if needed not in values:
             print(f"2: ceiling is not derivable — missing {needed!r}")
-            return 2, None
+            return 2, None, None
     if not _is_num(values.get("effective_parallel")) or values["effective_parallel"] <= 0:
         print("2: effective_parallel must be a positive number in .gap.terms")
-        return 2, None
+        return 2, None, None
     if not _is_num(values.get("effective_batch")) or values["effective_batch"] <= 0:
         print("2: effective_batch must be a positive number in .gap.terms")
-        return 2, None
+        return 2, None, None
     cycle = values["cycle_minutes"]
     if not _is_num(cycle) or cycle <= 0:
         print("2: cycle_minutes must be a positive number in MINUTES")
-        return 2, None
+        return 2, None, None
     derived = round(values["effective_parallel"] * values["effective_batch"] * 1440 / cycle)
     tolerance = max(1, round(derived * CEILING_TOLERANCE))
     if abs(ceiling - derived) > tolerance:
         print(f"2: ceiling {ceiling} does not reconcile with derived {derived} (±10%)")
-        return 2, None
-    return None, ceiling
+        return 2, None, None
+    return None, ceiling, section
 
 
 def _emitted_terms(payload: dict):
@@ -1078,6 +1096,9 @@ def _check_queue_entry(payload: dict, opts: dict) -> int:
         return 2
     if entered is not True:
         print(f"2: entered_queue is {entered!r}, not a boolean true")
+        return 2
+    if trigger in (None, UNKNOWN):
+        print("2: queue-entry trigger was never observed")
         return 2
     if trigger != "auto_merge_conditions":
         print(f"1: queue entry was not unaided (trigger={trigger!r})")
@@ -1534,6 +1555,10 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
             if key in row and not isinstance(row[key], bool):
                 print(f"2: no-languish row {key!r} is not boolean")
                 return 2
+        for key in ("bucket", "classification"):
+            if key in row and not isinstance(row[key], str):
+                print(f"2: no-languish row {key!r} is not a string")
+                return 2
         superseded = row.get("superseded_by")
         if superseded is not None and not isinstance(superseded, str):
             print("2: no-languish superseded_by is mis-shaped")
@@ -1541,13 +1566,18 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
     excluded = set(excludes)
 
     def _excluded(row: dict) -> bool:
-        label = str(row.get("classification", ""))
+        # Task 5's schema key for the classification is `bucket`; the booleans
+        # are optional columns beside it, not a substitute for it.
+        labels = {
+            str(row[key]) for key in ("bucket", "classification")
+            if row.get(key) is not None
+        }
         for key in excluded:
             if key == "superseded_by":
                 value = row.get("superseded_by")
                 if value not in (None, "", "null", UNKNOWN):
                     return True
-            elif row.get(key) or label == key:
+            elif row.get(key) or key in labels:
                 return True
         return False
 
