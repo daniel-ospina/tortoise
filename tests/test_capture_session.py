@@ -4602,6 +4602,47 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     assert st.get("session_capture_receipt_pi") is None
 
 
+def test_mcp_failed_recapture_names_the_stored_harness(tmp_path, monkeypatch):
+    """#4898: the MCP capture's failure path must attribute
+    ``session_capture_last_error_<harness>`` to the SESSION's stored harness,
+    never to the tool's raw ``harness`` argument — the same stored-or-claimed
+    resolution (``_observed_capture_harness``) the REST capture applies to both
+    per-harness keys (#3681 / #3700).
+
+    The forged replay below is the #3681 shape, one key down: a ``claude``
+    session re-captured with ``harness='cursor'`` and a FAILING payload. Before
+    the fix the error is written under the CALLER's declaration
+    (``session_capture_last_error_cursor``), so the dashboard paints the
+    failure on the cursor row — a harness the server's own Session record
+    contradicts.
+
+    RED mutation: restore ``_record_capture_last_error(org_id, harness, ...)``
+    (the raw tool argument) → the key becomes ``..._cursor`` → the stored-
+    harness assertion fails. GREEN: the key names the stored ``claude`` and no
+    cursor key is written.
+    """
+    from tortoise.mcp_server import tortoise_session_capture
+    with _mcp_team_context(tmp_path, monkeypatch):
+        # 1) a successful capture stamps the Session's stored harness = claude
+        first = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-4898")
+        assert not first.get("error"), first
+        # 2) forged replay: SAME session_id, a DIFFERENT caller harness, and a
+        # payload that FAILS at the empty-transcript 422 gate (the error path)
+        failed = tortoise_session_capture(
+            conversation=[], harness="cursor", session_id="s-4898")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert failed.get("status") == 422, failed
+    # the registered key set is always present (None-valued when unset), so
+    # read the SET keys — exactly one: the Session's stored harness.
+    error_keys = {k for k, v in st.items()
+                  if k.startswith("session_capture_last_error_") and v}
+    assert error_keys == {"session_capture_last_error_claude"}, (
+        f"a forged caller harness named the last-error key: {sorted(error_keys)}")
+    assert st.get("session_capture_last_error_cursor") is None, (
+        "the caller's declared harness claimed the last-error key")
+
+
 def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
     """#4010: the capture bridge carries `max_sessions` only when it is
     actually PRESENT, so a keyless limits dict reaches the sessions gate and
