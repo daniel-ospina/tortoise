@@ -2326,7 +2326,26 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // the load-time transient ONCE, read-only — the library has already consumed
   // `?code` synchronously inside createClient(), so never rewrite the URL before
   // it has attempted the code.
-  const LOAD_QUERY = new URLSearchParams(window.location.search);
+  //
+  // BOTH return channels are read. supabase-js folds the fragment into the
+  // params it parses (`xr(window.location.href)` in the bundle) and
+  // `detectSessionInUrl: true` deliberately keeps the library as the fragment
+  // consumer, so a provider that returns its refusal in the hash reaches the
+  // library but never `.search`. Reading one channel only left a hash-carried
+  // refusal on the bare sign-in view with no explanation — the dead end this
+  // terminal state exists to remove.
+  const loadParams = () => {
+    const out = new URLSearchParams(window.location.search);
+    if (window.location.hash.length > 1) {
+      try {
+        new URLSearchParams(window.location.hash.slice(1)).forEach((v, k) => {
+          if (!out.has(k)) out.set(k, v);
+        });
+      } catch (e) { /* malformed fragment — ignore it (the library will too) */ }
+    }
+    return out;
+  };
+  const LOAD_QUERY = loadParams();
   const LOAD_TRANSIENT = {
     present: STRIP_PARAMS.some((k) => LOAD_QUERY.has(k)),
     error_description: LOAD_QUERY.get("error_description"),
@@ -2344,6 +2363,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     try {
       const u = new URL(window.location.href);
       STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+      if (u.hash.length > 1) {
+        const h = new URLSearchParams(u.hash.slice(1));
+        STRIP_PARAMS.forEach((k) => h.delete(k));
+        const rest = h.toString();
+        u.hash = rest ? "#" + rest : "";
+      }
       history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
     } catch (e) { /* leave the URL alone */ }
   }

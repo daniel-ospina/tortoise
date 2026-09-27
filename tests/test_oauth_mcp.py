@@ -453,12 +453,18 @@ class TestAuthorizePage:
         assert r.text.count('nonce="') == 2  # CDN + inline script tags
 
     # ═════ #1701 R1 — consent page team-chooser + hardening (static strings) ═══
-    # These remain STATIC tripwires on the server-rendered markup; the behaviours
-    # they name are now EXECUTED (node:vm against the vendored supabase bundle) by
-    # tests/test_oauth_consent_pkce.py, added in #3496. The static form is kept
-    # because it is the only check that fails if the harness itself is removed
-    # from the selection. (An earlier revision of this comment said "the page JS
-    # has no jsdom harness in this repo" — true when written, false since #3496.)
+    # These remain STATIC tripwires on the server-rendered markup. The behaviours
+    # added by #3496 — the PKCE grant type and challenge, the verifier's storage
+    # home, the terminal failure state, the item-6 write path and the return-target
+    # canonicalisation — are EXECUTED (node:vm against the vendored supabase bundle)
+    # by tests/test_oauth_consent_pkce.py, so for THOSE the static form is a
+    # backstop that still fails if the harness is dropped from the selection.
+    # The #1701 behaviours are NOT in that harness: the multi-org picker
+    # (`org-select`), the refresh-first preview recovery, the absence of
+    # `signOut` and the in-flight guard stay static-only pins here. (An earlier
+    # revision of this comment said "the page JS has no jsdom harness in this
+    # repo" — true when written, false since #3496 — and the first #3496 draft
+    # claimed the harness covered the whole class, which it does not.)
 
     def _consent_html(self, api_client, *, client_name: str = "test-connector") -> str:
         tc, _ = api_client

@@ -120,7 +120,8 @@ the token regardless of which subdomain presented it.
   JS-readable Supabase session, not inert scaffolding:
   - **Issued by — the legacy writer, and the UNFIXED EXCEPTION to the ruling above** (tracked, not
     accepted): the MCP consent page in `tortoise/oauth.py`, served live at `/oauth/authorize`
-    (`tortoise/hosted_api.py:27035`) — that legacy cookie's production origin is `api.premiselabs.co`.
+    (`oauth_authorize` in `tortoise/hosted_api.py`) — that legacy cookie's production origin is
+    `api.premiselabs.co`.
     Its inline client uses the same name — `COOKIE_NAME = "sb-tortoise-auth-token"` — and
     writes that **legacy** cookie with `document.cookie` plus a `Domain=.premiselabs.co` attribute,
     i.e. **parent-domain and JS-readable**, after `signInWithPassword` /

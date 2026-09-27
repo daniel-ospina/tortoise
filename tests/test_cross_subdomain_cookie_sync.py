@@ -677,8 +677,11 @@ def test_key_identity_router_allows_only_the_session_key() -> None:
     three verifier key shapes (`<key>-code-verifier`,
     `<key>-flow-<id>-code-verifier`, `<key>-flows-code-verifier`), and it owns
     the writer, so the next one arrives without a change here. Routing by
-    `key !== SESSION_KEY` (oauth) / `key === SESSION_KEY` (blog-admin) is
-    closed by construction.
+    comparison against the session-key CONSTANT is closed by construction —
+    `_ROUTER_CASES` is the authority on the operator per method (oauth sends a
+    non-session key to the aux chain on BOTH methods; blog-admin always clears
+    its local copy first and clears the cookie only when the key IS the session
+    key, so its `removeItem` polarity is `===`).
 
     Both halves are asserted, so neither can pass vacuously: (1) EXACTLY ONE
     key-left comparison per method, and it must name that file's session-key

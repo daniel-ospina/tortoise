@@ -20,20 +20,34 @@ because a skipped harness is green, exit 0, zero coverage.
 
 Invariants pinned here:
  1 grant type actually used (`code_challenge_method=s256`) + implicit control
- 2 single-origin completion (#1566) + the exchange POST is `grant_type=pkce`
-   carrying the stored verifier
- 3 key-identity routing on set: the verifier never reaches `document.cookie`
- 4 the removal path (invalid stored session) writes ONLY the session-key expiry
- 5 the terminal state is exact, with a clean-load negative control
+ 2 single-origin completion (#1566): the return target the page BUILDS, evaluated
+   at the callback origin, plus the exchange POST being `grant_type=pkce` and
+   carrying the stored verifier. **Scope note:** this harness shims the DOM, the
+   stores and `fetch`, so it exercises the PAGE in isolation — it does NOT observe
+   GoTrue's own redirect handling, the terminal `POST /oauth/consent`, or its
+   401-refresh leg (those remain pinned by `tests/test_oauth_mcp.py` statically
+   and by `test_oauth_token_fault.py`/`test_cursor_mcp_exit_evidence.py`).
+ 3 key-identity routing on set: the verifier never reaches `document.cookie`,
+   asserted against BOTH verifier-shaped and non-verifier keys (a denylist routes
+   the former correctly, so only the latter discriminate)
+ 4 the removal path (invalid stored session, with a verifier seeded so the
+   assertion can fail) writes ONLY the session-key expiry
+ 5 the terminal state is exact, with a clean-load negative control; the message
+   is BOUNDED and control-char stripped; and a transient carried in the FRAGMENT
+   reaches the same state (with a benign-fragment control)
  6 an unavailable store refuses locally (no navigation, no verifier) — both a
    method-throw and an access-time-throw store
- 7 item 6 write-path parity: ≤SIZE_GUARD byte-identical, >SIZE_GUARD stripped,
-   >SIZE_CAP refused AND page-reported
+ 7 item 6 write-path parity: ≤SIZE_GUARD byte-identical, >SIZE_GUARD stripped AND
+   actually written (asserting `strippedWrites >= 1`, so removing the strip cannot
+   pass by falling through to the refusal), >SIZE_CAP refused AND page-reported
  9 no WebCrypto refuses locally; with the guard removed the bundle downgrades
    to `code_challenge_method=plain` (the paired control)
 11 the return target is canonicalised (no transient echoed), with a
    guard-removed control that DOES carry it
 12 the aux stores hold no verifier after the removal path
+
+Every field the tests assert on is produced by the page's own code running in the
+context, never read back from a shim.
 """
 
 from __future__ import annotations
@@ -43,6 +57,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 # #3786: the session-bridge toolchain contract is owned by the sibling harness —
@@ -136,9 +151,14 @@ def _run(scenario: str, *, page: str | None = None, **opts) -> dict:
             f"harness scenario {scenario!r} failed (exit {proc.returncode}):\n"
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
-    line = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
-    assert line, f"no RESULT line for {scenario!r}:\n{proc.stdout}\n{proc.stderr}"
-    return json.loads(line[-1][len("RESULT "):])
+    m = re.findall(r"^RESULT (\{.*\})$", proc.stdout, re.MULTILINE)
+    assert m, f"no RESULT line for {scenario!r}:\n{proc.stdout}\n{proc.stderr}"
+    # NOT `splitlines()`: Python splits on U+2028/U+2029, which ARE Unicode line
+    # boundaries there but are ordinary characters to JSON and to this regex —
+    # and `JSON.stringify` does not escape them, so a value carrying one (any
+    # URL-derived text) silently truncated the line and produced a JSON error
+    # pointing at the wrong thing.
+    return json.loads(m[-1])
 
 
 # ── invariant 8: version coupling (pure text / path, no node) ───────────────
@@ -182,36 +202,79 @@ def test_inv1_grant_type_is_pkce_with_an_implicit_negative_control() -> None:
 def test_inv2_single_origin_completion_and_pkce_exchange() -> None:
     """Invariant 2 (#1566's regression guard): the flow completes on the SAME
     origin it initiated on, and the token exchange is `grant_type=pkce` carrying
-    the verifier that was stored. This is the property that made implicit look
-    necessary — a migration must not break it."""
+    the verifier that was stored.
+
+    Two REAL observations, neither read back from the shim:
+      * the return target the page actually BUILDS, evaluated where the callback
+        landed (`authorizeReturnTo()`), paired with a control that moves it to a
+        foreign host;
+      * the token POST captured from the running client.
+    The INITIATION half — the `redirect_to` supabase-js puts on the authorize URL
+    — is observed by `test_inv11_...`, which parses it off the assign URL. An
+    earlier revision reported `location.origin` back from the driver here, which
+    asserted the shim against itself and stayed green even with the page
+    returning `https://evil.example`."""
     r = _run("single_origin", search="?code=THECODE&state=st-1",
              seedVerifier="verifier-abc")
-    assert r["innerOrigin"] == PAGE_ORIGIN, r
-    assert r["innerPath"] == AUTHORIZE_PATH, r
     assert r["exchangeGrant"] == "pkce", f"token POST was not grant_type=pkce: {r}"
     assert r["exchangeVerifier"] == "verifier-abc", (
         f"the exchange did not carry the stored verifier: {r}"
+    )
+    rt = urllib.parse.urlparse(r["returnTarget"])
+    assert f"{rt.scheme}://{rt.netloc}" == PAGE_ORIGIN, (
+        f"the page builds a return target for another origin: {r['returnTarget']!r}"
+    )
+    assert rt.path == AUTHORIZE_PATH, r
+
+    evil = _render_page().replace(
+        'return window.location.origin + AUTHORIZE_PATH + (u.search || "");',
+        'return "https://evil.example" + AUTHORIZE_PATH + (u.search || "");',
+    )
+    ctl = _run("single_origin", page=evil, search="?code=THECODE&state=st-1",
+               seedVerifier="verifier-abc")
+    assert urllib.parse.urlparse(ctl["returnTarget"]).netloc == "evil.example", (
+        f"the control did not move the return target off-origin, so the assertion "
+        f"above cannot fail: {ctl['returnTarget']!r}"
     )
 
 
 def test_inv3_and_inv12_the_verifier_never_reaches_the_cookie() -> None:
     """Invariants 3 + 12: on initiation the verifier keys land in the aux store
     and NEVER in `document.cookie`; on removal the aux stores are cleared and the
-    cookie jar sees only the session-key expiry."""
+    cookie jar sees only the session-key expiry.
+
+    The two NON-verifier aux shapes are exercised on purpose. A denylist router
+    (`key.endsWith("-code-verifier")`) routes verifier-shaped keys CORRECTLY by
+    construction, so only a key that does not look like a verifier discriminates
+    an allowlist from a denylist — and the cookie log is read by key IDENTITY,
+    not by a name substring (a substring filter answered `[]` with the denylist
+    installed, so it could not fail)."""
     r = _run("routing")
     assert r["auxVerifierKeys"], f"no verifier key in sessionStorage: {r}"
     assert r["cookieVerifierKeys"] == [], (
         f"a verifier key reached document.cookie: {r['cookieVerifierKeys']}"
     )
-    assert r["cookieAuxWrites"] == [], f"an aux key produced a cookie write: {r}"
+    assert len(r["nonVerifierAuxKeys"]) == 2, (
+        f"the non-verifier aux keys never reached a store, so the next assertion "
+        f"cannot fail: {r}"
+    )
+    assert r["cookieAuxWrites"] == [], (
+        f"an aux key produced a cookie write: {r['cookieAuxWrites']}"
+    )
 
 
 def test_inv4_removal_path_writes_only_the_session_key() -> None:
     """Invariant 4: an invalid stored session drives `_removeSession`, whose
     ONLY cookie assignment must be the session-key expiry. The raw per-assignment
     log is load-bearing — the final-state jar is identical whether or not an aux
-    key also reached the cookie."""
-    r = _run("removal", seedSession='{"access_token":"a"}')
+    key also reached the cookie.
+
+    A verifier IS seeded: without one the aux stores start empty, so
+    `auxVerifierKeys == []` held whether or not the removal path cleared them
+    (verified by mutation: a `removeAux` that skips `sessionStorage` stayed green
+    with no seed and reddens with one)."""
+    r = _run("removal", seedSession='{"access_token":"a"}',
+             seedVerifier="verifier-abc")
     assert r["cookieWriteNames"] == [COOKIE_NAME], (
         f"expected exactly one cookie assignment (the session key), got {r}"
     )
@@ -224,17 +287,66 @@ def test_inv4_removal_path_writes_only_the_session_key() -> None:
 def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     """Invariant 5: `?error=access_denied` ends on a VISIBLE sign-in view with the
     error; a CLEAN load with no session shows the sign-in view with NO error (the
-    negative control that catches a spurious-error regression)."""
+    negative control that catches a spurious-error regression).
+
+    Three further halves, each with its own control:
+      * the message is BOUNDED and control-char stripped (`boundedText`). The
+        description is attacker-controlled, so removing the bound must redden
+        this test rather than pass silently.
+      * a transient carried in the FRAGMENT reaches the same terminal state.
+        supabase-js folds the hash into the params it parses and the page keeps
+        the library as the fragment consumer, so a hash-carried refusal the page
+        cannot see is exactly the dead end this state exists to remove.
+      * a benign fragment is NOT read as a transient and is left alone."""
     bad = _run("load", search="?error=access_denied&error_description=boom&state=st-1")
     assert bad["viewSignin"] == "block", bad
     assert bad["errorVisible"] is True, bad
     assert "boom" in bad["errorText"], bad
     assert bad["replaceStates"], "the transient URL was not sanitised"
+    assert all("error_description" not in u for u in bad["replaceStates"]), (
+        f"the transient survived in the sanitised URL: {bad['replaceStates']}"
+    )
+
+    # The controls are placed at the FRONT, inside the 299-char window: at the
+    # tail the bound alone would remove them, and a test that cannot tell the
+    # strip from the bound passes with the strip deleted (verified — the
+    # tail-placement form survived that mutation).
+    long_msg = _run(
+        "load",
+        search=("?error=access_denied&error_description="
+                + "\x07\x0b\u2028" + "X" * 10000 + "\u2029\x1f"),
+    )
+    assert long_msg["errorVisible"] is True, long_msg
+    assert len(long_msg["errorText"]) <= 300, (
+        f"boundedText did not bound the description: {len(long_msg['errorText'])} chars"
+    )
+    assert long_msg["controlCharsInError"] == 0, (
+        f"boundedText did not strip control characters: {long_msg['errorText']!r}"
+    )
+
+    frag = _run("load", hash="#error=access_denied&error_description=hashboom")
+    assert frag["viewSignin"] == "block", frag
+    assert frag["errorVisible"] is True, (
+        f"a hash-carried refusal produced no message — the dead end is back: {frag}"
+    )
+    assert "hashboom" in frag["errorText"], frag
+    assert frag["replaceStates"], "the fragment transient was not sanitised"
+    assert all("hashboom" not in u for u in frag["replaceStates"]), (
+        f"the transient survived in the sanitised URL: {frag['replaceStates']}"
+    )
 
     clean = _run("load", search="")
     assert clean["viewSignin"] == "block", clean
     assert clean["errorVisible"] is False, (
         f"a clean load showed an error: {clean['errorText']!r}"
+    )
+
+    benign = _run("load", hash="#section-2")
+    assert benign["errorVisible"] is False, (
+        f"a benign fragment was read as a transient: {benign['errorText']!r}"
+    )
+    assert benign["replaceStates"] == [], (
+        f"a benign fragment was rewritten: {benign['replaceStates']}"
     )
 
 
@@ -256,6 +368,9 @@ def test_inv7_item6_write_path_parity() -> None:
     stripped; over SIZE_CAP is refused (no write) AND reported on the page."""
     r = _run("item6")
     assert r["smallWritten"] is True, r
+    assert r["strippedWrites"] >= 1, (
+        f"no stripped write landed, so the token assertion below is vacuous: {r}"
+    )
     assert r["strippedHasToken"] is False, (
         f"the size guard did not strip provider tokens: {r}"
     )
@@ -530,6 +645,14 @@ vm.runInContext(page, ctx, { filename: 'consent-inline.js' });
 
 const q = function (expr) { return vm.runInContext(expr, ctx); };
 const sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+// Poll instead of sleeping a fixed window: under machine load a fixed settle
+// made the click scenarios flaky (1 failure in 49 runs of inv 11 was observed
+// at load ~12). The condition, not the clock, decides when the run is ready.
+const waitFor = async function (fn, ms) {
+  const t0 = Date.now();
+  while (!fn() && Date.now() - t0 < ms) { await sleep(10); }
+  return fn();
+};
 
 function innerTarget(assignUrl) {
   // The assign URL is Supabase's authorize endpoint; the page's own return
@@ -547,6 +670,8 @@ function innerTarget(assignUrl) {
   if (scenario === 'grant' || scenario === 'click' || scenario === 'return_target') {
     await sleep(60);   // let createClient()'s _initialize settle
     await q('signInWithProvider("github")');
+    await waitFor(function () { return navs.length > 0 || (els['error'] &&
+      els['error'].classList.contains('visible')); }, 3000);
     await sleep(20);
     out.navs = navs.slice();
     out.errorVisible = els['error'] ? els['error'].classList.contains('visible') : false;
@@ -574,31 +699,50 @@ function innerTarget(assignUrl) {
       }
     }
   } else if (scenario === 'load') {
-    await sleep(120);
+    // One of the two terminal states must have been rendered; wait for the
+    // page to have touched its own view rather than assuming a duration.
+    await waitFor(function () { return els['view-signin'] || els['view-consent']; }, 3000);
+    await sleep(40);   // let the transient's replaceState land
     out.viewSignin = els['view-signin'] ? String(els['view-signin'].style.display) : null;
     out.viewConsent = els['view-consent'] ? String(els['view-consent'].style.display) : null;
     out.errorVisible = els['error'] ? els['error'].classList.contains('visible') : false;
     out.errorText = els['error'] ? String(els['error'].textContent) : '';
+    out.controlCharsInError = Array.from(String(out.errorText)).filter(function (c) {
+      const n = c.codePointAt(0);
+      return n < 32 || (n >= 127 && n <= 159) || n === 0x2028 || n === 0x2029;
+    }).length;
     out.replaceStates = replaceStates.slice();
     out.navs = navs.slice();
   } else if (scenario === 'routing') {
     await sleep(60);
     await q('signInWithProvider("google")');
+    await waitFor(function () { return navs.length > 0; }, 3000);
     await sleep(20);
-    out.auxVerifierKeys = Array.from(sessionStorage._map.keys())
-      .concat(Array.from(localStorage._map.keys()))
-      .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
+    // The two NON-verifier aux shapes a suffix denylist cannot see. A denylist
+    // routes verifier-SHAPED keys correctly by construction, so only keys that
+    // do not look like verifiers can tell an allowlist from a denylist. Written
+    // through the adapter — the real entry point — not straight to a store.
+    const storage = q('cookieStorage');
+    storage.setItem(COOKIE_NAME + '-user', 'u1');
+    storage.setItem(COOKIE_NAME + '-unknown-aux', 'x1');
+    const auxKeys = Array.from(sessionStorage._map.keys())
+      .concat(Array.from(localStorage._map.keys()));
+    out.auxVerifierKeys = auxKeys.filter(function (k) { return k.indexOf('code-verifier') >= 0; });
+    out.nonVerifierAuxKeys = [COOKIE_NAME + '-user', COOKIE_NAME + '-unknown-aux']
+      .filter(function (k) { return auxKeys.indexOf(k) >= 0; });
     out.cookieVerifierKeys = cookieWrites
       .filter(function (w) { return w.header.indexOf('code-verifier') >= 0; })
       .map(function (w) { return w.name; });
+    // EVERY cookie assignment whose name is not the session key. Keyed on
+    // identity, not on a name substring: a substring filter answered [] even
+    // when the router was replaced by a denylist, which made the assertion
+    // incapable of failing.
     out.cookieAuxWrites = cookieWrites
-      .filter(function (w) {
-        return w.name !== COOKIE_NAME && (w.name.indexOf('-user') >= 0 ||
-               w.name.indexOf('unknown') >= 0);
-      })
+      .filter(function (w) { return w.name !== COOKIE_NAME; })
       .map(function (w) { return w.name; });
   } else if (scenario === 'removal') {
-    await sleep(150);
+    await waitFor(function () { return cookieWrites.length > 0; }, 3000);
+    await sleep(40);
     out.cookieWriteNames = cookieWrites.map(function (w) { return w.name; });
     out.cookieWrites = cookieWrites.slice();
     out.navs = navs.slice();
@@ -606,7 +750,10 @@ function innerTarget(assignUrl) {
       .concat(Array.from(localStorage._map.keys()))
       .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
   } else if (scenario === 'single_origin') {
-    await sleep(200);
+    await waitFor(function () {
+      return fetchCalls.some(function (c) { return c.url.indexOf('/auth/v1/token') >= 0; });
+    }, 3000);
+    await sleep(40);
     out.fetchCalls = fetchCalls.slice();
     const exch = fetchCalls.filter(function (c) { return c.url.indexOf('/auth/v1/token') >= 0; });
     out.exchangeCount = exch.length;
@@ -621,12 +768,11 @@ function innerTarget(assignUrl) {
     out.exchangeVerifier = params.get('code_verifier');
     out.exchangeCode = params.get('auth_code') || params.get('code');
     out.navs = navs.slice();
-    // The completion origin is the page's own origin/path: the callback landed
-    // here (`?code=…`), and this scenario has no click, so the return target the
-    // flow was initiated with is the page's own origin+path by construction.
     out.outerOrigin = fetchCalls.length ? new URL(fetchCalls[0].url).origin : null;
-    out.innerOrigin = location.origin;
-    out.innerPath = location.pathname;
+    // The return target the page BUILDS, evaluated where the callback actually
+    // landed. Reporting `location.origin` back instead would assert the shim
+    // against itself and stay green even if the page returned a foreign host.
+    out.returnTarget = q('authorizeReturnTo()');
   } else if (scenario === 'item6') {
     await sleep(60);
     const storage = q('cookieStorage');

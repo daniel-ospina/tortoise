@@ -384,30 +384,43 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
    `code_challenge` + `code_challenge_method=s256`; **paired negative control**
    (`flowType:'implicit'`) yields **no** `code_challenge`. *Secure-context only; the no-WebCrypto
    case is invariant 9.*
-2. **Single origin (#1566 guard)** — completion origin == initiating origin; the exchange POST is
-   `grant_type=pkce` and carries a `code_verifier` equal to the stored value.
+2. **Single origin (#1566 guard)** — the return target the page **builds at the callback origin**
+   (`authorizeReturnTo()`) has the page's own origin+path, with a **paired control** that makes it a
+   foreign host; plus the exchange POST being `grant_type=pkce` and carrying a `code_verifier`
+   equal to the stored value. **Observed scope:** the harness shims the DOM/stores/`fetch`, so this
+   is *the page's* behaviour — the initiation half (the `redirect_to` supabase-js puts on the
+   authorize URL) is observed by inv 11's parse of the assign URL. An earlier revision read
+   `location.origin` back from the shim, which asserted the shim against itself and stayed green
+   with the page returning `https://evil.example`; that is corrected.
 3. **Key-identity routing (set)** — verifier **absent from `document.cookie`**, present in
    `sessionStorage`; a session-key read still returns the pre-seeded cookie byte-identically
-   (#1704); **`${KEY}-user` and a synthetic `${KEY}-unknown-aux` produce NO `document.cookie`
-   write**.
+   (#1704); **`${KEY}-user` and a synthetic `${KEY}-unknown-aux` are written through the adapter and
+   produce NO `document.cookie` write** — those two non-verifier shapes are what actually
+   discriminates an allowlist from a denylist, since a suffix matcher routes verifier-shaped keys
+   correctly by construction, and the cookie log is read by **key identity**, not a name substring.
 4. **Removal path** — seed a **structurally invalid** session
    (`'{"access_token":"a"}'` — missing `refresh_token`/`expires_at`, which `_isValidSession`
-   requires; an **expired but well-formed** session is NOT removed). Assert on the **raw
-   per-assignment write log**: "the **only** `document.cookie` assignment is the session-key expiry;
-   **no** assignment names a non-session key" (co-assert the final-state jar). The Node child is
-   timeout-bounded (the inverted guard loops `_removeSession`).
+   requires; an **expired but well-formed** session is NOT removed) **together with a verifier**, so
+   the aux-store assertion can fail (without the seed the stores start empty and the assertion held
+   whether or not the removal cleared them). Assert on the **raw per-assignment write log**: "the
+   **only** `document.cookie` assignment is the session-key expiry; **no** assignment names a
+   non-session key" (co-assert the final-state jar). The Node child is timeout-bounded (the inverted
+   guard loops `_removeSession`).
 5. **Terminal state exactness + negative control + message bounds (A3)** — (positive)
    `#view-signin.style.display === "block"` **and** the error element's `classList` **contains**
    `"visible"` with the message, for both `?error=access_denied` and a failing `?code=`; (negative) a
    **clean** load (no `code`, no `error`, null session) renders `#view-signin` visible with the error
-   element's `classList` **not** containing `"visible"`. **Message bounds are specified, not
-   asserted:** `boundedText(s)` strips `[\u0000-\u001F\u007F-\u009F\u2028\u2029]` and truncates to
-   **300 chars** (appending `…` when truncated; the bound is **inclusive** of the ellipsis, so the
-   natural `slice(0, 300) + "…"` is a false red — use 299 + `…`, or assert `≤ 300` against a
-   truncation that reserves the ellipsis). **Paired mutation:** a 10 kB
-   `?error_description=` containing `\x07` and `\u2028` renders a `textContent` of **≤ 300 chars**
-   and strip-clean. (Note: the message is displayed verbatim, so a crafted `error_description` can
-   *spoof the copy* — this row is about **reflection, not injection**, and the spoofing surface is
+   element's `classList` **not** containing `"visible"`. **Message bounds are asserted:** the
+   `boundedText(s)` spec is `[ -\u001F\u007F-\u009F\u2028\u2029]` stripped and truncation to
+   **300 chars** (appending `\u2026` when truncated; the bound is **inclusive** of the ellipsis, so
+   the natural `slice(0, 300) + "..."` is a false red — use 299 + `\u2026`, and assert `≤ 300`).
+   **The control characters sit INSIDE the 299-char window** (at the tail, the bound alone removes
+   them and a test that cannot tell the strip from the bound passes with the strip deleted).
+   **Paired mutations:** unbounded, and strip-removed, each redden the test. **The fragment channel
+   is the same terminal state:** `#error=access_denied&error_description=…` shows the message and is
+   sanitised out of the rewritten URL, with a **benign-fragment control** (`#section-2`) that is left
+   alone and shows no error. (The message is displayed verbatim, so a crafted `error_description`
+   can *spoof the copy* — this row is about **reflection, not injection**, and the spoofing surface is
    named out of scope in §8.)
 6. **Store unavailable** — **method-throwing AND access-time-throwing** both stores ⇒ the
    pre-flight guard shows the terminal state **locally**, **no authorize navigation is issued**, and
@@ -478,7 +491,13 @@ without the specifier → #8; empty the strip list / stop calling `authorizeRetu
    stores (invariants 3, 4, 10, 12).
 6. All **12** test invariants have a mutation that reddens them (inv 11: an emptied strip list → the
    navigate URL carries the stale `code`; inv 12: an aux `removeItem` that skips one store → the
-   aux-store assertion; inv 5: an unbounded message → the bounds assertion).
+   aux-store assertion; inv 5: an unbounded message **and** a strip-removed message → the bounds
+   assertion). **Verified by execution, 16/16 KILL.** The first round of this plan listed two rows
+   that could not fail — inv 3's denylist row (the cookie log was filtered by name substring and the
+   non-verifier keys were never written, so the assertion was empty) and inv 2's single-origin row
+   (the driver echoed the shim's own `location.origin` back). Both are corrected above and re-verified
+   by mutation; the rows are kept in this record because the *claim* was false, and a claim about a
+   test's strength is only checkable against the test.
 
 ---
 
@@ -547,6 +566,34 @@ No wiring gap is unresolved: every un-covered touch point is either **filed** as
 
 ## Review Cycle Log
 
+### diff-time code review (commit-workflow Step 3, standard tier)
+Seven fresh-context reviewers were dispatched against the pushed head: guidance/comments, bug scan
+(two ordered passes), history+prior-PR comments, security, architecture, config/CI-wiring, and UX.
+Security returned `NO ISSUES FOUND`; config/CI-wiring returned `NO ISSUES FOUND` (and measured that
+the vendor entry changes exactly 1 of 5,122 tracked paths' surface resolution). The other five
+returned 9 findings — **every one of them a defect in THIS PR's own test or comment artifacts, not
+in the production change**:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | inv 3's `cookieAuxWrites` was unfalsifiable (substring filter + keys never written), so the denylist mutation survived | the `routing` scenario now writes `${KEY}-user` and `${KEY}-unknown-aux` through the adapter and reads the cookie log by key **identity**; the denylist mutation now reddens it (2 mutations) |
+| 2 | inv 2's single-origin assertions echoed the shim back, so a foreign-origin return target stayed green | the assertion is now the return target the page **builds** (`authorizeReturnTo()`), with a foreign-host paired control |
+| 3 | inv 4's aux-store assertion was vacuous (no verifier seeded) | seeded; `removeAux`-skips-a-store now reddens it |
+| 4 | inv 7's `strippedHasToken` could not detect removal of the #1225 strip (the refusal masked it) | added `strippedWrites >= 1` |
+| 5 | `boundedText`'s bound and strip were unpinned — removing either left 10/10 green, and the doc's A3 row claimed otherwise | both asserted, with the control characters moved **inside** the 299-char window (at the tail the bound alone removes them) |
+| 6 | the terminal state read only `.search`, so a **fragment**-carried refusal still dead-ended | `loadParams()` merges both channels; `sanitiseUrl()` strips the fragment too; a fragment case and a benign-fragment control added |
+| 7 | `docs/auth-architecture.md` still carried a **wrong** line anchor (`tortoise/hosted_api.py:27035`, actually `28395`) in the very bullet whose stale line numbers this PR deletes | anchored to the symbol (`oauth_authorize`) |
+| 8 | `tests/test_cross_subdomain_cookie_sync.py`'s docstring still called oauth.py "a faithful inline port of the same adapter" after the routing divergence; the new test's docstring stated one operator where `_ROUTER_CASES` has two | both scoped to the session-cookie contract and to `_ROUTER_CASES` |
+| 9 | `tests/test_oauth_mcp.py`'s class comment claimed the harness executes a class of behaviours it does not (the #1701 team-chooser / refresh / in-flight guard) | scoped to what the harness drives; the #1701 behaviours are named static-only |
+
+Also corrected in the harness itself: `_run` parsed stdout with `str.splitlines()`, which splits on
+U+2028/U+2029 — characters `JSON.stringify` does not escape and a URL-derived value can carry — so a
+long `error_description` truncated the RESULT line and produced a JSON error pointing at the wrong
+field. The parse is now an anchored regex. The fixed `sleep()` settle windows were replaced with
+condition polling after one flaky failure of inv 11 under host load (1/49 runs).
+
+---
+
 **problem-verify** (2 problems-diverge / 2 problems-converge / 4 cycles × 2 verifiers):
 cycle 4 `GATE: PASS` (both). Amendments A1–A8 + B1–B3 + C1–C7 recorded in
 `/tmp/3496-converge-rev{2,3,4,5}*.md`.
@@ -578,12 +625,12 @@ recorded here rather than the gates being silently skipped.
 ### `### Adversarial Threat Surface` — coverage map (adversarial-domain acceptance)
 | class | adversarial input | required behaviour | pinned by |
 |---|---|---|---|
-| **A1** verifier exfiltration via store routing | a verifier key + an unknown aux key | never in `document.cookie`; aux stores only | inv 3, 4, 10 |
+| **A1** verifier exfiltration via store routing | a verifier key + an unknown aux key + a `-user` key | never in `document.cookie`; aux stores only | inv 3, 4, 10, 12 (inv 3 writes the non-verifier keys through the adapter and reads the cookie log by key identity) |
 | **A2** spent-`code` re-forwarding | a stale `?code=` on the return URL | the returned target carries no transient | **inv 11** (+ Step 10(a) textual as secondary) |
-| **A3** reflected-content injection | `?error_description=<script>…` / a 10 kB control-char payload | rendered via `textContent`, bounded to 300 chars, stripped | **inv 5** (specified `boundedText` + paired mutation) |
-| **A4** open redirect | a hostile `redirect_uri`/`next`/return target | origin+path are constants; strip only reduces | **inv 11** + inv 2 |
+| **A3** reflected-content injection | `?error_description=<script>…` / a 10 kB payload with controls inside the bound window | rendered via `textContent`, bounded to 300 chars, stripped | **inv 5** (both mutations killed: unbounded, strip-removed) |
+| **A4** open redirect | a hostile `redirect_uri`/`next`/return target | origin+path are constants; strip only reduces | **inv 11** + **inv 2** (the built return target, with a foreign-host control) |
 | **A5** verifier orphaning | a store that fails mid-flow; an abandoned/failed exchange | no verifier copy in `document.cookie`; removed keys cleared from both aux stores | **inv 3, 4, 10, 12** + R19 (library-owned copies) |
-| **A6** silent dead-end | a failed/declined/refused flow | visible sign-in view + message; no spurious error | inv 5, 6, 9 |
+| **A6** silent dead-end | a failed/declined/refused flow, in the **query OR the fragment** | visible sign-in view + message; no spurious error | inv 5 (both channels), 6, 9 |
 | **A7** weak-challenge downgrade | no `crypto.subtle` | refuse to initiate; never `plain` | inv 9 |
 
 **Explicitly OUT of scope (named, not silently dropped).** These are deferred with owners in the
@@ -688,5 +735,10 @@ Landed files and what each carries. Evidence is stated as a command → observed
 - `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q` → **341 passed, 2 xfailed**.
 - `… pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py test_attribution_actor.py test_control_plane_offload_3498.py test_oauth_redemption_state.py test_user_identity_authority.py -q` → **413 passed**; the 4 reds in that batch (`test_mcp_route_challenge::test_unknown_credential_carries_challenge[tt_deadbeef]`, three in `test_cursor_mcp_exit_evidence.py`) are **reproduced on a clean `origin/main` worktree** — they are the embedded FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), not this diff. Separate failures, different identities on re-run, so not deterministic under this change.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
-- Mutation evidence: **13/13 KILL, 0 survived** (see the mutation table in the PR body).
+- Mutation evidence: **16/16 KILL, 0 survived** (the table is in the PR body). The set now includes
+  the two invariants the first round could not redden (inv 3's denylist row, inv 2's single-origin
+  row), the `boundedText` bound and strip separately, the fragment channel, and the #1225
+  provider-token strip; the strip mutation is what surfaced that `strippedWrites` had to be asserted
+  before `strippedHasToken` (without it, removing the strip fell through to the refusal and the
+  assertion was vacuous).
 - Wiring: `select(["website/apps/dashboard/public/vendor/supabase-2.112.2.min.js"], "pull_request", manifest)` → `surfaces == ["api"]` (was tier-1 smoke before the entry).
