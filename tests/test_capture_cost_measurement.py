@@ -1615,6 +1615,79 @@ def test_m2_a_raising_usage_sink_must_not_erase_the_call():
             f"{stats!r} for {bad!r}")
 
 
+def test_accumulate_call_cost_is_atomic_on_a_bad_charge():
+    """#5822 review P3 — a payload the PROVIDER controls must never half-land.
+
+    ``cost_usd`` is the last value ``_accumulate_call_cost`` coerces, and it
+    used to be coerced AFTER the token counters were bumped. A well-formed-JSON
+    usage block with a string ``cost`` (``"abc"``) or an integer with 400
+    digits (``float()`` OverflowError) therefore left the failing call's TOKENS
+    in ``stats['cost']`` while ``by_route`` was never created. The M2 sink
+    counts AFTER this function returns, so the same call was disclosed as
+    ``unattributed`` AND priced into the row's top-level ``prompt_tokens`` —
+    which then contradicted the row's own priced ``by_stage`` breakdown.
+
+    Atomicity is the invariant: a call that cannot be parsed contributes
+    NOTHING, so the residual can disclose it cleanly.
+
+    REDs on: coercing ``cost_usd`` after the token mutations (the pre-review
+    order) — ``stats['cost']['prompt_tokens']`` reads 200 instead of 0.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    for label, make_bad_cost in (("non-numeric", lambda: "abc"),
+                                 ("overflowing", lambda: float(10 ** 400))):
+        stats: dict = {}
+        with contextlib.suppress(Exception):
+            # NB: the bad value must be produced INSIDE the guard — building the
+            # tuple eagerly would raise while constructing it, not in the call.
+            _accumulate_call_cost(
+                stats, prompt_tokens=200, completion_tokens=20,
+                cost_usd=make_bad_cost(), provider="openrouter",
+                model="point-model")
+        cost = stats.get("cost", {})
+        assert cost.get("prompt_tokens", 0) == 0, (
+            "a call whose charge cannot be parsed must contribute no tokens — "
+            f"got {cost!r} for a {label} cost")
+        assert cost.get("completion_tokens", 0) == 0, cost
+        assert cost.get("calls", 0) == 0, cost
+        assert "by_route" not in cost, (
+            f"a partial accumulation must not create a route bucket: {cost!r}")
+        assert stats.get("attempts", 0) == 0, stats
+
+
+def test_m2_bad_charge_does_not_contradict_the_row_it_is_disclosed_on():
+    """The end-to-end form of the atomicity invariant, on the lane that owns
+    the defect: after one GOOD call and one whose ``cost`` cannot be parsed,
+    the emitted row's top-level token count must agree with its priced
+    ``by_stage`` breakdown — the failing call's tokens must appear NOWHERE in
+    the priced totals, only in the ``unattributed`` count.
+    """
+    from tortoise.sdk import _session_llm_usage_sink
+
+    stats: dict = {}
+    sink = _session_llm_usage_sink(stats)
+    # call 1: priced normally
+    sink(provider="openrouter", model_id="point-model",
+         usage={"prompt_tokens": 100, "completion_tokens": 10,
+                "cost": 0.001}, usage_present=True)
+    # call 2: valid tokens, unparseable charge -> must land NOWHERE
+    with contextlib.suppress(Exception):
+        sink(provider="openrouter", model_id="point-model",
+             usage={"prompt_tokens": 200, "completion_tokens": 20,
+                    "cost": "abc"}, usage_present=True)
+
+    cost = stats["cost"]
+    assert cost["prompt_tokens"] == 100, cost
+    assert cost["completion_tokens"] == 10, cost
+    assert cost["calls"] == 1, cost
+    assert cost["cost_usd"] == 0.001, cost
+    # the priced breakdown must agree with the totals (the P3 contradiction)
+    assert cost["by_route"]["openrouter"]["point-model"]["prompt_tokens"] == 100
+    # and the residual the caller derives is exactly the unpriced call
+    assert max(0, 2 - stats.get("attempts", 0)) == 1
+
+
 def test_m2_missing_usage_block_is_disclosed_never_fabricated(
         tmp_path, monkeypatch):
     """A provider response with NO usage block must not be turned into a

@@ -7081,24 +7081,37 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     acc = stats.setdefault("cost", {})
     ptoks = int(prompt_tokens or 0)
     ctoks = int(completion_tokens or 0)
+    # #5822 review P3: normalise EVERY provider-controlled value before the
+    # first mutation into ``acc``. ``cost_usd`` is the last raise point, and it
+    # used to be coerced AFTER the token counters had already been bumped — so a
+    # payload the provider controls (a string ``cost``, or a JSON integer with
+    # 400 digits that overflows ``float()``) left the failing call's TOKENS in
+    # ``acc`` while ``by_route`` was never created. The M2 sink counts AFTER
+    # this returns (correctly — see ``_session_llm_usage_sink``), so the same
+    # call was simultaneously disclosed as ``unattributed`` AND priced into the
+    # row's top-level token count, contradicting its own ``by_stage`` breakdown.
+    # Parsing up front makes the mutation atomic w.r.t. provider input: a payload
+    # that cannot be coerced raises with ``acc`` untouched, and the caller's
+    # residual then discloses the call with no tokens attributed to it.
+    cost_val = None if cost_usd is None else float(cost_usd)
     acc["calls"] = int(acc.get("calls", 0)) + 1
     acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
     acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
-    if cost_usd is None:
+    if cost_val is None:
         acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
     else:
         acc["cost_usd"] = round(
-            float(acc.get("cost_usd", 0.0)) + float(cost_usd), 6)
-    has_usage = bool(ptoks or ctoks or cost_usd is not None)
+            float(acc.get("cost_usd", 0.0)) + cost_val, 6)
+    has_usage = bool(ptoks or ctoks or cost_val is not None)
     lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
             .setdefault(model or "unknown", _empty_cost_bucket()))
     lane["calls"] += 1
     lane["prompt_tokens"] += ptoks
     lane["completion_tokens"] += ctoks
-    if cost_usd is None:
+    if cost_val is None:
         lane["calls_without_cost"] += 1
     else:
-        lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
+        lane["cost_usd"] = round(lane["cost_usd"] + cost_val, 6)
     if not has_usage:
         acc["calls_without_usage"] = (
             int(acc.get("calls_without_usage", 0)) + 1)
