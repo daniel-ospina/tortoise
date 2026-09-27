@@ -126,7 +126,9 @@ now_epoch() {
   local v
   if [ -n "$LIVENESS_NOW_EPOCH" ]; then
     case "$LIVENESS_NOW_EPOCH" in
-      ''|*[!0-9]*) : ;;
+      *[!0-9]*)
+        warn "LIVENESS_NOW_EPOCH='[${LIVENESS_NOW_EPOCH}]' is not a usable epoch — ignoring the pin"
+        ;;
       *)
         v="$(dec_strip_zeros "$LIVENESS_NOW_EPOCH")"
         if [ -n "$v" ] && [ "${#v}" -le 12 ]; then

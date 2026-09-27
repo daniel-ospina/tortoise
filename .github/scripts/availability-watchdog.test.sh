@@ -270,7 +270,7 @@ while [ $# -gt 0 ]; do
 done
 payload=""
 if [ "$input" = "1" ]; then payload="$(cat)"; fi
-# #4573: route the LIFENESS heartbeat traffic under its own log prefix so every
+# #4573: route the LIVENESS heartbeat traffic under its own log prefix so every
 # incident assertion (which counts `GH POST …/issues`, `GH PATCH`, `GH-Q …`) is
 # untouched by the heartbeat leg. A heartbeat request is: a search whose query
 # names the heartbeat title, a create whose payload carries the heartbeat title,
@@ -292,7 +292,7 @@ fi
 case "$path" in
   search/issues*)
     [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
-    # #4573: the LIFENESS heartbeat search is a THIRD search shape (the incident
+    # #4573: the LIVENESS heartbeat search is a THIRD search shape (the incident
     # dedupe and the cross-incident ledger are the other two). Answer it from its
     # OWN fixture and log it under its own prefix so no incident assertion is
     # perturbed. Default: no heartbeat issue open → the watchdog creates one.

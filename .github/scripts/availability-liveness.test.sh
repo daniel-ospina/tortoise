@@ -50,6 +50,20 @@
 #     26. heartbeat_at=epoch:<valid>             → accepted (the writer's form)
 #     27. a FUTURE workflow created_at           → clamped (bootstrap path)
 #     28. jq absent                              → exit 1 (cannot parse = refuse)
+#     29. an unparseable heartbeat search         → exit 1 (NOT "no record")
+#     30. a non-numeric issue number             → exit 1 (never adopted)
+#     31. an unparseable heartbeat BODY          → unreadable (jq arm)
+#     32. a non-numeric create response          → "could not be filed"
+#     33. malformed workflow metadata            → STALE (not a bare abort)
+#     34. heartbeat_at=epoch:<non-numeric>       → unparseable
+#     35/36. leading-zero epochs (both forms)    → STALE + the alert IS filed
+#     37. the publication-boundary redaction     → all four shapes scrubbed
+#     38. the search query's constraints         → is:open/repo:/is:issue/…
+#     39/40. non-EXACT title / missing marker    → NOT adopted
+#     41. redaction AT the boundary              → create/update/comment payloads
+#     42/44/45/46. the clock pin is bounded      → normalized / unusable pins warn
+#         and fall back to the real clock
+#     43. a leading-zero workflow created_at     → STALE + the alert IS filed
 #   Parity
 #     20. the heartbeat TITLE + MARKER match the watchdog's byte-for-byte
 #         (a rename on one side would otherwise alarm forever)
@@ -698,6 +712,18 @@ seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=%s\\n"}' "$HEARTBEAT
 export LIVENESS_NOW_EPOCH=18446744073709551616
 run_checker
 assert_eq "$RC" "1" "45: an over-intmax clock pin falls back to the real clock (STALE, not LIVE)"
+
+# 46. a NON-NUMERIC clock pin (the third sub-arm of the clock guard) is rejected
+# LOUDLY and falls back to the real clock. Without the arm the pin is returned
+# verbatim, the arithmetic aborts, and the durable alert is silently lost.
+reset_case
+REAL_NOW="$(date -u +%s)"
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_epoch=%s\\n"}' "$HEARTBEAT_MARKER_FIXTURE" "$((REAL_NOW - 7200))")"
+export LIVENESS_NOW_EPOCH=abc
+run_checker
+assert_eq "$RC" "1" "46: a non-numeric clock pin falls back to the real clock (STALE, not an abort that loses the alert)"
+assert_contains "$OUT" "ignoring the pin" "46: …and it is rejected loudly, not silently repaired"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "46: …and the durable alert is filed"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
