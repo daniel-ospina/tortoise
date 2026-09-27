@@ -376,10 +376,30 @@ def test_production_emission_lanes_still_reach_the_sink_entry_point():
     is therefore pinned at PR time — this fails if a refactor removes the
     production lanes and leaves only the canary.
 
+    Two independent claims, because they fail differently:
+
+    1. The lane FUNCTION's body still calls the sink entry point (AST, below).
+       This catches the call being deleted from a surviving lane.
+    2. A handler lane is still a live endpoint on ``ha.app`` (below). Claim 1
+       alone does not cover a deleted *route*: the body keeps its call while no
+       production traffic can reach it, the canary keeps the heartbeat fresh,
+       and the absence half stays green over a lane that no longer runs.
+
+    What is still NOT asserted: that a helper lane (`_track_onboarding_event`)
+    is itself referenced by a handler, and that an endpoint's route PATH is
+    unchanged. See the module docstring's residual note.
+
     Adding a lane means adding it here (deliberate friction: the set is the
     reviewable record of where analytics is emitted from).
     """
     tree = ast.parse(HOSTED_API.read_text(), filename="hosted_api.py")
+    # Lanes whose own name is the endpoint function name — claim 2 applies to
+    # these; the helper lanes have no route of their own.
+    handler_lanes = {
+        "patch_onboarding_state",
+        "github_callback",
+        "webhooks_stripe",
+    }
     expected_lanes = {
         # the funnel lanes (see _emit_analytics_off_loop's docstring)
         "_track_onboarding_event",
@@ -413,4 +433,17 @@ def test_production_emission_lanes_still_reach_the_sink_entry_point():
         f"production analytics emission lane(s) {sorted(missing)} no longer "
         f"call _emit_analytics_off_loop — the sink-absence heartbeat cannot "
         f"detect that at runtime (#3944); got {sorted(found)}"
+    )
+
+    # Claim 2 — the handler lanes are still registered endpoints.
+    registered = {
+        getattr(route, "endpoint", None).__name__
+        for route in ha.app.routes
+        if getattr(route, "endpoint", None) is not None
+    }
+    unreachable = handler_lanes - registered
+    assert not unreachable, (
+        f"handler lane(s) {sorted(unreachable)} still call the sink but are no "
+        f"longer registered on the app — no production traffic reaches them, "
+        f"so the canary would mask the dead lane (#3944)"
     )

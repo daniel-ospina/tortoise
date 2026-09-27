@@ -124,6 +124,17 @@
 #      (the org census) precedes it in the payload
 #  81. #5028: the outcome's org census is `unknown` (never blank) when /status
 #      carries no object `per_team`; an object still reports the real count
+#  82. #3944: a /status with NO analytics block leaves the kind untouched
+#  83. #3944: a STALE heartbeat (age > threshold) files ANALYTICS_SINK_DEGRADED
+#  84. #3944: a FRESH heartbeat resolves the open incident
+#  85. #3944: cold start (no delivery yet, uptime under threshold) files nothing
+#  86. #3944: age null + uptime past threshold (the emitter never ran) files
+#  87. #3944: an UNCONFIGURED deployment never fires (the D5a principle)
+#  88. #3944: the HALF-CONFIGURED shape (#3677) DOES fire (`intended` gate)
+#  89. #3944 x #3820 D5a: the sink check fires with BACKUP_SWEEP_ENABLED=false
+#  90. #3944: a cold start must NOT RESOLVE an open incident (no delivered
+#      write yet — resolving would delete the dedup object on zero evidence)
+#  91. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1922,6 +1933,44 @@ assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
   "89. the sink check is NOT gated on BACKUP_SWEEP_ENABLED (D5a)"
 assert_contains "$OUT" "backups deliberately disabled" \
   "89. the sweep-side deliberate pause still took its own path"
+
+# ── 90. #3944: a cold start must NOT RESOLVE an open incident ───────────────
+# The bug-scan P1 shape: `intended` true, no delivered write yet, uptime under
+# the threshold. Not stale (nothing to file) — but also NOT fresh, so it must
+# not CLOSE an open incident either: resolving here deletes the R2 dedup object
+# with zero evidence of a delivered write, and a crash-looping deploy (which
+# never reaches its first write) would re-resolve it every hourly run, keeping
+# the absence alarm permanently silent on exactly the failure it exists for.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true null 5)"
+run_driver
+assert_eq "$RC" 0 "90. a cold start with an open incident stays green"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "90. a cold start does NOT resolve the open incident (no delivered write yet)"
+assert_contains "$OUT" "analytics heartbeat not yet established" \
+  "90. the log says the heartbeat is not yet established"
+
+# ── 91. #3944: an UNMEASURABLE block must NOT RESOLVE an open incident ──────
+# `intended` true and a threshold present, but neither age_s nor uptime_s is a
+# number (a malformed / partial /status). Acceptance criterion 6 — an absent or
+# malformed block never files AND never resolves. `unknown` is not freshness,
+# and a garbage numeric operand must not be read as `<= threshold` either.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"'"$TS_RECENT"'","last_team_count":0},"watcher":{"running":true,"age_minutes":1},"analytics":{"intended":true,"configured":true,"silent_threshold_s":900}}'
+run_driver
+assert_eq "$RC" 0 "91. an unmeasurable heartbeat stays green"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "91. an unmeasurable block does NOT resolve the open incident"
+assert_contains "$OUT" "analytics heartbeat not yet established" \
+  "91. the log reports the record as unestablished, not fresh"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
