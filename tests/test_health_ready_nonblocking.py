@@ -138,7 +138,7 @@ CONTROL_PLANE_OFFLOAD_INVENTORY = frozenset({
     "set_api_key_name",          # key-write lane: the label PATCH
     "set_api_key_scopes",        # key-write lane: the scopes PATCH
     "_resolve_signup_token",    # recovery lane: signup-token resolution
-    "_track_analytics_event",   # analytics lane: fresh httpx.Client per event
+    "_track_analytics_event",   # analytics lane: pooled httpx.Client (#4462)
     "_github_repos_count",      # github_status: blocking api.github.com call
 })
 

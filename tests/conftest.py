@@ -1216,6 +1216,15 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
                         {o: 0 for o in ha._ANALYTICS_OUTCOMES})
     monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
                         str(tmp_path / "analytics_fallback.jsonl"))
+    # #4462: the pooled analytics HTTP client is a process-wide cache. A client
+    # built under one test's monkeypatched ``httpx.Client`` (or env) must not
+    # serve the next test — several tests read the client CONSTRUCTED during
+    # their own run (``instances[0].init_kwargs`` in
+    # ``test_analytics_write_path_resolution``). Swapping the cache dict by
+    # reference makes each test start with an empty cache; monkeypatch restores
+    # the untouched original at teardown.
+    monkeypatch.setattr(ha, "_ANALYTICS_HTTP_CACHE",
+                        {"key": None, "client": None})
     mon.ANALYTICS_OUTCOME_COUNT.clear()
 
 

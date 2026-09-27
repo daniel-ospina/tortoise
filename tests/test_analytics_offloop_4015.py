@@ -55,9 +55,10 @@ HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 class _ThreadRecordingClient:
     """Stands in for ``httpx.Client`` — records the THREAD of every POST.
 
-    ``_track_analytics_event`` imports ``httpx`` lazily and constructs the
-    client inside the function, so patching the class is enough to observe
-    WHERE the network call ran. A ``MainThread`` record is the defect.
+    ``_track_analytics_event`` imports ``httpx`` lazily and resolves its client
+    through the process-wide pool (``_analytics_http_client``, #4462), so
+    patching the class is enough to observe WHERE the network call ran. A
+    ``MainThread`` record is the defect.
     """
 
     call_threads: ClassVar[list[str]] = []
@@ -604,3 +605,244 @@ def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
             "to the telemetry control-plane pool — the blocking POST could be "
             "back on the event loop (#4015)"
         )
+
+
+# ── #4462: the pooled client is REUSED, not rebuilt per emit ────────────────
+#
+# `_track_analytics_event` used to build a fresh `httpx.Client(timeout=5)` per
+# event. These tests assert the property that makes the change REAL — the SAME
+# client instance serves every later emit, and is never closed underneath them
+# — rather than merely that some client exists. Revert the pooling (construct
+# per call) and the first reddens with two constructions; put a `with` around
+# the shared client and it reddens with a close between emits.
+
+
+class _PooledRecordingClient:
+    """Records construction, POST and close separately, so a test can tell
+    "one client built and KEPT" from "one client built and closed" (what a
+    ``with`` around a shared client would do) and can see the thread each POST
+    ran on."""
+
+    instances: ClassVar[list] = []
+    posts: ClassVar[list] = []
+    threads: ClassVar[list[str]] = []
+    closes: ClassVar[int] = 0
+    exits: ClassVar[int] = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        type(self).exits += 1
+        return False
+
+    def post(self, url, **kwargs):
+        type(self).posts.append((url, kwargs.get("json")))
+        type(self).threads.append(threading.current_thread().name)
+
+        class _Resp:
+            status_code = 201
+
+        return _Resp()
+
+    def close(self):
+        type(self).closes += 1
+
+
+def _record_pooled_client(monkeypatch):
+    _PooledRecordingClient.instances = []
+    _PooledRecordingClient.posts = []
+    _PooledRecordingClient.threads = []
+    _PooledRecordingClient.closes = 0
+    _PooledRecordingClient.exits = 0
+    monkeypatch.setattr("httpx.Client", _PooledRecordingClient)
+    return _PooledRecordingClient
+
+
+def test_pooled_client_is_reused_and_not_closed_between_emits(monkeypatch):
+    """#4462 falsifier: ONE client, kept across emits.
+
+    Mutation 1 (construct per call, the pre-#4462 shape) → ``instances`` is 2.
+    Mutation 2 (wrap the shared client in ``with``) → ``exits`` is 1 after the
+    first emit and the second pays a fresh handshake.
+    """
+    _prod_env(monkeypatch)
+    rec = _record_pooled_client(monkeypatch)
+
+    first = ha._track_analytics_event("org-4462", "capture_cost", {"calls": 1})
+    second = ha._track_analytics_event("org-4462", "capture_cost", {"calls": 2})
+
+    assert first == second == "supabase", (first, second)
+    assert len(rec.instances) == 1, (
+        f"{len(rec.instances)} httpx.Client constructions for two emits — the "
+        "client is being rebuilt per event, which is the defect #4462 fixes"
+    )
+    assert len(rec.posts) == 2, "each emit must still issue exactly one POST"
+    assert rec.exits == 0, (
+        "the shared client was used as a context manager, so the first emit "
+        "CLOSED it — every later emit would pay a fresh handshake (#4462)"
+    )
+    assert rec.closes == 0, "the shared client was closed between emits (#4462)"
+
+
+def test_pooled_emit_reuses_one_client_off_the_event_loop(monkeypatch):
+    """The two properties together: two off-loop emits share ONE client, and
+    both POSTs run on the dedicated telemetry pool, never ``MainThread``.
+
+    Pins that reuse did not come at the cost of the #4015 off-loop contract.
+    """
+    _prod_env(monkeypatch)
+    rec = _record_pooled_client(monkeypatch)
+
+    async def _twice():
+        await ha._emit_analytics_off_loop(
+            "org-4462", "artifact_copied", {"harness": "claude", "section": "a"})
+        await ha._emit_analytics_off_loop(
+            "org-4462", "artifact_copied", {"harness": "claude", "section": "b"})
+
+    asyncio.run(_twice())
+
+    assert len(rec.instances) == 1, (
+        f"two off-loop emits built {len(rec.instances)} clients — the pool is "
+        "not being reused across the telemetry workers (#4462)"
+    )
+    assert len(rec.threads) == 2, rec.threads
+    assert all(t != "MainThread" for t in rec.threads), (
+        f"the pooled analytics emit ran on the event loop: {rec.threads}"
+    )
+    assert all(
+        t.startswith(monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME)
+        for t in rec.threads
+    ), (
+        f"the pooled emit ran on {rec.threads} — it must stay on the "
+        f"telemetry pool ({monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME})"
+    )
+
+
+def test_half_configured_env_builds_no_pooled_client(monkeypatch, tmp_path):
+    """The lifecycle is lazy and gated on ``configured``: a HALF-configured env
+    (URL but no key) must build NO client at all and still degrade to the JSONL
+    (#3677/#3820).
+
+    Mutation: construct the client unconditionally → ``instances`` is non-empty
+    (and a process with no Supabase key holds a pool it can never use).
+    """
+    monkeypatch.setenv("SUPABASE_URL", "https://analytics4462.supabase.co")
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    rec = _record_pooled_client(monkeypatch)
+
+    outcome = ha._track_analytics_event("org-4462", "capture_cost", {"calls": 1})
+
+    assert rec.instances == [], (
+        "a pooled client was constructed for a half-configured env — the "
+        "client must be lazy and gated on `configured` (#3677/#3820)"
+    )
+    assert outcome == "fallback", outcome
+    assert (tmp_path / "analytics_fallback.jsonl").exists(), (
+        "the half-configured event did not reach the JSONL fallback"
+    )
+
+
+def test_pooled_client_post_failure_is_never_raise(monkeypatch):
+    """A POOLED client whose POST raises must still not escape the sink: the
+    never-raise contract survives the lifetime change (#4462).
+
+    Mutation: drop the ``except Exception`` around the pooled call → this
+    raises instead of returning a terminal outcome.
+    """
+    _prod_env(monkeypatch)
+
+    class _Boom(_PooledRecordingClient):
+        def post(self, url, **kwargs):
+            raise RuntimeError("supabase unreachable")
+
+    monkeypatch.setattr("httpx.Client", _Boom)
+
+    outcome = ha._track_analytics_event("org-4462", "capture_cost", {"calls": 1})
+
+    assert outcome == "fallback", outcome
+    assert outcome in ha._ANALYTICS_OUTCOMES
+
+
+def test_analytics_http_reset_closes_and_drops_the_cached_client(monkeypatch):
+    """The test/ops lifetime seam actually closes AND drops — the property
+    that makes it a reset rather than a leak.
+
+    Mutation: clear the cache without closing → ``closes`` stays 0.
+    """
+    _prod_env(monkeypatch)
+    rec = _record_pooled_client(monkeypatch)
+
+    first = ha._analytics_http_client("https://analytics4462.supabase.co", "k")
+    ha._analytics_http_reset()
+
+    assert rec.closes == 1, "reset did not close the cached client (#4462)"
+    second = ha._analytics_http_client("https://analytics4462.supabase.co", "k")
+    assert second is not first, "reset did not drop the cached client (#4462)"
+
+
+def test_pooled_client_reuses_one_tcp_connection_across_emits(monkeypatch):
+    """#4462 MEASURED: five sequential emits open ONE real TCP connection.
+
+    This is the mechanism the change buys, counted on a real loopback socket
+    rather than asserted about an object — a per-call client opens five. It
+    also documents the bound the plan states honestly: reuse holds because the
+    emits arrive inside httpx's 5 s ``keepalive_expiry`` window (a burst);
+    sparser emits pay a handshake each. No external network is touched.
+
+    Mutation: revert to a per-call client → ``accepted`` is 5.
+    """
+    import http.server
+    import socketserver
+
+    accepted: list = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # else the server closes per request
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(201)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    class _Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        # A client that is NOT reused leaves its connection open; without these
+        # the handler thread blocks in readline() and server_close() joins it,
+        # turning the mutation's assertion failure into a HANG. Daemon threads
+        # plus no block-on-close keeps teardown prompt either way.
+        daemon_threads = True
+        block_on_close = False
+
+        def get_request(self):
+            conn, addr = super().get_request()
+            accepted.append(addr)
+            return conn, addr
+
+    server = _Server(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(
+            "SUPABASE_URL", f"http://127.0.0.1:{server.server_address[1]}")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-4462")
+        monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        for i in range(5):
+            assert ha._track_analytics_event(
+                "org-4462", "capture_cost", {"calls": i}) == "supabase"
+        assert len(accepted) == 1, (
+            f"{len(accepted)} TCP connections for 5 sequential emits — the "
+            "pooled client is not reusing its connection (#4462)"
+        )
+    finally:
+        ha._analytics_http_reset()
+        server.shutdown()
+        server.server_close()

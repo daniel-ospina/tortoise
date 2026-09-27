@@ -21539,9 +21539,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        # #3498/#4015: the analytics write builds a fresh httpx.Client per
-        # event — a blocking PostgREST call; off the loop via the shared entry
-        # point.
+        # #3498/#4015: the analytics write is a blocking PostgREST call
+        # (pooled ``httpx.Client`` since #4462); off the loop via the shared
+        # entry point.
         await _emit_analytics_off_loop(
             org["org_id"], "artifact_copied",
             {"harness": harness, "section": section})
@@ -22929,6 +22929,115 @@ _ANALYTICS_ALERT_LOCK = threading.Lock()
 # ephemeral JSONL — #3677's symptom reached by a different route.
 _ANALYTICS_POST_TIMEOUT_S = 5
 
+# ── #4462: the analytics sink's pooled HTTP client ──────────────────────────
+# The emit used to build a fresh ``httpx.Client(timeout=5)`` PER EVENT, so
+# every analytics row paid a new TCP+TLS handshake to Supabase. It now reuses
+# ONE process-wide client, built lazily on the first CONFIGURED emit.
+#
+# The shape is the repo's existing "lazy + env-keyed + locked + resettable
+# process-wide handle" idiom (``_PROBE_SDK_CACHE`` / ``_probe_sdk`` below): the
+# cache is a dict so tests/ops can drop it by reference, the lock guards the
+# CACHE only (never the network call), and a changed key rebuilds.
+#
+# Why ONE client can serve every caller: this sink is reached from THREE
+# executors — the dedicated 4-worker ``telemetry`` pool, the event loop's
+# shared default executor (the capture-cost lane, #4468), and the MCP lane's
+# daemon thread — and ``httpx.Client`` is documented safe for concurrent use
+# (the repo already relies on that in ``supabase_control``). It is a SYNC
+# client, so it is bound to NO event loop: that is what makes cross-executor
+# reuse safe, and why a pooled ``AsyncClient`` was not used.
+#
+# LIFETIME: process-lifetime by design, and deliberately NOT closed at shutdown
+# — mirroring ``SupabaseControlPlane._http`` (never closed) and
+# ``_probe_sdk_reset()`` (called at startup + tests, not teardown). A shutdown
+# close would race an in-flight telemetry worker — the seam abandons the AWAIT
+# on a wait-bound miss but never the daemon thread (CPython #87185) — and turn a
+# delivered event into a spurious JSONL fallback/degradation. That
+# close-in-flight contract is #4608's subject and is not re-derived here; the
+# process exit reclaims the sockets. ``_analytics_http_reset()`` is the
+# test/ops seam.
+_ANALYTICS_HTTP_CACHE: dict = {"key": None, "client": None}
+_ANALYTICS_HTTP_LOCK = threading.Lock()
+# Connection ceiling — pinned explicitly so it is auditable rather than an
+# implicit default. It is NOT a concurrency limit on the emit path: 100 is
+# several times the most emitters this process can run at once (the telemetry
+# pool's 4 workers plus the shared default executor plus the MCP lane), so a
+# slow telemetry call can never make another wait for a connection. Every lane
+# is off-loop, so even a saturated pool could never stall the event loop.
+_ANALYTICS_HTTP_MAX_CONNECTIONS = 100
+_ANALYTICS_HTTP_MAX_KEEPALIVE = 20
+# Deliberately httpx's own default. This is the window over which an idle
+# pooled connection is reused, so it BOUNDS the benefit: emits arriving within
+# it share the handshake (a burst), while sparser emits still pay one. A longer
+# window would hold sockets the server may already have closed, and with
+# ``retries=0`` that is a LOST event under the never-raise contract — a trade
+# that needs the pool measurement tracked by #5840, so it is not made blind.
+_ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S = 5.0
+
+
+def _analytics_http_key(url: str, key: str) -> tuple:
+    """Identity of the sink the cached client is bound to.
+
+    A changed ``SUPABASE_URL`` / service key / ``_ANALYTICS_POST_TIMEOUT_S``
+    must rebuild rather than POST through a client configured for the old sink.
+    Production is a stable key, so the client is built once.
+    """
+    return (url, key, _ANALYTICS_POST_TIMEOUT_S)
+
+
+def _analytics_http_reset() -> None:
+    """Close + drop the cached analytics client (tests / ops).
+
+    The ``close()`` is individually guarded: this runs in teardown and must
+    never raise, and test doubles standing in for ``httpx.Client`` do not all
+    define ``close()``.
+    """
+    with _ANALYTICS_HTTP_LOCK:
+        client = _ANALYTICS_HTTP_CACHE.get("client")
+        _ANALYTICS_HTTP_CACHE["client"] = None
+        _ANALYTICS_HTTP_CACHE["key"] = None
+    if client is not None:
+        try:  # noqa: SIM105 — a double without close() must not fail teardown
+            client.close()
+        except Exception:
+            pass
+
+
+def _analytics_http_client(url: str, key: str):
+    """Return the process-wide pooled ``httpx.Client`` for ``(url, key)``.
+
+    CALLED ONLY INSIDE ``if configured:`` in ``_track_analytics_event`` — an
+    unconfigured or half-configured env must never build (nor have to close) a
+    client; it still degrades to the JSONL (#3677/#3820).
+
+    The lock is held across cache lookup and construction, NEVER across the
+    POST, so no slow emit can block another. A superseded client (the env or
+    the timeout changed) is closed OUTSIDE the lock — the same accepted window
+    ``_probe_sdk`` documents.
+    """
+    cache_key = _analytics_http_key(url, key)
+    with _ANALYTICS_HTTP_LOCK:
+        old = _ANALYTICS_HTTP_CACHE.get("client")
+        if old is not None and _ANALYTICS_HTTP_CACHE.get("key") == cache_key:
+            return old
+        import httpx
+        client = httpx.Client(
+            timeout=_ANALYTICS_POST_TIMEOUT_S,
+            limits=httpx.Limits(
+                max_connections=_ANALYTICS_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=_ANALYTICS_HTTP_MAX_KEEPALIVE,
+                keepalive_expiry=_ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S,
+            ),
+        )
+        _ANALYTICS_HTTP_CACHE["client"] = client
+        _ANALYTICS_HTTP_CACHE["key"] = cache_key
+    if old is not None:
+        try:  # noqa: SIM105 — a double without close() must not fail the emit
+            old.close()
+        except Exception:
+            pass
+    return client
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> str:
@@ -23038,26 +23147,23 @@ def _track_analytics_event(org_id: str, event_name: str,
         # which can file an incident for a healthy sink.
         delivered = False
         try:
-            import httpx
-            # #4015: the client is built PER EVENT, deliberately. For the
-            # funnel sites it goes through ``_emit_analytics_off_loop`` → the
-            # telemetry pool, so a fresh TCP+TLS handshake costs a telemetry
-            # WORKER SLOT, never an event-loop stall — it is not the defect this
-            # issue names. (The capture-cost lane reaches this helper on the
-            # loop's shared default executor instead; either way, off-loop.)
-            # Reusing a pooled client is a throughput optimisation for those
-            # pools and needs its own measurement plus a lifecycle it does not
-            # have today (lazy construction gated on ``configured``, because
-            # this sink must keep serving a HALF-CONFIGURED env and degrade to
-            # the JSONL — the #3677/#3820 contract); tracked as #4462.
-            with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
-                resp = client.post(
-                    f"{url}/rest/v1/analytics_events",
-                    json=event,
-                    headers={"apikey": key, "Authorization": f"Bearer {key}",
-                             "Content-Type": "application/json",
-                             "Prefer": "return=minimal"},
-                )
+            # #4462: one process-wide pooled client, built lazily on the first
+            # configured emit and reused by every later one — including across
+            # the three executors that reach this sink (the telemetry pool, the
+            # loop's shared default executor, and the MCP lane's daemon thread).
+            # The ``with`` form is deliberately NOT used: httpx 0.28 closes an
+            # externally-constructed client on ``__exit__``, which would defeat
+            # reuse on the very first emit (see ``supabase_control``). The
+            # lookup sits INSIDE ``if configured:``, so a half-configured env
+            # builds nothing and still degrades to the JSONL (#3677/#3820).
+            client = _analytics_http_client(url, key)
+            resp = client.post(
+                f"{url}/rest/v1/analytics_events",
+                json=event,
+                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json",
+                         "Prefer": "return=minimal"},
+            )
             # #3677: a REJECTED write is still a lost event. `post` does not
             # raise on a 4xx/5xx, so without this check the event was silently
             # discarded — the #3677 loss class, reachable whenever the key is
@@ -23767,9 +23873,10 @@ async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     onboarding flow).
 
     #3498/#4015: async because the write it wraps is a blocking PostgREST call
-    — ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
-    event, which used to run ON the event loop from every async caller. The
-    emit goes through the shared off-loop entry point; the strict-mode
+    — ``_track_analytics_event`` POSTs with a synchronous ``httpx.Client``
+    (pooled process-wide since #4462), which used to run ON the event loop from
+    every async caller. The emit goes through the shared off-loop entry point;
+    the strict-mode
     ``UnregisteredTelemetryKey`` still escapes (it is raised in the worker
     thread and re-raised through ``await``)."""
     try:
