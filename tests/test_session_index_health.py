@@ -342,6 +342,32 @@ def test_doctor_session_indexing_check_unavailable_is_a_warning(
     assert rc == 0, out
 
 
+def test_doctor_session_indexing_configured_target_names_config_surface(
+        env, capsys, monkeypatch, tmp_path):
+    """PIN: the configured-missing arm names the target's config surface, and
+    does NOT offer the first-run remediation.
+
+    A `--db` target cannot be handed to `tortoise init` (it takes `--path`, not
+    `--db`), so offering `tortoise init` here would either fail or target the
+    wrong DB — masking the config error the #2204 split surfaces. The rc-1
+    verdict belongs to the `Graph: health` ❌ row, not to this one.
+    """
+    from tortoise.__main__ import main
+
+    _isolate_uninitialized(monkeypatch, tmp_path)
+    _write_session(env, "sess-a")
+
+    rc = main(["doctor", "--db", str(tmp_path / "nope" / "tortoise.db")])
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if "Session indexing" in line)
+
+    assert "configured target" in row, row
+    assert "tortoise init" not in row, row
+    assert "⚠️" in row and "❌" not in row, row
+    assert out.count("Session indexing") == 1, out
+    assert rc == 1
+
+
 def test_doctor_session_indexing_renders_when_target_unresolved(
         env, capsys, monkeypatch, tmp_path):
     """PIN (#5815): the row renders even when the target never RESOLVES.

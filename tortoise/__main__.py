@@ -6475,11 +6475,9 @@ def _cmd_index_github(args):
         indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
-#: #280 check 4 — the empty-corpus detail for a target that has no graph yet.
-#: Used by the graph-aware branch and by the `pre-init-default` fallback, so the
-#: expected-first-run verdict reads identically in both. The other fallback
-#: reasons deliberately carry their own empty-corpus wording (a configured-missing
-#: target and an unreadable graph are not "expected for new setups").
+#: #280 check 4 — the shared empty-corpus detail (the corpus has no `*.md`
+#: files yet). Used by the graph-aware branch and by the `pre-init-default`
+#: fallback; the other fallback reasons carry their own empty-corpus wording.
 _SESSION_INDEX_EMPTY_DETAIL = (
     "corpus empty — nothing indexed (expected for new setups)"
 )
@@ -6504,8 +6502,8 @@ def _session_index_rows_without_graph(
       detail and the `tortoise init` remediation.
     * ``pre-init-configured`` — an EXPLICITLY CONFIGURED target has no DB file.
       #2204's verdict split grades that a config error (❌ + rc 1 on the
-      `Graph: health` row), so this row must not narrate it as a first run nor
-      advise `tortoise init` at a path the user did not choose.
+      `Graph: health` row), so this row names the target's own configuration
+      surface rather than the first-run remediation.
     * ``graph-unavailable`` — the target did not resolve, or the projection /
       status call raised. The corpus is reported, never graded.
 
@@ -6539,10 +6537,6 @@ def _session_index_rows_without_graph(
             return [("Session indexing", "⚠️",
                      "corpus empty — nothing indexed "
                      "(no graph at the configured target)")]
-        # No `tortoise init` advice here: the target came from a flag or env
-        # var, and `init` takes no `--db`, so naming it would either fail or
-        # create the canonical default instead of the target the user aimed
-        # at — masking the config error this split exists to surface.
         return [("Session indexing", "⚠️",
                  f"{n} corpus file{plural}, none indexed — no graph at the "
                  "configured target (fix the configured target: "
