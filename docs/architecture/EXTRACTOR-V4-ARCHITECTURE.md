@@ -49,11 +49,12 @@ cap's behaviour. That separation is deliberate: this ruling is about the **unit*
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
 **post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
 
-> **OVERRIDES:** **prepaid credits** as the overage mechanism, and **`write_ops`** (the current metered-usage unit)
-> as the unit for extraction consumption — replaced by **tokens with purchased extraction overage**, because
-> per-write-op accounting cannot express LLM work at all (extraction consumes provider tokens, not graph writes), and
-> because **prepaid** is against the postpaid metered/auto-billing default the field uses. (Billing LLM work per
-> token is itself the field default, so the marker names the unit we leave *and* the payment shape we depart from.)
+> **OVERRIDES:** the **postpaid metered/auto-billing** default the field uses, and **`write_ops`** (the current
+> metered-usage unit) as the unit for extraction consumption — replaced by **prepaid credits** and per-token
+> extraction with purchased overage, because per-write-op accounting cannot express LLM work at all (extraction
+> consumes provider tokens, not graph writes), and because the owner's cashflow reason favours **buying credits in
+> advance** over approving a maximum spend. (Billing LLM work per token is itself the field default, so the marker
+> names the unit we leave *and* the payment shape we depart from.)
 
 ---
 

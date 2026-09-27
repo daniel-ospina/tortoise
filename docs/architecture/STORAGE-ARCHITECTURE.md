@@ -27,7 +27,7 @@ the **node as the customer-facing unit**:
 
 - **Storage is billed in MB/GB**, as both our cost input **and** the customer-facing unit — *"migrate away from
   counting nodes and start counting in mb/gb for storage (both as a cost input for us and customer facing bill them
-  per mb/gb as they understand that)"*.
+  per mb/gb as they understand that) **[typos in the source silently normalised: `coutnign`, `inout`]**"*.
 - **Exceeding the storage allowance is PURCHASED OVERAGE, not refusal** — consistent with the 22 September ruling
   that tiers price *features*, never refusal.
 - **Overage is bought with PREPAID CREDITS**, not a postpaid "max spend" approval — the owner's stated reason is
@@ -37,8 +37,9 @@ the **node as the customer-facing unit**:
   measured consumption.
 
 **⚠️ Why the node unit is not merely deprecated but replaced — and what actually removes the P0.** The stored data
-*"does not shrink back on its own"* (the ruling's own qualifier; a node count does fall when nodes are deleted,
-superseded or purged), so a customer who filled the stock cap stayed full **without doing anything further** — the
+*"does not shrink back on its own"* (the ruling's own qualifier; a node count does fall when nodes are deleted
+or purged — but **not** when one is superseded, which leaves the old point in place and only adds a `CORRECTS` edge,
+and the quota predicate carries no status filter, so a superseded point is still counted), so a customer who filled the stock cap stayed full **without doing anything further** — the
 P0 in `#4495` was **24,978 of 25,000, i.e. 22 points of headroom**, and a later capture in the same window was
 refused outright at **24,984 of 25,000 (16 points)** with no partial acceptance.
 
