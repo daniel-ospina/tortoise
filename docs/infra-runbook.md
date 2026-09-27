@@ -1420,8 +1420,8 @@ channel the first verifies:
    cannot silence the check on Telegram. On recovery it closes the alert.
 
 **Measured cadence, not cron intent.** The 5-minute cron delivers ~96 runs/day.
-Re-measured for #4573 over the whole live population (workflow created
-2026-09-13) through 2026-09-27T08:55:32Z — 14.22 days, n=1377 scheduled runs:
+Re-measured for #4573 over the whole live population (the watchdog workflow was
+created 2026-09-12T22:15 CDT, 2026-09-13T03:15Z) through 2026-09-27T08:55:32Z — 14.22 days, n=1377 scheduled runs:
 
 | Statistic | Value |
 |---|---|
@@ -1468,8 +1468,8 @@ but the heartbeat does not, read the last run's `heartbeat:` log lines.
 
 **Bootstrap, and the residual.** Before the monitor has ever run there is no
 record; the checker reads the **liveness workflow's own `created_at`** — the age
-of *this feature*, not of the watchdog workflow (which has existed since
-2026-09-12, so keying on it would alarm from the moment this checker first ships
+of *this feature*, not of the watchdog workflow (created 2026-09-12T22:15 CDT,
+2026-09-13T03:15Z, so keying on it would alarm from the moment this checker first ships
 until the first heartbeat lands, a false page produced by the rollout meant to
 prevent false pages). It does not alarm while the feature is younger than the
 threshold (a fresh rollout has nothing to verify). An **unreadable** feature age

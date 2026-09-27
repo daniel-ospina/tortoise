@@ -36,7 +36,8 @@
 #
 #   2. THE CADENCE IS MEASURED, NOT INTENDED. The watchdog's cron *intent* is
 #      5 min; its MEASURED delivery is ~96 runs/day. Re-measured for this issue
-#      over the whole live population (workflow created 2026-09-13) through
+#      over the whole live population (the watchdog workflow was created
+#      2026-09-12T22:15 CDT, 2026-09-13T03:15Z) through
 #      2026-09-27T08:55:32Z — 14.22 days, n=1377 scheduled runs:
 #
 #          runs/day = 96.8      mean inter-arrival = 14.88 min
@@ -86,9 +87,10 @@ LIVENESS_ALERT_MARKER='<!-- availability-liveness-alert -->'
 LIVENESS_ALERT_TITLE='[OPS] availability-watchdog LIVENESS — no heartbeat'
 
 # The "nothing to verify yet" grace is keyed to THIS feature's own rollout, NOT
-# to the watchdog workflow's age. The watchdog workflow has existed since
-# 2026-09-12, so keying the grace on it would alarm from the moment this checker
-# first ships until the first heartbeat lands — a false page produced by the very
+# to the watchdog workflow's age. The watchdog workflow was created
+# 2026-09-12T22:15 CDT (2026-09-13T03:15Z), so keying the grace on it would alarm
+# from the moment this checker first ships until the first heartbeat lands — a
+# false page produced by the very
 # rollout meant to prevent false pages. The liveness workflow is created in the
 # same change that adds the heartbeat, so ITS age is the feature's age. Metadata
 # only; an unreadable value fails closed.

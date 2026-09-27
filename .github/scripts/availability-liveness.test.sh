@@ -59,6 +59,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASH_BIN="$(command -v bash)"
 CHECKER="$SCRIPT_DIR/availability-liveness.sh"
 WATCHDOG_SCRIPT="$SCRIPT_DIR/availability-watchdog.sh"
 
@@ -175,9 +176,22 @@ reset_case() {
 }
 
 run_checker() { # -> RC, OUT
+  _run_checker "$CHECKER" "$PATH"
+}
+
+# Same, but the checker runs with PATH="$BIN" ONLY — provably no jq. `bash` is
+# resolved to an ABSOLUTE path here, in the harness's own PATH, and the shebang
+# is bypassed, so no system bin dir (which may contain jq on usrmerged Ubuntu,
+# where /bin -> /usr/bin) can leak into the child. Assuming "no jq under /bin"
+# was the case-28 defect: it held on macOS and failed on the CI runner.
+run_checker_no_jq() { # -> RC, OUT
+  _run_checker "$CHECKER" "$BIN"
+}
+
+_run_checker() { # <script> <child-PATH>
   set +e
   local so
-  so="$("$CHECKER" 2>"$STUB_TMP/stderr.log" </dev/null)"
+  so="$(PATH="$2" "$BASH_BIN" "$1" 2>"$STUB_TMP/stderr.log" </dev/null)"
   RC=$?
   OUT="$([ -f "$STUB_TMP/stderr.log" ] && cat "$STUB_TMP/stderr.log" || true)"
   OUT_STDOUT="$so"
@@ -477,14 +491,16 @@ run_checker
 assert_eq "$RC" "1" "24: 100001 (above the 1..100000 bound) is rejected to the default → 200-min heartbeat is STALE"
 assert_contains "$OUT" "threshold=90 min" "24: …the ACTIVE threshold is the measured default 90"
 
-# 25. the below-p95 WARN fires but the value is still HONOURED (an explicit
-# operator choice inside the scheduling jitter).
+# 25. the below-p95 WARN fires but the value is still HONOURED. The heartbeat is
+# 20 min — fresh under the DEFAULT 90 but STALE under the honoured 10, so this
+# distinguishes "honoured" from "silently defaulted" (a 5-min fixture was fresh
+# under both, so only the warn half was load-bearing).
 reset_case
-seed_heartbeat 5
+seed_heartbeat 20
 export HEARTBEAT_MAX_AGE_MIN=10
 run_checker
-assert_eq "$RC" "0" "25: a valid 10-min bound is honoured (5-min heartbeat is fresh)"
-assert_contains "$OUT" "below the measured p95" "25: …but it WARNS that it sits inside the scheduling jitter"
+assert_eq "$RC" "1" "25: a valid 10-min bound is HONOURED (a 20-min heartbeat is STALE, not defaulted to 90)"
+assert_contains "$OUT" "below the measured p95" "25: …and it WARNS that it sits inside the scheduling jitter"
 
 # 26. the iso_to_epoch `epoch:<n>` ACCEPTANCE path (18h covers only rejection):
 # the watchdog's fmt_iso fallback writes this exact form.
@@ -502,13 +518,67 @@ export STUB_WF_CREATED_AT="$WF_FUTURE"
 run_checker
 assert_eq "$RC" "0" "27: a future liveness-workflow created_at → clamped, not yet established, exit 0"
 assert_contains "$OUT" "is only 0 min old" "27: …the feature age is CLAMPED to 0 (not negative)"
+assert_eq "$(count_calls 'actions/workflows/availability-liveness.yml')" "1" "27: …the grace reads the LIVENESS workflow, not the watchdog's (keying it on the watchdog would alarm from the first run)"
 
-# 28. a checker without jq refuses to run (fail closed).
+# 28. a checker without jq refuses to run (fail closed). PATH="$BIN" ONLY — see
+# run_checker_no_jq: /bin may itself contain jq on usrmerged Linux.
 reset_case
-export PATH="$BIN:/bin"
-run_checker
+run_checker_no_jq
 assert_eq "$RC" "1" "28: jq absent → exit 1 (a checker that cannot parse refuses to run)"
 assert_contains "$OUT" "jq is required" "28: …and says why"
+assert_eq "$(count_calls 'GH ')" "0" "28: …before any GitHub call (a full run would prove jq WAS found)"
+
+# 29. a heartbeat-search response that does not PARSE is a search failure, not
+# "no record yet" — the __ERR__ arm of search_issue's jq guard. With a young
+# workflow the collapse would read as "not yet established / LIVE".
+reset_case
+export STUB_HB_SEARCH_JSON='not-json'
+export STUB_WF_CREATED_AT="$WF_RECENT"
+run_checker
+assert_eq "$RC" "1" "29: an unparseable heartbeat search → exit 1 (NOT downgraded to no-record)"
+assert_contains "$OUT" "heartbeat search failed" "29: …and names the search failure"
+
+# 30. a search result whose issue NUMBER is not numeric is a search failure, not
+# an adoptable alert.
+reset_case
+seed_heartbeat 5
+export STUB_ALERT_SEARCH_JSON="$(printf '{"items":[{"number":"abc","title":"%s","body":"%s","user":{"login":"github-actions[bot]","type":"Bot"}}]}' "$ALERT_TITLE_FIXTURE" "$ALERT_MARKER_FIXTURE")"
+run_checker
+assert_eq "$RC" "1" "30: a non-numeric issue number → exit 1 (never adopted as the open alert)"
+assert_contains "$OUT" "liveness-alert search failed" "30: …and refuses to file or resolve"
+assert_eq "$(count_calls 'GH PATCH')" "0" "30: …so nothing is closed on a garbage number"
+
+# 31. a heartbeat body that does not PARSE → unreadable (the jq arm of
+# get_issue_body, distinct from the gh-level failure in case 7).
+reset_case
+seed_heartbeat_raw 'not-json'
+run_checker
+assert_eq "$RC" "1" "31: an unparseable heartbeat BODY → exit 1 (fail closed)"
+assert_contains "$OUT" "heartbeat-record-unreadable" "31: …reason is unreadable, not unparseable"
+
+# 32. a create response whose number is not numeric is a FAILED create.
+reset_case
+seed_heartbeat 200
+export STUB_NEW_ALERT='"abc"'
+run_checker
+assert_eq "$RC" "1" "32: a non-numeric created number → exit 1 (treated as unfiled)"
+assert_contains "$OUT" "could not be filed" "32: …and names the un-fileable alert"
+
+# 33. malformed workflow metadata fails closed to STALE (the jq fallback in
+# workflow_created_at), rather than aborting outside the 0/1 contract.
+reset_case
+export STUB_WF_CREATED_AT='x"y'
+run_checker
+assert_eq "$RC" "1" "33: malformed workflow metadata → exit 1 (fail closed)"
+assert_contains "$OUT" "no-heartbeat-record" "33: …reason is no-heartbeat-record, not an unreadable-age abort"
+
+# 34. a non-numeric `epoch:` payload is unparseable (the inner digit guard in
+# iso_to_epoch; 18h covers only the sibling length guard).
+reset_case
+seed_heartbeat_raw "$(printf '{"body":"%s\\nheartbeat_at=epoch:abc\\n"}' "$HEARTBEAT_MARKER_FIXTURE")"
+run_checker
+assert_eq "$RC" "1" "34: heartbeat_at=epoch:abc → exit 1 (unparseable, never a coerced 0)"
+assert_contains "$OUT" "heartbeat-record-unparseable" "34: …reason is unparseable"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
