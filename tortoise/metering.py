@@ -54,6 +54,29 @@ supersede-only deltas exempt — R-14). It prevents the 25x per-node arbitrage
 vs ``create_point`` while the billed unit stays ``write_ops`` (a commit call
 is billed exactly once — PL4).
 
+Unmetered increments (#4779)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The ledger's identity IS the window — ``(org_id, period_start)``, both bounds
+``NOT NULL`` — so an increment whose window CANNOT be resolved is not
+representable in it at all. Dropped increments (an unresolvable window, or a
+failed increment write with the window known) are therefore recorded on a
+SEPARATE surface, keyed by things that exist when the window does not::
+
+    (:MeteringUnmeteredIncrement {
+        org_id:            "org_abc123",
+        lane:              "write_op",               -- site or writer
+        drop_class:        "window_unresolvable",     -- DECLARED vocabulary
+        increments:        47,                       -- a COUNT, never dollars
+        last_error_type:   "QuotaCheckError",
+        first_observed_at: "2026-09-27T08:00:00+00:00",
+        last_observed_at:  "2026-09-27T09:31:00+00:00"
+    })
+
+A count is NOT spend: ``get_cohort_spend_usd`` / ``metering_cohort_spend`` read
+only ``ask_cost_usd + capture_cost_usd`` from ``metering_records`` and are
+deliberately untouched (#4779 constraint 1). Read the two ALONGSIDE with
+``get_unmetered_increments`` / ``get_unmetered_increment_total``.
+
 Atomic increment via FalkorDB Cypher::
 
     MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart})
@@ -347,9 +370,20 @@ def _require_period(org_id: str, what: str) -> MeteringPeriod:
     recoverable about the old behaviour was the *silence*, which is why the
     request is still served and the drop is still announced.
 
-    Scope: ONLY window resolution. A failure of the increment RPC itself stays
+    Scope: the TWO drop paths are both represented (#4779). This function
+    covers window resolution. A failure of the increment RPC itself stays
     non-fatal inside each writer — logged at WARNING and dropped, not retried
-    at any call site. That is a separate residual; representing it is #3824.
+    at any call site — and is represented THERE, as
+    ``drop_class="increment_failed"``. Both land on
+    ``metering_unmetered_increments``, the sibling surface keyed by
+    org + lane + class — three things that exist when the window does not (see
+    ``record_unmetered_increment``).
+
+    #3824 does NOT represent either. Its ``unattributed`` counter rides the
+    capture-cost MEASUREMENT row, keyed to a capture session: a different
+    surface, answering "a capture made provider calls but no roll-up survived",
+    not "the ledger could not hold this increment". The pointers that said
+    otherwise were wrong and are corrected.
     """
     try:
         return _current_period(org_id)
@@ -384,11 +418,22 @@ def report_unmetered_increment(lane: str, org_id: str | None,
     Never raises: the alert itself must not become a new failure path (a signal
     that can raise is a refusal by another name). The incident — a GitHub issue
     plus Telegram, deduped per (kind, org) — is the durable operator signal; the
-    ERROR record below is the local one. The increment still reads short on the
-    ledger: this makes the drop VISIBLE, it does not repair it (leg 2 of the
-    ruling is tracked separately, see the plan doc / #3981).
+    ERROR record below is the local one.
+
+    LEG 2 (#4779) RIDES HERE. Before dispatching the alert this also writes the
+    durable representation (``record_unmetered_increment`` with
+    ``drop_class="window_unresolvable"``) on the sibling
+    ``metering_unmetered_increments`` surface — so the drop is not merely
+    announced, it is RECORDED, with a count and an observation window. The alert
+    cannot carry that: it is deduped per (kind, org), it is resolvable, and its
+    body is a create-once artifact a changing count would freeze stale.
     """
     with contextlib.suppress(Exception):  # the alert must never raise
+        # LEG 2 first: the durable record is what the operator triages with,
+        # and it must exist even when the alert machinery below is unavailable.
+        # Never raises — a representation, not a refusal.
+        record_unmetered_increment(
+            lane, org_id, DROP_CLASS_WINDOW_UNRESOLVABLE, error)
         _logger.error(
             "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s — the "
             "request was served and the ledger will read short for this "
@@ -400,6 +445,187 @@ def report_unmetered_increment(lane: str, org_id: str | None,
         from tortoise.operator_alert import alert_unmetered_increment
 
         alert_unmetered_increment(lane, org_id, error)
+
+
+# ── #4779 / leg 2 of #3981: the UNMETERED-increment representation ───────────
+#
+# Leg 1 (the request proceeds) and leg 3 (an operator alert fires) are above.
+# LEG 2 — "the increment is recorded as explicitly unmeterable" — is THIS
+# block: a durable record of the drop, on a surface keyed by things that exist
+# when the window does not.
+#
+# WHY A SIBLING SURFACE. ``metering_records``' identity IS the window
+# (``PRIMARY KEY (org_id, period_start)`` with both bounds NOT NULL —
+# 20260918000001:138,141,133,134). A window-unresolvable increment is therefore
+# not representable there WITHOUT INVENTING A WINDOW, which is the exact thing
+# #3825 exists to forbid (a substituted bucket attributes spend to a row the
+# cap may never read). A sentinel window is worse than unrepresentable: it
+# lands INSIDE the cap's overlap read and entangles the two representations.
+# So the drop gets its own rows — ``(org_id, lane, drop_class)``, plus
+# ``first_observed_at``/``last_observed_at`` as the window-free substitute for
+# period attribution (since-when, and whether it is still happening).
+#
+# NOT A CAP INPUT. ``metering_cohort_spend`` / ``get_cohort_spend_usd`` are
+# untouched and read ONLY ``ask_cost_usd + capture_cost_usd`` from
+# ``metering_records``. A count is not spend, and feeding a spend ceiling an
+# unattributable figure is a behaviour change (#4779 constraint 1).
+#
+# NOT DOLLARS. ``increments`` is a COUNT: the write-op lane carries no cost at
+# all, so a cross-lane "dropped dollars" figure would be a partial sum presented
+# as a total — worse than an honest count.
+#
+# A STATED LIMIT. Both drop causes are CONTROL-PLANE failures (a failed anchor
+# read, a failed increment RPC), so a CP-wide outage drops the increment AND
+# blocks THIS write. Leg 3 — whose channel is R2 + GitHub + Telegram, not the
+# CP — is the backstop there. The writer logs and never raises.
+
+#: #4779: the DECLARED drop vocabulary, mirrored by the CHECK constraint on
+#: ``metering_unmetered_increments.drop_class`` (migration 20260927000001). An
+#: ad-hoc string here would re-create the re-derivation defect at the
+#: representation layer, so adding a class is a migration on purpose.
+DROP_CLASS_WINDOW_UNRESOLVABLE = "window_unresolvable"
+DROP_CLASS_INCREMENT_FAILED = "increment_failed"
+
+_DROP_CLASSES = frozenset({
+    DROP_CLASS_WINDOW_UNRESOLVABLE, DROP_CLASS_INCREMENT_FAILED,
+})
+
+
+def record_unmetered_increment(lane: str, org_id: str | None,
+                               drop_class: str,
+                               error: BaseException) -> int | None:
+    """Durably represent one increment the metering ledger could NOT hold.
+
+    Leg 2 of the #3981 ruling; ``report_unmetered_increment`` is leg 3 (the
+    alert). Without this record a dropped increment is simply ABSENT from every
+    durable surface, so nothing can tell an unmeterable org apart from an org
+    that genuinely spent zero — and the pre-spend cap reads exactly that ledger.
+
+    ``(org_id, lane, drop_class)`` is the record's identity. ``drop_class`` is
+    one of the two DECLARED classes above; the SQL lane enforces that with a
+    CHECK, so the registry lane validates it here to keep the two modes
+    behaviourally equal. ``lane`` is unconstrained on purpose — the swallow-site
+    inventory is enumerated from source by
+    ``tests/test_metering_window_admission.py``, and a second hand-maintained
+    copy of it here is the drift this repo keeps removing.
+
+    Returns the new cumulative count, or ``None`` when nothing was written (no
+    org context, an undeclared class, or a write failure). NEVER raises: it is
+    called from handlers whose whole contract is that metering cannot block a
+    request, and from a ``report_unmetered_increment`` that must not either. A
+    failed representation is logged at WARNING — never silent — and the leg-3
+    alert remains the backstop.
+    """
+    if not org_id or drop_class not in _DROP_CLASSES:
+        return None
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_record_unmetered,
+            )
+            return metering_record_unmetered(
+                get_control_plane(), str(org_id), lane, drop_class,
+                type(error).__name__)
+        now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        reg = _reg_sdk()._get_registry()
+        # ``coalesce`` rather than ``ON CREATE SET``, mirroring the writers
+        # above: ``first_observed_at`` is the since-when of the episode and must
+        # survive every subsequent drop (the SQL lane preserves it the same way).
+        reg.query(
+            "MERGE (u:MeteringUnmeteredIncrement "
+            "{org_id: $tid, lane: $lane, drop_class: $cls}) "
+            "SET u.increments = coalesce(u.increments, 0) + 1, "
+            "    u.last_error_type = $etype, "
+            "    u.last_observed_at = $now, "
+            "    u.first_observed_at = coalesce(u.first_observed_at, $now)",
+            params={"tid": str(org_id), "lane": lane, "cls": drop_class,
+                    "etype": type(error).__name__, "now": now_iso},
+        )
+        rows = reg.query(
+            "MATCH (u:MeteringUnmeteredIncrement "
+            "{org_id: $tid, lane: $lane, drop_class: $cls}) "
+            "RETURN u.increments",
+            params={"tid": str(org_id), "lane": lane, "cls": drop_class},
+        ).result_set
+        return int(rows[0][0]) if rows else None
+    except Exception as e:
+        _logger.warning(
+            "unmetered-increment representation failed (non-fatal): lane=%s "
+            "team=%s class=%s error=%s — the drop is still alerted, but no "
+            "durable record of it exists",
+            lane, org_id, drop_class, e,
+        )
+        return None
+
+
+def get_unmetered_increments(org_id: str) -> list[dict]:
+    """Every unmetered-increment record for ONE org (#4779) — the triage read.
+
+    Returns ``[{lane, drop_class, increments, last_error_type,
+    first_observed_at, last_observed_at}, ...]`` ordered by
+    ``(lane, drop_class)``. An org with no drops returns ``[]`` — a legitimate
+    POSITIVE statement ("never unmeterable"), not a degraded view. This is the
+    read the ``UNMETERED_INCREMENT`` runbook row triages with: ``increments``
+    says how many were lost, ``first_observed_at`` since when, and
+    ``last_observed_at`` whether it is still happening (it stops advancing once
+    the org is repaired).
+
+    FAIL-CLOSED: a read FAILURE raises; it does NOT return ``[]``. Returning
+    the empty list on failure would manufacture exactly the false zero this
+    surface exists to remove — the reader could not then tell "no drops" from
+    "could not read". Mirrors ``get_cohort_spend_usd``, the sibling fail-closed
+    read. Never use this as a degrade-to-zero view on a customer path.
+    """
+    if not org_id:
+        return []
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, metering_unmetered_for_org,
+        )
+        return metering_unmetered_for_org(get_control_plane(), str(org_id))
+    rows = _reg_sdk()._get_registry().query(
+        "MATCH (u:MeteringUnmeteredIncrement {org_id: $tid}) "
+        "RETURN u.lane, u.drop_class, u.increments, u.last_error_type, "
+        "u.first_observed_at, u.last_observed_at "
+        "ORDER BY u.lane, u.drop_class",
+        params={"tid": str(org_id)},
+    ).result_set
+    return [
+        {"lane": r[0], "drop_class": r[1], "increments": int(r[2] or 0),
+         "last_error_type": r[3], "first_observed_at": r[4],
+         "last_observed_at": r[5]}
+        for r in rows
+    ]
+
+
+def get_unmetered_increment_total(org_ids: list[str]) -> int:
+    """Increments a COHORT could not record (#4779) — ONE scalar.
+
+    Read this ALONGSIDE ``get_cohort_spend_usd``, never inside it: the spend
+    ceiling keeps reading only ``ask_cost_usd + capture_cost_usd``, so a cohort
+    can read ``spend=0.0`` and ``unmetered=47`` at the same time — which is
+    precisely the distinction the old ledger could not express. Folding the
+    count into the ceiling is the behaviour change #4779 declares out of scope.
+
+    ONE scalar by construction, so a silently short row list cannot understate
+    how long a cohort has been unmeterable (the reason ``metering_cohort_spend``
+    is an RPC — 20260917000001). FAIL-CLOSED on a read failure, like
+    ``get_cohort_spend_usd``: an unreadable cohort must not read as zero drops.
+    """
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
+    if not wanted:
+        return 0
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, metering_unmetered_total,
+        )
+        return metering_unmetered_total(get_control_plane(), wanted)
+    rows = _reg_sdk()._get_registry().query(
+        "MATCH (u:MeteringUnmeteredIncrement) WHERE u.org_id IN $ids "
+        "RETURN coalesce(sum(u.increments), 0)",
+        params={"ids": wanted},
+    ).result_set
+    return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
 
 def _display_period_label() -> str:
@@ -479,10 +705,13 @@ def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
 
     Returns:
         ``{write_ops, nodes_written, period, ops_allowance, overage_eligible}``
-        for threshold checking, or None if the increment RPC is unreachable
-        (non-fatal — the window is known, and the drop is logged at WARNING:
-        it is NOT retried at any call site, so that increment is not
-        recovered. Representing an unmeterable increment is #3824).
+        for threshold checking, or None if the increment could not be WRITTEN
+        (non-fatal — the window is known; the drop is logged at WARNING and not
+        retried at any call site). Since #4779 that drop is also REPRESENTED
+        durably, on the sibling ``metering_unmetered_increments`` surface with
+        ``drop_class="increment_failed"``: a WARNING line on an ephemeral Fly
+        rootfs is not a record (#3677). #3824 does NOT represent it — that
+        counter rides the capture-cost MEASUREMENT row, a different surface.
 
     Raises:
         QuotaCheckError: the org's metering window is unresolvable. This is a
@@ -490,7 +719,7 @@ def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
             raise, alert the operator and serve the request, so it refuses no
             user request. Enforcement -- where a refusal exists -- lives at the
             pre-spend admission gate. Only window resolution raises; a failure
-            of the increment RPC itself is still logged and swallowed (the
+            of the increment write itself is still logged and swallowed (the
             window is known, but the increment is dropped — see Returns).
     """
     if not org_id:
@@ -505,55 +734,77 @@ def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
             write_ops = metering_increment(
                 get_control_plane(), org_id, period.start_iso, period.end_iso,
                 n, nodes_written=nodes_written)
-            result = {
-                "write_ops": write_ops,
-                "nodes_written": nodes_written,
-                "period": period.label,
-                "period_start": period.start_iso,
-                "period_end": period.end_iso,
-                "ops_allowance": _ops_allowance(tier) if tier else 0,
-                "overage_eligible": _overage_eligible(tier) if tier else False,
-            }
-            _check_thresholds(org_id, tier, result, n)
-            return result
-        sdk = _reg_sdk()
-        reg = sdk._get_registry()
-        reg.query(
-            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
-            "SET m.period = $label, m.period_end = $pend, "
-            "    m.write_ops = coalesce(m.write_ops, 0) + $n, "
-            "    m.nodes_written = coalesce(m.nodes_written, 0) + $nw, "
-            "    m.updated_at = $now",
-            params={"tid": org_id, "pstart": period.start_iso,
-                    "pend": period.end_iso, "label": period.label, "n": n,
-                    "nw": nodes_written, "now": now_iso},
-        )
-        rows = reg.query(
-            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
-            "RETURN m.write_ops, m.nodes_written",
-            params={"tid": org_id, "pstart": period.start_iso},
-        ).result_set
-        write_ops = int(rows[0][0]) if rows else n
-        nodes_written_total = int(rows[0][1]) if rows else nodes_written
+            nodes_written_total = nodes_written
+        else:
+            sdk = _reg_sdk()
+            reg = sdk._get_registry()
+            reg.query(
+                "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+                "SET m.period = $label, m.period_end = $pend, "
+                "    m.write_ops = coalesce(m.write_ops, 0) + $n, "
+                "    m.nodes_written = coalesce(m.nodes_written, 0) + $nw, "
+                "    m.updated_at = $now",
+                params={"tid": org_id, "pstart": period.start_iso,
+                        "pend": period.end_iso, "label": period.label, "n": n,
+                        "nw": nodes_written, "now": now_iso},
+            )
+            rows = reg.query(
+                "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+                "RETURN m.write_ops, m.nodes_written",
+                params={"tid": org_id, "pstart": period.start_iso},
+            ).result_set
+            write_ops = int(rows[0][0]) if rows else n
+            nodes_written_total = int(rows[0][1]) if rows else nodes_written
     except Exception as e:
         _logger.warning(
             "metering increment failed (non-fatal): team=%s period=%s error=%s",
             org_id, period.label, e,
         )
+        # #4779 leg 2: the increment is DROPPED, and until this call that was
+        # visible only as the WARNING above. The window IS known here — it is
+        # the write that failed — so this is a different ``drop_class`` from the
+        # window-resolvable one, and the operator needs to be able to tell them
+        # apart. Never raises (it is a representation, and this is already a
+        # handler).
+        record_unmetered_increment(
+            "write_op", org_id, DROP_CLASS_INCREMENT_FAILED, e)
         return None
 
-    result = {
-        "write_ops": write_ops,
-        "nodes_written": nodes_written_total,
-        "period": period.label,
-        "period_start": period.start_iso,
-        "period_end": period.end_iso,
-        "ops_allowance": _ops_allowance(tier) if tier else 0,
-        "overage_eligible": _overage_eligible(tier) if tier else False,
-    }
-
-    # Threshold events
-    _check_thresholds(org_id, tier, result, n)
+    # The increment HAS landed. The allowance/threshold work below is DERIVED,
+    # observability-only bookkeeping: a failure there is NOT a dropped increment
+    # and must never be represented as one. It used to sit inside the
+    # increment's ``try``, where a pricing-config drift (``_ops_allowance``
+    # raises KeyError on a missing required key — pricing.py:63) made this writer
+    # report ``None``, i.e. claim a drop for an increment that had committed.
+    # #4779's representation would have made that false claim DURABLE, so the
+    # derived work is separated out and guarded on its own here.
+    try:
+        result = {
+            "write_ops": write_ops,
+            "nodes_written": nodes_written_total,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+            "ops_allowance": _ops_allowance(tier) if tier else 0,
+            "overage_eligible": _overage_eligible(tier) if tier else False,
+        }
+        # Threshold events
+        _check_thresholds(org_id, tier, result, n)
+    except Exception as e:
+        _logger.warning(
+            "metering threshold bookkeeping failed (non-fatal, and NOT a "
+            "dropped increment — the increment LANDED): team=%s period=%s "
+            "error=%s", org_id, period.label, e,
+        )
+        return {
+            "write_ops": write_ops,
+            "nodes_written": nodes_written_total,
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+            "ops_allowance": 0,
+            "overage_eligible": False,
+        }
 
     return result
 
@@ -699,9 +950,13 @@ def record_ask_usage(org_id: str | None, tier: str | None = None, *,
     Window resolution RAISES on an unresolvable anchor (#3825) rather than
     keying the row to a calendar month. That raise is a SIGNAL, not a refusal
     (#3981): the caller (``sdk.ask``) absorbs it, serves the answer and reports
-    the dropped increment to the operator. A failure of the increment RPC
+    the dropped increment to the operator. A failure of the increment write
     itself stays non-fatal — logged at WARNING and dropped, not retried at any
-    call site (representing that increment is #3824).
+    call site — and is REPRESENTED durably since #4779, on the sibling
+    ``metering_unmetered_increments`` surface with
+    ``drop_class="increment_failed"``. #3824 does NOT represent it: that
+    counter rides the capture-cost MEASUREMENT row — a different surface, keyed
+    to a capture session.
     Extends the ``:MeteringRecord`` (registry) with additive fields
     ``ask_calls``/``ask_tokens_in``/``ask_tokens_out``/``ask_cost_usd`` via
     the MERGE+coalesce pattern (mirrors ``record_write_ops``); Supabase mode
@@ -774,6 +1029,11 @@ def _record_ask_usage_locked(org_id: str, period: MeteringPeriod,
             "ask metering increment failed (non-fatal): team=%s period=%s "
             "error=%s", org_id, period.label, e,
         )
+        # #4779 leg 2: the window IS known here (it is the WRITE that failed),
+        # so this is a distinct ``drop_class`` and the drop is represented
+        # durably rather than only logged. Never raises.
+        record_unmetered_increment(
+            "ask_ledger", org_id, DROP_CLASS_INCREMENT_FAILED, e)
         return None
 
 
@@ -866,9 +1126,13 @@ def record_capture_usage(org_id: str | None, *, calls: int = 1,
     Window resolution RAISES on an unresolvable anchor (#3825) rather than
     keying the row to a calendar month. That raise is a SIGNAL, not a refusal
     (#3981): the caller absorbs it, the capture is served and the dropped
-    increment is reported to the operator. A failure of the increment RPC
+    increment is reported to the operator. A failure of the increment write
     itself stays non-fatal — logged at WARNING and dropped, not retried at any
-    call site (representing that increment is #3824).
+    call site — and is REPRESENTED durably since #4779, on the sibling
+    ``metering_unmetered_increments`` surface with
+    ``drop_class="increment_failed"``. #3824 does NOT represent it: that
+    counter rides the capture-cost MEASUREMENT row — a different surface, keyed
+    to a capture session.
     Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or
     the selfhost-transport ContextVar (``_selfhost_transport``).
 
@@ -938,6 +1202,11 @@ def _record_capture_usage_locked(org_id: str, period: MeteringPeriod,
             "capture metering increment failed (non-fatal): team=%s "
             "period=%s error=%s", org_id, period.label, e,
         )
+        # #4779 leg 2: the window IS known here (it is the WRITE that failed),
+        # so this is a distinct ``drop_class`` and the drop is represented
+        # durably rather than only logged. Never raises.
+        record_unmetered_increment(
+            "capture_ledger", org_id, DROP_CLASS_INCREMENT_FAILED, e)
         return None
 
 

@@ -1,0 +1,512 @@
+"""#4779 — leg 2 of the #3981 ruling: a dropped increment is DISTINGUISHABLE
+from a zero increment.
+
+WHAT THIS FILE IS
+-----------------
+#3981's ruling ("PROCEED AND ALERT") has three legs. Leg 1 (the request
+proceeds) and leg 3 (an operator alert fires) shipped. Leg 2 — "the increment
+is recorded as explicitly unmeterable" — had no artifact, so a dropped
+increment was simply ABSENT from every durable surface: indistinguishable from
+an org that genuinely spent zero.
+
+THE CENTRAL ACCEPTANCE TEST
+---------------------------
+``test_a_dropped_increment_is_distinguishable_from_a_zero_increment`` is the
+one that matters, and it is written so that it CANNOT PASS on the old tree. It
+drives a REAL unmeterable org (an inverted anchor → ``_require_period`` raises →
+the caller's handler → ``report_unmetered_increment``) and a REAL control org
+that never dropped, then asserts the PAIR of observables *differ*:
+``get_cohort_spend_usd`` is 0.0 for BOTH (the count is not spend — the ceiling
+must keep reading only ``ask_cost_usd + capture_cost_usd``, #4779 constraint 1)
+while ``get_unmetered_increment_total`` is N for one and 0 for the other. An
+assertion that could not tell them apart would be the defect restated.
+
+BOTH DROP PATHS, TWO DECLARED CLASSES
+-------------------------------------
+A decrement is dropped in two distinct places, and they get distinct declared
+classes so an operator can tell them apart:
+
+  * ``window_unresolvable`` — ``_require_period`` raised; written from
+    ``report_unmetered_increment`` (so it rides all six leg-3 swallow lanes);
+  * ``increment_failed`` — the writer's own increment call failed with the
+    window KNOWN; written from that writer's handler.
+
+Every test NAMES the mutation that must make it RED.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from pathlib import Path
+
+import pytest
+
+import tortoise.metering as metering_mod
+from tests.test_metering import _break_increment_only
+from tests.test_metering_period_window import (
+    SUB_END,
+    SUB_START,
+    _anchor,
+    _period,
+    reg_org,  # noqa: F401 — a pytest fixture, requested by name in ``reg``
+    supabase_mode,  # noqa: F401 — a pytest fixture, requested by name in ``sb``
+)
+from tortoise.metering import (
+    DROP_CLASS_INCREMENT_FAILED,
+    DROP_CLASS_WINDOW_UNRESOLVABLE,
+    _current_period,
+    get_cohort_spend_usd,
+    get_unmetered_increment_total,
+    get_unmetered_increments,
+    record_ask_usage,
+    record_capture_usage,
+    record_unmetered_increment,
+    record_write_ops,
+    report_unmetered_increment,
+)
+from tortoise.quota import QuotaCheckError
+
+#: The six swallow-site lane tokens (leg 3's vocabulary — #3981). Leg 2 reuses
+#: it verbatim so the record and the alert are joinable on ONE vocabulary,
+#: rather than a second, parallel mapping that could drift.
+SIX_LANES = ("write_op", "object_write_op", "subject_write_op",
+             "capture_ledger", "mcp_write_op", "ask_ledger")
+
+_MIGRATION = (Path(__file__).resolve().parents[1] / "supabase" / "migrations"
+              / "20260927000001_metering_unmetered_increments.sql")
+
+
+@pytest.fixture
+def reg(request):
+    """The imported ``reg_org`` fixture, resolved BY NAME.
+
+    Not a parameter: importing a fixture from another test module puts its name
+    in this module's namespace, and using it as a parameter is an F811
+    redefinition at every call site. The repo's
+    ``test_metering_window_admission.py`` resolves it the same way.
+    """
+    return request.getfixturevalue("reg_org")
+
+
+@pytest.fixture
+def sb(request):
+    """The imported ``supabase_mode`` fixture, resolved by name (see ``reg``)."""
+    return request.getfixturevalue("supabase_mode")
+
+
+@pytest.fixture
+def registry_lane(monkeypatch):
+    """Force the embedded/registry lane deterministically (no Supabase)."""
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+
+
+# ── THE ACCEPTANCE TEST ─────────────────────────────────────────────────────
+
+
+def test_a_dropped_increment_is_distinguishable_from_a_zero_increment(
+        reg, registry_lane):
+    """THE #4779 acceptance test: the drop and the zero must NOT read the same.
+
+    Mutation caught: removing ``record_unmetered_increment`` from
+    ``report_unmetered_increment`` (the "leg 2 missing" tree). Then the dropped
+    org's ``unmetered`` is 0 — identical to the control — and the comparison
+    below REDs, naming the pair.
+
+    Note what is asserted and why: the spend figures are EQUAL and ZERO for
+    both orgs (a count is not spend), while the unmetered counts DIFFER. That
+    is the whole change — before it, both orgs produced the same observation,
+    so neither the cap nor an operator could see the drop.
+    """
+    sdk, tid = reg
+    control = sdk.org_create(name="4779-control")["id"]
+
+    # An inverted billing interval → ``_current_period`` RAISES (no
+    # calendar-month fallback, #3825/D10). This is the REAL failure, not a stub.
+    _anchor(sdk._get_registry(), tid, SUB_END, SUB_START, "sub-4779-inverted")
+
+    window = _period(SUB_START, SUB_END)
+    for _ in range(3):
+        with pytest.raises(QuotaCheckError):
+            record_write_ops(tid, tier="pro")
+        # ...the caller's handler, verbatim in shape: absorb, then report.
+        report_unmetered_increment("write_op", tid,
+                                   QuotaCheckError("unresolvable window"))
+
+    dropped_spend = get_cohort_spend_usd([tid], window)
+    control_spend = get_cohort_spend_usd([control], window)
+    dropped_unmetered = get_unmetered_increment_total([tid])
+    control_unmetered = get_unmetered_increment_total([control])
+
+    # The ledger the cap reads is legitimately zero for BOTH — the count must
+    # never become a cap input (#4779 constraint 1).
+    assert dropped_spend == 0.0
+    assert control_spend == 0.0
+    # ...and the representation is what tells them apart.
+    assert dropped_unmetered == 3, "the drop is not counted — leg 2 is missing"
+    assert control_unmetered == 0
+    assert (dropped_spend, dropped_unmetered) != (control_spend, control_unmetered)
+
+    rows = get_unmetered_increments(tid)
+    assert len(rows) == 1
+    (row,) = rows
+    assert row["lane"] == "write_op"
+    assert row["drop_class"] == DROP_CLASS_WINDOW_UNRESOLVABLE
+    assert row["increments"] == 3
+    # The diagnostic payload: a record that cannot name what broke is a filing
+    # defect (#5047's direction), so the error CLASS rides the row.
+    assert row["last_error_type"] == "QuotaCheckError"
+    assert row["first_observed_at"]
+    assert row["last_observed_at"]
+    assert get_unmetered_increments(control) == []
+
+
+def test_every_swallow_lane_carries_the_representation(reg, registry_lane):
+    """Leg 2 rides EVERY leg-3 lane — six sites, six rows (one per lane+class).
+
+    Mutation caught: wiring the representation into only one of the swallow
+    helpers (e.g. ``hosted_api``'s but not ``mcp_server``'s fallback), which
+    would leave a dropped increment on that lane still indistinguishable from
+    zero.
+    """
+    _sdk, tid = reg
+    for lane in SIX_LANES:
+        report_unmetered_increment(lane, tid, QuotaCheckError("x"))
+    rows = get_unmetered_increments(tid)
+    assert {r["lane"] for r in rows} == set(SIX_LANES)
+    assert all(r["drop_class"] == DROP_CLASS_WINDOW_UNRESOLVABLE
+               for r in rows)
+    assert all(r["increments"] == 1 for r in rows)
+    assert get_unmetered_increment_total([tid]) == len(SIX_LANES)
+
+
+# ── The second drop class ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("writer,lane,extra", [
+    (lambda tid: record_write_ops(tid, tier="pro"), "write_op", {}),
+    (lambda tid: record_ask_usage(tid, cost_usd=0.5), "ask_ledger", {}),
+    (lambda tid: record_capture_usage(tid, cost_usd=0.5), "capture_ledger", {}),
+])
+def test_the_increment_rpc_failure_is_represented_with_its_own_class(
+        reg, registry_lane, monkeypatch, writer, lane, extra):
+    """A KNOWN-WINDOW drop (the increment write failed) is represented too.
+
+    This is the residual the four stale docstrings claimed #3824 represented.
+    It is a different ``drop_class``, because the window IS known here — the
+    operator's fix is different (retry/repair the RPC, not repair the anchor).
+
+    Mutation caught: leaving the writer's ``except`` as a bare
+    ``_logger.warning`` + ``return None`` (the pre-#4779 shape), which is
+    exactly the state the issue calls indistinguishable from zero.
+    """
+    sdk, tid = reg
+    _break_increment_only(monkeypatch, sdk)
+    assert writer(tid) is None
+    rows = get_unmetered_increments(tid)
+    assert len(rows) == 1, rows
+    assert rows[0]["lane"] == lane
+    assert rows[0]["drop_class"] == DROP_CLASS_INCREMENT_FAILED
+    assert rows[0]["increments"] == 1
+    assert rows[0]["last_error_type"] == "RuntimeError"
+
+
+def test_the_two_drop_classes_are_separate_rows(reg, registry_lane,
+                                                monkeypatch):
+    """The PK includes ``drop_class``: one lane can carry BOTH episodes.
+
+    Mutation caught: dropping ``drop_class`` from the key (the registry MERGE's
+    identity, mirrored by the SQL PK's third column) — the two causes would
+    merge into one count and the operator could not tell which fix applies.
+    """
+    sdk, tid = reg
+    _break_increment_only(monkeypatch, sdk)
+    assert record_write_ops(tid, tier="pro") is None
+    report_unmetered_increment("write_op", tid, QuotaCheckError("x"))
+    classes = {r["drop_class"]: r["increments"]
+               for r in get_unmetered_increments(tid)}
+    assert classes == {DROP_CLASS_INCREMENT_FAILED: 1,
+                       DROP_CLASS_WINDOW_UNRESOLVABLE: 1}
+
+
+# ── Observation bounds, vocabulary guards, no-op paths ──────────────────────
+
+
+def test_first_observed_at_is_preserved_and_last_advances(reg, registry_lane):
+    """The since-when survives every later drop; the last-seen advances.
+
+    Mutation caught: collapsing both onto ``now()`` (the since-when then reports
+    the LATEST drop, so "how long has this been happening" is unanswerable), or
+    dropping ``last_observed_at`` from the update (the reader cannot then tell a
+    repaired org from an ongoing one).
+    """
+    sdk, tid = reg
+    reg = sdk._get_registry()
+    assert record_unmetered_increment(
+        "write_op", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("x")) == 1
+    # Pin a synthetic since-when, then drop again.
+    reg.query(
+        "MATCH (u:MeteringUnmeteredIncrement {org_id: $tid, lane: $lane, "
+        "       drop_class: $cls}) "
+        "SET u.first_observed_at = '2026-01-01T00:00:00+00:00', "
+        "    u.last_observed_at = '2026-01-01T00:00:00+00:00'",
+        params={"tid": tid, "lane": "write_op",
+                "cls": DROP_CLASS_WINDOW_UNRESOLVABLE},
+    )
+    assert record_unmetered_increment(
+        "write_op", tid, DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("y")) == 2
+    (row,) = get_unmetered_increments(tid)
+    assert row["first_observed_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["last_observed_at"] != "2026-01-01T00:00:00+00:00"
+
+
+def test_an_undeclared_drop_class_writes_nothing(reg, registry_lane):
+    """The drop vocabulary is CLOSED on both lanes.
+
+    The SQL lane enforces it with a CHECK; the registry lane must refuse it too,
+    or the two modes disagree on what a valid record is (and the Python lane
+    would write rows the SQL lane would reject on the next deploy).
+
+    Mutation caught: dropping the ``drop_class not in _DROP_CLASSES`` guard.
+    """
+    _sdk, tid = reg
+    assert record_unmetered_increment(
+        "write_op", tid, "some_invented_class", QuotaCheckError("x")) is None
+    assert get_unmetered_increments(tid) == []
+
+
+@pytest.mark.parametrize("org", [None, ""])
+def test_no_org_context_is_a_noop(reg, registry_lane, org):
+    """The stdio/selfhost shape: no org, no record (and no raise).
+
+    Mutation caught: writing an org-less row — it could never be read alongside
+    anything, and it would make ``_``-shaped keys that collapse unrelated lanes.
+    """
+    assert record_unmetered_increment(
+        "write_op", org, DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("x")) is None
+
+
+def test_the_representation_never_raises_and_logs_its_own_failure(
+        reg, registry_lane, monkeypatch, caplog):
+    """A failed representation is logged, not raised — and the alert still fires.
+
+    It is called from handlers whose whole point is that metering cannot block a
+    request (``report_unmetered_increment`` must not raise either), so this
+    branch is a stated limit rather than an exception: with the control plane
+    down, the leg-3 alert (a different channel) is the backstop.
+
+    Mutation caught: letting the representation's failure propagate — every
+    swallowed drop would become the user-facing 500 the #3981 ruling forbids.
+    """
+    def _broken():
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(metering_mod, "_reg_sdk", _broken)
+    with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
+        assert record_unmetered_increment(
+            "write_op", "org-4779", DROP_CLASS_WINDOW_UNRESOLVABLE,
+            QuotaCheckError("x")) is None
+        # ...and the reporter (which calls it) must not raise either.
+        report_unmetered_increment("write_op", "org-4779", QuotaCheckError("x"))
+    assert any("representation failed" in r.message for r in caplog.records), (
+        [r.message for r in caplog.records]
+    )
+
+
+# ── The readers ─────────────────────────────────────────────────────────────
+
+
+def test_readers_fail_closed_rather_than_reading_as_zero(reg, registry_lane, monkeypatch):
+    """An unreadable cohort must NOT read as "zero drops".
+
+    ``[]``/``0`` on a failure would manufacture the exact false zero this whole
+    surface exists to remove — the reader could not tell "no drops" from "could
+    not read". Both readers follow ``get_cohort_spend_usd``'s fail-closed
+    posture, NOT ``get_ask_usage``'s degrade-to-zero one.
+
+    Mutation caught: wrapping each reader's query in
+    ``except Exception: return []/0`` (the "never 500" reflex applied to a
+    surface where silence IS the defect).
+    """
+    def _broken():
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(metering_mod, "_reg_sdk", _broken)
+    with pytest.raises(RuntimeError):
+        get_unmetered_increments("org-4779")
+    with pytest.raises(RuntimeError):
+        get_unmetered_increment_total(["org-4779"])
+
+
+def test_an_empty_cohort_reads_zero(reg, registry_lane):
+    """No orgs is a legitimate 0 — distinct from an unreadable cohort."""
+    assert get_unmetered_increment_total([]) == 0
+    assert get_unmetered_increment_total(None) == 0
+    assert get_unmetered_increments("") == []
+
+
+# ── Constraint 1: the count never becomes a cap input ──────────────────────
+
+
+def test_the_count_never_leaks_into_the_spend_read(reg, registry_lane):
+    """``get_cohort_spend_usd`` reads ONLY ``ask_cost_usd + capture_cost_usd``.
+
+    The org here has REAL measured spend AND a non-zero unmetered count, so
+    this is a live divergence rather than an all-zero comparison. An
+    unattributable count folded into a spend ceiling is the behaviour change
+    #4779 puts explicitly out of scope.
+
+    Mutation caught: joining the representation into the cohort SUM, or
+    reading ``increments`` as if it were spend.
+    """
+    _sdk, tid = reg
+    period = _current_period(tid)
+    assert record_ask_usage(tid, calls=1, cost_usd=2.5) is not None
+    assert record_capture_usage(tid, calls=1, cost_usd=1.25) is not None
+    for _ in range(7):
+        report_unmetered_increment("write_op", tid, QuotaCheckError("x"))
+
+    assert get_cohort_spend_usd([tid], period) == pytest.approx(3.75)
+    assert get_unmetered_increment_total([tid]) == 7
+
+
+# ── The derived-bookkeeping boundary ────────────────────────────────────────
+
+
+def test_derived_threshold_bookkeeping_is_not_a_dropped_increment(
+        reg, registry_lane, monkeypatch, caplog):
+    """A pricing-drift failure AFTER a landed increment is NOT a drop.
+
+    ``record_write_ops`` computes the allowance and threshold events from
+    ``pricing.json``, which RAISES on a missing required key (``pricing.py:63``).
+    That work used to sit inside the increment's ``try``, so a config drift made
+    the writer report ``None`` — claiming a drop for an increment that had
+    committed. The representation would have made that false claim DURABLE, so
+    the derived work now has its own guard.
+
+    Mutation caught: moving the allowance/threshold block back inside the
+    increment ``try`` (or letting its failure reach the representation) — the
+    increment then reads as dropped, and a representation row appears.
+    """
+    _sdk, tid = reg
+
+    def _broken_allowance(_tier):
+        raise KeyError("pricing.json tier 'pro' missing required limit keys")
+
+    monkeypatch.setattr(metering_mod, "_ops_allowance", _broken_allowance)
+    with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
+        result = record_write_ops(tid, tier="pro")
+    assert result is not None, "a landed increment was reported as a drop"
+    assert result["write_ops"] == 1
+    assert get_unmetered_increments(tid) == [], (
+        "an increment that LANDED was represented as unmeterable"
+    )
+    assert any("threshold bookkeeping failed" in r.message
+               for r in caplog.records)
+
+
+# ── Supabase lane ───────────────────────────────────────────────────────────
+
+
+def _fake_cp(*, org_id="org-4779", spend_rows=()):
+    from tests.fake_control_plane import FakeControlPlane
+
+    return FakeControlPlane({
+        "organizations": [{"id": org_id, "subscription_id": "sub-4779",
+                           "current_period_start": SUB_START,
+                           "current_period_end": SUB_END}],
+        "metering_records": list(spend_rows),
+        "metering_unmetered_increments": [],
+    })
+
+
+def test_supabase_lane_writes_and_reads_the_representation(sb, monkeypatch):
+    """The Supabase lane has the same behaviour, through the RPC seams.
+
+    Mutation caught: implementing only the registry lane (or vice versa) — the
+    two modes are the production and the embedded deployment, so one of them
+    silently losing the representation is the defect this table removes.
+    """
+    fake = _fake_cp()
+    monkeypatch.setattr(sb, "get_control_plane", lambda: fake)
+
+    assert record_unmetered_increment(
+        "write_op", "org-4779", DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("x")) == 1
+    assert record_unmetered_increment(
+        "write_op", "org-4779", DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("y")) == 2
+    rows = get_unmetered_increments("org-4779")
+    assert [(r["lane"], r["drop_class"], r["increments"]) for r in rows] == [
+        ("write_op", DROP_CLASS_WINDOW_UNRESOLVABLE, 2)]
+    assert rows[0]["last_error_type"] == "QuotaCheckError"
+    assert get_unmetered_increment_total(["org-4779"]) == 2
+    # ...and it went through the declared RPC, not a raw table write.
+    assert fake.rpc_calls[-1][0] == "metering_unmetered_total"
+
+
+def test_supabase_lane_refuses_an_undeclared_class_and_an_unknown_org(
+        sb, monkeypatch):
+    """The SQL lane's constraints are observable through the seam.
+
+    Mutation caught: dropping the CHECK (an invented class is stored) or the org
+    FK (a representation row for an org that does not exist — unreadable
+    alongside anything, and unattributable in triage).
+    """
+    fake = _fake_cp()
+    monkeypatch.setattr(sb, "get_control_plane", lambda: fake)
+
+    assert record_unmetered_increment(
+        "write_op", "org-4779", "some_invented_class",
+        QuotaCheckError("x")) is None
+    assert record_unmetered_increment(
+        "write_op", "org-absent", DROP_CLASS_WINDOW_UNRESOLVABLE,
+        QuotaCheckError("x")) is None
+    assert fake.tables["metering_unmetered_increments"] == []
+
+
+def test_supabase_lane_count_never_leaks_into_the_spend_read(sb, monkeypatch):
+    """Constraint 1 again, in the lane where the cap actually runs.
+
+    The org carries measured spend (12.5) AND an unmetered count (7). The
+    spend read must return 12.5 exactly — not 19.5.
+
+    Mutation caught: adding the count to ``metering_cohort_spend``'s SUM.
+    """
+    fake = _fake_cp(spend_rows=[{
+        "org_id": "org-4779", "period_start": SUB_START,
+        "period_end": SUB_END, "period": "2026-09", "ask_cost_usd": 12.5}])
+    monkeypatch.setattr(sb, "get_control_plane", lambda: fake)
+
+    for _ in range(7):
+        assert record_unmetered_increment(
+            "write_op", "org-4779", DROP_CLASS_WINDOW_UNRESOLVABLE,
+            QuotaCheckError("x")) is not None
+    assert get_cohort_spend_usd(["org-4779"], _period(SUB_START, SUB_END)) \
+        == pytest.approx(12.5)
+    assert get_unmetered_increment_total(["org-4779"]) == 7
+
+
+# ── The vocabulary contract ─────────────────────────────────────────────────
+
+
+def test_the_declared_classes_match_the_migration_check():
+    """Python's declared vocabulary ⇄ the migration's CHECK — one set.
+
+    The two lanes must agree: a class Python accepts but the CHECK refuses
+    fails only in production (the Supabase deployment), where the write is
+    swallowed as best-effort and the row silently never appears. Pinning the two
+    together is what makes "declared vocabulary" true rather than aspirational.
+
+    Mutation caught: adding/renaming a class on one side only.
+    """
+    sql = _MIGRATION.read_text(encoding="utf-8")
+    check = re.search(r"CHECK \(drop_class IN \(([^)]*)\)\)", sql)
+    assert check, "the declared-vocabulary CHECK is gone from the migration"
+    declared = set(re.findall(r"'([a-z_]+)'", check.group(1)))
+    assert declared == set(metering_mod._DROP_CLASSES), (
+        f"migration declares {declared}, metering.py declares "
+        f"{set(metering_mod._DROP_CLASSES)}"
+    )

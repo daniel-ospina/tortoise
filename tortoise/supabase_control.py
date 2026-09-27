@@ -3388,6 +3388,83 @@ def metering_cohort_spend(cp, org_ids: list[str], period_start: str,
     return total
 
 
+# ── #4779: the UNMETERED-increment representation (leg 2 of #3981) ──────────
+#
+# A window-unresolvable (or RPC-failed) increment cannot be written to
+# ``metering_records`` at all: its PK is (org_id, period_start) and both bounds
+# are NOT NULL, so the row's identity IS the window that is missing. These three
+# seams are the SIBLING surface — keyed by (org_id, lane, drop_class), which all
+# exist when the window does not. They are deliberately NOT part of
+# ``metering_cohort_spend`` / ``metering_get``: a count is not spend, and feeding
+# an unattributable figure to a spend ceiling is a behaviour change (#4779
+# constraint 1).
+
+def metering_record_unmetered(cp, org_id: str, lane: str, drop_class: str,
+                              error_type: str, n: int = 1) -> int:
+    """Record *n* dropped increments for ``(org_id, lane, drop_class)``;
+    returns the new cumulative count (#4779).
+
+    ATOMIC: delegates to the ``metering_record_unmetered`` SQL RPC
+    (20260927000001) — ``increments = increments + n`` under Postgres row
+    locking, so two concurrent drops cannot lose an update (the same reason
+    ``metering_increment`` is an RPC rather than a GET-then-PATCH; 0014's
+    review P2, PR #911). ``first_observed_at`` is preserved by the RPC;
+    ``last_observed_at`` advances.
+
+    ``drop_class`` is a CHECK-enforced closed vocabulary
+    (``window_unresolvable`` | ``increment_failed``) — an undeclared class is
+    refused by the database rather than stored as an ad-hoc string. Best-effort
+    by contract: the Python caller swallows failures so metering can never block
+    a request.
+
+    Uses ``rpc_value`` (``return=representation``) so the single round trip
+    carries the new total back — the counter is the reader's whole subject, and
+    a second read-back would be a second failure point for no gain.
+    """
+    value = cp.rpc_value(
+        "metering_record_unmetered",
+        {"p_org_id": org_id, "p_lane": lane, "p_drop_class": drop_class,
+         "p_error_type": error_type, "p_n": n},
+    )
+    return int(value or 0)
+
+
+def metering_unmetered_for_org(cp, org_id: str) -> list[dict]:
+    """Every representation row for ONE org (#4779) — the triage read.
+
+    A ``RETURNS TABLE`` RPC, and BOUNDED by construction at lanes x declared
+    classes (<= 12 rows for one org), which is why a row read is safe here: the
+    PostgreSQL ``db-max-rows`` cap PostgREST applies to a row LIST cannot
+    truncate a set this small (the truncation mode that made
+    ``metering_cohort_spend`` a scalar RPC — 20260917000001 §"The cap's two
+    READS"). The cohort-wide read is :func:`metering_unmetered_total`, which is
+    a single scalar.
+
+    Returns ``[]`` for an org with no drops — an org that has never been
+    unmeterable genuinely has nothing to show, and that is the value a control
+    org must produce.
+    """
+    rows = cp.rpc_value("metering_unmetered_for_org", {"p_org_id": org_id})
+    return [dict(r) for r in (rows or [])]
+
+
+def metering_unmetered_total(cp, org_ids: list[str]) -> int:
+    """Dropped increments across a COHORT (#4779) — ONE scalar.
+
+    Read this ALONGSIDE :func:`metering_cohort_spend`, never inside it: the
+    spend ceiling keeps reading only ``ask_cost_usd + capture_cost_usd``.
+
+    A single scalar by construction, so a silently short row list cannot
+    understate how long a cohort has been unmeterable — the exact reason
+    ``metering_cohort_spend`` is an RPC (20260917000001). Empty/NULL cohort
+    reads 0 (``sum`` over an empty set is NULL; the RPC coalesces).
+    """
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
+    if not wanted:
+        return 0
+    return int(cp.rpc_value("metering_unmetered_total", {"p_org_ids": wanted}) or 0)
+
+
 def cohort_org_ids_since(cp, since: str, limit: int) -> list[str]:
     """Org ids created after *since*, at most ``limit + 1`` of them (#3665).
 

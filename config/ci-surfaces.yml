@@ -72,6 +72,12 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
+  # #4779 (leg 2 of #3981): the durable representation of a dropped increment,
+  # asserted against the frozen migration + the fake control plane. `api` is the
+  # surface that owns every source it pins — tortoise/metering.py,
+  # tortoise/quota.py and tortoise/supabase_control.py are all `api` patterns —
+  # so an `api`-only PR is exactly the shape that must run it.
+  - test_metering_unmetered.py
   # #3981: dual-registered with `core` for the same reason as test_boot_regressions.py
   # above. `api` is an exact-surface match that REPLACES the `core` fallback, so a
   # tortoise/hosted_api.py-only change would otherwise never run this file — which
@@ -2392,6 +2398,7 @@ durations:
   test_lifecycle_guards.py: 4.8
   test_metering_period_window.py: 2.9
   test_metering_window_admission.py: 1.0
+  test_metering_unmetered.py: 50.0  # unmeasured — #4779: locally measured (19 tests, live docker FalkorDB: 39.3s unloaded / 50.9s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
   test_pi_capture_hooks.py: 10.3
   test_product_rerank.py: 0.1
