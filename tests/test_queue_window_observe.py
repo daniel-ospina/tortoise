@@ -575,7 +575,9 @@ def test_cli_truncated_unknown_is_exit_2_not_a_crash(tmp_path, monkeypatch):
     # UNKNOWN that is still written.
     runs = [run("feature/x", "unrelated push run", minutes_ago=5)]
     monkeypatch.setattr(obs, "fetch_runs", lambda pages=8: (runs, True))
-    monkeypatch.setattr(obs, "live_queue_refs", lambda: None)
+    # A SUCCESSFUL but empty ref read (`[]`, not None): the point is the
+    # post-`build_record` truncation stamp, not the ref-read guard.
+    monkeypatch.setattr(obs, "live_queue_refs", lambda: [])
     monkeypatch.setattr(obs, "resolve_origin_main", lambda: "0" * 40)
     out = tmp_path / "record.json"
     code = obs.main(["--live", "--window-hours", "8", "--out", str(out)])
@@ -683,6 +685,39 @@ def test_cli_refuses_an_empty_or_malformed_main_sha(tmp_path):
         with pytest.raises(SystemExit):
             obs.main(["--from-json", str(runs), "--window-hours", "24",
                       "--main-sha", bad])
+
+
+def test_cli_refuses_an_empty_out(tmp_path):
+    # An empty `--out` printed to stdout and never wrote the intended file.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    with pytest.raises(SystemExit):
+        obs.main(["--from-json", str(runs), "--window-hours", "24", "--out", ""])
+
+
+def test_cli_records_a_caller_supplied_main_sha_verbatim(tmp_path):
+    # The value is recorded, but NOT labelled as one this tool resolved.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--main-sha", "5b6cb93", "--out", str(out)]) == 0
+    window = json.loads(out.read_text())["window"]
+    assert window["main_sha"] == "5b6cb93"
+    assert window["main_sha_source"].startswith("caller-supplied")
+
+
+def test_cli_exits_2_when_a_requested_ref_read_fails(tmp_path, monkeypatch):
+    # An explicitly requested `--confirm-refs` read that fails is UNKNOWN, never
+    # exit 0 with a null that cannot be told apart from "not requested".
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    monkeypatch.setattr(obs, "live_queue_refs", lambda: None)
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--confirm-refs", "--main-sha", "5b6cb93",
+                     "--out", str(out)]) == 2
+    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 
 
 def test_cli_emits_unknown_when_record_construction_raises(tmp_path, monkeypatch):

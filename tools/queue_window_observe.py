@@ -464,7 +464,7 @@ def configured_max_parallel_checks(config_path=None):
 
 def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
                  conflicted_set=None, resolved_main_sha=None, config_path=None,
-                 corpus_truncated=None):
+                 corpus_truncated=None, resolved_main_sha_source=None):
     """Assemble the observation record from a list of workflow-run dicts."""
     now = now or datetime.now(timezone.utc)  # noqa: UP017 - must import on 3.9 (see header)
     all_runs = [r for r in runs if isinstance(r, dict)]
@@ -726,9 +726,12 @@ def build_record(runs, window_hours, confirmed_max_parallel=None, now=None,
                 (f["main_sha"] for f in forms if f["main_sha"]), default=None
             ),
             "main_sha_source": (
-                "resolved origin/main at capture"
-                if resolved_main_sha
-                else "unresolved: max() over queue-title shas (provenance only)"
+                resolved_main_sha_source
+                or (
+                    "resolved origin/main at capture"
+                    if resolved_main_sha
+                    else "unresolved: max() over queue-title shas (provenance only)"
+                )
             ),
         },
         "parallelism": {
@@ -1038,18 +1041,35 @@ def main(argv=None):
         }
 
     refs = live_queue_refs() if (args.live or args.confirm_refs) else None
+    if (args.live or args.confirm_refs) and refs is None:
+        # An explicitly REQUESTED queue-ref read that failed is UNKNOWN (exit 2),
+        # never exit 0 with `live_queue_refs_at_observation: null` — the null
+        # cannot be told apart from "not requested" and would read as an
+        # unobserved value. Mirrors the `--conflicts-json` discipline.
+        return emit_unknown("queue-ref read was requested (--confirm-refs/--live) but failed")
     confirmed = len(refs) if refs is not None else None
     # Provenance: resolve origin/main only on a LIVE read (it shells out to `git
     # ls-remote`). A `--from-json` replay stays hermetic unless the caller passes
     # `--main-sha` OR `--confirm-refs` (the latter is an explicit opt-in to a live
     # queue-ref read), so an offline replay never SILENTLY depends on the network
     # — and the test suite's `--from-json` cases perform no network I/O.
-    resolved_sha = args.main_sha or (resolve_origin_main() if args.live else None)
+    # The SOURCE is threaded alongside the value: a caller-supplied sha must NOT
+    # be labelled as one this tool resolved.
+    if args.main_sha:
+        resolved_sha = args.main_sha
+        main_sha_source = "caller-supplied --main-sha (asserted, not resolved by this tool)"
+    elif args.live:
+        resolved_sha = resolve_origin_main()
+        main_sha_source = "resolved origin/main at capture" if resolved_sha else None
+    else:
+        resolved_sha = None
+        main_sha_source = None
     try:
         record = build_record(
             runs, args.window_hours, confirmed_max_parallel=confirmed,
             conflicted_set=conflicted, resolved_main_sha=resolved_sha, now=as_of,
             corpus_truncated=(truncated if args.live else None),
+            resolved_main_sha_source=main_sha_source,
         )
     except Exception as exc:
         # Fail-closed contract: malformed-but-plausible input is UNKNOWN/exit 2,

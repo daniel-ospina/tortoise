@@ -9,7 +9,7 @@
     "corpus_first_run_at": "2026-08-30T23:00:23Z",
     "truncated": null,
     "main_sha": "56e2558399e73f9619b817016c92790a97c7b4bc",
-    "main_sha_source": "resolved origin/main at capture"
+    "main_sha_source": "caller-supplied --main-sha (asserted, not resolved by this tool)"
   },
   "parallelism": {
     "effective_max_parallel_checks": 5,

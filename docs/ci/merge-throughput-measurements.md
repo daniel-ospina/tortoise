@@ -190,7 +190,7 @@ print({h: round(sum(c._duration_weight(d.get(f if f.endswith('.py') else f+'.py'
 | field | value |
 |---|---|
 | capture timestamp (UTC) | both records `end` = `2026-09-27T19:35:39Z` — the newest run in the corpus, pinned with `--as-of` so the window end sits **inside** the corpus's coverage (rather than in the gap between the dump and the run) |
-| resolved `origin/main` | `56e2558399e73f9619b817016c92790a97c7b4bc` — passed as `--main-sha` and recorded per record as `window.main_sha` with `main_sha_source` |
+| resolved `origin/main` at capture | `56e2558399e73f9619b817016c92790a97c7b4bc` — passed as `--main-sha` and recorded per record as `window.main_sha`, with `main_sha_source = "caller-supplied --main-sha (asserted, not resolved by this tool)"`: the replay did not itself resolve `origin/main`, and the source field says so rather than claiming the tool resolved it |
 | window (M3/M5/M6) | 8 h |
 | window (M4) | 14 d |
 | corpus | 39 972 unique workflow runs (`2026-08-30T23:00:23Z` → `2026-09-27T19:35:39Z`, 27.9 d) via `gh api /actions/runs`; 8 h window: 501 queue runs / 43 queue branches; 14 d window: 1 917 queue runs / 165 queue branches. The Actions endpoint caps pagination at **400 pages / 40 000 runs** (pages past it return HTTP 422), so the dump is **deduped by run `id`** and non-run error payloads dropped before replay. Both records carry the corpus read itself (`window.corpus_runs`, `window.corpus_first_run_at`, and `window.truncated` — **`null` here, because a `--from-json` replay did not produce the dump and its completeness is UNKNOWN; the field is `true`/`false` only on the observer's own `--live` read**), so this row is verifiable from the committed artifacts. |
