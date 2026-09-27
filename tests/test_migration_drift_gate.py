@@ -249,16 +249,24 @@ def test_duplicate_free_but_pending_blocks_normally():
 # lands the migration on top of its successor (`supabase db push --include-all`
 # applies the whole repo-pending set in filename order). The BLOCKING list also
 # silently omitted warn-class (index-only) repo-ahead migrations, which are
-# still pushed. The first four tests below FAIL on the pre-#4278 script; the
-# last is the negative control that guards against over-printing.
+# still pushed. Against the pre-#4278 script (`origin/main` @ 877fa52d1, which
+# predates this change) the behaviour tests below fail. Re-run it by writing
+# that revision to the script path and running this file — do NOT use `HEAD`,
+# which already contains the fix. `test_clean_run_has_no_remediation_markers`
+# and `test_duplicate_branch_never_executes_supabase` are guards rather than
+# fail-on-current tests; `test_report_never_executes_supabase` fails there too,
+# but on its stdout assertion — see the docstrings.
 
 
-def _run_fixture(files: dict[str, str], versions: list[str]) -> subprocess.CompletedProcess:
-    """Write fixture migrations with explicit content, then run the gate."""
-    mig = _write_fixture_migrations(list(files))
-    for name, body in files.items():
-        (mig / name).write_text(body)
-    stub = _stub_curl(versions)
+def _seam_env(
+    mig: Path, stub: Path, path_prefix: Path | None = None
+) -> dict[str, str]:
+    """Build the subprocess env with the gate's test seams at fixtures.
+
+    Tokens are popped so a dev-exported token cannot leak in; PATH is prefixed
+    only when a test needs a stub executable to win. Shared by the two fixture
+    runners below so a seam added here reaches both.
+    """
     env = dict(os.environ)
     env.pop("SUPABASE_ACCESS_TOKEN", None)
     env.pop("DRIFT_TOKEN", None)
@@ -270,6 +278,17 @@ def _run_fixture(files: dict[str, str], versions: list[str]) -> subprocess.Compl
             "DRIFT_TOKEN": "test-token",
         }
     )
+    if path_prefix is not None:
+        env["PATH"] = f"{path_prefix}:{env.get('PATH', '')}"
+    return env
+
+
+def _run_fixture(files: dict[str, str], versions: list[str]) -> subprocess.CompletedProcess:
+    """Write fixture migrations with explicit content, then run the gate."""
+    mig = _write_fixture_migrations(list(files))
+    for name, body in files.items():
+        (mig / name).write_text(body)
+    env = _seam_env(mig, _stub_curl(versions))
     return subprocess.run(
         ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT
     )
@@ -372,19 +391,7 @@ def _run_with_supabase_stub(
     mig = _write_fixture_migrations(list(files))
     for name, body in files.items():
         (mig / name).write_text(body)
-    curl_stub = _stub_curl(versions)
-    env = dict(os.environ)
-    env.pop("SUPABASE_ACCESS_TOKEN", None)
-    env.pop("DRIFT_TOKEN", None)
-    env.update(
-        {
-            "PATH": f"{fakebin}:{os.environ.get('PATH', '')}",
-            "DRIFT_CURL": str(curl_stub),
-            "DRIFT_MIGRATIONS_DIR": str(mig),
-            "DRIFT_API_URL": "https://api.supabase.invalid",
-            "DRIFT_TOKEN": "test-token",
-        }
-    )
+    env = _seam_env(mig, _stub_curl(versions), path_prefix=fakebin)
     r = subprocess.run(
         ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT
     )
@@ -392,10 +399,13 @@ def _run_with_supabase_stub(
 
 
 def test_report_never_executes_supabase():
-    """#4278 regression: an unescaped backtick in the remediation text made the
-    gate RUN `supabase db push --include-all` while merely printing it (it also
-    injected the CLI's error JSON into the remediation). The report must never
-    shell out to supabase."""
+    """Guard: an unescaped backtick in the remediation text ran
+    `supabase db push --include-all` while merely printing it (it also injected
+    the CLI's error JSON into the remediation). That defect existed only in an
+    INTERMEDIATE revision of this change — the pre-#4278 script never had it —
+    so against `origin/main` this test fails on its stdout assertion (the base
+    text is `--linked --include-all`), not on execution. It is mutation-provable
+    on execution by reintroducing the backticks."""
     r, marker = _run_with_supabase_stub(
         {
             "20260917000001_old.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n",
@@ -428,9 +438,52 @@ def test_duplicate_branch_flags_out_of_order_after_rename():
     assert "apply via supabase-deploy dispatch" in r.stdout, r.stdout
 
 
+def test_fresh_project_with_no_applied_migrations_is_not_out_of_order():
+    """A valid empty remote set means nothing is applied yet, so every
+    repo-ahead version is newer and none is out of order — and the gate still
+    exits 1 (drift), not 2."""
+    r = _run_fixture(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        [],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "nothing applied yet" in r.stdout, r.stdout
+    assert "OUT OF ORDER" not in r.stdout, r.stdout
+    assert "apply migrations first" in r.stdout, r.stdout
+
+
+def test_remote_max_is_the_greatest_applied_version():
+    """The out-of-order reference is the GREATEST applied version, not the first
+    or last line the API happened to return."""
+    r = _run_fixture(
+        {"20260917000001_old.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n"},
+        ["0001", "20260918000001", "20260813000004"],
+    )
+    assert r.returncode == 1, r.stdout
+    ooo = [ln for ln in r.stdout.splitlines() if "OUT OF ORDER" in ln]
+    assert ooo, r.stdout
+    assert "20260918000001" in ooo[0], ooo[0]
+
+
+def test_comparator_is_lexical_matching_cli_filename_order():
+    """The ordering reference follows the CLI's filename order (string compare),
+    not numeric order. With variable-width prefixes they differ: an applied
+    `999` and a pending `1000` — the CLI orders `1000` first, so applying `1000`
+    on top of the already-applied `999` IS out of order. Numeric comparison
+    would wrongly call it safe."""
+    r = _run_fixture(
+        {"1000_late_named.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n"},
+        ["999"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "OUT OF ORDER" in r.stdout, r.stdout
+    assert "999" in r.stdout, r.stdout
+
+
 def test_duplicate_branch_never_executes_supabase():
-    """The duplicate-prefix branch has its own escaped backticks — guard that
-    escaping site too, so a future unescaping there cannot shell out either."""
+    """Guard for a PRE-EXISTING escaped-backtick site (the duplicate-prefix
+    heading) — mutation-provable by unescaping it, though it passes as-is on the
+    pre-#4278 script. It must never shell out either."""
     r, marker = _run_with_supabase_stub(
         {
             "20260813000005_a.sql": "CREATE TABLE IF NOT EXISTS public.a (id text);\n",

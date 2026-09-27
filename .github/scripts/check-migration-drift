@@ -124,7 +124,13 @@ BLOCKING=""
 WARN_ONLY=""
 for v in $REPO_AHEAD; do
   f="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | head -n1)"
-  [ -z "$f" ] && continue
+  # A repo-ahead version with no resolvable file cannot be classified — block
+  # it (fail-closed) rather than dropping it, so the BLOCKING count always
+  # accounts for every repo-ahead version and the completeness note cannot lie.
+  if [ -z "$f" ]; then
+    BLOCKING="$BLOCKING $v"
+    continue
+  fi
   # strip -- and /* */ comments (line-scoped; multi-line /* */ is a known
   # limitation — over-blocks fail-closed, never under-blocks), then test block
   # patterns first
@@ -171,7 +177,7 @@ fi
 # list below — yet `supabase db push --include-all` still pushes it. Report it
 # before any exit so a short blocking list is never read as the whole job.
 if [ -n "$WARN_ONLY" ]; then
-  echo "  warn-only repo-ahead migrations (index-only, no correctness dependency; not order-checked — a non-unique index out of order has no correctness effect): $WARN_ONLY"
+  echo "  warn-only repo-ahead migrations (index-only, no data-correctness dependency): not order-checked — --include-all still applies them in filename order: $WARN_ONLY"
 fi
 
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
