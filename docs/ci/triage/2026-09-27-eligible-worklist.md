@@ -2,8 +2,8 @@
 
 Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge-throughput.md`, §10 Task 5). **Report only — this task closed, rebased, pushed to, or commented on no PR.**
 
-- **Population:** 173 open PRs, enumerated complete (all pages; no truncated page).
-- **Base:** `origin/main` = `2069d2194523090f0cd1ec796335e78146af7f77`; generated 2026-09-27T13:46:33Z.
+- **Population:** 169 open PRs, enumerated complete (all pages; no truncated page).
+- **Base:** `origin/main` = `8bc0d04e953248c89835adc6e29448f9a597f5c5`; generated 2026-09-27T14:26:38Z.
 - **Conflicts:** `git merge-tree --write-tree --name-only` per PR head — NOT the GitHub mergeability field, which under-reports.
 - **Surface / RE-MEASURE:** the evaluated-tree surface is read from the PR HEAD sha with the rail's own predicate (`scripts/admin-merge.sh` §4.5/§4.6/§4.7): newest attempt per `(app, name)`, non-red only for `success|neutral|skipped|cancelled|stale`, and only a MEASURING conclusion sets the last-production anchor. `re_measure` = a GREEN surface a base red STARTED after; `blocked` = the PR's own surface is red/pending (the rail's class (b), the correct refusal).
 - **Owner:** from session + branch + first user message. **Never the PR author** — every lane on this fleet authenticates as `daniel-ospina`, so `--author @me` is every lane's work.
@@ -15,12 +15,12 @@ Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge
 | `hard_stop` | 5 | E7 / **D12 decision queue** — a wrong resolution silently disables a check. Owner decision, Daniel. |
 | `terminal_decision` | 2 | E5 / **D5 adjudication** — asserts the OPPOSITE contract to main; never a silent rebase. Owner decision, Daniel. |
 | `dead_weight` | 3 | E3 — the work already landed; nothing to merge (positive `superseded_by` evidence). |
-| `draft` | 23 | E4 — contract-bound verbatim preservation. Must NOT enter the queue. |
+| `draft` | 20 | E4 — contract-bound verbatim preservation. Must NOT enter the queue. |
 | `conflicting` | 9 | `git merge-tree` conflict against main; the queue never rebases a conflict. |
-| `blocked` | 107 | Rail class (b) — the PR's own evaluated surface is red/pending. The correct refusal, not a bug. |
+| `blocked` | 106 | Rail class (b) — the PR's own evaluated surface is red/pending. The correct refusal, not a bug. |
 | `re_measure` | 24 | Rail class (c) — a STALE GREEN surface: main went red after this PR's checks were produced and GitHub did not re-run them. **Remedy: re-run the PR's checks.** |
 | `eligible` | 0 | Rail class (a) ACCEPT — green, fresh, conflict-free. |
-| **total** | **173** | counts reconcile to the enumerated population |
+| **total** | **169** | counts reconcile to the enumerated population |
 
 ## Owner decisions required (the decision queue, with a date)
 
@@ -54,7 +54,7 @@ Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge
 | #5453 | wip(recovered): preserve uncommitted work on fix/4661-capture-loop-blo… | `session:01a0ca2e-a1a` | branch=fix/4661-capture-loop-blocking; session=01a0ca2e-a1ad-734f-91be-cf5fb3a0cba9; first_msg=# NEW LANE — #4661: the product's only read path refuses. Tier 0, and nobody owns it. *(issue)* | True | #4825 (merged PR for #4625; _update_onboarding_state on main) | 4661 |
 | #5455 | wip(recovered): preserve uncommitted work on fix/2851-backup-watcher-o… | `UNKNOWN` | no holder session found for branch=fix/2851-backup-watcher-os-shadow *(unknown)* | True | #2984 (issue #2922) — the function-local `import os` guard fix is on main | 2851 |
 
-## draft (23)
+## draft (20)
 
 | PR | title | owner | owner evidence (tier) | conflict | superseded_by | owning_issue |
 |---:|---|---|---|---|---|---|
@@ -76,11 +76,8 @@ Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge
 | #5463 | wip(recovered): preserve uncommitted work on fix/3284-jwks-cold-start-… | `UNKNOWN` | no holder session found for branch=fix/3284-jwks-cold-start-bound *(unknown)* | True | UNKNOWN | 3284 |
 | #5464 | wip(recovered): preserve uncommitted work on fix/4889-subject-layer-ce… | `session:01a0cffc-928` | branch=fix/4889-subject-layer-census; worktree=/Users/danielospina/Documents/GitHub/tortoise/.worktrees/fix/4889-subject-layer-census; session=01a0cffc-928a-71a1-a290-a7ee54606872;… *(strong)* | True | UNKNOWN | 4889 |
 | #5466 | wip(recovered): preserve uncommitted work on feat/3664-subject-object-… | `session:01a08ca6-353` | branch=feat/3664-subject-object-capture; session=01a08ca6-3539-71ed-a0d7-7cee52feee03; holder=git-command naming the branch; first_msg=work on tortoise#2835 *(holder)* | True | UNKNOWN | 3664 |
-| #5807 | merge queue: checking #5242 + #5239 together on main (2069d21) | `UNKNOWN` | no holder session found for branch=mergify/merge-queue/7a1fe21b90 *(unknown)* | False | UNKNOWN | UNKNOWN |
-| #5808 | merge queue: checking #5241 + #4767 together on main (2069d21), stacke… | `UNKNOWN` | no holder session found for branch=mergify/merge-queue/3ad2db79c5 *(unknown)* | False | UNKNOWN | UNKNOWN |
-| #5809 | merge queue: checking #5229 + #4275 together on main (2069d21), stacke… | `UNKNOWN` | no holder session found for branch=mergify/merge-queue/6c763e4cbf *(unknown)* | False | UNKNOWN | UNKNOWN |
-| #5810 | merge queue: checking #3632 + #5527 together on main (2069d21), stacke… | `UNKNOWN` | no holder session found for branch=mergify/merge-queue/03b4e0d93c *(unknown)* | False | UNKNOWN | UNKNOWN |
-| #5811 | merge queue: checking #5384 + #5474 together on main (2069d21), stacke… | `UNKNOWN` | no holder session found for branch=mergify/merge-queue/0087960203 *(unknown)* | False | UNKNOWN | UNKNOWN |
+| #5816 | fix(doctor): render the session-indexing row on a never-initialized ta… | `UNKNOWN` | no holder session found for branch=fix/doctor-session-indexing *(unknown)* | False | UNKNOWN | 5815 |
+| #5817 | merge queue: checking #5241 on main (2069d21), stacked on #5242 and #5… | `UNKNOWN` | no holder session found for branch=mergify/merge-queue/46e18471d2 *(unknown)* | False | UNKNOWN | UNKNOWN |
 
 ## conflicting (9)
 
@@ -96,7 +93,7 @@ Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge
 | #5421 | fix(tests): verdicts from conditions, not ambient machine state — the … | `session:01a0d8c2-9c0` | branch=fix/5049-conditions-not-ambient; session=01a0d8c2-9c0f-7497-8af6-5fccdda8fbb2; holder=git-command naming the branch; first_msg=We have a series of issues around CI and I nee… *(holder)* | True | UNKNOWN | 5049 |
 | #5630 | fix(5002): scrub credentials out of the ship-test artifact | `session:01a0dc66-2c4` | branch=fix/5002-shiptest-url-scrub; worktree=/private/tmp/b3-5002-urlscrub; session=01a0dc66-2c40-70ed-ab17-413bb61a4f2a; first_msg=[B3 LANE-3 ONBOARDING — IMPLEMENT #5002]  You ar… *(strong)* | True | UNKNOWN | 5002 |
 
-## blocked (107)
+## blocked (106)
 
 | PR | title | owner | owner evidence (tier) | conflict | superseded_by | owning_issue |
 |---:|---|---|---|---|---|---|
@@ -115,9 +112,7 @@ Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge
 | #5229 | fix(ask): read the camel sessionId for the dedup bucket key — a date-l… | `session:01a0d65b-af2` | branch=fix/4155-dedup-bucket-sessionid; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.… *(holder)* | False | UNKNOWN | 4155 |
 | #5235 | fix(#3660): resolve transcript-upload identity from the user-global co… | `session:01a0d65b-af2` | branch=fix/3660-session-upload-identity; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST… *(holder)* | False | UNKNOWN | 3660 |
 | #5238 | fix(#4208): re-encode the embedding when update_point(content=…) chang… | `session:01a0d65b-af2` | branch=fix/4208; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 4208 |
-| #5239 | fix(#4061): make the resolver FTS-leg exclusion pre-truncation and fai… | `session:01a0d65b-af2` | branch=fix/4061; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 4061 |
 | #5241 | fix(#3049): key the pre-wipe sidecar to its graph, not to the log dir | `session:01a0d65b-af2` | branch=fix/3049; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 3049 |
-| #5242 | fix(#4032): stop the hosted + selfhost API silently discarding `confid… | `session:01a0d65b-af2` | branch=fix/4032; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 4032 |
 | #5243 | fix(#3253): bound the metrics() graph_size count and report its failur… | `session:01a0d65b-af2` | branch=fix/3253; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 3253 |
 | #5246 | fix(#4174): the branch-drift gate fetches first and fails on a silent … | `session:01a0d65b-af2` | branch=fix/4174; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 4174 |
 | #5247 | fix(#2903): stop echoing a raw TORTOISE_AUDIT_DSN prefix into logs and… | `session:01a0d65b-af2` | branch=fix/2903; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 — recovered. **PUSH YOUR WORK FIRST.** **Your pane was resp… *(holder)* | False | UNKNOWN | 2903 |
@@ -207,6 +202,7 @@ Task 5 of the **#5215 merge-throughput plan** (`docs/plans/2026-09-26-5215-merge
 | #5797 | fix(dashboard): two main-red guards — a stale call-site count and an u… | `session:01a0d689-fc` | branch=fix/dashboard-guard-stale; session=01a0d689-fc55-7379-a6d5-ea2eacf5fc71; holder=git-command naming the branch; first_msg=# Lane C — recovered (wedged again). Continue #4614.… *(holder)* | False | UNKNOWN | UNKNOWN |
 | #5803 | feat(#5215): Task 5 eligibility triage — stale-green RE-MEASURE class … | `UNKNOWN` | no holder session found for branch=feat/mt-task5-triage *(unknown)* | False | UNKNOWN | 5215 |
 | #5805 | fix(extractor): a role inversion is invisible to the near-duplicate fo… | `UNKNOWN` | no holder session found for branch=fix/5131-role-inversion *(unknown)* | False | UNKNOWN | 5131 |
+| #5813 | fix(4474): the entry's `writes` flag is authoritative — declare the fi… | `UNKNOWN` | no holder session found for branch=fix/4474-writes-flag-authoritative *(unknown)* | False | UNKNOWN | 4474 |
 
 ## re_measure (24)
 
@@ -243,13 +239,13 @@ _None._
 
 ## Findings
 
-1. **Rail verdict classes.** `BLOCK` 107, `OWNED` 42, `RE-MEASURE` 24. The RE-MEASURE bucket is 24 PRs (stale green surfaces), NOT the ~139 the orchestrator estimated — the measurement refutes it: most non-draft PRs carry a RED surface (class (b) `blocked`), which the rail refuses at its tree gate before §4.6 is ever reached. A red surface is not a stale green. Per-PR timestamps are in each row's `surface_evidence`.
+1. **Rail verdict classes.** `BLOCK` 106, `OWNED` 39, `RE-MEASURE` 24. The RE-MEASURE bucket is 24 PRs (stale green surfaces), NOT the ~139 the orchestrator estimated — the measurement refutes it: most non-draft PRs carry a RED surface (class (b) `blocked`), which the rail refuses at its tree gate before §4.6 is ever reached. A red surface is not a stale green. Per-PR timestamps are in each row's `surface_evidence`.
 2. **RE-MEASURE is mechanical.** 24 PRs: #5289, #5290, #5350, #5371, #5383, #5395, #5397, #5418, #5420, #5447, #5487, #5494, #5592, #5600, #5611, #5620, #5669, #5706, #5710, #5721, #5724, #5733, #5742, #5763. Each row's `surface_evidence` names the surface's production time and the base red that started after it.
-3. **Owner attribution is evidence-graded.** Tiers: `holder` 109, `issue` 7, `strong` 22, `unknown` 35. `holder` = a session transcript contains a git command naming the branch; it may be a coordinator, so Task 7 must confirm before routing.
+3. **Owner attribution is evidence-graded.** Tiers: `holder` 107, `issue` 7, `strong` 22, `unknown` 33. `holder` = a session transcript contains a git command naming the branch; it may be a coordinator, so Task 7 must confirm before routing.
 4. **The conflicts are still concentrated in shared registries.** Across the `conflicting` rows, `15` conflicted paths; `findings.conflict_artifact_paths` is the re-derivable distribution.
 5. **Population is a point-in-time snapshot.** The open set moved while this ran; `main_sha` and `generated_at` are recorded.
 
 ## Not classified, and why
 
 - None. Every row carries a first-match bucket; `UNKNOWN` is not a bucket. A PR whose surface could not be read REFUSES the whole read rather than emitting a mislabelled row.
-- **Owner UNKNOWN (35):** #2950, #3015, #3419, #4040, #4212, #4645, #5190, #5289, #5300, #5418, #5455, #5456, #5459, #5463, #5465, #5468, #5469, #5474, #5476, #5494, #5515, #5609, #5631, #5632, #5651, #5658, #5710, #5763, #5803, #5805, #5807, #5808, #5809, #5810, #5811 — no holder session could be tied to the branch. Not guessed, not the PR author.
+- **Owner UNKNOWN (33):** #2950, #3015, #3419, #4040, #4212, #4645, #5190, #5289, #5300, #5418, #5455, #5456, #5459, #5463, #5465, #5468, #5469, #5474, #5476, #5494, #5515, #5609, #5631, #5632, #5651, #5658, #5710, #5763, #5803, #5805, #5813, #5816, #5817 — no holder session could be tied to the branch. Not guessed, not the PR author.

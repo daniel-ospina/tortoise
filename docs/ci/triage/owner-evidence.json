@@ -180,21 +180,9 @@
     "tier": "holder"
   },
   {
-    "number": 5239,
-    "owner": "session:01a0d65b-af2",
-    "owner_evidence": "branch=fix/4061; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 \u2014 recovered. **PUSH YOUR WORK FIRST.** **Your pane was respawned.** Your session had **frozen** \u2014 session file",
-    "tier": "holder"
-  },
-  {
     "number": 5241,
     "owner": "session:01a0d65b-af2",
     "owner_evidence": "branch=fix/3049; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 \u2014 recovered. **PUSH YOUR WORK FIRST.** **Your pane was respawned.** Your session had **frozen** \u2014 session file",
-    "tier": "holder"
-  },
-  {
-    "number": 5242,
-    "owner": "session:01a0d65b-af2",
-    "owner_evidence": "branch=fix/4032; session=01a0d65b-af28-74e8-920e-16c84b292180; holder=git-command naming the branch; first_msg=# Lane L7 \u2014 recovered. **PUSH YOUR WORK FIRST.** **Your pane was respawned.** Your session had **frozen** \u2014 session file",
     "tier": "holder"
   },
   {
@@ -1008,33 +996,21 @@
     "tier": "unknown"
   },
   {
-    "number": 5807,
+    "number": 5813,
     "owner": "UNKNOWN",
-    "owner_evidence": "no holder session found for branch=mergify/merge-queue/7a1fe21b90",
+    "owner_evidence": "no holder session found for branch=fix/4474-writes-flag-authoritative",
     "tier": "unknown"
   },
   {
-    "number": 5808,
+    "number": 5816,
     "owner": "UNKNOWN",
-    "owner_evidence": "no holder session found for branch=mergify/merge-queue/3ad2db79c5",
+    "owner_evidence": "no holder session found for branch=fix/doctor-session-indexing",
     "tier": "unknown"
   },
   {
-    "number": 5809,
+    "number": 5817,
     "owner": "UNKNOWN",
-    "owner_evidence": "no holder session found for branch=mergify/merge-queue/6c763e4cbf",
-    "tier": "unknown"
-  },
-  {
-    "number": 5810,
-    "owner": "UNKNOWN",
-    "owner_evidence": "no holder session found for branch=mergify/merge-queue/03b4e0d93c",
-    "tier": "unknown"
-  },
-  {
-    "number": 5811,
-    "owner": "UNKNOWN",
-    "owner_evidence": "no holder session found for branch=mergify/merge-queue/0087960203",
+    "owner_evidence": "no holder session found for branch=mergify/merge-queue/46e18471d2",
     "tier": "unknown"
   }
 ]

@@ -2771,23 +2771,31 @@ def _surface_probe_entries(sha: str):
     THE RAIL READS TWO ENDPOINTS AND REFUSES A PARTIAL SURFACE. The rail's
     `check_surface_probe` fetches `/check-runs` AND `/status` independently and
     returns `partial` — a refusal — when either one could not be read, because
-    the half that was not read is exactly where a red would hide; it is the
-    read failure that disarmed §4.6/§4.7 and merged the stale green (#1261). It
-    also consumes the enumeration's own `total_count`, so a TRUNCATED page is
-    refused the same way (Task 1's `_check_main_gate` fails closed on exactly
-    this; this newer, more consequential consumer must not be the one place
-    that accepts a partial read).
+    the half that was not read is exactly where a red would hide; that read
+    failure is what disarmed §4.6/§4.7 and merged the stale green (#1261).
 
-    An UNREADABLE, PARTIAL or TRUNCATED surface is therefore UNKNOWN here —
+    TWO REFUSALS HERE GO BEYOND THE RAIL and are declared as such rather than
+    described as parity:
+
+    * EACH ENUMERATION IS RECONCILED AGAINST ITS OWN `total_count`. The rail
+      does NOT read that field — it derives its total from the entries it
+      parsed — so a truncated page is not a shape the rail can detect at all.
+      The instrument can, cheaply, and a short page would otherwise report
+      GREEN (the `eligible` class) for a PR whose red sits on the unread page.
+      Failing closed here is strictly safer than the rail.
+    * an unreadable surface is UNKNOWN, a single verdict, rather than the
+      rail's separate `unreadable`/`partial`/`unmeasured` states, all three of
+      which its callers refuse.
+
+    A surface that is unreadable, PARTIAL or truncated is therefore UNKNOWN —
     never GREEN, and never a partial list of reds.
     """
-    runs, total = fetch_check_runs(sha)
-    statuses, _status_total = fetch_statuses(sha)
-    if runs is UNKNOWN and statuses is UNKNOWN:
-        return UNKNOWN, None, [], 0
+    runs, run_total = fetch_check_runs(sha)
+    statuses, status_total = fetch_statuses(sha)
     if runs is UNKNOWN or statuses is UNKNOWN:
         return UNKNOWN, None, [], 0
-    if not _is_num(total) or len(runs) != total:
+    if (not _is_num(run_total) or len(runs) != run_total
+            or not _is_num(status_total) or len(statuses) != status_total):
         return UNKNOWN, None, [], 0
     return _surface_entries(runs, statuses)
 

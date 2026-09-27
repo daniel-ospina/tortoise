@@ -1202,11 +1202,10 @@ _RAIL_TOKEN_SETS = (
 def test_surface_token_sets_match_the_committed_rail_record():
     """The instrument's token sets against the COMMITTED rail record.
 
-    This half ALWAYS RUNS. The live rail pin below skipped on every CI runner —
-    `scripts/admin-merge.sh` is untracked in this repo, so the only parity
-    check on these sets was inert exactly where it mattered. A drift in any of
-    these sets is a drift in what the instrument treats as GREEN, so it must
-    break a test that a runner actually executes.
+    This half ALWAYS RUNS. `scripts/admin-merge.sh` is untracked in this repo,
+    so a pin that reads only the live rail does not run on a CI runner — and
+    the sets below are what the instrument treats as GREEN. A drift in any of
+    them must break a test a runner actually executes.
     """
     record = _json.loads(_RAIL_TOKENS_PATH.read_text())
     for rail_name, py_name in _RAIL_TOKEN_SETS:
@@ -1219,14 +1218,15 @@ def test_rail_surface_token_sets_match():
 
     SIX token sets drive its probe: the non-red allow-list and MEASURING
     predicate for EACH endpoint (check runs AND legacy statuses), the named
-    in-flight statuses, and the non-code actions events. The instrument
-    OBSERVES that rule, so each set is pinned here — a vendor adding a
-    conclusion must break this test rather than silently widen what the
-    instrument treats as green.
+    in-flight statuses, and the non-code actions events (which the rail states
+    as a `case` arm rather than a set). The instrument OBSERVES that rule, so
+    each set is pinned here — a vendor adding a conclusion must break this test
+    rather than silently widen what the instrument treats as green.
 
-    Split into two halves because they fail differently: the committed record
-    above always runs, while THIS half can only run where the rail is readable
-    (and records the rail's own sets back into the record when it is).
+    Two halves, because they run in different places: the committed record
+    above always runs, and THIS half additionally asserts the record still
+    matches the live rail — so the record cannot itself go stale where the rail
+    is readable.
     """
     candidates = []
     import os
@@ -1249,17 +1249,26 @@ def test_rail_surface_token_sets_match():
             match = re.search(rf"^{name}\s*=\s*\{{([^}}]*)\}}", body, re.M)
             if match:
                 found[name] = set(re.findall(r'"([^"]+)"', match.group(1)))
+        # The non-code events are a `case` ARM in the rail, not a set, so the
+        # set-shaped regex above never sees them. Parsing the arm keeps the
+        # exemption genuinely rail-verified: an event REMOVED from the rail
+        # must not stay exempt here, which is a fail-open direction.
+        arm = re.search(r"^\s*([a-z_]+(?:\|[a-z_]+)+)\)\s*noncode=1", body,
+                        re.M)
+        if arm:
+            found["NON_CODE_EVENTS"] = set(arm.group(1).split("|"))
         if found:
             # The record must still describe the LIVE rail: otherwise the pin
             # above holds the instrument to a record that has itself gone stale.
             record = _json.loads(_RAIL_TOKENS_PATH.read_text())
             for rail_name, py_name in _RAIL_TOKEN_SETS:
-                if rail_name in found:
-                    assert found[rail_name] == set(record[rail_name]), (
-                        f"the committed rail record for {rail_name} no longer "
-                        f"matches {path} — update the record and the instrument "
-                        f"together")
-                    assert found[rail_name] == set(getattr(mt, py_name))
+                if rail_name not in found:
+                    continue
+                assert found[rail_name] == set(record[rail_name]), (
+                    f"the committed rail record for {rail_name} no longer "
+                    f"matches {path} — update the record and the instrument "
+                    f"together, WITH the rail change")
+                assert found[rail_name] == set(getattr(mt, py_name))
             return
     if read_any:
         pytest.fail("rail readable but its surface token sets were not found — "
@@ -2503,6 +2512,74 @@ def test_surface_probe_refuses_a_partial_surface(monkeypatch):
     # BOTH unreadable is UNREADABLE (also a refusal, never GREEN).
     monkeypatch.setattr(mt, "fetch_statuses", lambda sha: (mt.UNKNOWN, mt.UNKNOWN))
     assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+
+
+def test_newest_status_keeps_the_earlier_entry_on_a_tie_and_supersedes_later():
+    """The legacy-status newest rule is `stamp > best`, STRICTLY.
+
+    The rail keeps the entry it saw FIRST on an equal stamp, so a tie must not
+    be resolved by list order: with `failure` first and `success` second at the
+    SAME stamp, `>=` would let the green supersede the red and the status half
+    would read GREEN. A LATER stamp legitimately supersedes.
+    """
+    def status(state, stamp):
+        return {"context": "legacy", "state": state, "updated_at": stamp}
+
+    tied = [status("failure", "2026-09-27T10:00:00Z"),
+            status("success", "2026-09-27T10:00:00Z")]
+    verdict, _anchor, reds, _pending = mt.classify_surface_runs([], tied)
+    assert verdict == mt.SURFACE_RED
+    assert reds == [("legacy", "2026-09-27T10:00:00Z")]
+    later = [status("failure", "2026-09-27T09:00:00Z"),
+             status("success", "2026-09-27T10:00:00Z")]
+    assert mt.classify_surface_runs([], later)[0] == mt.SURFACE_GREEN
+
+
+def test_surface_probe_refuses_a_truncated_status_enumeration(monkeypatch):
+    """The status half is reconciled against its own total too."""
+    monkeypatch.setattr(mt, "fetch_check_runs", lambda sha: ([], 0))
+    monkeypatch.setattr(mt, "fetch_statuses",
+                        lambda sha: ([{"context": "c", "state": "success"}], 5))
+    assert mt.surface_probe("a" * 40)[0] == mt.UNKNOWN
+
+
+def test_fetch_statuses_reports_an_unreadable_body(monkeypatch):
+    """The reader that decides whether the consumer ever sees UNKNOWN."""
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: mt.UNKNOWN)
+    assert mt.fetch_statuses("a" * 40) == (mt.UNKNOWN, mt.UNKNOWN)
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: "not-a-dict")
+    assert mt.fetch_statuses("a" * 40) == (mt.UNKNOWN, mt.UNKNOWN)
+    monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: {"statuses": "x"})
+    assert mt.fetch_statuses("a" * 40) == (mt.UNKNOWN, mt.UNKNOWN)
+    # A well-formed body, including the EMPTY one (a sha with no statuses is
+    # READ SUCCESSFULLY — that is not an unreadable endpoint).
+    monkeypatch.setattr(mt, "_gh_api",
+                        lambda *a, **k: {"statuses": [], "total_count": 0})
+    assert mt.fetch_statuses("a" * 40) == ([], 0)
+    one = [{"context": "c", "state": "success"}]
+    monkeypatch.setattr(mt, "_gh_api",
+                        lambda *a, **k: {"statuses": one, "total_count": 1})
+    assert mt.fetch_statuses("a" * 40) == (one, 1)
+
+
+def test_run_event_resolves_the_first_run_id_in_the_url(monkeypatch):
+    """`_run_event` resolves the first `/runs/<N>` it finds, and only digits."""
+    seen = []
+
+    def fake_api(path, *a, **k):
+        seen.append(path)
+        return {"event": "salvage"}
+
+    monkeypatch.setattr(mt, "_gh_api", fake_api)
+    assert mt._run_event(
+        "https://github.com/o/r/actions/runs/111/job/2?x=/runs/222") == \
+        "salvage"
+    assert seen == [f"repos/{mt.OWNER_REPO}/actions/runs/111"]
+    # A URL with no run id is UNKNOWN, and UNKNOWN blocks.
+    seen.clear()
+    assert mt._run_event("https://example.com/job/2") == mt.UNKNOWN
+    assert seen == []
+    assert mt._run_event("") == mt.UNKNOWN
 
 
 def test_stale_by_clock_refuses_a_red_that_started_after_the_anchor():
