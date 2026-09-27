@@ -785,16 +785,16 @@ def test_analytics_http_reset_closes_and_drops_the_cached_client(monkeypatch):
     assert second is not first, "reset did not drop the cached client (#4462)"
 
 
-def test_pooled_client_rebuilds_on_url_or_key_change_without_closing_the_superseded(
+def test_pooled_client_rebuilds_on_cache_key_change_without_closing_the_superseded(
         monkeypatch):
     """Each cache-key element forces a FRESH client on its own, and the
     superseded one is DROPPED, never closed — an in-flight emitter may still
     hold it, and closing a pool under a live request is the #4608 class.
 
     Mutation A: return the cached client regardless of key → one construction
-    instead of three (a pool warmed for the old configuration serves the new).
-    Mutation B: drop ``url`` OR ``key`` from ``_analytics_http_key`` → that
-    element no longer forces a rebuild.
+    instead of four (a pool warmed for the old configuration serves the new).
+    Mutation B: drop ``url``, ``key`` OR the timeout from
+    ``_analytics_http_key`` → that element no longer forces a rebuild.
     Mutation C: close the superseded client → ``closes`` is 1.
     """
     _prod_env(monkeypatch)
@@ -802,17 +802,23 @@ def test_pooled_client_rebuilds_on_url_or_key_change_without_closing_the_superse
 
     first = ha._analytics_http_client("https://a4462.supabase.co", "k1")
     same = ha._analytics_http_client("https://a4462.supabase.co", "k1")
-    # Vary each element while the OTHER is held constant, so a regression that
-    # drops one from ``_analytics_http_key`` cannot be masked by a change to
-    # the other (varying the key only after a URL change would still rebuild).
+    # Vary each element while the OTHERS are held constant, so a regression
+    # that drops one from ``_analytics_http_key`` cannot be masked by a change
+    # to another (varying the key only after a URL change would still rebuild).
     by_key = ha._analytics_http_client("https://a4462.supabase.co", "k2")
     by_url = ha._analytics_http_client("https://b4462.supabase.co", "k2")
+    # The remaining cache-key element is the POST timeout (a module constant,
+    # so a test is the only place it can change).
+    monkeypatch.setattr(ha, "_ANALYTICS_POST_TIMEOUT_S", 3.5)
+    by_timeout = ha._analytics_http_client("https://b4462.supabase.co", "k2")
 
     assert same is first, "an unchanged key must reuse the cached client"
-    assert len(rec.instances) == 3, (
-        f"changing the url or the service key built {len(rec.instances)} "
-        "clients — each element must force exactly one rebuild")
-    assert by_key is not first and by_url is not by_key, (by_key, by_url)
+    assert len(rec.instances) == 4, (
+        f"changing the url, the service key or the timeout built "
+        f"{len(rec.instances)} clients — each element must force exactly one "
+        "rebuild")
+    assert (by_key is not first and by_url is not by_key
+            and by_timeout is not by_url), (by_key, by_url, by_timeout)
     assert rec.closes == 0, (
         "the superseded client was CLOSED while an in-flight emitter may "
         "still hold it — the #4608 class, not re-derived here (#4462)"

@@ -22939,13 +22939,14 @@ _ANALYTICS_POST_TIMEOUT_S = 5
 # cache is a dict so tests/ops can drop it by reference, the lock guards the
 # CACHE only (never the network call), and a changed key rebuilds.
 #
-# Why ONE client can serve every caller: this sink is reached from THREE
-# executors — the dedicated 4-worker ``telemetry`` pool, the event loop's
-# shared default executor (the capture-cost lane, #4468), and the MCP lane's
-# daemon thread — and ``httpx.Client`` is documented safe for concurrent use
-# (the repo already relies on that in ``supabase_control``). It is a SYNC
-# client, so it is bound to NO event loop: that is what makes cross-executor
-# reuse safe, and why a pooled ``AsyncClient`` was not used.
+# Why ONE client can serve every caller: this sink is reached from TWO executors
+# — the dedicated 4-worker ``telemetry`` pool and the event loop's shared
+# default executor (the capture-cost lane, #4468, and the MCP lane whenever a
+# loop is running; the MCP lane's ephemeral daemon thread is its no-loop
+# fallback) — and ``httpx.Client`` is documented safe for concurrent use (the
+# repo already relies on that in ``supabase_control``). It is a SYNC client, so
+# it is bound to NO event loop: that is what makes cross-executor reuse safe,
+# and why a pooled ``AsyncClient`` was not used.
 #
 # LIFETIME: process-lifetime by design, and closed from NO production path —
 # mirroring ``SupabaseControlPlane._http`` (never closed). Closing a pool while
@@ -23179,8 +23180,9 @@ def _track_analytics_event(org_id: str, event_name: str,
         try:
             # #4462: one process-wide pooled client, built lazily on the first
             # configured emit and reused by every later one — including across
-            # the three executors that reach this sink (the telemetry pool, the
-            # loop's shared default executor, and the MCP lane's daemon thread).
+            # the two executors that reach this sink (the telemetry pool and the
+            # loop's shared default executor, which serves the MCP lane too
+            # while a loop is running).
             # The ``with`` form is deliberately NOT used: httpx 0.28 closes an
             # externally-constructed client on ``__exit__``, which would defeat
             # reuse on the very first emit (see ``supabase_control``). The
