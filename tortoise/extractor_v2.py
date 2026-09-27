@@ -57,6 +57,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -7093,7 +7094,22 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     # Parsing up front makes the mutation atomic w.r.t. provider input: a payload
     # that cannot be coerced raises with ``acc`` untouched, and the caller's
     # residual then discloses the call with no tokens attributed to it.
+    #
+    # A NON-FINITE charge (an ``inf`` from a JSON ``1e400``, or a string
+    # ``"nan"``/``"Infinity"``) does NOT raise on ``float()``, so it would land
+    # on the row and break the emit: ``_track_analytics_event`` encodes with
+    # httpx's ``allow_nan=False``, so one non-finite value raises
+    # ``ValueError``, the row is only written to the local JSONL fallback, and
+    # it never reaches ``analytics_events`` — the table
+    # ``cost_per_session_distribution`` scans. Worse, ``round(nan + x, 6)``
+    # stays ``nan``, so a single ``nan`` silently SWALLOWS every later valid
+    # charge in the session. An unusable charge is therefore treated exactly
+    # like an absent one: disclosed via ``calls_without_cost``, never a
+    # non-finite row, and the tokens are still kept so the row stays repricable
+    # from the pricing map.
     cost_val = None if cost_usd is None else float(cost_usd)
+    if cost_val is not None and not math.isfinite(cost_val):
+        cost_val = None
     acc["calls"] = int(acc.get("calls", 0)) + 1
     acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
     acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks

@@ -1688,6 +1688,57 @@ def test_m2_bad_charge_does_not_contradict_the_row_it_is_disclosed_on():
     assert max(0, 2 - stats.get("attempts", 0)) == 1
 
 
+def test_accumulate_call_cost_rejects_a_non_finite_charge():
+    """#5822 review P3 — ``float()`` does NOT raise on ``inf``/``nan``, so the
+    non-finite charge is the one provider-controlled ``cost`` that slips past
+    both earlier guards and lands on the row.
+
+    Consequences, both reproduced: ``_track_analytics_event`` encodes with
+    httpx's ``allow_nan=False``, so one non-finite value raises ``ValueError``
+    and the capture_cost row is written ONLY to the local JSONL fallback — it
+    never reaches ``analytics_events``, the table
+    ``cost_per_session_distribution`` scans. And because ``round(nan + x, 6)``
+    stays ``nan``, a single ``nan`` SWALLOWS every later valid charge.
+
+    An unusable charge must be treated exactly like an absent one: disclosed
+    via ``calls_without_cost``, never a non-finite row — while the TOKENS are
+    still kept so the row stays repricable from the pricing map.
+
+    REDs on: accepting the parsed value unconditionally (the pre-review order).
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    for label, bad in (("json 1e400 -> inf", float("inf")),
+                       ("-inf", float("-inf")),
+                       ("nan", float("nan")),
+                       ("string nan", "nan")):
+        stats: dict = {}
+        _accumulate_call_cost(
+            stats, prompt_tokens=100, completion_tokens=10, cost_usd=bad,
+            provider="openrouter", model="point-model")
+        cost = stats["cost"]
+        assert math.isfinite(cost.get("cost_usd", 0.0)), (
+            f"a non-finite charge must never land on the row ({label}): {cost!r}")
+        assert cost.get("cost_usd", 0.0) == 0.0, cost
+        assert cost["calls_without_cost"] == 1, (
+            f"an unusable charge is disclosed as without-cost ({label}): {cost!r}")
+        assert cost["prompt_tokens"] == 100, cost   # tokens survive for repricing
+        assert cost["completion_tokens"] == 10, cost
+
+    # and the sharper half: a nan must not swallow a LATER valid charge
+    stats = {}
+    _accumulate_call_cost(stats, prompt_tokens=100, completion_tokens=10,
+                          cost_usd="nan", provider="p", model="m")
+    _accumulate_call_cost(stats, prompt_tokens=10, completion_tokens=1,
+                          cost_usd=0.001, provider="p", model="m")
+    cost = stats["cost"]
+    assert cost["cost_usd"] == 0.001, (
+        "a poisoned session total must not swallow the next valid charge: "
+        f"{cost!r}")
+    assert math.isfinite(cost["cost_usd"]), cost
+    assert cost["calls_without_cost"] == 1, cost
+
+
 def test_m2_missing_usage_block_is_disclosed_never_fabricated(
         tmp_path, monkeypatch):
     """A provider response with NO usage block must not be turned into a
