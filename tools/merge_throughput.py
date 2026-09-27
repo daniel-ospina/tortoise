@@ -1844,13 +1844,12 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
             # re-derived like `bucket`. Without this arm, `classification:
             # "draft"` with `draft:false` hid a moveless PR while the same row
             # written with `bucket` was refused.
-            declared = row["bucket"] if "bucket" in row else label
-            if declared in rank or "bucket" in row:
-                if declared != expected:
-                    print(f"2: no-languish row {row.get('number')} bucket "
-                          f"{declared!r} is not the first match "
-                          f"({expected!r})")
-                    return 2
+            declared = row.get("bucket", label)
+            if (declared in rank or "bucket" in row) and declared != expected:
+                print(f"2: no-languish row {row.get('number')} bucket "
+                      f"{declared!r} is not the first match "
+                      f"({expected!r})")
+                return 2
         for key in ("hard_stop", "terminal_decision", "draft"):
             if (row.get(key) is True and label in rank
                     and rank[label] > rank[key]):
@@ -2692,10 +2691,8 @@ def _surface_entries(runs, statuses=()):
             continue
         raw_ctx = str(status.get("context") or "")
         ctx = raw_ctx or UNNAMED_STATUS
-        if raw_ctx and raw_ctx != UNNAMED_STATUS:
-            key = (ctx,)
-        else:
-            key = (ctx, "entry", index)
+        key = ((ctx,) if raw_ctx and raw_ctx != UNNAMED_STATUS
+               else (ctx, "entry", index))
         st_groups.setdefault(key, []).append(status)
     if not groups and not st_groups:
         return UNKNOWN, None, [], 0
@@ -2725,9 +2722,9 @@ def _surface_entries(runs, statuses=()):
             continue
         completed = str(newest.get("completed_at") or "")
         parsed = _parse_ts(completed)
-        if concl in MEASURING_CONCLUSIONS and parsed is not None:
-            if anchor is None or parsed > anchor[0]:
-                anchor = (parsed, completed)
+        if (concl in MEASURING_CONCLUSIONS and parsed is not None
+                and (anchor is None or parsed > anchor[0])):
+            anchor = (parsed, completed)
         if concl not in NON_RED_CONCLUSIONS:
             note_red(key[1], newest)
     for key, group in st_groups.items():
@@ -2745,9 +2742,9 @@ def _surface_entries(runs, statuses=()):
             reds.append({"name": context, "started": stamp,
                          "url": "", "app": "commit-status"})
         parsed = _parse_ts(stamp)
-        if state in MEASURING_STATES and parsed is not None:
-            if anchor is None or parsed > anchor[0]:
-                anchor = (parsed, stamp)
+        if (state in MEASURING_STATES and parsed is not None
+                and (anchor is None or parsed > anchor[0])):
+            anchor = (parsed, stamp)
     if reds:
         verdict = SURFACE_RED
     elif pending:
