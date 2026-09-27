@@ -684,6 +684,18 @@ def _ensure_object(sha: str) -> bool:
     return fetch.returncode == 0
 
 
+def _failed_read(payload) -> bool:
+    """A read that did not succeed or was not complete.
+
+    `read_ok` must be exactly `True`; `incomplete_results` must be absent/False
+    (a truthy string or `1` is a sentinel, not "complete").
+    """
+    return (
+        payload.get("read_ok", True) is not True
+        or payload.get("incomplete_results") not in (None, False)
+    )
+
+
 def collect_conflicts(bound=None):
     """Enumerate open PRs (complete) and sweep conflicts with git merge-tree."""
     body = _gh_api(
@@ -701,20 +713,28 @@ def collect_conflicts(bound=None):
     refs = [
         (p, p.get("head", {}).get("sha"))
         for p in body
-        if isinstance(p, dict) and p.get("head", {}).get("sha")
+        if isinstance(p, dict)
     ]
-    bounded_map(lambda item: _ensure_object(item[1]), refs, bound)
+    probe_refs = [(p, sha) for p, sha in refs if sha]
+    bounded_map(lambda item: _ensure_object(item[1]), probe_refs, bound)
 
     def probe(item):
         return merge_tree_conflict(REPO, "origin/main", item[1])
 
-    results = bounded_map(probe, refs, bound)
+    results = bounded_map(probe, probe_refs, bound)
     after = live_main_sha()
     if assert_main_unchanged(main_sha, after) is UNKNOWN:
         return {"items": [], "total_count": 0, "read_ok": True,
                 "main_moved": True}
+    probed = {
+        id(pr): conflict
+        for (pr, _sha), conflict in zip(probe_refs, results, strict=False)
+    }
     items = []
-    for (pr, _sha), conflict in zip(refs, results, strict=False):
+    for pr, sha in refs:
+        # A PR without a head sha was not probed: it is UNKNOWN, never silently
+        # dropped from the claimed population.
+        conflict = probed.get(id(pr), UNKNOWN) if sha else UNKNOWN
         items.append({
             "number": pr.get("number"),
             "branch": pr.get("head", {}).get("ref"),
@@ -1049,7 +1069,7 @@ def _check_queue_entry(payload: dict, opts: dict) -> int:
 
 
 def _check_queue_eta(payload: dict, opts: dict) -> int:
-    if payload.get("read_ok", True) is not True or payload.get("incomplete_results") is True:
+    if _failed_read(payload):
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
@@ -1203,7 +1223,7 @@ def _check_fast_files_unclassified(payload: dict, opts: dict) -> int:
 
 
 def _check_conflicts(payload: dict, opts: dict) -> int:
-    if payload.get("read_ok", True) is not True or payload.get("incomplete_results") is True:
+    if _failed_read(payload):
         return 2
     if payload.get("main_moved"):
         print("2: origin/main moved between fetch and sweep")
@@ -1350,7 +1370,7 @@ def _check_parallelism_headroom(payload: dict, opts: dict) -> int:
                 return 2
     cap = _as_number(payload.get("capacity_at_first_failure"))
     configured = _as_number(payload.get("configured_max_parallel_checks"))
-    if cap is None or configured is None:
+    if cap is None or configured is None or cap < 0 or configured < 0:
         print("2: capacity_at_first_failure is UNKNOWN (refuse, never pass)")
         return 2
     # I9: refusal condition is configured >= capacity_at_first_failure.
@@ -1428,8 +1448,8 @@ def _check_gap(payload: dict, opts: dict) -> int:
     ):
         print("2: .gap.terms must carry numeric `ceiling` and `observed`")
         return 2
-    if observed_term["value"] <= 0:
-        print("2: .gap.terms.observed must be positive")
+    if observed_term["value"] <= 0 or ceiling_term["value"] <= 0:
+        print("2: .gap.terms ceiling/observed must be positive")
         return 2
     derived = ceiling_term["value"] / observed_term["value"]
     if abs(value - derived) > GAP_VALUE_TOLERANCE * abs(derived):
@@ -1452,7 +1472,7 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         if key not in EXCLUDE_KEYS:
             print(f"2: unknown exclude key {key!r}")
             return 2
-    if payload.get("read_ok", True) is not True or payload.get("incomplete_results") is True:
+    if _failed_read(payload):
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
@@ -1548,8 +1568,8 @@ def _check_assert_queue_head_checks(payload: dict, opts: dict) -> int:
 
 
 def _check_durations_map(payload: dict, opts: dict) -> int:
-    if payload.get("read_ok", True) is not True:
-        print("2: jobs read was empty/0-byte")
+    if _failed_read(payload):
+        print("2: jobs read was empty/0-byte or incomplete")
         return 2
     dm = payload.get("durations_map")
     if not isinstance(dm, dict):
