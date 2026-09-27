@@ -163,10 +163,21 @@ class TestRelationTemplates:
             "description": "a concept implemented by an artefact",
         }]) == []
 
-    def test_the_mechanism_vocabulary_is_the_closed_s3_set(self):
-        """A template must not describe an edge the pipeline cannot build."""
+    def test_the_mechanism_vocabulary_is_the_relations_pair(self):
+        """IMPL|NAND — the pair `ontology.relations` enforces, NOT
+        `CORE_PREDICATES`. A template must not describe an edge the engine
+        cannot build (review of PR #5647, history agent)."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "SUPPORTS"}])
-        assert any("mechanism must be one of" in e for e in errors), errors
+        assert any("must be IMPL or NAND" in e for e in errors), errors
+
+    def test_mitigates_is_refused_as_a_template_mechanism(self):
+        """MITIGATES was RETIRED from the operator menu (ONTOLOGY v3.17, #4937 /
+        #2552) and `sdk.create_operator` refuses it. `CORE_PREDICATES` still
+        carries it, so validating against that set made this slot BROADER than
+        its own sibling `relations[].mechanism` and re-advertised a retired
+        spelling on the author-facing template."""
+        errors = _extraction_errors(relationTemplates=[{"mechanism": "MITIGATES"}])
+        assert any("must be IMPL or NAND" in e for e in errors), errors
 
     def test_an_unknown_template_key_is_rejected(self):
         errors = _extraction_errors(

@@ -201,10 +201,22 @@ extraction:
 #                      manifest convention. `core:Project`, the internal
 #                      spelling the compiled brief emits, is accepted too, but
 #                      prefer the bare form.
+#                      ⚠️ NOTE — per-kind surface forms ALREADY have a home the
+#                      classifier reads: `ontology.kindDefs.<kind>.synonyms`
+#                      and `.examples`, which compile_kind_index_spec renders
+#                      into the classification surface. Nothing reads
+#                      `entityCues` yet. Until a consumer migrates, declaring
+#                      this block ALONE does not reach the classifier — put the
+#                      forms in kindDefs.synonyms/examples.
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
-#                      the domain's IMPL/NAND/MITIGATES phrasings.
+#                      the domain's IMPL/NAND phrasings.
 #                        predicate:        the domain verb
-#                        mechanism:        IMPL | NAND | MITIGATES (closed set)
+#                        mechanism:        IMPL | NAND — the same pair
+#                                          `ontology.relations` accepts.
+#                                          ⛔ NOT MITIGATES: it was RETIRED from
+#                                          the operator menu by the F1 ruling
+#                                          (#4937 / #2552) and
+#                                          `sdk.create_operator` refuses it.
 #                        fromKind/toKind:  kind references, resolved as above
 #                        description:      one line of what the shape captures
 #   valueGate:         {keep: [...], drop: [...]} — what a VALUABLE utterance

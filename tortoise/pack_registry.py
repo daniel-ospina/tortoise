@@ -1092,9 +1092,9 @@ class PackRegistry:
                         f"non-empty strings"
                     )
 
-        # relationTemplates: pack-typical IMPL/NAND/MITIGATES shapes. The
-        # mechanism vocabulary is the SAME closed set the S3 pipeline emits, so
-        # a template can never describe an edge the engine cannot build.
+        # relationTemplates: pack-typical IMPL/NAND shapes. The mechanism
+        # vocabulary is the pair `relations[].mechanism` already enforces — see
+        # the note at the check below for why it is NOT `CORE_PREDICATES`.
         templates = extraction.get("relationTemplates")
         if templates is not None and not isinstance(templates, list):
             errors.append("extraction.relationTemplates must be a list")
@@ -1113,6 +1113,16 @@ class PackRegistry:
                             f"toKind, description)"
                         )
                 mechanism = tpl.get("mechanism")
+                # IMPL|NAND — the SAME pair `relations[].mechanism` enforces,
+                # deliberately NOT `CORE_PREDICATES`. That set still carries
+                # MITIGATES, which ONTOLOGY v3.17 (#4937, the F1 ruling on
+                # #2552) RETIRED: `sdk.create_operator` refuses it, and the
+                # ontology's own changelog says that where the document and the
+                # code disagree, the DOCUMENT is right. Accepting it here would
+                # advertise, on the author-facing template, an edge the engine
+                # cannot build — and would make this slot BROADER than its own
+                # sibling. `CORE_PREDICATES` still admitting MITIGATES is a
+                # separate, pre-existing defect: #5322.
                 # `predicate` is the one REFERENCE among these slots. The
                 # sibling `ontology.relations` requires a non-empty camelCase
                 # predicate and both kind sides, and a template naming none of
@@ -1138,11 +1148,10 @@ class PackRegistry:
                             f"and toKind are required when either is given "
                             f"(a half-declared shape cannot be matched)"
                         )
-                if mechanism is not None and mechanism not in CORE_PREDICATES:
+                if mechanism is not None and mechanism not in ("IMPL", "NAND"):
                     errors.append(
-                        f"extraction.relationTemplates[{i}].mechanism must be one "
-                        f"of {', '.join(sorted(CORE_PREDICATES))}, got "
-                        f"{mechanism!r}"
+                        f"extraction.relationTemplates[{i}].mechanism must be "
+                        f"IMPL or NAND, got {mechanism!r}"
                     )
                 for side in ("fromKind", "toKind"):
                     ref = tpl.get(side)
