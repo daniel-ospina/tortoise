@@ -34,6 +34,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import json as jsonlib
+import math
 import os
 import re
 import statistics
@@ -73,9 +74,13 @@ HARD_MAX_SWEEP_CONCURRENCY = 8
 
 DEFAULT_RECORD_WINDOW_DAYS = 7
 M4_RECORD_WINDOW_DAYS = 14
+GH_API_ATTEMPTS = 3
 # S11 cycle 8: `--require-fresh` validates each of these fields' OWN record —
 # one fresh M4 record cannot vouch for a stale capacity_at_first_failure.
-_CAPACITY_FRESH_FIELDS = ("queued", "in_progress", "capacity_at_first_failure")
+# `oldest_minutes` is included because it is the value S11 thresholds.
+_CAPACITY_FRESH_FIELDS = (
+    "queued", "in_progress", "oldest_minutes", "capacity_at_first_failure",
+)
 I1_RECORD_WINDOW_DAYS = 90
 
 GAP_TERM_MIN = 6
@@ -129,7 +134,12 @@ MERGE_THROUGHPUT_ALLOW_FIXTURE=1.
 # ---------------------------------------------------------------------------
 
 def _is_num(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """A real, finite number. `bool`, NaN and Infinity are not measurements."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def _as_number(value: object):
@@ -143,9 +153,10 @@ def _as_number(value: object):
     if _is_num(value):
         return value
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _as_int(value: object):
@@ -515,18 +526,29 @@ def _gh_api(path: str, paginate: bool = False):
         # the page lists.
         cmd += ["--paginate", "--slurp"]
     cmd.append(path)
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return UNKNOWN
-    if proc.returncode != 0:
-        return UNKNOWN
-    body = parse_api_body(proc.stdout.encode())
-    if body is UNKNOWN:
-        return UNKNOWN
-    if paginate:
-        body = _merge_pages(body)
-    return body
+    last_status = None
+    for _attempt in range(GH_API_ATTEMPTS):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            last_status = type(exc).__name__
+            continue
+        if proc.returncode != 0:
+            last_status = f"exit {proc.returncode}: {proc.stderr.strip()[:200]}"
+            continue
+        body = parse_api_body(proc.stdout.encode())
+        if body is UNKNOWN:
+            last_status = "unparsable body"
+            continue
+        if paginate:
+            body = _merge_pages(body)
+        return body
+    # Exhausted retries is UNKNOWN with the status RECORDED — never a partial
+    # fallback (Task 1 Step 3).
+    print(f"UNKNOWN: gh api {path} failed after {GH_API_ATTEMPTS} attempts "
+          f"({last_status})", file=sys.stderr)
+    return UNKNOWN
 
 
 def _merge_pages(pages):
@@ -814,7 +836,7 @@ def _check_main_gate(payload: dict, opts: dict) -> int:
     if not isinstance(runs, list) or not runs:
         return 2
     total = payload.get("total_count")
-    if isinstance(total, int) and len(runs) != total:
+    if _is_num(total) and len(runs) != total:
         print(f"2: check-run pagination is partial ({len(runs)} of {total})")
         return 2
     if opts.get("require_fresh"):
@@ -873,6 +895,9 @@ def _check_prs_per_day(payload: dict, opts: dict) -> int:
     spec = opts.get("or_artifact")
     if measured is None:
         print("2: prs_per_day is UNKNOWN (a ceiling artifact does not measure it)")
+        return 2
+    if spec is not None and not spec:
+        print("2: --or-artifact requires a PATH#ANCHOR value")
         return 2
     if spec:
         code, ceiling = _evaluate_ceiling(spec, payload)
@@ -1029,13 +1054,13 @@ def _check_queue_eta(payload: dict, opts: dict) -> int:
     # total_count with no items is not an observation.
     if needs_population and (
         not isinstance(items, list)
-        or not isinstance(total, int)
+        or not _is_num(total)
         or len(items) != total
     ):
         print("2: ETA enumeration did not reconcile to its total")
         return 2
     if min_depth is not None:
-        population = total if isinstance(total, int) else None
+        population = total if _is_num(total) else None
         if population is None or population < min_depth:
             print("2: ETA population below --min-depth")
             return 2
@@ -1046,6 +1071,11 @@ def _check_queue_eta(payload: dict, opts: dict) -> int:
         etas = [e for e in etas if e is not None]
         if etas:
             observed = max(etas)
+        elif value is not None:
+            # A non-empty population whose ETAs were never observed cannot be
+            # vouched for by a self-set maximum.
+            print("2: queue-eta items carry no numeric ETA")
+            return 2
     if value is not None and observed is not None and abs(value - observed) > 1e-9:
         print(f"2: max_eta_minutes {value} does not reconcile with items ({observed})")
         return 2
@@ -1075,7 +1105,12 @@ def _check_batch_size(payload: dict, opts: dict) -> int:
     value = _as_number(payload.get("max_batch_size", UNKNOWN))
     numeric = [_as_number(s) for s in sizes]
     numeric = [s for s in numeric if s is not None]
-    if value is not None and numeric and abs(value - max(numeric)) > 1e-9:
+    if value is not None and not numeric:
+        # Nothing to reconcile against: a self-set max over an empty/opaque
+        # batch-event window is not an observation (S6 derives from events).
+        print("2: max_batch_size has no observed batch_sizes to reconcile with")
+        return 2
+    if value is not None and abs(value - max(numeric)) > 1e-9:
         print(f"2: max_batch_size {value} does not reconcile with batch_sizes")
         return 2
     if value is None:
@@ -1158,7 +1193,7 @@ def _check_conflicts(payload: dict, opts: dict) -> int:
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
-    if not isinstance(items, list) or not isinstance(total, int):
+    if not isinstance(items, list) or not _is_num(total):
         return 2
     if len(items) != total or total < 1:
         print("2: conflict enumeration did not reconcile to its total")
@@ -1243,7 +1278,7 @@ def _check_capacity(payload: dict, opts: dict) -> int:
     if opts.get("require_complete"):
         items = payload.get("items")
         total = payload.get("total_count")
-        if not isinstance(items, list) or not isinstance(total, int) or len(items) != total or total < 1:
+        if not isinstance(items, list) or not _is_num(total) or len(items) != total or total < 1:
             print("2: capacity enumeration did not reconcile to its total")
             return 2
     if opts.get("require_fresh"):
@@ -1278,7 +1313,7 @@ def _check_parallelism_headroom(payload: dict, opts: dict) -> int:
     if opts.get("require_complete"):
         items = payload.get("items")
         total = payload.get("total_count")
-        if (not isinstance(items, list) or not isinstance(total, int)
+        if (not isinstance(items, list) or not _is_num(total)
                 or len(items) != total or total < 1):
             print("2: parallelism-headroom enumeration did not reconcile to its total")
             return 2
@@ -1343,6 +1378,16 @@ def _check_gap(payload: dict, opts: dict) -> int:
             record.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS
         ):
             return 2
+        # The term's VALUE must be read from that record (S13) — a fabricated
+        # inline value is not made true by a fresh file existing.
+        record_value = record.get("value")
+        if record_value is None and "effective_parallel" in record:
+            record_value = record.get("effective_parallel")
+        if not _is_num(record_value) or abs(
+            parallel.get("value") - record_value
+        ) > 1e-9:
+            print("2: effective_parallel value does not match its M3 record")
+            return 2
     value = _as_number(gap.get("value", UNKNOWN))
     if value is None:
         return 2
@@ -1366,7 +1411,7 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         return 2
     items = payload.get("items")
     total = payload.get("total_count")
-    if not isinstance(items, list) or not isinstance(total, int):
+    if not isinstance(items, list) or not _is_num(total):
         return 2
     if len(items) != total or total < 1:
         return 2
@@ -1387,6 +1432,9 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
         return 2
     if opts.get("require_complete") and len(items) != total:
         return 2
+    if any(not isinstance(row, dict) for row in items):
+        print("2: no-languish items are mis-shaped")
+        return 2
     excluded = set(excludes)
 
     def _excluded(row: dict) -> bool:
@@ -1403,6 +1451,9 @@ def _check_no_languish(payload: dict, opts: dict) -> int:
     active = [row for row in items if isinstance(row, dict) and not _excluded(row)]
     if not active:
         print("2: every row is in an excluded state")
+        return 2
+    if any(not isinstance(row.get("moved_in_window"), bool) for row in active):
+        print("2: no-languish active rows carry no boolean moved_in_window")
         return 2
     languishing = [row for row in active if not row.get("moved_in_window")]
     threshold = _as_number(opts.get("max"))
@@ -1662,6 +1713,10 @@ _VALUE_FLAGS = {
     "--input": "input",
     "--sweep-concurrency": "sweep_concurrency",
 }
+_NUMERIC_FLAGS = frozenset({
+    "min", "max", "pr", "min_depth", "min_population",
+    "max_oldest_minutes", "min_headroom", "max_age_days", "sweep_concurrency",
+})
 _BOOL_FLAGS = {
     "--strict": "strict",
     "--require-complete": "require_complete",
@@ -1692,6 +1747,19 @@ def _parse_check_argv(argv):
                 return None, 2
             value = argv[i + 1]
             key = _VALUE_FLAGS[token]
+            if key in _NUMERIC_FLAGS:
+                # An unset/empty/garbage shell value must refuse, not silently
+                # disable the gate it was meant to arm.
+                if value == "" or value.startswith("--") or _as_number(value) is None:
+                    print(f"2: {token} requires a numeric value, got {value!r}",
+                          file=sys.stderr)
+                    return None, 2
+            elif key == "or_artifact" and value == "":
+                print("2: --or-artifact requires a PATH#ANCHOR value", file=sys.stderr)
+                return None, 2
+            elif key in ("fixture", "input") and value == "":
+                print(f"2: {token} requires a value", file=sys.stderr)
+                return None, 2
             if key == "fixture":
                 fixture = value
             elif key == "input":
