@@ -1413,6 +1413,46 @@ def _own_start_time() -> float | None:
     return _own_start_cache[pid]
 
 
+def _owner_record_stamp() -> str:
+    """This process's owner-record filename stamp: ``<pid>-<start>``.
+
+    An undeterminable start time is stamped ``unknown``; ``_owner_records``
+    treats that as LIVE (fail closed) — never as a dead owner.
+    """
+    start = _own_start_time()
+    return f"{os.getpid()}-{'unknown' if start is None else int(start)}"
+
+
+def _write_owner_record_file(socket_file: str) -> bool:
+    """Write THIS process's ``<pid>-<start>`` owner record for a socket.
+
+    Split out of `record_owner` so the at-fork adoption (#3630) can write the
+    child's own record WITHOUT touching the inherited per-socket refcount.
+    The old hook conflated the two jobs — it cleared the (already correct)
+    inherited counts purely to force this write, and rebuilt every count as
+    1 in the process.
+
+    Idempotent (``O_EXCL``; a pre-existing record is success). Never raises —
+    an unwritable socket dir leaves the server uninstrumented and the reaper
+    falls back to its global gate (fail closed). Returns True when this
+    process's record file exists afterwards.
+    """
+    try:
+        os.makedirs(owner_record_dir(socket_file), exist_ok=True)
+    except OSError:
+        return False
+    try:
+        fd = os.open(os.path.join(owner_record_dir(socket_file),
+                                  _owner_record_stamp()),
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        return True  # already recorded by this process' first client
+    except OSError:
+        return False
+    return True
+
+
 def _adopt_owner_records_after_fork() -> None:
     """Re-establish owner records for inherited clients in a forked child.
 
@@ -1425,33 +1465,38 @@ def _adopt_owner_records_after_fork() -> None:
     connection — would be invisible, `_owner_records` would report 0 live
     owners, and the reaper would kill the server out from under it.
 
-    So in the child: drop the parent's counts and re-record every socket the
-    parent had claimed, making the child an explicit owner in its own right.
+    So in the child: write the child's own `<child-pid>-<start>` record for
+    every socket the parent had claimed, making the child an explicit owner
+    in its own right.
 
-    RESIDUAL (narrower, documented): the child cannot know HOW MANY clients
-    it inherited, so the re-adopted refcount is 1 per socket. Closing one of
-    two inherited clients would drop the record while the other is still
-    live. The load-bearing property — a parent SIGKILL cannot make a forked
-    child's live server look orphaned — does hold.
+    #3630: the inherited per-socket REFCOUNT is KEPT, not reset. It already
+    holds the number of live clients this child inherited, and the child's
+    `forget_owner` needs exactly that to know when its record is the last
+    claim. The previous cut cleared the map and called `record_owner` once per
+    socket purely to force the record write — which rebuilt every count as 1,
+    so closing one of two inherited clients unlinked the child's record while
+    the other was still live (the #1557 fail-open, one fork deep). Writing the
+    record file and counting the clients are SEPARATE jobs; only the first
+    belongs in this hook (`_write_owner_record_file` does it without a count).
 
     #4487 review: `_own_start_cache` is inherited too, and a stale entry for
     a pid the KERNEL later reassigns to this child would make `record_owner`
     stamp the child's record with a dead ancestor's start — `_owner_records`
     compares it against the real start, reads the record DEAD, and the reaper
     kills a live owner's server (the #1642 FIX 5 fail-open class). Drop it so
-    the child resolves its own start fresh, exactly as the counts are redone.
+    the child resolves its own start fresh.
     """
     _own_start_cache.clear()
-    inherited = list(_owner_refcounts)
-    _owner_refcounts.clear()
+    # #3630: snapshot the inherited counts (do NOT clear them — see above).
+    inherited = dict(_owner_refcounts)
     # #4879: a forked child inherits no THREADS, so no in-flight replay claim
     # can belong to it. `_in_flight_replays` is copied into the child by the
     # fork, but the thread that registered a claim (one still inside
     # `RedisMixin.__init__`) does not exist here — nothing can ever release it,
     # so `cotenant_holds_server` would read "co-tenant" forever and the socket
     # would never be torn down (a leaked server + socket dir, the failure mode
-    # #4879 exists to prevent). Drop the inherited claims exactly like the
-    # inherited refcounts above.
+    # #4879 exists to prevent). Drop the inherited claims (the inherited
+    # refcounts above are deliberately KEPT, #3630 — claims and counts differ).
     _in_flight_replays.clear()
     # #4926: `_inflight_claim_lock` must NOT be inherited. This hook runs in
     # the CHILD; if another thread held the lock at fork time, the child's
@@ -1478,12 +1523,35 @@ def _adopt_owner_records_after_fork() -> None:
     # for a concurrent reaper.
     inherited_locks = dict(_owner_lock_fds)
     _owner_lock_fds.clear()
-    # Re-acquire for the union: a held fd whose refcount entry was somehow
-    # missing must still get a fresh descriptor, or the child would drop a
-    # lock it inherited without replacing it.
+    # For the union of counted sockets and held locks: write THIS child's own
+    # record and re-acquire a fresh descriptor. A held fd whose refcount entry
+    # was somehow missing must still get a fresh descriptor, or the child would
+    # drop a lock it inherited without replacing it.
     for sock in dict.fromkeys([*inherited, *inherited_locks]):
-        with contextlib.suppress(Exception):
-            record_owner(sock)
+        key = os.path.abspath(sock)
+        # #3630: write the child's own record WITHOUT a count (the inherited
+        # refcount above is kept). A write failure is the fail-OPEN state
+        # #3599 exists to prevent — a live owner invisible to the reaper — so
+        # it fails LOUDLY rather than silently.
+        try:
+            if not _write_owner_record_file(sock):
+                logger.error(
+                    "#3630: forked child %s could NOT write its owner record "
+                    "for the inherited socket %s (inherited client count=%s) "
+                    "— a live owner is now invisible to the reaper and its "
+                    "server can be read as orphaned; NOT silently ignored",
+                    os.getpid(), key, inherited.get(key))
+        except Exception:
+            logger.error(
+                "#3630: forked child %s raised while adopting the inherited "
+                "owner record for %s — the child is a live owner with no "
+                "record (fail-open); re-check the socket dir",
+                os.getpid(), key)
+        if key not in _owner_lock_fds:
+            with contextlib.suppress(Exception):
+                fd = _acquire_owner_lock(sock)
+                if fd is not None:
+                    _owner_lock_fds[key] = fd
     for fd in inherited_locks.values():
         with contextlib.suppress(OSError):
             os.close(fd)
@@ -1539,23 +1607,11 @@ def record_owner(socket_file: str | None) -> bool:
     if _owner_refcounts.get(key, 0) > 0:
         _owner_refcounts[key] += 1  # this process already owns the record
         return False
-    try:
-        os.makedirs(owner_record_dir(socket_file), exist_ok=True)
-    except OSError:
-        return False
-    # #4487: this process's own start time is invariant — resolve it once
-    # (see `_own_start_time`), not a `ps` fork on every construction.
-    start = _own_start_time()
-    # An undeterminable start time is stamped 'unknown'; _owner_records
-    # treats that as LIVE (fail closed) — never as a dead owner.
-    stamp = f"{os.getpid()}-{'unknown' if start is None else int(start)}"
-    try:
-        fd = os.open(os.path.join(owner_record_dir(socket_file), stamp),
-                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(fd)
-    except FileExistsError:
-        pass  # already recorded by this process' first client
-    except OSError:
+    # #4487: this process's own start time is invariant — resolved once in
+    # `_owner_record_stamp` (see `_own_start_time`), not a `ps` fork on every
+    # construction. #3630: the record write is split out so the at-fork
+    # adoption can reuse it without moving the refcount.
+    if not _write_owner_record_file(socket_file):
         return False
     _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
     # #4577: hold the shared liveness lock alongside the record file. The

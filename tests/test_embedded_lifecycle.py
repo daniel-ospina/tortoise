@@ -1363,6 +1363,147 @@ def test_forked_child_reclaims_ownership_of_inherited_server(tmp_path):
             db.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_forked_child_keeps_its_owner_record_until_the_last_inherited_client(
+        tmp_path):
+    """#3630: the at-fork hook must KEEP the inherited per-socket refcount.
+
+    `_owner_refcounts` is inherited across `fork()` already holding the number
+    of live clients the child inherited. The old hook cleared it and called
+    `record_owner` once per socket purely to force the child's own record
+    write — which rebuilt every count as **1**. Closing ONE of two inherited
+    clients then took `forget_owner`'s removal path and unlinked the child's
+    `<pid>-<start>` record while the second client was still live, so a later
+    `_mark_orphan_confirmation` could orphan-confirm a live server (the #1557
+    / #1642 FIX 5 fail-open, one fork deep).
+
+    All assertions run IN THE CHILD (rc reported back through a pipe).
+    Mutation: restore `_owner_refcounts.clear()` + `record_owner(sock)` in
+    `_adopt_owner_records_after_fork` and the child's count reads 1 / the
+    record is gone after the first close.
+    """
+    from tortoise.embedded_lifecycle import _owner_refcounts, owner_socket_of
+
+    db_path = str(tmp_path / "fork_refcount.db")
+    first = FalkorDB(db_path)
+    second = FalkorDB(db_path)
+    try:
+        sock = owner_socket_of(first) or first.client.socket_file
+        key = os.path.abspath(sock)
+        assert _owner_refcounts.get(key) == 2, \
+            "test setup: two clients on one server are this process's 2 claims"
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # child
+            child_pid = os.getpid()
+            rc = 1
+            try:
+                os.close(r)
+                assert _owner_refcounts.get(key) == 2, (
+                    "#3630: the forked child must KEEP the inherited refcount "
+                    f"2, not rebuild it as 1 (got "
+                    f"{_owner_refcounts.get(key)!r})")
+                entries = _owner_entries(sock) or []
+                assert any(e.startswith(f"{child_pid}-") for e in entries), (
+                    "#3630: the child must write its OWN record for the "
+                    f"inherited server (entries={entries})")
+                # Close ONE of the two inherited clients.
+                first.close()
+                assert _owner_refcounts.get(key) == 1, (
+                    "#3630: closing one of two inherited clients must leave "
+                    "the child's claim at 1")
+                entries = _owner_entries(sock) or []
+                assert [e for e in entries if e.startswith(f"{child_pid}-")], (
+                    "#3630: the child's owner record was unlinked while a "
+                    "second inherited client was still live — the reaper can "
+                    f"now orphan-confirm a live server (entries={entries})")
+                # Closing the SECOND (last) inherited client releases it.
+                second.close()
+                assert _owner_refcounts.get(key) is None, (
+                    "#3630: the LAST inherited client must release the claim")
+                entries = _owner_entries(sock) or []
+                assert not [e for e in entries
+                            if e.startswith(f"{child_pid}-")], (
+                    "#3630: the child's record must be removed once its last "
+                    f"inherited client closes (entries={entries})")
+                rc = 0
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                rc = 1
+            finally:
+                with contextlib.suppress(OSError):
+                    os.write(w, str(rc).encode())
+                    os.close(w)
+                os._exit(rc if rc else 0)
+        os.close(w)
+        try:
+            child_rc = os.read(r, 8).decode()
+        finally:
+            os.close(r)
+        os.waitpid(pid, 0)
+        assert child_rc == "0", "the forked child's #3630 assertions failed"
+        # The child's closes must not move the PARENT's own claim/record.
+        assert _owner_refcounts.get(key) == 2, \
+            "the child's closes must not move the PARENT's refcount"
+        assert any(e.startswith(f"{os.getpid()}-")
+                   for e in (_owner_entries(sock) or [])), \
+            "the parent's own record must survive the child's closes"
+    finally:
+        with contextlib.suppress(Exception):
+            first.close()
+        with contextlib.suppress(Exception):
+            second.close()
+
+
+def test_fork_adoption_preserves_count_and_fails_loud_without_a_record(
+        tmp_path, monkeypatch, caplog):
+    """#3630: the hook KEEPS the inherited count and, on the fail-OPEN edge
+    where the child cannot write its own record for an inherited socket,
+    reports it LOUDLY instead of silently leaving a live owner invisible to
+    the reaper.
+
+    Mutation: restore `_owner_refcounts.clear()` and the preserved-count
+    assertion fails; drop the `logger.error` and the caplog assertion fails.
+    """
+    import logging as _logging
+
+    from tortoise.embedded_lifecycle import (
+        _adopt_owner_records_after_fork,
+        _owner_lock_fds,
+        _owner_refcounts,
+        record_owner,
+    )
+
+    sock = str(tmp_path / "adopt" / "redis.socket")
+    key = os.path.abspath(sock)
+    try:
+        assert record_owner(sock) is True
+        assert record_owner(sock) is False
+        assert _owner_refcounts.get(key) == 2, "test setup: two inherited claims"
+        monkeypatch.setattr(
+            "tortoise.embedded_lifecycle._write_owner_record_file",
+            lambda _sock: False)
+        with caplog.at_level(_logging.ERROR,
+                             logger="tortoise.embedded_lifecycle"):
+            _adopt_owner_records_after_fork()
+        assert _owner_refcounts.get(key) == 2, (
+            "#3630: the hook must PRESERVE the inherited count, never rebuild "
+            "it as 1")
+        assert any("could NOT write its owner record" in rec.getMessage()
+                   for rec in caplog.records), (
+            "#3630: a child that cannot write its own record is a live owner "
+            "invisible to the reaper — it must fail LOUDLY, not silently")
+    finally:
+        _owner_refcounts.pop(key, None)
+        _fd = _owner_lock_fds.pop(key, None)
+        if _fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(_fd)
+
+
 # ── #4487: EVERY redislite construction writes an owner record ────────────
 # The guarded `tortoise.FalkorDB` used to be the only writer, so a RAW
 # `redislite.falkordb_client.FalkorDB(...)` / `redislite.client.Redis(...)`
