@@ -84,6 +84,17 @@ _CAPACITY_FRESH_FIELDS = (
 I1_RECORD_WINDOW_DAYS = 90
 
 GAP_TERM_MIN = 6
+#: The six named terms of the gap decomposition (S13). The count floor alone
+#: would let arbitrary sourced keys stand in for a missing named term.
+_GAP_TERMS = frozenset({
+    "effective_parallel", "effective_batch", "cycle_minutes", "wait",
+    "ceiling", "observed",
+})
+#: Checks that implement a real freshness test for `--require-fresh`.
+_FRESHNESS_CHECKS = frozenset({
+    "main-gate", "queue-entry", "batch-size", "cycle", "attribution",
+    "capacity", "parallelism-headroom", "gap", "no-languish", "drain-rate",
+})
 # S13: `.gap.value` is independently measured as ceiling / observed, so the
 # reconciliation can fail. Tolerance stated numerically (±10%).
 GAP_VALUE_TOLERANCE = 0.10
@@ -308,16 +319,30 @@ def _group_runs(runs, workflow_of=None) -> dict:
     return groups
 
 
+def _is_sha(value) -> bool:
+    """A real commit sha, never an UNKNOWN sentinel.
+
+    Two identical sentinels compare equal, so a truthy-but-unknown value would
+    satisfy a head-binding check that only tested truthiness and equality.
+    """
+    if not isinstance(value, str):
+        return False
+    token = value.strip()
+    return bool(token) and token.upper() != UNKNOWN
+
+
 def _newest(group: list[dict]):
     """Newest attempt by `id`, or None when the group cannot be totally ordered.
 
     A partial order is not an order: if any attempt in a multi-attempt group
-    lacks an integer `id`, list order would decide the newest and an older red
-    could be shadowed by a newer green. That is UNKNOWN, never GREEN.
+    lacks an integer `id`, or two attempts share an `id`, list order would
+    decide the newest and an older red could be shadowed by a newer green.
+    That is UNKNOWN, never GREEN.
     """
     if len(group) == 1:
         return group[0]
-    if any(_run_id(run) is None for run in group):
+    ids = [_run_id(run) for run in group]
+    if any(i is None for i in ids) or len(set(ids)) != len(ids):
         return None
     return max(group, key=_run_id)
 
@@ -867,7 +892,7 @@ def _check_main_gate(payload: dict, opts: dict) -> int:
     if opts.get("require_fresh"):
         record_sha = payload.get("sha")
         live_sha = payload.get("live_main_sha")
-        if not record_sha or not live_sha or record_sha != live_sha:
+        if not _is_sha(record_sha) or not _is_sha(live_sha) or record_sha != live_sha:
             print("2: main-gate evidence is not bound to the live main sha")
             return 2
     if opts.get("strict"):
@@ -1060,7 +1085,7 @@ def _check_queue_entry(payload: dict, opts: dict) -> int:
     if opts.get("require_fresh"):
         head = payload.get("head_sha")
         run_sha = payload.get("run_sha")
-        if not head or not run_sha or head != run_sha:
+        if not _is_sha(head) or not _is_sha(run_sha) or head != run_sha:
             print("2: queue-entry evidence is not on the PR's current head")
             return 2
         if not _age_ok(payload.get("verified_at"), DEFAULT_RECORD_WINDOW_DAYS):
@@ -1385,6 +1410,10 @@ def _check_gap(payload: dict, opts: dict) -> int:
     if not isinstance(terms, dict) or len(terms) < GAP_TERM_MIN:
         print(f"2: .gap.terms must carry at least {GAP_TERM_MIN} terms")
         return 2
+    missing = sorted(_GAP_TERMS - set(terms))
+    if missing:
+        print(f"2: .gap.terms is missing the named decomposition term(s) {missing}")
+        return 2
     for key, term in terms.items():
         if not isinstance(term, dict):
             return 2
@@ -1625,6 +1654,11 @@ def run_check(name: str, json=None, **opts) -> int:
     if name not in CHECK_NAMES:
         print(f"2: unknown check {name!r}")
         return 2
+    if opts.get("require_fresh") and name not in _FRESHNESS_CHECKS:
+        # Accept-and-ignore would let a stale record pass while the flag reads
+        # as an enforced freshness gate.
+        print(f"2: {name} implements no freshness test; --require-fresh is refused")
+        return 2
     payload = json
     if payload is None:
         payload = collect_payload(name, opts)
@@ -1731,7 +1765,7 @@ def build_report(fixture=None):
         "max_batch_size": batch.get("max_batch_size", UNKNOWN),
         "shard_imbalance_minutes": UNKNOWN,
         "queue_depth": UNKNOWN,
-        "fast_files_unclassified": ff.get("fast_files_unclassified", []),
+        "fast_files_unclassified": ff.get("fast_files_unclassified", UNKNOWN),
         "conflicts": {
             "total": conflicts.get("total_count", UNKNOWN),
             "items": conflicts.get("items", []),
@@ -1747,7 +1781,7 @@ def build_report(fixture=None):
         },
         "durations_map": {
             "age_days": dm.get("age_days", UNKNOWN),
-            "sampled_keys": dm.get("sampled_keys", 0),
+            "sampled_keys": dm.get("sampled_keys", UNKNOWN),
             "tolerance": dm.get("tolerance", UNKNOWN),
         },
     }
