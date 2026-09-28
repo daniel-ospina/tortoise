@@ -1055,6 +1055,23 @@ def _redact_turn_contents(
     blanket "idempotent" claim that ignored this is exactly what would invite
     the P1 back (a 6,927-char turn became ``original length 5,008`` on the
     second pass).
+
+    ⛔ THE CLIP IS DECIDED ON THE MARKER-FREE BODY, NEVER ON THE MARKER'S
+    PRESENCE (round-3 P1). A marker is CALLER-SUPPLIED text; treating one as
+    proof that this module already clipped the turn exempted the whole body from
+    the cap, so any client could smuggle an unbounded turn past it by appending
+    a marker-shaped tail (reproduced: a 2,000,038-char body at ``cap=5000``),
+    and a bare-sentinel tail yielded a marker with NO total — the exact lie
+    #4897 exists to remove. The invariant is now STRUCTURAL: the text scanned is
+    the marker-free ``body``, and ``len(body) > cap`` clips it (re-deriving the
+    marker from the body's OWN length) whether or not a marker was present. A
+    caller's marker is preserved verbatim only while the body it describes
+    already fits ``cap`` — the state THIS module leaves behind, since it reserves
+    the marker INSIDE the cap and a #4911 replacement grows the body only by the
+    redaction markup. A marker that arrives on a body PAST ``cap`` therefore
+    cannot vouch for that body: the body is clipped and the caller's claim is
+    replaced by the length actually seen. The window is a bound, so a claim
+    needing a longer body than the cap can never be honoured.
     """
     out: list[dict] = []
     totals: dict[str, int] = {}
@@ -1070,15 +1087,24 @@ def _redact_turn_contents(
         # #4897: split the truncation marker (if any) OFF the text that gets
         # SCANNED — a fail-closed redaction (``private_key``'s ``\Z`` branch)
         # would otherwise consume the marker and store a cut turn unmarked.
-        # An ALREADY-marked body is left alone here (never re-clipped): its
-        # marker carries the TRUE total, so re-deriving one from the scrubbed
-        # length would be the round-1 P1 all over again.
         body, marker = _split_truncation_marker(content)
-        if not marker and cap is not None and len(content) > cap:
-            # #4897: clip WITH the marker — a capped scan that returned a
-            # silently-shortened string is the same defect one layer down.
+        # #4897 round-3 P1: the clip is decided on the MARKER-FREE BODY, never
+        # on the marker's presence. A marker is caller-supplied, so trusting it
+        # as proof of "already clipped" exempted the body from the cap and let
+        # any client store an unbounded turn by appending a marker-shaped tail.
+        # Clipping on ``len(body)`` bounds every caller — raw or windowed — while
+        # leaving a body THIS module already clipped (and its true ``total``)
+        # alone: the marker is reserved INSIDE the cap, so that body fits and is
+        # not touched. A marker on a body PAST the cap cannot vouch for the
+        # body, so the body is clipped and a fresh marker — derived from the
+        # body's own length — replaces the caller's claim; ``_split_truncation_
+        # marker`` pulls that fresh marker back out so the scan input stays
+        # marker-free (the round-2 P2). Clip WITH the marker: a capped scan that
+        # returned a silently-shortened string is the same defect one layer
+        # down.
+        if cap is not None and len(body) > cap:
             body, marker = _split_truncation_marker(
-                _clip_capture_turn_content(content, cap))
+                _clip_capture_turn_content(body, cap))
             cut = True
         # #5445: the role is caller-controlled and persisted as text by three
         # sinks, so it is coerced and scrubbed through this same chokepoint. The

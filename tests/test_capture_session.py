@@ -4384,6 +4384,47 @@ def test_capture_turn_texts_bounds_a_raw_over_cap_conversation():
     assert f"original length {len(content)} chars]" in body
 
 
+def test_a_caller_supplied_marker_cannot_defeat_the_cap():
+    """#4897 round-3 P1: a marker-shaped tail is NOT proof of an earlier clip.
+
+    The pre-fix guard skipped the clip whenever ANY marker was found, but the
+    marker is CALLER-SUPPLIED text and nothing verified it. A client could
+    append one to an unbounded body and store it whole (reproduced: a
+    2,000,038-char body at ``cap=5,000``); a bare-sentinel tail produced a marker
+    with NO total at all. The clip is now decided on the marker-FREE body, so the
+    raw caller is genuinely bounded and the recorded total is the length of the
+    body actually clipped — not the caller's claim.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts_with_redactions,
+    )
+    body_text = "A" * 2_000_000
+    for tail, label in (
+        (f"{_CAPTURE_TRUNCATION_SENTINEL} original length 1 chars]",
+         "lying total"),
+        (_CAPTURE_TRUNCATION_SENTINEL, "bare sentinel, no total"),
+    ):
+        content = body_text + tail
+        texts, _counts = _capture_turn_texts_with_redactions(
+            [{"role": "user", "content": content}])
+        body = texts[0][len("[user] "):]
+        assert len(body) <= _CAPTURE_TURN_CAP, (
+            f"{label}: a caller-supplied marker defeated the cap — got "
+            f"{len(body)} chars")
+        assert _CAPTURE_TRUNCATION_SENTINEL in body, label
+        assert f"original length {len(body_text)} chars]" in body, (
+            f"{label}: the marker must carry the length of the body actually "
+            "clipped, not the caller's claim (or no total at all)")
+        assert "original length 1 chars]" not in body, (
+            f"{label}: the caller's claim survived as the recorded total")
+    # Control: the bound is the same one the no-marker raw caller already got.
+    control, _c = _capture_turn_texts_with_redactions(
+        [{"role": "user", "content": body_text}])
+    assert len(control[0][len("[user] "):]) <= _CAPTURE_TURN_CAP
+
+
 def test_extract_session_llm_windows_a_raw_over_cap_conversation(
         sdk, monkeypatch):
     """#4897 round-2 P3: the M2 seam windows its own input.

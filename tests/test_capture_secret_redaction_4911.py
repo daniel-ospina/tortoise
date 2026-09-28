@@ -625,6 +625,60 @@ def test_capped_reapplication_preserves_the_true_total():
         "the false post-redaction total was written on re-application")
 
 
+def test_rfind_not_find_so_an_earlier_lookalike_cannot_hide_the_marker():
+    """#4897 round-3 P3/M10: ``rfind`` is load-bearing, and was untested.
+
+    ``_split_truncation_marker`` must find the marker THIS module appended — the
+    LAST sentinel in the text. If it used ``content.find`` it would take an
+    EARLIER sentinel-lookalike as the split point; the tail would then no longer
+    ``fullmatch`` a marker, the split would return the whole content UNSPLIT,
+    and the real trailing marker would enter the scan, where ``private_key``'s
+    fail-closed ``\\Z`` branch eats it. The cut turn is stored UNMARKED — the
+    round-2 P2 returns. The lookalike is ordinary user prose, so this is a body
+    any client can send.
+    """
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL as S
+    # Inside the cap, so the round-3 pre-scan clip is NOT the behaviour under
+    # test — only which sentinel the split picks.
+    content = (
+        "user pasted earlier: " + S + " original length 1 chars] "
+        + "x" * 200 + " " + _pem("RSA PRIVATE KEY") + "\n"
+        + "MIIEowIBAAKCAQEA" * 40 + " "
+        + S + " original length 1234 chars]")
+    assert len(content) <= 5000, "keep the clip out of this fixture"
+    out, _counts = _redact_turn_contents(
+        [{"role": "user", "content": content}], cap=5000)
+    stored = out[0]["content"]
+    assert "original length 1234 chars]" in stored, (
+        "an earlier sentinel-lookalike moved the split point: the real marker "
+        "entered the scan and a fail-closed rule ate it")
+
+
+def test_a_marker_lookalike_cannot_hide_a_credential_tail():
+    """#4897 round-3 P3/M11: ``fullmatch`` is load-bearing, and was untested.
+
+    ``_split_truncation_marker`` returns the ENTIRE tail from the sentinel to
+    end-of-text as the marker. If recognition used ``search`` instead of
+    ``fullmatch``, a marker-shaped PREFIX followed by a credential would be
+    classified as a marker and re-attached VERBATIM — the tail is never scanned,
+    so the credential is STORED. ``fullmatch`` means a tail with anything after
+    the marker is not a marker at all, and the credential stays in the scanned
+    body. Security-relevant: ``search`` leaks.
+    """
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL as S
+    key = "AKIA" + "ABCDEFGHIJKLMNOP"          # aws_access_key_id, 20 chars
+    content = "filler. " * 50 + S + " original length 5 chars] " + key
+    assert len(content) <= 5000, "keep the clip out of this fixture"
+    out, counts = _redact_turn_contents(
+        [{"role": "user", "content": content}], cap=5000)
+    assert key not in out[0]["content"], (
+        "a credential AFTER a marker-shaped prefix was re-attached verbatim — "
+        "the tail would then never be scanned")
+    assert counts.get("aws_access_key_id") == 1, (
+        "the credential under a marker lookalike must be COUNTED, not just "
+        "absent by accident")
+
+
 def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     """The Source scrub is bounded, and a non-str content cannot dodge it.
 
