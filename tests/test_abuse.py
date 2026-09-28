@@ -544,6 +544,65 @@ class TestFakeTrigger:
         assert alerts and alerts[0]["type"] in ("suspend", "flag")
 
 
+# ── PostgREST order dialect at the store's call sites (#4037) ──────────────
+
+class TestAbuseOrderParam:
+    """#4037: ``SupabaseAbuseStore`` transmitted ``order="-created_at"``, which
+    PostgREST rejects (``PGRST100`` / HTTP 400). Every consumer of these reads
+    is fail-soft, so the 400 was swallowed — Stage-2 suspension never ran and
+    ``/v1/team/alerts`` was permanently empty. The only coverage was over
+    ``FakeControlPlane``, which implemented the SAME invalid ``-col`` dialect:
+    the double was the mask, not the guard."""
+
+    class _CapturingCP:
+        def __init__(self):
+            self.orders: list[str | None] = []
+
+        def query(self, table, **kw):
+            self.orders.append(kw.get("order"))
+            # A row so `latest_flag_at` proceeds to its SECOND (newest-clear)
+            # read — the early `if not rows: return None` would otherwise skip
+            # that site, leaving it unpinned.
+            return [{"created_at": "2026-01-01T00:00:00+00:00"}]
+
+    def test_abuse_store_sends_the_postgrest_order_dialect(self):
+        """Pin the transmitted ``order`` at the store's three descending
+        sites. REDs per site when any is reverted to ``-created_at`` — the
+        wire-param assertion a fake-based test could never make."""
+        from tortoise.abuse import SupabaseAbuseStore
+        cp = self._CapturingCP()
+        store = SupabaseAbuseStore(cp)
+        store.latest_flag_at("t1", "point_create")  # newest flag + newest clear
+        store.recent_alerts("t1")
+        assert cp.orders == ["created_at.desc"] * 3, cp.orders
+        assert not any(o and o.startswith("-") for o in cp.orders)
+
+    def test_captured_abuse_order_is_accepted_by_the_fake(self):
+        """Oracle cross-check (#4037): feed the CAPTURED wire string into the
+        real ``FakeControlPlane`` and require (a) no raise and (b)
+        newest-first. This is what ties the double's semantics to the
+        client's wire form; a lane that changes production to a spelling the
+        double rejects reds here."""
+        from tortoise.abuse import SupabaseAbuseStore
+        from tests.fake_control_plane import FakeControlPlane
+        cp = self._CapturingCP()
+        store = SupabaseAbuseStore(cp)
+        store.latest_flag_at("t1", "point_create")
+        store.recent_alerts("t1")
+
+        fake = FakeControlPlane(tables={"abuse_events": [
+            {"org_id": "t1", "event_type": "flag", "rule": "point_create",
+             "created_at": "2026-01-01T00:00:00+00:00"},
+            {"org_id": "t1", "event_type": "flag", "rule": "point_create",
+             "created_at": "2026-03-01T00:00:00+00:00"},
+        ]})
+        for order in cp.orders:
+            rows = fake.query("abuse_events", select=["created_at"],
+                              order=order)
+            assert rows, order
+            assert rows[0]["created_at"] == "2026-03-01T00:00:00+00:00", order
+
+
 # ── notify_abuse (Task 4) ───────────────────────────────────────────────────
 
 class TestNotifyAbuse:
