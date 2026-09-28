@@ -7,14 +7,24 @@ the permissive ``cwd → global`` order, so the repo both **authorized** and
 **redirected** the upload of the full session transcript — on a host with no
 env key, the user's own global identity was simply shadowed.
 
-Fix: ``session capture`` / ``session drain`` / ``sessions import`` resolve
-through ``_resolve_transmit_config()`` — the user-global config only, the same
-posture the per-turn reflex and the session-start digest already had
-(#2369 D1.2).  Env is still honoured (#2369 D1.1 co-sources its URL with its
-key).  These tests assert the identity that reaches the UPLOADER, so every
-"attacker" case FAILS on the permissive resolver and PASSES once the surface
-is hardened; the last case pins that the documented env-keyed setup still
-transmits.
+Fix: every subcommand that resolves through ``_cmd_session``'s pre-dispatch
+resolver — ``capture`` / ``probe`` / ``verify`` / ``list`` / ``view``, plus
+``drain`` and ``sessions import`` — now uses ``_resolve_transmit_config()``,
+which excludes the cwd ``./.tortoise`` FILE candidate and keeps the
+user-global ``~/.tortoise/credentials.json`` as the only file candidate.
+
+DIVERGENCE (known, not endorsed): this is NOT the ``context`` / ``volunteer``
+posture.  Those pass ``include_env=False, global_only=True``; this resolver
+leaves ``include_env=True``, so an env KEY + URL pair still fully chooses the
+identity (the D1.1 co-source rule only prevents a bare ``TORTOISE_API_URL``
+from redirecting a *file*-store key).  Removing env support is a documented
+setup change and is PENDING AN OWNER DECISION, so
+``test_env_identity_still_honoured_for_capture`` pins the CURRENT behaviour —
+a known divergence — rather than a desired end state.
+
+These tests assert the identity that reaches the UPLOADER, so every "attacker"
+case FAILS on the permissive resolver and PASSES once the surface is
+hardened.
 
 MUTATIONS THAT RED THESE:
   * change ``_resolve_transmit_config`` back to ``_resolve_config_path()``
@@ -185,6 +195,28 @@ def test_repo_config_alone_does_not_authorize_drain(places, monkeypatch):
     assert called == [], "the repo config authorized a spool drain"
 
 
+def test_repo_config_alone_does_not_authorize_read_only_list(places, monkeypatch,
+                                                            capsys):
+    """The resolver swap runs BEFORE dispatch in ``_cmd_session``, so the
+    read-only subcommands lost the cwd candidate too — prove that is the
+    intended posture for them, not an accident of dispatch order.
+
+    READ-ONLY is not "harmless": ``session list`` and ``session view`` still
+    send the user's Bearer key to whatever host the config names, so a
+    repo-chosen host would receive the user's credential (and the session
+    index).  With ONLY a repo ``.tortoise`` present, ``list`` must refuse."""
+    (places.home / ".tortoise" / "credentials.json").unlink()
+    called = []
+    monkeypatch.setattr(main, "_cmd_session_list",
+                        lambda *a, **k: called.append(a) or 0)
+
+    rc = main._cmd_session(SimpleNamespace(session_cmd="list"))
+
+    assert rc == 1
+    assert called == [], "the repo config authorized a credentialled list call"
+    assert "No .tortoise config found" in capsys.readouterr().err
+
+
 def test_repo_config_alone_does_not_authorize_import(places, tmp_path,
                                                      monkeypatch):
     monkeypatch.setenv("TORTOISE_CAPTURE", "1")
@@ -204,9 +236,16 @@ def test_repo_config_alone_does_not_authorize_import(places, tmp_path,
 
 
 def test_env_identity_still_honoured_for_capture(places, monkeypatch):
-    """The fix narrows the FILE candidate list, not env: an explicit
-    `TORTOISE_API_KEY` + co-sourced `TORTOISE_API_URL` is a single, coherent,
-    user-controlled identity and must keep working."""
+    """PINS A KNOWN DIVERGENCE, not a desired end state.
+
+    The fix narrows the FILE candidate list, not env: an explicit
+    `TORTOISE_API_KEY` + co-sourced `TORTOISE_API_URL` is still a complete
+    identity for this resolver, so the documented env-keyed setup keeps
+    working.  `context` / `volunteer` pass `include_env=False` and would NOT
+    transmit on env alone — that asymmetry is open pending the owner decision
+    on whether the env channel should be honoured here at all.  This test
+    records the behaviour so a change to it is visible, and must be updated
+    (not deleted) when that decision lands."""
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_env")
     monkeypatch.setenv("TORTOISE_API_URL", "https://env.example.com")
     seen: dict = {}

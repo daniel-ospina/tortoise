@@ -1740,8 +1740,11 @@ def _resolve_config_path(include_env: bool = True, *,
       session-start hosted digest) resolve their identity from the user-global
       config only; a repo-supplied .tortoise must never authorize transmission
       to a host the repo (attacker-controllable) chose. The transcript-upload
-      family (#3660 — `session capture` / `session drain` / `sessions import`)
-      resolves through `_resolve_transmit_config()`, the same posture.
+      family (#3660 — `session capture` / `session probe` / `session verify` /
+      `session list` / `session view` / `session drain` / `sessions import`)
+      resolves through `_resolve_transmit_config()`, which uses this
+      `global_only` FILE posture but leaves `include_env=True` — see that
+      function's docstring for the divergence.
     """
     import json as _json
     import os as _os
@@ -1786,20 +1789,41 @@ def _resolve_config_path(include_env: bool = True, *,
 
 
 def _resolve_transmit_config() -> tuple[Path | None, dict | None, str | None, str | None]:
-    """Resolve identity for a TRANSMITTING surface — cwd config excluded.
+    """Resolve identity for a TRANSMITTING surface — the cwd file is excluded.
 
-    The transcript-upload family (#3660) shares the `global_only` posture the
-    per-turn reflex and the session-start digest already had (#2369 D1.2):
-    `session capture`, `session drain` and `sessions import` all POST session
-    content, so a repo-committed `./.tortoise` — attacker-controllable — must
-    never choose the host that content is sent to. Skipping the cwd candidate
-    is what makes the upload fail CLOSED (no key → no transmission) instead of
-    quietly filing the transcript at a repo-chosen endpoint.
+    Every subcommand that reaches this resolver — `session capture`,
+    `session probe`, `session verify`, `session list`, `session view`,
+    `session drain` and `sessions import` — resolves its identity here, so the
+    exchange below applies to all of them (the resolver runs before dispatch in
+    `_cmd_session`, so even the read-only subcommands are narrowed). A
+    repo-committed `./.tortoise` is attacker-controllable and must never choose
+    the host a transcript — or a stored Bearer key — is sent to; skipping the
+    cwd candidate is what makes those surfaces fail CLOSED (no identity → no
+    transmission) instead of quietly filing content at a repo-chosen endpoint.
 
-    Env is still honoured: it is an explicit, user-controlled source, and the
-    resolver co-sources its URL with its key (D1.1), so a bare
-    `TORTOISE_API_URL` can never redirect a file-store key. Only the FILE
-    candidate list is narrowed.
+    ⚠️ What is actually true, and where this DIVERGES from the surfaces the
+    original change claimed to mirror:
+
+    * The cwd `./.tortoise` candidate is excluded, and
+      `~/.tortoise/credentials.json` is the only *FILE* candidate.
+    * The env channel is NOT excluded. This call is
+      `_resolve_config_path(global_only=True)`, which leaves
+      `include_env=True`; `context` and `volunteer` both pass
+      `include_env=False, global_only=True`, so **env alone can still make
+      these surfaces transmit** where it cannot for those two. The
+      "same posture as context/volunteer" claim is FALSE.
+    * The D1.1 co-source rule only stops a bare `TORTOISE_API_URL` from
+      redirecting a *file*-store key. An env-supplied KEY + URL is still one
+      coherent identity that fully chooses the host, and that pair is
+      reachable from a repo-committed harness config (e.g.
+      `.claude/settings.json`'s `env` block, applied to the hook subprocesses
+      this repo installs) — so the env channel remains a complete identity
+      source for the `session capture` / `drain` / `import` uploaders.
+    * Removing env here is a USER-FACING behaviour change (env-keyed setup is
+      documented: `docs/quickstart-cloud.md`) and is PENDING AN OWNER
+      DECISION; it is deliberately not done in the #3660 commit.
+      `test_env_identity_still_honoured_for_capture` pins the current
+      behaviour as a known divergence, not as the desired end state.
     """
     return _resolve_config_path(global_only=True)
 
@@ -3494,10 +3518,13 @@ def _cmd_session(args) -> int:
         # error the caller can act on.
         return _cmd_session_drain_best_effort(args)
 
-    # Transmitting-identity resolver (#2369 D1.2, #3660): `session capture`
-    # POSTs the full transcript, so a repo/cwd `./.tortoise` must never choose
-    # the host it is sent to — resolve the user-global config only. Env is
-    # still honoured (its URL is co-sourced with its key, D1.1).
+    # Transmitting-identity resolver (#2369 D1.2, #3660): this resolver runs
+    # BEFORE dispatch, so the uploaders (`capture`) and the read-only
+    # subcommands (`probe` / `verify` / `list` / `view`) all share it — a
+    # repo/cwd `./.tortoise` must never choose the host they talk to. Note the
+    # env channel remains an identity source here (unlike `context` /
+    # `volunteer`, which pass `include_env=False`); see
+    # `_resolve_transmit_config` for the divergence.
     try:
         _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
@@ -3505,10 +3532,11 @@ def _cmd_session(args) -> int:
               "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
     if api_key is None:
-        print("No user-global .tortoise config found — session uploads resolve "
-              "their identity from ~/.tortoise/credentials.json or "
-              "TORTOISE_API_KEY only; a repo-local ./.tortoise never chooses "
-              "the upload host (#3660).", file=sys.stderr)
+        print("No .tortoise config found — session uploads resolve their "
+              "identity from the user-global config only "
+              "(~/.tortoise/credentials.json or TORTOISE_API_KEY); a repo-local "
+              "./.tortoise never chooses the upload host (#3660). Run "
+              "'tortoise init --api-key <key>' first.", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":
@@ -4760,10 +4788,11 @@ def _cmd_sessions_import(args) -> int:
         _record_capture_error(harness, f"invalid config at {e}")
         return 1
     if api_key is None:
-        print("No user-global .tortoise config found — session uploads resolve "
-              "their identity from ~/.tortoise/credentials.json or "
-              "TORTOISE_API_KEY only; a repo-local ./.tortoise never chooses "
-              "the upload host (#3660).",
+        print("No .tortoise config found — session uploads resolve their "
+              "identity from the user-global config only "
+              "(~/.tortoise/credentials.json or TORTOISE_API_KEY); a repo-local "
+              "./.tortoise never chooses the upload host (#3660). Run "
+              "'tortoise init --api-key <key>' first.",
               file=_sys.stderr)
         _record_capture_error(
             harness, "no user-global .tortoise config found (a repo-local "
