@@ -461,10 +461,7 @@ class TestAuthorizePage:
     # the exact CDN semver, `flowType: "pkce"`, `SIZE_GUARD` and `SIZE_CAP`.
     # The #1701 behaviours are NOT in that harness: the multi-org picker
     # (`org-select`), the refresh-first preview recovery, the absence of
-    # `signOut` and the in-flight guard stay static-only pins here. (An earlier
-    # revision of this comment said "the page JS has no jsdom harness in this
-    # repo" — true when written, false since #3496 — and two later revisions
-    # claimed the harness executed the whole class, which it does not.)
+    # `signOut` and the in-flight guard stay static-only pins here.
 
     def _consent_html(self, api_client, *, client_name: str = "test-connector") -> str:
         tc, _ = api_client

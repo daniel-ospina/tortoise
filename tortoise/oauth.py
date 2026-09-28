@@ -1896,18 +1896,24 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // custom storage when persistSession is false, review P0) and
   // setItem/removeItem are REAL writes — getSession() always re-reads
   // storage, so an ingested OAuth/email session must persist to the cookie
-  // or the sign-in fallback loops. detectSessionInUrl stays true so the
-  // provider redirect back with #access_token is ingested.
+  // or the sign-in fallback loops. detectSessionInUrl stays TRUE, but not to
+  // ingest a token fragment: #3496 moved this flow to PKCE, so the provider
+  // returns `?code=` in the QUERY, and the library gates the code exchange on
+  // this flag (an implicit-style fragment return is refused by the bundle).
   // #3503: this page is the ONE place it stays true — it does NOT load
   // website/assets/supabase-session.js (that file's factory sets it false,
-  // because its load-time IIFE is the fragment consumer there), so this
-  // inline client is the sole consumer of the hash and must ingest it.
+  // because its load-time IIFE is the fragment consumer there). loadParams()
+  // below still merges the hash, because a provider REFUSAL arrives there.
   const COOKIE_NAME = "sb-tortoise-auth-token";
-  // #1704: parent-domain cookie storage — a faithful port of the
-  // dashboard's supabaseStorage (website/assets/supabase-session.js):
-  // getItem reads an existing dashboard session (no second login),
-  // setItem/removeItem persist sign-ins here (the OAuth/email fallback
-  // needs a REAL write — getSession() always re-reads storage).
+  // #1704: parent-domain cookie storage — the COOKIE mechanics (name, domain
+  // and secure attributes, size guard; getItem reads an existing dashboard
+  // session so there is no second login; setItem/removeItem are REAL writes,
+  // because getSession() always re-reads storage) are ported from the
+  // dashboard's supabaseStorage (website/assets/supabase-session.js). #3496
+  // SPLITS the provenance: the KEY-IDENTITY ROUTING below is ported from the
+  // blog-admin console's authStorage (website/apps/blog-admin/src/lib/
+  // supabase.ts) — that bridge has no key routing at all, it writes whatever
+  // key it is handed to the cookie, which is the hole this adapter now closes.
   // Method shorthand so `this` binds to the object (arrow functions
   // would bind window). Size guard + localhost-aware domain/secure
   // attributes mirror the canonical adapter.
@@ -1956,15 +1962,19 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // whose accepted-size band sits between the probe and the real value (or which
   // refuses removal only once it holds something) would pass the probe and then
   // orphan the credential. This re-verifies per store, at write time, with a
-  // payload of the REAL length under a THROWAWAY key — so a store that cannot be
-  // cleaned never receives the credential itself (only its own probe entry).
+  // payload of the REAL length under a THROWAWAY key — and that payload is a
+  // DUMMY of the same length, never the credential itself: a store that accepts
+  // the write but SILENTLY IGNORES removal would otherwise retain the verifier
+  // under `probeKey`, a key no path can ever clean. Cleanability of the real
+  // value is still proven separately, by the read-back of the real key below.
   const writeAux = (key, value) => {
     const v = String(value);
+    const probe = "x".repeat(v.length);
     const probeKey = "__tt_wprobe-" + Math.random().toString(16).slice(2).padEnd(32, "0");
     for (const s of auxStores()) {
       try {
-        s.setItem(probeKey, v);
-        if (s.getItem(probeKey) !== v) throw 0;
+        s.setItem(probeKey, probe);
+        if (s.getItem(probeKey) !== probe) throw 0;
         s.removeItem(probeKey);
         if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
         s.setItem(key, v);
@@ -2055,7 +2065,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           storageKey: COOKIE_NAME,
           persistSession: true,   // required for the custom storage to be used
           autoRefreshToken: false,
-          detectSessionInUrl: true,  // OAuth fallback ingests the hash
+          detectSessionInUrl: true,  // gates the PKCE ?code exchange (_initialize)
           // #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
           // browser-based client. Explicit PKCE; the code_verifier is routed to
           // the origin-scoped aux chain by the adapter above, never the cookie.

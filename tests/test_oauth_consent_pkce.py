@@ -40,11 +40,17 @@ Invariants pinned here:
  7 item 6 write-path parity: ≤SIZE_GUARD byte-identical, >SIZE_GUARD stripped AND
    actually written (asserting `strippedWrites >= 1`, so removing the strip cannot
    pass by falling through to the refusal), >SIZE_CAP refused AND page-reported
+ 8 version coupling: the page's CDN specifier EQUALS the version of the vendored
+   bundle this harness executes (pure text/path, no node — see
+   `test_page_specifier_matches_the_vendored_bundle_version`)
  9 no WebCrypto refuses locally; with the guard removed the bundle downgrades
    to `code_challenge_method=plain` (the paired control)
 11 the return target is canonicalised (no transient echoed), with a
    guard-removed control that DOES carry it
 12 the aux stores hold no verifier after the removal path
+13 the WRITER proves, for the real key and the real value, that the store which
+   receives the verifier can also remove it — a store that fails that proof is
+   skipped, never written to (`test_inv13_...`, A5 writer half)
 
 Every field the tests assert on is produced by the page's own code running in the
 context, never read back from a shim.
@@ -92,8 +98,14 @@ def _vendored_bundle() -> Path:
     return files[0]
 
 
-def _render_page(*, search: str = "") -> str:
-    """Render the consent page with the pure renderer (no app boot)."""
+def _render_page() -> str:
+    """Render the consent page with the pure renderer (no app boot).
+
+    Note: the load-time URL is supplied to the DRIVER (`_run(..., search=...)`),
+    not here — `consent_page_html` takes no URL. A `search` parameter on this
+    renderer would be inert, and a caller reaching for it to build a
+    ``?error=…`` case would silently exercise a clean load.
+    """
     sys.path.insert(0, str(REPO_ROOT))
     from tortoise.oauth import consent_page_html
 
