@@ -1489,7 +1489,6 @@ surfaces:
   - eval/retrieval/test_1348.py
   - eval/retrieval/test_bootstrap.py
   - eval/retrieval/test_gate_1349.py
-  - eval/retrieval/test_integration.py
   - eval/retrieval/test_judge.py
   - eval/retrieval/test_metrics.py
   - eval/retrieval/test_oracle.py
@@ -1589,7 +1588,6 @@ tier1:
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
-- eval/retrieval/test_integration.py
 - test_about_edges.py
 - test_backfill_sources.py
 - test_billing.py
@@ -2507,3 +2505,32 @@ durations:
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_helpers.py: 0.0  # unmeasured
+
+# ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
+# A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
+# out). It is run only by `.github/workflows/evals-on-demand.yml`
+# (`workflow_dispatch`), which is the point.
+#
+# WHY A LANE AND NOT JUST DELETING IT FROM slow_files: `fast_pool()` is
+# defined as "everything not slow / env-broken / carve-out", so removing a
+# file from `slow_files` moves it INTO the fast matrix — the opposite of what
+# is wanted. There is no "runs nowhere on the pre-merge gate" state, so this
+# key creates one, and `leg_coverage_issues()` is taught about it so a file
+# cannot sit here unclassified and unnoticed either.
+#
+# WHAT IS HERE, AND WHY:
+#   eval/retrieval/test_integration.py — 25.4 min, 24.9% of ALL measured
+#   test time, and the single dominant cost of the `test-slow (b)` leg
+#   (24.9 of its 27.4 min). Its own docstring says it is a WARN-ONLY harness
+#   smoke: it asserts the eval runner's REPORT SHAPE (schema_version, the
+#   strategy set, ndcg within [0,1], gate verdict membership) and states it is
+#   "never asserted for absolute quality". It is a calibration instrument for
+#   the retrieval pipeline, not a merge gate: a PR cannot break a customer by
+#   changing whether a report contains its strategy keys, and the value it
+#   provides at merge time does not justify 25 minutes of the critical path
+#   for every PR in a 176-deep queue.
+#
+#   The genuinely cheap eval unit tests (schema / metrics / grading, all
+#   sub-second) stay in the merge path — they are real contracts.
+on_demand:
+  - eval/retrieval/test_integration.py

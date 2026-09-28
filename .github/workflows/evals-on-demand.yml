@@ -1,0 +1,140 @@
+# On-demand evals — the pipeline-running tests that must NOT gate a merge
+#
+# WHY THIS WORKFLOW EXISTS
+# `config/ci-surfaces.yml` `on_demand:` lists test files that execute the real
+# retrieval/write-path harness rather than assert a contract. They are
+# excluded from EVERY pre-merge leg (fast halves, slow, carve-out) by
+# `tools/ci_selection.py::on_demand_files`, and run only here.
+#
+# The file this lane was created for, `eval/retrieval/test_integration.py`,
+# was 25.4 min — 24.9% of ALL measured test time in this repo, and 24.9 of the
+# 27.4 min of the `test-slow (b)` leg. Its own docstring says it is warn-only:
+# it asserts the eval runner's REPORT SHAPE (schema_version, the strategy set,
+# ndcg within [0,1], gate-verdict membership) and declares itself "never
+# asserted for absolute quality". Nothing in it can tell a PR that it broke a
+# customer; it is a calibration instrument for the retrieval pipeline.
+#
+# It still has to RUN — a calibration instrument that is never run is
+# documentation. Hence this workflow, which is the lane's ONLY runner.
+#
+# WHY NOT JUST DROP IT FROM slow_files
+# `fast_pool()` is "every classified file that is not slow / env-broken /
+# carve-out". Deleting a `slow_files` entry therefore moves the file INTO the
+# fast matrix and onto the gate — the exact opposite of the intent. The lane
+# is what creates a "runs, but does not gate" state, and
+# `leg_coverage_issues()` fails closed if a file is in the lane and still in a
+# gated leg (the lane would then be a no-op that reads like a saving).
+#
+# THE FILE LIST IS READ FROM THE CONFIG, NOT HARDCODED HERE
+# A second copy of the list is a second place to forget: the lane would grow
+# in the manifest and not here, and the new file would run nowhere at all —
+# excluded from the gate and claimed by nothing. `on_demand_files()` is the
+# single source of truth, and the step below asserts the lane is non-empty so
+# the silent-empty case fails instead of passing green.
+
+name: On-demand evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: >-
+          Space-separated tests/-relative test files to run. Leave blank to
+          run the whole `on_demand:` lane from config/ci-surfaces.yml.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # A manual, expensive job on a shared repo: never let two stack up.
+  group: on-demand-evals-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The eval test picks its lane from TORTOISE_DB_URI (docker when set,
+  # embedded otherwise) — see its `_expected_mode`. Unset here on purpose:
+  # embedded FalkorDBLite needs no service, which is why this workflow
+  # provisions none. Set it only if you add a docker-lane input.
+  TORTOISE_TEST_CARVE_OUT: '1'
+  TORTOISE_SECRET_PEPPER: test-static-pepper
+  TORTOISE_FAST_ATEXIT: '1'
+  # The real embedder must not reach huggingface.co mid-run: shared runner IPs
+  # get rate-limited into flaky failures. The cache step below pre-warms it.
+  HF_HUB_OFFLINE: '1'
+  TRANSFORMERS_OFFLINE: '1'
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    # The lane exists because these tests are slow. Bounded generously, but
+    # bounded: the point of moving them off the gate was that an unbounded
+    # harness run must not be able to hold anything for hours.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # pyproject requires-python >= 3.12
+
+      - name: Install package + test extras
+        run: pip install -e '.[test,embeddings]'
+
+      - name: Cache the HF embedder
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Resolve the lane
+        id: lane
+        # Passed via env, never interpolated into the script body: `run:` with
+        # `${{ }}` inside it is the classic workflow-script injection vector,
+        # and a dispatchable workflow is still a workflow a human can mistype.
+        env:
+          INPUT_FILES: ${{ inputs.files }}
+        run: |
+          if [ -n "$INPUT_FILES" ]; then
+            printf '%s\n' $INPUT_FILES | grep -v '^$' > /tmp/lane.txt
+          else
+            python3 - > /tmp/lane.txt <<'PY'
+          import sys
+          sys.path.insert(0, 'tools')
+          from ci_selection import load_manifest, on_demand_files
+          lane = sorted(on_demand_files(load_manifest()))
+          if not lane:
+              # Fail loudly: an EMPTY lane means the exclusion silently stopped
+              # excluding anything, and a green run here would read as "the
+              # evals passed" while running nothing. leg_coverage_issues()
+              # makes the same call in --integrity.
+              sys.exit("on_demand lane in config/ci-surfaces.yml is EMPTY — "
+                       "refusing to report a green run that executed nothing")
+          for f in lane:
+              print(f if f.startswith('tests/') else f"tests/{f}")
+          PY
+          fi
+          # A blank or whitespace-only `files` input passes `[ -n ]`, then
+          # word-splits to zero words — so the lane file would be EMPTY and
+          # `pytest` with no path argument collects the WHOLE suite (there is no
+          # `testpaths` in pyproject), bounded only by timeout-minutes. Verified
+          # by the reviewer: INPUT_FILES="   " gave rc=0 and a 0-byte file.
+          # The guard is here, on the COMMON path, not only in the config branch.
+          if [ ! -s /tmp/lane.txt ]; then
+            echo "::error::resolved an EMPTY file list (input='$INPUT_FILES') — "
+            echo "::error::refusing to run, because pytest with no paths would "
+            echo "::error::collect the entire suite and report it as 'the evals'."
+            exit 1
+          fi
+          echo "resolved $(wc -l < /tmp/lane.txt) file(s):"
+          cat /tmp/lane.txt
+
+      - name: Run the lane
+        run: |
+          # Paths are passed explicitly so a file that no longer exists FAILS
+          # (pytest exits 4 on a nonexistent path) instead of the lane being
+          # silently reduced to the files that do still exist.
+          echo "running $(wc -l < /tmp/lane.txt) file(s)"
+          pytest $(tr '\n' ' ' < /tmp/lane.txt) -v -p no:cacheprovider --durations=25
