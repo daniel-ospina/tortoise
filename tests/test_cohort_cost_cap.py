@@ -1006,3 +1006,51 @@ def test_non_finite_capture_cost_never_poisons_the_cohort_sum(
         window = _current_period("org-3665-finite")
         assert get_cohort_spend_usd(["org-3665-finite"], window) == \
             pytest.approx(2.5)
+
+
+# ── 7. the cap/balance relation, WRITTEN DOWN rather than assumed (#3873) ───
+
+
+def test_runbook_records_the_cap_below_balance_relation():
+    """#3780's cap only bounds aggregate spend if it sits BELOW the provider's
+    available credit — and nothing in the repo can observe that balance, so the
+    relation has to be an operator step in the runbook. This pins the four
+    load-bearing facts: the STRICT inequality, the exact balance endpoints a
+    human reads, the re-check on top-up, and the truthful default posture (the
+    cap is OFF unless the env var is set).
+
+    REDs on: deleting the relation sentence, softening "strictly below" to a
+    vague comparison, dropping either balance endpoint, dropping the top-up
+    re-check, or claiming the cap is armed by default.
+
+    GREEN legitimate form: the section, as written.
+    """
+    from pathlib import Path
+
+    runbook = (Path(__file__).resolve().parents[1]
+               / "docs/ops/registry-backup-dr.md").read_text(encoding="utf-8")
+    assert "## Cohort spend cap" in runbook, (
+        "the cap/balance relation has no runbook section (#3873)")
+    section = runbook.split("## Cohort spend cap", 1)[1].split("\n## ", 1)[0]
+
+    assert "STRICTLY BELOW" in section, (
+        "the relation must be a STRICT inequality — a cap AT the balance still "
+        "lets the provider cliff fire before the cap does (#3873)")
+    assert "EVERY top-up" in section, (
+        "the section must require re-reading the balance after every top-up: a "
+        "spend-down moves the balance toward the cap with no event (#3873)")
+    for endpoint in ("https://openrouter.ai/api/v1/key",
+                     "https://api.deepseek.com/user/balance"):
+        assert endpoint in section, (
+            f"the runbook does not name the balance endpoint {endpoint} — an "
+            "operator cannot read the number the relation depends on (#3873)")
+    assert "limit_remaining" in section, (
+        "the OpenRouter key read's field is unnamed — the endpoint alone does "
+        "not tell an operator what to look at (#3873)")
+
+    # Truthful default posture: the cap is DISARMED unless the env var is set.
+    assert "OFF by default" in section, (
+        "the section must state the current default posture truthfully — on an "
+        "unarmed deployment the cohort-aggregate bound IS the provider balance")
+    assert _cc.CAP_ENV in section, (
+        "the section must name the env var that arms the cap")
