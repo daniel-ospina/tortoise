@@ -1838,9 +1838,20 @@ def run_s2(model, story: str, master: dict | None = None, *,
 # ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
 
 def resolve_backend_mode() -> str:
-    """'real' when a supported TORTOISE_DB_URI (docker:// / redis:// /
-    rediss://) or a hosted API URL is configured; 'embedded' otherwise
-    (FalkorDBLite — the test/eval-only store S3 must NOT read)."""
+    """The ENV-derived backend label — a diagnostic, NOT the S3 gate.
+
+    Three-valued, and exactly two of them are searchable:
+      * ``"real"`` — a supported ``TORTOISE_DB_URI`` (docker:// / redis:// /
+        rediss://) is configured;
+      * ``"hosted"`` — no supported DB URI, but ``TORTOISE_API_URL`` is;
+      * ``"embedded"`` — neither (FalkorDBLite, the test/eval-only store S3
+        must NOT read).
+
+    ⛔ The label is NOT authoritative for searchability: a process can carry
+    ``TORTOISE_API_URL`` while the client it hands S3 is the embedded
+    FalkorDBLite store (#3679). ``_is_searchable_backend()`` is the gate — it
+    prefers the SDK's OWN backend and falls back to this label only when no
+    client projection is resolvable."""
     import os  # noqa: I001
     from tortoise.config import is_db_uri
     uri = os.environ.get("TORTOISE_DB_URI")
@@ -1849,6 +1860,55 @@ def resolve_backend_mode() -> str:
     if os.environ.get("TORTOISE_API_URL"):
         return "hosted"
     return "embedded"
+
+
+def _sdk_backend_is_embedded(sdk) -> bool | None:
+    """The SDK's OWN embedded flag (``FalkorProjection._is_embedded``).
+
+    ``True`` when the client's actual store is the embedded one, ``False``
+    when it is a real graph, and ``None`` when the client exposes no projection
+    attribute at all (lightweight test doubles / mocks) — the only case in
+    which the caller may fall back to the env-derived label (#3679).
+
+    FAIL-CLOSED: a projection this cannot resolve — ``_get_proj()`` raising,
+    or returning ``None`` — is reported as embedded, NOT as unresolvable.
+    ``_get_proj`` is not guaranteed to raise deterministically (``sdk.py``
+    caches ``_proj`` on success only, so a transient failure retries and
+    succeeds), and the query path calls it again — so treating a raise as
+    "unknown" falls back to the env label, re-opens the gate, and S3 then
+    reads the embedded store this exists to exclude. ``True`` is therefore the
+    fail-closed default — for the reason just stated, not by convention. It
+    happens to match the product package's readers of a FOREIGN projection
+    (``sdk.py:11205``, ``sdk.py:15011``, ``pack_state.py:175``), but it is not
+    a universal: several readers default to ``False``
+    (``projection/__init__.py:5795`` reads its OWN flag;
+    ``graph-scripts/backfill_is_operator.py:155``)."""
+    get_proj = getattr(sdk, "_get_proj", None)
+    if not callable(get_proj):
+        return None
+    try:
+        proj = get_proj()
+    except Exception:  # noqa: BLE001, RUF100 — unresolvable ⇒ fail closed
+        return True
+    if proj is None:
+        return True
+    return bool(getattr(proj, "_is_embedded", True))
+
+
+def _is_searchable_backend(mode: str, sdk=None) -> bool:
+    """S3's single searchability gate: may the extractor read this store?
+
+    A real graph (FalkorDB via docker/redis URI, or a hosted API) is
+    searchable; FalkorDBLite (the test/eval-only embedded store) is NOT. The
+    SDK's actual backend wins when it is resolvable — the env ``mode`` label
+    can diverge from the store the client really holds (#3679: a
+    ``TORTOISE_API_URL``-set process whose SDK is the embedded store must
+    still skip). The label is consulted only for clients without a resolvable
+    projection (mocks)."""
+    embedded = _sdk_backend_is_embedded(sdk)
+    if embedded is not None:
+        return not embedded
+    return mode in ("real", "hosted")
 
 
 def _story_topics(story: str, cap: int = 6) -> list[str]:
@@ -2078,8 +2138,12 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                  session_id: str | None = None) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
 
-    - Resolves the active backend from the environment (design doc §3 owner
-      confirmation: NOT FalkorDBLite). Embedded → skip with a degraded flag.
+    - Resolves searchability from the CLIENT's actual backend when one is
+      provided (design doc §3 owner confirmation: NOT FalkorDBLite) — a real
+      graph (FalkorDB via docker/redis URI or hosted API) is searched,
+      FalkorDBLite is skipped with a degraded flag. The env-derived
+      ``resolve_backend_mode()`` label is the fallback only when the client
+      exposes no projection (mocks) — see ``_is_searchable_backend`` (#3679).
     - Runs the same queries a client would: entity by name+kind, points by
       topic, events by entity (tortoise_fts_query, batch).
     - Graceful degradation: unreachable graph (connection error/timeout)
@@ -2098,8 +2162,10 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     mode = resolve_backend_mode()
     empty = {"mode": mode, "degraded": True, "reason": None,
              "entities": [], "points": [], "events": [], "queries_run": 0}
-    if mode != "real":
-        empty["reason"] = (f"S3 skipped: active backend is {mode!r} — the real "
+    if not _is_searchable_backend(mode, sdk):
+        store = ("FalkorDBLite (embedded)"
+                 if _sdk_backend_is_embedded(sdk) else repr(mode))
+        empty["reason"] = (f"S3 skipped: active backend is {store} — the real "
                            "graph (FalkorDB via docker/redis URI or hosted API) "
                            "is required, not FalkorDBLite")
         return empty
