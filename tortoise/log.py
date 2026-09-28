@@ -65,10 +65,12 @@ from pathlib import Path
 # ``EntityMutated`` op=delete / ``PointsMerged`` / ``ObjectSuperseded`` /
 # ``DirectEdgeRepoint`` / ``ConfidenceChanged`` with ``outdated=true``). So a
 # member's folds MERGE/SET authoritative state and never delete a node or edge
-# (clearing a DERIVED embedding so it is recomputed is a cache clear, not such
-# a removal), or the member has no fold at all, so its loss is a proof-carrying
-# no-op. A torn tail whose type is legible and wholly inside this set keeps the
-# pre-existing tolerance. EVERYTHING ELSE is refused: an unlisted type and an
+# NOR CLEAR an authoritative property — a ``SET n.x = $x`` whose payload value
+# is a legitimate ``null`` IS a removal (the live write cleared it), even
+# though nothing is deleted (see ``PointRevised`` below). Clearing a DERIVED
+# embedding so it is recomputed is a cache clear, not such a removal. A member
+# with no fold at all is a proof-carrying no-op. A torn tail whose type is
+# legible and wholly inside this set keeps the pre-existing tolerance. EVERYTHING ELSE is refused: an unlisted type and an
 # unreadable type cannot be proven harmless, and a silent resurrection is worse
 # than a loud refusal — the refusal touches no graph and leaves the journal for
 # the operator.
@@ -84,7 +86,9 @@ from pathlib import Path
 #     create (``_born_terminal``, sdk.py:3655, a first-class case: see #2422)
 #     journals ``status`` in its ``PointAdded`` point snapshot (sdk.py:3828). A
 #     torn born-terminal ``PointAdded`` for an id an EARLIER record left live is
-#     therefore a resurrection this classifier tolerates. It is NOT a
+#     therefore a resurrection this classifier tolerates. ``n.content=$content``
+#     and the operator ``n.direction=$dir`` (entities.py:767, :822) are the same
+#     family on the same re-create composition. It is NOT a
 #     first-order path (unlike ``EventRecorded``'s connector leg, which every
 #     connector ingest reaches, or ``SessionRecorded`` above): it needs a second
 #     ``PointAdded`` for an EXISTING id with an explicit TERMINAL status, and
@@ -104,8 +108,10 @@ from pathlib import Path
 # removal types instead) fails OPEN: a new terminal type would silently
 # resurrect, which is exactly the defect class this exists to close.
 TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
-    # Point / operator lifecycle additions and updates (MERGE + SET only).
-    "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
+    # Point / operator lifecycle additions (MERGE + SET). ``PointAdded`` /
+    # ``OperatorAdded`` also carry a payload-dependent write — see the
+    # disclosed exception below.
+    "PointAdded", "OperatorAdded",
     "PointPromoted", "OperatorPromoted",
     # Object / subject lane additions (MERGE + SET; an object or subject
     # upsert clears the DERIVED embedding so it is recomputed).
@@ -123,7 +129,30 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # Additive edge / prop writes (MERGE + SET only).
     "EntityLinked",
 })
-# Deliberately NOT harmless although the name reads as an addition:
+# Deliberately NOT harmless although the name reads as an addition or an
+# update:
+#   PointRevised — its fold WRITES a payload property with a plain
+#                  ``SET n.{key} = ${key}`` (PointRevised belief props
+#                  projection/__init__.py:6734-6736, in-memory :2082-2083;
+#                  the point's content :6660-6712; the annotator dims :6717),
+#                  and ``None`` is a LEGITIMATE payload value that CLEARS — the
+#                  code says so at ``_belief_prop_value_ok``
+#                  (projection/entities.py:104-106, "``None`` is VALID for
+#                  every key — it is the journaled CLEAR … dropping it would
+#                  leave a stale prior in place across a rebuild") and at
+#                  ``_annotator_value_ok`` (projection/__init__.py:1790-1792,
+#                  the same sentence for ``annotate_operator``/``update_point``
+#                  with ``x=None``). ``update_point(id, confidence=None)``
+#                  journals ``"confidence": null`` (sdk.py:6162-6164), so a
+#                  torn ``PointRevised`` that drops a CLEAR leaves the stale
+#                  prior live and the rebuild disagrees with the live graph.
+#                  Unlike ``EventRecorded`` this needs no prefix-inference
+#                  argument: the clear is visible IN THE SURVIVING PREFIX when
+#                  it is the torn key, and the type alone cannot exclude it.
+#   OperatorAnnotated — same shape: ``set_clauses = [f"n.{key} = ${key}" for
+#                  key in dims]`` (projection/__init__.py:6585), and
+#                  ``annotator_bias=None`` / a dim of ``None`` is the journaled
+#                  CLEAR (``_annotator_value_ok``).
 #   DocumentCreated — ``_upsert_document`` scrubs the RETIRED props
 #                     ``content`` / ``doc_status`` / ``docStatus`` /
 #                     ``objectKind`` / ``object_kind``
@@ -173,12 +202,61 @@ _RECORD_TYPE_RE = re.compile(r'"type"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"')
 # at the COLON (not the opening quote): a tear between ``:`` and the quote is
 # still "the value did not survive".
 _TYPE_KEY_RE = re.compile(r'"type"\s*:')
-# A ``"type"`` key torn MID-TOKEN at the end of the line (``"t`` / ``"ty``
-# / ``"typ`` / ``"type``). Anchored at the end because elsewhere a prefix of
-# the word collides with other keys (``"title``, ``"tag``) — and required to
-# be preceded by ``,`` / ``{`` (a KEY position), so a torn STRING VALUE that
-# merely begins ``"t`` (``"id": "t``) is not mistaken for a torn key.
-_TORN_TYPE_KEY_RE = re.compile(r'[{,]\s*"t(?:y(?:p(?:e)?)?)?$')
+# A ``"type"`` key torn MID-TOKEN at the end of the line (``"t`` / ``"ty`` /
+# ``"typ`` / ``"type``). Used only with
+# :func:`_torn_type_key_at_end_of_line`, which requires the fragment to sit in
+# a KEY position of an OBJECT — see that helper for why a bare delimiter test
+# over-refuses (an array ELEMENT follows a ``,`` too).
+_TORN_TYPE_FRAGMENT_RE = re.compile(r'"t(?:y(?:p(?:e)?)?)?$')
+
+
+def _unclosed_openers(raw: str) -> list[str]:
+    """The ``{`` / ``[`` characters still open at the end of *raw*.
+
+    A minimal scanner: string literals (and their ``\\`` escapes) are skipped,
+    so a brace inside a value cannot shift the depth. Truncation is expected —
+    an unterminated string simply stops the scan.
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]" and stack:
+            stack.pop()
+    return stack
+
+
+def _torn_type_key_at_end_of_line(raw: str) -> bool:
+    """True when *raw* ends in a ``"type"`` key torn mid-token (#3316).
+
+    Both conditions are needed, and each closes an over-refusal:
+
+    * the fragment must sit after a ``,`` or ``{`` rather than a ``:`` — the
+      latter is a torn string VALUE (``"id": "t``), not a torn key;
+    * the innermost still-open container must be an OBJECT. A ``,`` also
+      precedes an array ELEMENT, and ``{"point": {"tags": ["a", "t`` is a
+      torn tag, not a torn key — refusing it would turn a routine crash
+      mid-array into a full replay refusal.
+    """
+    m = _TORN_TYPE_FRAGMENT_RE.search(raw)
+    if m is None:
+        return False
+    prefix = raw[:m.start()].rstrip()
+    if not prefix or prefix[-1] not in ",{":
+        return False
+    stack = _unclosed_openers(prefix)
+    return bool(stack) and stack[-1] == "{"
 
 
 def record_types_from_partial(raw: str) -> list[str]:
@@ -207,8 +285,9 @@ def has_truncated_type_value(raw: str) -> bool:
       harmless record. Refusing is the only safe read: a nested type must never
       stand in for an envelope that did not survive.
     * A ``"type"`` KEY torn mid-token at the end of the line (``"t`` / ``"ty`` /
-      ``"typ`` / ``"type`` with no colon), in KEY position (after ``,`` or
-      ``{``) — a torn string VALUE that happens to start ``"t`` is not one.
+      ``"typ`` / ``"type`` with no colon), in an OBJECT's key position — a torn
+      string VALUE that happens to start ``"t`` (``"id": "t``) and a torn
+      ARRAY element (``["a", "t``) are both not one.
 
     Named limit, so it is not overstated: a hand-written PAYLOAD-FIRST record
     whose nested ``"type"`` survives while the envelope's key has not yet been
@@ -226,7 +305,7 @@ def has_truncated_type_value(raw: str) -> bool:
         return True
     if len(_TYPE_KEY_RE.findall(raw)) != 1:
         return True
-    return _TORN_TYPE_KEY_RE.search(raw) is not None
+    return _torn_type_key_at_end_of_line(raw)
 
 
 def torn_record_may_revive_state(raw: str) -> bool:

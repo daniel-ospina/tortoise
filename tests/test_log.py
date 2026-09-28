@@ -430,6 +430,17 @@ def test_torn_record_with_a_truncated_envelope_type_is_refused():
         '{"type": "PointAdded", "point": {"id": "torn-1", "content": "t')
     assert not torn_record_may_revive_state(
         '{"type": "PointAdded", "point": {"id": "torn-1", "content": "typ')
+    # A torn ARRAY ELEMENT is not a torn type KEY either: a ``,`` precedes an
+    # element too, and a routine crash mid-array must not refuse the replay.
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "torn-1", "tags": ["a", "t')
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "torn-1", "tags": ["a", "type')
+    # …but a torn key of the ENVELOPE object still refuses.
+    assert torn_record_may_revive_state(
+        '{"point": {"id": "x"}, "ty')
+    assert torn_record_may_revive_state(
+        '{"point": {"id": "x"}, "t')
     print("PASS test_torn_record_with_a_truncated_envelope_type_is_refused")
 
 
@@ -477,6 +488,31 @@ def test_torn_born_terminal_point_added_is_a_disclosed_tolerance():
     print("PASS test_torn_born_terminal_point_added_is_a_disclosed_tolerance")
 
 
+def test_a_torn_point_revised_carrying_a_clear_is_refused():
+    """``PointRevised`` / ``OperatorAnnotated`` are NOT allowlisted.
+
+    Their fold writes a payload property with a plain ``SET n.{key} = ${key}``,
+    and ``None`` is a LEGITIMATE payload value that CLEARS the property — the
+    code documents both instances as a journaled CLEAR whose loss "would leave a
+    stale prior in place across a rebuild". Unlike ``EventRecorded`` this needs
+    no prefix inference: when the torn key IS the cleared one, the clear is
+    visible in the surviving prefix, and the type alone cannot exclude it.
+    """
+    assert torn_record_may_revive_state(
+        '{"type": "PointRevised", "id": "p1", "new_content": null, '
+        '"confidence": nu')
+    assert torn_record_may_revive_state(
+        '{"type": "PointRevised", "id": "p1", "confidence": null')
+    assert torn_record_may_revive_state(
+        '{"type": "OperatorAnnotated", "id": "op1", "dims": '
+        '{"annotator_bias": nul')
+    # A revision that carries no clearing value is still refused: the type is
+    # the discriminator, and refusal is the fail-closed direction.
+    assert torn_record_may_revive_state(
+        '{"type": "PointRevised", "id": "p1", "new_content": "')
+    print("PASS test_a_torn_point_revised_carrying_a_clear_is_refused")
+
+
 def test_torn_tail_allowlist_holds_no_destructive_type():
     """The allowlist IS the fail-open/fail-closed switch, so pin its POLARITY
     and its CONTENT.
@@ -494,8 +530,8 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
     """
     # Exact membership: any addition, removal or typo must update this literal.
     assert frozenset({
-        # point / operator lifecycle additions and updates (MERGE + SET)
-        "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
+        # point / operator lifecycle additions (MERGE + SET)
+        "PointAdded", "OperatorAdded",
         "PointPromoted", "OperatorPromoted",
         # object / subject lane additions (+ a derived-embedding clear)
         "ObjectRegistered", "SubjectAdded",
@@ -508,14 +544,16 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         "DedupeRecorded", "DedupeRejected", "EntityBindingRefused",
         "DirectEdgeCreated",
     }) == TORN_TAIL_HARMLESS_EVENT_TYPES
-    # Named terminal / removal types that would resurrect state if tolerated.
-    # PointInvalidated / PointSuperseded are EP-terminal (a dropped one lets a
-    # withdrawn claim vote); EntityMutated op=delete and PointsMerged hard-delete.
+    # Named terminal / removal / CLEARING types that would resurrect state if
+    # tolerated. PointInvalidated / PointSuperseded are EP-terminal (a dropped
+    # one lets a withdrawn claim vote); EntityMutated op=delete and PointsMerged
+    # hard-delete; PointRevised / OperatorAnnotated carry a payload null that
+    # CLEARS an authoritative property.
     destructive = {
         "PointRetracted", "PointSuperseded", "PointInvalidated",
         "PointsMerged", "EntityMutated", "ObjectSuperseded",
         "ConfidenceChanged", "DocumentCreated", "DirectEdgeRepoint",
-        "EventRecorded",
+        "EventRecorded", "PointRevised", "OperatorAnnotated",
     }
     offenders = sorted(destructive & TORN_TAIL_HARMLESS_EVENT_TYPES)
     assert not offenders, f"destructive types in the allowlist: {offenders}"
