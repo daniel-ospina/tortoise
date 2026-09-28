@@ -743,14 +743,14 @@ def test_refresh_durations_preserves_unknown_top_level_keys(tmp_path: Path) -> N
 
 
 def test_refresh_durations_on_the_real_manifest_of_record() -> None:
-    """The committed 688-entry map is refreshed without corruption: comments
+    """The committed 690-entry map is refreshed without corruption: comments
     survive, a sampled value changes, and the manifest gate stays green."""
     manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
     before = manifest_path.read_text()
     new_text, stats = ci_timing.render_refreshed_manifest(
         before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
-    assert stats["manifest_keys"] == 688
-    assert stats["carried_forward"] == 687
+    assert stats["manifest_keys"] == 690
+    assert stats["carried_forward"] == 689
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
