@@ -44,7 +44,7 @@ from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
-from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
+from .embedded_lifecycle import atexit_fast_close  # #1371: the fast-close seam
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         resolve_pool_size)
 from . import monitoring
@@ -2614,6 +2614,113 @@ HOLDS_ROLE_UNAVAILABLE = (
 )
 
 
+def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
+                          stored_vf, successor_created_at, now):
+    """Resolve the predecessor's window END and refuse an inverted window (#4021).
+
+    #4021 — the supersession stamped ``old.validTo`` from the SUCCESSOR's
+    window start and never read the predecessor's own ``validFrom``, so a
+    successor dated earlier than its predecessor persisted
+    ``validTo < validFrom``.  ``restore_point_at``'s ``_covers``
+    (``sdk.py``) then rejects an inverted window for EVERY query instant, so
+    the predecessor became unreachable from every read surface with no error
+    anywhere — a silent, permanent loss of the old fact.
+
+    Resolution order is unchanged and is the ONE home for it::
+
+        str(valid_from) → stored_vf (truthiness) → successor_created_at → now
+
+    Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
+    ``str()``): a numeric stored value must keep keying as ``(0, float)``
+    (``_created_sort_key`` documents numeric epochs as supported and seeded
+    corpora carry them) — passing it through ``str()`` makes it unparseable
+    ``(1, text)`` and REINTRODUCES the unbounded predecessor window the
+    ``valid_from``-agreement guard exists to prevent.
+
+    Refuses when ANY of the predecessor's own starts is present and the
+    successor's resolved start sorts STRICTLY BEFORE it — the same measure and
+    the same ``is not None`` presence predicate ``_covers`` uses, so the
+    guard's boundary IS the read path's.  Strictly-before only: equality (a
+    zero-length predecessor window) is well-formed and accepted.  ``old_vfs``
+    is a SEQUENCE, not a scalar: a point id is not unique (the duplicate
+    fan-out is a tested shape), and the stamp block below MATCHes and stamps
+    EVERY node carrying the id, so reading only the first row would pass the
+    guard and still leave an inverted window on a sibling node — and the
+    verdict would then depend on server row order.  ``_assert_window_start_
+    not_inverted`` (the #5358 sibling) documents and loops over the same
+    fan-out; this mirrors it.
+
+    The refusal fires only when BOTH instants are orderable.  A predecessor
+    start that is present-but-unparseable (``""``, ``"TBD"``, ``"2026-6-1"``)
+    is SKIPPED, not refused — matching ``_assert_window_start_not_inverted``,
+    the #5358 sibling, which documents the same choice: such a window already
+    covers no PARSEABLE instant, so the write cannot newly hide it from any
+    parseable query instant, whereas refusing would refuse on an
+    ordering-fallback artefact rather than a comparison.  It also matters
+    practically: ``create_point`` accepts any caller ``validFrom``, so a
+    legacy or imported point carrying a non-ISO start is reachable, and
+    refusing here would make such a point impossible to supersede until its
+    window was repaired — foreclosing the very write a caller would use to
+    move past it.  An unparseable resolved END is #5360's residual for the
+    same reason.
+
+    Raises ``ValueError`` BEFORE any mutation at either call site, so no
+    event is journaled and no half-write survives a refusal.
+
+    Scope: this refuses the **inverted** direction.  An **unparseable**
+    resolved end (a truthy-but-unparseable stored successor ``validFrom``
+    with no kwarg) is a SEPARATE residual — the orderability gap on the
+    no-kwarg path — deliberately NOT absorbed here.
+
+    The ``valid_from``-vs-successor agreement guard is NOT here: it is
+    reachable only when a kwarg is passed, and it stays inline at its
+    reviewed call site.
+    """
+    from .search_engine import _created_sort_key  # lazy — import cycle
+    if valid_from is not None:
+        succ_vf = str(valid_from)
+    elif stored_vf:
+        succ_vf = stored_vf
+    elif successor_created_at:
+        succ_vf = successor_created_at
+    else:
+        succ_vf = now  # monotone fallback — never a gap
+    if old_vfs:
+        k_succ = _created_sort_key(succ_vf)
+        # An unparseable successor start has no instant to compare against;
+        # that is #5360's residual, not this guard's.
+        if k_succ[0] == 0:
+            for old_vf in old_vfs:
+                if old_vf is None:
+                    continue
+                k_old = _created_sort_key(old_vf)
+                if k_old[0] != 0:
+                    # Present but unorderable — skipped, NOT refused, and
+                    # with no message: it buckets LAST as ``(1, text)``, so
+                    # comparing it would fire for ANY successor on an
+                    # ordering-fallback artefact. The #5358 sibling proceeds
+                    # on this identical shape; two guards in one file must
+                    # not return opposite verdicts for one input.
+                    continue
+                if k_succ[1] < k_old[1]:
+                    # Wording is pinned by two tests: the literal substring
+                    # "inverted window", and scrub-stability under
+                    # mcp_server._scrub_error, whose `(host=|at |to )[\w.-]+`
+                    # rule rewrites any word ending in at/to followed by a
+                    # space — a scrubbed hint reaches the caller as `***`.
+                    raise ValueError(
+                        f"supersede_point: refusing supersede {old_id!r} - "
+                        f"{new_id!r} - the successor's window start "
+                        f"{succ_vf!r} precedes the predecessor's validFrom "
+                        f"{old_vf!r}; persisting it would leave an inverted "
+                        f"window (validTo < validFrom), which no query "
+                        f"instant resolves. Give the successor a validFrom "
+                        f"on-or-after {old_vf!r}, or use `retract_point()` "
+                        f"(window-agnostic) for withdrawal of the predecessor"
+                    )
+    return succ_vf
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -4581,6 +4688,42 @@ class TortoiseSDK:
                                     "eid": event_id, "sid": session_id,
                                     "harness": source_harness, "ing": now},
                         )
+                    # #4936: the minted-point join above CANNOT reach an
+                    # operator whose endpoint RE-KEYED to a pre-existing
+                    # graph node (#4716 Part 1): the payload point resolved
+                    # to the existing node, so it is NOT in ``minted_ids``
+                    # (and a folded-only capture mints nothing at all, leaving
+                    # ``minted_ids`` empty and the join above unreached). The
+                    # operator node was created and wired correctly but stayed
+                    # unstamped — invisible to the eventId-keyed retrievable
+                    # layer (the #2552 ``operator_counts == {}`` signature).
+                    # Stamp exactly the operator ids THIS capture created
+                    # (meta["operator_ids"], the apply_payload_operators
+                    # return) — the topology's own provenance handle, whereas
+                    # the minted join has none. ``eventId IS NULL`` is the
+                    # no-clobber guard. The minted join's ``draft`` guard is
+                    # deliberately NOT repeated: these ids are Points created
+                    # by THIS call (fresh ULIDs, draft at creation), so
+                    # re-checking status only adds a race — a concurrent
+                    # capture's ``_apply_capture_ingest_ep`` promotion can
+                    # flip one to 'live' before this stamp runs, and the stamp
+                    # must still land. The join is KEPT because it is the only
+                    # surface covering operators created outside
+                    # apply_payload_operators (the M2 projection path —
+                    # test_capture_session_stamps_operator_event_ids).
+                    operator_ids = list(meta.get("operator_ids") or [])
+                    if operator_ids:
+                        proj.g.query(
+                            "MATCH (o:Point {is_operator:true}) "
+                            "WHERE o.id IN $ids "
+                            "AND o.eventId IS NULL "
+                            "SET o.eventId=$eid, o.source_session=$sid, "
+                            "    o.source_harness=$harness, "
+                            "    o.ingested_at=$ing",
+                            params={"ids": operator_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
                         # failed first attempt's provenance gap. The retry's
@@ -5686,11 +5829,18 @@ class TortoiseSDK:
         #    bridge-attack record routed to mitigate_operator — #4937; shared
         #    commit semantics, #1532 D3 — apply_payload_operators) ──
         ops = payload.get("operators", []) or []
+        # #4936: the ids of the operator Points this capture CREATED — the
+        # provenance stamp's own handle on the operator topology. Surfaced on
+        # ``meta`` for the capture assembly (below), which mints the
+        # sessionCaptured eventId AFTER extraction returns. Empty when the
+        # payload carried no operators.
+        operator_ids: list[str] = []
         if ops:
             from tortoise.commit_ops import (
                 _payload_point_content_by_id,
                 apply_payload_operators,
                 remap_operator_endpoint_refs,
+                reverse_point_id_map,
             )
             # #4716 Part 1: rewrite payload endpoint refs to the ids the commit
             # resolved the points to BEFORE the operator write. A payload id
@@ -5707,9 +5857,8 @@ class TortoiseSDK:
             # pre-remap ref named (first payload id wins when several folded
             # into one graph id — deterministic, and the fold guarantees equal
             # normalized content anyway).
-            _capture_reverse_id_map: dict[str, str] = {}
-            for _payload_id, _resolved_id in capture_point_id_map.items():
-                _capture_reverse_id_map.setdefault(_resolved_id, _payload_id)
+            _capture_reverse_id_map = reverse_point_id_map(
+                capture_point_id_map)
             # A FOLDED (NOOP) endpoint's ref is the PRIOR's graph id and has no
             # payload point at all — the extractor's noop record carries the
             # canonical content precisely so the reason still resolves here
@@ -5721,7 +5870,7 @@ class TortoiseSDK:
                 for _n in noops
                 if _n.get("point_id") and _n.get("content")}
             ops = remap_operator_endpoint_refs(ops, capture_point_id_map)
-            apply_payload_operators(
+            operator_ids = apply_payload_operators(
                 proj, self, ops,
                 point_content_by_id=lambda pid: (
                     _payload_point_content_by_id(
@@ -5772,6 +5921,14 @@ class TortoiseSDK:
             "errors": errors,
             "warnings": warnings,
             "mode": "error" if errors else "v2",
+            # #4936: ids of the IMPL/NAND operator Points this capture CREATED
+            # (``apply_payload_operators`` return) — the capture's provenance
+            # stamp MUST use these, not a join on the minted point set: an
+            # operator whose endpoint re-keyed to a pre-existing graph node
+            # (#4716 Part 1) is absent from the minted set, and a folded-only
+            # capture has no minted id at all, so the join left the operator
+            # unstamped and invisible to the eventId-keyed memory layer.
+            "operator_ids": operator_ids,
             # #2335 WI-1a: surface the extractor_v2 telemetry (recovery
             # per-seam tokens / llm / chunks) on the product-lane meta —
             # eval lane already surfaces it via ingest_v2; the product
@@ -6441,8 +6598,16 @@ class TortoiseSDK:
         window START is its own ``validFrom`` (the create path, D3), or the
         optional ``valid_from`` kwarg when the caller knows it (else read
         the successor's ``validFrom``, fall back to its ``createdAt``, fall
-        back to now — monotone, never a gap). Additive-only: no behavior
-        change for callers that don't pass the kwarg.
+        back to now — monotone, never a gap). Additive-only for callers that
+        stay inside the predecessor's window: a successor whose resolved start
+        sorts strictly BEFORE the predecessor's own ``validFrom`` is refused
+        (``ValueError``, before any mutation — an inverted window is satisfiable
+        by no query instant, so the old fact would be silently unreachable from
+        every read surface; #4021). Equality (a zero-length predecessor window)
+        is legal. The comparison needs an INSTANT on both sides: a resolved
+        start that is itself unparseable is not compared (it names no instant,
+        so a refusal would rest on a lexicographic accident rather than a
+        comparison) — that open orderability residual is #5360's.
 
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
@@ -6585,14 +6750,25 @@ class TortoiseSDK:
                     f"validTo gaps or overlaps the chain (read paths use "
                     f"the stored window start)"
                 )
-        if valid_from is not None:
-            succ_vf = str(valid_from)
-        elif stored_vf:
-            succ_vf = stored_vf
-        elif vf_rows and vf_rows[0][1]:
-            succ_vf = vf_rows[0][1]
-        else:
-            succ_vf = now  # monotone fallback — never a gap
+        # #4021: the resolution above plus the INVERTED-window refusal live in
+        # ONE home, shared with the MCP dry-run preview (parity by construction).
+        # This read of the predecessor's own start is the one the defect was
+        # missing: the stamp below used the successor's start without ever
+        # comparing it to the window it was truncating.
+        old_vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+            params={"id": old_id},
+        ).result_set
+        # EVERY node carrying the id, not just the first: the stamp below
+        # MATCHes and stamps them all, and row order is server-dependent
+        # (the #5358 sibling loops over the same fan-out for this reason).
+        old_vfs = [r[0] for r in old_vf_rows]
+        succ_vf = _supersede_window_end(
+            old_id=old_id, new_id=new_id, old_vfs=old_vfs,
+            valid_from=valid_from, stored_vf=stored_vf,
+            successor_created_at=(vf_rows[0][1] if vf_rows else None),
+            now=now,
+        )
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
@@ -10684,8 +10860,8 @@ class TortoiseSDK:
         return _get_kind_expander().list_relations()
 
     def _atexit_close(self) -> None:
-        """#1371: atexit seam — collect ephemeral test servers for the
-        batch flush first.
+        """#1371: atexit seam — collect ephemeral test servers so interpreter
+        exit takes the fast close.
 
         Falls through to the normal _t_close when the fast path does not
         apply.
@@ -21174,7 +21350,7 @@ class TortoiseSDK:
         from pathlib import Path  # noqa: I001
         from .file_indexer import compute_file_hash
         from .session_indexer import (
-            extract_session_id, session_corpus_dir,
+            corpus_files, extract_session_id, session_corpus_dir,
         )
 
         dir_path = Path(directory or session_corpus_dir())
@@ -21191,7 +21367,7 @@ class TortoiseSDK:
         ).result_set
         by_event = {r[0]: r[1] for r in rows}
 
-        files = sorted(dir_path.rglob("*.md"))
+        files = corpus_files(dir_path)
         # Group by session id: two files may share a sessionId (rglob picking
         # up copies, or duplicated frontmatter). Classify only the PRIMARY
         # file (first in sorted order) so the delta drives the sweep to
