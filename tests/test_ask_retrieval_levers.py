@@ -209,20 +209,22 @@ def test_gold_turn_in_pool_membership_embedded():
 
 @pytest.mark.xfail(
     strict=True,
+    condition=not _embedder_present(),
     reason="Accepted regression from the #4155 grouping fix — root-caused as "
-           "#5821. The corrected bucket key makes the per-session cap stop "
-           "binding (120 in → 119 out, was 91), so the binding constraint is "
-           "now the TOKEN cap, not the byte cap this marker used to name: at "
-           "this helper's 8000-token budget the assembly step keeps 58 items "
-           "(measured — the byte cap is NOT what produces 58: holding the byte "
-           "ceiling at the lane's own 64000 while raising tokens admits 78), "
-           "and the gold turn sits at "
-           "rank 68 after the evidence boost, so it is cut. The gold DOES land "
-           "at the product's own 16000-token default (97 kept). This test "
-           "raises the window and the item cap but not the token cap, so those "
-           "two raises cannot lift the keep above 58 — the measured "
-           "attribution is pinned by test_ask_cap_attribution_5821 below. "
-           "strict=True so that landing #5821 makes this an XPASS failure and "
+           "#5821 — BUT ONLY ON THE KEYWORD LANE, which is what this marker's "
+           "condition now encodes. Measured 2026-09-28 at origin/main 20e4819be: "
+           "with the dense leg ABSENT the gold turn sits at rank 77 and is cut "
+           "(kept 58); with it PRESENT the gold is at rank 9 and LANDS in "
+           "context at item_cap=40, so this test XPASSes and strict=True reds "
+           "the suite on any vector-capable checkout. The regression is the "
+           "missing dense leg, not the ranking: there is no measured "
+           "retrieval-quality regression on the vector lane. The corrected "
+           "bucket key does make the per-session cap stop binding (120 in → "
+           "119 out, was 91), and at this helper's 8000-token budget the "
+           "assembly step keeps 58 items — the TOKEN cap, not the byte cap "
+           "this marker used to name. The measured attribution is pinned by "
+           "test_ask_cap_attribution_5821 below. strict=True on the keyword "
+           "lane so that a real fix there makes this an XPASS failure and "
            "forces the marker's removal.",
 )
 def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
@@ -232,12 +234,19 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     Step 0. Default-off knobs are exercised explicitly.
 
     ⚠️ Known-failing by owner decision, tracked as #5821 — see the marker
-    reason. This test raises the window and the item cap, but a THIRD cap —
-    this helper's own 8000-token budget — is what binds at 58, so the two
-    raises here cannot satisfy the assertion. Only an ordering change that
-    moves the gold from rank 68 into the kept 58 can (a token-cap decision
-    belongs to #5821's Task 3 and is deliberately NOT made here). It is
-    xfail(strict) so the fix cannot land without removing this marker.
+    reason. **The failure is lane-dependent and the marker now says so:** with
+    the dense leg absent the gold sits at rank 77 and the assembly step keeps
+    only 58, so it is cut; with the dense leg present the gold is at rank 9 and
+    lands at `item_cap=40`, so the test passes and `strict=True` would red the
+    suite. That is why the marker carries
+    `condition=not _embedder_present()` — it encodes the lane the regression
+    actually belongs to instead of asserting it universally.
+
+    This test raises the window and the item cap but not the token cap, so on
+    the keyword lane those two raises cannot lift the keep above 58 (a
+    token-cap decision belongs to #5821's Task 3 and is deliberately NOT made
+    here). On the keyword lane it is `xfail(strict)` so a real fix there cannot
+    land without removing the marker.
     """
     questions = _recorded_questions()
     if not questions:
