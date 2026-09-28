@@ -1890,6 +1890,187 @@ def test_upsert_document_partial_update_preserves_search_text(live_proj):
     assert rows[0][1] is True
 
 
+# ── #5422: the document :Source's version anchor (contentHash) ──────────────
+# The extraction path was version-BLIND: `_upsert_document` wrote no
+# contentHash at all, so a document-derived Point had no version to anchor on
+# (the operand ONTOLOGY §4.6 names and #5256's anchor reader resolves). These
+# tests pin the fold contract only — they are NOT the re-inference adapter.
+
+def _doc_anchor(proj, url: str):
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.contentHash, count(s)",
+        params={"u": url},
+    ).result_set
+    return (rows[0][0], int(rows[0][1])) if rows else (None, 0)
+
+
+def test_document_source_records_content_hash_anchor(live_proj):
+    """#5422: a DocumentCreated carrying contentHash lands it on the node."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h1", "title": "V1",
+                "contentHash": "sha-v1"})
+    assert _doc_anchor(proj, "doc-h1") == ("sha-v1", 1)
+
+
+def test_document_hashless_reemit_preserves_the_anchor(live_proj):
+    """#5422: a write carrying NO hash must NOT wipe the anchor.
+
+    The #900 index path (`_doc_write`) emits DocumentCreated with no hash at
+    all, and `--capture-metadata` deliberately passes none; a hash-less write
+    that cleared the stored hash would silently un-anchor every fact derived
+    from the doc. An EMPTY-string hash (the spelling `_mint_source_stub`,
+    `_materialize_session_source` and `hosted_api` use for "no hash") is the
+    same shape and must behave identically.
+    """
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h2", "title": "V1",
+                "contentHash": "sha-v1"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-h2", "title": "V1 renamed"})
+    assert _doc_anchor(proj, "doc-h2") == ("sha-v1", 1), "anchor wiped by a hash-less re-emit"
+    proj.apply({"type": "DocumentCreated", "id": "doc-h2", "content_hash": ""})
+    assert _doc_anchor(proj, "doc-h2") == ("sha-v1", 1), (
+        "an empty-string hash wiped the anchor")
+
+
+def test_document_content_hash_accepts_both_journal_spellings(live_proj):
+    """#5422 + api.py §4.3: the journal field is snake_case, but the camelCase
+    spelling must still land on the node — and must not leak as a second,
+    unread property (neither spelling may reach the open passthrough)."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h7", "content_hash": "sha-snake"})
+    assert _doc_anchor(proj, "doc-h7") == ("sha-snake", 1)
+    proj.apply({"type": "DocumentCreated", "id": "doc-h7", "contentHash": "sha-snake"})
+    assert _doc_anchor(proj, "doc-h7") == ("sha-snake", 1)
+    leaked = proj.g.query(
+        "MATCH (s:Source {url:'doc-h7'}) RETURN s.content_hash"
+    ).result_set
+    assert leaked and leaked[0][0] is None, f"snake spelling leaked as a node prop: {leaked}"
+
+
+def test_document_version_counter_advances_with_the_hash(live_proj):
+    """#5422 + ONTOLOGY §4.6: ``version`` is the monotonic ordinal beside the
+    hash — 1 at creation, +1 on each content-hash change — and a hash-less
+    write must not move it. The pair is never half-written."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "title": "V1",
+                "content_hash": "sha-v1"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v1", 1], rows
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "content_hash": "sha-v1"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v1", 1], f"unchanged content bumped the version: {rows[0]}"
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "content_hash": "sha-v2"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v2", 2], f"version did not advance with the hash: {rows[0]}"
+    proj.apply({"type": "DocumentCreated", "id": "doc-v1", "title": "renamed"})
+    rows = proj.g.query(
+        "MATCH (s:Source {url:'doc-v1'}) RETURN s.contentHash, s.version").result_set
+    assert list(rows[0]) == ["sha-v2", 2], f"hash-less write moved the pair: {rows[0]}"
+
+
+def test_document_content_hash_completes_an_empty_stub(live_proj):
+    """#5422: an empty stored hash (a `_mint_source_stub` stub, or a pre-#5422
+    document node) is COMPLETED by a real hash — never treated as a match."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h3", "title": "V1"})
+    proj.g.query("MATCH (s:Source {url:'doc-h3'}) SET s.contentHash = ''")
+    proj.apply({"type": "DocumentCreated", "id": "doc-h3", "title": "V2",
+                "contentHash": "sha-v2"})
+    assert _doc_anchor(proj, "doc-h3") == ("sha-v2", 1)
+
+
+def test_document_content_hash_replaces_on_change_and_identity_stays_url(live_proj):
+    """#5422 + ONTOLOGY §4.6: a NEW version replaces the hash on the SAME node.
+
+    Identity is `url`; the hash names a version. A changed document must never
+    mint a second :Source — that would fork the provenance of every fact the
+    document derives.
+    """
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h4", "title": "V1",
+                "contentHash": "sha-v1"})
+    proj.apply({"type": "DocumentCreated", "id": "doc-h4", "title": "V2",
+                "contentHash": "sha-v2"})
+    assert _doc_anchor(proj, "doc-h4") == ("sha-v2", 1), "new version forked the node"
+
+
+def test_minted_source_stub_does_not_clobber_the_document_anchor(live_proj):
+    """#5422 ordering hazard: the extractedFrom wiring runs AFTER the document
+    fold. `_mint_source_stub`'s `contentHash=''` is ON CREATE only, so a Point
+    linking to an existing document Source must not erase its anchor."""
+    proj = live_proj
+    proj.apply({"type": "DocumentCreated", "id": "doc-h5", "title": "V1",
+                "contentHash": "sha-v1"})
+    prov = provenance("doc-h5", [0, 10], "a claim", extracted_by="test@0")
+    _api(projection=proj)[0].add_point("a claim in the doc", prov,
+                                       extractedFrom="doc-h5")
+    assert _doc_anchor(proj, "doc-h5") == ("sha-v1", 1), (
+        "the extractedFrom stub write clobbered the anchor")
+    edge = proj.g.query(
+        "MATCH (n:Point)-[:extractedFrom]->(s:Source {url:'doc-h5'}) RETURN count(n)"
+    ).result_set
+    assert int(edge[0][0]) == 1, "extractedFrom edge not wired to the document Source"
+
+
+def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
+    """#5422: the anchor rides the JOURNALED event, so replay reproduces it.
+
+    Write through EventAPI.add_document, then re-apply the same journal to a
+    FRESH graph and assert the anchored prop is identical — the
+    `derived = replay(journal)` contract for this field.
+    """
+    from tortoise.ids import content_hash as _ch
+    proj = live_proj
+    api, log = _api(projection=proj)
+    api.add_document("doc-h6", "Doc", content_hash=_ch("body v1"))
+    live = _doc_anchor(proj, "doc-h6")
+    assert live == (_ch("body v1"), 1), live
+    # A metadata-only re-emit must not move it either.
+    api.add_document("doc-h6", "Doc renamed")
+    assert _doc_anchor(proj, "doc-h6") == live
+
+    uri = (os.environ.get("TORTOISE_DB_URI")
+           or "docker://:@localhost:16379/tortoise_test_proj125")
+    replay = FalkorProjection.from_uri(
+        uri, graph_name=f"test_proj125_5422_{os.urandom(4).hex()}")
+    try:
+        replay.g.query("MATCH (n) DETACH DELETE n")
+        for ev in log.read_all():
+            replay.apply(ev)
+        assert _doc_anchor(replay, "doc-h6") == live, (
+            "replay diverged on the document anchor")
+    finally:
+        replay.close()
+
+
+def test_document_version_does_not_double_bump_across_the_two_folds(live_proj):
+    """#5422: a document `:Source` can be reached by BOTH folds (`DocumentCreated`
+    and `SourceCreated`) on one `url`. The hash gate is idempotent — the second
+    fold sees stored == incoming — so one re-ingest must not bump `version`
+    twice, in either order."""
+    from tortoise.ids import content_hash as _ch
+    h = _ch("body v1")
+    for order in ("doc-first", "source-first"):
+        gid = f"doc-v2-{order}"
+        events = [{"type": "DocumentCreated", "id": gid, "title": "Doc",
+                   "content_hash": h},
+                  {"type": "SourceCreated", "url": gid, "sourceKind": "document",
+                   "contentHash": h, "title": "Doc"}]
+        if order == "source-first":
+            events.reverse()
+        for ev in events:
+            live_proj.apply(ev)
+        rows = live_proj.g.query(
+            "MATCH (s:Source {url:$u}) RETURN s.contentHash, s.version, count(s)",
+            params={"u": gid}).result_set
+        assert rows[0][0] == h and int(rows[0][2]) == 1, rows[0]
+        assert int(rows[0][1]) == 1, (
+            f"double-bumped version on {order}: {rows[0]}")
+
+
 def test_upsert_event_uses_dict_kind(live_proj):
     """#125: structured uses {name, kind} → Object objectKind from kind field."""
     proj = live_proj
