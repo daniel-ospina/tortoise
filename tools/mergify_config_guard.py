@@ -542,9 +542,14 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
             i += 1
             continue
         if ch == "[":
-            # `]` as the first member is a LITERAL member, not the class close.
+            # `]` as the first member is a LITERAL member; a leading `!`/`^` may
+            # precede it (`[!]]` negates the class containing a literal `]`).
             j = i + 1
-            if j < len(pattern) and pattern[j] in ("]", "!"):
+            negate = False
+            if j < len(pattern) and pattern[j] in ("!", "^"):
+                negate = True
+                j += 1
+            if j < len(pattern) and pattern[j] == "]":
                 j += 1
             close = pattern.find("]", j)
             content = pattern[i + 1 : close] if close != -1 else ""
@@ -552,7 +557,6 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
                 out.append(re.escape(ch))
                 i += 1
                 continue
-            negate = content[0] in ("!", "^")
             body = content[1:] if negate else content
             out.append("[" + ("^" if negate else "") + _class_body(body) + "]")
             i = close + 1
@@ -626,7 +630,9 @@ def _unioned_files(root: Path) -> set[str]:
                         unioned.add(match.relative_to(root).as_posix())
                 # A glob matching nothing contributes nothing (git unions nothing).
             else:
-                unioned.add(pat)
+                # No glob metachar: a `\x` escape names the literal `x`
+                # (`docs/README\.md` names `docs/README.md`).
+                unioned.add(re.sub(r"\\(.)", r"\1", pat))
     return unioned
 
 

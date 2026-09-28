@@ -1528,3 +1528,22 @@ def test_clause_vii_nested_scope_failure_is_red(tmp_path: Path) -> None:
         tmp_path, "python3 tools/registry_integrity.py", validator_src=src
     )
     assert clause(root, "vii") == 1
+
+
+def test_gitattributes_negated_class_with_close_member(tmp_path: Path) -> None:
+    """`[!]]` negates a class whose only member is a literal `]`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "cfg").mkdir(parents=True, exist_ok=True)
+    for name in ("a.yml", "b.yml", "z.yml"):
+        (root / "cfg" / name).write_text("a: 1\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("cfg/[!]].yml merge=union\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"cfg/a.yml", "cfg/b.yml", "cfg/z.yml"}
+
+
+def test_gitattributes_escaped_literal_name(tmp_path: Path) -> None:
+    """`docs/README\\.md` (no glob metachar) names `docs/README.md`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "docs").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "README.md").write_text("a\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("docs/README\\.md merge=union\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"docs/README.md"}
