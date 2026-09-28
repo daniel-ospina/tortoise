@@ -184,7 +184,10 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
       mm="${off##*:}"
       hh="$(printf '%s' "$hh" | sed 's/^0*//')"; [ -n "$hh" ] || hh=0
       mm="$(printf '%s' "$mm" | sed 's/^0*//')"; [ -n "$mm" ] || mm=0
-      # RFC 3339 bounds. Without these, `+99:99` / `+05:60` resolve to a
+      # ISO 8601 / real-world offset range (±14:00). Deliberately NOT described
+      # as "RFC 3339 bounds": RFC 3339 §5.6 gives time-hour = 00-23, so `+15:00`
+      # through `+23:59` is grammatically VALID there and this cap is tighter than
+      # that grammar. Without the cap, `+99:99` / `+05:60` resolve to a
       # plausible-but-wrong epoch, which is the class this function refuses to
       # emit — fail closed instead.
       [ "$hh" -le 14 ] 2>/dev/null || { printf ''; return 0; }

@@ -3078,6 +3078,21 @@ run_watchdog
 assert_eq "$RC" "0" "hb6: a heartbeat SEARCH failure does NOT fail a healthy run"
 assert_contains "$OUT" "heartbeat: search failed" "hb6: …but it is logged loudly"
 
+# (hb6b) …and neither does an UPDATE failure. This is the third write/search arm:
+# without it, a failed PATCH to an EXISTING rolling record would log
+# "heartbeat: recorded on #N" and the suite would stay green while the record
+# silently went stale — the fail-OPEN direction of the same class hb5 pins.
+# (Labelled 6b, not 8: hb7/hb8/hb9 already exist below for the kill switch and
+# the per-step emitter, and a re-used label makes a failure ambiguous.)
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_SEARCH_JSON="$(heartbeat_search_json 7000)"
+export STUB_HEARTBEAT_PATCH_FAIL=1
+run_watchdog
+assert_eq "$RC" "0" "hb6b: a heartbeat UPDATE failure does NOT fail a healthy run"
+assert_contains "$OUT" "heartbeat: could not update" "hb6b: …but it is logged loudly"
+assert_not_contains "$OUT" "heartbeat: recorded on" "hb6b: …and NEVER claims the record was written"
+
 # (hb7) the operator kill switch records nothing (and the checker will then
 # alarm BY DESIGN — a silence is never an all-clear).
 reset_case

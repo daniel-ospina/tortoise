@@ -818,9 +818,19 @@ for bad in "2026-09-13T03:1:01.750Z" "2026-09-13T3:15:01.750Z" \
            "2026-9-13T03:15:01.750Z" "2026-09-13T03:15:1.750Z" \
            "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
            "2026-09-13T03:15:01.000+05:00garbage" "2026-09-13T03:15:01.000garbage" \
-           "2026-09-13T03:15:01.5.Z" "2026-09-13T03:15:01+banana" "2026-09-13 03:15:01" \
-           "2026-09-13T03:15:01+5:00" "2026-09-13T03:15:01Z0"; do
+           "2026-09-13T03:15:01.5.Z"; do
   assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (not a plausible epoch)"
+done
+# (c4) refused by the OUTER shape fallback (`*)`), NOT by the `dt` guard above.
+# These carry no "." at all, so they never enter the `*.*` branch and never reach
+# `dt`. Split out because attributing them to `dt` — as an earlier revision of this
+# table did — claims coverage of a guard they do not exercise, which is the same
+# per-guard misattribution (c2) and (c3) exist to avoid. `date` may reject some of
+# them on its own, which is exactly why a bare value assertion cannot by itself
+# attribute the refusal to a guard.
+for bad in "2026-09-13T03:15:01+banana" "2026-09-13 03:15:01" \
+           "2026-09-13T03:15:01+5:00" "2026-09-13T03:15:01Z0"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (outer shape fallback)"
 done
 # (c2) out-of-range offsets — pinned to the hh/mm bounds. Tested separately because
 # they are a DIFFERENT guard: ablating the shape check does not redden these, and
