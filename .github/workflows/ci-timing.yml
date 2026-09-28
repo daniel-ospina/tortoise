@@ -298,6 +298,21 @@ jobs:
           git add docs/ci-timing.md docs/ci-timing.json config/ci-surfaces.yml
           git -c user.name="tortoise-ci[bot]" -c user.email="actions@github.com" \
             commit -m "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)"
+          # Does the branch ALREADY exist on origin? The answer decides whether the
+          # cleanup below may delete it: a branch this run CREATED is an orphan by
+          # construction, but a branch that was already there may be the head of an
+          # open PR — and "no PR" is precisely the conclusion a FAILED PR query
+          # cannot support. Fails closed: `git ls-remote --exit-code` documents 2 as
+          # "no matching refs", the only status that means the branch is absent, so
+          # any other failure (network, auth) keeps the default 1 = "pre-existing,
+          # leave it alone".
+          ls_rc=0
+          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 || ls_rc=$?
+          BRANCH_EXISTED=1
+          case "$ls_rc" in
+            2) BRANCH_EXISTED=0 ;;
+          esac
+
           git push -u origin "$BRANCH" || {
             rc=$?
             echo "::error::\`git push\` of $BRANCH failed (exit $rc) — nothing to clean up, but the refresh did not land. A rejection here is usually a re-run at the same main SHA colliding with a branch a previous run left behind (#3092)."
@@ -314,12 +329,15 @@ jobs:
           #
           # `BRANCH_HAS_PR=1` means "a PR exists or was just opened, so the branch
           # must stay" — that includes the legitimate skip below, where the remote
-          # branch is the one the existing PR points at.
+          # branch is the one the existing PR points at. `BRANCH_EXISTED=1` means
+          # the branch predates this run, so a delete would reach a ref this job did
+          # not create — and it would be reaching it on the strength of a PR query
+          # that just FAILED.
           BRANCH_HAS_PR=0
           cleanup_orphan_branch() {
             local rc=$?
             trap - EXIT
-            if [ "${BRANCH_HAS_PR}" = "0" ]; then
+            if [ "${BRANCH_HAS_PR}" = "0" ] && [ "${BRANCH_EXISTED}" = "0" ]; then
               if git push origin --delete "$BRANCH" >/dev/null 2>&1; then
                 echo "removed the orphan branch $BRANCH (it was pushed but no PR was opened)"
               else

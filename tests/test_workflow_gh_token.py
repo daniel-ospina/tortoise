@@ -38,6 +38,7 @@ guard bans the ``secrets`` context in run text but does NOT cover
 """
 from __future__ import annotations
 
+import bisect
 import re
 from pathlib import Path
 
@@ -84,22 +85,25 @@ _GH_CALL = re.compile(
     # A prefix assignment must be on the SAME line as the call: `\s+` here would
     # let the group swallow an intervening command and match its `gh`.
     r"|[A-Za-z_][A-Za-z0-9_]*=[^\s]*[^\S\n]+)*"
-    r"gh\s+"
-    r"(api|pr|issue|run|release|repo|secret|variable|workflow|auth|label|"
+    r"(?P<gh>gh\s+)"
+    r"(?P<sub>api|pr|issue|run|release|repo|secret|variable|workflow|auth|label|"
     r"milestone|search|gist|project|codespace|extension|cache|attestation)\b",
     re.M,
 )
 _TOKEN_KEYS = {"GH_TOKEN", "GITHUB_TOKEN"}
-# A token EXPORTED inside the body itself is in scope — a non-exported assignment
-# is not, because bash does not put it in a child's environment, so a later `gh`
-# would run unauthenticated while the guard claimed it was covered.
+_HEREDOC = re.compile(r"<<[-~]?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+# A token EXPORTED inside the body is in scope from that line onward — a
+# non-exported assignment is not, because bash does not put it in a child's
+# environment, so a later `gh` would run unauthenticated while the guard claimed
+# it was covered.
 _TOKEN_EXPORT = re.compile(r"^\s*export\s+(GH_TOKEN|GITHUB_TOKEN)=", re.M)
-# ...but a PREFIX assignment on the same command IS the child's environment
-# (`GH_TOKEN=x gh pr list`).
+# ...but a PREFIX assignment IS the child's environment. This is applied to the
+# text BEFORE each call on its OWN line, never to the whole body: a prefix on one
+# command must not credential a different call.
 _TOKEN_PREFIX = re.compile(
-    r"(?:^|[;&|(]|\$\()[^\S\n]*(GH_TOKEN|GITHUB_TOKEN)=[^\s]*[^\S\n]+"
-    r"(?:\S+[^\S\n]+)*gh[^\S\n]",
-    re.M,
+    r"(?:^|[;&|(])[^\S\n]*"
+    r"(?:(?:command|sudo|time|env|nohup|nice|builtin|exec)[^\S\n]+)?"
+    r"(GH_TOKEN|GITHUB_TOKEN)=[^\s]*"
 )
 # The token CONTEXTS must never appear in run text (see module docstring).
 # Case-insensitive and index-form aware, because the runner resolves context names
@@ -220,6 +224,11 @@ def _token_bound_env_keys(*mappings: dict | None) -> set[str]:
 #     made the whole class possible at once.
 #   * The `with:` inputs of third-party actions (e.g. a shared workflow action
 #     taking a `github-token`), which are not `run:` bodies at all.
+#   * A `gh` line inside a MULTI-LINE QUOTED STRING handed to an interpreter
+#     (`python3 -c '…` newline `gh api …'`). Bash does not run it, so counting it
+#     is a false positive; excluding it needs quote-aware parsing, not the
+#     line transform `_shell_code` performs. Heredoc BODIES are stripped (the
+#     common case); this shape is not, and no current workflow body contains it.
 
 
 def _workflow_paths() -> list[Path]:
@@ -229,31 +238,57 @@ def _workflow_paths() -> list[Path]:
 
 
 def _shell_code(body: str) -> str:
-    """Executable lines only — full-line shell comments removed, so a commented-out
-    `gh` call is not mistaken for a live one."""
-    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+    """Executable text only.
+
+    Two transforms, both needed to keep the scan honest:
+      * full-line shell comments are removed, so a commented-out `gh` call is not
+        mistaken for a live one;
+      * HEREDOC BODIES are dropped. A heredoc body is DATA — `cat <<EOF` with a
+        `gh api` line inside runs no command, so counting it invents a site, and on
+        a token-less step it fails the invariant on text bash never executes.
+
+    NOT handled (declared in SCOPE BOUNDARY): a multi-line quoted string handed to
+    an interpreter (`python3 -c '…\ngh api…'`), which needs quote-aware parsing
+    rather than a line transform.
+    """
+    out: list[str] = []
+    terminator: str | None = None
+    for line in body.splitlines():
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        found = _HEREDOC.search(line)
+        if found:
+            terminator = found.group(1)
+        out.append(line)
+    return "\n".join(out)
 
 
 def _has_token(mapping: dict | None) -> bool:
     return bool({str(k).upper() for k in (mapping or {})} & _TOKEN_KEYS)
 
 
-def _token_in_scope(doc_env: dict | None, job: dict, step: dict, body: str) -> bool:
-    """Workflow-root env, job env, step env, an in-body export, or a prefix
-    assignment on the same command."""
-    code = _shell_code(body)
+def _env_scope(doc_env: dict | None, job: dict, step: dict) -> bool:
+    """A token supplied by a YAML `env:` block — in scope for every call in the step."""
     return (
         _has_token(doc_env)
         or _has_token(job.get("env"))
         or _has_token(step.get("env"))
-        or bool(_TOKEN_EXPORT.search(code))
-        or bool(_TOKEN_PREFIX.search(code))
     )
 
 
 def gh_call_sites(doc: dict, *, source: str = "<doc>") -> list[dict]:
     """Every `gh` call written directly in a `run:` body, with whether a token is
-    in scope.
+    in scope FOR THAT CALL.
+
+    Coverage is evaluated PER SITE, not per body. A body is a small script: a
+    prefix assignment credentials one command and an `export` credentials the lines
+    after it — neither credentials a different call elsewhere in the step. Deciding
+    coverage once for the whole body marked every other call covered too, which is a
+    false NEGATIVE in the exact guard whose job is that call's credential.
 
     Takes a PARSED document so the scanner itself can be tested against synthetic
     workflows (mutation tests below) without touching the real tree. See the
@@ -267,14 +302,34 @@ def gh_call_sites(doc: dict, *, source: str = "<doc>") -> list[dict]:
             if not body:
                 continue
             code = _shell_code(body)
+            lines = code.split("\n")
+            starts: list[int] = []
+            offset = 0
+            for line in lines:
+                starts.append(offset)
+                offset += len(line) + 1
+            from_scope = _env_scope(doc_env, job or {}, step)
             for match in _GH_CALL.finditer(code):
+                # The match's START is the boundary its prefix group consumed (the
+                # `&` in `a && GH_TOKEN=x gh pr list`), so the site's own offset is
+                # where `gh` itself begins — the cut a prefix has to precede.
+                gh_at = match.start("gh")
+                lineno = bisect.bisect_right(starts, gh_at) - 1
+                col = gh_at - starts[lineno]
+                covered = (
+                    from_scope
+                    # an `export` on this line or an earlier one
+                    or any(_TOKEN_EXPORT.search(ln) for ln in lines[:lineno + 1])
+                    # a prefix assignment on THIS command, before the call
+                    or bool(_TOKEN_PREFIX.search(lines[lineno][:col]))
+                )
                 sites.append({
                     "source": source,
                     "job": job_name,
                     "step": step.get("name") or "(unnamed)",
-                    "subcommand": match.group(1),
+                    "subcommand": match.group("sub"),
                     "match": match.group(0),
-                    "covered": _token_in_scope(doc_env, job or {}, step, body),
+                    "covered": covered,
                 })
     return sites
 
@@ -399,6 +454,51 @@ def test_token_scope_distinguishes_export_from_a_bare_assignment() -> None:
     prefix = _doc("GH_TOKEN=abc gh api repos/o/r\n")
     sites = gh_call_sites(prefix)
     assert len(sites) == 1 and sites[0]["covered"] is True, sites
+
+    # a prefix word between the operator and the assignment still counts
+    wrapped = _doc("env GH_TOKEN=abc gh api repos/o/r\n")
+    sites = gh_call_sites(wrapped)
+    assert len(sites) == 1 and sites[0]["covered"] is True, sites
+
+
+def test_coverage_is_per_call_site_not_per_body() -> None:
+    """A body is a small SCRIPT. A prefix credentials one command and an `export`
+    credentials the lines after it — neither may credential a different call, or
+    the guard reports a token-less call as covered (a false negative in the exact
+    class it exists for)."""
+    # the prefix is on the SECOND call only
+    doc = _doc("gh api repos/o/r\nGH_TOKEN=abc gh pr list\n")
+    sites = gh_call_sites(doc)
+    assert [s["covered"] for s in sites] == [False, True], sites
+
+    # ...and a LATER export cannot credential an EARLIER call
+    doc = _doc("gh api repos/o/r\nexport GH_TOKEN=abc\n")
+    sites = gh_call_sites(doc)
+    assert [s["covered"] for s in sites] == [False], sites
+
+    # ...while an EARLIER export does
+    doc = _doc("export GH_TOKEN=abc\ngh api repos/o/r\n")
+    sites = gh_call_sites(doc)
+    assert [s["covered"] for s in sites] == [True], sites
+
+    # two calls on ONE line: only the one after the prefix is covered
+    doc = _doc("gh api repos/o/r && GH_TOKEN=abc gh pr list\n")
+    sites = gh_call_sites(doc)
+    assert [s["covered"] for s in sites] == [False, True], sites
+
+
+def test_scanner_does_not_count_a_heredoc_body_as_a_call() -> None:
+    """A heredoc body is DATA. `cat <<EOF` with a `gh api` line inside runs no
+    command, so counting it invents a site — and on a token-less step it would fail
+    the invariant on text bash never executes."""
+    assert gh_call_sites(_doc("cat <<EOF\ngh api repos/o/r\nEOF\n")) == []
+    assert gh_call_sites(_doc("cat <<-'EOF'\n  gh api repos/o/r\n  EOF\n")) == []
+    # ...but a real call AFTER the heredoc still counts
+    sites = gh_call_sites(_doc("cat <<EOF\nnot a call\nEOF\ngh api repos/o/r\n"))
+    assert len(sites) == 1, sites
+    # ...and one on the SAME line as the opener does too
+    sites = gh_call_sites(_doc("gh api repos/o/r <<EOF\nnot a call\nEOF\n"))
+    assert len(sites) == 1, sites
 
 
 def test_scanner_ignores_a_commented_out_gh_call() -> None:
