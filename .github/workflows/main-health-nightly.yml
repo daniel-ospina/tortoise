@@ -5,9 +5,9 @@ name: Main health (nightly)
 # Five of the six branch-protection required contexts — pricing-artifact,
 # docs, test-isolation, license-surface, legal-e2e — are emitted by ci.yml,
 # which was `on: pull_request:` only. A required context that never runs on
-# `main` can be red on main indefinitely with nothing reporting it; that is how
-# #5583 (a polarity defect in search_engine.py — `score = 1.0 - distance` over a
-# cosine DISTANCE) and a test-isolation defect both lived on main undetected.
+# `main` can sit red there with nothing reporting it. (The #5583 class is NOT
+# this gap: that was a retrieval defect in `tortoise/search_engine.py`, and
+# `python-ci.yml` already grades its suite on `push: main`.)
 #
 # This workflow is the signal: on a schedule (and on demand) it CALLS ci.yml
 # via `on.workflow_call` with `main_health: true`, so the SAME jobs emit
