@@ -1785,6 +1785,54 @@ def test_cmd_rebuild_reports_unverified_not_gone(tmp_path, capsys,
     assert "are gone" not in out.err, out.err
 
 
+def test_cmd_rebuild_reports_a_confirmed_loss_as_gone(tmp_path, capsys,
+                                                      monkeypatch):
+    """The CLI's LOSS rung must reach stderr for a confirmed partial loss.
+
+    The other two rungs of the onboarding ladder are asserted POSITIVELY
+    ("UNVERIFIED", "UNKNOWN, not absent"), but this one was only ever pinned
+    in the negative — every other `_cmd_rebuild` test seeds
+    `onboarding_missing_total: 0` and asserts `"are gone" not in out.err` for
+    the shapes that must NOT be described as loss. Deleting the
+    `onboarding_missing_total` branch therefore left the suite green, and the
+    one verdict #4641 exists to surface went unpinned: the CLI would print
+    "1 of 1 org state(s) restored" over a destroyed `onboards`/
+    `COMPLETED_STEP` edge and say nothing on stderr. Counts are injected
+    directly; the end-to-end producer of a non-zero `onboarding_missing_total`
+    is `test_onboarding_onboards_edge_gap_is_reported_not_silent`.
+    """
+    import argparse
+
+    from tortoise.__main__ import _cmd_rebuild
+    from tortoise.projection import FalkorProjection
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "onboarding_expected": 1, "onboarding_verified": True,
+              "onboarding_restored": 1, "onboarding_missing_orgs": 0,
+              "onboarding_missing_links": 0,
+              "onboarding_missing_onboards": 1,
+              "onboarding_restore_failures": 0,
+              "onboarding_gap": 1, "onboarding_missing_total": 1,
+              "onboarding_state_unknown": False}
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir: dict(counts))
+    sdk, events = _mk_sdk(tmp_path)
+    sdk.close()
+    _write_journal(events, [])
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "loss.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "1 state/edge restore gap(s)" in out.err, out.err
+    assert "are gone" in out.err, out.err
+    # A CONFIRMED loss is neither UNVERIFIED nor UNKNOWN: those lines describe
+    # other shapes and asserting their absence keeps the rungs distinct.
+    assert "UNVERIFIED" not in out.err, out.err
+    assert "UNKNOWN, not absent" not in out.err, out.err
+
+
 def test_cmd_rebuild_reports_unverified_and_unknown_together(
         tmp_path, capsys, monkeypatch):
     """UNVERIFIED and UNKNOWN are independent and must BOTH be printed.
@@ -2118,12 +2166,16 @@ def test_foreign_section_from_a_sibling_build_is_refused_before_wipe(
     """The version is a FORMAT gate, not a SECTION-SET gate.
 
     Two sibling builds can legitimately claim the same version with different
-    section sets (the open #5327 takes `3` for `event_meta`, this change takes
-    `3` for the onboarding pair). Without a section-set check the same-version
-    file is ACCEPTED, its unknown section is never read (validation walks only
-    `_SNAPSHOT_SECTIONS` and the union reads only known keys), and the class
-    that section carried is destroyed by the wipe — the fail-open the version
-    bump exists to prevent, one level down.
+    section sets: `3` is contested by the open #5327 (`event_meta`) and #5241
+    (`graph_identity`). This change reserved `4` so it would not join that
+    fight (its earlier revisions still claimed `3`), but that removes only ONE
+    way for a same-version payload to arrive — a payload stamped at OUR version
+    by a build whose section set differs from ours still presents the same
+    version with a section we cannot read. Without a section-set check the
+    same-version file is ACCEPTED, its unknown section is never read
+    (validation walks only `_SNAPSHOT_SECTIONS` and the union reads only known
+    keys), and the class that section carried is destroyed by the wipe — the
+    fail-open the version bump exists to prevent, one level down.
     """
     from tortoise.projection import _load_prewipe_snapshot
 
