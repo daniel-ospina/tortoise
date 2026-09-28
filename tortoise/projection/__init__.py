@@ -1304,7 +1304,7 @@ def _fmt_bytes(n: int) -> str:
         val /= step
     return f"{val:.1f} TiB"
 from tortoise.embedded_lifecycle import (  # noqa: E402
-    atexit_fast_close,  # #1371: registers the batch flush
+    atexit_fast_close,  # #1371: the fast-close seam
     register_atexit_close,
     register_gc_close,
 )
@@ -6491,8 +6491,8 @@ class FalkorProjection(
             pass
 
     def _atexit_close(self) -> None:
-        """#1371: atexit seam — collect ephemeral test servers for the
-        batch flush first.
+        """#1371: atexit seam — collect ephemeral test servers so interpreter
+        exit takes the fast close.
 
         Falls through to the normal close() when the fast path does not
         apply (server-mode clients have no fast path; non-ephemeral or
