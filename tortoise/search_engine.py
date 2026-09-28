@@ -1030,19 +1030,39 @@ def run_vector_query(
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
             if sig == "B":
-                # Engine-native scores: cosine similarity in (-1, 1] on
-                # similarityFunction:'cosine' indexes — clamp to [0, 1]
-                # and pass through in index rank order.
+                # #5583: the engine's value here is a DISTANCE (lower is
+                # better), NOT a similarity. `db.idx.vector.queryNodes`
+                # returns `1 - cosine` for a
+                # `similarityFunction: 'cosine'` index: a PERFECT match comes
+                # back as 0.0 and an orthogonal one as 1.0. Passing that
+                # through as a similarity inverted this leg exactly — the
+                # WORST row scored highest, and every `min_similarity` floor
+                # discarded the rows it exists to keep. Measured on the
+                # docker lane (falkordb-server, module ver 42004): a query
+                # identical to the stored vector scored 0.0, an orthogonal
+                # one scored 1.0.
+                #
+                # The conversion mirrors this function's own scan fallback
+                # below (`1.0 / (1.0 + distance)`): both branches derive a
+                # similarity from a distance, so they agree on polarity.
+                # Cosine distance lies in [0, 2], so `1 - d` lies in [-1, 1]
+                # and the [0, 1] clamp still maps a perfect match to 1.0.
+                # The engine's row order is ALREADY best-first, so only the
+                # value changes here; the order is passed through untouched.
                 out = []
                 for row in rows:
                     try:
-                        score = float(row[1])
+                        distance = float(row[1])
                     except (IndexError, TypeError, ValueError):
-                        score = 0.0
+                        distance = None
+                    # An unreadable score carries no evidence of similarity —
+                    # send it to the floor (0.0), never to the ceiling.
+                    score = 0.0 if distance is None else 1.0 - distance
                     out.append((row[0], max(0.0, min(1.0, score))))
                 if min_similarity is not None and out:
-                    # Score IS cosine here — filter directly. Only claim the
-                    # FLOOR when there was something to filter: a zero-row
+                    # Score is a true cosine similarity now — filter directly.
+                    # Only claim the FLOOR when there was something to filter: a
+                    # zero-row
                     # index result is `empty_results`, not a relevance verdict
                     # (claiming the floor there would suppress the caller's
                     # legitimate degraded fallback, #4028 review P1).

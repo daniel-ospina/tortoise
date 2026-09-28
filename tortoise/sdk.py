@@ -21224,7 +21224,7 @@ class TortoiseSDK:
         from pathlib import Path  # noqa: I001
         from .file_indexer import compute_file_hash
         from .session_indexer import (
-            extract_session_id, session_corpus_dir,
+            corpus_files, extract_session_id, session_corpus_dir,
         )
 
         dir_path = Path(directory or session_corpus_dir())
@@ -21241,7 +21241,7 @@ class TortoiseSDK:
         ).result_set
         by_event = {r[0]: r[1] for r in rows}
 
-        files = sorted(dir_path.rglob("*.md"))
+        files = corpus_files(dir_path)
         # Group by session id: two files may share a sessionId (rglob picking
         # up copies, or duplicated frontmatter). Classify only the PRIMARY
         # file (first in sorted order) so the delta drives the sweep to

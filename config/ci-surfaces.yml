@@ -721,6 +721,10 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #5215 (merge-throughput plan, Task 3): the queue-window observer that feeds
+  # M3/M4/M5/M6 records to the instrument. Hermetic (no DB, no network) — it
+  # pins tools/queue_window_observe.py, which `core` runs on engine-wide changes.
+  - test_queue_window_observe.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py

@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.17"
+title: "Tortoise — Canonical Ontology v3.18"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-24
+updated: 2026-09-27
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.17
+# Tortoise — Canonical Ontology v3.18
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,34 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
+> - §3.9: **`related` is defined.** It means *connected, and nothing more* — no
+>   direction (symmetric), no chaining (non-transitive), and never a substitute for a
+>   hierarchy relation (`hasPart` / `memberOf` / `reportsTo`). The shape follows the
+>   SKOS Reference's associative link.
+> - **It carries no epistemic weight, by decision.** Nothing that computes confidence
+>   may traverse it — neither the support path (`IMPL`/`NAND`) nor the
+>   source-credibility prior path (`_apply_source_inheritance`, which reads
+>   `extractedFrom`). **Relevance is not expressed by this link; it is expressed on
+>   the operator** (`IMPL`/`NAND`). The AIF scheme node (`RA-node`) is cited only as an
+>   **illustrative** analogy for relevance-on-the-operator, and operator-less direct
+>   `IMPL`/`NAND` edges also exist (§8).
+> - Enforcement status is stated rather than implied: the three meanings are
+>   **declarations** (`_VALID_EDGE_PREDICATES` is a flat membership set). What *is*
+>   enforced is the **durability** half — `related` sits in **neither**
+>   `DERIVABLE_STRUCTURAL_RELS` nor `SUPERSEDE_STRUCTURAL_RELS`, pinned by
+>   `test_related_is_neutral_by_construction` (#5547). Wiring a producer requires
+>   revisiting both sets first (#2489).
+> - Precedent recorded: SKOS `skos:related` (W3C); ConceptNet `/r/RelatedTo` ("the
+>   most general relation … can't determine what that relationship is"); and AIF's
+>   scheme node, cited as an **illustrative** analogy for relevance-on-the-operator
+>   only.
+> - Known defect on the designated operator route, **and it breaches the rule above
+>   today**: **#5566** — a non-logical edge onto an operator pulls the node into the
+>   affected set, where its prior is discarded (`Beta(1,1)`). The EP traversal is
+>   unfiltered on relation, so `related` is not yet weight-free in fact. Owner-reserved
+>   (belief model, DECISION-LEDGER §22).
 >
 > **Changelog v3.17 (2026-09-24 — issue #4937, the F1 ruling recorded on #2552 — MITIGATES retires from the operator menu):**
 > - §2: the operator KINDS are `IMPL`/`NAND` (+ declared labels). `MITIGATES`
@@ -556,15 +584,96 @@ performs, produces, uses, authoredBy, ownedBy, managedBy,
 hasMember, holdsRole, memberOf, reportsTo,
 participatesIn, hasPart, related, dependsOn, references,
 wasDerivedFrom
+```
 
 > **#214 (2026-08-06):** `instantiates` removed — Event→Action legacy from v2.5;
 > Action was dissolved in Ontology v3.0.
 >
 > **Vocabulary-only edges** (valid predicates with zero producers):
-> `reportsTo` (org hierarchy, Subject→Subject), `related` (generic catch-all),
-> `dependsOn` (pack-declared — dev:api dependsOn dev:database; used by `list_relations()`
-> for kind expansion). All three remain valid for `create_edge()`.
-```
+> `reportsTo` (org hierarchy, Subject→Subject), `dependsOn` (pack-declared —
+> dev:api dependsOn dev:database; used by `list_relations()` for kind expansion),
+> and `related` — **defined below**. All three remain valid for `create_edge()`.
+>
+> **`related` — the neutral association link.**
+>
+> Use it when two things are connected and you mean nothing more than that. It says
+> "these belong in the same neighbourhood" and deliberately does not say how. It is
+> not support, not contradiction, not provenance, and not a way of saying "part of"
+> or "reports to"; where one of those is meant, one of those links must be used.
+>
+> Three meanings follow, and they are what make it safe to use freely:
+>
+>   * **It has no direction.** "A is related to B" and "B is related to A" are the
+>     same statement — so it can never be used to say "A adds information to B",
+>     which does have a direction.
+>   * **It does not chain.** A related to B, and B related to C, tells you nothing
+>     directly about A and C.
+>   * **It is not a hierarchy.** It never substitutes for "part of", "member of" or
+>     "reports to".
+>
+> **It carries no epistemic weight, by decision (#5025, owner ruling 2026-09-27).**
+> Nothing that computes confidence may read this link: it must not be traversed when
+> support is propagated (the `IMPL`/`NAND` path), and it must not be traversed when
+> the system weighs how much to trust a source (`_apply_source_inheritance`, which
+> reads `extractedFrom`). A structural link a confidence path walks is no longer
+> neutral — it is an argument wearing a neutral name.
+>
+> **`related` is exempt from §8's "confidence edge attribute" row.** §8 gives a plain
+> structural edge a `confidence` attribute; for `related` that attribute is **not** a
+> weight, and no confidence path reads it. The two sections are consistent once read
+> together: a `confidence` property may exist on the edge without the edge being an
+> argument.
+>
+> **Where relevance is expressed: not here.** Relevance belongs on the **operator** —
+> by attaching an `IMPL`/`NAND` to the operator's node. That matches the shape
+> argumentation interchange uses: in AIF the *rationale for a relation* is carried by
+> a **scheme node** (`RA-node`), not by the relation itself. **The analogy is
+> illustrative, not authoritative** — AIF's `RA-node` is about inference-rule
+> application; the point here is only that "why are these two connected" is a property
+> of the node rather than of the pair. **Plain support or contradiction between two
+> claims may also be an operator-less direct `IMPL`/`NAND` edge** (§8 below,
+> `create_direct_edge`), so claims do **not** connect only through a scheme in this
+> ontology, and the neutral link is not what makes relevance possible.
+>
+> **`related` — enforcement status (normative detail).** The three meanings above
+> follow the SKOS Reference (W3C Recommendation): symmetric (`owl:SymmetricProperty`,
+> S23); **not** transitive (§8.6.4 — "Note that `skos:related` is not a transitive
+> property"); disjoint from the hierarchical relations (§8.6.10 — "fundamentally
+> distinct in nature"). The same shape is the norm elsewhere: ConceptNet's
+> `/r/RelatedTo` is documented as "the most general relation. There is some positive
+> relationship between A and B, but ConceptNet can't determine what that relationship
+> is based on the data", and is symmetric.
+>
+> **Declared, not machine-enforced.** Symmetry, non-transitivity and
+> hierarchy-disjointness are declarations. `_VALID_EDGE_PREDICATES` is a flat
+> frozenset, and **for `related`** `create_edge()` applies no symmetry, transitivity
+> or disjointness logic — no test asserts those properties of `related`. (Transitivity
+> logic *does* exist in the codebase for a **different** predicate: `create_edge`'s
+> transitive cycle guard for `ownedBy` (`projection/edges.py:565-582`), tested by
+> `test_transitive_cycle_rejected` and `test_direct_cycle_rejected`. This claim is
+> scoped to `related`.)
+>
+> **The durability half IS enforced — the confidence half is NOT.** What is enforced
+> is *transfer and replay*: `related` is in **neither** `DERIVABLE_STRUCTURAL_RELS`
+> (no replay descriptor) **nor** `SUPERSEDE_STRUCTURAL_RELS` (a supersede does not
+> transfer it — it stays at the old point), pinned by
+> `tests/test_dry_run_preview.py` ("in NO transfer leg") and
+> `test_related_is_neutral_by_construction` (#5547). **These two sets govern
+> durability, not weight** — do not read their enforcement as the rule above being
+> true in the code.
+>
+> ⛔ **"Carries no epistemic weight" is a DECISION WITH A KNOWN BREACH — it is the
+> target, not today's behaviour.** The EP affected-set traversal is **unfiltered on
+> relation** (`ep.py:807`, `:922`, `:937`), so a `related` edge that lands on an
+> operator *does* reach `_update_claim_posterior` (`ep.py:625+`), which recomputes
+> that node as `Beta(1,1)` and **discards its prior** — **#5566**. Until that is
+> fixed, `related` **can** change a belief number. Tracked as its own defect and
+> owner-reserved (belief model, DECISION-LEDGER §22).
+>
+> **Wiring a producer requires revisiting both sets first.** Per #2489 a predicate's
+> label and its replay key are one unit: `STRUCTURAL_REL_LABELS` holds the target
+> label and the replay-key selection sits beside it in `stub_key`, so the two must
+> move together, and the replay branch keys on `etype in DERIVABLE_STRUCTURAL_RELS`.
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 
@@ -1074,6 +1183,17 @@ edge attribute.
 | Point↔Point support / contradict (IMPL/NAND) | **Yes** | EP over the IMPL/NAND edge |
 | Any edge needing mitigation (+/− relevance) | **Yes** — mitigations attach to the operator | EP over IMPL/NAND |
 | Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
+| `related` — the neutral association edge (§3.9) | **No** — plain edge | **none** — evidence-free by construction; no belief path may read it |
+
+- **Neutral vs structural (#5025):** the `Structural edge without mitigation` row above
+  permits a `confidence` attribute on a plain structural edge; for `related` that
+  attribute is **not a weight** — the property may exist, and no confidence path reads
+  it — because its neutrality is the point. "Structural" and "belief-free" are not
+  synonyms:
+  `extractedFrom` is structural and **does** carry weight, via the Beta prior set in
+  `_apply_source_inheritance`. A predicate is neutral only when no read path traverses it
+  — see §3.9 for the breach that currently leaves `related`'s neutrality a target rather
+  than a fact (#5566).
 
 - **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
   (no operator); EP propagates over it the same way.

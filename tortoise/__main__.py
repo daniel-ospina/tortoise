@@ -2834,8 +2834,14 @@ def _install_read_hook_impl(args) -> int:
       hooks are merged key-wise; codex hooks.json entries are appended only
       when our registration is absent; an existing cline UserPromptSubmit hook
       that is not ours is REFUSED (printed conflict), never overwritten.
-    - --uninstall removes ONLY registrations whose command references
-      volunteer-turn.sh (wrapper-aware for both flat and claude shapes).
+    - --uninstall removes ONLY registrations this installer can PROVE it
+      wrote: the exact shipped registration (``<shipped volunteer-turn.sh>
+      <harness>``), or a structurally identical 2-token registration whose
+      script path is DEAD (the stale remnant of a relocated install — the
+      same case the install-side repair claims). A user wrapper, a comment
+      mention, another product's LIVE volunteer-turn.sh at a different path,
+      and malformed commands are NOT ours and are left untouched: an
+      uninstall must never delete config it cannot prove it created (#2383).
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
@@ -2950,6 +2956,33 @@ def _install_read_hook_impl(args) -> int:
         print(f"No {harness} registration at {target} — nothing to remove.")
         return 0
 
+    def _cline_marker_owns(text: str) -> bool:
+        """True iff ``text`` carries OUR registration LINE — ``exec
+        <…volunteer-turn.sh> cline`` — not merely a mention of the script.
+
+        The line is shlex-parsed (so the quoted shipped path matches), a
+        leading ``exec`` shell keyword is stripped, and ownership requires the
+        exact shipped path OR a DEAD path (a stale marker from a relocated
+        install — cline's self-heal rewrites it). A comment/echo mention, a
+        different product's LIVE hook, and malformed lines are NOT ours.
+        """
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                toks = _shlex.split(line)
+            except ValueError:
+                continue
+            if toks and toks[0] == "exec":
+                toks = toks[1:]
+            if (len(toks) == 2 and toks[1] == harness
+                    and toks[0].endswith("volunteer-turn.sh")
+                    and (toks[0] == str(script)
+                         or not Path(toks[0]).exists())):
+                return True
+        return False
+
     if harness == "cline":
         # Cline hooks are files at .cline/hooks/<EventName> (project) or
         # ~/.cline/hooks (global); hooks must also be enabled in settings.
@@ -2961,18 +2994,22 @@ def _install_read_hook_impl(args) -> int:
         if target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
-            if uninstall:
-                if "volunteer-turn.sh" not in existing_text:
-                    print(f"{target} is not a volunteer-turn.sh hook — refusing "
-                          "to delete it.", file=_sys.stderr)
-                    return 1
-            else:
-                if "volunteer-turn.sh" not in existing_text:
-                    print(f"{target} already exists and is not a "
+            # #2383: ownership is the registration LINE, not a substring.
+            # The old check (``"volunteer-turn.sh" in existing_text``)
+            # treated a user hook that merely MENTIONS the script name — in a
+            # comment or an echo — as ours, and silently OVERWROTE it on
+            # install / DELETE it on uninstall. A marker-line match cannot
+            # fire on a mention.
+            if not _cline_marker_owns(existing_text):
+                if uninstall:
+                    print(f"{target} is not our volunteer-turn.sh hook — "
+                          "refusing to delete it.", file=_sys.stderr)
+                else:
+                    print(f"{target} already exists and is not our "
                           "volunteer-turn.sh hook — refusing to overwrite it. "
                           "Remove it manually or install into another dir.",
                           file=_sys.stderr)
-                    return 1
+                return 1
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
@@ -3003,6 +3040,54 @@ def _install_read_hook_impl(args) -> int:
             return inner if isinstance(inner, str) else ""
         return ""
 
+    def _cmd_dict(e):
+        """The dict whose command carries the command, for either the flat
+        or the nested claude wrapper shape (or None)."""
+        if isinstance(e, dict) and isinstance(e.get("command"), str):
+            return e
+        if isinstance(e, dict):
+            hs = e.get("hooks")
+            if (isinstance(hs, list) and hs
+                    and isinstance(hs[0], dict)
+                    and isinstance(hs[0].get("command"), str)):
+                return hs[0]
+        return None
+
+    # The registration THIS build writes. '' only if the shape ever changes.
+    desired = _entry_command(registration[0])
+
+    def _entry_is_ours(e) -> bool:
+        """POSITIVE ownership: the only entries ``--uninstall`` may delete.
+
+        True only for a registration this build provably wrote:
+
+        * the EXACT shipped registration (``<shipped volunteer-turn.sh>
+          <harness>``), which is what a real install leaves behind; or
+        * a structurally identical 2-token registration whose script path is
+          DEAD — the stale remnant of a relocated install, the same case the
+          install-side repair claims.
+
+        Everything else is NOT ours and must never be deleted: a user wrapper
+        (``firejail … volunteer-turn.sh …``), a comment mention (the old
+        substring marker), another product's LIVE ``volunteer-turn.sh`` at a
+        different path, and malformed / non-str commands. ``#2383``: the
+        install half already refuses to rewrite these very entries, so an
+        uninstall that deletes them destroys config it did not create.
+        """
+        cmd_d = _cmd_dict(e)
+        if cmd_d is None:
+            return False
+        cmd = cmd_d["command"]
+        if desired and cmd == desired:
+            return True
+        try:
+            toks = _shlex.split(cmd)
+        except ValueError:
+            return False
+        return (len(toks) == 2 and toks[1] == harness
+                and "volunteer-turn.sh" in toks[0]
+                and not Path(toks[0]).exists())
+
     existing = target.read_text(encoding="utf-8") if target.exists() else None
     if existing is not None:
         try:
@@ -3031,13 +3116,27 @@ def _install_read_hook_impl(args) -> int:
         ups = ups or []
         ours = [e for e in ups if "volunteer-turn.sh" in _entry_command(e)]
         if uninstall:
-            if not ours:
+            # #2383: delete only what we can PROVE we wrote. `ours` (above)
+            # stays the broad "mentions our script" list — the install half
+            # uses it to decide "the hook is already wired, don't add a
+            # duplicate" — but DELETION needs positive ownership, because the
+            # broad marker also matches a user wrapper and another product's
+            # live hook, which install deliberately leaves untouched.
+            deletable = [e for e in ups if _entry_is_ours(e)]
+            if not deletable:
+                if ours:
+                    print(f"{target} has volunteer-turn.sh registration(s) "
+                          "that this installer did not write — refusing to "
+                          "remove them (a wrapper, a foreign hook, or a "
+                          "malformed entry). Remove the entry manually if "
+                          "you want it gone.", file=_sys.stderr)
+                    return 1
                 # #2383: nothing of ours present — never rewrite the file
                 # and claim "Uninstalled".
                 print(f"No volunteer-turn.sh registration in {target} — "
                       "nothing to remove.")
                 return 0
-            remaining = [e for e in ups if e not in ours]
+            remaining = [e for e in ups if e not in deletable]
             if remaining:
                 hooks["UserPromptSubmit"] = remaining
             else:
@@ -3071,20 +3170,6 @@ def _install_read_hook_impl(args) -> int:
             # volunteer-turn.sh, live-but-moved installs — are left
             # untouched: rewriting them silently strips the security wrapper
             # or hijacks a foreign hook (R2 finding).
-            desired = _entry_command(registration[0])
-            def _cmd_dict(e):
-                """The dict whose command carries the command, for either
-                the flat or the nested claude wrapper shape (or None)."""
-                if isinstance(e, dict) and isinstance(e.get("command"), str):
-                    return e
-                if isinstance(e, dict):
-                    hs = e.get("hooks")
-                    if (isinstance(hs, list) and hs
-                            and isinstance(hs[0], dict)
-                            and isinstance(hs[0].get("command"), str)):
-                        return hs[0]
-                return None
-
             repaired = 0
             live_ours = 0
             foreign = []
@@ -5423,11 +5508,27 @@ def _cmd_verify(args):
     from .projection import FalkorProjection
     proj = FalkorProjection.from_uri(args.db)
     try:
-        proj.apply([{"type": "PointAdded", "point": {"id": "test-verify", "content": "verify", "pointKind": "observation", "createdAt": "2026-01-01T00:00:00Z"}}])
+        # #3600: apply() takes ONE event dict. This passed a one-element list;
+        # _norm() degrades a non-dict to {} and the type guard then skips it, so
+        # the write was a silent no-op.
+        proj.apply({"type": "PointAdded", "point": {"id": "test-verify", "content": "verify", "pointKind": "observation", "createdAt": "2026-01-01T00:00:00Z"}})
+        # Confirm the write landed before reporting it. The original printed
+        # "✓ write OK" unconditionally, which is the same silent-success defect
+        # the list argument caused — a health check must be able to fail.
+        written = proj.g.query("MATCH (p:Point {id: 'test-verify'}) RETURN p").result_set
+        if not written:
+            print("✗ write FAILED")
+            return 1
         print("✓ write OK")
-        result = proj.db.query("MATCH (p:Point {id: 'test-verify'}) RETURN p")
-        print("✓ read OK" if result.result_set else "✗ read FAILED")
-        proj.db.query("MATCH (p:Point {id: 'test-verify'}) DELETE p")
+        # Read leg asserts the properties round-trip, not merely that the node
+        # exists (the write probe above already covers existence) — and it must
+        # affect the exit code, which it previously did not.
+        result = proj.g.query("MATCH (p:Point {id: 'test-verify'}) RETURN p.content")
+        if not result.result_set or result.result_set[0][0] != "verify":
+            print("✗ read FAILED")
+            return 1
+        print("✓ read OK")
+        proj.g.query("MATCH (p:Point {id: 'test-verify'}) DELETE p")
         print("✓ delete OK")
     except Exception as e:
         print(f"✗ {e}")
@@ -6390,6 +6491,89 @@ def _cmd_index_github(args):
         indexed > 0 or unreadable == 0 or already_indexed > 0) else 1
 
 
+#: #280 check 4 — the shared empty-corpus detail (the corpus has no `*.md`
+#: files yet). Used by the graph-aware branch and by the `pre-init-default`
+#: fallback; the other fallback reasons carry their own empty-corpus wording.
+_SESSION_INDEX_EMPTY_DETAIL = (
+    "corpus empty — nothing indexed (expected for new setups)"
+)
+
+#: The remediation for a target that was explicitly configured but has no DB
+#: file: point at the target, not at the first-run remedy. Shared by BOTH
+#: variants (empty and populated corpus) so the arm cannot answer a config
+#: error with a first-run remedy in one variant and nothing in the other.
+#: Deliberately NOT an enumeration of the DB-target knobs — several flags and env
+#: vars reach this arm (`--db`, `--path`, TORTOISE_DB_URI, FALKORDB_*,
+#: TORTOISE_DB_PATH) and the `Graph: health` row above already names the
+#: resolved target, so a list here is a drift surface, not information.
+_SESSION_INDEX_CONFIGURED_FIX = ("fix the configured target, then re-run doctor")
+
+
+def _session_index_rows_without_graph(
+        reason: str = "graph-unavailable") -> list[tuple[str, str, str]]:
+    """Session-indexing row when no graph-aware verdict was produced (#5815).
+
+    `doctor` rendered the row inside the graph-health block, so the row's
+    EXISTENCE was coupled to a different check's execution and it vanished in
+    every state where that block did not run or raised: no Tortoise DB file
+    (fresh install, CI — the #5815 bug), an unresolved target, an unopenable
+    embedded DB, an unreachable URI. The caller renders this row from ONE
+    post-graph seam instead, so the row is structurally exactly-once in every
+    target state rather than branch-locally present.
+
+    `reason` selects wording only, never polarity — every row here is ⚠️:
+
+    * ``pre-init-default`` — the canonical DEFAULT target has no DB file, the
+      expected first-run state (#2204, rc 0). Keeps the shared empty-corpus
+      detail and the `tortoise init` remediation.
+    * ``pre-init-configured`` — an EXPLICITLY CONFIGURED target has no DB file.
+      #2204's verdict split grades that a config error (❌ + rc 1 on the
+      `Graph: health` row), so this row points at the configured target rather
+      than at the first-run remediation.
+    * ``graph-unavailable`` — the target did not resolve, or the projection /
+      status call raised. The corpus is reported, never graded.
+
+    ⚠️-not-❌ on a NON-empty corpus is a deliberate departure from #280/#793's
+    "delta > 0 → fail" contract, and it is deliberate for one reason: on a
+    never-initialized target every corpus file is unindexed BY CONSTRUCTION, so
+    failing here would fail every `doctor` run on the fresh machines #2204
+    rules must pass (rc 0) — reintroducing the false alarm this check exists to
+    avoid. Recorded as an `OVERRIDES:` ruling on issue #5815. Do not "restore"
+    the ❌ without reopening that decision.
+
+    No SDK or projection is constructed: the #2204 guard exists so doctor never
+    creates state on a target it only inspects.
+    """
+    from tortoise.session_indexer import corpus_files
+    try:
+        files = corpus_files()
+    except Exception as e:
+        return [("Session indexing", "⚠️", f"check unavailable: {str(e)[:60]}")]
+    n = len(files)
+    plural = "" if n == 1 else "s"
+    if reason == "pre-init-default":
+        if n == 0:
+            return [("Session indexing", "⚠️", _SESSION_INDEX_EMPTY_DETAIL)]
+        return [("Session indexing", "⚠️",
+                 f"{n} corpus file{plural}, none indexed — no graph at the "
+                 "resolved target yet (run `tortoise init`, then `tortoise "
+                 "index sessions`)")]
+    if reason == "pre-init-configured":
+        if n == 0:
+            return [("Session indexing", "⚠️",
+                     "corpus empty — nothing indexed (no graph at the "
+                     f"configured target; {_SESSION_INDEX_CONFIGURED_FIX})")]
+        return [("Session indexing", "⚠️",
+                 f"{n} corpus file{plural}, none indexed — no graph at the "
+                 f"configured target ({_SESSION_INDEX_CONFIGURED_FIX})")]
+    if n == 0:
+        return [("Session indexing", "⚠️",
+                 "corpus empty — nothing indexed (graph unavailable)")]
+    return [("Session indexing", "⚠️",
+             f"{n} corpus file{plural}, not graded — graph unavailable "
+             "(see the `Graph: health` row)")]
+
+
 def _cmd_doctor(args):
     """Health check — verify Tortoise setup is healthy."""
     import importlib
@@ -6497,6 +6681,12 @@ def _cmd_doctor(args):
     # 3. Graph health — verify the SAME resolved target above (probe + check
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
+    #
+    # #5815: WHY the graph-aware session-index verdict may not appear. Set
+    # below and consumed by ONE post-graph seam after this block, so the row
+    # renders in every target state instead of only the states in which this
+    # block happens to complete.
+    _session_index_reason = "graph-unavailable"
     if target is not None:
         # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
         # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
@@ -6544,6 +6734,12 @@ def _cmd_doctor(args):
         if not _initialized:
             from tortoise.config import DEFAULT_DB_PATH, _abs
             _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            # #5815: grade the corpus against the #2204 verdict split — a
+            # missing DEFAULT target is the expected first run, a missing
+            # configured target is a config error and must not be narrated as
+            # a first run.
+            _session_index_reason = ("pre-init-default" if _is_default_target
+                                     else "pre-init-configured")
             _icon = "⚠️" if _is_default_target else "❌"
             _detail = (
                 f"not set up yet — no Tortoise DB at {target}"
@@ -6574,7 +6770,7 @@ def _cmd_doctor(args):
                         _fc = _chk4["file_count"]
                         if _fc == 0:
                             results.append(("Session indexing", "⚠️",
-                                            "corpus empty — nothing indexed (expected for new setups)"))
+                                            _SESSION_INDEX_EMPTY_DETAIL))
                         else:
                             _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
                             _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
@@ -6599,6 +6795,17 @@ def _cmd_doctor(args):
                         sdk._proj.close()
             except Exception as e:
                 results.append(("Graph: health", "❌", str(e)[:60]))
+
+    # #280 check 4 / #5815 — ONE seam, exactly once. The session-index row used
+    # to be appended inside the graph-health block, so its EXISTENCE was
+    # coupled to a different check's execution: it disappeared whenever that
+    # block did not run or raised (no DB file → the #5815 fresh-install/CI
+    # case; `target is None`; an existing-but-unopenable embedded DB; an
+    # unreachable URI). The graph-aware verdict is authoritative when it ran;
+    # this corpus-only row speaks whenever it did not, from every target
+    # state. #2204 still holds — no projection is constructed to say this.
+    if not any(r[0] == "Session indexing" for r in results):
+        results.extend(_session_index_rows_without_graph(_session_index_reason))
 
     # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
     # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer
@@ -8300,7 +8507,9 @@ def main(argv: list[str] | None = None) -> int:
     inst.add_argument(
         "--uninstall", action="store_true",
         help="Remove the per-turn read-hook (volunteer-turn.sh) registration "
-             "for the harness — the capture seam is left in place")
+             "for the harness — only registrations this installer wrote are "
+             "removed (a user wrapper or a foreign hook is refused, not "
+             "deleted); the capture seam is left in place")
     # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
     # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
     # (re-copies the scripts AND merges the settings.json timeout). Also
