@@ -700,3 +700,402 @@ def test_restore_chain_guard_bounded(sdk):
     assert out["found"] is True
     assert out["valid_point"]["id"] == pts[0]["id"]
     assert len(out["chain"]) == 3
+
+
+# ── #4021: inverted predecessor window (backdated successor) ──────────────
+#
+# The defect: ``supersede_point`` stamped the predecessor's window END from
+# the successor's window START without ever reading the predecessor's own
+# ``validFrom`` — so a successor dated EARLIER than its predecessor persisted
+# ``validTo < validFrom``.  The window then satisfies ``_covers`` for no query
+# instant, so the predecessor becomes unreachable from every read surface
+# (#4021).  The fix is ``_supersede_window_end``: one home for the successor-
+# window RESOLUTION plus a fail-closed refusal of the inverted direction.
+
+from tortoise.sdk import _supersede_window_end  # noqa: E402
+from tortoise.search_engine import _created_sort_key  # noqa: E402
+
+
+def _window_end(old_vf, *, valid_from=None, stored_vf=None,
+                successor_created_at=None, now="2030-01-01T00:00:00+00:00"):
+    """Call the helper the way ``supersede_point`` does (keyword-only)."""
+    return _supersede_window_end(
+        old_id="pt_old", new_id="pt_new", old_vfs=[old_vf],
+        valid_from=valid_from, stored_vf=stored_vf,
+        successor_created_at=successor_created_at, now=now)
+
+
+def _corrects_out(sdk: TortoiseSDK, from_id: str) -> int:
+    """Outgoing CORRECTS edges — ``(successor)-[:CORRECTS]->(predecessor)``."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id})-[:CORRECTS]->() RETURN count(*)",
+        params={"id": from_id}).result_set
+    return rows[0][0]
+
+
+# -- the helper: resolution + the inversion refusal -----------------------
+
+def test_window_end_refuses_inverted_start():
+    """B1/B6 — every resolution branch is measured against the predecessor's
+    start, not just the kwarg branch (the pre-fix write read no start at all).
+
+    The four rows are the four sources of the successor window start, each one
+    strictly BEFORE the predecessor's ``validFrom``."""
+    cases = [
+        ("stored validFrom", dict(stored_vf="2026-06-01")),
+        ("kwarg", dict(valid_from="2026-06-01")),
+        ("successor createdAt", dict(successor_created_at="2026-06-01")),
+        ("now fallback", dict(now="2026-06-01")),
+    ]
+    for _label, kw in cases:
+        with pytest.raises(ValueError, match="inverted window"):
+            _window_end("2026-06-10", **kw)
+    # forward control — the same four sources, one day LATER, are accepted
+    for label, kw in [
+        ("stored validFrom", dict(stored_vf="2026-06-20")),
+        ("kwarg", dict(valid_from="2026-06-20")),
+        ("successor createdAt", dict(successor_created_at="2026-06-20")),
+        ("now fallback", dict(now="2026-06-20")),
+    ]:
+        assert _window_end("2026-06-10", **kw) == "2026-06-20", label
+    # an OPEN predecessor window (no start) can never be inverted
+    assert _window_end(None, stored_vf="2026-06-01") == "2026-06-01"
+
+
+def test_window_end_equal_start_allowed():
+    """Equality is well-formed (a zero-length predecessor window) — the guard
+    is strictly-before only, so it must not reject contiguity."""
+    assert _window_end("2026-06-10", stored_vf="2026-06-10") == "2026-06-10"
+    # format-only difference naming the SAME instant is still equality
+    assert _window_end("2026-06-10T00:00:00+00:00",
+                       stored_vf="2026-06-10T00:00:00Z") == "2026-06-10T00:00:00Z"
+
+
+def test_window_end_falsey_or_unparseable_start_refused():
+    """B4/B5 — the PRESENCE predicate is ``is not None`` and the measure is
+    ``_created_sort_key`` (the read path's), not truthiness.
+
+    The two predicates disagree in BOTH directions, and the fixture reaches
+    both:
+
+    - ``0`` is PRESENT but falsey.  It keys as the parseable epoch-0 instant,
+      so it is a real window start and IS compared — a truthiness predicate
+      would have skipped a genuine inversion.
+    - ``'not-a-date'`` is TRUTHY but unorderable, and ``''`` is falsey and
+      unorderable.  Both key as ``(1, text)``, which sorts after every
+      parseable instant, so comparing them would refuse ANY successor on an
+      ordering-fallback artefact.  Both are SKIPPED — the same choice
+      ``_assert_window_start_not_inverted``, the #5358 sibling, documents for
+      the identical shape.  (``''`` is skipped under EITHER predicate, so it is
+      not the case that discriminates them; ``'not-a-date'`` is.)
+
+    Both directions are pinned because they are different behaviours, not two
+    spellings of one.
+    """
+    # ``0`` is present-and-parseable: a real inversion, refused.
+    with pytest.raises(ValueError, match="inverted window"):
+        _window_end(0, stored_vf="1969-12-31T00:00:00+00:00")
+    # control: a POST-epoch end is not an inversion against epoch-0
+    assert _window_end(0, stored_vf="2026-06-01") == "2026-06-01"
+    # present-but-UNORDERABLE starts are skipped, not refused.
+    assert _window_end("", stored_vf="2026-06-01") == "2026-06-01"
+    assert _window_end("not-a-date", stored_vf="2026-06-01") == "2026-06-01"
+
+
+def test_window_end_checks_EVERY_predecessor_start_not_just_the_first():
+    """A point id is not UNIQUE, and the stamp block MATCHes and stamps
+    EVERY node carrying it — so reading only the first row's start would pass
+    the guard and still persist an inverted window on a sibling node.
+
+    Value that makes it fail: starts on BOTH sides of the successor's start.
+    The fixture reaches it — the sequence carries ``'2026-06-01'`` (before)
+    and ``'2026-06-20'`` (after) against a successor start of
+    ``'2026-06-10'``. A first-row-only read sees the first entry and accepts;
+    the verdict would also flip with the row order the server happens to
+    return, which is what makes it a correctness bug and not a nicety.
+    """
+    with pytest.raises(ValueError, match="inverted window"):
+        _supersede_window_end(
+            old_id="pt_old", new_id="pt_new",
+            old_vfs=["2026-06-01", "2026-06-20"],
+            valid_from=None, stored_vf="2026-06-10",
+            successor_created_at=None, now="2030-01-01T00:00:00+00:00")
+    # Order must not change the verdict: the same two starts, reversed.
+    with pytest.raises(ValueError, match="inverted window"):
+        _supersede_window_end(
+            old_id="pt_old", new_id="pt_new",
+            old_vfs=["2026-06-20", "2026-06-01"],
+            valid_from=None, stored_vf="2026-06-10",
+            successor_created_at=None, now="2030-01-01T00:00:00+00:00")
+    # Control: no sibling start is after the successor, so it is accepted.
+    assert _supersede_window_end(
+        old_id="pt_old", new_id="pt_new",
+        old_vfs=["2026-06-01", None],
+        valid_from=None, stored_vf="2026-06-10",
+        successor_created_at=None, now="2030-01-01T00:00:00+00:00"
+    ) == "2026-06-10"
+
+
+def test_unparseable_predecessor_start_matches_the_sibling_5358(sdk):
+    """An unorderable predecessor start is SKIPPED — exactly as the merged
+    #5358 sibling skips it — so the supersede still completes.
+
+    Value that makes it fail: the predecessor start ``'TBD'``, written through
+    the public create path.  The fixture reaches it — ``create_point`` accepts
+    any caller ``validFrom``, so a legacy or imported non-ISO start is a real
+    graph state.  Refusing here would make such a point impossible to
+    supersede until its window was repaired: the guard would refuse the very
+    write a caller uses to move past the bad point.  The sibling's docstring
+    states the same reasoning — the window already covers no PARSEABLE
+    instant, so the write cannot newly hide it from any parseable query.
+    """
+    old = _make_point(sdk, content="legacy claim", validFrom="TBD")
+    new = _make_point(sdk, content="corrected claim", validFrom="2026-06-01")
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    op = _props(sdk, old["id"])
+    assert op["validFrom"] == "TBD", (
+        "the fixture must reach the unorderable start for this to mean anything"
+    )
+    assert op["validTo"] == "2026-06-01"
+    assert op["status"] == "superseded"
+    assert _corrects_out(sdk, new["id"]) == 1
+
+
+def test_window_end_numeric_stored_value_stays_raw():
+    """The STORED branch returns the value AS STORED — raw, never ``str()``.
+
+    ``_created_sort_key`` keys a numeric epoch as ``(0, float)`` but
+    ``str(1781049600.0)`` as unparseable ``(1, text)``; normalising it would
+    make the guard read a different instant than the read path (and would
+    re-introduce the unbounded predecessor window #3980 exists to prevent)."""
+    out = _window_end("2026-06-01", stored_vf=1781049600.0)
+    assert out == 1781049600.0
+    assert isinstance(out, float), f"stored value was normalised: {out!r}"
+
+
+def test_window_end_numeric_kwarg_resolved_before_measure():
+    """B3 — a numeric kwarg is measured AFTER the resolution the writer
+    persists, i.e. ``str(valid_from)`` (``sdk.py``'s ``succ_vf = str(valid_from)``).
+
+    This is the undated-successor sibling of the pre-existing
+    ``test_supersede_numeric_epoch_kwarg_refused``: a numeric kwarg can only
+    reach this guard when the successor carries NO stored ``validFrom``,
+    because the #3980 agreement guard already refuses it whenever a stored
+    start exists (``(1, text)`` never equals ``(0, float)``).
+
+    The self-check below is the discriminator and it is HOST-INDEPENDENT:
+    ``_created_sort_key`` parses a date-only string on a NAIVE datetime, so
+    ``'2026-06-10'`` keys as LOCAL midnight (+/- 14 h across real timezones).
+    The raw epoch is therefore asserted to precede it, rather than assumed."""
+    raw = 1780000000.0  # a fixed epoch comfortably before old_vf's instant
+    assert _created_sort_key(raw) < _created_sort_key("2026-06-10"), (
+        "the raw-vs-resolved discriminator needs a raw epoch strictly before "
+        "the predecessor's (host-local) start"
+    )
+    out = _window_end("2026-06-10", valid_from=raw)
+    # (a) the resolved (persisted) value keys unparseable, so it is NOT an
+    #     inversion — measuring the caller's raw object would have refused;
+    # (b) and the value returned is the string the write persists.
+    assert out == str(raw) == "1780000000.0"
+    assert isinstance(out, str), f"returned the unresolved object: {out!r}"
+
+
+# -- the writer: fail-closed refusal, no half-write ------------------------
+
+def test_supersede_retroactive_successor_refused(sdk):
+    """B1 — a backdated successor is refused BEFORE any mutation.
+
+    Fail-closed means *nothing* of the supersede landed: no window end, no
+    transaction-time expiry, no terminal status, no CORRECTS edge, and no
+    ``PointSuperseded`` journal line (a journaled event is what rebuild
+    replays, so an early emit would re-materialise the corruption)."""
+    from tortoise.event_store import read_after
+
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-10")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(old["id"], new["id"])
+
+    op = _props(sdk, old["id"])
+    assert "validTo" not in op
+    assert "expiredAt" not in op
+    assert op.get("status") != "superseded"
+    assert _corrects_out(sdk, new["id"]) == 0
+    assert read_after(sdk._get_proj(), 0, types=["PointSuperseded"]) == []
+
+
+def test_supersede_retroactive_successor_agreeing_kwarg_refused(sdk):
+    """B2 — the agreement guard (#3980) is NOT enough.
+
+    When the kwarg AGREES with the successor's stored start, #3980 accepts it
+    (both sides parse to the same instant) — so this input reaches the window
+    stamp untouched and is the case the new guard exists for.  Distinct from
+    #3980: that guard compares the kwarg to the successor, this one compares
+    the successor to the PREDECESSOR."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-10")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-01")
+
+    assert "validTo" not in _props(sdk, old["id"])
+    assert _corrects_out(sdk, new["id"]) == 0
+
+
+def test_supersede_refuses_when_a_DUPLICATE_predecessor_node_is_late(sdk):
+    """The end-to-end form of the fan-out gap: a duplicated predecessor id
+    with starts on BOTH sides of the successor's start.
+
+    Value that makes it fail: the LATE sibling node's window. The fixture
+    reaches it — two nodes share one id (``create_point(id=...)`` allows it),
+    carrying starts ``'2026-06-01'`` and ``'2026-06-20'`` against a successor
+    start of ``'2026-06-10'``. The writer's stamp is a bare
+    ``MATCH (n:Point {id:$id}) SET n.validTo = ...``, so it stamps EVERY node
+    with that id: reading only the first start accepts and leaves the
+    ``'2026-06-20'`` node with ``validFrom > validTo`` — the exact #4021
+    corruption, silently, and with the verdict depending on server row order.
+    """
+    dup = "pt_dup_4021"
+    sdk.create_point("statement", "claim v1 early", id=dup,
+                     validFrom="2026-06-01")
+    sdk.create_point("statement", "claim v1 late", id=dup,
+                     validFrom="2026-06-20")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(dup, new["id"])
+
+    # Fail-closed: NEITHER node was stamped, and no CORRECTS edge landed.
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.validTo",
+        params={"id": dup}).result_set
+    assert len(rows) == 2, rows
+    # The PREMISE, asserted rather than assumed: the fixture must actually carry
+    # one start BEFORE the successor's and one AFTER it, or "it raised" would be
+    # the only evidence and a first-row-only read could pass by row luck (the
+    # verdict would flip if the server returned the early sibling first).
+    starts = {vf for vf, _ in rows}
+    assert starts == {"2026-06-01", "2026-06-20"}, (
+        f"the fan-out premise is not reached: {starts}"
+    )
+    assert any(vf > "2026-06-10" for vf in starts if vf), (
+        "no sibling start is AFTER the successor's — nothing to discriminate"
+    )
+    for _start, vt in rows:
+        assert vt is None, f"a node was stamped despite the refusal: {rows}"
+    assert _corrects_out(sdk, new["id"]) == 0
+
+
+
+def test_supersede_equal_start_allowed(sdk):
+    """A zero-length predecessor window (start == end) is well-formed and must
+    still supersede — the guard refuses strictly-before only."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-10")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
+
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+
+    op = _props(sdk, old["id"])
+    assert op["validTo"] == op["validFrom"] == "2026-06-10"
+    assert op["status"] == "superseded"
+    assert _corrects_out(sdk, new["id"]) == 1
+
+
+def test_supersede_future_dated_predecessor_refused(sdk):
+    """B6 — a FUTURE-dated predecessor against an undated successor (whose
+    resolved end falls back to its ``createdAt``/now) is refused.
+
+    The undated successor has an open window start, so this is the write that
+    would otherwise stamp a predecessor whose window has not even begun."""
+    old = _make_point(sdk, content="future claim", validFrom="2099-01-01")
+    new = _make_point(sdk, content="undated claim")
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(old["id"], new["id"])
+
+    assert "validTo" not in _props(sdk, old["id"])
+    assert _corrects_out(sdk, new["id"]) == 0
+
+
+def test_supersede_numeric_stored_start_no_kwarg_raw_end(sdk):
+    """The no-kwarg path stamps the successor's numeric start RAW.
+
+    Numeric epochs are a supported stored form (``_created_sort_key`` documents
+    them, seeded corpora carry them), and the predecessor's end must equal it
+    exactly — normalising to ``str(...)`` would write an UNPARSEABLE end that
+    ``_covers`` cannot order, i.e. an unbounded predecessor window."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom=1781049600.0)
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    vt = _props(sdk, old["id"])["validTo"]
+    assert vt == 1781049600.0
+    assert isinstance(vt, float), f"numeric end was normalised: {vt!r}"
+
+
+def test_restore_point_at_forward_supersede_window_not_inverted(sdk):
+    """Read-path control: a legitimate forward supersede leaves a well-formed
+    window that an interior instant resolves to the PREDECESSOR."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
+
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+
+    out = sdk.restore_point_at(old["id"], "2026-06-05")
+    assert out["found"] is True
+    assert out["valid_point"]["id"] == old["id"]
+    assert out["chain"][0]["valid_to"] == "2026-06-10"
+    assert _created_sort_key(out["chain"][0]["valid_to"]) >= \
+        _created_sort_key(out["chain"][0]["valid_from"])
+
+
+def test_restore_point_at_after_refusal_predecessor_window_intact(sdk):
+    """The read-path assertion that REDs without the guard.
+
+    Pre-fix the retroactive ``supersede_point`` is ACCEPTED, inverts the
+    predecessor's window, and every read instant then reports honest absence
+    (``_covers`` rejects an inverted interval) — the predecessor becomes
+    unreachable.  Post-fix the write is refused and the still-open predecessor
+    window keeps resolving.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-10")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(old["id"], new["id"])
+
+    out = sdk.restore_point_at(old["id"], "2026-06-15")
+    assert out["found"] is True, "predecessor became unreachable"
+    assert out["valid_point"]["id"] == old["id"]
+    entry = out["chain"][0]
+    assert entry["valid_to"] is None or (
+        _created_sort_key(entry["valid_to"]) >=
+        _created_sort_key(entry["valid_from"])
+    ), f"inverted predecessor window: {entry['valid_from']!r} -> {entry['valid_to']!r}"
+
+
+def test_supersede_refusal_message_survives_scrub(sdk):
+    r"""The refusal must reach the MCP surface intact.
+
+    ``_safe`` scrubs every error through ``_scrub_error``, whose
+    ``(host=|at |to )[\w.-]+`` rule rewrites any word ending in ``at``/``to``
+    followed by a space.  A message that trips it loses the actionable hint
+    behind ``***``, so the template must avoid those forms entirely."""
+    from tortoise.mcp_server import _scrub_error
+
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-10")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
+
+    with pytest.raises(ValueError, match="inverted window") as excinfo:
+        sdk.supersede_point(old["id"], new["id"])
+
+    msg = str(excinfo.value)
+    assert "inverted window" in msg
+    assert _scrub_error(msg) == msg, f"scrub rewrote the message: {_scrub_error(msg)}"
+    # the remedy is named, and it exists
+    assert "retract_point" in msg
+    assert hasattr(sdk, "retract_point")
