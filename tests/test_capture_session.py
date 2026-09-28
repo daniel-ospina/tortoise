@@ -4516,6 +4516,62 @@ def test_extract_session_llm_windows_a_raw_over_cap_conversation(
         "EVERY builder call must receive a clipped body, gate included")
 
 
+def test_extract_session_llm_refuses_a_marker_only_conversation(sdk, monkeypatch):
+    """#4897 round-13 P2: the M2 seam's OWN empty guard reads the STRIPPED window.
+
+    Round 12 routed this defence-in-depth guard through ``_capture_gate_window``
+    but pinned only the transcript's clipping, so reverting the gate left the
+    whole pinned selection green — mutation (d) SURVIVED the round-13 review.
+    Reverting it is NOT a no-op: read against the MARKED window, a conversation
+    whose entire content is a marker lookalike is non-blank, the guard passes,
+    and the v1 extractor turns the marker into a Point whose whole content is
+    synthetic — the exact defect round 12 claimed to close.
+
+    The extractor is monkeypatched to one that yields NO points, and THAT is
+    what makes this pin selective: a gate that fails to fire lands in
+    ``mode='llm'`` with a 'no points' warning, while a gate that fires returns
+    ``mode='empty'``. Asserting only ``extracted == []`` would pass either way.
+    """
+    from tortoise.sdk import _capture_truncation_marker
+    monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                        lambda: _EmptyOutputExtractor())
+    for lookalike in (_capture_truncation_marker(5001),
+                      _capture_truncation_marker(10 ** 9)):
+        extracted, meta = sdk._extract_session_llm(
+            [{"role": "user", "content": lookalike}],
+            "sess_r13", "2026-08-20T00:00:00+00:00")
+        assert meta["mode"] == "empty", (lookalike, meta)
+        assert extracted == []
+        assert any("empty" in e.lower() for e in meta["errors"]), meta
+
+    # The strip takes only the MARKER: a turn with real content past the cap still
+    # extracts, so the guard cannot be satisfied by refusing everything long.
+    _extracted, admitted = sdk._extract_session_llm(
+        [{"role": "user", "content": "x" * 6000}],
+        "sess_r13b", "2026-08-20T00:00:00+00:00")
+    assert admitted["mode"] == "llm", admitted
+
+
+def test_the_gate_strips_a_lookalike_with_trailing_whitespace(sdk, monkeypatch):
+    """#4897 round-13 P3: a marker lookalike followed by a space is still one.
+
+    ``_split_truncation_marker`` recognises the marker only as the EXACT tail, so
+    ``marker + " "`` escaped the gate's strip and was admitted as a non-blank
+    turn holding nothing but marker text — the docstring's fail-closed claim was
+    one character wide. Right-stripping before the split closes it, and only in
+    the fail-closed direction.
+    """
+    from tortoise.sdk import _capture_truncation_marker
+    monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                        lambda: _EmptyOutputExtractor())
+    for suffix in (" ", "\n", "\t  "):
+        extracted, meta = sdk._extract_session_llm(
+            [{"role": "user", "content": _capture_truncation_marker(5001) + suffix}],
+            "sess_r13c", "2026-08-20T00:00:00+00:00")
+        assert meta["mode"] == "empty", (suffix, meta)
+        assert extracted == []
+
+
 def test_a_blank_over_cap_turn_is_not_marked(sdk):
     """A blank past-cap turn stores NO synthetic marker (#4897 review round 12).
 
@@ -4542,6 +4598,21 @@ def test_a_blank_over_cap_turn_is_not_marked(sdk):
     assert _CAPTURE_TRUNCATION_SENTINEL in real, (
         "a turn with REAL content past the cap must still be marked")
     assert len(real) == _CAPTURE_TURN_CAP
+
+    # ⛔ AND REAL CONTENT IN THE RESERVED BAND MUST NOT BE DROPPED SILENTLY
+    # (#4897 review round 13, P1). Round 12 tested ``content[:cap - len(marker)]``
+    # — the width left after reserving the marker — while RETURNING
+    # ``content[:cap]``, so a turn whose only non-whitespace sat in that 41-char
+    # band came back UNMARKED and 971 real characters were lost with no signal.
+    # The marker must be present whenever ANY retained character is
+    # non-whitespace, so the test is deliberately built on the band: the first
+    # 4,960 characters are spaces and the real content begins inside it.
+    band = " " * (_CAPTURE_TURN_CAP - 40) + "REALCONTENT" + "x" * 1000
+    banded = _clip_capture_turn_content(band, _CAPTURE_TURN_CAP)
+    assert _CAPTURE_TRUNCATION_SENTINEL in banded, (
+        "content in the marker-reserved band must not be cut silently; got "
+        f"{banded[-60:]!r}")
+    assert len(banded) == _CAPTURE_TURN_CAP
 
     # And end to end: a mixed conversation stores no synthetic marker.
     sdk.capture_session(

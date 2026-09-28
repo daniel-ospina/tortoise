@@ -811,9 +811,20 @@ def _capture_gate_window(windowed: list[dict]) -> list[dict]:
     gate admits is unaffected.
 
     A caller who supplies a turn whose whole content is itself a marker
-    lookalike is stripped to an empty body and the gate refuses — correct (such
-    a turn has no extractable content) and fail-closed, which is the safe
-    direction.
+    lookalike is stripped to a body that is BLANK once stripped — the marker's
+    own leading space is all that precedes the sentinel — and the gate refuses.
+    Correct (such a turn has no extractable content) and fail-closed, which is
+    the safe direction.
+
+    ⛔ TRAILING WHITESPACE IS TOLERATED BEFORE THE MARKER SPLIT (#4897 review
+    round 13, P3). ``_split_truncation_marker`` recognises a marker only as the
+    exact tail, so a caller-supplied ``marker + " "`` escaped the strip and was
+    admitted as a non-blank turn holding only marker text — the claim above was
+    one character wide. Right-stripping first closes it in the FAIL-CLOSED
+    direction (a lookalike is stripped more readily, never less); real clipped
+    text is unaffected because the module writes its marker with nothing after
+    it, and dropping trailing whitespace from a blankness signal cannot turn a
+    non-blank conversation blank.
     """
     out: list[dict] = []
     for turn in windowed:
@@ -821,7 +832,7 @@ def _capture_gate_window(windowed: list[dict]) -> list[dict]:
         if not isinstance(content, str):
             out.append(turn)
             continue
-        body, _marker = _split_truncation_marker(content)
+        body, _marker = _split_truncation_marker(content.rstrip())
         out.append({**turn, "content": body} if body != content else turn)
     return out
 
@@ -908,7 +919,24 @@ def _clip_capture_turn_content(
     # content was synthetic (reproduced in review). Returning the blank
     # retention silently is the same value the store would hold minus the
     # misleading sentence, and it keeps the window idempotent.
-    if not content[:max(cap - len(_capture_truncation_marker(len(content))), 0)].strip():
+    #
+    # ⛔ THE PREDICATE MUST TEST THE SLICE IT RETURNS (#4897 review round 13,
+    # P1). Round 12 tested ``content[:keep]`` — the width left after reserving
+    # the marker — while RETURNING ``content[:cap]``. Real content in the
+    # reserved band ``[keep, cap)`` therefore made the premise ("the retention
+    # is blank") FALSE while the turn came back UNMARKED: a 5,971-char turn of
+    # 4,960 spaces + "REALCONTENT" + 1,000 further chars was stored as 5,000
+    # chars with no sentinel, silently dropping the rest — reintroducing exactly
+    # the mid-word cut #4897 exists to end. Testing ``content[:cap]`` — the
+    # slice actually returned — makes the cut marked whenever ANY retained
+    # character is non-whitespace, so the band is never dropped silently.
+    #
+    # The residual: a turn whose only non-whitespace lives IN the band is now
+    # marked and spends the band on the marker — the reserved width and the
+    # content compete for the same 41 characters. Losing the band WITH a marker
+    # that says "there is more" is the honest failure; losing it without one was
+    # not.
+    if not content[:cap].strip():
         return content[:cap]
     marker = _capture_truncation_marker(len(content))
     keep = cap - len(marker)
