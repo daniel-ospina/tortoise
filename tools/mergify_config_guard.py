@@ -72,7 +72,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -480,32 +480,92 @@ def _attributes_files(root: Path) -> list[Path]:
     return files
 
 
+def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
+    """A regex reproducing gitattributes glob semantics for a path pattern.
+
+    Unlike `PurePosixPath.match`, `*` does not cross `/`, `**/` matches zero or
+    more directories, and a trailing `/**` matches everything inside — without
+    this, `config/**` unioned only direct children and `config/sub/x.yml` was
+    never required (a silent under-approximation of git's union set).
+    """
+    out = ["^"]
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "*":
+            if pattern[i : i + 3] == "**/":
+                out.append("(?:.*/)?")
+                i += 3
+                continue
+            if pattern[i : i + 2] == "**":
+                out.append(".*")
+                i += 2
+                continue
+            out.append("[^/]*")
+            i += 1
+            continue
+        if ch == "?":
+            out.append("[^/]")
+            i += 1
+            continue
+        if ch == "[":
+            close = pattern.find("]", i)
+            if close != -1:
+                out.append(pattern[i : close + 1])
+                i = close + 1
+                continue
+        out.append(re.escape(ch))
+        i += 1
+    out.append("$")
+    return re.compile("".join(out))
+
+
 def _unioned_files(root: Path) -> set[str]:
     unioned: set[str] = set()
     for path in _attributes_files(root):
-        for line in _read(path).splitlines():
+        # A nested `.gitattributes` anchors its patterns to ITS directory.
+        base = path.parent.relative_to(root).as_posix()
+        lines = _read(path).splitlines()
+        # `[attr]NAME a b` defines a macro; a path line naming the macro applies
+        # its attributes. Ignoring the definition left the real unioned file
+        # outside the required set (a silent fail-open).
+        macros: dict[str, list[str]] = {}
+        for line in lines:
+            fields = line.strip().split()
+            if len(fields) >= 2 and fields[0].startswith("[attr]"):
+                macros[fields[0][len("[attr]") :]] = fields[1:]
+        for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
             fields = stripped.split()
             if len(fields) < 2:
                 continue
-            pattern, attrs = fields[0], fields[1:]
-            if any(attr == "merge=union" for attr in attrs):
-                # A glob pattern (`config/**`) names CONCRETE files; expand it so a
-                # validator naming the real file is not falsely rejected.
-                # (`Path.glob("config/**")` only yields directories in 3.12, so
-                # match each file's relative POSIX path instead.)
-                expanded = False
-                if any(ch in pattern for ch in "*?["):
-                    for match in sorted(root.rglob("*")):
-                        if match.is_file() and PurePosixPath(
-                            match.relative_to(root).as_posix()
-                        ).match(pattern):
-                            unioned.add(match.relative_to(root).as_posix())
-                            expanded = True
-                if not expanded:
-                    unioned.add(pattern)
+            pattern = fields[0]
+            if pattern.startswith("[attr]"):
+                continue
+            attrs: list[str] = []
+            for attr in fields[1:]:
+                attrs.extend(macros.get(attr, [attr]))
+            if "merge=union" not in attrs:
+                continue
+            if pattern.startswith("/"):
+                pat = pattern[1:]
+            elif base != ".":
+                pat = f"{base}/{pattern}"
+            else:
+                pat = pattern
+            expanded = False
+            if any(ch in pat for ch in "*?["):
+                regex = _attr_glob_regex(pat)
+                for match in sorted(root.rglob("*")):
+                    if match.is_file() and regex.match(
+                        match.relative_to(root).as_posix()
+                    ):
+                        unioned.add(match.relative_to(root).as_posix())
+                        expanded = True
+            if not expanded:
+                unioned.add(pat)
     return unioned
 
 
@@ -531,11 +591,14 @@ def _if_excludes_pull_request(expr: Any) -> bool:
     if expr is None:
         return False
     text = str(expr).strip().lower()
-    if text in ("", "true", "0"):
-        return False
     # Strip a `${{ … }}` wrapper so the allow-list matches the inner expression.
     inner = re.sub(r"^\$\{\{\s*|\s*\}\}$", "", text).strip()
-    if inner in ("true", "always()", "success()", "!cancelled()", "!failure()"):
+    if inner == "true":
+        return False
+    # GitHub's falsy conditionals: the step is SKIPPED, not unconditional.
+    if inner in ("", "false", "0", "-0", "null", "none", "''", '\"\"'):
+        return True
+    if inner in ("always()", "success()", "!cancelled()", "!failure()"):
         return False
     if re.fullmatch(rf"{_PR_EVENT}\s*==\s*['\"]pull_request['\"]", inner):
         return False
@@ -669,7 +732,7 @@ def _names_path(path: str, literal: str) -> bool:
     A substring test accepted `backup/config/ci-surfaces.yml.bak` as naming the
     unioned `config/ci-surfaces.yml` — a validator that never opens the real file.
     """
-    pattern = r"(?<![\w\-])" + re.escape(path) + r"(?![\w\-./])"
+    pattern = r"(?<![\w.\-])" + re.escape(path) + r"(?=$|[\s'\"()\[\]{},;:=<>|&])"
     return re.search(pattern, literal) is not None
 
 
@@ -718,14 +781,42 @@ def _source_can_fail(source: str) -> bool:
     except SyntaxError:
         return False
     parents: dict[int, ast.AST] = {}
-    referenced: set[str] = set()
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[id(child)] = parent
-        if isinstance(parent, ast.Name):
-            referenced.add(parent.id)
-        elif isinstance(parent, ast.Attribute):
-            referenced.add(parent.attr)
+
+    def _called_names(scope: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for sub in ast.walk(scope):
+            if isinstance(sub, ast.Call):
+                func = sub.func
+                if isinstance(func, ast.Name):
+                    names.add(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.add(func.attr)
+        return names
+
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    # A function is LIVE only if a MODULE-LEVEL statement reaches it, directly or
+    # through other live functions: a `sys.exit(1)` inside a never-called helper
+    # is not an exit status (a flat "referenced" set wrongly counted it).
+    live: set[str] = set()
+    for stmt in tree.body:
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            live |= _called_names(stmt)
+    frontier = list(live)
+    while frontier:
+        fn = functions.get(frontier.pop())
+        if fn is None:
+            continue
+        for callee in _called_names(fn):
+            if callee not in live:
+                live.add(callee)
+                frontier.append(callee)
 
     def enclosing_function(node: ast.AST) -> ast.AST | None:
         current: ast.AST | None = node
@@ -736,9 +827,9 @@ def _source_can_fail(source: str) -> bool:
         return None
 
     def reachable(node: ast.AST) -> bool:
-        """Module-level statements, or statements in a REFERENCED function.
+        """Module-level statements, or statements in a LIVE function.
 
-        A fail-capable statement inside a never-referenced function
+        A fail-capable statement inside a never-called function
         (`def unused(): sys.exit(1)`) is not an exit status: the module exits 0.
         A lambda body never counts on its own (#5570 bound).
         """
@@ -747,7 +838,7 @@ def _source_can_fail(source: str) -> bool:
             return True
         if isinstance(fn, ast.Lambda):
             return False
-        return fn.name in referenced
+        return fn.name in live
 
     for node in ast.walk(tree):
         if not reachable(node):
@@ -793,6 +884,24 @@ def _defaults_shell(spec: Any) -> Any:
     return run.get("shell")
 
 
+def _ancestor_jobs(jobs: dict, start: str) -> list[str]:
+    """`start` plus every job it transitively `needs` (its required path)."""
+    seen: list[str] = []
+    frontier = [start]
+    while frontier:
+        current = frontier.pop()
+        if current in seen or current not in jobs:
+            continue
+        seen.append(current)
+        job = jobs.get(current)
+        if isinstance(job, dict):
+            needs = job.get("needs") or []
+            if isinstance(needs, str):
+                needs = [needs]
+            frontier.extend(str(n) for n in needs)
+    return seen
+
+
 def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, str]:
     """Clause (vii): whenever `merge=union` is active, a fail-closed validator
     must be invoked as a step's SOLE, DIRECT command, ON THE REQUIRED PATH, and
@@ -820,23 +929,7 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
             "is ambiguous, so an unrelated job could report it (#2055/#5649)"
         )
     required_workflow, closure = closures[0]
-    # A skipped ANCESTOR skips the validator and the gate (GitHub cascades a
-    # `needs` skip downstream), so every job on the required path must be
-    # unconditional, not just the validator step's own job.
     jobs_doc = docs.get(required_workflow, {}).get("jobs")
-    if isinstance(jobs_doc, dict):
-        conditional = sorted(
-            jid
-            for jid in closure
-            if isinstance(jobs_doc.get(jid), dict)
-            and _if_excludes_pull_request(jobs_doc[jid].get("if"))
-        )
-        if conditional:
-            return EXIT_DIVERGED, (
-                f"{required_workflow}: jobs {conditional} on the required path carry an "
-                "`if:` that can skip a pull_request run — a skipped ancestor skips the "
-                "validator and the gate"
-            )
     problems: list[str] = []
     accepted = 0
     for cand in _validator_candidates(docs, required_workflow, closure):
@@ -844,6 +937,23 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         job = cand["job_spec"]
         argv = cand["argv"]
         label = f"{cand['workflow']}:{cand['job']}"
+        # A skipped ANCESTOR skips the validator (GitHub cascades a `needs` skip
+        # downstream). Only the ACCEPTED validator's own ancestor path is checked:
+        # inspecting every job in the closure reds the real `python-ci.yml`, whose
+        # sibling jobs carry legitimate path-filter `if:`s that cannot skip it.
+        if isinstance(jobs_doc, dict):
+            bad_ancestors = sorted(
+                jid
+                for jid in _ancestor_jobs(jobs_doc, cand["job"])
+                if isinstance(jobs_doc.get(jid), dict)
+                and _if_excludes_pull_request(jobs_doc[jid].get("if"))
+            )
+            if bad_ancestors:
+                problems.append(
+                    f"{label}: ancestor job(s) {bad_ancestors} can skip the validator "
+                    "— a skipped ancestor skips the gate"
+                )
+                continue
         if any(arg in ("-h", "--help") for arg in argv):
             problems.append(f"{label}: validator invocation is `--help`-only")
             continue

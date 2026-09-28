@@ -1252,3 +1252,94 @@ def test_clause_vii_lambda_failure_is_red(tmp_path: Path) -> None:
         tmp_path, "python3 tools/registry_integrity.py", validator_src=src
     )
     assert clause(root, "vii") == 1
+
+
+# --- cycle-6 review regressions ---------------------------------------------
+
+
+def test_clause_vii_falsy_if_is_red(tmp_path: Path) -> None:
+    """`if: 0` / `if: ""` are falsy in Actions: the step is SKIPPED, not unconditional."""
+    for expr in (0, "0", ""):
+        root, _ = union_tree(
+            tmp_path, "python3 tools/registry_integrity.py", step_if=expr
+        )
+        assert clause(root, "vii") == 1, expr
+
+
+def test_clause_vii_sibling_conditional_does_not_red(tmp_path: Path) -> None:
+    """Only the validator's OWN ancestor path matters: a sibling job with a
+    path-filter `if:` that the gate needs cannot skip `manifest-integrity`."""
+    workflows = default_workflows(
+        python_ci_jobs={
+            "manifest-integrity": {
+                "runs-on": "ubuntu-latest",
+                "steps": [{"run": "python3 tools/registry_integrity.py"}],
+            },
+            "test": {
+                "runs-on": "ubuntu-latest",
+                "if": "needs.changes.outputs.python == 'true'",
+                "steps": [{"run": "true"}],
+            },
+            "python-ci-gate": {
+                "runs-on": "ubuntu-latest",
+                "if": "always()",
+                "needs": ["manifest-integrity", "test"],
+                "steps": [{"run": "true"}],
+            },
+        }
+    )
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        workflows=workflows,
+        attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root, "vii") == 0
+
+
+def test_clause_vii_recursive_glob_requires_nested_files(tmp_path: Path) -> None:
+    """`config/**` unions nested files too, so naming only the direct child reds."""
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "ci-surfaces.yml").write_text("x: 1\n", encoding="utf-8")
+    (root / "config" / "sub").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "sub" / "extra.yml").write_text("y: 1\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("config/** merge=union\n", encoding="utf-8")
+    assert clause(root, "vii") == 1
+
+
+def test_nested_gitattributes_is_anchored(tmp_path: Path) -> None:
+    """`docs/.gitattributes` with `*.yml` unions `docs/*.yml`, not the root's."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "docs").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / ".gitattributes").write_text("*.yml merge=union\n", encoding="utf-8")
+    (root / "docs" / "x.yml").write_text("a: 1\n", encoding="utf-8")
+    (root / "root.yml").write_text("b: 1\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"docs/x.yml"}
+
+
+def test_attr_macro_is_expanded(tmp_path: Path) -> None:
+    """`[attr]m merge=union` + `config/ci-surfaces.yml m` unions the real file."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "ci-surfaces.yml").write_text("x: 1\n", encoding="utf-8")
+    (root / ".gitattributes").write_text(
+        "[attr]myunion merge=union\nconfig/ci-surfaces.yml myunion\n", encoding="utf-8"
+    )
+    assert mcg._unioned_files(root) == {"config/ci-surfaces.yml"}
+
+
+def test_clause_vii_indirect_helper_failure_is_red(tmp_path: Path) -> None:
+    """Reachability is transitive: a helper called only by a never-called function
+    is not an exit status."""
+    src = (
+        'REG = "config/ci-surfaces.yml"\n'
+        "def unused():\n    helper()\n"
+        "def helper():\n    return 1\n"
+        'print("ok")\n'
+    )
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1
