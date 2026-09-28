@@ -21644,7 +21644,7 @@ def _read_onboarding_state_and_version(org_id: str) -> tuple[dict, int | None]:
     lost update the CAS exists to prevent.
 
     ``version is None`` means the identity is ABSENT (no Team node / no
-    ``teams`` row) — the pre-existing silent no-op case, kept distinct from
+    ``organizations`` row) — the pre-existing silent no-op case, kept distinct from
     version 0 (identity present, never CAS-written) so the caller can
     preserve the legacy no-op write. This read NEVER writes.
     """
