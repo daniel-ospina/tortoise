@@ -289,7 +289,7 @@ from typing import Protocol  # noqa: E402
 
 # #3317: the Object statuses the RESOLVER will not resolve — the resolver's
 # view of the Object-SEARCH exclusion boundary (deliberately NARROWER than
-# the read-surface object tuple ``commit_ops._RECALL_OBJECT_EXCLUDED_STATUS``
+# the read-surface vocabulary ``commit_ops.OBJECT_TERMINAL_STATUSES``
 # = superseded / deprecated / archived / retracted):
 #
 # * ``superseded`` MUST resolve — the state render ("STATE (couch):
@@ -311,14 +311,13 @@ from typing import Protocol  # noqa: E402
 # "invisible to the read surfaces". The literal matches the established
 # "exclude retracted" idiom (``hosted_api.py:5011/:5023/:5047``).
 #
-# ⛔ TRANSITIONAL BINDING (#2977 Task 5, unlanded): the canonical home for
-# this value is ``commit_ops.OBJECT_SEARCH_EXCLUDED_STATUS = {retracted}``
-# (docs/plans/2026-09-11-2977-object-retraction.md:2602; the rationale at
-# :2594-2601 names the resolver's FTS leg as a consumer of that concept).
-# That symbol does not exist in code yet, so the set is stated here rather
-# than imported from nowhere. When Task 5 lands, this constant must be
-# RE-POINTED at it — and this leg's Python filter becomes redundant once the
-# search lane itself excludes the vocabulary.
+# ⛔ DELIBERATE NARROWING, NOT A COPY. The read-surface vocabulary is
+# ``commit_ops.OBJECT_TERMINAL_STATUSES`` (#3301), and the search lane now
+# applies it; THIS port resolves the wider set on purpose (superseded /
+# deprecated / archived Objects must resolve to render their own state), so
+# its FTS leg reads the terminal-INCLUSIVE view from the SDK and filters
+# here. Re-point this constant at the canonical set and the current-state
+# question stops firing.
 _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES = frozenset({"retracted"})
 
 # #4061 R2: the ceiling of the FTS leg's adaptive window. The window doubles
@@ -582,13 +581,15 @@ def docker_resolver_port(sdk) -> ResolverPort:
     (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` — today ``retracted``), so
     resolution here cannot return a removed Object. (Scoped to this port:
     the sibling Object-anchor resolvers — ``aggregate.py``,
-    ``coverage_loop.py`` — remain status-blind; #2977 Task 5 owns the
-    search-lane vocabulary.) The exact + alias legs carry it as a Cypher
-    conjunct (the graph filters; the batched exact probe stays one query).
-    The FTS leg CANNOT take that conjunct — ``search_engine`` gates its
-    terminal clause on ``label == 'Point'`` so an Object FTS hit still
-    carries a terminal status — and its rows are filtered here instead,
-    through the SAME constant so the two can never drift.
+    ``coverage_loop.py`` — take the shared search lane's wider Object
+    vocabulary, which #3301 defines.) The exact + alias legs carry it as a
+    Cypher conjunct (the graph filters; the batched exact probe stays one
+    query). The FTS leg applies it in Python instead, through the SAME
+    constant so the two can never drift — and, since #3301 widened the
+    shared lane's Object exclusion, it asks the SDK for the
+    terminal-INCLUSIVE view (``include_terminal=True``) so the narrower set
+    here stays the only filter on this leg and a SUPERSEDED Object still
+    resolves.
 
     #4061 (R1/R2/R3) closes the three residuals #3317 left in THIS port:
     ``excluded_exact_objects`` makes the exact leg's exclusion DISTINGUISHABLE
@@ -602,13 +603,14 @@ def docker_resolver_port(sdk) -> ResolverPort:
     """
     proj = sdk._get_proj()
     # Object-scoped predicate, stated inline rather than routed through
-    # ``search_engine._exclude_status_clause``: that helper composes the
-    # POINT predicate (it ANDs the legacy ``outdated`` flag, coerce-false),
-    # and the Object lane deliberately has no such flag. (#2977 Task 5 gives
-    # ``live._terminal_excluded`` an ``excluded`` + ``include_outdated_flag``
-    # parameter, and its Object lanes take that flagless shape — the
-    # parameter does not exist on main yet.) Derived from the constant so the
-    # Cypher and the Python (FTS) check share one vocabulary.
+    # ``search_engine._exclude_status_clause``: that helper's ALIAS handling
+    # and WHERE-fragment shape differ from this port's plain conjunct, and the
+    # resolver's set is a deliberate NARROWING (see
+    # ``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``), not the read surface's
+    # vocabulary. Derived from the constant so the Cypher and the Python (FTS)
+    # check share one vocabulary; #3301's Object lanes in ``live``
+    # (``excluded`` + ``include_outdated_flag``) compose the WIDER read-surface
+    # predicate, which this port deliberately does not apply.
     #
     # WELL-FORMED AT ANY CARDINALITY: an emptied constant must not leave a
     # dangling `AND` in either query — the resulting Cypher error is swallowed
@@ -669,9 +671,21 @@ def docker_resolver_port(sdk) -> ResolverPort:
         window = max(1, limit)
         live: list[dict] = []
         seen: set[str] = set()
+        # #3301: the search lane's Object legs now exclude the canonical
+        # OBJECT vocabulary (superseded/deprecated/archived/retracted) at the
+        # QUERY level, so the shared FTS leg no longer returns a SUPERSEDED
+        # Object — which THIS port must still resolve (its state render IS the
+        # answer to the current-state question; see
+        # ``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``). The leg therefore asks
+        # the SDK for the terminal-INCLUSIVE view and applies its own,
+        # deliberately NARROWER set below — net resolver behaviour is
+        # byte-identical to before #3301, and the exclusion stays in ONE place
+        # (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``) instead of being split
+        # between the shared lane's wider set and this leg's filter.
         while True:
             hits = sdk.tortoise_fts_query(term, entity_type="object",
-                                          limit=window) or []
+                                          limit=window,
+                                          include_terminal=True) or []
             exhausted = len(hits) < window
             # R3: authoritative status for hits the search read did not carry
             # one for. Let a failure PROPAGATE: this leg's R10 contract is
@@ -725,8 +739,9 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # #2165 Task 4 — typed walker + slice builder (R2/R3-8/R12, R17 P3-1/
 # P3-6; P3-3: TWO Object-status vocabularies now exist in this file and they
 # are NOT the same set — (a) the RESOLVE-time set
-# (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` = {retracted}, the Object-SEARCH
-# boundary per #2977's ``OBJECT_SEARCH_EXCLUDED_STATUS``; the resolver's legs
+# (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` = {retracted}, a deliberate
+# NARROWING of the read-surface vocabulary
+# ``commit_ops.OBJECT_TERMINAL_STATUSES`` (#3301); the resolver's legs
 # apply it, see `docker_resolver_port`), and (b) the RENDER/probe-time set
 # (``_RECALL_OBJECT_EXCLUDED_STATUSES``, five statuses including ``outdated``,
 # used only by `_probe_visible_successors`). Neither is EVER applied to a

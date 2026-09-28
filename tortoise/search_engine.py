@@ -40,27 +40,44 @@ from .live import (
 
 
 def _exclude_status_clause(alias: str,
-                           excluded=TERMINAL_EXCLUDED_STATUSES) -> str:
-    """Cypher WHERE fragment excluding the terminal statuses on ``alias``
-    plus the ``outdated=true`` legacy flag (invalidate_point writes the flag
-    without touching status). ``excluded=()`` produces the empty string
-    (no exclusion — the audit/full-scan opt-in).
+                           excluded=TERMINAL_EXCLUDED_STATUSES,
+                           *,
+                           include_outdated_flag: bool = True) -> str:
+    """Cypher WHERE fragment excluding ``excluded`` on ``alias`` (plus the
+    ``outdated=true`` legacy flag unless ``include_outdated_flag=False``).
+    ``excluded=()`` produces the empty string (no exclusion — the
+    audit/full-scan opt-in).
 
-    #2490: DELEGATES to live.py's ``_terminal_excluded`` composition (single
-    source of truth for the terminal predicate). A non-default ``excluded``
-    (audit surfaces pass ``()``; the historical signature allowed a custom
-    vocab) falls back to the legacy inline ``<>``-chain composition over the
-    caller-provided values — the DEFAULT path never duplicates live.py.
+    #2490/#3301: this is a thin SHIM. It chooses nothing and composes nothing;
+    the vocabulary + flag decision lives in ``_status_vocab_for`` (the ONE
+    place the family rule lives) and the composition in
+    ``live._terminal_excluded``. The default path is byte-identical to the
+    pre-change implementation, so the Point legs do not change.
     """
-    if excluded is not TERMINAL_EXCLUDED_STATUSES:
-        # Custom/empty vocab (audit opt-in or legacy callers) — inline
-        # composition over the caller's values, not the live.py vocabulary.
-        if not excluded:
-            return ""
-        chain = " AND ".join(f"{alias}.status <> '{s}'" for s in excluded)
-        return (f"(({alias}.status IS NULL OR ({chain})) "
-                f"AND coalesce({alias}.outdated, false) = false)")
-    return _terminal_excluded(f"{alias}.status")
+    if not excluded:
+        return ""
+    return _terminal_excluded(f"{alias}.status", excluded,
+                              include_outdated_flag=include_outdated_flag)
+
+
+def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
+    """#3301: the ONE place the family -> (excluded vocabulary, whether the
+    legacy ``outdated`` conjunct applies) decision lives. Every leg calls
+    this; none re-states the mapping.
+
+    * ``Point`` -> the canonical ``TERMINAL_EXCLUDED_STATUSES`` and the
+      legacy ``outdated`` flag conjunct (Points have both).
+    * ``Object`` -> ``commit_ops.OBJECT_TERMINAL_STATUSES`` (the canonical
+      OBJECT vocabulary — superseded / deprecated / archived / retracted)
+      and NO flag conjunct: no Object writer sets ``outdated``, so the Point
+      flag would hide an Object nobody can mark.
+    """
+    if label == "Point":
+        return TERMINAL_EXCLUDED_STATUSES, True
+    # Function-level import: commit_ops has no module-level tortoise imports,
+    # so there is no cycle (the same pattern entities.py uses).
+    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+    return OBJECT_TERMINAL_STATUSES, False
 
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
@@ -783,9 +800,14 @@ def run_fts_query(
     # as quota.py's `documents` meter (documentKind IS NOT NULL) and
     # sdk.list_sources() (documentKind IS NULL). All three legs mean one
     # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
-    if label == "Point":
+    if label in ("Point", "Object"):
+        # #3301: the OBJECT family shares this leg's exclusion — before it,
+        # a retracted/superseded/deprecated/archived Object was SEARCH-VISIBLE
+        # while recall_state hid it. The family rule (vocabulary + whether the
+        # Point ``outdated`` flag applies) lives in ``_status_vocab_for``.
+        _vocab, _flag = _status_vocab_for(label)
         status_filter = ("" if excluded_statuses == ()
-                         else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+                         else f"WHERE {_exclude_status_clause('node', excluded_statuses or _vocab, include_outdated_flag=_flag)} ")
     elif entity_type == "document":
         status_filter = "WHERE node.documentKind IS NOT NULL "
     elif entity_type == "source":
@@ -957,9 +979,10 @@ def run_vector_query(
         # (documentKind NULL); the predicate lands post-YIELD, ahead of the
         # outer LIMIT, so a document query never fuses a non-document Source
         # (and vice versa). Same axis on all three legs.
-        if label == "Point":
+        if label in ("Point", "Object"):
+            _vocab, _flag = _status_vocab_for(label)
             vec_status_filter = ("" if excluded_statuses == ()
-                                 else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+                                 else f"WHERE {_exclude_status_clause('node', excluded_statuses or _vocab, include_outdated_flag=_flag)} ")
         elif entity_type == "document":
             vec_status_filter = "WHERE node.documentKind IS NOT NULL "
         elif entity_type == "source":
@@ -1118,9 +1141,10 @@ def run_vector_query(
         # corpus/provenance Source in the MATCH's WHERE — the brute-force
         # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
         # and structural legs (documentKind IS NOT NULL ⟺ document).
-        if label == "Point":
+        if label in ("Point", "Object"):
+            _vocab, _flag = _status_vocab_for(label)
             bf_status_clause = ("" if excluded_statuses == ()
-                                else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+                                else f" AND {_exclude_status_clause('n', excluded_statuses or _vocab, include_outdated_flag=_flag)}")
         elif entity_type == "document":
             bf_status_clause = " AND n.documentKind IS NOT NULL"
         elif entity_type == "source":
@@ -1286,9 +1310,11 @@ def run_structural_query(
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
         # scan). include_terminal opts out for audit/history queries.
-        if excluded_statuses != () and label_str == "Point":
+        if excluded_statuses != () and label_str in ("Point", "Object"):
+            _vocab, _flag = _status_vocab_for(label_str)
             conditions.append(_exclude_status_clause(
-                "n", excluded_statuses or TERMINAL_EXCLUDED_STATUSES))
+                "n", excluded_statuses or _vocab,
+                include_outdated_flag=_flag))
         where_clause = " AND ".join(conditions)
         cypher = (
             f"MATCH (n:{label_str}) "

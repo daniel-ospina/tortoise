@@ -76,7 +76,8 @@ TERMINAL_EXCLUDED_STATUSES = (
     TERMINAL_STATUS_VALUES | LEGACY_NON_CURRENT_STATUS_VALUES)
 
 
-def _terminal_excluded(clause: str) -> str:
+def _terminal_excluded(clause: str, excluded=None, *,
+                       include_outdated_flag: bool = True) -> str:
     """Cypher predicate: the node's status is NOT terminal AND its legacy
     ``outdated`` flag is not true.
 
@@ -86,12 +87,28 @@ def _terminal_excluded(clause: str) -> str:
     leaves status untouched) so both must be excluded. Legacy nodes without a
     stored status are LIVE (the entity write path defaults
     ``coalesce($st, n.status, 'live')``), hence the NULL check.
+
+    ``excluded`` — the vocabulary to exclude. Default ``None`` = the canonical
+    ``TERMINAL_EXCLUDED_STATUSES`` (the POINT vocabulary), so the default call
+    is byte-identical to the pre-#3301 composition and every existing caller
+    is unaffected. The OBJECT read surfaces (#3301) pass
+    ``commit_ops.OBJECT_TERMINAL_STATUSES`` — a different family with no
+    ``outdated`` member — and must pass ``include_outdated_flag=False``: no
+    Object writer sets ``outdated``, so ANDing that Point conjunct would hide
+    an Object nobody can mark, and the two families' vocabularies would be
+    conflated in one predicate.
     """
+    if excluded is None:
+        excluded = TERMINAL_EXCLUDED_STATUSES
     alias = clause.split(".", 1)[0] if "." in clause else clause
     flag = f"{alias}.outdated"
-    chain = " AND ".join(f"{clause} <> '{s}'" for s in sorted(TERMINAL_EXCLUDED_STATUSES))
-    return (f"(({clause} IS NULL OR ({chain})) "
-            f"AND coalesce({flag}, false) = false)")
+    chain = " AND ".join(
+        f"{clause} <> '{s}'" for s in sorted(excluded))
+    status_part = (f"({clause} IS NULL OR ({chain}))"
+                   if chain else "true")
+    if not include_outdated_flag:
+        return status_part
+    return f"({status_part} AND coalesce({flag}, false) = false)"
 
 
 # #2490 (terminal posterior freeze): a terminalized claim's posterior pins at

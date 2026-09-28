@@ -1014,6 +1014,9 @@ surfaces:
   - test_notify.py
   - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
+  # #3301: the four search legs must apply the canonical OBJECT vocabulary —
+  # per-leg returned-set tests (docker lane).
+  - test_object_search_visibility_3301.py
   - test_open_kinds.py
   - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
   - test_operator_source_search.py
@@ -2108,6 +2111,7 @@ durations:
   test_load_test.py: 1.4
   test_mcp_server_auth_modes.py: 0.7
   test_object_registered_journal.py: 1.7
+  test_object_search_visibility_3301.py: 2.0
   test_session_extraction_modes.py: 5.3
   test_claim_lifecycle.py: 1.4
   test_e2e_journey.py: 0.9

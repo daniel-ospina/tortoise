@@ -22,17 +22,27 @@ from .live import is_terminal_status  # #2498 shared terminal vocabulary
 
 _logger = logging.getLogger(__name__)
 
+# ═════════════════════════════════════════════════════════════════════════
+# #3301 — THE canonical OBJECT terminal vocabulary. ONE declaration; nothing
+# re-literals it. The OBJECT family is NOT the Point family: an Object has no
+# ``outdated`` concept (no writer sets ``outdated`` on an Object) and no
+# ``draft`` state, so this set is the recall/read-surface tuple and it is
+# deliberately narrower than ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds
+# ``outdated``). A retracted/superseded/deprecated/archived Object is a dead
+# Object — no current state to report.
+#
+# This is NOT ``TortoiseSDK.STATE_EXCLUDED_STATUS`` (a class attr missing
+# 'archived' and used for the POINT pool).
+OBJECT_TERMINAL_STATUSES = frozenset(
+    {"superseded", "deprecated", "archived", "retracted"})
+
 # Statuses excluded from recall_state's default OBJECT view (the #1350 fold
-# consumer). Mirrors the literal exclusion tuple in TortoiseSDK.recall_state
-# (sdk.py — "(o.get('status') or '') not in (superseded, deprecated,
-# archived, retracted)"). NOTE: this is NOT TortoiseSDK.STATE_EXCLUDED_STATUS
-# (a class attr missing 'archived' and used for the POINT pool) and NOT
-# search_engine.TERMINAL_EXCLUDED_STATUSES (adds 'outdated', which recall's
-# object view DOES surface). Keep in sync with the recall_state filter — a
+# consumer, sdk.py — "(o.get('status') or '') not in (superseded, deprecated,
+# archived, retracted)"). An ALIAS, never a second literal: the recall view
+# and the search legs must agree, and a copy is exactly how they drift. A
 # supersession fold is only valid when a successor VISIBLE to that view
 # remains.
-_RECALL_OBJECT_EXCLUDED_STATUS = frozenset(
-    {"superseded", "deprecated", "archived", "retracted"})
+_RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
 
 
 def _op_attr(op, name, default=None):
