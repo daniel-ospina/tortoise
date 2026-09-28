@@ -57,6 +57,119 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
             ) from None
 
 
+# #4243: columns whose SQL type is ``timestamptz``. Postgres's timestamptz input
+# function REJECTS a bare JSON number — the number reaches it as text and is not
+# a valid timestamp literal — so PostgREST 400s. Verified against Postgres 18
+# (PGlite 0.5.4, every migration applied):
+# ``json_populate_record(NULL::organizations,
+# '{"current_period_end":1756348800}')`` → `date/time field value out of
+# range: "1756348800"`, and with ``'{"current_period_end":2024}'`` → `invalid
+# input syntax for type timestamp with time zone: "2024"`, and a JSON
+# boolean likewise; JSON null and an ISO-8601 string are accepted. The fake
+# stored ANY JSON value verbatim, so it accepted an epoch int — exactly how
+# #4216 (Stripe delivers the period bounds as Unix epoch ints, PATCHed into
+# ``timestamptz`` columns) passed CI and 400'd in production. Default-on
+# fidelity makes the fake raise the SAME RuntimeError surface the real query()
+# raises, so "a write of a shape the real PostgREST rejects" fails in CI.
+# Extendable registry (mirrors UUID_FILTER_COLUMNS).
+#
+# DERIVED, not hand-copied, from ``supabase/migrations/*.sql``: every column
+# declared ``timestamptz`` in a CREATE TABLE body or an
+# ``ALTER TABLE ... ADD COLUMN``, with the 20260915000001 renames applied
+# transitively (``teams`` → ``organizations``, ``user_teams`` →
+# ``team_memberships`` → ``org_memberships``). Regenerate rather than guess
+# when a migration adds a column; ``tests/test_fake_control_plane.py`` pins the
+# set against the migrations so a forgotten column fails the suite.
+TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
+    ("abuse_events", "created_at"),
+    ("agent_signup_tokens", "created_at"),
+    ("agent_signup_tokens", "last_used_at"),
+    ("agent_signup_tokens", "revoked_at"),
+    ("analytics_events", "created_at"),
+    ("api_keys", "created_at"),
+    ("api_keys", "expires_at"),
+    ("api_keys", "last_used_at"),
+    ("api_keys", "revoked_at"),
+    ("audit_events", "created_at"),
+    ("blog_admins", "created_at"),
+    ("blog_agent_keys", "created_at"),
+    ("blog_posts", "created_at"),
+    ("blog_posts", "published_at"),
+    ("blog_posts", "reviewed_at"),
+    ("blog_posts", "updated_at"),
+    ("graphs", "created_at"),
+    ("graphs", "deleted_at"),
+    ("graphs", "purged_at"),
+    ("invitations", "accepted_at"),
+    ("invitations", "created_at"),
+    ("invitations", "email_sent_at"),
+    ("invitations", "expires_at"),
+    ("invitations", "otp_expires_at"),
+    ("invitations", "otp_sent_at"),
+    ("invitations", "otp_verified_at"),
+    ("link_intents", "consumed_at"),
+    ("link_intents", "created_at"),
+    ("link_intents", "expires_at"),
+    ("metering_records", "period_end"),
+    ("metering_records", "period_start"),
+    ("metering_records", "updated_at"),
+    ("oauth_access_tokens", "created_at"),
+    ("oauth_access_tokens", "expires_at"),
+    ("oauth_access_tokens", "revoked_at"),
+    ("oauth_clients", "created_at"),
+    ("oauth_clients", "revoked_at"),
+    ("oauth_codes", "created_at"),
+    ("oauth_codes", "expires_at"),
+    ("oauth_codes", "redemption_settled_at"),
+    ("oauth_codes", "used_at"),
+    ("oauth_refresh_tokens", "created_at"),
+    ("oauth_refresh_tokens", "expires_at"),
+    ("oauth_refresh_tokens", "revoked_at"),
+    ("org_memberships", "created_at"),
+    ("org_memberships", "updated_at"),
+    ("organizations", "backup_latest_at"),
+    ("organizations", "backup_restored_at"),
+    ("organizations", "created_at"),
+    ("organizations", "current_period_end"),
+    ("organizations", "current_period_start"),
+    ("organizations", "deleted_at"),
+    ("organizations", "flagged_at"),
+    ("organizations", "grace_until"),
+    ("organizations", "onboarding_email_sent_at"),
+    ("organizations", "suspended_at"),
+    ("user_unlink_permits", "consumed_at"),
+    ("user_unlink_permits", "created_at"),
+    ("waitlist_subscribers", "consented_at"),
+    ("waitlist_subscribers", "created_at"),
+    ("webhook_events", "first_seen"),
+}
+
+
+def _assert_timestamptz_fidelity(table: str, json_body: dict | None) -> None:
+    """Raise RuntimeError("... HTTP 400") when a POST/PATCH body carries a
+    NUMBER on a registered ``timestamptz`` column — mirroring the Postgres
+    ``timestamptz`` input function's rejection (``date/time field value out of
+    range`` / ``invalid input syntax``) that PostgREST surfaces as HTTP 400.
+
+    REJECT, not coerce: #4216 normalised the epoch at the single writer seam
+    (``update_org_billing``) precisely because the control plane cannot bind a
+    epoch; a fake that coerced would be MORE permissive than production and
+    would keep hiding the next writer. ``None`` and every string pass — the fake
+    has no timestamp parser, so only the number shape (``bool`` included, a
+    Python ``int`` subclass, also rejected by Postgres) is provably rejected."""
+    if not json_body:
+        return
+    for col, value in json_body.items():
+        if (table, col) not in TIMESTAMPTZ_COLUMNS:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400"
+            ) from None
+
+
 # #2863: module-level registry of every control plane a `fail_query` was installed
 # on. The autouse `_no_silent_faults` guard in the OAuth fault suite reads it to
 # fail a test whose injector never fired (a stale matcher is a silent green test) —
@@ -105,7 +218,8 @@ def _as_dt(value):
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
                  *, missing_columns: dict[str, set[str]] | None = None,
-                 uuid_fidelity: bool = True):
+                 uuid_fidelity: bool = True,
+                 timestamptz_fidelity: bool = True):
         # rows are stored as dicts keyed by column name
         self.tables: dict[str, list[dict]] = tables or {}
         self.query_count = 0
@@ -115,6 +229,12 @@ class FakeControlPlane:
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
         self.uuid_fidelity = uuid_fidelity
+        # #4243: timestamptz write fidelity — a JSON number on a registered
+        # timestamptz column 400s (see TIMESTAMPTZ_COLUMNS). Opt out for the
+        # registry-lane doubles, which store the raw epoch int the Stripe
+        # webhook wrote (``metering._anchor_instant`` reads both shapes).
+        # Independent of uuid_fidelity — each guard covers its own type.
+        self.timestamptz_fidelity = timestamptz_fidelity
         # #1709: serializes recover_team_key emulation (the real RPC SELECTs
         # the token row FOR UPDATE — the fake must be atomic under the
         # concurrency E2E).
@@ -805,6 +925,12 @@ class FakeControlPlane:
         # 22P02 in prod is method-agnostic.
         if self.uuid_fidelity:
             _assert_uuid_fidelity(table, filters)
+        # #4243: the same fidelity for WRITE bodies — a JSON number bound to a
+        # timestamptz column 400s in prod (method-agnostic: PATCH and POST
+        # both carry json_body). Checked here so the raise precedes any
+        # mutation, exactly as the real seam rejects before the row changes.
+        if self.timestamptz_fidelity:
+            _assert_timestamptz_fidelity(table, json_body)
         if method == "PATCH":
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
