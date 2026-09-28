@@ -1343,3 +1343,86 @@ def test_clause_vii_indirect_helper_failure_is_red(tmp_path: Path) -> None:
         tmp_path, "python3 tools/registry_integrity.py", validator_src=src
     )
     assert clause(root, "vii") == 1
+
+
+# --- cycle-7 review regressions ---------------------------------------------
+
+
+def test_gitattributes_no_slash_matches_any_depth(tmp_path: Path) -> None:
+    """A no-slash pattern matches at any depth (gitignore semantics)."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".gitattributes").write_text("*.yml merge=union\n", encoding="utf-8")
+    (root / "top.yml").write_text("a: 1\n", encoding="utf-8")
+    (root / "sub").mkdir(parents=True, exist_ok=True)
+    (root / "sub" / "deep.yml").write_text("b: 1\n", encoding="utf-8")
+    unioned = mcg._unioned_files(root)
+    assert {"top.yml", "sub/deep.yml"} <= unioned
+
+
+def test_gitattributes_nested_leading_slash_is_dir_anchored(tmp_path: Path) -> None:
+    """`/x.yml` in `nest/.gitattributes` anchors to `nest/`, not the repo root."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "nest").mkdir(parents=True, exist_ok=True)
+    (root / "nest" / ".gitattributes").write_text("/x.yml merge=union\n", encoding="utf-8")
+    (root / "nest" / "x.yml").write_text("a: 1\n", encoding="utf-8")
+    (root / "x.yml").write_text("b: 1\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"nest/x.yml"}
+
+
+def test_attr_macro_expands_transitively(tmp_path: Path) -> None:
+    """`[attr]b a` where `a` is a macro must resolve to `merge=union`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "f.txt").write_text("x\n", encoding="utf-8")
+    (root / ".gitattributes").write_text(
+        "[attr]a merge=union\n[attr]b a\nf.txt b\n", encoding="utf-8"
+    )
+    assert mcg._unioned_files(root) == {"f.txt"}
+
+
+def test_attr_macro_is_inherited_by_nested_file(tmp_path: Path) -> None:
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".gitattributes").write_text("[attr]m merge=union\n", encoding="utf-8")
+    (root / "docs").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / ".gitattributes").write_text("*.yml m\n", encoding="utf-8")
+    (root / "docs" / "x.yml").write_text("a: 1\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"docs/x.yml"}
+
+
+def test_gitattributes_bracket_negation(tmp_path: Path) -> None:
+    """`[!r]` is a NEGATED class in git; Python `re` needs `[^r]`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".gitattributes").write_text("cfg/[!r]eg.yml merge=union\n", encoding="utf-8")
+    (root / "cfg").mkdir(parents=True, exist_ok=True)
+    (root / "cfg" / "!eg.yml").write_text("a: 1\n", encoding="utf-8")
+    (root / "cfg" / "seg.yml").write_text("b: 1\n", encoding="utf-8")
+    (root / "cfg" / "reg.yml").write_text("c: 1\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"cfg/!eg.yml", "cfg/seg.yml"}
+
+
+def test_gitattributes_empty_class_does_not_raise(tmp_path: Path) -> None:
+    """`[]` is git-legal (matches nothing) and must not raise `re.error`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".gitattributes").write_text("[] merge=union\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == set()
+
+
+def test_clause_vii_explicit_null_if_is_red(tmp_path: Path) -> None:
+    """A bare `if:` parses to null (falsy) — the step is skipped."""
+    _root, workflows = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    workflows["python-ci.yml"]["jobs"]["manifest-integrity"]["steps"][0]["if"] = None
+    root2 = make_tree(
+        tmp_path / "b",
+        merge_config(),
+        workflows=workflows,
+        attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root2, "vii") == 1
+
+
+def test_static_reds_on_a_recorded_live_divergence(tmp_path: Path) -> None:
+    """A stored `live_result: DIVERGED` (I1's whole point) must red `--static`."""
+    root = make_tree(
+        tmp_path, merge_config(), record_overrides={"live_result": "DIVERGED"}
+    )
+    assert mcg.run_static(root)[0] == 1

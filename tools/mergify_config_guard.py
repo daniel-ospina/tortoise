@@ -481,12 +481,13 @@ def _attributes_files(root: Path) -> list[Path]:
 
 
 def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
-    """A regex reproducing gitattributes glob semantics for a path pattern.
+    """A regex reproducing gitattributes/.gitignore glob semantics.
 
-    Unlike `PurePosixPath.match`, `*` does not cross `/`, `**/` matches zero or
-    more directories, and a trailing `/**` matches everything inside — without
-    this, `config/**` unioned only direct children and `config/sub/x.yml` was
-    never required (a silent under-approximation of git's union set).
+    `*` does not cross `/`, `**/` matches zero or more directories, `[!…]` is a
+    NEGATED class (Python `re` spells that `[^…]`), and an empty/invalid class
+    (`[]`, `[]]`) is a literal `[` that matches nothing — injecting it raw would
+    raise `re.error` and make clause (vii) UNAVAILABLE on a git-legal line.
+    Callers add the `(?:.*/)?` prefix for no-slash patterns.
     """
     out = ["^"]
     i = 0
@@ -509,11 +510,18 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
             i += 1
             continue
         if ch == "[":
-            close = pattern.find("]", i)
-            if close != -1:
-                out.append(pattern[i : close + 1])
-                i = close + 1
+            close = pattern.find("]", i + 1)
+            content = pattern[i + 1 : close] if close != -1 else ""
+            if close == -1 or content in ("", "!"):
+                out.append(re.escape(ch))
+                i += 1
                 continue
+            negate = content.startswith("!")
+            body = content[1:] if negate else content
+            safe = body.replace("\\", "\\\\").replace("]", "\\]").replace("^", "\\^")
+            out.append("[" + ("^" if negate else "") + safe + "]")
+            i = close + 1
+            continue
         out.append(re.escape(ch))
         i += 1
     out.append("$")
@@ -522,40 +530,50 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
 
 def _unioned_files(root: Path) -> set[str]:
     unioned: set[str] = set()
-    for path in _attributes_files(root):
-        # A nested `.gitattributes` anchors its patterns to ITS directory.
-        base = path.parent.relative_to(root).as_posix()
-        lines = _read(path).splitlines()
-        # `[attr]NAME a b` defines a macro; a path line naming the macro applies
-        # its attributes. Ignoring the definition left the real unioned file
-        # outside the required set (a silent fail-open).
-        macros: dict[str, list[str]] = {}
-        for line in lines:
+    files = sorted(_attributes_files(root), key=lambda p: len(p.parts))
+    # Macros are inherited DOWNWARD (a root `[attr]` is visible to a nested
+    # file), and expand TRANSITIVELY (`[attr]b a` where `a` is a macro).
+    macros: dict[str, list[str]] = {}
+    file_lines: dict[Path, list[str]] = {}
+    for path in files:
+        file_lines[path] = _read(path).splitlines()
+        for line in file_lines[path]:
             fields = line.strip().split()
             if len(fields) >= 2 and fields[0].startswith("[attr]"):
                 macros[fields[0][len("[attr]") :]] = fields[1:]
-        for line in lines:
+
+    def expand(attrs: list[str]) -> list[str]:
+        out: list[str] = []
+        stack, seen = list(attrs), set()
+        while stack:
+            attr = stack.pop(0)
+            if attr in macros and attr not in seen:
+                seen.add(attr)
+                stack.extend(macros[attr])
+            else:
+                out.append(attr)
+        return out
+
+    for path in files:
+        base = path.parent.relative_to(root).as_posix()
+        for line in file_lines[path]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
             fields = stripped.split()
             if len(fields) < 2:
                 continue
-            pattern = fields[0]
+            pattern = fields[0].strip('"')
             if pattern.startswith("[attr]"):
                 continue
-            attrs: list[str] = []
-            for attr in fields[1:]:
-                attrs.extend(macros.get(attr, [attr]))
-            if "merge=union" not in attrs:
+            if "merge=union" not in expand(fields[1:]):
                 continue
-            if pattern.startswith("/"):
-                pat = pattern[1:]
-            elif base != ".":
-                pat = f"{base}/{pattern}"
-            else:
-                pat = pattern
-            expanded = False
+            prefix = "" if base == "." else f"{base}/"
+            # A pattern with NO slash matches at ANY depth below its directory;
+            # a `/` (or leading `/`) anchors it to that directory.
+            anchored = pattern.startswith("/") or "/" in pattern
+            body = pattern.lstrip("/") if pattern.startswith("/") else pattern
+            pat = prefix + body if anchored else prefix + "**/" + body
             if any(ch in pat for ch in "*?["):
                 regex = _attr_glob_regex(pat)
                 for match in sorted(root.rglob("*")):
@@ -563,8 +581,8 @@ def _unioned_files(root: Path) -> set[str]:
                         match.relative_to(root).as_posix()
                     ):
                         unioned.add(match.relative_to(root).as_posix())
-                        expanded = True
-            if not expanded:
+                # A glob matching nothing contributes nothing (git unions nothing).
+            else:
                 unioned.add(pat)
     return unioned
 
@@ -607,8 +625,23 @@ def _if_excludes_pull_request(expr: Any) -> bool:
     )
 
 
+def _if_lets_pull_request_through(container: dict) -> bool:
+    """False if the `if:` (incl. an explicit YAML null) is not allow-listed.
+
+    Key-presence matters: `if:` with no value parses to `None`, which GitHub
+    treats as falsy (the step is skipped), and `job.get("if")` cannot tell it
+    from an absent key.
+    """
+    if "if" not in container:
+        return True
+    expr = container["if"]
+    if expr is None:
+        return False
+    return not _if_excludes_pull_request(expr)
+
+
 def _job_reaches_pull_request(job: dict) -> bool:
-    return not _if_excludes_pull_request(job.get("if"))
+    return _if_lets_pull_request_through(job)
 
 
 def _single_command_run(run: str) -> list[str] | None:
@@ -946,7 +979,7 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
                 jid
                 for jid in _ancestor_jobs(jobs_doc, cand["job"])
                 if isinstance(jobs_doc.get(jid), dict)
-                and _if_excludes_pull_request(jobs_doc[jid].get("if"))
+                and not _if_lets_pull_request_through(jobs_doc[jid])
             )
             if bad_ancestors:
                 problems.append(
@@ -979,7 +1012,7 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         if job.get("continue-on-error"):
             problems.append(f"{label}: validator JOB is `continue-on-error`")
             continue
-        if _if_excludes_pull_request(step.get("if")):
+        if not _if_lets_pull_request_through(step):
             problems.append(f"{label}: validator step's `if:` excludes pull_request")
             continue
         # `env:` can be set on the step, the job, or the WORKFLOW; all are
@@ -1334,6 +1367,16 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
         return (
             EXIT_DIVERGED,
             f"record verified_at is {age.days}d old (> {RECORD_FRESH_DAYS}d); re-cut with `--recut`",
+        )
+    # A recorded non-clean LIVE read (I1 DIVERGED/UNAVAILABLE) must red `--static`:
+    # otherwise the one state I1 exists to surface is only visible to a human
+    # reading the JSON.
+    live_result = record.get("live_result")
+    if isinstance(live_result, str) and live_result not in ("", "SATISFIED"):
+        return (
+            EXIT_DIVERGED,
+            f"the live I1 read was {live_result} at {record.get('live_checked_at')} — "
+            "re-run `--live` when the admin read succeeds",
         )
     return EXIT_OK, f"gate_digest matches head and was verified {_iso(verified_at)}"
 
