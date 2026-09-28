@@ -1138,3 +1138,49 @@ class TestSessionKeyMintSerialization1879:
         # rotated=True): this pins that the interleave really exercises the
         # `others` branch — the branch that loses the race when unserialized.
         assert results == [{"rotated": False, "rotated_key_prefix": None}] * 2, results
+
+    def test_at_cap_others_revoke_emits_no_phantom_key_create_event(
+            self, rest_client, authed_user):
+        """#1879 P2(a) pin: the at-cap `others`-branch mint emits exactly ONE
+        `key_create` abuse event — for the key it CREATED, and NONE for the row
+        it REVOKED. The real trigger is `AFTER INSERT ON public.api_keys` only
+        (0015_abuse_events.sql), so a revoke is not a create.
+        `_abuse_evaluate_keys` consumes these events, so a phantom event would
+        silently inflate key_create telemetry.
+
+        Mutation pin: re-adding `self._trigger_key_create(org_id,
+        others[0]["id"], None)` after the revoke in
+        `FakeControlPlane.session_key_mint` makes the count 2 and this REDs.
+        """
+        tc, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id=tid)])
+        # free tier max_api_keys == 2: two OTHER live keys fill the cap, so the
+        # mint MUST take the `others` revoke path.
+        fake.seed("api_keys", [
+            _key_row(id="other-old", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-old", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="other-new", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-new", created_at="2026-08-02T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+
+        created = next(k for k in fake.tables["api_keys"]
+                       if k.get("lookup_hash") == lookup_hash(r.json()["key"]))
+        assert created["id"] != "other-old"
+        revoked = next(k for k in fake.tables["api_keys"]
+                       if k["id"] == "other-old")
+        assert revoked["revoked_at"] is not None, (
+            "this test is only meaningful if the mint really took the "
+            "others-branch revoke")
+
+        events = [e for e in fake.tables.get("abuse_events", [])
+                  if e.get("event_type") == "key_create"]
+        assert len(events) == 1, (
+            f"the revoke path emitted a phantom key_create event: {events}")
+        assert events[0]["key_id"] == created["id"], (
+            f"the single key_create event must name the CREATED key "
+            f"({created['id']}), got {events[0]}")
+        assert all(e["key_id"] != "other-old" for e in events), events

@@ -19987,10 +19987,19 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
-                    reg.query(
-                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    # #1879 P2: the revoke is a CLAIM, not a blind write —
+                    # `WHERE k.revoked_at IS NULL` makes it the Cypher twin of
+                    # `_claim_key_revocation`, so a concurrent revoke of the
+                    # SAME victim (rotate's claim-revoke, or any other
+                    # non-lock-holding writer) is never OVERWRITTEN. The
+                    # returned rows are what THIS call claimed; the
+                    # compensation below is gated on it — a lost claim wrote
+                    # nothing, so there is nothing to restore.
+                    claimed_revoke = bool(reg.query(
+                        "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL "
+                        "SET k.revoked_at = $now RETURN k.id",
                         params={"id": oldest[0][0], "now": now},
-                    )
+                    ).result_set)
                     # #1879: FAIL-CLOSED RE-CHECK (parity with the rotation
                     # branch below). The revoke above frees a slot ONLY if the
                     # count did not move underneath it: this lane's lock is
@@ -20018,16 +20027,23 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         # its RAISE ROLLS THE REVOKE BACK). Refusing without
                         # undoing it would destroy another user's live key and
                         # return no key at all — a refusal that loses data is
-                        # strictly worse than the overshoot it prevents. The
-                        # restore is a compare-and-swap on the exact timestamp
-                        # WE wrote, so it can never resurrect a row another
-                        # writer deliberately revoked (`SET k.revoked_at = NULL`
-                        # only WHERE k.revoked_at = $now).
-                        reg.query(
-                            "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now "
-                            "SET k.revoked_at = NULL",
-                            params={"id": oldest[0][0], "now": now},
-                        )
+                        # strictly worse than the overshoot it prevents.
+                        #
+                        # #1879 P2: gated on `claimed_revoke` — restoring is
+                        # only correct when THIS call's claim actually wrote
+                        # the row. A lost claim (another writer revoked the
+                        # victim first) freed no slot, so the revoke is left
+                        # exactly as that writer made it. The restore itself is
+                        # a compare-and-swap on the exact timestamp WE wrote,
+                        # so it can never resurrect a row another writer
+                        # deliberately revoked (`SET k.revoked_at = NULL` only
+                        # WHERE k.revoked_at = $now).
+                        if claimed_revoke:
+                            reg.query(
+                                "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now "
+                                "SET k.revoked_at = NULL",
+                                params={"id": oldest[0][0], "now": now},
+                            )
                         raise HTTPException(status_code=402, detail=_key_limit_refusal())
                 else:
                     # #1828: at max_api_keys with no OTHER key to revoke, the

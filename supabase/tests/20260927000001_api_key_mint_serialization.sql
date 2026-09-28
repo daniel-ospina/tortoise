@@ -550,6 +550,36 @@ BEGIN
   PERFORM tests.assert(v_rows <= 2,
       'credit-aware provision + the owed revoke ends at or under the cap');
 
+  -- (d) ...and the DEFAULT bootstrap cap is enforced when p_bootstrap_cap is
+  --     NULL, via a call that actually REACHES the comparison. (a) could not:
+  --     its p_expires_at is NULL, so the `bootstrap requires an expiry` guard
+  --     above short-circuits before `v_boot >= COALESCE(...)`. Pass a VALID
+  --     24h expiry with p_bootstrap_cap => NULL: three live bootstrap rows are
+  --     seeded, so the 4th must RAISE `bootstrap cap reached`. This is what
+  --     pins the COALESCE — reverting to `v_boot >= p_bootstrap_cap` makes
+  --     `3 >= NULL` NULL, the IF is not taken, the mint inserts, and the
+  --     assert(false) below fires instead.
+  INSERT INTO public.api_keys
+      (id, org_id, lookup_hash, created_via, created_by, created_at, expires_at)
+  VALUES ('k1879-np-b2', v_org, 'lu1879-np-b2', 'bootstrap', 'u-1879-np', now(),
+          now() + interval '24 hours'),
+         ('k1879-np-b3', v_org, 'lu1879-np-b3', 'bootstrap', 'u-1879-np', now(),
+          now() + interval '24 hours'),
+         ('k1879-np-b4', v_org, 'lu1879-np-b4', 'bootstrap', 'u-1879-np', now(),
+          now() + interval '24 hours');
+  BEGIN
+    PERFORM public.session_key_mint(v_org, 'u-1879-np', 'bootstrap',
+        'k1879-np-b5', 'lu1879-np-b5', 'tt_npb5', now(),
+        p_expires_at => now() + interval '24 hours',
+        p_max_api_keys => NULL,
+        p_bootstrap_cap => NULL);
+    PERFORM tests.assert(false,
+        'NULL bootstrap cap must still enforce the DEFAULT 3-active cap');
+  EXCEPTION WHEN others THEN
+    PERFORM tests.assert(SQLERRM LIKE '%bootstrap cap reached%',
+        'NULL bootstrap cap defaults to 3 (4th active bootstrap RAISEs): ' || SQLERRM);
+  END;
+
   DELETE FROM public.api_keys WHERE org_id = v_org;
   DELETE FROM public.organizations WHERE id = v_org;
 END $$;
