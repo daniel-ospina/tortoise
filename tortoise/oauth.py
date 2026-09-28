@@ -1970,11 +1970,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // REMOVABILITY OF THE REAL KEY: the credential has to be WRITTEN before its
   // removal can be observed, so a store that accepts the credential and then
   // refuses to remove it keeps a copy no path can clean (recorded residual R21 —
-  // a store that discriminates by key is not a conforming browser store, and no
-  // probe can prevent this, only detect it after the fact). Re-proving removal on
-  // the real key would detect nothing the probe misses and would leave the
-  // credential in TWO stores; the writer therefore keeps the probe, and the real
-  // write is proven by its read-back alone.
+  // a store that discriminates by key is not a conforming browser store). A
+  // re-probe on the REAL key DOES detect that store, but only AFTER the credential
+  // is already written to it, so it cannot un-write it: it skips the store and
+  // copies the same credential into the next one, leaving two copies where the
+  // throwaway-key probe leaves one. The writer therefore keeps the probe, and the
+  // real write is proven by its read-back alone.
   const writeAux = (key, value) => {
     const v = String(value);
     const probe = "x".repeat(v.length);
@@ -2429,20 +2430,22 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
       if (u.hash.length > 1) {
         const raw = u.hash.slice(1);
-        // Touch the fragment ONLY when it is a pure param list: every
-        // `&`-separated part is `name=value` with a NON-EMPTY name. `#section-2`
-        // and `#/route/x` are not param lists, and re-serialising one mangles an
-        // unrelated part of the URL this function does not own. (Testing this by
-        // comparing `new URLSearchParams(raw).toString()` to `raw` is NOT the same
-        // test — that is byte-identity after NORMALISATION, which any value
-        // carrying an escaped character fails, so a provider `error_description`
-        // with a space (`boom%20boom`) took the left-alone branch and kept the
-        // transient on the URL, which is the one case this branch exists for.) A
-        // fragment that is not a param list is left alone, transient included:
+        // A param list: every `&`-separated part is `name=value` with a NON-EMPTY
+        // name that is not path/route shaped. Testing this by comparing
+        // `new URLSearchParams(raw).toString()` to `raw` is NOT the same test —
+        // that is byte-identity after NORMALISATION, which any value carrying an
+        // escaped character fails, so a provider `error_description` with a space
+        // (`boom%20boom`) took the left-alone branch and kept the transient on the
+        // URL, which is the one case this branch exists for. The NAME test also
+        // keeps `#/route/x?a=1` and `#settings?tab=x` out: both contain `=`, so a
+        // bare "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
+        // A fragment that is not a param list is left alone, transient included:
         // that is cosmetic URL-bar residue, not page state (the page derives its
         // own transient from `LOAD_QUERY`, captured before this runs).
-        const isParamList = raw.indexOf("=") > 0 &&
-          raw.split("&").every((p) => p.indexOf("=") > 0);
+        const isParamList = raw.split("&").every((p) => {
+          const i = p.indexOf("=");
+          return i > 0 && /^[^/?:=]+$/.test(p.slice(0, i));
+        });
         if (isParamList) {
           const h = new URLSearchParams(raw);
           STRIP_PARAMS.forEach((k) => h.delete(k));

@@ -376,6 +376,17 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
         f"an escaped transient survived in the sanitised URL: {frag_esc['replaceStates']}"
     )
 
+    # The stricter param-list test must not now MANGLE a fragment it used to leave
+    # alone: `#/route/x?a=1` and `#settings?tab=x` both contain `=`, so a bare
+    # "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
+    for router_frag in ("#/route/x?a=1", "#settings?tab=x&foo=bar"):
+        routed = _run("load", search="?error=access_denied&error_description=boom",
+                      hash=router_frag)
+        assert routed["errorVisible"] is True, routed
+        assert all("%2F" not in u and u.endswith(router_frag) for u in routed["replaceStates"]), (
+            f"a router-shaped fragment was mangled or re-encoded: {routed['replaceStates']}"
+        )
+
     # A reachable, non-provider cause of the SAME terminal state: the provider
     # returns `?code=`, and the code exchange inside createClient() is rejected.
     # This is the case the state exists to catch — it carries no
@@ -472,7 +483,7 @@ def _assert_session_store_attempted(r: dict) -> None:
     )
 
 
-def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
+def test_inv13_the_write_lands_only_after_a_probe_cycle() -> None:
     """Invariant 13 (A5, the WRITER half): the pre-flight probe writes its OWN key
     with a 160-byte payload, so it cannot prove that the store which will RECEIVE
     the real verifier can also remove it. The writer therefore probes per store on

@@ -248,10 +248,12 @@ function pkceIncapable() {                       // null | "no-webcrypto" | "no-
 The guard is an early-failure optimisation: it must never *be* the invariant, because it probes a
 throwaway key with a payload sized for the verifier, and the writer's own choice can differ (a store
 whose accepted-size band sits between the probe and the real value). The invariant is enforced where
-the real key and value are known — in `writeAux`, which re-proves writability AND cleanability on
-each candidate store at write time, with a payload of the REAL length under a throwaway key — a
-DUMMY of that length, never the credential itself — and only then writes the credential
-(invariant 13):
+the writer's own choice is known — in `writeAux`, which re-proves the probe cycle on each candidate
+store at write time, with a payload of the REAL length under a throwaway key — a DUMMY of that
+length, never the credential itself — reads the real value back, and only then treats the store as
+chosen (invariant 13). What no probe can settle is whether the store will remove the REAL key: the
+credential must be written before its removability is observable, so a store that discriminates by
+key keeps the copy it accepted (residual R21). The landed writer (invariant 13):
 ```js
 const writeAux = (key, value) => {
   const v = String(value);
@@ -280,7 +282,8 @@ const writeAux = (key, value) => {
 `removeAux` still scans EVERY aux store (it runs on paths where the guard never did, e.g. an
 invalid-session load), and `readAux` likewise (a verifier may live in either store). Residual R21: a
 store that discriminates by KEY (accepts/removes its own probe key but refuses the `sb-…` key) is
-not caught by either probe, and the credential it accepts is RETAINED there until the tab closes —
+not caught by either probe, and the credential it accepts is RETAINED there until the tab closes (or
+longer on the `localStorage` fallback, which outlives the tab) —
 re-proving removal on the real key cannot help, because the credential must be written before its
 removal is observable, and the re-probe would leave the credential in two stores instead of one; no
 browser storage behaves that way, and a key-aware shim on the origin
@@ -396,9 +399,9 @@ patched → `['api']`; `oauth.py` → `['api','core']`; the derived ratchet
 (a) `tests/test_oauth_mcp.py::TestAuthorizePage`: textual pins for the genuinely textual (explicit
 `flowType: "pkce"`, `SIZE_CAP`) **plus the shape-only version tripwire** (an exact-semver shape regex
 and a mutable-form negative — the **derived** version assertion of Step 1 lives in the harness, which
-owns the vendor path). The `authorizeReturnTo` **presence** pin is demoted to a secondary name check —
-the behavioural proof of A2/A4 is **invariant 11**, not a grep (a presence pin cannot discriminate
-an emptied strip list or a helper that stopped being called).
+owns the vendor path). The `authorizeReturnTo` **presence** pin was **deleted** (it was a static
+backstop that could not discriminate an emptied strip list or a helper that stopped being called); the
+behavioural proof of A2/A4 is **invariant 11** alone, not a grep.
 (b) `tests/test_cross_subdomain_cookie_sync.py`: **first extend `_extract_fn_body`'s optional sigil
 group to accept `:\s*(…)`** (backward-compatible: covers `name: (k, v) => {` and
 `name: function (k) {`) so there is **one** body extractor for both the JS-method and TS-arrow
@@ -521,7 +524,8 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
     that the cookie jar saw only the session-key expiry. The remaining case — a failed exchange that
     leaves *older* `${KEY}-flow-<id>-code-verifier` copies, or **all** `-flow-<id>-` copies when the
     return carries no `sb_flow_id`, plus `${KEY}-flows-code-verifier` — is a **library-owned**
-    residual (R19), not a page defect, and is asserted as such. The two halves are seeded in turn —
+    residual (R19), not a page defect, and is **recorded as a library-owned residual, not asserted**
+    here. The two halves are seeded in turn —
     `sessionStorage` then `localStorage` — because "cleared from both aux stores" is only exercised on
     the non-default store by the second seed.
 13. **Write-time cleanability (A5, writer half)** — the credential must reach only a store whose probe
@@ -570,7 +574,7 @@ store's one leaked probe entry then reads as a credential).
    modification directions (invariant 8).
 5. No verifier copy reaches the parent-domain cookie, and removed keys are cleared from both aux
    stores (invariants 3, 4, 12, 13).
-6. All **13** test invariants have a mutation that reddens them (inv 11: an emptied strip list → the
+6. All **12** numbered test invariants (§4's item 10 is a list item, not a test) have a mutation that reddens them (inv 11: an emptied strip list → the
    navigate URL carries the stale `code`; inv 12: an aux `removeItem` that skips one store → the
    aux-store assertion; inv 13: the writer's cleanability proof removed — and, separately, only its
    removal read-back, which is what the silent-remove store reaches — → the credential lands in the
@@ -712,7 +716,7 @@ them a reproduced production gap**:
 
 | # | Finding | Fix |
 |---|---|---|
-| 15 | **The round-2 guard fix did not close A5.** The guard probes with its own key and a 160-byte payload, so it cannot know whether the store the WRITER will pick can be cleaned *for the real key and value*. Reproduced by execution: a first store that rejects the 160-byte probe on size but accepts the ~114-byte verifier **and** refuses removal → the guard skips it and accepts the next store, while `writeAux` writes the credential to the first → the credential is orphaned in the store that cannot remove it (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). The absolute claim in A5/R3/R20 ("a store that refuses REMOVAL is refused by the guard") was therefore false. | The invariant is now enforced **where the real key and value are known**: `writeAux` re-proves writability AND cleanability on each candidate store at write time, with a payload of the REAL length under a throwaway key, and only then writes the credential — so an uncleanable store never receives it. Invariant 13 pins the exact divergence (with a both-un-cleanable control); R21 records the residual (a store that discriminates by key). The doc's A5 row, R3/R20 and the Step 3b sketch now state the guard's true role (early-failure optimisation, never the invariant). |
+| 15 | **The round-2 guard fix did not close A5.** The guard probes with its own key and a 160-byte payload, so it cannot know whether the store the WRITER will pick can be cleaned *for the real key and value*. Reproduced by execution: a first store that rejects the 160-byte probe on size but accepts the ~114-byte verifier **and** refuses removal → the guard skips it and accepts the next store, while `writeAux` writes the credential to the first → the credential is orphaned in the store that cannot remove it (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). The absolute claim in A5/R3/R20 ("a store that refuses REMOVAL is refused by the guard") was therefore false. | The invariant is now enforced **where the real key and value are known**: `writeAux` re-proves writability AND cleanability on each candidate store at write time, with a payload of the REAL length under a throwaway key, and only then writes the credential — so an uncleanable store never receives it. Invariant 13 pins the exact divergence (with a both-un-cleanable control); R21 records the residual (a store that discriminates by key). The doc's A5 row, R3/R20 and the Step 3b sketch now state the guard's true role (early-failure optimisation, never the invariant). *(Superseded in round 9: the writer-side real-key re-prove described here was reverted as net-negative — it detected the key-discriminating store only after the credential was written, and copied the residue into the next store. See R21 and the round-9 log entry.)* |
 | 16 | the doc's Step 3b sketch still showed the **pre-round-2** guard (`padEnd(49) + "-code-verifier"`, a bare `catch` that fell through to the next store) and its comment ("a remove failure is INCAPABLE, never silently skipped") was false of the code below it — a reader copying the sketch would reintroduce the hole | the sketch is replaced with the landed guard and the writer-side proof |
 | 17 | the coverage map cited **inv 10**, which does not exist (the free 10th numbering slot was never written; its content is covered by inv 3 + inv 6) | the A1/A5 rows now cite the tests that exist |
 
@@ -727,7 +731,7 @@ previous round's own fix note**:
 | # | Finding | Fix |
 |---|---|---|
 | 18 | **The writer's removal read-back was unpinned, and its `silent-remove` companion mode was dead code.** Deleting `if (s.getItem(probeKey) !== null) throw 0;` left all 11 tests green: the store mode the round-3 commit added "for it" was never instantiated by any scenario, and a bare `silent-remove` never reaches the writer at all (the guard refuses that store first — its 160-byte probe fits there and ITS read-back-null fires). The line is load-bearing only with an item-size cap: `sessionMode="silent-remove", sessionQuota=130`. Measured: pristine relocates the verifier to `localStorage`; with the line deleted the credential lands in the silent-remove `sessionStorage` (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). (The reviewer rated it P1 because the mutation survived a suite the round-3 note called 21/21.) | inv 13 now runs that exact scenario, plus a both-`silent-remove` fail-closed control; the mutation reddens it. |
-| 19 | **R3 and R20 still attributed the A5 invariant to the GUARD** ("a store that refuses REMOVAL is refused by the guard") — the exact confusion round 3 existed to remove — and the round-3 fix note claimed R3/R20 had been updated when the diff shows neither was touched | both reworded: the invariant lives in `writeAux` (prove removal for the real value, per store); the guard only refuses early when the FIRST writable store is uncleanable |
+| 19 | **R3 and R20 still attributed the A5 invariant to the GUARD** ("a store that refuses REMOVAL is refused by the guard") — the exact confusion round 3 existed to remove — and the round-3 fix note claimed R3/R20 had been updated when the diff shows neither was touched | both reworded: the invariant lives in `writeAux` (probe cycle on a throwaway key, plus the real value's read-back); the guard only refuses early when the FIRST writable store is uncleanable. *(Superseded in round 9: the real-key removal re-prove this row describes was reverted as net-negative — see R21.)* |
 | 20 | **four** `inv 10` citations survived the round-3 fix (lines 135, 542, 603 — reached then — and 524, missed): the round-3 row below claims three were replaced, which was true only of the ones it listed | all four replaced with the tests that exist (`3, 4, 12`, and `3, 4, 12, 13` for the aux-store criterion) |
 
 ### diff-time code review ROUND 5 (re-review of `61e8ad2a7`)
@@ -776,17 +780,43 @@ reviewer returned NO ISSUES FOUND. **Round 7's widened version negative was itse
 its unbounded `\d+(?:\.\d+){0,2}` arm also matched the allowed pinned form, so
 `test_authorize_renders_consent_html` went red — the round-7 commit's test run omitted
 `tests/test_oauth_mcp.py`, which is how it escaped. Also fixed: the A5 writer's real-key removal proof
-added in the same commit was net-negative (it detected nothing the probe misses and left the credential
-in TWO stores instead of one — reverted, with A5/R20/R21 and the Step-3b sketch corrected to state the
-residual instead of claiming a guarantee the writer cannot give); inv 13's `sessionVerifierKeys == []`
+was incomplete (it proved remove/read-back-null only for the throwaway probe key, never for the real
+key it stored, so its own comment overclaimed — the proof was **extended** to the real key), the
+scoping doc's 341-count verification row (whose command omits `tests/test_oauth_mcp.py`'s
+`-k "not Cimd"` requirement), and two comments that described earlier revisions of this PR's own test
+file. The blog-admin follow-up was filed as **#5735**.
+
+### diff-time code review ROUND 9 (re-review of `f458c3edf`)
+Four fresh reviewers (correctness/logic, security, test-quality, doc-consistency). This round found
+that **round 8's real-key removal proof was net-negative rather than merely incomplete**: it cannot
+prevent the residual it appears to guard (the credential must be WRITTEN before its removability is
+observable, so a key-discriminating store keeps a copy either way) and it left that credential in TWO
+stores instead of one — **reverted**, with A5/R20/R21, the invariant-13 docstring and the Step-3b
+sketch corrected to state the residual instead of claiming a guarantee the writer cannot give. Two
+real behaviour bugs, each verified by execution before and after: inv 13's `sessionVerifierKeys == []`
 assertions were satisfiable by a store never being in the chain (a **per-store attempt log** now pins
-that the store was TRIED); `strippedHasToken` could not see `provider_refresh_token`;
-`LOAD_TRANSIENT.present` was derived from the generic names `type`/`flow_id`, so a benign first load was
-told its sign-in had failed; and `sanitiseUrl()`'s fragment param-list test was byte-identity after
-normalisation, so an escaped provider `error_description` kept the transient on the URL. A pre-existing
-defect found on the way — a server value containing a literal `__SUPABASE_URL__` placeholder expands
-into the inline script and breaks it (attacker-triggerable page corruption, no secret leak) — is
-**not fixed here** (identical on `origin/main`) and is filed as **#6001**.
+that the store was TRIED), `strippedHasToken` could not see `provider_refresh_token` (deleting only the
+sibling strip kept it green), `LOAD_TRANSIENT.present` was derived from the generic names
+`type`/`flow_id` so a benign first load was told its sign-in had failed, and `sanitiseUrl()`'s fragment
+param-list test was byte-identity after normalisation so an escaped provider `error_description` kept
+the transient on the URL. A pre-existing defect found on the way — a server value containing a literal
+`__SUPABASE_URL__` placeholder expands into the inline script and breaks it (attacker-triggerable page
+corruption, no secret leak) — is **not fixed here** (identical on `origin/main`) and is filed as
+**#6001**.
+
+### diff-time code review ROUND 10 (re-review of `a98886611`)
+Three fresh reviewers (correctness/logic, test-quality, doc-consistency). All findings were record- or
+comment-level, and all are fixed: round 9's fragment param-list test was itself too permissive — a
+bare "has an `=`" test treated `#/route/x?a=1` and `#settings?tab=x` as param lists and re-serialised
+them to `%2Froute%2Fx%3Fa=1`, so the test is now structural on the NAME (non-empty, not
+path/route-shaped) with those two shapes pinned as preserved; the `writeAux` revert comment claimed a
+real-key re-probe "would detect nothing the probe misses", which the round-9 delta had itself
+disproved (it did detect the key-discriminating store — but only after writing the credential, and it
+copied the residue into the next store), so the comment now gives that reason; R3 and two review-log
+rows still stated the reverted real-key proof as current behaviour; the invariant-13 test name still
+claimed the reverted guarantee and is renamed to the operation actually pinned; and the doc's
+"13 invariants", the dead `authorizeReturnTo` presence-pin sentence, the R19 "asserted as such"
+wording, R21's tab-close bound and the `round-8 head` verification labels were all corrected.
 
 ---
 
@@ -887,8 +917,12 @@ WebCrypto ⇒ the pre-flight guard refuses locally and sign-in cannot complete**
 failure after the probe passed (a race) costs a round trip ending in the generic terminal state; a
 store that TRUNCATES the write leaks one `__tt_probe-*` entry per attempt (harmless: the probe key
 deliberately carries no `-code-verifier` suffix, so it cannot be mistaken for a credential, and the
-real verifier is never written there because `writeAux` proves the write and its removal for the
-real value first); a store that refuses removal **never receives a credential** — that is enforced by
+real verifier is never written there because `writeAux` proves the write and its read-back for the
+real value, and refuses a store whose THROWAWAY-key probe cycle (write → read back → remove → read
+back null) does not complete); a store that refuses removal is refused for USE, though a store that
+discriminates by KEY still keeps the copy it accepted — that residual is R21, and re-proving removal
+on the real key cannot prevent it (the credential must be written before its removal is observable),
+it only copies the residue into the next store — that is enforced by
 `writeAux` (write → read back → remove → read back null, per store, for the real value), NOT by the
 guard, which only refuses early when the FIRST writable store is uncleanable (inv 6). R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
 the verdict is an open PR on #3524 deleting the inline client. R6 version drift — test-enforced in
@@ -937,8 +971,8 @@ Landed files and what each carries. Evidence is stated as a command → observed
 
 **Verification (all run at base `5b6cb9367` + this diff).**
 
-- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q -k "not Cimd"` → **326 passed, 2 xfailed**. `-k "not Cimd"` deselects 17 live-network CIMD classes in `test_oauth_mcp.py` (they fetch over the network and hang without it; CI runs them). Counts at the round-8 head.
-- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py tests/test_attribution_actor.py tests/test_control_plane_offload_3498.py tests/test_oauth_redemption_state.py tests/test_user_identity_authority.py -q` → **412 passed, 1 failed** (re-measured at the round-8 head). The red is `test_mcp_route_challenge::TestAuthChallenge::test_unknown_credential_carries_challenge[tt_deadbeef]` — the embedded-FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), **reproduced on a clean `origin/main` worktree**, not this diff; the failure's identity moves between runs, so it is not deterministic under this change. An earlier revision of this row printed the two bare `test_*.py` paths without their `tests/` prefix, recorded `413 passed`, and attributed extra reds to `test_cursor_mcp_exit_evidence.py`, which this command does not list — all three corrected. `TORTOISE_TEST_CARVE_OUT=1` is required; without it the URI gate errors the whole set.
+- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q -k "not Cimd"` → **326 passed, 2 xfailed**. `-k "not Cimd"` deselects 17 live-network CIMD classes in `test_oauth_mcp.py` (they fetch over the network and hang without it; CI runs them). Counts at the round-9 head.
+- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py tests/test_attribution_actor.py tests/test_control_plane_offload_3498.py tests/test_oauth_redemption_state.py tests/test_user_identity_authority.py -q` → **412 passed, 1 failed** (re-measured at the round-9 head). The red is `test_mcp_route_challenge::TestAuthChallenge::test_unknown_credential_carries_challenge[tt_deadbeef]` — the embedded-FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), **reproduced on a clean `origin/main` worktree**, not this diff; the failure's identity moves between runs, so it is not deterministic under this change. An earlier revision of this row printed the two bare `test_*.py` paths without their `tests/` prefix, recorded `413 passed`, and attributed extra reds to `test_cursor_mcp_exit_evidence.py`, which this command does not list — all three corrected. `TORTOISE_TEST_CARVE_OUT=1` is required; without it the URI gate errors the whole set.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
 - Mutation evidence: **the union table in the PR body — every row observed red, 0 survived.** The set now includes
   the two invariants the first round could not redden (inv 3's denylist row, inv 2's single-origin
