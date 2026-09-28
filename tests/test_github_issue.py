@@ -67,7 +67,10 @@ def _fake_request(method, url, token, payload=None, timeout=15.0):
             assert payload["assignees"] == ["daniel-ospina"]
         return {"number": 42}
     if "/search/issues" in url:
-        return {"items": [{"number": 7}]}
+        # #3029: the hit must carry an incident-shaped title — adoption is
+        # verified against the incident's own title, never trusted from the
+        # search result alone (a titleless item is not an incident).
+        return {"items": [{"number": 7, "title": "[DR] STALE"}]}
     if "/issues/42/comments" in url:
         return {}
     if url.endswith("/issues/42") and method == "PATCH":
@@ -172,5 +175,65 @@ def test_search_open_incident_filters_prefix_colliding_titles():
         assert gi.search_open_incident("r", "t", "STALE", "team_a:g_x") == [11]
         # global kinds keep the kind-wide match (prose titles)
         assert gi.search_open_incident("r", "t", "STALE") == [10, 11, 12]
+    finally:
+        gi._request = orig
+
+
+# ── #3029: the DR title contract (shared by both writers) ────────────────────
+
+
+def test_incident_title_matches_rejects_prose_mentions():
+    """#3029: a title that merely MENTIONS the kind is not the incident.
+
+    GitHub search tokenizes punctuation away, so the platform-scoped query for
+    `[DR] R2_DOWN` matched #2844 — a bug report ABOUT R2_DOWN whose title
+    contains the tokens `dr` + `r2_down`. Adoption is destructive (the resolver
+    closes the adopted issue), so the index is a recall filter only.
+    """
+    import tortoise.github_issue as gi
+
+    # Real incident titles (driver prose + server-derived forms) match.
+    assert gi.incident_title_matches("[DR] R2_DOWN", "R2_DOWN")
+    assert gi.incident_title_matches("[DR] R2_DOWN — backup storage unreachable", "R2_DOWN")
+    assert gi.incident_title_matches("[DR] STALE — last backup 3h", "STALE")
+    # Prose mentions and non-incident shapes do not.
+    assert not gi.incident_title_matches(
+        "bug(dr): R2_DOWN is deduped under two different R2 keys by the driver "
+        "and the app watcher", "R2_DOWN")
+    assert not gi.incident_title_matches("chore: bump the [DR] R2_DOWN docs", "R2_DOWN")
+    assert not gi.incident_title_matches("[DR] R2_DOWNISH — a different kind", "R2_DOWN")
+    assert not gi.incident_title_matches("R2_DOWN — no [DR] prefix", "R2_DOWN")
+
+
+def test_incident_title_matches_subject_is_an_exact_segment():
+    """#2413/#2375 cross-talk guard: a bare team subject is a literal PREFIX of
+    its per-graph subjects, so the subject must be the EXACT ` — ` segment."""
+    import tortoise.github_issue as gi
+
+    assert gi.incident_title_matches("[DR] STALE — team_a", "STALE", "team_a")
+    assert gi.incident_title_matches("[DR] STALE — team_a — last backup 4h", "STALE", "team_a")
+    assert gi.incident_title_matches("[DR] STALE — team_a:g_x", "STALE", "team_a:g_x")
+    assert not gi.incident_title_matches("[DR] STALE — team_a:g_x", "STALE", "team_a")
+    assert not gi.incident_title_matches("[DR] STALE — team_ab", "STALE", "team_a")
+    assert not gi.incident_title_matches("[DR] STALE", "STALE", "team_a")
+
+
+def test_search_open_incident_verifies_platform_scoped_titles():
+    """#3029 live regression: the production query resolved to #2844, a bug
+    report ABOUT the kind — which `resolve_global` would then have closed."""
+    import tortoise.github_issue as gi
+
+    def _request(method, url, token):
+        return {"items": [
+            {"number": 2844, "title": "bug(dr): R2_DOWN is deduped under two "
+                                      "different R2 keys by the driver and the app watcher"},
+            {"number": 42, "title": "[DR] R2_DOWN — backup storage unreachable"},
+            {"number": 43, "title": "[DR] R2_DOWN"},
+        ]}
+
+    orig = gi._request
+    gi._request = _request
+    try:
+        assert gi.search_open_incident("r", "t", "R2_DOWN") == [42, 43]
     finally:
         gi._request = orig

@@ -9,8 +9,13 @@ Two halves live in this module — do not conflate them:
   network calls.
 - **Opt-in live half** — ``test_invite_email_delivers``,
   ``test_bounced_address_reports_bounced`` and the ``live``-marked
-  ``test_invite_link_resolves``. This half is NOT run in CI: it requires a real
-  ``RESEND_API_KEY`` + ``RESEND_FROM_EMAIL``, and the deployed-page probe
+  ``test_invite_link_resolves``. This half is NOT run in CI: each test carries
+  ``@pytest.mark.integration`` (registered in ``pyproject.toml``), which the
+  deterministic lanes deselect with
+  ``-m 'not track_b and not live and not integration'`` (#4750). The marker — not
+  a per-test ``pytest.skip`` — is what keeps this half out of the required path,
+  so the exclusion is explicit and cannot read as a green skip. It requires a
+  real ``RESEND_API_KEY`` + ``RESEND_FROM_EMAIL``, and the deployed-page probe
   additionally requires ``ALLOW_PROD=1`` (the repo convention for production
   assertions). Run it locally when deploying the transactional email env vars
   (#1221):
@@ -43,7 +48,8 @@ the REAL ``_build_invite_link`` and replays the recorded cassette
 (``fixtures/invite_accept_page.json``) through a transport that RAISES on any
 URL the cassette does not cover, so it can never pass by reaching the network.
 - ``test_invite_link_resolves`` — the deployed-page probe, now
-``@pytest.mark.live`` (deselected by the required path's ``-m 'not live'``) and
+``@pytest.mark.live`` + ``@pytest.mark.integration`` (both deselected by the
+required path's ``-m 'not track_b and not live and not integration'``) and
 gated on ``ALLOW_PROD=1`` (the repo convention for production assertions).
 """
 from __future__ import annotations
@@ -58,7 +64,12 @@ import pytest
 
 from tortoise import email_notify
 
-pytestmark = pytest.mark.integration
+# #4750: NO module-level ``pytestmark``. This module is deliberately HALF
+# required-path (the hermetic contract + its pin, which must keep running in CI)
+# and HALF opt-in (the live/credentialed tests, which must not). A module-level
+# ``integration`` mark said "none of this runs in CI" — false for the hermetic
+# half — and, being unregistered, matched no lane filter anyway. The marker now
+# lives on the opt-in tests only, and the lanes deselect it.
 
 RESEND_URL = "https://api.resend.com/emails"
 TEST_DELIVERED = "delivered@resend.dev"
@@ -148,6 +159,7 @@ def _poll_until_terminal(message_id: str) -> dict:
     raise AssertionError(f"no terminal event within {POLL_TIMEOUT_S}s: {last}")
 
 
+@pytest.mark.integration
 def test_invite_email_delivers(monkeypatch):
     """Real send → delivered@resend.dev reaches terminal 'delivered'."""
     _require_env()
@@ -164,6 +176,7 @@ def test_invite_email_delivers(monkeypatch):
     assert terminal.get("last_event") == "delivered", terminal
 
 
+@pytest.mark.integration
 def test_bounced_address_reports_bounced():
     """bounced@resend.dev converges to 'bounced' (terminal, not delivered)."""
     _require_env()
@@ -235,16 +248,18 @@ def test_hermetic_guard_refuses_unrecorded_requests():
 # ── #4367: the deployed-page probe — live-marked, opt-in ─────────────────────
 
 
+@pytest.mark.integration
 @pytest.mark.live
 def test_invite_link_resolves():
     """LIVE: the DEPLOYED invite link resolves to a working accept page.
 
-    Production assertion, so it needs BOTH opt-ins: ``@pytest.mark.live``
-    (deselected by the required path's ``-m 'not live'`` — see
-    pyproject.toml markers) and ``ALLOW_PROD=1`` (the repo convention that
-    forbids production assertions pre-merge). The hermetic counterpart above
-    covers link construction + the recorded page contract on every PR/push;
-    this probe is what re-records the cassette's assumptions against reality.
+    Production assertion, so it needs BOTH opt-ins: ``@pytest.mark.live`` and
+    ``@pytest.mark.integration`` (both deselected by the required path's
+    ``-m 'not track_b and not live and not integration'`` — see pyproject.toml
+    markers) and ``ALLOW_PROD=1`` (the repo convention that forbids production
+    assertions pre-merge). The hermetic counterpart above covers link
+    construction + the recorded page contract on every PR/push; this probe is
+    what re-records the cassette's assumptions against reality.
 
     Follows redirects: the site serves a permanent redirect from
     ``/invite-accept.html`` on the static-Pages host to the extensionless

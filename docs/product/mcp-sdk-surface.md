@@ -126,6 +126,7 @@ the gate *fails* on — not about what goes *unrecorded*.
 | Response | Field | Emitted when | Unchanged when off |
 |---|---|---|---|
 | `tortoise_analyze` | `why` | TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off) | yes — the response is byte-identical when the flag is off |
+| `tortoise_session_capture` | `capture_redactions` | always — the count of credential-shaped spans redacted from this capture's stored turn text (0 when nothing matched) | n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911) |
 
 A field belongs in that table from the moment it is added — an off-by-default field that is
 not recorded here has no approval behind it, and the carve-out does not cover it.
