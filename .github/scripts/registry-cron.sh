@@ -982,9 +982,12 @@ ANALYTICS_FRESH=0
 # all-digit operand longer than that makes `[ -gt ]` ERROR, and a failed
 # comparison must never read as "fresh". A non-compliant /status therefore can
 # neither fabricate an incident nor resolve one. The app cannot emit such a
-# value: with the clamp, `age_s` is a plain decimal in [0, 1e16) — jq only
-# normalises a number to exponent form past 1e16 or below 1e-4, and neither is
-# a stale sink. Leading zeros cannot occur: jq never emits them.
+# value: with the clamp, `age_s` is a plain decimal in [0, 1e16) — jq
+# normalises to exponent form past 1e16 or below ~1e-6 (measured on jq 1.7.1:
+# `1e-4` and `1e-5` render plain, `9e-7` renders `9E-7`), and the app's
+# timestamps are microsecond-resolution, so its smallest non-zero age is 1e-6,
+# which renders plain. Neither end is a stale sink. Leading zeros cannot occur:
+# jq never emits them.
 ANALYTICS_AGE_PRESENT=0
 ANALYTICS_AGE_INT=""
 case "$ANALYTICS_AGE_S" in
