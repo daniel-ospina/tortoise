@@ -674,9 +674,13 @@ def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
     _rebuild(sdk, events)
     via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
     corr_all = _corr_total(sdk._get_proj(), a)
+    belief_all = {k: (sdk.get_point(a) or {}).get(k) for k in
+                  ("confidence", "posterior_alpha", "posterior_beta")}
     _apply_replay(sdk, events)
     via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
     corr_apply = _corr_total(sdk._get_proj(), a)
+    belief_apply = {k: (sdk.get_point(a) or {}).get(k) for k in
+                    ("confidence", "posterior_alpha", "posterior_beta")}
 
     assert via_all["outdated"] is not True, (
         "rebuild_all follows the re-emission — the pre-recreation fold drops")
@@ -688,3 +692,14 @@ def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
         f"{via_apply} != {via_all}")
     assert corr_apply == corr_all == 0, (
         "pre-recreation CORRECTS died with the node")
+    # The OTHER half of the selection: the invalidate's BELIEF decay is anchored
+    # on the REAL delete→recreate boundary, so it must STILL fire even though
+    # the stamp half is dropped (#2884 A3) — asserted against literals, on BOTH
+    # engines, because a decay silently dropped on one is exactly the class of
+    # drift this contract exists to catch.
+    vacuous = {"confidence": 0.5, "posterior_alpha": 1.0,
+               "posterior_beta": 1.0}
+    assert belief_all == vacuous, (
+        f"rebuild_all dropped the #2884 A3 belief decay: {belief_all}")
+    assert belief_apply == vacuous, (
+        f"apply() replay dropped the #2884 A3 belief decay: {belief_apply}")

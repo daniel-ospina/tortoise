@@ -1257,6 +1257,7 @@ def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
     import logging
 
     for bad_id in ("", "nul\x00id", "lone\ud800id"):
+        caplog.clear()  # per-id: the assertion must be load-bearing for EACH id
         with caplog.at_level(logging.WARNING):
             decisions, fold_seq = plan_point_restamp_folds([
                 {"type": "PointSuperseded", "id": bad_id, "new_id": "b"},
