@@ -344,8 +344,9 @@ def test_read_path_materialization_never_clobbers_a_concurrent_write(
 # `return=representation` yields an EMPTY row list on a refused guard. The
 # shared `tests/fake_control_plane.py` double CANNOT model this (it dict-gets
 # the raw `onboarding_state->>state_version` column string), so a test built on
-# it would pass/fail for the wrong reason. The guard encoding this exercises is
-# the first `->>` path filter in the repo.
+# it would pass/fail for the wrong reason. This class pins the guard's FILTER
+# SPEC — the `(column, op, value)` tuple `query()` receives. It does NOT pin the
+# HTTP encoding of that filter, which is `SupabaseControlPlane.query`'s job.
 
 class _FakeSupabaseControlPlane:
     """In-memory `organizations` table with a faithful jsonb-path guard."""

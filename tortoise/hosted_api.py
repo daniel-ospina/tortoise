@@ -21698,7 +21698,7 @@ def _cas_write_onboarding_state(org_id: str, state: dict,
     - registry: one Cypher ``MATCH ... WHERE coalesce(t.state_version,0) =
       $expected SET ... RETURN t.id`` — FalkorDB executes a query to
       completion, so the returned row count is the CAS verdict ([] = mismatch).
-    - Supabase: one PostgREST ``PATCH ... ?id=eq.X&onboarding_state->>version=
+    - Supabase: one PostgREST ``PATCH ... ?id=eq.X&onboarding_state->>state_version=
       eq.N`` with ``Prefer: return=representation`` — PostgreSQL re-evaluates
       the WHERE against the latest committed row under READ COMMITTED, so a
       racing writer's UPDATE cannot also match; an empty body = mismatch.
@@ -21745,6 +21745,18 @@ def _write_jsonb_fields_cas(org_id: str, fields: dict) -> None:
     A version of ``None`` (identity absent) preserves the PRE-#3553 semantics
     exactly: the write is a MATCH-no-op / PATCH-on-a-missing-row, never an
     error, and the caller's echo still reflects the ACKed fields.
+
+    ⚠️ **TOCTOU on that fallback — stated, not implied.** It is the one
+    whole-dict write that does not go through the CAS, and it is safe only
+    while the identity STAYS absent. If the Team node / organizations row
+    appears between the read above and ``_write_onboarding_state``, the
+    fallback writes a real row: the registry leg then writes ``onboarding_state``
+    while leaving ``state_version`` at whatever a concurrent CAS writer set (the
+    epoch no longer describes the content), and the Supabase leg PATCHes without
+    the version filter, rewinding the epoch to "never CAS-written" so a later
+    CAS at 0 succeeds. Reachable only when provisioning races an onboarding
+    write. Closing it means re-reading once and CASing when the identity
+    materialized, or carrying a passed-in version into ``_write_onboarding_state``.
     """
     last_version: int | None = None
     for _ in range(_ONBOARDING_STATE_CAS_ATTEMPTS):
@@ -21984,9 +21996,10 @@ def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
 
 def _update_onboarding_state(org_id: str, _echo: bool = True,
                              **fields) -> dict:
-    """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
-    legacy whole-dict merge — its non-atomicity caveat is pre-existing
-    infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
+    """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb COMPARE-AND-SET
+    (`_write_jsonb_fields_cas`, guarded on `state_version` — the pre-#3553
+    read → mutate → whole-dict write was what lost concurrent writers' keys);
+    FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
     → graph writers. Branches BEFORE the allowlist filter so FLOW keys can
     never round-trip into jsonb. Unknown keys are dropped (fail-closed,
     never default-to-FLOW) and the drop is REPORTED (raised instead under
