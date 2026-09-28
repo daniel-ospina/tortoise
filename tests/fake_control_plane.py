@@ -57,6 +57,75 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
             ) from None
 
 
+# #4037: PostgREST's `order` grammar is a comma-separated list of
+# `field[.asc|.desc][.nullsfirst|.nullslast]`. The fake used to speak a private
+# `-col` dialect (`col = order.lstrip("-")`), which ACCEPTED the form PostgREST
+# rejects (a leading `-` is not part of the grammar → PGRST100 / HTTP 400) AND
+# silently NO-OP'd the form it accepts (`col.desc` looked up a column literally
+# named `"created_at.desc"`). So `SupabaseAbuseStore`'s `order="-created_at"`
+# was green in CI while 400ing in prod: Stage-2 suspension never ran and
+# `/v1/team/alerts` was permanently empty (the 400 is swallowed fail-soft).
+#
+# This parser is deliberately an INDEPENDENT oracle — it must NOT import a
+# production order helper, because a shared implementation would share its
+# blind spot, which is the exact failure #4037 fixes. It is a stated SUBSET of
+# the wire grammar: JSON-path (`col->>key`) and embedded-resource ordering raise
+# loudly rather than being silently accepted, and no call site uses them.
+_ORDER_DIRECTIONS = {"asc": False, "desc": True}
+_ORDER_NULLS = {"nullsfirst": True, "nullslast": False}
+
+
+def _is_order_field(token: str) -> bool:
+    """A PostgREST field name, minus the JSON-path/embedded-resource forms the
+    fake does not model. A leading `-` is refused — that is the #4037 defect."""
+    if not token or token[0] == "-":
+        return False
+    if not (token[0].isalpha() or token[0] == "_"):
+        return False
+    return all(c.isalnum() or c in "_$-" for c in token)
+
+
+def _parse_order(table: str, order: str) -> list[tuple[str, bool, bool | None]]:
+    """Parse a PostgREST ``order`` string into ``(field, descending,
+    nulls_first|None)`` terms. An unparseable term raises the same
+    ``RuntimeError(... HTTP 400)`` surface the real client produces when
+    PostgREST rejects the query string (``PGRST100``)."""
+    terms: list[tuple[str, bool, bool | None]] = []
+    for raw in order.split(","):
+        parts = raw.split(".")
+        field = parts.pop(0)
+        if not _is_order_field(field):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400")
+        descending = False
+        nulls_first: bool | None = None
+        if parts and parts[0] in _ORDER_DIRECTIONS:
+            descending = _ORDER_DIRECTIONS[parts.pop(0)]
+        if parts and parts[0] in _ORDER_NULLS:
+            nulls_first = _ORDER_NULLS[parts.pop(0)]
+        if parts:
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400")
+        terms.append((field, descending, nulls_first))
+    return terms
+
+
+def _apply_order(rows: list[dict],
+                 terms: list[tuple[str, bool, bool | None]]) -> list[dict]:
+    """Apply PostgREST order terms (most-significant first) as successive
+    STABLE sorts, so a tie on a later term keeps the earlier term's order.
+    NULL placement follows Postgres: ``asc`` → nulls last, ``desc`` → nulls
+    first, overridable by an explicit ``nullsfirst``/``nullslast`` token."""
+    for field, descending, nulls_first in reversed(terms):
+        if nulls_first is None:
+            nulls_first = descending
+        present = [r for r in rows if r.get(field) is not None]
+        nulls = [r for r in rows if r.get(field) is None]
+        present.sort(key=lambda r: r.get(field), reverse=descending)
+        rows = (nulls + present) if nulls_first else (present + nulls)
+    return rows
+
+
 # #2863: module-level registry of every control plane a `fail_query` was installed
 # on. The autouse `_no_silent_faults` guard in the OAuth fault suite reads it to
 # fail a test whose injector never fired (a stale matcher is a silent green test) —
@@ -805,6 +874,12 @@ class FakeControlPlane:
         # 22P02 in prod is method-agnostic.
         if self.uuid_fidelity:
             _assert_uuid_fidelity(table, filters)
+        # #4037: an order term PostgREST would 400 on (PGRST100) must fail here
+        # too — and, like 22P02, that is method-agnostic → parse BEFORE the
+        # method dispatch below. `if order:` mirrors the real seam, which drops
+        # a falsy order (`supabase_control.query`: `if order:`), so `""`/None
+        # are NOT false refusals.
+        order_terms = _parse_order(table, order) if order else []
         if method == "PATCH":
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
@@ -897,11 +972,29 @@ class FakeControlPlane:
                 # escalation decomposition's sweep/health tests.
                 raise RuntimeError(
                     f"Supabase control-plane query failed ({table}): HTTP 400")
+            if (self.missing_columns and table in self.missing_columns
+                    and order_terms
+                    and self.missing_columns[table]
+                    & {f for f, _, _ in order_terms}):
+                # Ordering by an absent column is the SAME PostgREST rejection as
+                # the `select`/`filter` drift above: real PostgREST 400s on an
+                # undefined column (PGRST204) rather than returning the rows
+                # unordered. Left accepted, it reintroduces the exact #4037 mask
+                # — an invalid order term that 400s in production but is masked
+                # in CI, with a fail-soft consumer reading `rows[0]` after
+                # `limit=1`. The user-facing outcome is identical, so the fake
+                # must not be the one place it stays invisible.
+                raise RuntimeError(
+                    f"Supabase control-plane query failed ({table}): HTTP 400")
+            # #4037: order BEFORE the projection — PostgREST orders server-side
+            # before projecting, so an ordered column need not be in `select`
+            # (the old fake sorted after the projection, silently no-oping any
+            # order on a non-selected column, e.g. `active_membership_org_ids`
+            # `select=["org_id"], order="created_at.asc"`).
+            if order_terms:
+                rows = _apply_order(rows, order_terms)
             if select:
                 rows = [{k: r.get(k) for k in select} for r in rows]
-            if order:
-                col = order.lstrip("-")
-                rows.sort(key=lambda r: r.get(col) or "", reverse=order.startswith("-"))
             if limit is not None:
                 rows = rows[:limit]
             return rows

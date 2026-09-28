@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from tortoise.alert_store import AlertStore
+from tortoise.alert_store import AlertStore, CloseCooldown
 from tortoise.backup_watcher import (
     HEARTBEAT_KEY,
     BackupWatcher,
@@ -45,6 +46,26 @@ class _Channels:
 
     def push_telegram(self, text):
         self.telegram.append(text)
+
+
+class _CloseFailingChannels(_Channels):
+    """The REAL close path failing — not a patched ``resolve_incident``.
+
+    #5191: the issue is about a close that *raises* inside a poll cycle, so the
+    fixture must fail the actual ``close_issue`` the ``AlertStore`` calls (a
+    monkeypatched ``resolve_incident`` would bypass the very code under test).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.fail_close = True
+        self.close_attempts = 0
+
+    def close_issue(self, number, comment=None):
+        self.close_attempts += 1
+        if self.fail_close:
+            raise RuntimeError("GitHub 502 while closing the incident issue")
+        self.issues.pop(number, None)
 
 
 def _store(ch) -> AlertStore:
@@ -1751,3 +1772,123 @@ def test_a_failed_team_resolve_is_carried_pending_and_retried():
     w._alerts.resolve_incident = lambda kind, team_id="": True  # type: ignore[method-assign]
     w.poll()
     assert "team_a" not in w._pending_team_resolves
+
+
+# ── #5191: a raising alert close must not abort the poll cycle ──────────────
+
+
+def test_a_raising_close_in_the_alert_drive_still_heartbeats(caplog):
+    """#5191 acceptance: a poll cycle in which the alert CLOSE raises must still
+    heartbeat.
+
+    The fixture fails the REAL ``close_issue`` (``AlertStore`` is not patched), so
+    the now-raising close contract from #3405/#5143 is exercised end to end: the
+    ``STALE`` incident is opened on poll 1, the archive goes fresh on poll 2, and
+    the resolve leg's close raises.
+
+    Class-B doctrine — (1) the state that makes it fail: a close that RAISES
+    (``fail_close=True``) while a resolve leg fires; (2) reachable in the fixture:
+    poll 1 opens ``STALE`` against ``team_a``'s sentinel, and the fresh archive on
+    poll 2 is exactly the condition that drives the resolve leg.
+
+    RED under a mutation that lets the close exception escape ``_alert_leg``: the
+    poll returns ``{"poll_error": ...}`` and the heartbeat is never written.
+    """
+    ch = _CloseFailingChannels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)   # stale → the open leg fires
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+
+    w.poll()                                 # opens [DR] STALE
+    assert len(ch.issues) == 1, ch.issues
+
+    _seed_archive(storage, "team_a", 0.5)    # fresh → the RESOLVE leg fires
+    with caplog.at_level(logging.ERROR, logger="tortoise.backup_watcher"):
+        status = w.poll()
+
+    # The cycle completed, and the failure is LOUD (attributed traceback) —
+    # never a silent swallow (this lane's core defect class).
+    assert "poll_error" not in status, status
+    assert status["per_team"]["team_a"] == "ok"
+    assert ch.close_attempts == 1, "the close leg actually ran and raised"
+    assert any(r.exc_info for r in caplog.records if r.levelno >= logging.ERROR), (
+        "the failed close must be logged with a traceback, not swallowed")
+
+    # The heartbeat is the watcher's own liveness evidence → WATCHER_DOWN is not
+    # fabricated, and the driver keeps sweeping.
+    hb = json.loads(storage.download(HEARTBEAT_KEY))
+    assert hb["last_poll_at"]
+    assert hb["r2_ok"] is True
+
+    # No false all-clear was pushed and the incident is still ON RECORD.
+    assert not any("resolved" in t.lower() for t in ch.telegram), ch.telegram
+    assert ch.issues, "the incident must stay OPEN — the close did not happen"
+
+
+def test_a_failed_close_is_isolated_to_its_leg_and_does_not_stop_the_others():
+    """#5191: one alert leg failing must not take down the rest of the poll.
+
+    Two orgs are stale on poll 1 (both incidents open); both go fresh on poll 2,
+    so BOTH resolve legs fire while every close raises. Per-leg containment
+    attempts both closes — a block-level abort would stop after the first.
+
+    Sibling order matters: the heartbeat and ``retry_pending`` still run AFTER the
+    alert drive, so a real (non-alert) poll failure is not masked either.
+    """
+    ch = _CloseFailingChannels()
+    storage = MemoryStorage()
+    for team in ("team_a", "team_b"):
+        _seed_archive(storage, team, 200)
+        _seed_state(storage, team)
+    w = _watcher(storage, ch, orgs=("team_a", "team_b"))
+
+    w.poll()
+    assert len(ch.issues) == 2, ch.issues
+
+    for team in ("team_a", "team_b"):
+        _seed_archive(storage, team, 0.5)
+    status = w.poll()
+
+    assert "poll_error" not in status, status
+    assert ch.close_attempts == 2, (
+        "each org's close leg must be attempted despite the first raising")
+    assert len(ch.issues) == 2, "both incidents stay open"
+    assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
+
+
+def test_close_cooldown_on_the_vanished_graph_leg_is_a_logged_backoff(caplog):
+    """#5191: the vanished-graph resolve leg uses the shared ``_alert_leg``.
+
+    A ``CloseCooldown`` means "still open, backing off" — a NORMAL state, not a
+    crash. Before the change this path's ad-hoc ``try/except`` logged it at ERROR
+    with a full exception traceback, which read as a failure on the one path where
+    that is the operator's only signal.
+
+    The poll runs in GRACE so the alert drive is skipped and the only resolve legs
+    are the vanished-graph ones — the assertion is therefore specific to this
+    path, not satisfied by the drive.
+
+    RED pre-change: ``logger.exception`` emits an ERROR record carrying
+    ``exc_info`` for the ``team_a:vanished`` leg.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 2)      # fresh → no drive legs
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch, grace_min=120)
+    w._last_graph_keys = {"team_a", "team_a:vanished"}
+
+    def _cooling(kind, team_id=""):
+        raise CloseCooldown("still open, backing off")
+
+    w._alerts.resolve_incident = _cooling  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO, logger="tortoise.backup_watcher"):
+        w.poll()
+
+    assert "alert leg cooling down" in caplog.text, caplog.text
+    assert "team_a:vanished" in caplog.text
+    assert not [
+        r for r in caplog.records if r.levelno >= logging.ERROR and r.exc_info
+    ], "a cooldown is a backoff, not a crash"
+    assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
