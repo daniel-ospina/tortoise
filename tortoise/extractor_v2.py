@@ -65,6 +65,7 @@ import time
 import unicodedata
 import warnings
 import weakref
+from collections import Counter
 from typing import Any
 
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
@@ -4064,16 +4065,14 @@ def _content_tokens(content: str) -> set[str]:
 
     Entity-bearing pronouns and possessives are KEPT (``_CONTENT_STOPWORDS``
     is the frame set minus them): a change of subject is a change of entity.
+
+    The split itself lives in ``_frame_and_content``, which keeps both halves
+    and their POSITIONS; this is that split read as the set the boundary has
+    always compared, so the two can never drift into disagreeing about which
+    token is content.
     """
-    out: set[str] = set()
-    for t in _guard_tokens(content):
-        t = _apostrophe_free(_deaccent(t))
-        if t in _CONTENT_STOPWORDS or t in _CLOCK_UNITS or t in _DATE_WORDS:
-            continue
-        if any(c.isdigit() for c in t) or _num_word_value(t) is not None:
-            continue
-        out.add(t)
-    return out
+    _frame, tokens = _frame_and_content(content)
+    return {t for _, t in tokens}
 
 
 def _state_predicate(content: str, targets: frozenset[str] | set[str]) -> bool:
@@ -4142,7 +4141,10 @@ def _polarity_drop(a: str, b: str,
     on") is not refused here: the skeleton is a SET, so both sides compare
     equal and this predicate sees no difference at all.  That is the
     set-level / attachment blind spot of the whole boundary (#5139 / #5131),
-    pre-existing and not specific to polarity.
+    pre-existing and not specific to polarity.  `_role_inversion` (#5131) does
+    not reach it either — the members' exchange straddles the coordination
+    `and`, which commutes, so `_coordination_between` reads it as the
+    coordination reordering itself.
 
     A non-empty result is a substituted-content difference — dropping a state
     substitutes the claim, it does not broaden it — so `fold_allowed`,
@@ -4169,6 +4171,416 @@ def _polarity_drop(a: str, b: str,
             and _state_predicate(b, only_b):
         return frozenset(only_b)
     return frozenset()
+
+
+def _frame_and_content(
+        content: str) -> tuple[tuple[tuple[int, str], ...],
+                               tuple[tuple[int, str], ...]]:
+    """The claim split into its function-word FRAME and its CONTENT, in order.
+
+    ``_content_tokens`` keeps only the second half, and gives it back as a SET
+    — which is the comparison the boundary has always made.  A ROLE comparison
+    needs both halves, both ORDERS and the POSITIONS: the frame is the
+    syntactic template the claim is built from, the content is what fills its
+    slots, and an exchange of slots is a statement about where the tokens sit.
+    Each half is therefore a tuple of ``(position, token)``.
+
+    The split is the one ``_content_tokens`` already makes (frame words, clock
+    units, date words and values are the frame).  Position is kept and
+    duplicates are NOT collapsed, because a token that is reused stops being a
+    permutation when the sequence is read as a set.
+    """
+    frame: list[tuple[int, str]] = []
+    tokens: list[tuple[int, str]] = []
+    for i, t in enumerate(_guard_token_seq(content)):
+        ident = _apostrophe_free(_deaccent(t))
+        if (ident in _CONTENT_STOPWORDS or ident in _CLOCK_UNITS
+                or ident in _DATE_WORDS
+                or any(c.isdigit() for c in ident)
+                or _num_word_value(ident) is not None):
+            frame.append((i, ident))
+        else:
+            tokens.append((i, ident))
+    return tuple(frame), tuple(tokens)
+
+
+# The connectives an EXCHANGE may cross.  This is the COORDINATING subset of
+# `_CONNECTIVE_SLOTS`'s clause-relation slot, and it is deliberately narrower
+# than that slot: a coordination asserts both of its members and commutes, so
+# two members trading places says nothing new, while the slot's subordinating
+# members (`because`, `although`, `whereas`, `as`, `for`) bind a DIRECTION and
+# do not commute.  Keeping the two sets distinct is what lets a coordination
+# reorder keep folding without also letting an inversion through on the
+# strength of a causal connective beside it.
+_COORDINATION_MEMBERS = frozenset({"and", "or", "nor", "but", "yet"})
+# The exemption must stay a SUBSET of the clause-relation slot, and that is
+# checked at import.  What the check catches is a member DROPPED from
+# `_CONNECTIVE_SLOTS[0]`, or a member ADDED to `_COORDINATION_MEMBERS` that the
+# slot lacks: either would leave the exemption claiming a connective the slot
+# family does not treat as coordinating.  An explicit raise rather than
+# `assert`, because `python -O` strips asserts and the check would then vanish
+# exactly where a stale exemption needs catching.
+if not _CONNECTIVE_SLOTS[0] >= _COORDINATION_MEMBERS:
+    raise RuntimeError(
+        "_COORDINATION_MEMBERS must be a subset of the clause-relation slot; "
+        f"missing {sorted(_COORDINATION_MEMBERS - _CONNECTIVE_SLOTS[0])}")
+
+# The exchange scan is a nested search over every head/tail alignment the pair
+# shares and every `P M Q -> Q M P` decomposition of each — O(n^4) candidate
+# decompositions for `n` content tokens — and it runs on the NEGATIVE path too
+# (no decomposition exists), which is the common case.  The in-capture seam
+# calls the boundary once per retrieved candidate (`dedup_classify` caps that at
+# 64) and a claim's text is model output, so an unbounded scan is an
+# availability defect on the capture path and not a theoretical one: two long
+# claims sharing an opening and a close made ONE comparison run for minutes.
+# The budget caps the work per call, and hitting it returns
+# `_EXCHANGE_BUDGET_EXCEEDED`, which the caller reads as REFUSE — the
+# fail-CLOSED direction, so a rival is never deleted by a pair too long to scan.
+_BLOCK_EXCHANGE_BUDGET = 5000
+# A second, cheaper ceiling on the input itself.  The budget bounds the number
+# of candidate decompositions; this bounds the length of each comparison those
+# candidates perform, so the two together bound the product.  Above it the
+# scan is not attempted and the sentinel is returned — the same FAIL-CLOSED
+# direction as the budget, and for the same reason.  The value is a SAFETY
+# bound and not a similarity threshold, and a change to it is a deliberate
+# act, not a tuning knob —
+# `test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up` pins the
+# literal so it cannot drift.  Each bound is INDEPENDENTLY sufficient to keep
+# the scan finite — the budget caps the number of decompositions at any length,
+# the ceiling caps the length (and so the per-attempt cost) when the budget is
+# absent — so only removing BOTH re-opens the ≈n^4.4 blow-up: measured on the
+# fixture box at the ceiling the scan itself is ≈5 ms and the whole
+# `fold_allowed` call ≈80 ms, while with BOTH bounds removed the same shape runs
+# 0.19 s at 60 content tokens, 1.74 s at 100 and 7.74 s at 140 — minutes at a
+# few hundred.
+_BLOCK_EXCHANGE_MAX_TOKENS = 200
+_EXCHANGE_BUDGET_EXCEEDED = (-1, -1, -1, -1)
+
+def _block_exchange(
+        ca: tuple[tuple[int, str], ...],
+        cb: tuple[tuple[int, str], ...]) -> tuple[int, int, int, int] | None:
+    """The span two blocks exchanged, or None when no two blocks exchanged.
+
+    ``a = H + P + M + Q + T`` and ``b = H + Q + M + P + T`` over the CONTENT
+    tokens (``ca``/``cb``), with ``P`` and ``Q`` non-empty, ``M`` possibly
+    empty, and a token required to sit BETWEEN ``P`` and ``Q`` in EACH claim's
+    raw stream.  That is the shape a role inversion HAS: two noun phrases change SIDES of a middle both claims keep (the predicate), so
+    each phrase now fills the slot the other held.
+
+    ``H`` and ``T`` are the fixed ends — the parts the exchange does not
+    touch, such as the object in ``alice gave bob a gift`` against ``bob gave
+    alice a gift``.  They are NOT taken maximally.  When the two blocks begin
+    with the same token (``the server pings the server pool`` against ``the
+    server pool pings the server``), the longest common prefix eats a whole
+    block's leading token and the exchange disappears; the same is true of a
+    shared trailing token.  Every head and tail length the pair actually
+    shares is therefore tried.
+
+    ``M`` may be empty, because the separation between the two blocks need not
+    be CONTENT: a relator that is a FRAME word (``the key is in the lock``
+    against ``the lock is in the key``) separates them without adding a content
+    token.  What the exchange requires is a token between the blocks in BOTH
+    claims — the ``M`` content middle, a frame relator, or both.  One side
+    alone makes the verdict depend on which claim was captured first
+    (``the build failed silently`` has an empty span while ``silently the build
+    failed`` has a determiner); a span of nothing is a RE-FLOW, not an
+    exchange.
+
+    Returns the FOUR POSITIONS the exchange straddles — the last content
+    token of ``P`` and the first of ``Q`` in BOTH claims — because whether a
+    coordination sits between them is what decides whether the exchange is the
+    coordination's own members moving (``_coordination_between``).  Both
+    claims' spans are returned so the coordination is read from the pair and
+    not from whichever side happened to be first.
+
+    ``_EXCHANGE_BUDGET_EXCEEDED`` is returned instead when the scan could not
+    decide, which has TWO triggers: the input exceeds
+    ``_BLOCK_EXCHANGE_MAX_TOKENS`` (in which case the scan is not attempted at
+    all), or the scan runs ``_BLOCK_EXCHANGE_BUDGET`` attempted
+    decompositions without deciding.  It is NOT "no exchange": the caller
+    REFUSES the fold, because a pair the scan could not decide must not be
+    allowed to delete a rival.
+    """
+    if len(ca) != len(cb) or len(ca) < 2:
+        return None
+    if len(ca) > _BLOCK_EXCHANGE_MAX_TOKENS:
+        return _EXCHANGE_BUDGET_EXCEEDED
+    n = len(ca)
+    seq_a = [t for _, t in ca]
+    seq_b = [t for _, t in cb]
+    lcp = 0
+    while lcp < n and seq_a[lcp] == seq_b[lcp]:
+        lcp += 1
+    lcs = 0
+    while lcs < n and seq_a[n - 1 - lcs] == seq_b[n - 1 - lcs]:
+        lcs += 1
+    attempts = 0
+    for head in range(lcp + 1):
+        for tail in range(lcs + 1):
+            attempts += 1
+            if attempts > _BLOCK_EXCHANGE_BUDGET:
+                return _EXCHANGE_BUDGET_EXCEEDED
+            if n - head - tail < 2:
+                continue
+            end = n - tail
+            sub_a = seq_a[head:end]
+            sub_b = seq_b[head:end]
+            k = len(sub_a)
+            if sub_a == sub_b:
+                continue
+            # ``b = H Q M P T``: `P` is the SUFFIX of `sub_b` and `Q` its
+            # prefix.  The three segment equalities below are equivalent to the
+            # single concatenation `sub_b == sub_a[p+m:] + sub_a[p:p+m] +
+            # sub_a[:p]` (both sides are the same partition), split out so each
+            # is one slice comparison and the cheapest, `m`-independent one runs
+            # first — the tuple building the old form did was the inner loop's
+            # dominant cost.
+            for p_len in range(1, k):
+                attempts += 1
+                if attempts > _BLOCK_EXCHANGE_BUDGET:
+                    return _EXCHANGE_BUDGET_EXCEEDED
+                if sub_b[k - p_len:] != sub_a[:p_len]:
+                    continue
+                for m_len in range(0, k - p_len):
+                    attempts += 1
+                    if attempts > _BLOCK_EXCHANGE_BUDGET:
+                        return _EXCHANGE_BUDGET_EXCEEDED
+                    q = k - p_len - m_len
+                    if sub_b[:q] != sub_a[p_len + m_len:]:
+                        continue
+                    if sub_b[q:q + m_len] != sub_a[p_len:p_len + m_len]:
+                        continue
+                    lo_a = ca[head + p_len - 1][0]
+                    hi_a = ca[head + p_len + m_len][0]
+                    # `b = H Q M P T`, so the mirror span is the last content
+                    # token of Q and the first of P.
+                    lo_b = cb[head + q - 1][0]
+                    hi_b = cb[head + q + m_len][0]
+                    # A token must sit BETWEEN the blocks in BOTH claims — the
+                    # shared content middle, a frame relator, or both.  One
+                    # side alone makes the verdict depend on capture order, and
+                    # a span of nothing is a re-flow, not an exchange.
+                    if hi_a - lo_a >= 2 and hi_b - lo_b >= 2:
+                        return lo_a, hi_a, lo_b, hi_b
+    return None
+
+
+def _role_inversion_is_unscannable(
+        exchange: tuple[int, int, int, int]) -> bool:
+    """True when the exchange result means "could not decide", not "no".
+
+    A tiny predicate rather than a bare comparison at the call site, so the
+    sentinel is read in exactly one place and its meaning is stated where it is
+    consumed.  ``==`` rather than ``is`` because the sentinel is a VALUE: a
+    real span can never equal it (positions are non-negative and `lo < hi`), so
+    equality is unambiguous and survives the tuple being rebuilt.
+    """
+    return exchange == _EXCHANGE_BUDGET_EXCEEDED
+
+
+def _coordination_between(content: str, lo: int, hi: int) -> bool:
+    """True when a coordinating conjunction sits strictly between two positions.
+
+    A coordination's members commute, so where a conjunction separates the two
+    blocks an exchange is the coordination's members trading places rather
+    than two arguments changing slots.  Read from the PAIR's own positions, so
+    a coordination ELSEWHERE in the claim cannot mask a real inversion: the
+    conjunction must sit in the span the exchange itself straddles.  (The pair
+    is canonicalised before this runs, so the span is the same in both capture
+    orders.)  The exemption is deliberately BROAD — a conjunction ANYWHERE
+    inside the straddled span folds, including one inside the shared middle or
+    one joining two clauses — which is the pinned fail-open ``_role_inversion``
+    records.
+
+    ``_guard_token_seq`` is the same ordered token stream
+    ``_frame_and_content`` positions its halves against, so an index taken
+    from there addresses the same token here.
+    """
+    return any(lo < i < hi and _apostrophe_free(_deaccent(t))
+               in _COORDINATION_MEMBERS
+               for i, t in enumerate(_guard_token_seq(content)))
+
+
+def _role_inversion(a: str, b: str) -> bool:
+    """True when the pair is one claim whose two content blocks changed SLOTS.
+
+    A marker-free pair with the same content multiset in a different order has
+    TWO readings.  A legitimate paraphrase reorders freely, and #4652 pins
+    that ``backpressure control is missing from the ingest queue`` folds into
+    ``the ingest queue is missing backpressure control``.  A role inversion
+    reorders two arguments around one predicate and carries two meanings, and
+    the set comparison saw one content multiset, so it folded and the
+    in-capture seam then ``DETACH DELETE``d the rival (#5131).  Three
+    structural signals separate the readings, and all three are read from the
+    PAIR:
+
+      * the FRAME multiset is unchanged.  A paraphrase that moves its
+        arguments re-frames them as it goes: the #4652 pair drops ``from``
+        when the prepositional object becomes the subject, and an
+        active/passive pair adds the auxiliary and ``by``.  An unchanged frame
+        means the two claims are the same syntactic template, so nothing was
+        re-framed;
+      * the content is a two-block exchange around a shared middle — a content
+        predicate, a frame relator, or both (``_block_exchange``);
+      * no coordination sits in the span the exchange straddles — a
+        coordination's members commute, so an exchange across one is the
+        coordination reordering itself (``_coordination_between``).
+
+    Read together, ``the cat chased the dog`` / ``the dog chased the cat`` is
+    one frame (``the … the``) with ``cat`` and ``dog`` exchanging slots around
+    ``chased``, and so is ``alice reports to bob`` / ``bob reports to alice``
+    around ``reports`` — while the #4652 pair is NOT, because its frame
+    differs (``from`` is gone), which is the same signal that keeps an
+    active/passive pair folding.
+
+    A non-empty result is a substituted-content difference — an argument that
+    changed slots substitutes the claim, it does not broaden it — so
+    ``fold_allowed``, ``supersede_allowed``, ``classify_consolidation`` and
+    ``dedup_classify.rephrase_hit`` all refuse from the one boundary.
+
+    Declared residuals, each pinned in ``tests/test_never_across_fold_5080.py``
+    so they cannot go silent — an enumeration of the KNOWN ones, not a
+    completeness claim (see the closing note below):
+
+      * a REORDER is decided by the ADJACENCY condition and by nothing else —
+        ``_block_exchange`` accepts a decomposition only when a token sits
+        strictly BETWEEN the two content blocks in EACH claim.  Where the
+        blocks are adjacent on either side the reorder is a RE-FLOW and keeps
+        FOLDING (FAIL-OPEN in the delete direction): ``alice quickly shipped
+        the order`` against ``alice shipped the order quickly``; ``the build
+        failed silently`` against ``silently the build failed``; ``from the
+        depot we shipped the crate`` against ``we shipped the crate from the
+        depot``; ``she drove the car to the office on tuesday`` against ``she
+        drove the car on tuesday to the office``; and ``the red car hit the
+        truck`` against ``the car hit the red truck`` — that last pair DOES
+        differ (which car hit which), so its fold is a FAIL-OPEN in the delete
+        direction, which is why it is pinned.  Where the gap holds on BOTH
+        sides the same surface shape is REFUSED (FAIL-CLOSED, both claims
+        kept): ``in staging the alpha engine processed the delta record``
+        against ``the alpha engine processed the delta record in staging``;
+        ``we shipped the crate from the depot to the store`` against ``we
+        shipped the crate to the store from the depot``.  The verdict is read
+        from the PAIR's own spans, never from what the moved phrase is called
+        or what its head token classifies as: ``from the depot we shipped the
+        crate`` FOLDS while ``from the depot the alpha engine processed the
+        delta record`` is REFUSED — same moved phrase, same frame head, and the
+        opposite verdict, because the following block's determiner supplies the
+        gap in one and not in the other.  A dedicated check for the moved
+        phrase's SPAN would separate the two sides; this walk does not keep it,
+        so a reorder that does leave a gap is refused at the cost of a dedup;
+      * an exchange a COORDINATION straddles stays foldable — ``the cat and
+        the dog`` against ``the dog and the cat``, and ``the flag is on and
+        the gate is off`` against its mirror, the attachment residual the
+        connective family already declares (#5139/#5134).  The exemption is
+        deliberately BROAD: a coordination ANYWHERE in the straddled span
+        folds, including one inside the shared middle and one that coordinates
+        two CLAUSES rather than two commuting members, so ``the cat and the dog
+        chased the book`` against ``the book and the dog chased the cat`` and
+        ``we tested the build and then shipped the release`` against ``we
+        shipped the release and then tested the build`` both fold.  That is a
+        FAIL-OPEN in the delete direction (both pairs do differ); closing it
+        needs the coordination's member spans, which a token walk does not
+        recover.  All of these are pinned;
+      * a COMMA-LIST reorder (``we ship the server, the client`` against ``we
+        ship the client, the server``) is REFUSED, and that is FAIL-CLOSED:
+        its two blocks are separated only by the second block's determiner,
+        which is the same raw shape a reduced relative has (``the cat the dog
+        chased`` against ``the dog the cat chased``, a genuine inversion).
+        Telling the commuting list from the inversion needs the comma, which
+        the token stream has already dropped.  Both claims are kept;
+      * when a pair admits SEVERAL ``P M Q -> Q M P`` decompositions the FIRST
+        accepted one decides, so a contrived pair can fold on a decomposition
+        whose span happens to contain a coordination while another
+        decomposition's does not.  The pair is canonicalised (``_norm``)
+        before any work, so the decomposition — and the verdict — is the same
+        in BOTH capture orders, which is the property the seam depends on;
+      * an exchange whose frame ALSO changed stays foldable — a one-sided
+        preposition is the documented broadening case (``_connective_swap``),
+        and it is the shape active/passive shares;
+      * a COPULA's two arguments in exchanged order (``the owner is the
+        manager`` against ``the manager is the owner``) is now refused, and
+        that refusal is FAIL-CLOSED: a copula is a relator, so the exchange is
+        seen, and it is not a coordination, so it does not fold.  Both claims
+        are kept.  Telling an identity copula, where the exchange preserves
+        meaning, from a directional preposition (``the key is in the lock``
+        against ``the lock is in the key``, a genuine inversion) needs a
+        semantic reading of the relator that the pair's structure does not
+        supply; the safe direction is to refuse, at the cost of one dedup;
+      * a SYMMETRIC RELATION's arguments in exchanged order is refused for the
+        same reason and with the same safe direction (``the addon pairs with
+        the plugin`` against ``the plugin pairs with the addon``, ``alice is
+        married to bob`` against ``bob is married to alice``, ``the file
+        matches the pattern`` against ``the pattern matches the file``).  The
+        copula is the shape the exchange rule sees most often, not the only
+        one: any relator with no structural direction lands here, and telling
+        it from a directional one needs the semantics a token walk does not
+        have.  FAIL-CLOSED, both claims kept, pinned;
+      * a pair the scan cannot decide is refused, and that is FAIL-CLOSED
+        (``_role_inversion_is_unscannable``): either the input exceeds
+        ``_BLOCK_EXCHANGE_MAX_TOKENS`` (the scan is not attempted) or the scan
+        ran ``_BLOCK_EXCHANGE_BUDGET`` decompositions without deciding.  The
+        bounds exist so one comparison cannot run away on the capture path
+        (the seam runs the boundary once per retrieved candidate), and an
+        undecided pair must not delete a rival.  Both claims are kept;
+    The list above is the residuals FOUND SO FAR, each pinned in
+    ``tests/test_never_across_fold_5080.py``.  It is an enumeration of the
+    KNOWN ones, NOT a proof of completeness: the rule is a token-level reading
+    of a structural shape, so a construction the reading cannot distinguish
+    from a re-assigned slot is refused (FAIL-CLOSED, both claims kept) while a
+    construction covered by a declared exemption above — the adjacency
+    RE-FLOW (which is also what folds a multi-token block whose decomposition
+    closes the gap) or the coordination straddle, both FAIL-OPEN in the DELETE
+    direction — still folds and can lose a rival.  A newly found shape must be pinned and added here, and it can land on EITHER
+    side; "not listed" must not be read as "safe".
+    """
+    # Orientation-invariant.  The in-capture seam calls
+    # `fold_allowed(prior, candidate)`, so which claim is first must not change
+    # the verdict; a deterministic canonical order also makes the FIRST
+    # accepted exchange decomposition — and the coordination read on its span
+    # — the same in both directions.
+    if _norm(a) > _norm(b):
+        a, b = b, a
+    frame_a, content_a = _frame_and_content(a)
+    frame_b, content_b = _frame_and_content(b)
+    if not content_a or not content_b:
+        return False
+    # The frame multiset, not the sequence: a determiner travels WITH its noun
+    # phrase (``alice reports to the manager`` against ``the manager reports to
+    # alice`` moves `the`), so a positional comparison would miss the inversion
+    # the multiset still sees.  What the multiset catches is the RE-FRAMING a
+    # paraphrase performs — an auxiliary, a preposition, a dropped article.
+    if (Counter(t for _, t in frame_a)
+            != Counter(t for _, t in frame_b)):
+        return False
+    if (Counter(t for _, t in content_a)
+            != Counter(t for _, t in content_b)):
+        return False
+    # The SAME content in the SAME order is not an exchange, and it must be
+    # decided here rather than by the scan: on two long, byte-equal claims the
+    # scan cannot decide — the length ceiling fires above
+    # `_BLOCK_EXCHANGE_MAX_TOKENS`, and below it the maximal head/tail search
+    # is the budget's first casualty — and a re-captured claim would then read
+    # as a rival and be duplicated.  Exact equality is the cheap, exact answer
+    # for the one pair that must never be refused.
+    if [t for _, t in content_a] == [t for _, t in content_b]:
+        return False
+    exchange = _block_exchange(content_a, content_b)
+    if exchange is None:
+        return False
+    if _role_inversion_is_unscannable(exchange):
+        # The scan hit `_BLOCK_EXCHANGE_BUDGET` (or the claim was longer than
+        # `_BLOCK_EXCHANGE_MAX_TOKENS`) and could not decide.  REFUSE —
+        # fail-CLOSED, so a pair too long to scan never deletes a rival.  The
+        # coordination read is skipped: there is no span to read.
+        return True
+    # A coordination on EITHER side's straddled span folds the exchange: the
+    # pair is canonicalised above, so reading both spans is what makes the
+    # coordination verdict a property of the PAIR rather than of argument
+    # order (a date-binding pair whose `and` sits between the blocks on only
+    # one side is the pinned case).
+    lo_a, hi_a, lo_b, hi_b = exchange
+    return not (_coordination_between(a, lo_a, hi_a)
+                or _coordination_between(b, lo_b, hi_b))
 
 
 def _possessives(content: str) -> frozenset[str]:
@@ -4305,6 +4717,17 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     # documented broadening case.  See `_POLARITY_MEMBERS` for why a token list
     # cannot decide and which residuals are pinned.
     if _polarity_drop(a, b, content_a, content_b):
+        out.add("substituted_content")
+    # A content MULTISET whose blocks traded SLOTS (#5131).  The skeleton is a
+    # SET, so "the cat chased the dog" against "the dog chased the cat"
+    # carries one content multiset and no dimension could see that each token
+    # now fills the other's slot; the in-capture seam then `DETACH DELETE`d
+    # the rival.  Read from the PAIR — the frame multiset plus the block
+    # exchange — exactly as the connective guard above and the state guard
+    # above it are (#5139/#5134), and never from the token: a reordering is
+    # an inversion only when the frame that holds it did not change.  See
+    # `_role_inversion`.
+    if _role_inversion(a, b):
         out.add("substituted_content")
     # Negation and condition are SCOPE-bearing, and a set cannot express that:
     # "the cache is not the problem, the lock is" and "the cache is the
