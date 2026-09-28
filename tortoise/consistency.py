@@ -1085,7 +1085,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # loop silently discarded corruption ANYWHERE in the file, not just the
     # torn tail.
     log_path = os.path.join(events_dir, files[0])
-    from tortoise.log import EventLog, describe_torn_tail_revival
+    from tortoise.log import (
+        EventLog,
+        TornTailResurrectionError,
+        refuse_torn_tail_revival,
+    )
 
     log = EventLog(log_path)
     try:
@@ -1110,16 +1114,16 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # record cannot be reconstructed, so the retraction survives only by not
     # being contradicted: refuse the whole replay BEFORE applying anything,
     # rather than rebuilding a graph that serves removed state as current.
+    # The classification AND the message come from the shared home in
+    # :mod:`tortoise.log` — this engine only converts the raise into its own
+    # dict-shaped result, so there is exactly ONE refusal string to keep true.
     revival = log.torn_tail_revival_records()
     if revival:
-        kinds = describe_torn_tail_revival(revival)
-        return {"recovered": False, "log_points": len(events), "db_points": 0,
-                "reason": (f"refusing to replay {files[0]}: the trailing record "
-                           f"is torn ({kinds}) and cannot be reconstructed, so "
-                           "replaying without it could resurrect state its "
-                           "fold would have removed (#3316) — the graph was "
-                           "NOT rebuilt; repair or truncate the journal, "
-                           "then retry")}
+        try:
+            refuse_torn_tail_revival(revival)
+        except TornTailResurrectionError as e:
+            return {"recovered": False, "log_points": len(events),
+                    "db_points": 0, "reason": f"{files[0]}: {e}"}
 
     torn = log.torn_trailing_count
 

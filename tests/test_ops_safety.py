@@ -831,6 +831,47 @@ def test_backup_restore_refuses_before_touching_the_destination():
         proj.close()
 
 
+def test_backup_restore_default_copies_a_torn_tail_backup():
+    """The DEFAULT (``into_falkor=False``) restore must still COPY a backup
+    whose journal ends in a torn removal tail (#3316 review P1).
+
+    That path replays nothing — it only copies the backup journal (and any
+    snapshot) over the destination — so it cannot resurrect removed state.
+    The refusal belongs to the replay-capable (``into_falkor=True``)
+    invocation only; applying it here made ``tortoise restore`` die with a
+    traceback on a crash-backup instead of copying it.
+    """
+    from tortoise.backup import restore
+
+    tmp = _mk_tmp()
+    backup_dir = os.path.join(tmp, "backup")
+    work = os.path.join(tmp, "work")
+    os.makedirs(backup_dir, exist_ok=True)
+    os.makedirs(work, exist_ok=True)
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(backup_dir, "events.jsonl"),
+                   _point_added("gone-1"), full[:full.index('"op"')],
+                   torn_last=True)
+    dest_events = os.path.join(work, "events.jsonl")
+    db_path = os.path.join(work, "restored.db")
+
+    # Default argument on purpose: this is the path the CLI takes.
+    result = restore(backup_dir, db_path, events_path=dest_events)
+
+    assert result["status"] == "ok", result
+    assert result["events"] == 2, result
+    assert os.path.exists(dest_events), \
+        "the copy-only restore wrote no destination journal"
+    with open(dest_events, encoding="utf-8") as fh:
+        copied = fh.read()
+    assert "gone-1" in copied and '"op"' not in copied, (
+        "the destination journal is not the byte-identical torn backup: "
+        f"{copied!r}")
+
+
 def test_reconcile_cli_refuses_a_torn_removal_tail(capsys):
     """``tortoise reconcile`` is a replay engine too (#3316 review).
 

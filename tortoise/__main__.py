@@ -8483,7 +8483,8 @@ def main(argv: list[str] | None = None) -> int:
         # No refusal handler here: the CLI's restore does not replay the
         # journal (`into_falkor` defaults to False, so it only copies files),
         # so it cannot resurrect removed state. The refusal lives in
-        # `backup.restore`'s JSONL fallback for programmatic replay callers.
+        # `backup.restore`'s replay path (`into_falkor=True`) for programmatic
+        # replay callers.
         result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
         print(f"Restored {result['events']} events — {result['status']}")
         return 0

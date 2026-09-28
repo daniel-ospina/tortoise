@@ -116,28 +116,36 @@ def restore(backup_dir: str, db_path: str,
     if not events_file.exists():
         return {"events": 0, "status": "error: no events.jsonl in backup"}
 
-    # #3316: classify the SOURCE journal BEFORE any destination mutation. This
-    # is the FOURTH whole-journal replay engine, so a torn trailing removal
-    # record must not be replayed away — but the refusal has to land before the
-    # block below REPLACES the destination store, or a refused restore leaves
-    # the caller's DB emptied and its AOF removed (``remove_stale_aof``
-    # rmtree's it) with nothing restored: the refusal message would claim the
-    # graph was left alone while it had just been destroyed. The RDB path is
-    # deliberately NOT consulted first — consulting it needs the snapshot
-    # copied over the destination, which is the very mutation being guarded.
-    # The cost is bounded: a torn DESTRUCTIVE tail also refuses a restore whose
-    # snapshot could have carried the graph, and the remedy (repair or truncate
-    # the journal in the backup) is the one every other engine names.
-    from tortoise.log import EventLog, refuse_torn_tail_revival
-    _source_log = EventLog(events_file)
-    try:
-        _source_records: list[dict] | None = _source_log.read_all()
-        refuse_torn_tail_revival(_source_log.torn_tail_revival_records())
-    except ValueError:
-        # Mid-file corruption is NOT this refusal (it is a parse error, not a
-        # torn tail) and the RDB path does not read the journal at all: let the
-        # JSONL fallback below raise it, as it did before #3316.
-        _source_records = None
+    # #3316: the refusal guards the REPLAY, so it applies ONLY to an
+    # invocation that can replay (``into_falkor=True``). The default
+    # ``into_falkor=False`` path replays NOTHING — it only copies the backup
+    # files — so it cannot resurrect removed state and must still copy a
+    # crash-backup. (The CLI's ``tortoise restore`` uses that default; see the
+    # matching note at ``tortoise/__main__.py``.)
+    #
+    # It is taken HERE rather than inside the JSONL fallback below because the
+    # fallback runs AFTER the block that REPLACES the destination store: a
+    # refusal there would leave the caller's DB emptied and its AOF removed
+    # (``remove_stale_aof`` rmtree's it) while claiming the graph was left
+    # alone. So the verdict is bound to the replay-capable invocation, before
+    # the destructive copy. The RDB path is deliberately NOT consulted first —
+    # consulting it needs the snapshot copied over the destination, which is
+    # the very mutation being guarded. The cost is bounded: a torn DESTRUCTIVE
+    # tail also refuses a ``into_falkor=True`` restore whose snapshot could
+    # have carried the graph, and the remedy (repair or truncate the journal in
+    # the backup) is the one every other engine names.
+    _source_records: list[dict] | None = None
+    if into_falkor:
+        from tortoise.log import EventLog, refuse_torn_tail_revival
+        _source_log = EventLog(events_file)
+        try:
+            _source_records = _source_log.read_all()
+            refuse_torn_tail_revival(_source_log.torn_tail_revival_records())
+        except ValueError:
+            # Mid-file corruption is NOT this refusal (it is a parse error, not
+            # a torn tail) and the RDB path does not read the journal at all:
+            # let the JSONL fallback below raise it, as it did before #3316.
+            _source_records = None
 
     # Copy files to target
     shutil.copy2(events_file, events_path)
