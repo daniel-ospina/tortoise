@@ -1006,14 +1006,15 @@ def test_clause_vii_step_if_event_pull_request_null_is_red(tmp_path: Path) -> No
     assert clause(root, "vii") == 1
 
 
-def test_clause_vii_step_if_not_push_is_green(tmp_path: Path) -> None:
-    """`!= 'push'` DOES run on a pull_request — the older test false-flagged it."""
+def test_clause_vii_step_if_not_push_is_red(tmp_path: Path) -> None:
+    """`!= 'push'` can reach PR, but a conditionally-run validator is not a
+    gate: the fail-closed allow-list requires unconditional (or a benign form)."""
     root, _ = union_tree(
         tmp_path,
         "python3 tools/registry_integrity.py",
         step_if="github.event_name != 'push'",
     )
-    assert clause(root, "vii") == 0
+    assert clause(root, "vii") == 1
 
 
 def test_clause_vii_fail_marker_inside_a_string_is_red(tmp_path: Path) -> None:
@@ -1068,14 +1069,15 @@ def test_clause_vii_step_if_pull_request_target_is_red(tmp_path: Path) -> None:
     assert clause(root, "vii") == 1
 
 
-def test_clause_vii_step_if_bare_event_name_is_green(tmp_path: Path) -> None:
-    """A bare `github.event_name` is truthy on every event — it does reach PR."""
+def test_clause_vii_step_if_bare_event_name_is_red(tmp_path: Path) -> None:
+    """A bare `github.event_name` is truthy everywhere, but the allow-list admits
+    only the exact PR predicate or a benign form — fail-closed over-rejection."""
     root, _ = union_tree(
         tmp_path,
         "python3 tools/registry_integrity.py",
         step_if="github.event_name",
     )
-    assert clause(root, "vii") == 0
+    assert clause(root, "vii") == 1
 
 
 def test_clause_vii_exit_zero_variants_are_red(tmp_path: Path) -> None:
@@ -1198,3 +1200,55 @@ def test_live_non_dict_record_does_not_raise(tmp_path: Path) -> None:
         write=True,
     )
     assert code == 1
+
+
+# --- cycle-5 review regressions ---------------------------------------------
+
+
+def test_clause_vii_conditional_ancestor_job_is_red(tmp_path: Path) -> None:
+    """A skip cascades down `needs`: a conditional ancestor skips the validator."""
+    step = {"run": "python3 tools/registry_integrity.py"}
+    workflows = default_workflows(
+        python_ci_jobs={
+            "ancestor": {"runs-on": "ubuntu-latest", "if": "false", "steps": [{"run": "true"}]},
+            "manifest-integrity": {
+                "runs-on": "ubuntu-latest",
+                "needs": ["ancestor"],
+                "steps": [step],
+            },
+            "python-ci-gate": {
+                "runs-on": "ubuntu-latest",
+                "needs": ["manifest-integrity"],
+                "steps": [{"run": "true"}],
+            },
+        }
+    )
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        workflows=workflows,
+        attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_glob_union_pattern_expands(tmp_path: Path) -> None:
+    """`.gitattributes` `config/** merge=union` names the real file."""
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "ci-surfaces.yml").write_text("x: 1\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("config/** merge=union\n", encoding="utf-8")
+    assert clause(root, "vii") == 0
+
+
+def test_clause_vii_lambda_failure_is_red(tmp_path: Path) -> None:
+    """A lambda body's `sys.exit` is not a module exit status."""
+    src = (
+        'import sys\nREG = "config/ci-surfaces.yml"\n'
+        "f = lambda: sys.exit(1)\n"
+    )
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1

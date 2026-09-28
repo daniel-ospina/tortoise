@@ -72,7 +72,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -492,79 +492,56 @@ def _unioned_files(root: Path) -> set[str]:
                 continue
             pattern, attrs = fields[0], fields[1:]
             if any(attr == "merge=union" for attr in attrs):
-                unioned.add(pattern)
+                # A glob pattern (`config/**`) names CONCRETE files; expand it so a
+                # validator naming the real file is not falsely rejected.
+                # (`Path.glob("config/**")` only yields directories in 3.12, so
+                # match each file's relative POSIX path instead.)
+                expanded = False
+                if any(ch in pattern for ch in "*?["):
+                    for match in sorted(root.rglob("*")):
+                        if match.is_file() and PurePosixPath(
+                            match.relative_to(root).as_posix()
+                        ).match(pattern):
+                            unioned.add(match.relative_to(root).as_posix())
+                            expanded = True
+                if not expanded:
+                    unioned.add(pattern)
     return unioned
 
 
-_PR_LITERAL = r"['\"]pull_request['\"]"
-
-
-def _pr_predicate_is_negated(text: str) -> bool:
-    """True iff a `pull_request` predicate is NEGATED or compared to false.
-
-    `!contains(github.event_name, 'pull_request')`, `!(... == 'pull_request')`,
-    `contains(...) == false` all run on every event EXCEPT pull_request, yet a
-    positive-substring match would read them as PR-reaching (fail-open).
-    """
-    return bool(
-        re.search(r"!\s*\(*\s*contains\s*\([^)]*" + _PR_LITERAL, text)
-        or re.search(r"!\s*\(*[^()!]*==\s*" + _PR_LITERAL, text)
-        or re.search(r"==\s*" + _PR_LITERAL + r"\s*\)*\s*==\s*false", text)
-        or re.search(r"contains\s*\([^)]*" + _PR_LITERAL + r"\)\s*\)*\s*==\s*false", text)
-    )
+_PR_EVENT = r"(?:github\.)?event_name"
 
 
 def _if_excludes_pull_request(expr: Any) -> bool:
-    """True unless the `if:` can be shown to admit a `pull_request` run.
+    """True unless the `if:` is PROVABLY safe to run on a `pull_request`.
 
-    Fail-closed polarity: only an expression we can PROVE reaches PR is
-    admitted. A `!= 'pull_request'` test excludes PR, and
-    `github.event.pull_request == null` excludes it too — an earlier version
-    admitted both because they merely CONTAINED the substring. Conversely
-    `!= 'push'` DOES reach PR and is admitted (an earlier version rejected it).
-    An unrecognised event predicate is excluded, never assumed PR-true.
+    FAIL-CLOSED ALLOW-LIST. An earlier version tried to RECOGNISE every
+    PR-reaching predicate and was fail-open in a new way each review:
+    `!= 'pull_request'`, `!contains(...)`, `contains(...) == false`,
+    `github.event.action == 'pull_request'`, `failure()`, `needs.*` all skip PR
+    while looking PR-shaped. Enumerating the unsafe forms cannot converge, so the
+    rule is now the narrow one the plan actually needs: the validator runs
+    UNCONDITIONALLY, or under a predicate from a small auditable allow-list.
+
+    Deliberately rejected even though they *can* reach PR: `!= 'push'`, a bare
+    `github.event_name`, and disjunctions. A conditionally-run gate is not a
+    gate, and the remedy (drop the `if:`) is trivial — fail-closed over-rejection
+    is preferred to any fail-open form.
     """
     if expr is None:
         return False
     text = str(expr).strip().lower()
-    if text in ("false", "${{ false }}", "0"):
-        return True
-    # No event predicate at all (`true`, `!cancelled()`, `success()`, ...).
-    if "github." not in text and "event_name" not in text and "event." not in text:
+    if text in ("", "true", "0"):
         return False
-    # A NEGATED PR predicate excludes PR, and a `false` conjunct means the step
-    # can never run; both are checked BEFORE the positive forms.
-    if _pr_predicate_is_negated(text):
-        return True
-    if re.search(r"&&\s*false\b", text) or re.search(r"\bfalse\s*&&", text):
-        return True
-    # Explicit PR-excluding tests.
-    if re.search(r"!=\s*['\"]pull_request['\"]", text):
-        return True
-    if re.search(r"pull_request\s*==\s*null", text):
-        return True
-    # Explicit PR-admitting tests, matched on the EXACT event name. A substring
-    # catch-all admitted `pull_request_target`/`pull_request_review` — distinct
-    # events on which a `pull_request`-gated job never runs.
-    if re.search(r"==\s*['\"]pull_request['\"]", text):
+    # Strip a `${{ … }}` wrapper so the allow-list matches the inner expression.
+    inner = re.sub(r"^\$\{\{\s*|\s*\}\}$", "", text).strip()
+    if inner in ("true", "always()", "success()", "!cancelled()", "!failure()"):
         return False
-    if re.search(r"contains\s*\([^,]+,\s*['\"]pull_request['\"]\s*\)", text):
+    if re.fullmatch(rf"{_PR_EVENT}\s*==\s*['\"]pull_request['\"]", inner):
         return False
-    if re.search(r"(?<![_a-z])pull_request\s*!=\s*null", text):
-        return False
-    # A bare truthiness test on the event is truthy on every event.
-    bare = re.sub(r"^\$?\{\{?\s*|\s*\}?\}?$", "", text).strip()
-    if bare in ("github.event_name", "github.event", "github.event_name != ''"):
-        return False
-    # push/schedule-only predicates.
-    if re.search(r"==\s*['\"](push|schedule)['\"]", text):
-        return True
-    if re.search(r"!=\s*['\"](push|schedule)['\"]", text):
-        return False  # runs on everything except push/schedule, PR included
-    if "schedule" in text:
-        return True
-    # An event predicate we cannot resolve: exclude, never assume PR-true.
-    return True
+    return not re.fullmatch(
+        rf"contains\s*\(\s*{_PR_EVENT}\s*,\s*['\"]pull_request['\"]\s*\)", inner
+    )
 
 
 def _job_reaches_pull_request(job: dict) -> bool:
@@ -692,7 +669,7 @@ def _names_path(path: str, literal: str) -> bool:
     A substring test accepted `backup/config/ci-surfaces.yml.bak` as naming the
     unioned `config/ci-surfaces.yml` — a validator that never opens the real file.
     """
-    pattern = r"(?<![A-Za-z0-9_\-])" + re.escape(path) + r"(?![A-Za-z0-9_.\-/])"
+    pattern = r"(?<![\w\-])" + re.escape(path) + r"(?![\w\-./])"
     return re.search(pattern, literal) is not None
 
 
@@ -754,7 +731,7 @@ def _source_can_fail(source: str) -> bool:
         current: ast.AST | None = node
         while current is not None and id(current) in parents:
             current = parents[id(current)]
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 return current
         return None
 
@@ -763,9 +740,14 @@ def _source_can_fail(source: str) -> bool:
 
         A fail-capable statement inside a never-referenced function
         (`def unused(): sys.exit(1)`) is not an exit status: the module exits 0.
+        A lambda body never counts on its own (#5570 bound).
         """
         fn = enclosing_function(node)
-        return fn is None or fn.name in referenced
+        if fn is None:
+            return True
+        if isinstance(fn, ast.Lambda):
+            return False
+        return fn.name in referenced
 
     for node in ast.walk(tree):
         if not reachable(node):
@@ -838,6 +820,23 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
             "is ambiguous, so an unrelated job could report it (#2055/#5649)"
         )
     required_workflow, closure = closures[0]
+    # A skipped ANCESTOR skips the validator and the gate (GitHub cascades a
+    # `needs` skip downstream), so every job on the required path must be
+    # unconditional, not just the validator step's own job.
+    jobs_doc = docs.get(required_workflow, {}).get("jobs")
+    if isinstance(jobs_doc, dict):
+        conditional = sorted(
+            jid
+            for jid in closure
+            if isinstance(jobs_doc.get(jid), dict)
+            and _if_excludes_pull_request(jobs_doc[jid].get("if"))
+        )
+        if conditional:
+            return EXIT_DIVERGED, (
+                f"{required_workflow}: jobs {conditional} on the required path carry an "
+                "`if:` that can skip a pull_request run — a skipped ancestor skips the "
+                "validator and the gate"
+            )
     problems: list[str] = []
     accepted = 0
     for cand in _validator_candidates(docs, required_workflow, closure):
