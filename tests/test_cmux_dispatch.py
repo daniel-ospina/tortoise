@@ -627,6 +627,29 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertFalse(cd.pending_queue_unparsed(SCREEN_IDLE_READY))
         self.assertFalse(cd.pending_queue_unparsed(None))
 
+    def test_a_stray_pending_SHAPED_line_is_NOT_a_queue(self):
+        """A `Steering:`-shaped line in the lane's own transcript or bash output is
+        scrollback, not a queue. If a bare such line counted, a genuinely lost send
+        could never be re-sent on a pane that merely printed one."""
+        stray = SCREEN_IDLE_READY.replace(
+            "/private/tmp",
+            " Steering: continue with the migration\n/private/tmp",
+        )
+        self.assertFalse(cd.pending_queue_unparsed(stray))
+        self.assertTrue(cd.composer_empty(stray))
+        self.assertEqual(cd.recovery_action(stray, cd.fingerprint(PROBE), PROBE), cd.R_RESEND)
+
+    def test_a_FULL_hint_with_no_entries_is_NOT_a_queue(self):
+        """A hint line whose container is EMPTY means pi holds no queued message,
+        so suppressing the resend there would strand a lost send."""
+        no_entries = "\n".join(
+            row for row in SCREEN_QUEUED_MID_TURN.splitlines() if "Steering:" not in row
+        )
+        self.assertFalse(cd.pending_queue_unparsed(no_entries))
+        self.assertEqual(
+            cd.recovery_action(no_entries, cd.fingerprint(PROBE), PROBE), cd.R_RESEND
+        )
+
     def test_an_ARBITRARY_arrow_line_does_not_forge_a_container(self):
         """SECURITY. The bound requires pi's OWN hint text, not just the `↳` glyph:
         a lane can print `↳` freely, but a `Steering: <our message>` line above an
@@ -1248,12 +1271,14 @@ class TestDispatcherRecovery(unittest.TestCase):
         duplicate this guard exists to prevent."""
         fake = FakeCmux(narrow_unparsed_queue=True)
         result = _dispatcher(fake).send_message(
-            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=0,
+            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=1,
         )
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
+        # Exactly ONE copy of the text reaches the lane; the recovery is a bare
+        # Enter against the pane, not a re-send.
         self.assertEqual(fake.sent_log.count(PROBE), 1)
-        self.assertEqual(fake.sent_log.count("\\n"), 1)
+        self.assertEqual(fake.sent_log.count("\\n"), 2)
 
     def test_a_text_in_the_composer_is_not_queued(self):
         # `composer_region` -> None means "cannot tell", and an unsent composer

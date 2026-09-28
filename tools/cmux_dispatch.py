@@ -229,6 +229,12 @@ PENDING_TURN_RE = re.compile(r"^\s*(?:Steering|Follow-up):\s*(?P<text>.*)$")
 #: unobservable queue from authorizing a duplicate re-send in recovery.
 PENDING_HINT_RE = re.compile(r"^\s*\u21b3.*to edit all queued messages\s*$")
 
+#: A pi DEQUEUE HINT that the renderer CUT: it still starts with the `\u21b3` glyph
+#: and ends in the truncation ellipsis, but no longer carries the full
+#: `to edit all queued messages` text. A narrow pane truncates pi's own hint, so the
+#: container cannot be located — the queue is unobservable, not absent.
+TRUNCATED_HINT_RE = re.compile(r"^\s*\u21b3.*\.\.\.\s*$")
+
 #: The ellipsis `truncateToWidth` appends to a cut line (its default).
 TRUNCATION_ELLIPSIS = "..."
 
@@ -594,9 +600,9 @@ def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
     A recovery HINT, never a success verdict. Only this narrow case suppresses the
     `resend` recovery: the pending text carries the renderer's `...`, is a head of
     our message, and is shorter than `min(len(message), PENDING_MIN_CHARS)`, the
-    threshold this hint exists for. (The identity floor is lower for messages under
-    32 chars, so an entry here may already be an identity — that is harmless, the
-    two branches both yield `release`.)
+    threshold this hint exists for. (The identity floor is at or below this one for
+    messages of at most 30 chars, so an entry here may already be an identity —
+    harmless, both branches yield `release`.)
 
     The `...` requirement is load-bearing in the other direction too: a plain
     short line that merely shares a head with our message (`Steering: continue`
@@ -616,19 +622,29 @@ def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
 
 
 def pending_queue_unparsed(screen: str | None) -> bool:
-    """A pending-turn-shaped line is present, but no container could be parsed.
+    """pi has a queue the matcher CANNOT parse, so our message may be in it.
 
-    pi's hint line is right-truncated on a narrow pane, so `PENDING_HINT_RE`
+    On a narrow pane pi right-truncates its own hint line, so `PENDING_HINT_RE`
     cannot locate the container and `_pending_entries` returns nothing — the queue
-    is UNOBSERVABLE, not absent. Recovery must then fail closed: the composer reads
-    empty (pi cleared it), so a `resend` would queue a SECOND copy of a message pi
-    may already hold.
+    is UNOBSERVABLE, not absent. The evidence required is BOTH a CUT hint line
+    (`\u21b3 … ...`) and a `Steering:`/`Follow-up:`-shaped line: a bare
+    `Steering:`-shaped line in a lane's transcript or bash output is scrollback,
+    not a queue, and must not disable recovery for a genuinely lost send.
+
+    A parsed container is never reported here, and a full hint line with no
+    entries above it is not either (there is no queue to hold our message). When
+    this IS true the queued entry cannot be compared with `message` at all, so the
+    verdict is the module's fail-closed default even if the unparsed entry belongs
+    to another message: a re-dispatch is cheaper than a duplicated turn.
     """
     if not screen:
         return False
     if _pending_entries(screen):
         return False
-    return any(PENDING_TURN_RE.match(row) for row in screen.splitlines())
+    rows = screen.splitlines()
+    return any(TRUNCATED_HINT_RE.match(row) for row in rows) and any(
+        PENDING_TURN_RE.match(row) for row in rows
+    )
 
 
 def recovery_action(screen: str | None, fp: str, message: str = "") -> str:
@@ -682,11 +698,11 @@ def recovery_action(screen: str | None, fp: str, message: str = "") -> str:
         # stale-line false positive out.
         return R_RELEASE
     if pending_queue_unparsed(screen):
-        # A `Steering:`/`Follow-up:`-shaped line is on the pane but no container
-        # could be parsed (pi's hint is right-truncated on a narrow pane). The
-        # queue is unobservable, not absent, and the composer reads EMPTY because
-        # pi cleared it — so `composer_empty` would authorize a resend that queues
-        # a SECOND copy. Release instead.
+        # pi's hint line is CUT and a pending-shaped line exists: the queue is
+        # unobservable, not absent, and the composer reads EMPTY because pi cleared
+        # it — so `composer_empty` would authorize a resend that queues a SECOND
+        # copy. Release instead. (A bare `Steering:`-shaped scrollback line without
+        # a cut hint does NOT reach here; see `pending_queue_unparsed`.)
         return R_RELEASE
     if composer_empty(screen):
         return R_RESEND
