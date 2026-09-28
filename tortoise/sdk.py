@@ -840,7 +840,7 @@ def _clip_capture_turn_content(
     ``original length \\d+`` run — ``_TRUNCATION_MARKER_FULL_RE`` admits any
     width) is longer than ``cap`` and is CLIPPED like any other over-cap turn,
     with a fresh marker derived from the length actually seen. Testing a
-    marker-free ``body`` instead would leave a 100,136-char turn (100 chars plus
+    marker-free ``body`` instead would leave a 100,137-char turn (101 chars plus
     a 100,036-char "marker") unbounded in the store — the round-5 P2.
 
     ⛔ THE MARKER IS RESERVED INSIDE THE CAP — the whole point. The Pi client

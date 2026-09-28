@@ -695,7 +695,7 @@ def test_the_window_caps_by_total_length_not_by_a_marker_free_body():
     ``_TRUNCATION_MARKER_FULL_RE`` accepts an ``original length \\d+`` run of ANY
     width, so a caller can append a marker-shaped tail whose digit run is six
     figures. If the window tested a marker-free BODY instead of the total, this
-    content (100 chars + a 100,036-char "marker") would be stored at 100,136
+    content (101 chars + a 100,036-char "marker") would be stored at 100,137
     chars — an unbounded turn in the turn store and the session ``:Source``
     sink. ``_clip_capture_turn_content`` tests the TOTAL, so the turn is a cut
     turn whose fresh marker reports the length actually seen.
