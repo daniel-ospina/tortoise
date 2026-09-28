@@ -166,6 +166,9 @@
 #  95. #3944: a NEGATIVE age must not be read as "no delivery since boot" (a
 #      present age proves a delivery; the pre-clamp app can publish one)
 #  96. #3944: the threshold is the BODY's `silent_threshold_s`, not a hardcoded
+#      900 (the period is never re-typed in bash)
+#  97. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
+#      19-digit magnitude compares successfully, so without the bound it files
 #      900 — a non-default threshold moves the verdict
 #
 # Fixtures are simulated; the real driver defers nothing.
@@ -2372,6 +2375,29 @@ run_driver
 assert_eq "$RC" 1 "107. a non-default threshold from the body reds the run"
 assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
   "107. the driver uses the body's silent_threshold_s (not a hardcoded 900)"
+# ── 108. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band ──
+# Case 93 does NOT pin the digit bound, and this is why. Its 26-digit operand
+# makes `[ -gt ]` itself ERROR (rc=2), so 93 stays unmeasurable even with the
+# bound gone — `[ "${#ANALYTICS_AGE_INT}" -le 18 ]` can be deleted and 93 stays
+# green. But a 19-digit operand that still FITS signed 64-bit (1e18 < 9.2e18)
+# compares SUCCESSFULLY, so without the bound it reads as a grossly stale sink
+# and FILES. The bound is what keeps an over-long magnitude unmeasurable. No
+# producer can emit one (the app clamps `age_s` to [0, 1e16)), so this pins the
+# defensive contract against a non-compliant /status — the same class as 92/104.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 1000000000000000000 10000)"
+run_driver
+assert_eq "$RC" 0 "108. a 19-digit int64-fitting age changes nothing"
+assert_not_match "$OUT" "analytics sink silent" \
+  "108. the 18-digit bound keeps an over-long magnitude unmeasurable (no FILE)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "108. an over-long magnitude files nothing"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "108. an over-long magnitude never resolves the open incident"
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
