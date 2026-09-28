@@ -1987,6 +1987,84 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
+def test_extract_session_v2_over_cap_supersession_batch_warns_bounded(
+        sdk, monkeypatch):
+    """#5654: CAPTURE applies the raw extractor batch with NO Layer-1 gate
+    (#2243 proposes a Layer-1 cap on the commit API's ``supersessions`` list —
+    PR #5648, still open at this base — which would not cover the capture
+    path anyway), so an over-cap batch reaches
+    ``commit_ops.apply_supersessions``, whose fail-open loop emitted ONE warn
+    PER RECORD. The per-record emission is
+    now bounded (the first N, then ONE summary carrying the total) — an
+    emission bound only: the batch below places records that MUST still be
+    folded AFTER the warn budget is exhausted, so the loop is proven not to
+    have become a write bound."""
+    import tortoise.extractor_v2 as ev2
+
+    # Hard-coded, deliberately NOT imported from commit_ops: an expected
+    # value taken from the thing under test asserts nothing (#5654 brief).
+    BOUND = 20
+    OVER_CAP = 25
+
+    # 25 records whose successor resolves nowhere — each warns exactly once
+    # (the entity lane's dangling-successor skip) and is skipped fail-open.
+    malformed = [
+        {"superseded": f"ghost-ref-{i}",
+         "supersedes_by": f"ghost-successor-{i}",
+         "evidence": "malformed batch record"}
+        for i in range(OVER_CAP)
+    ]
+    # 3 records that MUST still fold. The fold-order pre-pass keeps payload
+    # order here (no chain edges among them), so these sort AFTER the
+    # malformed block — they are only reached once the warn budget is spent.
+    applied_pairs = []
+    for k in range(3):
+        target, successor = f"bulk-target-{k}", f"bulk-successor-{k}"
+        sdk.create_entity("object", target, objectKind="core:strategy")
+        sdk.create_entity("object", successor, objectKind="core:strategy")
+        applied_pairs.append((target, successor))
+
+    supersessions = malformed + [
+        {"superseded": t, "supersedes_by": s, "evidence": "must still fold"}
+        for t, s in applied_pairs
+    ]
+    payload = {"session_id": "sess_5654", "story_arc": "",
+               "entities": [], "points": [], "operators": [], "events": [],
+               "supersessions": supersessions,
+               "client_commit_id": "ccid5654"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_5654", "2026-08-20T00:00:00+00:00")
+
+    assert meta["errors"] == [], meta
+    # (1) BOUNDED emission: one warn per malformed record would be 25; the
+    # bound emits BOUND of them and adds exactly ONE summary warn.
+    sup_warns = [w for w in meta["warnings"] if "supersession" in w]
+    assert len(sup_warns) == BOUND + 1, (
+        f"expected {BOUND} per-record warns + 1 summary, got "
+        f"{len(sup_warns)}: {sup_warns!r}")
+    assert len(sup_warns) < OVER_CAP, (
+        "emission must stay below one-warn-per-record")
+    # (2) the summary carries the batch size and the true warning total, so
+    # the amplification is still observable even when it is not emitted.
+    summary = sup_warns[-1]
+    assert "supersession batch of" in summary, summary
+    assert f"{len(supersessions)} record(s)" in summary, summary
+    assert f"{OVER_CAP} per-record warning(s) raised" in summary, summary
+
+    # (3) NO DATA LOSS: every foldable record still landed. These three are
+    # the last records in fold order, i.e. processed after suppression — a
+    # write bound would have dropped them.
+    proj = sdk._get_proj()
+    for target, successor in applied_pairs:
+        rows = proj.g.query(
+            "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+            params={"n": target}).result_set
+        assert rows and rows[0][0] == "superseded", (target, rows)
+        assert rows[0][1] == successor, (target, rows)
+
+
 # ── #2164 Task 4: pt_ capture routing + terminal guard + unresolved-ref
 #    meta warnings (indicators 3 + 4) — end-to-end through
 #    _extract_session_v2 (each test fails if the helper's pt_ branch were

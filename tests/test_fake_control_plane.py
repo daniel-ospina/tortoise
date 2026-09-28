@@ -108,3 +108,143 @@ def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
     # the supported-op control: the same PATCH/DELETE path still works
     assert f.query("org_memberships", method="DELETE",
                    filters=[("org_id", "eq", "t1")]) == []
+
+
+# ── #4037: PostgREST `order` grammar fidelity ─────────────────────────────
+
+def _order_fake() -> FakeControlPlane:
+    return FakeControlPlane(tables={"events": [
+        {"id": "old", "created_at": "2026-01-01T00:00:00+00:00"},
+        {"id": "new", "created_at": "2026-03-01T00:00:00+00:00"},
+        {"id": "mid", "created_at": "2026-02-01T00:00:00+00:00"},
+    ]})
+
+
+def test_order_legacy_dash_prefix_raises() -> None:
+    """#4037: the fake used to ACCEPT ``-created_at`` (``order.lstrip("-")``)
+    while PostgREST answers PGRST100 / HTTP 400. That inverted dialect is why
+    ``SupabaseAbuseStore``'s invalid order stayed green in CI while 400ing in
+    prod (Stage-2 suspension never ran; ``/v1/team/alerts`` was always empty).
+
+    REDs on: reverting the order handling to ``order.lstrip("-")`` /
+    ``order.startswith("-")``. This is the SOLE witness for the double —
+    under the old dialect every fake-backed integration test still passed."""
+    f = _order_fake()
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        f.query("events", order="-created_at")
+
+
+def test_order_dot_desc_sorts_newest_first() -> None:
+    """The valid ``col.desc`` form must actually order. The old dialect looked
+    up a column literally named ``created_at.desc`` → ``None`` → every key
+    equal → silent no-op, so this ordering was never exercised.
+
+    REDs on: reverting to the ``lstrip("-")`` dialect (no reorder) or
+    dropping the ``.desc`` direction."""
+    f = _order_fake()
+    rows = f.query("events", select=["id"], order="created_at.desc")
+    assert [r["id"] for r in rows] == ["new", "mid", "old"]
+
+
+def test_order_bare_column_and_dot_asc_ascend() -> None:
+    f = _order_fake()
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at")] == ["old", "mid", "new"]
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at.asc")] == [
+            "old", "mid", "new"]
+
+
+def test_order_null_placement_follows_postgres_defaults() -> None:
+    """Postgres places NULLs LAST on ``asc`` and FIRST on ``desc``; the old
+    key (``value or ""``) was the inverse in both directions. Explicit
+    ``nullsfirst``/``nullslast`` override."""
+    f = FakeControlPlane(tables={"events": [
+        {"id": "null", "created_at": None},
+        {"id": "a", "created_at": "2026-01-01T00:00:00+00:00"},
+    ]})
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at")] == ["a", "null"]
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at.desc")] == ["null", "a"]
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at.nullsfirst")] == [
+            "null", "a"]
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at.desc.nullslast")] == [
+            "a", "null"]
+
+
+def test_order_by_a_missing_column_is_refused_like_select_and_filter() -> None:
+    """Ordering by an absent column is the SAME PostgREST rejection as the
+    ``select``/``filter`` drift (#1001/#302): real PostgREST 400s on an
+    undefined column rather than returning the rows unordered. Left accepted,
+    it is the #4037 mask again — an invalid order term that 400s in production
+    and stays invisible in CI, with a fail-soft consumer reading ``rows[0]``."""
+    f = FakeControlPlane(
+        tables={"events": [
+            {"id": "a", "created_at": "2026-01-01T00:00:00+00:00"}]},
+        missing_columns={"events": {"ghost"}})
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        f.query("events", select=["id"], order="ghost.desc")
+    # Not a blanket refusal: the declared column still orders.
+    assert [r["id"] for r in f.query(
+        "events", select=["id"], order="created_at.desc")] == ["a"]
+
+
+def test_order_multi_term_is_stable() -> None:
+    """``a.desc,b.asc`` — ties on ``a`` resolve by ``b``, and the relative
+    order of ``a``-ties is preserved (successive stable per-term sorts)."""
+    f = FakeControlPlane(tables={"events": [
+        {"id": "1", "g": "x", "n": 2},
+        {"id": "2", "g": "y", "n": 5},
+        {"id": "3", "g": "x", "n": 1},
+    ]})
+    rows = f.query("events", select=["id"], order="g.desc,n.asc")
+    assert [r["id"] for r in rows] == ["2", "3", "1"]
+
+
+@pytest.mark.parametrize("term", ["-x", "a b", "a.desc.desc",
+                                  "a.asc.nullslast.desc", "a..b", "a.desc."])
+def test_order_unparseable_term_raises(term: str) -> None:
+    """#4037: an unparseable order term must RAISE, never silently no-op —
+    a permissive fallback is the mask this issue removes.
+
+    REDs on: any permissive fallback (the old ``lstrip("-")`` dialect, or
+    "accept if the leftmost segment names a known column")."""
+    f = _order_fake()
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        f.query("events", order=term)
+
+
+def test_order_validation_is_method_agnostic() -> None:
+    """A malformed order 400s regardless of method (PGRST100 is a query-string
+    parse error), so the parse must precede the PATCH/DELETE dispatch, exactly
+    as the 22P02 uuid check does.
+
+    REDs on: moving the parse into the GET branch only."""
+    f = _order_fake()
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        f.query("events", method="PATCH", order="-created_at",
+                filters=[("id", "eq", "old")], json_body={"id": "old"})
+
+
+def test_falsy_order_is_accepted_like_the_real_seam() -> None:
+    """``None`` and ``""`` are dropped by the real client
+    (``supabase_control.query`` guards ``if order:``), so the double must not
+    400 on them — that would be a false refusal the wire never sees."""
+    f = _order_fake()
+    assert len(f.query("events", order=None)) == 3
+    assert len(f.query("events", order="")) == 3
+
+
+@pytest.mark.parametrize("order", ["created_at", "created_at.asc",
+                                   "created_at.desc", "deleted_at",
+                                   "created_at.nullsfirst",
+                                   "created_at.desc.nullslast"])
+def test_every_order_form_used_in_the_repo_is_accepted(order: str) -> None:
+    """False-refusal guard: every order spelling this repo transmits — and
+    the optional modifiers the issue names — must parse. ``supabase_control``
+    sends ``created_at`` / ``created_at.asc`` / ``deleted_at``; ``abuse.py``
+    and ``hosted_api.py`` send ``created_at.desc``."""
+    _order_fake().query("events", order=order)  # must not raise
