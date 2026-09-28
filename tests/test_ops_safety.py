@@ -432,6 +432,43 @@ def test_complete_log_with_a_removal_still_replays_identically():
         proj.close()
 
 
+def test_rebuild_all_refuses_a_torn_tail_in_any_journal_file():
+    """The refusal is PER FILE, not just for the first/only journal.
+
+    ``rebuild_all`` iterates every adjacent ``.jsonl`` and classifies each
+    file's own ``torn_trailing_raw``. A refactor that hoisted the refusal out of
+    that loop and classified only one file's tear would pass every other test
+    here while replaying a removal away in the second file.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "multi_torn.db")
+    log_dir = os.path.join(tmp, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    # a.jsonl is COMPLETE and allowlisted; b.jsonl holds the torn removal.
+    _write_journal(os.path.join(log_dir, "a.jsonl"), _point_added("ka-1"),
+                   _point_added("ka-2"))
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(log_dir, "b.jsonl"), _point_added("gone-1"),
+                   full[:full.index('"op"')], torn_last=True)
+
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("CREATE (:Canary {id: 'c1'})")
+        with pytest.raises(RuntimeError, match="resurrect"):
+            proj.rebuild_all(log_dir)
+        # Refused BEFORE the wipe: the canary is untouched and nothing from
+        # either file (including the COMPLETE a.jsonl) was replayed.
+        assert proj.g.query(
+            "MATCH (n:Canary) RETURN count(n)").result_set[0][0] == 1
+        assert proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
+    finally:
+        proj.close()
+
+
 def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
     """`rebuild_all` refuses the journal, and refuses it BEFORE the graph wipe.
 
@@ -794,6 +831,13 @@ def test_recover_from_log_pending_snapshot_route_refuses_a_torn_tail():
         proj.g.query("MATCH (n) DETACH DELETE n")   # the 0-node "lost DB" case
         result = recover_from_log(log_dir, proj)
         assert result["recovered"] is False, result
+        # Discriminate the PENDING route from the apply-only fall-through: only
+        # the pending arm reports the snapshot and hard-codes log_points=0 (the
+        # fall-through would report the parsed journal entry instead). Without
+        # this the test would silently degrade into re-covering the apply-only
+        # route if the sidecar were ever retired.
+        assert "pending pre-wipe snapshot" in result["reason"], result
+        assert result["log_points"] == 0, result
         assert "refusing to replay" in result["reason"], result
         # The sidecar Point would have been materialized had the route
         # replayed; its absence proves the refusal preceded the wipe+replay.

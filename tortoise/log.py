@@ -58,15 +58,36 @@ from pathlib import Path
 # reports success (#3316).
 #
 # So the classifier is an ALLOWLIST of record types whose loss is provably the
-# data-LOSS direction: either their folds MERGE/SET authoritative state and
-# never delete a node or edge or terminalize a lifecycle (clearing a DERIVED
-# embedding so it is recomputed is a cache clear, not such a removal), or they
-# have no fold at all, so their loss is a proof-carrying no-op. A torn tail
-# whose type is legible and wholly inside this set keeps the pre-existing
-# tolerance. EVERYTHING ELSE is refused: an unlisted type and an unreadable
-# type cannot be proven harmless, and a silent resurrection is worse than a
-# loud refusal — the refusal touches no graph and leaves the journal for the
-# operator.
+# data-LOSS direction. The criterion, precisely: the fold's effect on the graph
+# is additive, OR the removal it performs is itself carried by a DEDICATED
+# terminal record type that this classifier refuses on its own
+# (``PointRetracted`` / ``PointSuperseded`` / ``PointInvalidated`` /
+# ``EntityMutated`` op=delete / ``PointsMerged`` / ``ObjectSuperseded`` /
+# ``DirectEdgeRepoint`` / ``ConfidenceChanged`` with ``outdated=true``). So a
+# member's folds MERGE/SET authoritative state and never delete a node or edge
+# (clearing a DERIVED embedding so it is recomputed is a cache clear, not such
+# a removal), or the member has no fold at all, so its loss is a proof-carrying
+# no-op. A torn tail whose type is legible and wholly inside this set keeps the
+# pre-existing tolerance. EVERYTHING ELSE is refused: an unlisted type and an
+# unreadable type cannot be proven harmless, and a silent resurrection is worse
+# than a loud refusal — the refusal touches no graph and leaves the journal for
+# the operator.
+#
+# ONE DISCLOSED EXCEPTION to "never terminalize a lifecycle" — read before
+# trusting the criterion above:
+#   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold writes
+#     ``n.status = coalesce($st, n.status, 'live')`` straight from the payload
+#     (projection/entities.py:770, :795) and ``create_point`` accepts every
+#     value in ``POINT_STATUS_VALUES`` (sdk.py:3489) — a BORN-TERMINAL create
+#     (``_born_terminal``, sdk.py:3655, a first-class case: see #2422) journals
+#     ``status`` in its ``PointAdded`` point snapshot (sdk.py:3828). A torn
+#     born-terminal ``PointAdded`` for an id an EARLIER record left live is
+#     therefore a resurrection this classifier tolerates. It is NOT a
+#     first-order path (unlike ``EventRecorded``'s connector leg, which every
+#     connector ingest reaches): it needs a second ``PointAdded`` for an
+#     EXISTING id with an explicit TERMINAL status, and excluding the two types
+#     would refuse the most common torn record of all. Filed as #5921 with the
+#     reproduction rather than silently tolerated.
 #
 # ⛔ THE POLARITY IS DELIBERATE: a NEW event type defaults to REFUSED, not
 # tolerated. Adding one here is the claim that its loss cannot revive state —

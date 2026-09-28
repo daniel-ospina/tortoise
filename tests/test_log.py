@@ -372,15 +372,42 @@ def test_a_torn_event_recorded_is_refused_however_it_was_cut():
     print("PASS test_a_torn_event_recorded_is_refused_however_it_was_cut")
 
 
+def test_torn_born_terminal_point_added_is_a_disclosed_tolerance():
+    """DISCLOSED EXCEPTION to the allowlist criterion — see tortoise/log.py.
+
+    ``PointAdded``/``OperatorAdded`` folds write ``n.status`` straight from the
+    payload (``entities.py:770``/``:795``) and ``create_point`` accepts terminal
+    statuses (``sdk.py:3489``), so a BORN-TERMINAL create journals its terminal
+    ``status`` in the ``PointAdded`` point snapshot (``sdk.py:3828``). A torn
+    born-terminal ``PointAdded`` for an id an EARLIER record left live is
+    therefore a resurrection this classifier TOLERATES.
+
+    Pinned so the tolerance is visible and a future tightening is deliberate
+    rather than silent. Filed as #5921. ``EventRecorded`` is NOT tolerated for
+    the same reason: its connector leg is reached by EVERY connector ingest, so
+    there the harmful payload is the common case, not a narrow re-create.
+    """
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "x", "status": "superseded"')
+    assert not torn_record_may_revive_state(
+        '{"type": "OperatorAdded", "point": {"id": "x", "status": "retracted"')
+    print("PASS test_torn_born_terminal_point_added_is_a_disclosed_tolerance")
+
+
 def test_torn_tail_allowlist_holds_no_destructive_type():
     """The allowlist IS the fail-open/fail-closed switch, so pin its POLARITY
     and its CONTENT.
 
     Behavioural tests cover a handful of members; without an exact pin an edit
     that typos a member name (silently dropping the tolerance for the intended
-    type), drops an audit member, or moves a removal/terminal type in —
-    including a new one — would pass unnoticed. The full-equality assertion
-    makes ANY edit to the set a deliberate, visible test change.
+    type) or drops an audit member would pass unnoticed. The full-equality
+    assertion makes ANY edit to the set a deliberate, visible test change.
+
+    The `destructive` assertion below is NOT redundant with that pin: it is the
+    only check that catches a terminal type moved into BOTH the set and the
+    equality literal in the same commit. It cannot catch a type NEITHER list
+    knows about — a brand-new terminal type added to both would pass here — so
+    it pins the KNOWN terminal vocabulary, not the class.
     """
     # Exact membership: any addition, removal or typo must update this literal.
     assert frozenset({
