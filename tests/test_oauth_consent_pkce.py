@@ -38,7 +38,7 @@ Invariants pinned here:
  6 an unavailable store refuses locally (no navigation, no verifier) — both a
    method-throw and an access-time-throw store
  7 item 6 write-path parity: ≤SIZE_GUARD byte-identical, >SIZE_GUARD stripped AND
-   actually written (asserting `strippedWrites >= 1`, so removing the strip cannot
+   actually written (asserting `strippedWrites == 1`, so removing the strip cannot
    pass by falling through to the refusal), >SIZE_CAP refused AND page-reported
  8 version coupling: the page's CDN specifier EQUALS the version of the vendored
    bundle this harness executes (pure text/path, no node — see
@@ -663,11 +663,9 @@ def test_inv7_item6_write_path_parity() -> None:
     # negative check ("nothing un-narrowed survives anywhere") is a partial
     # denylist: it goes false the moment a re-attach lands in a slot it does not
     # name (`obj.user.id = md.<bloat>`) or a SECOND cookie carries the bloat past
-    # the one entry this reads. Two review rounds found precisely those holes.
-    # A complete positive assertion is defeated only by a mutation that writes a
-    # DIFFERENT artifact — which is exactly what it exists to catch. The fixture
-    # gives the kept and the non-kept values distinct contents, so a swap, a
-    # relocation and a partial narrowing are all visible.
+    # the one entry this reads. A complete positive assertion is defeated only by
+    # a mutation that writes a DIFFERENT artifact — which is what it exists to
+    # catch.
     #
     # `strippedWrites == 1` above plus the non-empty `sessions` here is what makes
     # this the ONLY write to characterise.
