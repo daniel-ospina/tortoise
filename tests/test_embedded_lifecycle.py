@@ -1363,6 +1363,692 @@ def test_forked_child_reclaims_ownership_of_inherited_server(tmp_path):
             db.close()
 
 
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_forked_child_keeps_its_owner_record_until_the_last_inherited_client(
+        tmp_path):
+    """#3630: the at-fork hook must KEEP the inherited per-socket refcount.
+
+    `_owner_refcounts` is inherited across `fork()` already holding the number
+    of live clients the child inherited. The old hook cleared it and called
+    `record_owner` once per socket purely to force the child's own record
+    write — which rebuilt every count as **1**. Closing ONE of two inherited
+    clients then took `forget_owner`'s removal path and unlinked the child's
+    `<pid>-<start>` record while the second client was still live, so a later
+    `_mark_orphan_confirmation` could orphan-confirm a live server (the #1557
+    / #1642 FIX 5 fail-open, one fork deep).
+
+    All assertions run IN THE CHILD (rc reported back through a pipe).
+    Mutation: restore `_owner_refcounts.clear()` + `record_owner(sock)` in
+    `_adopt_owner_records_after_fork` and the child's count reads 1 / the
+    record is gone after the first close.
+    """
+    from tortoise.embedded_lifecycle import _owner_refcounts, owner_socket_of
+
+    db_path = str(tmp_path / "fork_refcount.db")
+    first = FalkorDB(db_path)
+    second = FalkorDB(db_path)
+    try:
+        sock = owner_socket_of(first) or first.client.socket_file
+        key = os.path.abspath(sock)
+        assert _owner_refcounts.get(key) == 2, \
+            "test setup: two clients on one server are this process's 2 claims"
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # child
+            child_pid = os.getpid()
+            rc = 1
+            try:
+                os.close(r)
+                assert _owner_refcounts.get(key) == 2, (
+                    "#3630: the forked child must KEEP the inherited refcount "
+                    f"2, not rebuild it as 1 (got "
+                    f"{_owner_refcounts.get(key)!r})")
+                entries = _owner_entries(sock) or []
+                assert any(e.startswith(f"{child_pid}-") for e in entries), (
+                    "#3630: the child must write its OWN record for the "
+                    f"inherited server (entries={entries})")
+                # Close ONE of the two inherited clients.
+                first.close()
+                assert _owner_refcounts.get(key) == 1, (
+                    "#3630: closing one of two inherited clients must leave "
+                    "the child's claim at 1")
+                entries = _owner_entries(sock) or []
+                assert [e for e in entries if e.startswith(f"{child_pid}-")], (
+                    "#3630: the child's owner record was unlinked while a "
+                    "second inherited client was still live — the reaper can "
+                    f"now orphan-confirm a live server (entries={entries})")
+                # Closing the SECOND (last) inherited client releases it.
+                second.close()
+                assert _owner_refcounts.get(key) is None, (
+                    "#3630: the LAST inherited client must release the claim")
+                entries = _owner_entries(sock) or []
+                assert not [e for e in entries
+                            if e.startswith(f"{child_pid}-")], (
+                    "#3630: the child's record must be removed once its last "
+                    f"inherited client closes (entries={entries})")
+                rc = 0
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                rc = 1
+            finally:
+                with contextlib.suppress(OSError):
+                    os.write(w, str(rc).encode())
+                    os.close(w)
+                os._exit(rc if rc else 0)
+        os.close(w)
+        try:
+            child_rc = os.read(r, 8).decode()
+        finally:
+            os.close(r)
+        os.waitpid(pid, 0)
+        assert child_rc == "0", "the forked child's #3630 assertions failed"
+        # The child's closes must not move the PARENT's own claim/record.
+        assert _owner_refcounts.get(key) == 2, \
+            "the child's closes must not move the PARENT's refcount"
+        assert any(e.startswith(f"{os.getpid()}-")
+                   for e in (_owner_entries(sock) or [])), \
+            "the parent's own record must survive the child's closes"
+    finally:
+        with contextlib.suppress(Exception):
+            first.close()
+        with contextlib.suppress(Exception):
+            second.close()
+
+
+def test_fork_adoption_preserves_count_and_fails_loud_without_a_record(
+        tmp_path, monkeypatch, caplog):
+    """#3630: the hook KEEPS the inherited count and, on the fail-OPEN edge
+    where the child cannot write its own record for an inherited socket,
+    reports it LOUDLY instead of silently leaving a live owner invisible to
+    the reaper.
+
+    Mutation: restore `_owner_refcounts.clear()` and the preserved-count
+    assertion fails; drop the `logger.error` and the caplog assertion fails.
+    """
+    import logging as _logging
+
+    from tortoise.embedded_lifecycle import (
+        _adopt_owner_records_after_fork,
+        _owner_lock_fds,
+        _owner_refcounts,
+        record_owner,
+    )
+
+    sock = str(tmp_path / "adopt" / "redis.socket")
+    key = os.path.abspath(sock)
+    try:
+        assert record_owner(sock) is True
+        assert record_owner(sock) is False
+        assert _owner_refcounts.get(key) == 2, "test setup: two inherited claims"
+        monkeypatch.setattr(
+            "tortoise.embedded_lifecycle._write_owner_record_file",
+            lambda _sock: False)
+        with caplog.at_level(_logging.ERROR,
+                             logger="tortoise.embedded_lifecycle"):
+            _adopt_owner_records_after_fork()
+        assert _owner_refcounts.get(key) == 2, (
+            "#3630: the hook must PRESERVE the inherited count, never rebuild "
+            "it as 1")
+        assert any("could NOT write its owner record" in rec.getMessage()
+                   for rec in caplog.records), (
+            "#3630: a child that cannot write its own record is a live owner "
+            "invisible to the reaper — it must fail LOUDLY, not silently")
+    finally:
+        _owner_refcounts.pop(key, None)
+        from tortoise import embedded_lifecycle as _el_mod
+        _pending = getattr(_el_mod, "_owner_record_pending", None)
+        if _pending is not None:
+            _pending.discard(key)
+        _fd = _owner_lock_fds.pop(key, None)
+        if _fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(_fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_fork_inside_the_owner_release_window_drops_the_released_client(
+        tmp_path, monkeypatch):
+    """#3630 F1: a `fork()` landing BETWEEN `_t_owner_released = True` and the
+    `forget_owner(sock)` decrement must not carry the RELEASED client's claim
+    into the child.
+
+    The child inherits no THREADS, so that release can never complete there:
+    without the correction the inherited claim is unreleasable, `forget_owner`
+    can never drive the count to 0, and the child's own record keeps naming a
+    LIVE owner for a child with no live client — so the server is never
+    reaped (a leak, the opposite polarity to the #1557 kill, but the same
+    never-reaped outcome). Base (5826c50) reads the child's count as 2; the
+    fix subtracts the in-flight release and reads 1.
+
+    The fork is taken INSIDE the window: `forget_owner` is patched to fork
+    before delegating, so the child is a snapshot of the flag-set state.
+    Class-B: the failing state is `_owner_releases_in_flight[key] == [client]`
+    with the client's flag already True — reachable here by construction,
+    because the patch sits exactly between those two production statements.
+    """
+    from tortoise import embedded_lifecycle
+    from tortoise.embedded_lifecycle import _owner_refcounts, owner_socket_of
+
+    db_path = str(tmp_path / "fork_window.db")
+    first = FalkorDB(db_path)
+    second = FalkorDB(db_path)
+    real_forget = embedded_lifecycle.forget_owner
+    parent_pid = os.getpid()
+    key = None
+    try:
+        sock = owner_socket_of(first) or first.client.socket_file
+        key = os.path.abspath(sock)
+        assert _owner_refcounts.get(key) == 2, "test setup: two live clients"
+
+        def forking_forget(socket_file, client=None):
+            """Fork at the EXACT window: flag set, count not moved yet."""
+            assert os.getpid() == parent_pid, "the child must not re-enter"
+            pid = os.fork()  # the after_in_child hook adopts in the child
+            if pid == 0:
+                rc = 1
+                try:
+                    child = os.getpid()
+                    assert _owner_refcounts.get(key) == 1, (
+                        "#3630 F1: the released client's claim must NOT be "
+                        "carried into the child (got "
+                        f"{_owner_refcounts.get(key)!r}, want 1)")
+                    entries = _owner_entries(sock) or []
+                    assert any(e.startswith(f"{child}-") for e in entries), (
+                        "the child's own record for its LIVE inherited client "
+                        f"must exist (entries={entries})")
+                    # Release the one client the child still owns; the record
+                    # must go, proving the child is not pinned by the
+                    # mid-release client's carried claim.
+                    embedded_lifecycle.forget_owner = real_forget
+                    second.close()
+                    assert _owner_refcounts.get(key) is None, (
+                        "#3630 F1: closing the last LIVE inherited client "
+                        "must drive the child's claim to 0")
+                    entries = _owner_entries(sock) or []
+                    assert not [e for e in entries
+                                if e.startswith(f"{child}-")], (
+                        "the child's record must be unlinked with its last "
+                        f"live client (entries={entries})")
+                    rc = 0
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    rc = 1
+                finally:
+                    os._exit(rc)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, \
+                "the forked child's #3630 F1 assertions failed"
+            return real_forget(socket_file, client) if client is not None \
+                else real_forget(socket_file)
+
+        monkeypatch.setattr(embedded_lifecycle, "forget_owner", forking_forget)
+        # close() takes the shared branch (2 claims), then the finally seam
+        # `_t_release_owner` sets the flag and calls the patched forget —
+        # which forks inside the window.
+        first.close()
+    finally:
+        monkeypatch.undo()
+        with contextlib.suppress(Exception):
+            first.close()
+        with contextlib.suppress(Exception):
+            second.close()
+        if key is not None:
+            _inflight = getattr(embedded_lifecycle,
+                               "_owner_releases_in_flight", None)
+            if _inflight is not None:
+                _inflight.pop(key, None)
+            _pending = getattr(embedded_lifecycle, "_owner_record_pending", None)
+            if _pending is not None:
+                _pending.discard(key)
+            _owner_refcounts.pop(key, None)
+            _fd = embedded_lifecycle._owner_lock_fds.pop(key, None)
+            if _fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(_fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_fork_window_with_no_live_client_leaves_no_record_and_no_lock(
+        tmp_path, monkeypatch):
+    """#3630 F1, the `after_both_closed=None, own_record_after=[]` case: when
+    the ONLY inherited client was mid-release at the fork, the child must end
+    with NO claim, NO record and NO lock for that socket.
+
+    Keeping the inherited count (or re-acquiring #4577's lock) would leave the
+    child's record naming a LIVE owner for a child with no live client, so the
+    dead child's server is never reaped. Base (5826c50) reads the child's
+    count as 1 and writes its record; the fix subtracts the in-flight release
+    to 0 and skips both the record and the lock.
+    """
+    from tortoise import embedded_lifecycle
+    from tortoise.embedded_lifecycle import (
+        _owner_lock_fds,
+        _owner_refcounts,
+        owner_socket_of,
+    )
+
+    db_path = str(tmp_path / "fork_stale.db")
+    db = FalkorDB(db_path)
+    real_forget = embedded_lifecycle.forget_owner
+    parent_pid = os.getpid()
+    key = None
+    try:
+        sock = owner_socket_of(db) or db.client.socket_file
+        key = os.path.abspath(sock)
+        assert _owner_refcounts.get(key) == 1, "test setup: one live client"
+
+        def forking_forget(socket_file, client=None):
+            assert os.getpid() == parent_pid, "the child must not re-enter"
+            pid = os.fork()  # the after_in_child hook adopts in the child
+            if pid == 0:
+                rc = 1
+                try:
+                    child = os.getpid()
+                    assert _owner_refcounts.get(key) is None, (
+                        "#3630 F1: the only client was mid-release, so the "
+                        "child must inherit NO claim (got "
+                        f"{_owner_refcounts.get(key)!r})")
+                    assert key not in _owner_lock_fds, (
+                        "#3630 F1: with no live client the child must not "
+                        "hold the server's liveness lock")
+                    entries = _owner_entries(sock) or []
+                    assert not [e for e in entries
+                                if e.startswith(f"{child}-")], (
+                        "#3630 F1: with no live client the child must write "
+                        f"no owner record (entries={entries})")
+                    rc = 0
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    rc = 1
+                finally:
+                    os._exit(rc)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, \
+                "the forked child's #3630 F1 (stale) assertions failed"
+            return real_forget(socket_file, client) if client is not None \
+                else real_forget(socket_file)
+
+        monkeypatch.setattr(embedded_lifecycle, "forget_owner", forking_forget)
+        db._t_release_owner()
+    finally:
+        monkeypatch.undo()
+        with contextlib.suppress(Exception):
+            db.close()
+        if key is not None:
+            _inflight = getattr(embedded_lifecycle,
+                               "_owner_releases_in_flight", None)
+            if _inflight is not None:
+                _inflight.pop(key, None)
+            _pending = getattr(embedded_lifecycle, "_owner_record_pending", None)
+            if _pending is not None:
+                _pending.discard(key)
+            _owner_refcounts.pop(key, None)
+            _fd = _owner_lock_fds.pop(key, None)
+            if _fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(_fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores the read-only owner dir")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_forked_child_retries_a_failed_owner_record_write(tmp_path):
+    """#3630 F2: a FAILED owner-record write at the fork must be RETRYABLE.
+
+    The hook keeps the inherited count when its own record write fails (never
+    drop a live owner), so every later `record_owner` short-circuits on
+    `_owner_refcounts.get(key, 0) > 0` — and without a retry the child's
+    `<pid>-<start>` record never appears, for the rest of its life, even after
+    the cause clears. Base (5826c50) returns False and leaves
+    `own_record_after_retry=[]`; the fix retries the write on the next claim.
+
+    Class-B: the failing state is a held claim with no on-disk record for
+    THIS pid — reachable by construction, because the fork inherits the
+    parent's claim while the owner dir is read-only.
+    """
+    from tortoise import embedded_lifecycle
+    from tortoise.embedded_lifecycle import (
+        _owner_refcounts,
+        owner_record_dir,
+        owner_socket_of,
+        record_owner,
+    )
+
+    db_path = str(tmp_path / "fork_retry.db")
+    db = FalkorDB(db_path)
+    owners_dir = None
+    key = None
+    try:
+        sock = owner_socket_of(db) or db.client.socket_file
+        key = os.path.abspath(sock)
+        assert _owner_refcounts.get(key) == 1, "test setup: one live client"
+        owners_dir = owner_record_dir(sock)
+        assert os.path.isdir(owners_dir)
+        os.chmod(owners_dir, 0o500)  # the child's record write will fail
+        pid = os.fork()
+        if pid == 0:
+            rc = 1
+            try:
+                child = os.getpid()
+                assert _owner_refcounts.get(key) == 1, (
+                    "#3630 F2: a failed write must KEEP the inherited claim")
+                assert not [e for e in (_owner_entries(sock) or [])
+                            if e.startswith(f"{child}-")], (
+                    "the child's record write must have failed on the "
+                    "read-only owner dir")
+                # The cause clears; the next claim must RETRY the write.
+                os.chmod(owners_dir, 0o700)
+                record_owner(sock)
+                entries = _owner_entries(sock) or []
+                assert any(e.startswith(f"{child}-") for e in entries), (
+                    "#3630 F2: a later claim must RETRY the failed record "
+                    "write instead of short-circuiting on the inherited "
+                    f"count forever (entries={entries})")
+                rc = 0
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                rc = 1
+            finally:
+                os._exit(rc)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, \
+            "the forked child's #3630 F2 assertions failed"
+    finally:
+        if owners_dir is not None:
+            with contextlib.suppress(OSError):
+                os.chmod(owners_dir, 0o700)
+        with contextlib.suppress(Exception):
+            db.close()
+        if key is not None:
+            _pending = getattr(embedded_lifecycle, "_owner_record_pending", None)
+            if _pending is not None:
+                _pending.discard(key)
+
+
+# ── #3630 P1: the release marker is IDENTITY-keyed ───────────────────────
+# The marker ledger must name the client whose claim it accounts for. The
+# pre-fix `entries.pop()` retracted by POSITION (youngest first), so with two
+# concurrent releases one client's `forget_owner` could consume another's
+# marker; the at-fork correction then subtracted by COUNT (`len(clients)`)
+# while it assigned released-ness by IDENTITY, dropping a LIVE client's claim
+# to 0. These four tests pin the fix from both sides: identity alignment, the
+# flag split (drop committed releases, keep releasable ones), and the
+# leak-side ledger hygiene. The LAST is a REAL fork; the rest are the state
+# machine it depends on.
+
+
+def test_fork_adoption_drops_only_the_committed_release(tmp_path):
+    """#3630 P1 (state machine): the at-fork split is per-marker FLAG.
+
+    A marker whose client already set ``_t_owner_released`` is past the point
+    of no return — the child inherits no threads and can never complete it,
+    so its claim is subtracted. A marker whose flag is still False is a
+    release the CHILD's own `_t_release_owner` will still perform — its claim
+    is KEPT and its flag is left False. The pre-fix code subtracted
+    `len(clients)` and set every marked client True, so the live client's
+    claim read 0 ("dropped to 0", the #1557 kill polarity).
+    """
+    from tortoise import embedded_lifecycle
+    from tortoise.embedded_lifecycle import (
+        _adopt_owner_records_after_fork,
+        _owner_lock_fds,
+        _owner_refcounts,
+        record_owner,
+    )
+
+    class _Client:
+        def __init__(self, released):
+            self._t_owner_released = released
+
+    sock = str(tmp_path / "split" / "redis.socket")
+    key = os.path.abspath(sock)
+    committed, live = _Client(True), _Client(False)
+    try:
+        assert record_owner(sock) is True
+        assert record_owner(sock) is False
+        assert _owner_refcounts.get(key) == 2, "test setup: two inherited claims"
+        embedded_lifecycle._owner_releases_in_flight[key] = [committed, live]
+        _adopt_owner_records_after_fork()
+        assert _owner_refcounts.get(key) == 1, (
+            "#3630 P1: only the COMMITTED release's claim may be subtracted; "
+            "the live client's claim must be kept (got "
+            f"{_owner_refcounts.get(key)!r}, want 1)")
+        assert committed._t_owner_released is True, \
+            "a committed release stays committed"
+        assert live._t_owner_released is False, (
+            "#3630 P1: the child's own release must still be able to run — "
+            "the correction must NOT mark a releasable client released")
+    finally:
+        embedded_lifecycle._owner_releases_in_flight.pop(key, None)
+        embedded_lifecycle._owner_record_pending.discard(key)
+        _owner_refcounts.pop(key, None)
+        _fd = _owner_lock_fds.pop(key, None)
+        if _fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(_fd)
+        import shutil
+        shutil.rmtree(os.path.dirname(key), ignore_errors=True)
+
+
+def test_owner_release_marker_is_retracted_by_identity(tmp_path):
+    """#3630 P1: `_retract_one_owner_release` consumes THIS client's marker.
+
+    Two markers for one socket, retracted in both orders: the survivor must
+    always be the client that was NOT retracted. The pre-fix positional pop
+    consumed the wrong client's marker (and had no identity parameter at
+    all), which is what let the at-fork count and identity diverge.
+    """
+    from tortoise import embedded_lifecycle as el
+
+    sock = str(tmp_path / "ident" / "redis.socket")
+    key = os.path.abspath(sock)
+    first, second = object(), object()
+    try:
+        el.begin_owner_release(first, sock)
+        el.begin_owner_release(second, sock)
+        el._retract_one_owner_release(key, first)
+        assert el._owner_releases_in_flight.get(key) == [second], (
+            "retracting `first` must leave `second`'s marker — the pre-fix "
+            "positional pop consumed the WRONG client's marker")
+        # The other concurrent order.
+        el.begin_owner_release(first, sock)
+        el._retract_one_owner_release(key, second)
+        assert el._owner_releases_in_flight.get(key) == [first], (
+            "retracting `second` must leave `first`'s marker")
+    finally:
+        el._owner_releases_in_flight.pop(key, None)
+
+
+def test_owner_release_marker_ledger_is_leak_free(tmp_path):
+    """#3630 P1 re-attack, leak side: no marker may be stranded.
+
+    A marker published but never consumed (the `finally` net retracts it), a
+    duplicate/nested publish (one marker per client), a RAW identity-less
+    `forget_owner` (consumes nothing), and an exception between publish and
+    consume must ALL leave the ledger clean. A stranded marker would make the
+    next fork subtract a claim that is no longer pending — the same
+    count/identity divergence, in the other direction.
+    """
+    from tortoise import embedded_lifecycle as el
+
+    sock = str(tmp_path / "leak" / "redis.socket")
+    key = os.path.abspath(sock)
+    a, b = object(), object()
+    try:
+        # (1) published but never consumed -> the `_t_release_owner` finally
+        #     net (`end_owner_release`) retracts it.
+        release_key = el.begin_owner_release(a, sock)
+        assert el._owner_releases_in_flight.get(key) == [a]
+        el.end_owner_release(release_key, a)
+        assert el._owner_releases_in_flight.get(key) is None, (
+            "a release that never reached `forget_owner` must be retracted "
+            "by the finally net")
+
+        # (2) nested/duplicate releases of one client: exactly ONE marker,
+        #     consumed exactly once.
+        key1 = el.begin_owner_release(a, sock)
+        key2 = el.begin_owner_release(a, sock)
+        assert el._owner_releases_in_flight.get(key) == [a], (
+            "a duplicate publish must not count two pending decrements")
+        el._retract_one_owner_release(key1, a)
+        assert el._owner_releases_in_flight.get(key) is None
+        el.end_owner_release(key2, a)  # idempotent: already retracted
+        assert el._owner_releases_in_flight.get(key) is None
+
+        # (3) a RAW `forget_owner` (no identity) must not steal a guarded
+        #     client's marker — stealing one recreates the P1 divergence.
+        el.begin_owner_release(a, sock)
+        el.forget_owner(sock)
+        assert el._owner_releases_in_flight.get(key) == [a], (
+            "an identity-less raw forget must consume NO marker")
+
+        # (4) an exception between publish and consume: the finally retracts
+        #     only THIS client's marker, leaving the unrelated one alone.
+        release_key = el.begin_owner_release(b, sock)
+        try:
+            raise RuntimeError("between publish and consume")
+        except RuntimeError:
+            pass
+        finally:
+            el.end_owner_release(release_key, b)
+        assert el._owner_releases_in_flight.get(key) == [a], (
+            "the exception path must leave no residue of its own, and must "
+            "not touch an unrelated client's marker")
+    finally:
+        el._owner_releases_in_flight.pop(key, None)
+
+
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_two_concurrent_releases_keep_the_live_client_across_a_fork(
+        tmp_path, monkeypatch):
+    """#3630 P1: two concurrent releases + a REAL `fork()` keep the live claim.
+
+    Client `other` is inside `_t_release_owner`, past
+    `begin_owner_release` but BEFORE its own flag is set; client `release`
+    then runs its release to completion, and the fork lands inside
+    `forget_owner`. On the pre-fix code `forget_owner` retracted by POSITION
+    and the at-fork correction subtracted `len(markers)` while flagging every
+    marked client, so the fork dropped the LIVE `other`'s claim to 0 — no
+    claim, no `<child>-<start>` record, no lock. Once the parent is killed,
+    `_owner_records` reads 0 live owners and the server is reaped out from
+    under `other` (the #1557 kill polarity this fix exists to remove).
+
+    The fork is REAL. `forget_owner` is wrapped to fork before delegating,
+    and the wrapper forwards the identity through on the fixed signature
+    while tolerating the pre-fix one-argument call, so this test runs against
+    BOTH revisions (RED on a4f05a21d, GREEN after).
+    """
+    from tortoise import embedded_lifecycle
+    from tortoise.embedded_lifecycle import (
+        _owner_lock_fds,
+        _owner_refcounts,
+        owner_socket_of,
+    )
+
+    db_path = str(tmp_path / "concurrent_release.db")
+    release = FalkorDB(db_path)
+    other = FalkorDB(db_path)
+    real_begin = embedded_lifecycle.begin_owner_release
+    real_forget = embedded_lifecycle.forget_owner
+    parent_pid = os.getpid()
+    key = None
+    try:
+        sock = owner_socket_of(release) or release.client.socket_file
+        key = os.path.abspath(sock)
+        assert _owner_refcounts.get(key) == 2, "test setup: two live clients"
+
+        def racing_begin(client, socket_file):
+            """`release`'s publish, with `other` concurrently entering the
+            window: two releases in flight, both flags still False."""
+            began = real_begin(client, socket_file)
+            real_begin(other, socket_file)
+            return began
+
+        def forking_forget(socket_file, client=None):
+            assert os.getpid() == parent_pid, "the child must not re-enter"
+            pid = os.fork()  # after_in_child adopts in the child
+            if pid == 0:
+                rc = 1
+                try:
+                    child = os.getpid()
+                    count = _owner_refcounts.get(key)
+                    assert (count or 0) >= 1, (
+                        "#3630 P1: the live client's claim must survive the "
+                        "fork (got "
+                        f"{count!r}, want 1) — the released client must not "
+                        "be carried and a LIVE one must not be dropped")
+                    assert getattr(other, "_t_owner_released", False) is False, (
+                        "#3630 P1: a still-releasable client must not be "
+                        "marked released by the at-fork correction")
+                    entries = _owner_entries(sock) or []
+                    assert any(e.startswith(f"{child}-") for e in entries), (
+                        "#3630 P1: the child must record its live inherited "
+                        f"owner (entries={entries})")
+                    assert key in _owner_lock_fds, (
+                        "#3630 P1: the child must hold the server's liveness "
+                        "lock for its live inherited owner")
+                    # The surviving client's child-side release must still work.
+                    embedded_lifecycle.forget_owner = real_forget
+                    other.close()
+                    assert _owner_refcounts.get(key) is None, (
+                        "#3630 P1: the surviving client's own release must "
+                        "drive the count to 0 (got "
+                        f"{_owner_refcounts.get(key)!r})")
+                    rc = 0
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    rc = 1
+                finally:
+                    sys.stdout.flush()
+                    os._exit(rc)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+                "the forked child's #3630 P1 assertions failed")
+            if client is None:  # pre-fix signature
+                return real_forget(socket_file)
+            return real_forget(socket_file, client)
+
+        monkeypatch.setattr(embedded_lifecycle, "begin_owner_release",
+                            racing_begin)
+        monkeypatch.setattr(embedded_lifecycle, "forget_owner",
+                            forking_forget)
+        release.close()
+    finally:
+        monkeypatch.undo()
+        with contextlib.suppress(Exception):
+            release.close()
+        with contextlib.suppress(Exception):
+            other.close()
+        if key is not None:
+            _inflight = getattr(embedded_lifecycle,
+                                "_owner_releases_in_flight", None)
+            if _inflight is not None:
+                _inflight.pop(key, None)
+            _pending = getattr(embedded_lifecycle, "_owner_record_pending", None)
+            if _pending is not None:
+                _pending.discard(key)
+            _owner_refcounts.pop(key, None)
+            _fd = _owner_lock_fds.pop(key, None)
+            if _fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(_fd)
+
+
 # ── #4487: EVERY redislite construction writes an owner record ────────────
 # The guarded `tortoise.FalkorDB` used to be the only writer, so a RAW
 # `redislite.falkordb_client.FalkorDB(...)` / `redislite.client.Redis(...)`
@@ -3933,3 +4619,42 @@ def test_live_fixture_server_reports_rdb_save_disabled(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             proj.close()
+
+
+def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
+    """#3653: redis-server must never be spawned with a config ``dir`` that is gone.
+
+    redislite renders ``dir <dirname(db)>`` from ``self.dbdir``
+    (``configuration.py``: ``config_dict['dir'] = config_dict['dbdir']``), so a
+    start against a removed tree kills redis-server inside its own config parse:
+
+        *** FATAL CONFIG FILE ERROR (Redis 8.6.2) ***
+        >>> 'dir '/tmp/tmpXXXX''
+
+    Six of those, six different dirs, all inside one test file, in a PASSING CI
+    lane (run 36432057326) — naming neither the db nor the holder whose tree was
+    removed. The seam is ``RedisMixin._start_redis``, which the guard wraps.
+    ``FalkorProjection`` happens to mask this locally by recreating the parent
+    dir, so the client construction is what the guard itself is measured on.
+    """
+    import redislite.client as _rc
+
+    # The guard installer is armed at `tortoise` import time and installs as soon
+    # as redislite is importable, so no explicit install call is needed here.
+    from tortoise.embedded_lifecycle import EmbeddedDbDirGoneError
+
+    tree = tmp_path / "hosted"
+    tree.mkdir()
+    db = str(tree / "test.db")
+    tree.rmdir()  # exactly what a function-scoped fixture teardown does
+
+    with pytest.raises(EmbeddedDbDirGoneError) as excinfo:
+        _rc.Redis(dbfilename=db)
+    assert str(tree) in str(excinfo.value), (
+        "the refusal must name the directory that is gone")
+    assert not os.path.isdir(tree), "the guard must not recreate the directory"
+
+    captured = "".join(capfd.readouterr())
+    assert "FATAL CONFIG FILE ERROR" not in captured, (
+        "redis-server was spawned into a missing db dir — the unattributable "
+        "FATAL this guard exists to prevent")
