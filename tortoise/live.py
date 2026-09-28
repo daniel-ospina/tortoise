@@ -116,12 +116,12 @@ def _terminal_excluded(clause: str) -> str:
 #: ⚠️ This is NOT yet the only declaration, and nothing here should be read as
 #: claiming it is. TWO hand-declared copies of the same triple remain besides
 #: this one: ``tortoise/consistency.py``'s ``_DECAY`` (the JOURNAL side of the
-#: divergence detector that measures this very invariant) and the
+#: divergence detector that measures this very invariant; pinned to this
+#: declaration by ``tests/test_4542_retract_fold_decay.py``) and the
 #: ``assess_source`` sweep's ``ConfidenceChanged`` payload in ``tortoise/sdk.py``
-#: (unguarded — read it there). ``_DECAY`` is pinned to this declaration by
-#: ``tests/test_4542_retract_fold_decay.py`` so it cannot drift silently while
-#: #5011's lane (which owns that file) consolidates it. Read the values from
-#: here; do not add a third.
+#: (whose values ``test_2884_ep_state_journaled.py``'s
+#: ``test_f3_assess_source_decay_is_journaled`` holds to the contract, though not
+#: to this declaration). Read the values from here; do not add a third.
 VACUITY_BELIEF: dict[str, float] = {
     "confidence": 0.5,
     "posterior_alpha": 1.0,

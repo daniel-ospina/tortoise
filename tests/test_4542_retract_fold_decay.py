@@ -22,8 +22,7 @@ Pinned contracts here:
       (the journal side of the divergence detector) is asserted equal to it in
       case (e). Two hand-declared copies of the triple remain besides
       ``VACUITY_BELIEF`` — that one, and the ``assess_source`` payload in
-      ``tortoise/sdk.py``; consolidating the first belongs to the held #5011
-      lane and the second is unguarded, so neither is edited here.
+      ``tortoise/sdk.py``; neither is edited here.
   (c) ``fold()`` and ``rebuild_all()`` agree on a retract produced by the REAL
       emitters (``create_point`` + ``retract_point``), which is also what makes
       the synthetic shapes above reachable rather than invented;
@@ -207,12 +206,11 @@ def test_4542_detector_journal_side_is_pinned_to_the_declaration():
     side of the divergence detector that measures this invariant — so a drift
     there would silently corrupt the verdict (`check_consistency` would report
     the writer's own graph as diverged, or a real divergence as clean). That
-    module belongs to the held #5011 lane, so it is not edited here; it is
-    PINNED instead. If the declaration moves, this reds and names the copy that
-    must follow it.
+    module is not edited here, so the copy is PINNED to the declaration instead:
+    if the declaration moves, this reds and names the copy that must follow it.
 
     (1) Fails if `_DECAY` drifts from the contract values below.
     (2) Reachable: the object is imported from the shipped module.
     """
-    from tortoise.consistency import _DECAY  # held #5011 lane — read only
+    from tortoise.consistency import _DECAY  # hand-declared copy of the triple
     assert dict(_DECAY) == VACUITY_LITERAL
