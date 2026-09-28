@@ -22,6 +22,48 @@ import queue_window_observe as obs  # noqa: E402
 
 NOW = datetime(2026, 9, 27, 9, 0, tzinfo=UTC)
 
+# The TOOL's clock is pinned to a sentinel that is deliberately NOT `NOW`.
+# #5970: the corpus below is anchored at NOW, but CLI tests that omitted
+# `--as-of` let the window end slide with the wall clock; ~14 h after merge the
+# 24 h window had slid past the corpus and `effective_max_parallel_checks` read
+# UNKNOWN. The pin makes that condition the DEFAULT for every run of this file,
+# so a CLI test that omits `--as-of` while asserting SUCCESS fails
+# deterministically instead of passing whenever the real clock is near NOW.
+# The pin is a CONDITION, not an assertion, so
+# `test_the_observer_clock_is_pinned_by_the_fixture` asserts it is in effect and
+# `test_the_tool_reads_the_pinned_clock_not_the_real_one` asserts the tool
+# actually consults `obs.datetime`.
+SENTINEL_CLOCK = NOW + timedelta(days=400)
+
+
+def _clock_at(moment):
+    """A `datetime` replacement whose `now()` is always `moment`."""
+
+    class _FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # Mirror `datetime.now`: an explicit tz converts; no tz hands the
+            # pinned moment back unchanged.
+            return moment if tz is None else moment.astimezone(tz)
+
+    return _FixedClock
+
+
+# `queue_window_observe` reads the clock only through `datetime.now(...)` (it
+# imports the name directly), so patching its module attribute pins every
+# clock-derived window without touching the real clock or any other module.
+@pytest.fixture(autouse=True)
+def _pin_the_observer_clock(monkeypatch):
+    monkeypatch.setattr(obs, "datetime", _clock_at(SENTINEL_CLOCK))
+
+
+def test_the_observer_clock_is_pinned_by_the_fixture():
+    # The pin above is what makes #5970 fail closed. If the autouse fixture
+    # silently stopped applying (a rename, a scope change), every other test
+    # here would still pass and the time bomb could return undetected — so the
+    # pin's EFFECT is asserted, not assumed.
+    assert obs.datetime.now(UTC) == SENTINEL_CLOCK
+
 
 def _iso(dt):
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -497,13 +539,21 @@ def test_configured_max_parallel_checks_falls_back_to_the_documented_default(
 def test_cli_exits_2_on_an_empty_read(tmp_path):
     runs = tmp_path / "runs.jsonl"
     runs.write_text("")
-    assert obs.main(["--from-json", str(runs), "--window-hours", "8"]) == 2
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "8",
+                     "--out", str(out)]) == 2
+    # DISCRIMINATOR: `not runs` (an empty read), not `runs is None` (a bad line).
+    assert json.loads(out.read_text())["reason"] == "empty run enumeration"
 
 
 def test_cli_exits_2_on_an_unparseable_line(tmp_path):
     runs = tmp_path / "runs.jsonl"
     runs.write_text('{"head_branch": "x"}\n{not json}\n')
-    assert obs.main(["--from-json", str(runs), "--window-hours", "8"]) == 2
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "8",
+                     "--out", str(out)]) == 2
+    # DISCRIMINATOR: `runs is None` (a bad LINE), not `not runs` (empty read).
+    assert "unparseable" in json.loads(out.read_text())["reason"]
 
 
 def test_cli_overwrites_a_stale_out_file_with_unknown(tmp_path):
@@ -521,7 +571,7 @@ def test_cli_writes_a_json_record(tmp_path):
     runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
-                     "--out", str(out)]) == 0
+                     "--as-of", _iso(NOW), "--out", str(out)]) == 0
     record = json.loads(out.read_text())
     assert record["status"] == "OK"
     assert record["parallelism"]["effective_max_parallel_checks"] == 5
@@ -536,6 +586,7 @@ def test_cli_exits_2_on_an_unreadable_conflicts_input(tmp_path):
     bad.write_text("{not json")
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
                      "--conflicts-json", str(bad), "--out", str(out)]) == 2
     assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 
@@ -552,6 +603,67 @@ def test_as_of_pins_the_window_end(tmp_path):
     assert json.loads(out.read_text())["window"]["end"] == _iso(NOW)
 
 
+def test_cli_record_is_independent_of_the_wall_clock(tmp_path, monkeypatch):
+    # #5970 REGRESSION: the corpus is anchored at NOW, so a window derived from
+    # the clock moves with it. With `--as-of NOW` the record must be byte-for-byte
+    # identical at any clock — here 14 h and 400 d past the anchor, the real rot
+    # point and beyond. A leaked clock read makes the two bodies differ.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bodies = []
+    for clock in (NOW + timedelta(hours=14), SENTINEL_CLOCK):
+        monkeypatch.setattr(obs, "datetime", _clock_at(clock))
+        out = tmp_path / f"record-{clock:%Y%m%dT%H%M}.json"
+        assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                         "--as-of", _iso(NOW), "--out", str(out)]) == 0
+        bodies.append(out.read_text())
+    assert bodies[0] == bodies[1]
+    record = json.loads(bodies[0])
+    assert record["parallelism"]["effective_max_parallel_checks"] == 5
+    assert record["window"]["end"] == _iso(NOW)
+
+
+def test_omitting_as_of_under_the_pinned_clock_fails_closed(tmp_path):
+    # The negative leg. With no `--as-of`, a NOW-anchored corpus under the
+    # SENTINEL clock must read UNKNOWN with a WINDOW reason. If SENTINEL_CLOCK
+    # were ever moved inside the corpus window the guard would silently stop
+    # guarding; this assertion is what makes that visible.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--out", str(out)]) == 2
+    body = json.loads(out.read_text())
+    assert body["status"] == obs.UNKNOWN
+    assert "window" in body["reason"]
+
+
+def test_the_tool_reads_the_pinned_clock_not_the_real_one(tmp_path):
+    # The pin only helps if the TOOL consults the attribute the fixture patches.
+    # A corpus anchored at SENTINEL_CLOCK with NO `--as-of` must yield an OK
+    # record whose window ENDS at SENTINEL_CLOCK — true only if `build_record`
+    # read `obs.datetime.now(...)`. This is asserted at a FIXTURE-relative time,
+    # so it stays discriminating as the real clock moves (the negative leg above
+    # would eventually be satisfied by a real clock-derived window by accident).
+    minutes_ago = (NOW - SENTINEL_CLOCK).total_seconds() / 60.0
+    runs = [
+        run("mergify/merge-queue/pinned-a",
+            "merge queue: checking #1 + #2 together on main (abc)",
+            minutes_ago=minutes_ago, conclusion="failure"),
+        run("mergify/merge-queue/pinned-b",
+            "merge queue: checking #3 + #4 together on main (abc)",
+            minutes_ago=minutes_ago + 1, conclusion="failure"),
+    ]
+    runs_path = tmp_path / "runs.jsonl"
+    runs_path.write_text("\n".join(json.dumps(r) for r in runs))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs_path), "--window-hours", "24",
+                     "--out", str(out)]) == 0
+    record = json.loads(out.read_text())
+    assert record["status"] == "OK"
+    assert record["window"]["end"] == _iso(SENTINEL_CLOCK)
+
+
 def test_from_json_replay_does_not_shell_out_for_a_main_sha(tmp_path, monkeypatch):
     # `--from-json` must stay hermetic: resolving origin/main shells out to `git
     # ls-remote`, so it is only done on `--live` (or when `--main-sha` is given).
@@ -563,7 +675,7 @@ def test_from_json_replay_does_not_shell_out_for_a_main_sha(tmp_path, monkeypatc
     runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
-                     "--out", str(out)]) == 0
+                     "--as-of", _iso(NOW), "--out", str(out)]) == 0
     record = json.loads(out.read_text())
     assert record["window"]["main_sha_source"].startswith("unresolved")
 
@@ -587,17 +699,74 @@ def test_cli_truncated_unknown_is_exit_2_not_a_crash(tmp_path, monkeypatch):
     assert body["truncated"] is True
 
 
+def test_cli_marks_truncation_on_an_ok_record(tmp_path, monkeypatch):
+    # The OK branch of the read-cap stamp: a truncated read whose window DID hold
+    # queue runs must carry the note on `window`, so capacity reads as a LOWER
+    # bound rather than a proven value. (The UNKNOWN branch is covered above.)
+    monkeypatch.setattr(obs, "fetch_runs", lambda pages=8: (_corpus(), True))
+    monkeypatch.setattr(obs, "live_queue_refs", lambda: ["mergify/merge-queue/x"])
+    monkeypatch.setattr(obs, "resolve_origin_main", lambda: "0" * 40)
+    out = tmp_path / "record.json"
+    assert obs.main(["--live", "--window-hours", "24",
+                     "--as-of", _iso(NOW), "--out", str(out)]) == 0
+    window = json.loads(out.read_text())["window"]
+    assert window["truncated"] is True
+    assert window["truncated_note"]
+
+
 def test_cli_exits_2_on_a_failed_conflicts_read(tmp_path):
-    # A well-formed but FAILED conflicts read is still UNKNOWN: `{read_ok: false,
-    # items: []}` must not read as "checked, none found".
+    # A well-formed but FAILED conflicts read is still UNKNOWN. The population is
+    # deliberately NON-degenerate (1 item, total 1): a `total: 0` payload would be
+    # rejected by the `total < 1` guard as well, so the test could not tell that
+    # THIS guard is what refuses it.
     runs = tmp_path / "runs.jsonl"
     runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
     bad = tmp_path / "conflicts.json"
-    bad.write_text(json.dumps({"read_ok": False, "items": [], "total_count": 0}))
+    bad.write_text(json.dumps({"read_ok": False, "items": [{"conflicting": True}],
+                               "total_count": 1}))
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
                      "--conflicts-json", str(bad), "--out", str(out)]) == 2
-    assert json.loads(out.read_text())["status"] == obs.UNKNOWN
+    body = json.loads(out.read_text())
+    assert body["status"] == obs.UNKNOWN
+    assert "failed read" in body["reason"]
+
+
+def test_cli_exits_2_on_a_conflicts_input_without_an_items_list(tmp_path):
+    # A PARSEABLE JSON value that is not an object carrying an `items` list is a
+    # malformed conflicts read, not an empty one.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bad = tmp_path / "conflicts.json"
+    bad.write_text(json.dumps([1, 2, 3]))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    body = json.loads(out.read_text())
+    assert body["status"] == obs.UNKNOWN
+    # Guard-UNIQUE phrase: "items" alone also appears in the reconciliation
+    # guard's reason ("... did not reconcile to its total: 1 items vs 177").
+    assert "carries no `items` list" in body["reason"]
+
+
+def test_cli_exits_2_on_an_invalidated_conflicts_sweep(tmp_path):
+    # DISCRIMINATING: a NON-degenerate population (1 item, total 1) means only
+    # the `main_moved` guard can reject it — `total < 1` does not apply.
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
+    bad = tmp_path / "conflicts.json"
+    bad.write_text(json.dumps({"read_ok": True, "main_moved": True,
+                               "items": [{"conflicting": False}],
+                               "total_count": 1}))
+    out = tmp_path / "record.json"
+    assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
+                     "--conflicts-json", str(bad), "--out", str(out)]) == 2
+    body = json.loads(out.read_text())
+    assert body["status"] == obs.UNKNOWN
+    assert "moved" in body["reason"]
 
 
 def test_cli_exits_2_on_a_partial_conflicts_read(tmp_path):
@@ -609,6 +778,7 @@ def test_cli_exits_2_on_a_partial_conflicts_read(tmp_path):
                                "total_count": 177}))
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
                      "--conflicts-json", str(bad), "--out", str(out)]) == 2
     assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 
@@ -630,6 +800,19 @@ def test_cli_refuses_an_empty_as_of(tmp_path):
     runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
     with pytest.raises(SystemExit):
         obs.main(["--from-json", str(runs), "--as-of", ""])
+
+
+def test_cli_refuses_an_empty_from_json():
+    # `--from-json "$P"` with an unset variable is a MISUSE, not a request to
+    # read the empty path.
+    with pytest.raises(SystemExit):
+        obs.main(["--from-json", "", "--window-hours", "24"])
+
+
+def test_cli_refuses_neither_read_flag():
+    # No read source at all is a usage error, never a silent empty read.
+    with pytest.raises(SystemExit):
+        obs.main(["--window-hours", "24"])
 
 
 def test_cli_refuses_an_empty_conflicts_json(tmp_path):
@@ -732,6 +915,7 @@ def test_cli_records_a_caller_supplied_main_sha_verbatim(tmp_path):
     runs.write_text("\n".join(json.dumps(r) for r in _corpus()))
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
                      "--main-sha", "5b6cb93", "--out", str(out)]) == 0
     window = json.loads(out.read_text())["window"]
     assert window["main_sha"] == "5b6cb93"
@@ -746,6 +930,7 @@ def test_cli_exits_2_when_a_requested_ref_read_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(obs, "live_queue_refs", lambda: None)
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
                      "--confirm-refs", "--main-sha", "5b6cb93",
                      "--out", str(out)]) == 2
     assert json.loads(out.read_text())["status"] == obs.UNKNOWN
@@ -811,6 +996,7 @@ def test_cli_exits_2_on_incomplete_conflicts_results(tmp_path):
                                "total_count": 1}))
     out = tmp_path / "record.json"
     assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                     "--as-of", _iso(NOW),
                      "--conflicts-json", str(bad), "--out", str(out)]) == 2
     assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 
@@ -829,6 +1015,7 @@ def test_cli_exits_2_on_a_degenerate_conflicts_population(tmp_path):
         bad.write_text(json.dumps(payload))
         out = tmp_path / "record.json"
         assert obs.main(["--from-json", str(runs), "--window-hours", "24",
+                         "--as-of", _iso(NOW),
                          "--conflicts-json", str(bad), "--out", str(out)]) == 2
         assert json.loads(out.read_text())["status"] == obs.UNKNOWN
 

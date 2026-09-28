@@ -23,11 +23,21 @@ from tools.ci_selection import (  # noqa: I001
     SOURCE_PATTERNS, SHARED_MODULES, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
+    on_demand_files, leg_coverage_issues, push_legs, fast_pool,
+    duration_issues, TESTS_DIR,
 )
+
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 def _sel(changed, event="pull_request"):
     return select(changed, event, load_manifest())
+
+
+def _expand(legs: dict) -> dict:
+    """Compare leg membership without caring about the .py suffix."""
+    return {k: set(v) for k, v in legs.items()}
 
 
 def _tier1() -> set:
@@ -672,37 +682,54 @@ def test_slow_files_never_in_fast_gate_selections():
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
-def test_expensive_eval_integration_stays_slow():
-    """#4711/#4712: the suite's single most expensive file must stay in slow_files.
+def test_expensive_eval_integration_is_in_the_on_demand_lane():
+    """The suite's single most expensive file is OFF the merge gate.
 
-    MEASURED from the junit artifact of green main run 35779482728 (`45aa52f70`):
-    `eval/retrieval/test_integration.py` cost **1465.9s = 24.4 min**, 1.71x its
-    stale declared 855.2s, and it ran in the FAST lane (half_a). That alone put
-    half_a at 2956.5s (49.3 min) against the 55-minute watchdog — 5.7 minutes of
-    headroom — while half_b sat at 1357.5s (22.6 min): a real 2.18:1 split that
-    the placeholder-symmetric durations map concealed. Moving it to slow_files
-    restored a real 1.05:1 balance (half_a 1392.3s / half_b 1455.7s) with ~31
-    minutes of headroom, WITHOUT raising any timeout.
+    SUPERSEDED PIN, deliberately repointed rather than deleted. The previous
+    version of this test (#4711/#4712) asserted the file must stay in
+    `slow_files`. That pin was created for a real reason and its docstring says
+    which: the file had been in the FAST lane, cost a MEASURED 1465.9s = 24.4
+    min, put half_a at 2956.5s (49.3 min) against a 55-minute watchdog with only
+    5.7 minutes of headroom, and moving it to slow_files restored a 1.05:1 split.
+    The decision was about WHERE the 24.4 minutes sat so the watchdog was not
+    blown — never about whether it had to gate a merge.
 
-    `test_slow_files_never_in_fast_gate_selections` cannot catch a revert that
-    ALSO drops the slow_files entry — the generic assertion would still pass.
-    This pin names the file so the regression is loud.
+    The `on_demand:` lane satisfies that intent strictly better: the 24.4
+    minutes leave the pre-merge gate entirely, so no fast or slow leg can be
+    blown by it at all. The pin is repointed, not removed, because the reason it
+    exists — "this file is enormous and must not sit in a fast lane" — is still
+    true and still needs to be loud.
+
+    The old assertion `f in m["slow_files"]` would now be wrong in the opposite
+    direction, and its sibling `test_slow_files_never_in_fast_gate_selections`
+    cannot catch a revert that ALSO drops the slow_files entry, which is exactly
+    what happened here. So this names the file.
     """
     m = load_manifest()
     f = "eval/retrieval/test_integration.py"
-    assert f in set(m["slow_files"]), (
-        f"{f} must stay in slow_files — it is 24.4 min of the fast lane's "
-        "55-minute budget (#4711)"
-    )
+    assert f in on_demand_files(m), (
+        f"{f} is 24.4 min measured (1.71x its stale declared 855.2s) — it must "
+        "stay in the on_demand lane, or it is back on the merge gate (#4711)")
+    # Stronger than the pin it replaces: not merely absent from the fast gate
+    # for three sample diffs, but absent from EVERY pre-merge leg for ALL of
+    # them, because the exclusion is structural (fast_pool filters the lane).
+    lanes = push_legs(m)
+    bare = f[:-3]
+    for leg in ("half_a", "half_b", "slow", "carve_out", "env_broken"):
+        assert bare not in lanes[leg], (
+            f"{f} leaked into {leg!r} — the lane must exclude it from every "
+            f"pre-merge leg, not just the fast ones")
     for changed in (["tortoise/graph.py"], ["docs/README.md"],
-                    ["tortoise/ranking.py"]):
-        got = set(_sel(changed)["test_files"])
-        assert f not in got, f"{f} leaked into the fast gate for {changed}"
-    # Deliberately NOT asserting `f not in m["durations"]`: a slow-lane key
-    # carries its measured cost there on purpose, so a cost regression in a lane
-    # that exists *because* it is expensive stays visible
-    # (ci_selection.validate_durations). It cannot re-pack the file into the fast
-    # gate — split_fast_gate subtracts slow_files first (`files -= slow`).
+                    ["tortoise/ranking.py"], ["tortoise/search_engine.py"]):
+        assert f not in set(_sel(changed)["test_files"]), (
+            f"{f} leaked into the fast gate for {changed}")
+    # The cost must stay DECLARED. It no longer re-packs the file anywhere
+    # (the lane is subtracted before any packing), but the value is what makes
+    # the lane's justification checkable, and dropping it would quietly turn
+    # "we measured 24.4 min" into folklore.
+    assert f in m["durations"], (
+        f"{f} must keep its measured duration — it is the entire justification "
+        "for the lane existing")
 
 
 def test_slow_files_emitted_on_every_return_path():
@@ -4195,3 +4222,227 @@ def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
         f"all three orphan-assert steps must be handed {report_path}, the "
         f"path the empty-selection blocks write; found {len(handed)}"
     )
+
+
+# ── THE ON-DEMAND LANE ────────────────────────────────────────────────────
+# `config/ci-surfaces.yml` `on_demand:` lists files that RUN but do not GATE.
+# The lane exists because `fast_pool()` is "everything not slow / env-broken /
+# carve-out" — so deleting a file from `slow_files` moves it into the FAST
+# matrix and onto the gate. There is no "runs, but does not gate" state without
+# a lane, and the lane is only real if a runner actually runs it.
+
+THE_EXPENSIVE_EVAL = "eval/retrieval/test_integration.py"
+
+
+def test_the_on_demand_lane_excludes_its_file_from_every_pre_merge_leg():
+    # The whole point: absent from fast halves, slow, AND carve-out. Asserted
+    # per leg, because the failure that matters is "one leg forgot", and a
+    # set-level assertion reports that as an opaque union.
+    lanes = _expand(push_legs(load_manifest()))
+    name = THE_EXPENSIVE_EVAL
+    bare = name[:-3] if name.endswith(".py") else name
+    assert bare in lanes["on_demand"] or name in lanes["on_demand"], (
+        "the lane must own the file, or it is excluded and claimed by nothing")
+    for leg in ("half_a", "half_b", "slow", "carve_out", "env_broken"):
+        assert bare not in lanes[leg] and name not in lanes[leg], (
+            f"{THE_EXPENSIVE_EVAL} must NOT run in {leg!r}: the lane exists to "
+            f"keep it off the pre-merge gate")
+    assert bare not in {f[:-3] for f in fast_pool(load_manifest())}, (
+        "the lane must be filtered out of fast_pool — that filter is the only "
+        "reason the file is off the gate")
+
+
+def test_the_on_demand_lane_is_not_silently_empty():
+    # ABSENT != EMPTY. A repo that has not adopted the lane is fine (no key);
+    # a repo that declares the key and leaves it empty has a no-op exclusion —
+    # the expensive file is back on the merge path behind something that reads
+    # like a saving. Same polarity as the `durations` guard.
+    m = load_manifest()
+    assert "on_demand" in m, (
+        "this repo must declare the lane: the PR that created it removed the "
+        "25.4-min file from slow_files, and without the key that file is on "
+        "the gate again")
+    assert on_demand_files(m), "the declared lane must not be empty"
+
+    adopted = dict(m)
+    adopted.pop("on_demand")
+    issues = leg_coverage_issues(adopted)
+    assert not [i for i in issues if "on_demand lane is present but EMPTY" in i], (
+        "an ABSENT lane is 'not adopted', not a broken declaration — making it "
+        "red would break every repo that does not use the lane")
+
+    empty = dict(m, on_demand=[])
+    assert any("present but EMPTY" in i for i in leg_coverage_issues(empty)), (
+        "a declared-but-empty lane excludes nothing and must red")
+
+
+def test_a_lane_file_still_on_a_gated_leg_is_reported():
+    # The silent-and-expensive direction: a file in the lane AND in slow_files
+    # is still on the merge path, so the lane saves nothing while reading as if
+    # it did. leg_coverage_issues is the only thing that can see this.
+    m = load_manifest()
+    still_slow = dict(m, slow_files=[*list(m["slow_files"]), THE_EXPENSIVE_EVAL])
+    hits = [i for i in leg_coverage_issues(still_slow) if "on-demand/slow overlap" in i]
+    assert hits, "a lane file still in slow_files must be reported"
+    assert THE_EXPENSIVE_EVAL in hits[0]
+
+
+def test_the_lane_has_a_real_runner_and_reads_the_lane_from_config():
+    # A lane with no runner is strictly worse than no lane: the file is off the
+    # gate AND runs nowhere, so a calibration instrument silently stops being
+    # run while every guard reports green. Pin that the workflow exists, is
+    # manual (it must NOT gate), and does not keep a SECOND copy of the list —
+    # a second copy is a second place to forget, and the forgetting is silent.
+    wf = (REPO / ".github/workflows/evals-on-demand.yml").read_text()
+    import yaml
+    doc = yaml.safe_load(wf)
+    # `on:` parses as the boolean True key in YAML 1.1 — check both spellings
+    # rather than assuming, or this assertion silently tests nothing.
+    triggers = doc.get("on", doc.get(True))
+    assert list(triggers) == ["workflow_dispatch"], (
+        f"the lane's runner must be manual only, got {list(triggers)}")
+    assert "pull_request" not in triggers, "an on-demand runner must not gate a PR"
+    assert on_demand_files.__name__ in wf, (
+        "the workflow must resolve the lane through on_demand_files() — "
+        "hardcoding a second list here lets the two drift")
+
+
+def test_the_lane_files_duration_key_is_classified_not_drift():
+    # `duration_issues()` requires every `durations` key to be a CLASSIFIED
+    # test file. The lane file is classified into a LANE rather than a surface,
+    # so the lane must be added to that guard's `classified` set — otherwise
+    # `--integrity` reds on a manifest that is correct, and the obvious "fix"
+    # for the red is to delete the measured cost that justifies the lane.
+    #
+    # The counterfactual is the load-bearing half: with the lane removed the
+    # SAME key IS drift, which proves the assertion above is testing the lane
+    # and not merely an empty guard that would pass for any manifest.
+    m = load_manifest()
+    assert duration_issues(m) == [], (
+        "the lane's declared duration must not read as unclassified drift")
+    without = dict(m)
+    without.pop("on_demand")
+    assert any(THE_EXPENSIVE_EVAL in i for i in duration_issues(without)), (
+        "control: with the lane absent this key IS drift — if this passes too, "
+        "the guard above is vacuous")
+
+
+def test_the_lane_is_a_classification_for_integrity_too():
+    # Same defect, other guard: `integrity()` asks "is this test file
+    # classified?". A lane file is deliberately absent from every surface, so
+    # without the lane it reads as DRIFT (a test file nobody registered) and
+    # `--integrity` reds. This is the guard whose failure would be "fixed" by
+    # re-registering the file into a surface — silently putting it back on the
+    # gate. Counterfactual pinned the same way.
+    assert integrity(load_manifest()) == [], (
+        "the lane's file must not read as unregistered drift")
+    assert classify_test_file(THE_EXPENSIVE_EVAL, load_manifest()) is None, (
+        "the file is deliberately in NO surface — that is what makes the lane "
+        "necessary rather than decorative; if it acquires a surface, the "
+        "exclusion in fast_pool becomes the only thing keeping it off the gate")
+    # The counterfactual, ASSERTED. The docstring above claimed this test pinned
+    # one "the same way" as its sibling, and it did not — the sibling pops the
+    # lane and asserts drift while this test asserted only the clean direction.
+    # With the lane removed the file IS unregistered drift; without that half,
+    # a `integrity()` that simply returned [] for everything would pass here.
+    without = dict(load_manifest())
+    without.pop("on_demand")
+    assert THE_EXPENSIVE_EVAL in integrity(without), (
+        "control: with the lane absent the file really is unregistered drift — "
+        "if this also passes, the assertion above is vacuous")
+    assert THE_EXPENSIVE_EVAL not in integrity(load_manifest()), (
+        "and with the lane present it is classified, which is the actual claim")
+
+
+def test_a_null_on_demand_key_is_reported_not_a_traceback():
+    # `on_demand:` with NO entries parses to None — not to []. YAML's empty
+    # value. `manifest.get("on_demand", [])` returns that None (the key IS
+    # present, so the default is never used), and `set(None)` raises TypeError,
+    # so EVERY caller crashed before the guard that exists to name an empty
+    # lane could report it.
+    #
+    # This test uses None SPECIFICALLY. The rest of these tests spell it
+    # `on_demand=[]`, a Python list — a state a human editing the YAML can
+    # never produce. That is why the whole suite passed while the real bug
+    # lived: the empty-lane guard was verified against a state that never
+    # occurs, which is a false assurance and not coverage.
+    m = dict(load_manifest(), on_demand=None)
+    assert on_demand_files(m) == set(), "a null lane must read as empty, not raise"
+    assert any("present but EMPTY" in i for i in leg_coverage_issues(m)), (
+        "the guard must still FIRE for the state a human actually types")
+    # Every other consumer must survive the null form too — they each called
+    # on_demand_files() and each raised. They must RETURN (fail closed with a
+    # report), not merely not-crash: with the lane nulled the file is genuinely
+    # unclassified, so drift IS the correct answer here and asserting an empty
+    # list would pin the wrong behaviour.
+    assert isinstance(integrity(m), list), "must report drift, not raise"
+    assert any(THE_EXPENSIVE_EVAL in x for x in integrity(m)), (
+        "with the lane nulled the file really is unclassified — the guard must "
+        "say so rather than crash")
+    assert isinstance(duration_issues(m), list)
+    assert isinstance(fast_pool(m), list), "must not raise on a null lane"
+
+
+def test_the_surface_audit_separates_the_lane_from_drift():
+    # The lane file is unregistered ON PURPOSE — that is what the lane means.
+    # Listing it under "files in NO surface" reads as drift, and the obvious
+    # fix for that reading is to re-register the file into a surface, which
+    # silently puts it back on the merge gate. The two states are separated.
+    #
+    # Pinned against the RENDERED output as well as the report, because the
+    # first version of the render fix read `report["manifest"]` — a key the
+    # report does not carry — so it silently evaluated to an empty list and
+    # the note never appeared. A fix that cannot fail is not a fix.
+    r = surface_audit(load_manifest())
+    assert THE_EXPENSIVE_EVAL not in r["no_surface"], (
+        "a lane file is not drift — it is classified, into a lane")
+    assert THE_EXPENSIVE_EVAL in r["on_demand"], (
+        "the report must carry the lane, or the renderer cannot show it")
+    rendered = render_surface_audit(r)
+    assert "in the on_demand lane" in rendered, (
+        "the rendered audit must name the lane; the fix that read a missing key "
+        "produced no line at all and still passed its own test")
+    assert THE_EXPENSIVE_EVAL in rendered
+
+def test_a_dead_on_demand_entry_is_reported():
+    # The guard this replaces was VACUOUS: `classified` had just been updated
+    # with the lane itself, so `f not in classified` was tautologically False
+    # and the branch could never fire. Pinned with an entry that names a file
+    # which does not exist — a lane entry like that excludes nothing that runs,
+    # while the lane still reads as healthy.
+    m = dict(load_manifest(), on_demand=["bogus/nonexistent.py"])
+    hits = [i for i in leg_coverage_issues(m) if "on-demand" in i and "dead entry" in i]
+    assert hits, "a lane entry naming a missing file must be reported"
+    assert "bogus/nonexistent.py" in hits[0]
+
+
+def test_a_top_level_lane_file_is_not_re_registered_by_unlisted_tests():
+    # `--register` fixes "unlisted" files by registering them into a surface.
+    # For a lane file that fix is the BUG: it would silently put the file back
+    # on the merge gate.
+    #
+    # THE STATE THAT MATTERS is a file that is BOTH unregistered AND laned —
+    # only then does the lane skip change the answer. An earlier version of this
+    # test laned `test_billing.py`, which is registered under `api`, so
+    # `unlisted_tests()` never listed it either way and the test proved nothing
+    # (the reviewer's mutation — deleting the lane skip — left it GREEN).
+    # So: take a real registered file, REMOVE it from every surface, and show
+    # that the lane alone decides whether it reads as drift.
+    base = load_manifest()
+    stripped = {**base,
+                "surfaces": {s: [e for e in entries if e != "test_billing.py"]
+                             for s, entries in base["surfaces"].items()}}
+    assert classify_test_file("test_billing.py", stripped) is None, (
+        "setup: the file must be in NO surface, or the lane skip is not what "
+        "is being tested")
+    # Control: unregistered and NOT laned -> drift, so --register would take it.
+    assert "test_billing.py" in unlisted_tests(TESTS_DIR, stripped), (
+        "control: with no lane, an unregistered file IS unlisted — if this "
+        "fails the test below is vacuous")
+    # The guard: unregistered BUT laned -> not drift, so --register leaves it be.
+    laned = {**stripped, "on_demand": ["test_billing.py"]}
+    assert "test_billing.py" not in unlisted_tests(TESTS_DIR, laned), (
+        "a lane file must not read as unlisted, or --register would put it "
+        "back on the merge gate")
+    # And the real manifest must not report the currently-laned file either.
+    assert "eval/retrieval/test_integration.py" not in unlisted_tests(TESTS_DIR, base)
