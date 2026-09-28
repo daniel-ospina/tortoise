@@ -211,11 +211,16 @@ def test_gold_turn_in_pool_membership_embedded():
     strict=True,
     reason="Accepted regression from the #4155 grouping fix — root-caused as "
            "#5821. The corrected bucket key makes the per-session cap stop "
-           "binding (120 in → 119 out, was 91), so the UNCHANGED byte cap is "
-           "now the binding constraint and keeps 58 items where it kept 70; "
-           "the gold turn sits at rank 67 and is cut. This test's premise — "
-           "that raising the window and the item cap TOGETHER is sufficient — "
-           "no longer holds, so it is marked rather than silently red. "
+           "binding (120 in → 119 out, was 91), so the binding constraint is "
+           "now the TOKEN cap, not the byte cap this marker used to name: at "
+           "this helper's 8000-token budget the assembly step keeps 58 items "
+           "(measured — the byte cap is NOT what produces 58: holding tokens at "
+           "64000 and byte_cap at 64000 keeps 78), and the gold turn sits at "
+           "rank 68 after the evidence boost, so it is cut. The gold DOES land "
+           "at the product's own 16000-token default (97 kept). This test "
+           "raises the window and the item cap but not the token cap, so those "
+           "two raises cannot lift the keep above 58 — the measured "
+           "attribution is pinned by test_ask_cap_attribution_5821 below. "
            "strict=True so that landing #5821 makes this an XPASS failure and "
            "forces the marker's removal.",
 )
@@ -226,9 +231,12 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     Step 0. Default-off knobs are exercised explicitly.
 
     ⚠️ Known-failing by owner decision, tracked as #5821 — see the marker
-    reason. The value that would make this pass is a working ordering/budget
-    fix, not a louder assertion: it is xfail(strict) so the fix cannot land
-    without removing this marker.
+    reason. This test raises the window and the item cap, but a THIRD cap —
+    this helper's own 8000-token budget — is what binds at 58, so the two
+    raises here cannot satisfy the assertion. Only an ordering change that
+    moves the gold from rank 68 into the kept 58 can (a token-cap decision
+    belongs to #5821's Task 3 and is deliberately NOT made here). It is
+    xfail(strict) so the fix cannot land without removing this marker.
     """
     questions = _recorded_questions()
     if not questions:
@@ -246,6 +254,89 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
         assert {h["id"] for h in ctx} & gold, (
             "1d4e3b97: gold must land in context when the window+cap are "
             "raised together (A6 tandem threading)")
+    finally:
+        sdk.close()
+
+
+def test_ask_cap_attribution_5821():
+    """#5821 Task 1: pin WHICH cap binds, so this gate cannot mis-attribute it.
+
+    The #4155 marker originally blamed the byte cap for the 58-item keep.
+    Measured on main at b2448869d, BOTH caps bind and they are coupled
+    (`resolve_byte_cap_from_caps` derives byte = 8 x token), but the 58 is the
+    TOKEN cap's doing: holding tokens high at the lane's own 64000-byte ceiling
+    admits 78, which is more than 58. This records that attribution as a
+    PROPERTY rather than a fixed count, so it pins the mechanism without
+    becoming a place to widen a budget (#5821 Task 3 keeps that decision out
+    of code).
+
+    What value makes this test fail: if the token cap stops being the tighter
+    constraint at 8000 (property 2 breaks), if relaxing it no longer raises the
+    keep (property 1 breaks), or if the byte cap stops constraining anything
+    (property 3 breaks) — any of those makes the attribution recorded on the
+    #5821 marker false again, and this test says so instead of letting the
+    comment drift.
+    """
+    questions = _recorded_questions()
+    if not questions:
+        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    q = questions.get("1d4e3b97")
+    if q is None:
+        pytest.skip("1d4e3b97 not in cached dataset")
+
+    from tortoise.retrieval import (
+        DEFAULT_MAX_CHUNKS_PER_SESSION,
+        apply_evidence_boost,
+        ask_session_key,
+        assemble_context,
+        dedup_pool,
+        resolve_ask_boost_multipliers,
+        resolve_byte_cap_from_caps,
+    )
+
+    sdk = _fresh_sdk()
+    try:
+        _seed(sdk, q)
+        hits = sdk.tortoise_fts_query(
+            q["question"], limit=120, pool_size=120, include_terminal=True,
+            keep_numeric=True, search_keys_prf=True)
+        ann = sdk.annotate_ask_hits(hits)
+        assert ann, "retrieval returned nothing — the premise is broken"
+        ded = dedup_pool(
+            ann, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
+            session_key=ask_session_key)
+        mult = resolve_ask_boost_multipliers()
+        bo, _ = apply_evidence_boost(
+            ded, boost_answer_string=mult["answer_string"],
+            boost_verbatim=mult["verbatim"], boost_source=mult["source"])
+
+        def kept(token_cap: int, byte_cap: int | None = None) -> int:
+            bc = byte_cap if byte_cap is not None else resolve_byte_cap_from_caps(
+                {"context_token_cap": token_cap})
+            return len(assemble_context(
+                bo, top_k=120, max_context_tokens=token_cap,
+                context_item_cap=120, byte_cap=bc))
+
+        # (1) the token cap is what produces the 58-item keep at this
+        #     helper's 8000-token lane: relaxing it alone raises the keep.
+        assert kept(16000) > kept(8000), (
+            "relaxing the token cap did not raise the keep — the token cap is "
+            "no longer what binds at 8000, so the #5821 attribution is stale")
+
+        # (2) at the 8000-token lane the token cap is the TIGHTER of the two
+        #     coupled caps (byte = 8 x token): holding tokens high and keeping
+        #     the lane's 64000-byte ceiling admits MORE than 58, so the 58 is
+        #     the token cap's doing and not the byte cap's.
+        assert kept(64000, byte_cap=64000) > kept(8000), (
+            "holding tokens high at the lane's 64000-byte ceiling did not "
+            "admit more than the 8000-token lane — the attribution of the 58 "
+            "to the token cap is wrong")
+
+        # (3) the byte cap is a real, independently binding constraint — it is
+        #     NOT inert, and no comment should say it is.
+        assert kept(64000, byte_cap=64000) < kept(64000, byte_cap=1000000), (
+            "raising the byte ceiling alone did not change the keep — the byte "
+            "cap is inert here, contradicting the measured attribution")
     finally:
         sdk.close()
 
