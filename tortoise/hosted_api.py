@@ -38,6 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Mount, get_route_path
 
 import tortoise
 
@@ -2345,6 +2346,288 @@ class McpPathCanonicalizerMiddleware:
 app.add_middleware(McpPathCanonicalizerMiddleware)
 
 
+# ── #4491: egress (response bytes) per org — the network cost dimension ────
+#
+# #4491: inbound bytes were the ONLY byte accounting in this app, and only as
+# a DoS cap (the manifest route's `content-length` guard) — a safety bound, not
+# a cost metric. NOTHING counted outbound bytes, so the network cost of serving
+# a read-heavy org (retrieval/ask result sets, graph read, export) had no
+# signal while reads are free by decision (`product/pricing.json` ->
+# `billing.reads_free: true`).
+#
+# ONE wrapper for every route, REST and the mounted MCP app alike (a FastAPI
+# mount is an ordinary route, so this middleware sees it): a new endpoint
+# cannot be born unmeasured and no handler needs editing.
+#
+# WHERE IT SITS — inside `InFlightMiddleware` and `WaitBoundMiddleware`, NOT
+# outermost:
+#   * `WaitBoundMiddleware` must stay outermost (#3834; pinned by
+#     `test_transport_wait_bound.py::test_middleware_is_installed_outermost`, and
+#     the gauge at index 1 by
+#     `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`) —
+#     an accounting wrapper must not take that seat. Starlette's `add_middleware`
+#     INSERTS at index 0, so this registration is placed BEFORE
+#     `InFlightMiddleware`'s to land at index 2.
+#   * Sitting INSIDE the bound is what makes the count truthful, not merely
+#     polite: on a breach the bound ABANDONS the handler and DROPS its response
+#     (`_guarded_send`), so bytes that never left must not be credited to the
+#     org. The drop is invisible in `send` (it returns normally), but the bound
+#     publishes it — `_WAIT_BOUND_REFUSED_STATE` — and this middleware reads
+#     that flag before recording. Without it, every breached request would
+#     credit a DISCARDED response to the org's egress.
+_WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
+
+#: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
+#: request under one is admitted on the ROUTE axis (see ``monitoring``'s
+#: two-axis note) rather than the request-derived one. That matters because a
+#: mounted surface is a primary read path: on the derived axis, eight cheap 404s
+#: on UNRELATED paths starve it for the process lifetime (measured). The prefix
+#: is the label — no per-sub-route precision is claimed for a sub-app whose
+#: inner routes this layer does not enumerate.
+_EGRESS_DECLARED_PREFIXES = ("/mcp",)
+
+#: Exact paths of the app's PLAIN Starlette routes — CODE LITERALS that FastAPI
+#: does not stamp onto the scope (``APIRoute.matches`` sets ``scope["route"]``,
+#: plain ``Route.matches`` does not), so they would otherwise be labelled on the
+#: request-derived axis with unknown traffic. ``test_declared_paths_match...``
+#: pins the list against ``app.routes`` so it cannot drift.
+_EGRESS_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+
+#: Bounds on the fallback (request-derived) route label. A FastAPI route
+#: template is a code literal and always short; the normalised fallback is not,
+#: so it is truncated per segment — at most two segments of
+#: ``_EGRESS_MAX_SEGMENT_LEN``, so the whole label is bounded by construction.
+_EGRESS_MAX_SEGMENT_LEN = 24
+
+
+def _route_describes(route, path: str) -> bool:
+    """Whether ``route`` is the route that served ``path``.
+
+    The route's OWN pattern is the arbiter, so path params still resolve to the
+    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). This predicate
+    answers ONLY whether the pattern covers the path: it cannot itself tell the
+    serving route from a mount's INNER route, and must not be asked to — an
+    inner ``Route("/{rest:path}")`` has regex ``^(?P<rest>.*)$`` and covers the
+    prefixed path too (measured). The mount cases are excluded by the CALLER,
+    never by a pattern match here.
+
+    ``re.match``, NOT ``fullmatch``: the router matches with ``match`` against
+    ``^…$`` (``starlette.routing.compile_path``), and Python's ``$`` also matches
+    just before a TRAILING NEWLINE — so the router serves ``/v1/version\n`` with
+    the ``/v1/version`` route while ``fullmatch`` rejects it. That divergence
+    put a matched route's bytes on the untrusted axis (measured), which is
+    exactly the direction this predicate exists to prevent.
+
+    TOTAL: any failure to answer is ``False`` (fall back to the request-derived
+    label), never an exception a caller could turn into a failed request.
+    """
+    regex = getattr(route, "path_regex", None)
+    if regex is None:
+        return getattr(route, "path", None) == path
+    try:
+        return regex.match(path) is not None
+    except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
+        return False
+
+
+def _routed_inside_a_mount(scope, entry_path: str) -> bool:
+    """Whether the matched route lives INSIDE a ``Mount`` the request descended.
+
+    A mount appends its prefix to ``root_path`` as it descends, and that happens
+    after ``entry_path`` was captured — so comparing the two answers the
+    question exactly. It has to be asked separately from the ``Mount`` check: a
+    mount's INNER route is a plain ``Route`` whose pattern is relative to the
+    mount, and a catch-all inner route (``Route("/{rest:path}")``, regex
+    ``^(?P<rest>.*)$``) describes the prefixed arrival path just as well as its
+    own, so it would stand in for the whole undeclared surface on the
+    code-literal axis (measured on starlette 1.7.0, where the sub-app's route is
+    stamped; 1.6.0 stamps nothing and fell to the derived axis — the label must
+    not depend on which version is installed).
+
+    ``entry_path`` is ``get_route_path(scope)`` at middleware entry, i.e. the
+    path minus the root_path of that moment, so the arrival's own root_path is
+    the slice of ``scope["path"]`` in front of it. A server ``--root-path``
+    prefixes EVERY request and so cancels out on both sides, leaving it
+    untouched — as it must, since a route's ``path_regex`` is matched against
+    the root_path-relative path and templates under a root_path are legitimate.
+    """
+    full_path = scope.get("path")
+    if isinstance(full_path, str) and full_path.endswith(entry_path):
+        entry_root_path = full_path[: len(full_path) - len(entry_path)]
+    else:  # cannot reconstruct it - assume the app did not change root_path
+        entry_root_path = scope.get("root_path") or ""
+    return (scope.get("root_path") or "") != entry_root_path
+
+
+def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
+    """The route class a response is attributed to, and whether it was DERIVED.
+
+    A matched FastAPI route stamps its TEMPLATE onto the scope
+    (``scope["route"].path`` is ``/v1/points/{pid}``), which is the exact,
+    bounded label — two point ids never become two metric children. When no
+    template describes the request, the label falls back to a NORMALISED path:
+    at most two segments, with pure-numeric and long digit-bearing segments
+    collapsed to ``{id}`` (``/nope/123`` -> ``/nope/{id}``; ``/v1/...`` is
+    untouched because ``v1`` is a literal, not an id).
+
+    ``entry_path`` is the path the request ARRIVED with, and it is REQUIRED: it
+    is simply not safe to read the scope at response time (measured across the
+    two environments this suite runs in, i.e. what the lock resolves and what
+    CI's unpinned ``pip install -e '.[test,embeddings]'`` resolves). For a
+    request to ``/mcp/export`` both leave ``scope["path"]`` alone, but starlette
+    1.7.0 STAMPS ``scope["route"]`` with the sub-app's INNER route
+    (``Route('/export')``) while 1.6.0 stamps nothing — so trusting
+    ``scope["route"]`` unconditionally attributed the mounted request to
+    ``/export``. Trusting it here is conditional instead: the template must
+    describe the arrival path.
+
+    Callers must pass ``starlette.routing.get_route_path(scope)`` taken BEFORE
+    the app runs: it is the request path minus ``root_path``, which is what a
+    route's ``path_regex`` is matched against. Reading ``scope["path"]``
+    instead would break template matching outright under a server
+    ``--root-path`` (the regex is root_path-relative, the path is prefixed) and
+    — for a ``Mount`` — would also pick up the mount prefix in ``root_path``
+    once the sub-app has run.
+
+    A DECLARED path (a ``Mount`` prefix or a plain ``Route`` path — the app's
+    code literals that Starlette does not stamp onto the scope) is a
+    CODE-LITERAL label on the ROUTE axis, and the ``derived`` flag marks the
+    rest as REQUEST-DERIVED so ``monitoring.record_egress`` can admit them into
+    a separate, tightly capped budget: unknown traffic can never consume the
+    code-literal route budget and fold real routes into overflow.
+    """
+    path = entry_path or ""
+    if path in _EGRESS_DECLARED_PATHS:
+        return path, False
+    # A dot-segment path is rejected for the mount rule deliberately. The mount's
+    # sub-app DOES receive it (measured: the MCP sub-app emits the 404 for
+    # ``/mcp/../v1/version``), so this is a policy: a traversal shape must not
+    # carry the mounted surface's label.
+    if "." not in path:
+        for prefix in _EGRESS_DECLARED_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return prefix, False
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    # A ``Mount`` is NEVER the serving template: its pattern is relative to the
+    # mount and its regex matches everything beneath it
+    # (``^/mcp/(?P<path>.*)$``), so it would happily describe
+    # ``/mcp/../v1/version`` and hand a traversal shape the mount's label — the
+    # mount rule above is the only route from a mount to a label, and it covers
+    # DECLARED prefixes only. (Measured: WHICH router stamps a ``Mount`` at all
+    # depends on the parent app — FastAPI's ``APIRouter.app`` does not, while
+    # Starlette's base ``Router`` does — so the label must not depend on it.)
+    if (isinstance(template, str) and template
+            and not isinstance(route, Mount) and not _routed_inside_a_mount(scope, path)
+            and _route_describes(route, path)):
+        return template, False
+    segments = [seg for seg in path.split("/") if seg][:2]
+    if not segments:
+        return "/", True
+    bounded = []
+    for seg in segments:
+        looks_like_id = seg.isdigit() or (len(seg) >= 8 and any(c.isdigit() for c in seg))
+        bounded.append("{id}" if looks_like_id else seg[:_EGRESS_MAX_SEGMENT_LEN])
+    return "/" + "/".join(bounded), True
+
+
+class EgressBytesMiddleware:
+    """Account response body bytes per org and route class (#4491).
+
+    Pure ASGI and cheap: it wraps ``send`` and adds the ``body`` length of each
+    ``http.response.body`` message. No request/response objects, no buffering,
+    no change to what is sent, no I/O — one integer add per body message plus
+    one counter increment per response.
+
+    The org is read from the SAME ``scope["state"]`` dict the auth dependency
+    writes ``org_id`` into (Starlette's ``request.state`` IS that dict, and
+    ``Mount`` forwards the same mapping to the MCP sub-app) and it is read
+    AFTER the app returns, so an org resolved mid-request is still attributed.
+    A request that never resolved one is recorded as unattributed (``""``).
+    WHICH lanes resolve one is a real limit, stated rather than implied:
+      * the API-KEY data-plane lanes publish the org (``state["org_id"]``);
+      * the SESSION-JWT lane resolves an org but deliberately does not publish
+        it — ``state["org_id"]`` is also what ``AnalyticsMiddleware`` reads to
+        fire the ``first_api_call`` activation event, so publishing here would
+        change analytics, not just measurement;
+      * an MCP call's org is set inside the mount by ``mcp_auth`` in a
+        ContextVar this layer does not own.
+    Both non-publishing lanes are therefore attributed to ``""``: honest, and
+    the reason the figure is not yet a complete per-org cost.
+
+    WHAT IT DOES NOT COUNT, stated rather than assumed:
+      * response headers — the body is the payload cost;
+      * the bound's own refusal, sent by the OUTERMOST ``WaitBoundMiddleware``
+        outside this wrapper;
+      * a response the bound DROPPED on breach (``_WAIT_BOUND_REFUSED_STATE``);
+      * a 500 synthesized by Starlette's ``ServerErrorMiddleware``, which sits
+        OUTSIDE this wrapper (the innermost ``ExceptionMiddleware`` is inside it,
+        so every handled response is counted);
+      * a request whose handler raised BEFORE the app sent anything: measured,
+        such a request propagates the exception and no response is produced, so
+        it is not counted AT ALL — recording it would add a 0-byte observation
+        to a route that never responded, indistinguishable in the histogram from
+        a route that answered with an empty body (ASGI ends every response with
+        a ``http.response.body`` message, so the first one is the signal that a
+        response exists — a stream that breaks halfway is still counted, which
+        makes the figure a lower bound on partial sends);
+      * anything after a client disconnect whose ``send`` raised before the
+        final message (the count is "bytes handed to ``send``", so the message
+        that raised may still be credited — a bound, not an exact wire-byte
+        count; proxy compression is likewise invisible here).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not responses
+            await self.app(scope, receive, send)
+            return
+        nbytes = 0
+        # ``get_route_path`` (path minus ``root_path``) taken BEFORE the app
+        # runs: that is what a route's pattern is matched against, and it is
+        # fixed for the request — a ``Mount`` mutates ``root_path`` as it
+        # descends, so the same call at response time would no longer name it.
+        entry_path = get_route_path(scope)
+        # Whether a response was ever produced (see the docstring): an app that
+        # raises before sending must not be recorded as a 0-byte response.
+        responded = False
+
+        async def _counting_send(message):
+            nonlocal nbytes, responded
+            if message["type"] == "http.response.body":
+                responded = True
+                nbytes += len(message.get("body") or b"")
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _counting_send)
+        finally:
+            state = scope.get("state")
+            # NO `return` in this block: a `return` here would SWALLOW an
+            # in-flight exception from the app and turn a real error into a
+            # silent 200-less hang. Skip the record with a flag instead.
+            dropped = (isinstance(state, dict)
+                       and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
+            if responded and not dropped:
+                org_id = state.get("org_id") if isinstance(state, dict) else None
+                try:
+                    # Call-time attribute read (`_monitoring`), so a test or an
+                    # operator can substitute the writer; measurement must never
+                    # be a NEW failure mode for the request it measures — which
+                    # covers the LABEL derivation too, not just the increment:
+                    # a raise here would replace the app's own exception.
+                    path_label, derived = _egress_route_class(scope, entry_path)
+                    _monitoring.record_egress(
+                        org_id, path_label, nbytes, derived=derived)
+                except Exception:
+                    _logger.debug("egress accounting failed", exc_info=True)
+
+
+app.add_middleware(EgressBytesMiddleware)
+
+
 class InFlightMiddleware:
     """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
 
@@ -2810,7 +3093,11 @@ class WaitBoundMiddleware:
         # event is the only one — which is why this is a FLAG and not a
         # ``remaining <= 0`` guard at the seam.
         if isinstance(state, dict):
-            state["_wait_bound_refused"] = True
+            # Same key as ``mcp_server._WAIT_BOUND_REFUSED_KEY`` (one string, two
+            # modules) and as ``_WAIT_BOUND_REFUSED_STATE`` above, which the
+            # egress middleware reads to avoid crediting a DROPPED response
+            # (#4491) — keep the three in step by name, not by literal.
+            state[_WAIT_BOUND_REFUSED_STATE] = True
         org_id = state.get("org_id") if isinstance(state, dict) else None
         # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
         # with embedded CR/LF; logged verbatim that forges log lines. This is
@@ -3244,6 +3531,78 @@ def _validate_mint_expiry(body: dict) -> str | None:
 _PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
 _PROBE_SDK_LOCK = threading.Lock()
 
+# ── #4608: a displaced probe handle is RETIRED, never closed under a live probe
+#
+# A probe fetches the cached handle, releases ``_PROBE_SDK_LOCK`` and queries it
+# (``probe_db``) with NO lock held, so a ``_probe_sdk_reset()`` or a target
+# change landing in that window used to CLOSE the handle underneath the live
+# query. The query then failed and its ``{ok: False}`` was recorded as the
+# CURRENT generation — a spurious ``degraded`` for a reachable graph. The
+# coordinator's own ``seq`` check cannot help here: a reset does not touch
+# ``HealthProbe._seq`` at all, and on this surface ``_HEALTH_PROBE`` and
+# ``_READY_PROBE`` share this ONE cache while keeping INDEPENDENT ``_seq``
+# counters, so a reset driven by either can close a handle the other's
+# in-flight worker is using with no generation protection whatsoever.
+#
+# So the close is DEFERRED while any probe is in flight: a displaced handle goes
+# on ``_PROBE_SDK_DEFERRED`` and the last probe episode to finish closes it.
+# ``_PROBE_SDK_EPISODES`` is taken under ``_PROBE_SDK_LOCK`` BEFORE the handle
+# is fetched — the same lock the retirement decision takes — so no reset or
+# rebuild can observe "no probe in flight" while a probe sits between its fetch
+# and its release.
+_PROBE_SDK_EPISODES = 0
+_PROBE_SDK_DEFERRED: list = []
+
+
+def _retire_probe_sdk_locked(sdk):
+    """Displace ``sdk`` from the cache and decide who closes it (#4608).
+
+    Returns ``sdk`` when the CALLER must close it (no probe is in flight), or
+    ``None`` when the close is deferred to the last in-flight probe. A
+    displaced handle is never handed out again, so exactly one path closes each
+    one. Caller holds ``_PROBE_SDK_LOCK``.
+    """
+    if sdk is None:
+        return None
+    if _PROBE_SDK_EPISODES == 0:
+        return sdk
+    _PROBE_SDK_DEFERRED.append(sdk)
+    return None
+
+
+def _close_probe_sdks(sdks) -> None:
+    """Close displaced probe handles, out of the lock, never raising."""
+    for sdk in sdks:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _probe_episode():
+    """Account for ONE probe execution against the cached handle (#4608).
+
+    Held across the whole of ``_probe_db`` — handle acquisition AND query — so
+    a reset/rebuild landing at any point in between defers the close instead of
+    pulling the connection out from under this probe. Opened under
+    ``_PROBE_SDK_LOCK`` before the handle is fetched; the last episode to
+    finish performs any deferred close.
+    """
+    global _PROBE_SDK_EPISODES
+    with _PROBE_SDK_LOCK:
+        _PROBE_SDK_EPISODES += 1
+    try:
+        yield
+    finally:
+        with _PROBE_SDK_LOCK:
+            _PROBE_SDK_EPISODES -= 1
+            deferred = (list(_PROBE_SDK_DEFERRED)
+                        if _PROBE_SDK_EPISODES == 0 else [])
+            if deferred:
+                _PROBE_SDK_DEFERRED.clear()
+        _close_probe_sdks(deferred)
+
 
 def _probe_sdk_key() -> tuple:
     """Identity of the DB target the cached probe SDK is bound to.
@@ -3261,16 +3620,19 @@ def _probe_sdk_key() -> tuple:
 
 
 def _probe_sdk_reset() -> None:
-    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    """Close + drop the cached probe SDK (app startup / tests / ops).
+
+    #4608: the close is DEFERRED while a probe is in flight — the handle is
+    dropped from the cache immediately, but a live query keeps the connection
+    it is using until it releases it.
+    """
     with _PROBE_SDK_LOCK:
         sdk = _PROBE_SDK_CACHE.get("sdk")
         _PROBE_SDK_CACHE["sdk"] = None
         _PROBE_SDK_CACHE["key"] = None
-    if sdk is not None:
-        try:  # noqa: SIM105 — a stale temp DB may already be gone
-            sdk.close()
-        except Exception:
-            pass
+        close_now = _retire_probe_sdk_locked(sdk)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
 
 
 def _probe_sdk() -> TortoiseSDK:
@@ -3301,11 +3663,11 @@ def _probe_sdk() -> TortoiseSDK:
         sdk = _make_sdk(namespace=None)
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
-    if old is not None:
-        try:  # noqa: SIM105
-            old.close()
-        except Exception:
-            pass
+        # #4608: a target change displaces ``old``; close it only when no probe
+        # is still querying it.
+        close_now = _retire_probe_sdk_locked(old)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
     return sdk
 
 
@@ -3332,12 +3694,15 @@ def _probe_db() -> dict:
     registry_control_plane on every health check.
     """
     from tortoise.monitoring import probe_db
-    try:
-        sdk = _probe_sdk()
-    except Exception as exc:
-        _probe_sdk_reset()
-        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return probe_db(sdk)
+    # #4608: the episode spans the handle fetch AND the query, so a reset or a
+    # target change cannot close this handle mid-query.
+    with _probe_episode():
+        try:
+            sdk = _probe_sdk()
+        except Exception as exc:
+            _probe_sdk_reset()
+            return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+        return probe_db(sdk)
 
 
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
@@ -5493,7 +5858,7 @@ def _normalize_mapped_ipv6(ip):
 
 
 async def _check_ip_bucket_rate_limit(
-    request: Request, *,
+    request: Request | None = None, *,
     buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
     detail: str | dict, retry_after_s: int | None = None,
     key: Hashable | None = None, max_entries: int = 10_000,
@@ -5513,6 +5878,17 @@ async def _check_ip_bucket_rate_limit(
     test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
     computes time-until-oldest-entry-expires (sliding-window precision).
 
+    #2050: widening this helper for a Request-FREE caller (the MCP dispatch
+    point, key-authenticated per team — no client address exists there) must
+    not widen it for the HTTP callers that already pass a Request. The
+    Request is therefore consulted FIRST: a Request with no client address
+    has no identity to bucket on and returns, exactly as before #2050. Only
+    when NO Request is passed does an explicit `key` stand alone as the
+    bucket identity. An HTTP caller's `key` is a composite that CONTAINS the
+    client IP, so admitting it on a client-less Request would collide the
+    per-IP dimension of invite-accept / invite-otp into one shared
+    (…, "ip", None) bucket across unrelated callers (#5397 review).
+
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
     outcome (success/401/403), so a server fault (5xx) never consumes the
@@ -5520,13 +5896,25 @@ async def _check_ip_bucket_rate_limit(
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
-        return
-    ip = key if key is not None else request.client.host
+    if request is None:
+        # Request-free arm (#2050): `key` alone is the bucket identity. There
+        # is no client address to fall back to, so a missing key is the only
+        # reason to return.
+        if key is None:
+            return
+    else:
+        # Pre-#2050 guard, restored for EVERY Request-carrying caller: a
+        # client-less request has no identity to bucket on, whether or not a
+        # `key` was supplied. This is what keeps every existing caller's
+        # behaviour identical to the merge-base.
+        if not request.client or not request.client.host:
+            return
+        if key is None:
+            key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles both dotted-quad
     # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
         bucket = buckets[ip]
@@ -5955,12 +6343,33 @@ def _check_dashboard_key_login(org: dict, request: Request) -> None:
         )
 
 
+def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
+    """Admission kwargs for `_check_ip_bucket_rate_limit`, keyed by `bucket_key`.
+
+    The op → limit / window / refusal-copy mapping is stated ONCE, here. Both
+    arms of the budget — the REST per-IP arm and the MCP per-team arm (#2050)
+    — pass their own bucket identity through this seam, so the limit and the
+    refusal contract cannot drift between the two surfaces that enforce it.
+    Two implementations of one limit is how a budget stops being one.
+
+    Returns None when the op carries no budget: `_SENSITIVE_OP_LIMITS` is the
+    only authority for what is budgeted.
+    """
+    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
+    if max_per_hour is None:
+        return None
+    return {
+        "buckets": _SENSITIVE_BUCKETS, "lock": _SENSITIVE_LOCK,
+        "limit": max_per_hour, "window_s": 3600,
+        "key": bucket_key,
+        "detail": f"Rate limit exceeded for {op}. Please try again later.",
+        "retry_after_s": 3600,
+    }
+
+
 async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     """Per-IP hourly budget for sensitive org ops (export / org_delete /
     import / pack_manifest)."""
-    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
-    if max_per_hour is None:
-        return
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -5969,12 +6378,42 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
     _ip = _normalize_mapped_ipv6(_ip)
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
-        limit=max_per_hour, window_s=3600,
-        key=(_ip, op),
-        detail=f"Rate limit exceeded for {op}. Please try again later.",
-        retry_after_s=3600)
+    # An unknown client has no identity to bucket on, and this composite key
+    # must never be built around a None IP. _check_ip_bucket_rate_limit
+    # enforces the same requirement for every Request-carrying caller (#5397
+    # review restored it); stated here as well so the invariant is explicit
+    # at the one place this key is formed.
+    if _ip is None:
+        return
+    kwargs = _sensitive_op_budget(op, (_ip, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(request, **kwargs)
+
+
+async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
+    """#2050: the SAME sensitive-op budget, keyed by an explicit identity.
+
+    The MCP dispatch point (``mcp_server._wrapped_call_tool``) has no Request:
+    it is authenticated per TEAM, and a per-IP frame would be wrong there even
+    if one existed — an MCP caller is an agent server whose egress address is
+    shared with unrelated tenants (the #2866 DCR trusted-CIDR discussion). So
+    the MCP arm passes ``(scope_key, op)`` — the team id — as the bucket key
+    into the SAME shared ``_SENSITIVE_BUCKETS`` store, under the SAME
+    ``_SENSITIVE_OP_LIMITS`` entry and the SAME refusal contract, via the SAME
+    ``_check_ip_bucket_rate_limit`` implementation. One budget per op, enforced
+    on BOTH first-class pack-install surfaces.
+
+    ``scope_key`` must never be None: a None key would collapse to a single
+    shared bucket across every tenant. Callers without a scope (stdio, the
+    selfhost placeholder) must skip the call rather than pass one.
+    """
+    if scope_key is None:
+        raise ValueError("scope_key is required — a None key merges tenants")
+    kwargs = _sensitive_op_budget(op, (scope_key, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(None, **kwargs)
 
 
 async def _check_signup_ip_rate_limit(request: Request) -> None:
