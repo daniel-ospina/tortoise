@@ -1155,6 +1155,52 @@ test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () =
   assert.ok(html.includes(`<style nonce="${nonce}">`), 'the inline style must carry that nonce')
 })
 
+/**
+ * Frame protection for the consent interstitial (#4636).
+ *
+ * The page's whole value is that the user READS which account the link names, so
+ * a page that can be embedded in an attacker's frame shows the WRONG chrome
+ * around that name, and the name stops being the mitigation. `_headers` never
+ * reaches a Function response, so BOTH arms are the response's own
+ * responsibility — and both are read off the SERVED response here, because a
+ * source scan reports a spelling, not a behaviour.
+ *
+ * Neither arm is covered elsewhere. `X-Frame-Options` had no assertion at all
+ * before this test. And while the policy-equality test above does redden when the
+ * served policy drifts, the value it compares against is a pin that a LEGITIMATE
+ * policy edit updates in the same commit (see the `PINNED_POLICIES` failure
+ * message below) — so the `frame-ancestors` read here is the pin-INDEPENDENT
+ * statement of the requirement, and the one check that still reddens if
+ * `frame-ancestors 'none'` is deliberately dropped rather than accidentally
+ * drifted.
+ */
+test('the /auth/confirm interstitial cannot be framed', async () => {
+  const { emailInterstitial } = loadConfirmModule()
+  const res = emailInterstitial('victim@example.com', 'flow-abc', 'recovery')
+
+  assert.equal(
+    res.headers.get('X-Frame-Options'),
+    'DENY',
+    'the interstitial is a consent screen; it must refuse to be framed (X-Frame-Options: DENY)',
+  )
+
+  // Read the directive a browser ACTUALLY reads: the FIRST `frame-ancestors`,
+  // matched case-insensitively because CSP directive names are case-insensitive.
+  // A later duplicate is ignored by CSP, so a policy whose first value is
+  // permissive and whose last is `'none'` is NOT protected and must fail here —
+  // hence the leading-named read and not a scan for any `'none'`.
+  const csp = res.headers.get('Content-Security-Policy') ?? ''
+  const frameAncestors = csp
+    .split(';')
+    .map((d) => d.trim())
+    .find((d) => /^frame-ancestors(?:\s|$)/i.test(d))
+  assert.equal(
+    frameAncestors,
+    "frame-ancestors 'none'",
+    'the served policy must forbid every ancestor — a subset allowance leaves the interstitial frameable',
+  )
+})
+
 // ── 4. the policy in `_headers` cannot drift from the code ─────────────────
 
 test('_headers values are byte-identical to the stamped constants', () => {

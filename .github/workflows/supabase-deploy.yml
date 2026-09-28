@@ -59,7 +59,7 @@ jobs:
           rc=$?
           set -e
           if [ "$rc" -eq 1 ]; then
-            echo "::warning::Migrations pending — dispatch Deploy Supabase (migrations + functions) to apply before the next app deploy."
+            echo "::warning::Migrations pending — read the check-migration-drift output above. Resolve any OUT OF ORDER versions FIRST (forward migration, or 'migration repair --linked --status applied <version>') and rename any duplicate-prefix pair; then dispatch Deploy Supabase (migrations + functions) to apply before the next app deploy."
             exit 0
           fi
           exit "$rc"
