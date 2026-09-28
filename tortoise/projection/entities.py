@@ -1449,7 +1449,7 @@ class _EntityHandlers:
 
     def apply_journal_point_restamp(
             self, ev: dict, seq: int,
-            plan: dict[int, tuple[bool, bool]]) -> None:
+            plan: dict[int, tuple[bool, bool]]) -> tuple[str, str] | None:
         """#3305: apply the shared whole-journal plan to ONE terminalizer.
 
         The apply()-based whole-journal engines (``rebuild(EventLog)``,
@@ -1477,12 +1477,23 @@ class _EntityHandlers:
         it decides and ``rebuild_all`` normalizes before folding, so an
         unnormalized call here would make the engines disagree on a
         supported-by-``_norm`` record (#325/#3722's raw-vs-normalized class).
+
+        Returns the ``(old_id, successor_id)`` CORRECTS endpoints when a STAMP
+        was applied and the record names a successor (``PointSuperseded``'s
+        ``new_id`` / ``PointInvalidated``'s ``corrected_by``), else ``None``.
+        The caller BUFFERS the pair and re-applies it after every creation —
+        this pass is chronological, so the inline MERGE no-ops when the
+        successor is created LATER in the journal, and only the trailing
+        ``fold_deferred_corrects_edges`` sweep can resolve it (the same
+        forward-reference treatment ``EntityLinked`` gets; ``rebuild_all``'s
+        sweep already runs after its pass-1a hoist, which is why the two
+        engines disagreed).
         """
         ev = self._norm(ev)
         apply_decay, apply_stamp = plan.get(seq, (False, False))
         if not apply_decay and not apply_stamp:
             # Ineligible (a non-non-empty-writable id): the plan already warned.
-            return
+            return None
         matched = self._fold_point_restamp(
             ev, decay=apply_decay, stamp=apply_stamp)
         if apply_stamp and matched == 0:
@@ -1492,6 +1503,68 @@ class _EntityHandlers:
                 "created, or the record carries no successor",
                 ev.get("type"), ev.get("event_id"), ev.get("id"),
                 ev.get("new_id"))
+        if not apply_stamp:
+            return None
+        rid = ev.get("id")
+        successor = ev.get("new_id") or ev.get("corrected_by")
+        if not rid or not successor:
+            # No named successor (a bare invalidate, or a supersede the fold's
+            # own applicability guard dropped): nothing to defer.
+            return None
+        return (rid, successor)
+
+    def _merge_corrects_edge(self, old_id: str, new_id: str) -> int:
+        """#3305: the ONE home for a terminalizer fold's CORRECTS edge MERGE.
+
+        Both lifecycle folds (``_fold_point_superseded``,
+        ``_fold_point_invalidated``) and the deferred re-apply
+        (``fold_deferred_corrects_edges``) merge the SAME edge, so the query
+        lives here rather than in three copies.
+
+        Best-effort by construction: the MERGE only binds when BOTH endpoints
+        exist, so a missing successor no-ops the edge without failing the fold
+        (the fold's status/validity stamp needs only the target). Returns 1
+        when the edge was merged, 0 when an endpoint was absent.
+
+        The edge names the SUCCESSOR, which a chronological replay may not
+        have materialized yet — the caller is responsible for the trailing
+        re-apply in that case (see ``fold_deferred_corrects_edges``).
+        """
+        result = self.g.query(
+            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+            "MERGE (a)-[:CORRECTS]->(b)",
+            params={"new_id": new_id, "old_id": old_id},
+        )
+        return 1 if result.result_set else 0
+
+    def fold_deferred_corrects_edges(self, edges) -> int:
+        """#3305: re-apply a replayed terminalizer's CORRECTS edge AFTER every
+        creation has applied.
+
+        The SIBLING arm of the target-existence gate. ``plan_point_restamp_folds``
+        gates each fold on the id it TERMINALIZES, but the fold's CORRECTS edge
+        names the SUCCESSOR (``PointSuperseded.new_id`` /
+        ``PointInvalidated.corrected_by``) — a second endpoint the record may
+        name before it exists. On a chronological replay of
+        ``[PointAdded a, PointSuperseded a→s2, PointAdded s2]`` the inline
+        MERGE finds no ``s2`` and no-ops, so the apply()-based engines lost the
+        edge while ``rebuild_all``'s trailing sweep (which runs after pass-1a
+        hoists every creation) created it — the mirror of #3305's own symptom.
+        The edge MERGE is idempotent and order-free, so the fix is the SAME
+        forward-reference treatment ``fold_deferred_entity_links`` gives
+        ``EntityLinked``: buffer the endpoints during the pass and re-apply
+        them here. Deferring the flags instead would drag the invalidate
+        family's ``updatedAt`` seq-gate along and risk a NEW divergence.
+
+        ``edges`` is a sequence of ``(old_id, new_id)`` pairs. Returns the
+        number of edges actually merged.
+        """
+        applied = 0
+        for old_id, new_id in edges:
+            if not old_id or not new_id:
+                continue
+            applied += self._merge_corrects_edge(old_id, new_id)
+        return applied
 
     def _fold_point_superseded(self, ev: dict) -> int:
         """#2423: fold a PointSuperseded event into Point.status/validity +
@@ -1550,11 +1623,7 @@ class _EntityHandlers:
                     "ua": updated_at},
         )
         if result.result_set:
-            self.g.query(
-                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-                "MERGE (a)-[:CORRECTS]->(b)",
-                params={"new_id": new_id, "old_id": oid},
-            )
+            self._merge_corrects_edge(oid, new_id)
         return len(result.result_set)
 
     def _decay_point_belief(self, oid) -> int:
@@ -1664,12 +1733,10 @@ class _EntityHandlers:
             # (never re-created, hard-deleted) silently no-ops the MERGE.
             # A RAW producer omitting corrected_by entirely still gets the
             # outdated flag + stamps (the #2488 fix needs only oid) — only
-            # the CORRECTS arm is gated on it (P2-2, code-review).
-            self.g.query(
-                "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-                "MERGE (a)-[:CORRECTS]->(b)",
-                params={"new_id": corrected_by, "old_id": oid},
-            )
+            # the CORRECTS arm is gated on it (P2-2, code-review). A
+            # corrected_by created LATER in the journal is re-applied by the
+            # trailing ``fold_deferred_corrects_edges`` sweep (#3305).
+            self._merge_corrects_edge(oid, corrected_by)
         return len(result.result_set)
 
     def _fold_confidence_changed(self, ev: dict) -> int:

@@ -2097,10 +2097,14 @@ def plan_point_restamp_folds(
       hoist lands it. The decay is therefore suppressed so BOTH engines agree.
       This DELIBERATELY changes ``rebuild_all`` relative to its pre-#3305
       behaviour for that shape (it used to decay, at 0.5, while the apply arm
-      missed): the shape has no live truth to match — live cannot supersede a
-      Point that does not exist yet — and engine agreement is the contract this
-      plan exists to enforce. The STAMP half was already dropped for it in both
-      versions. The STAMP half needs the SAME existence gate — on a
+      missed). The justification is NOT that no live truth exists — it is true
+      only for the SINGLE-FILE shape, and FALSE multi-file: there the live graph
+      had the node (created earlier, journaled into a later-sorted file) and
+      live DID apply the decay, so dropping it regresses live parity. The gate
+      is chosen anyway because engine agreement is the contract this plan
+      exists to enforce and a record may not be folded before its target is
+      replayed; the multi-file cost is accepted, named here rather than
+      claimed away (#21's cross-file ordering). The STAMP half needs the SAME existence gate — on a
       promote-materialized node (``PointPromoted`` is not a recreate boundary,
       so no ``PointAdded`` follows to suppress the stamp) it would otherwise
       land on ``rebuild_all``'s trailing sweep while missing on the
@@ -3710,6 +3714,12 @@ class FalkorProjection(
         # pre-recreation ones and canonicalizes supersedes. Feeding each
         # record through the plan keeps the two engines on ONE selection.
         restamp_plan, _ = plan_point_restamp_folds(events)
+        # #3305: a terminalizer's CORRECTS edge names a SUCCESSOR this
+        # chronological pass may not have materialized yet, so the inline
+        # MERGE no-ops where ``rebuild_all``'s after-creations sweep succeeds.
+        # Buffer the endpoints and re-apply them after the pass — the same
+        # forward-reference treatment ``EntityLinked`` gets below.
+        deferred_corrects: list[tuple[str, str]] = []
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                 entity_link_events.append((seq, ev))
@@ -3721,9 +3731,13 @@ class FalkorProjection(
             # inline branch — which folds EVERY terminalizer, skipping this
             # engine's selection (#325/#3722's raw-vs-normalized class).
             if seq in restamp_plan:
-                self.apply_journal_point_restamp(ev, seq, restamp_plan)
+                edge = self.apply_journal_point_restamp(ev, seq, restamp_plan)
+                if edge is not None:
+                    deferred_corrects.append(edge)
                 continue
             self.apply(ev)
+        if deferred_corrects:
+            self.fold_deferred_corrects_edges(deferred_corrects)
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
     def rebuild_all(self, log_dir: str) -> dict:

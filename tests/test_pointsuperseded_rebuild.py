@@ -1365,3 +1365,93 @@ def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
     ])
     assert decisions[2] == (False, True)
     assert fold_seq == {"a": 2}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #3305 — the SUCCESSOR arm of the fold's existence gate
+#
+# The plan gates each terminalizer fold on the id it TERMINALIZES (its
+# TARGET), but the CORRECTS edge names the SUCCESSOR — a second endpoint the
+# record may name before the journal creates it. A chronological replay
+# reached the record first, so the inline edge MERGE no-op'd while
+# rebuild_all's after-creations sweep resolved it: the mirror of #3305's own
+# symptom, reachable from every apply()-based engine. The edge half is
+# deferred to a trailing sweep (``fold_deferred_corrects_edges``); the
+# flags/validity half stays inline, because it depends on the target only and
+# the engines already agree on it.
+# ══════════════════════════════════════════════════════════════════════
+
+def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
+        sup):
+    """#3305 (review P1, sibling arm): for
+    ``[PointAdded a, PointSuperseded a→s2, PointAdded s2]`` the CORRECTS edge
+    must fold IDENTICALLY on ``rebuild_all`` and on BOTH chronological
+    engines — pinning one engine's value is exactly the hole this closes.
+
+    The successor endpoint is created AFTER the record that names it, so the
+    edge can only be merged by a trailing sweep. Asserted for BOTH lifecycle
+    families: ``PointSuperseded`` (``new_id``) and ``PointInvalidated``
+    (``corrected_by``) share the arm."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live", "confidence": 0.9}}
+
+    shapes = {
+        # ``expired_at`` is journaled, not left to the ``_now_iso()`` fallback:
+        # the folds replay the ORIGINAL stamp verbatim, and a rebuild-time
+        # fallback would differ between the three sequential engine runs.
+        "supersede": {"type": "PointSuperseded", "id": "a", "new_id": "s2",
+                      "valid_to": ts, "expired_at": ts},
+        "invalidate": {"type": "PointInvalidated", "id": "a",
+                       "corrected_by": "c", "valid_to": ts,
+                       "expired_at": ts},
+    }
+    for name, term in shapes.items():
+        successor = term.get("new_id") or term.get("corrected_by")
+        synth_dir = events.parent / f"synth-forward-{name}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", [
+            _added("a"),
+            {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+             "projection_version": 2, **term},
+            _added(successor),
+        ])
+
+        def _observable(successor=successor):
+            return (_point_state(sdk, "a"),
+                    _corr(proj, "a", successor),
+                    (sdk.get_point("a") or {}).get("confidence"))
+
+        # rebuild_all (trailing sweep) — the reference value.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _observable()
+
+        # rebuild(EventLog) — the chronological apply() arm.
+        _apply_replay(sdk, synth_dir)
+        via_apply = _observable()
+
+        # recover_from_log — the DB-loss engine, sharing the same plan.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _observable()
+
+        assert via_apply == via_all, (
+            f"{name}: rebuild(EventLog) != rebuild_all — "
+            f"{via_apply} != {via_all}")
+        assert via_recover == via_all, (
+            f"{name}: recover_from_log != rebuild_all — "
+            f"{via_recover} != {via_all}")
+        # The CORRECTS edge IS the subject: a remedy that drops it on BOTH
+        # engines must not pass as "parity".
+        assert via_all[1] == 1, (
+            f"{name}: the CORRECTS edge was dropped on every engine: {via_all}")

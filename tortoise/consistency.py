@@ -1129,6 +1129,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # pre-recreation ones and canonicalizes supersedes. Computing the plan
     # here keeps this recovery engine on the same selection.
     restamp_plan, _ = plan_point_restamp_folds(events)
+    # #3305: defer the terminalizers' CORRECTS edges — an endpoint created later
+    # in the journal cannot be merged chronologically (see
+    # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
+    # sweep resolves it, so the engines would disagree.
+    deferred_corrects: list[tuple[str, str]] = []
     for seq, ev in enumerate(events):
         if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
             entity_link_events.append((seq, ev))
@@ -1140,13 +1145,22 @@ def recover_from_log(events_dir: str, projection) -> dict:
             # through to ``apply()``'s inline branch and its unshared selection
             # (#325/#3722's raw-vs-normalized class).
             if seq in restamp_plan:
-                projection.apply_journal_point_restamp(
+                edge = projection.apply_journal_point_restamp(
                     ev, seq, restamp_plan)
+                if edge is not None:
+                    deferred_corrects.append(edge)
             else:
                 projection.apply(ev)
             applied += 1
         except Exception:
             torn += 1
+    if deferred_corrects:
+        try:
+            projection.fold_deferred_corrects_edges(deferred_corrects)
+        except Exception:
+            logger.exception(
+                "recover_from_log: deferred CORRECTS fold failed; %d "
+                "edge(s) not replayed", len(deferred_corrects))
     if entity_link_events:
         try:
             applied += projection.fold_deferred_entity_links(
