@@ -601,8 +601,9 @@ def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
     `resend` recovery: the pending text carries the renderer's `...`, is a head of
     our message, and is shorter than `min(len(message), PENDING_MIN_CHARS)`, the
     threshold this hint exists for. (The identity floor is at or below this one for
-    messages of at most 30 chars, so an entry here may already be an identity —
-    harmless, both branches yield `release`.)
+    messages of at least 4 chars; for a 1-3-char message the hard floor of 4 puts it
+    above, so the ambiguity branch can fire on an entry that is not an identity —
+    harmless, both branches still yield `release`.)
 
     The `...` requirement is load-bearing in the other direction too: a plain
     short line that merely shares a head with our message (`Steering: continue`
@@ -626,10 +627,12 @@ def pending_queue_unparsed(screen: str | None) -> bool:
 
     On a narrow pane pi right-truncates its own hint line, so `PENDING_HINT_RE`
     cannot locate the container and `_pending_entries` returns nothing — the queue
-    is UNOBSERVABLE, not absent. The evidence required is BOTH a CUT hint line
-    (`\u21b3 … ...`) and a `Steering:`/`Follow-up:`-shaped line: a bare
-    `Steering:`-shaped line in a lane's transcript or bash output is scrollback,
-    not a queue, and must not disable recovery for a genuinely lost send.
+    is UNOBSERVABLE, not absent. The evidence required is a CUT hint line
+    (`\u21b3 … ...`) with a `Steering:`/`Follow-up:`-shaped line DIRECTLY above it,
+    mirroring the container's own contiguity: a bare `Steering:`-shaped line in a
+    lane's transcript or bash output is scrollback, not a queue, and an unrelated
+    `\u21b3 … ...` line elsewhere must not disable recovery for a genuinely lost
+    send.
 
     A parsed container is never reported here, and a full hint line with no
     entries above it is not either (there is no queue to hold our message). When
@@ -642,9 +645,10 @@ def pending_queue_unparsed(screen: str | None) -> bool:
     if _pending_entries(screen):
         return False
     rows = screen.splitlines()
-    return any(TRUNCATED_HINT_RE.match(row) for row in rows) and any(
-        PENDING_TURN_RE.match(row) for row in rows
-    )
+    for index, row in enumerate(rows):
+        if index and TRUNCATED_HINT_RE.match(row) and PENDING_TURN_RE.match(rows[index - 1]):
+            return True
+    return False
 
 
 def recovery_action(screen: str | None, fp: str, message: str = "") -> str:

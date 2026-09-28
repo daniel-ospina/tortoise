@@ -639,6 +639,20 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertTrue(cd.composer_empty(stray))
         self.assertEqual(cd.recovery_action(stray, cd.fingerprint(PROBE), PROBE), cd.R_RESEND)
 
+    def test_NON_ADJACENT_stray_shapes_are_not_a_queue(self):
+        """Both pieces of the unparsed-queue evidence are required ADJACENT, as in
+        the real container: two unrelated scrollback lines (a `Steering:` line here,
+        an `↳ … ...` line elsewhere) must not strand a genuinely lost send."""
+        filler = "\n".join(f"line {i}" for i in range(20))
+        screen = SCREEN_IDLE_READY.replace(
+            "/private/tmp",
+            " Steering: continue with the migration\n" + filler + "\n ↳ see the docs...\n/private/tmp",
+        )
+        self.assertFalse(cd.pending_queue_unparsed(screen))
+        self.assertEqual(
+            cd.recovery_action(screen, cd.fingerprint(PROBE), PROBE), cd.R_RESEND
+        )
+
     def test_a_FULL_hint_with_no_entries_is_NOT_a_queue(self):
         """A hint line whose container is EMPTY means pi holds no queued message,
         so suppressing the resend there would strand a lost send."""
