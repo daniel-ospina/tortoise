@@ -22,8 +22,10 @@ is still `ci_selection.py --integrity`; this tool only writes the map it reads.
 Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYAML
 (the manifest-side checks load the refreshed text through `yaml.safe_load`) —
 `ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
-does. Deterministic output (sorted, stable JSON) so the refresh job's no-diff
-check works.
+does — outside that pin the import is unguarded, so a missing/broken PyYAML
+surfaces as an `ImportError` traceback with exit 1, which is a DEPENDENCY
+failure, not the exit-1 manifest-gate meaning below. Deterministic output
+(sorted, stable JSON) so the refresh job's no-diff check works.
 """
 from __future__ import annotations
 
@@ -372,9 +374,13 @@ def validate_refreshed_manifest(manifest_text: str) -> list[str]:
     the 0.90 coverage floor lives, on the RESULTING manifest rather than on the
     partial collector projection. `--integrity` additionally runs `integrity`,
     `slow_file_issues`, `leg_coverage_issues`, `workflow_matrix_issues` and
-    `workflow_halves_issues`; the halves-balance recomputation is NOT run here,
-    so a refresh that would unbalance the pack is caught one step later by the
-    refresh PR's `manifest-integrity` job, not by this pre-write gate.
+    `workflow_halves_issues`; the halves-balance recomputation is NOT run here
+    (it needs the workflow's matrix halves, so a full run of it stays in
+    `--integrity`), and the refresh PR that would run `--integrity` does not
+    currently open — the `refresh` job calls `gh` with no token in scope
+    (#3092). A refresh that would unbalance the pack is therefore NOT refused
+    before the write today; the map's basis and its pack impact are tracked on
+    #5050.
     """
     import yaml
 
