@@ -230,12 +230,50 @@ def test_bare_bearer_redacts_a_run_that_follows_a_separator():
         assert redact_secrets(text) == (text, {}), text
 
 
-def test_bare_bearer_never_leaves_a_long_token_s_tail():
-    """The body class may not match a 24-char PREFIX of a longer base64url token.
+def test_bare_bearer_over_redacts_mixed_case_identifiers():
+    """PINNED RESIDUAL, not a contract: an uppercase letter is enough to redact.
 
-    Without the whole-token lookahead + terminator, the body ``{24,}`` would stop
-    only where the class ends, leaving the remainder in cleartext while the
-    count said the token was redacted — #5470's failure mode in the bearer rule.
+    The discriminator cannot tell a camelCase/PascalCase identifier from a
+    credential body by alphabet alone, so these ordinary names ARE destroyed and
+    counted — the #5471 harm, narrowed but not eliminated. The earlier comment
+    claimed prose-safety outright, and no test bound the claim in either
+    direction: deleting the uppercase alternative left this file green, so
+    nothing pinned that signal.
+
+    Recorded as a test because the accepted direction is deliberate — a false
+    positive costs a span and one count, a false negative leaks a credential —
+    and because a future tightening must consciously change THIS line rather than
+    discover the residual. Genuine all-lowercase prose is spared (the test
+    above); the tightening that would spare these too is a follow-up, not a
+    licence to weaken the rule here.
+    """
+    over_redacted = (
+        "bearer OAuth2TokenRefreshMiddleware",
+        "the bearer JWTRefreshHandler-config-value",
+        "bearer Content-Security-Policy-header",
+        "the bearer localStorage-auth-token-key",
+    )
+    for text in over_redacted:
+        out, counts = redact_secrets(text)
+        assert "[REDACTED:bearer_token]" in out, (
+            f"if this no longer redacts, the residual was tightened — move it to the "
+            f"prose test above rather than loosening this one: {text!r} -> {out!r}")
+        assert counts == {"bearer_token": 1}, (text, counts)
+
+
+def test_bare_bearer_never_leaves_a_long_token_s_tail():
+    """The body class is GREEDY, so a long base64url token is consumed WHOLE.
+
+    ⛔ Corrected reason (#5445 review). This test used to credit a "whole-token
+    lookahead + terminator": that lookahead was INERT — the greedy ``{24,}``
+    capture starts at the same position and consumes the maximal class run with
+    or without it (0 span differences over 4,000 fuzz inputs, and the lookahead
+    has since been deleted). So the test passes because of GREEDINESS, and it was
+    green under the very mutation it named.
+
+    It is kept, with the reason fixed, because the property is real and worth
+    binding: a future ``{24,}?``, a non-greedy body, or a trailing terminator
+    added to the capture WOULD reproduce #5470's failure mode here.
     """
     token = _join("dGhpcy1pcy1hLXRva2VuLXN0cmluZy0xMjM0NTY3ODkw", "QUJDREVGR0hJSktM")
     out, counts = redact_secrets(f"bearer {token}")

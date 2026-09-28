@@ -696,11 +696,29 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # is instead all-lowercase WORDS joined by ``-``/``_``, so every unbroken run
     # in it is a dictionary word — short. All three signals are what a random
     # token alphabet supplies and a word-joined identifier does not.
-    # ⛔ The whole-token lookahead and the terminator are LOAD-BEARING for the
-    # same reason as the `sk-` family (#5470): without them the body class could
-    # match a 24-char PREFIX of a longer base64url token and leave the tail in
-    # cleartext while the count said it was redacted. The ``Authorization:`` rule
-    # above is unchanged — its header-name anchor is precise on its own.
+    #
+    # ⛔ WHAT THE DISCRIMINATOR DOES **NOT** SPARE, stated because the earlier
+    # comment claimed prose-safety on a premise no test bound: an identifier that
+    # contains ANY uppercase letter is treated as a candidate and redacted, so
+    # camelCase/PascalCase names are destroyed and counted —
+    # ``bearer OAuth2TokenRefreshMiddleware`` and
+    # ``bearer Content-Security-Policy-header`` both become
+    # ``bearer [REDACTED:bearer_token]`` (reproduced in review; pinned in
+    # ``test_bare_bearer_over_redacts_mixed_case_identifiers``). That is
+    # deliberate over-redaction, not a defect to trade away here: a false
+    # positive costs a span of text and one count, a false negative leaks a
+    # credential, and the two are not symmetric. The all-lowercase prose this
+    # fix is FOR is spared; a mixed-case identifier still is not.
+    #
+    # ⛔ THE BODY CLASS IS GREEDY, and that — not the lookahead — is what keeps
+    # a long token from being redacted only as a 24-char prefix. An earlier
+    # revision carried a whole-token lookahead here and called it LOAD-BEARING
+    # for #5470's failure mode; it was INERT (the greedy ``{24,}`` capture starts
+    # at the same position and consumes the maximal class run either way,
+    # so removing it changed no span over 9,600 fuzz inputs — re-measured here
+    # over 4,000 more, 0 differences). It has been deleted rather than left to
+    # be read as verified. The #5470 terminator matters on rules whose body is
+    # NOT greedy (the ``sk-`` family); claiming it here was the defect.
     #
     # ⛔ The unbroken-run signal matches a run ANYWHERE in the candidate, not
     # only at its start: its lead-in class INCLUDES ``-``/``_`` so a ≥24-char run
@@ -724,7 +742,6 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # at the cost of re-redacting the prose this fix is for.
     ("bearer_token",
      re.compile(r"(\b(?i:bearer)\s+)"
-                r"(?=[A-Za-z0-9._\-+/=]{24,}(?![A-Za-z0-9._\-+/=]))"
                 r"(?=[A-Za-z0-9._\-+/=]*[A-Z+/=]"
                 r"|[0-9a-f._\-]{24,}"
                 r"|[A-Za-z0-9._\-+/=]*[A-Za-z0-9+/=]{24,})"

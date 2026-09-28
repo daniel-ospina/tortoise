@@ -857,6 +857,18 @@ def _capture_turn_texts_with_redactions(
     texts: list[str] = []
     for turn in redacted:
         role = _normalize_turn_role(turn.get("role"))
+        # ⛔ NEUTRALIZE THE FRAMING DELIMITERS IN THE ROLE (#5445 review). The
+        # frame is ``[<role>] <body>`` and ``<role>`` is caller-controlled, so a
+        # role containing ``]`` ends the frame early. That is not hypothetical:
+        # the #5445 role scrub WRITES one — a role holding a credential becomes
+        # ``[REDACTED:github_token]``, and the stored text is
+        # ``[[REDACTED:github_token]] please review…``. The reader's inverse
+        # (``_CAPTURE_ROLE_PREFIX``, ``^\[([^\]]+)\]\s*``) then parses the
+        # speaker as ``[REDACTED:github_token`` — dropping the closing bracket —
+        # and hands the BODY a stray ``] ``, so ``:Point.speaker`` and the turn
+        # the read path serves are both corrupted on the exact path this cluster
+        # fixes. Brackets are rewritten in the ROLE only; the body is untouched.
+        role = role.replace("[", "(").replace("]", ")")
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         texts.append(f"[{role}] {content[:_CAPTURE_TURN_CAP]}")

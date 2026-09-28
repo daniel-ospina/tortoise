@@ -119,15 +119,26 @@ def test_credential_in_role_is_redacted_in_all_three_sinks(sdk, monkeypatch):
     content0, speaker0 = stored[f"{sid}_t0"]
     assert secret not in content0, (
         f"the role VALUE survived into the stored turn text: {content0!r}")
-    assert "[REDACTED:github_token]" in content0, content0
+    assert "REDACTED:github_token" in content0, content0
 
-    # Sink 2 — :Point.speaker. Derived from the REDACTED role, so it also
-    # agrees with what the read path parses back out of the stored text.
+    # Sink 1b — the frame must ROUND-TRIP (#5445 review). The previous assertion here was
+    # `speaker0 == _capture_turn_role_text(content0)[0]`, and the writer computes `speaker` as LITERALLY
+    # that expression — `f(x) == f(x)`, which could not fail. It also missed a real defect: the role scrub
+    # writes `[REDACTED:github_token]`, so the stored text was `[[REDACTED:github_token]] please review…`
+    # and the reader's inverse (`^\[([^\]]+)\]\s*`) parsed the speaker as `[REDACTED:github_token` and
+    # handed the BODY a stray `] `. The property that actually binds is that the inverse recovers the body
+    # VERBATIM, which it cannot do if the (redacted) role ends the frame early.
+    role0, body0 = _capture_turn_role_text(content0)
+    assert body0 == "please review the attached patch", (
+        f"the stored frame does not round-trip — the role scrub wrote a `]` that ends it early: {content0!r}")
+
+    # Sink 2 — :Point.speaker. It must be the role the read path parses (not a fragment), and it carries
+    # no credential.
     assert secret not in (speaker0 or ""), (
         f"the role VALUE survived into :Point.speaker: {speaker0!r}")
-    assert speaker0 == _capture_turn_role_text(content0)[0], (
-        "the stored speaker disagrees with the reader's parse of the stored "
-        "turn text (#4675 parity)")
+    assert speaker0 == role0, (
+        f"the stored speaker disagrees with the reader's parse of the stored turn text (#4675 parity): "
+        f"{speaker0!r} != {role0!r}")
 
     # Sink 3 — the session :Source (summary/topics/search text). Topics are
     # lower-cased, so compare case-insensitively or the leak hides.
