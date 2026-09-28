@@ -66,6 +66,11 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},  # #3926 — the literal IS the canonical namespace PROD code resolves
     "test_index_docs_api.py": {"registry": "index-docs"},
+    # #3553: the CAS concurrency tests provision + tear down REAL Team nodes in
+    # the registry control-plane graph (the same graph `_get_registry()` and the
+    # production onboarding-state reader/writer resolve), so the literal IS the
+    # canonical namespace the code under test uses.
+    "test_onboarding_state_cas.py": {"registry": "prod-coupled"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
