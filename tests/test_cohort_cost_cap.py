@@ -1047,6 +1047,16 @@ def test_runbook_records_the_cap_below_balance_relation():
     assert "limit_remaining" in section, (
         "the OpenRouter key read's field is unnamed — the endpoint alone does "
         "not tell an operator what to look at (#3873)")
+    assert "balance_infos[].total_balance" in section, (
+        "the DeepSeek field path is wrong or unnamed: `total_balance` is a "
+        "member of `balance_infos[]`, NOT a top-level field — the endpoint "
+        "alone sends an operator looking for a field that does not exist "
+        "there (#3873)")
+    assert "billing-period rollover" in section, (
+        "the section must require a re-read at each billing-period rollover: "
+        "the cap's measured spend is per-period and RESETS while the provider "
+        "balance only falls, so re-reading solely after a top-up misses the "
+        "rollover that puts the balance below the cap with no event (#3873)")
 
     # Truthful default posture: the cap is DISARMED unless the env var is set.
     assert "OFF by default" in section, (

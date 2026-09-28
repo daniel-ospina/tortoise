@@ -502,7 +502,23 @@ the available balance**, and nothing in the repo can observe the balance.
 
 > **`TORTOISE_COHORT_COST_CAP_USD` must be set to a value STRICTLY BELOW the
 > provider's CURRENT credit balance, and that balance must be re-read after
-> EVERY top-up.**
+> EVERY top-up AND at EVERY billing-period rollover.**
+
+**The cap is PER-PERIOD; the balance is NOT.** The cap's measured spend is
+scoped to a window: `cohort_cost.enforce_cohort_cost_cap` resolves
+`period = metering._current_period(org_id)` (the subscription's own billing
+period, or the calendar month in UTC) and compares
+`get_cohort_spend_usd(ids, period)` against the cap
+(`tortoise/cohort_cost.py:453-460`; the refusal message reads "for this billing
+period"). So the measured spend **resets to zero at each rollover while the
+provider balance only ever falls** — and the rollover is an event nothing
+announces. Worked example: arm cap=25 with balance=30; period 1 spends 24, so
+the balance is now ~6; period 2 re-arms at a fresh 0 and the next 25 of spend is
+available to the cap while the balance it is supposed to sit under is **already
+below it**. The cliff then fires first, with **no top-up having occurred** —
+exactly the failure the paragraph below warns about. Re-reading only "after
+EVERY top-up" misses this, because the top-up is the *rarest* event and the
+rollover is the frequent one.
 
 **Why it is written down rather than assumed.** A cap set above the balance lets
 the cliff hit first — every lane starts refusing at once and the cap never fires,
@@ -528,13 +544,16 @@ applies depends on which route the deployment resolves):
 |---|---|---|---|
 | OpenRouter key limit (the deploy-default route) | `GET https://openrouter.ai/api/v1/key` | `limit_remaining` | the **existing inference key** — no new secret |
 | OpenRouter account credits | `GET https://openrouter.ai/api/v1/credits` | `total_credits`, `total_usage` | requires a **Management API key** (a separate credential, not provisioned) |
-| DeepSeek direct | `GET https://api.deepseek.com/user/balance` | `is_available`, `total_balance`, `balance_infos[].currency` (**CNY**) | the existing `DEEPSEEK_API_KEY` |
+| DeepSeek direct | `GET https://api.deepseek.com/user/balance` | `is_available`, `balance_infos[].total_balance`, `balance_infos[].currency` (**CNY** *or* **USD**) | the existing `DEEPSEEK_API_KEY` |
 
 On the OpenRouter key read, `limit_remaining` is only meaningful when a
 **key-level limit** is set; a key with no limit falls back to account credits, so
-treat it as a lower bound, not the account balance. The two providers expose two
-APIs and two currencies — a cap in USD must be compared to the balance in the
-**same** currency.
+treat it as a lower bound, not the account balance. Note the DeepSeek shape:
+`total_balance` is a member of `balance_infos[]`, **not** a top-level field, and
+`currency` is `CNY` *or* `USD` depending on the account — so read the currency
+the response actually reports rather than assuming CNY. The two providers expose
+two APIs and two currencies — a cap in USD must be compared to the balance in
+the **same** currency.
 
 **No number is set here.** The page threshold, whether a trip is advisory or also
 refuses, and whether a Management API key may be provisioned are owner decisions,
