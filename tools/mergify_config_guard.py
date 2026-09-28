@@ -63,8 +63,10 @@ NOT re-implemented here — it is already asserted by
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -495,20 +497,47 @@ def _unioned_files(root: Path) -> set[str]:
 
 
 def _if_excludes_pull_request(expr: Any) -> bool:
-    """True only for an `if:` that is literally false or non-PR-only.
+    """True unless the `if:` can be shown to admit a `pull_request` run.
 
-    The plan's rule is "an `if:` that is NOT false/schedule-only" — an
-    unrecognised expression is allowed, so this is deliberately narrow. A bare
-    `github.event_name == 'push'` (or a schedule-only gate) is NOT a
-    pull_request-true path and must be excluded.
+    Fail-closed polarity: only an expression we can PROVE reaches PR is
+    admitted. A `!= 'pull_request'` test excludes PR, and
+    `github.event.pull_request == null` excludes it too — an earlier version
+    admitted both because they merely CONTAINED the substring. Conversely
+    `!= 'push'` DOES reach PR and is admitted (an earlier version rejected it).
+    An unrecognised event predicate is excluded, never assumed PR-true.
     """
     if expr is None:
         return False
     text = str(expr).strip().lower()
-    if text in ("false", "${{ false }}"):
+    if text in ("false", "${{ false }}", "0"):
         return True
-    non_pr = "schedule" in text or "'push'" in text or '"push"' in text
-    return non_pr and "pull_request" not in text
+    # No event predicate at all (`true`, `!cancelled()`, `success()`, ...).
+    if "github." not in text and "event_name" not in text and "event." not in text:
+        return False
+    # Explicit PR-excluding tests.
+    if re.search(r"!=\s*['\"]pull_request['\"]", text):
+        return True
+    if re.search(r"pull_request\s*==\s*null", text):
+        return True
+    # Explicit PR-admitting tests (checked before the push/schedule tests so a
+    # disjunction containing a positive `pull_request` arm is admitted).
+    if re.search(r"==\s*['\"]pull_request['\"]", text):
+        return False
+    if re.search(r"contains\s*\([^)]*pull_request", text):
+        return False
+    if re.search(r"pull_request\s*!=\s*null", text):
+        return False
+    if "pull_request" in text:
+        return False
+    # push/schedule-only predicates.
+    if re.search(r"==\s*['\"](push|schedule)['\"]", text):
+        return True
+    if re.search(r"!=\s*['\"](push|schedule)['\"]", text):
+        return False  # runs on everything except push/schedule, PR included
+    if "schedule" in text:
+        return True
+    # An event predicate we cannot resolve: exclude, never assume PR-true.
+    return True
 
 
 def _job_reaches_pull_request(job: dict) -> bool:
@@ -544,15 +573,22 @@ def _single_command_run(run: str) -> list[str] | None:
         return None
 
 
-def _required_job_closure(docs: dict[str, dict]) -> tuple[str | None, set[str]]:
-    """(workflow, jobs reachable into `python-ci-gate` via `needs`).
+def _required_job_closures(docs: dict[str, dict]) -> list[tuple[str, set[str]]]:
+    """Every (workflow, jobs reachable into a `python-ci-gate` job via `needs`).
 
     §7 requires the union validator to run *inside a job in `python-ci-gate.needs`*:
     a validator in an unrelated job satisfies the shape rules while never being
     able to red the required aggregate.
+
+    ALL definitions are returned, never the first filename match: a second
+    workflow that merely DEFINES a job id `python-ci-gate` would otherwise shadow
+    the real gate and let clause (vii) certify a protection that does not exist
+    (the caller rejects the ambiguity — a duplicate gate id is itself the
+    #2055/#5649 hazard, since the wrong job can report the required check).
     """
-    for workflow, doc in docs.items():
-        jobs = doc.get("jobs")
+    closures: list[tuple[str, set[str]]] = []
+    for workflow in sorted(docs):
+        jobs = docs[workflow].get("jobs")
         if not isinstance(jobs, dict) or "python-ci-gate" not in jobs:
             continue
         closure: set[str] = set()
@@ -568,18 +604,19 @@ def _required_job_closure(docs: dict[str, dict]) -> tuple[str | None, set[str]]:
                 if isinstance(needs, str):
                     needs = [needs]
                 frontier.extend(str(n) for n in needs)
-        return workflow, closure
-    return None, set()
+        closures.append((workflow, closure))
+    return closures
 
 
-def _validator_candidates(docs: dict[str, dict]) -> list[dict]:
+def _validator_candidates(docs: dict[str, dict], required_workflow: str, closure: set[str]) -> list[dict]:
     """Fail-closed validator steps: a direct `python3 <tool>.py` in a PR-true job
     ON THE REQUIRED PATH (a job `python-ci-gate` reaches through `needs`).
 
-    Excludes the guard itself and `ci_selection.py` (the drift gate is a
-    different assertion). A candidate is still subject to the shape rules below.
+    Restricted to the UNIQUE workflow that defines the required gate (the caller
+    has already rejected a duplicate definition). Excludes the guard itself and
+    `ci_selection.py` (the drift gate is a different assertion). A candidate is
+    still subject to the shape rules below.
     """
-    required_workflow, closure = _required_job_closure(docs)
     candidates: list[dict] = []
     for workflow, doc in docs.items():
         if workflow != required_workflow or not _has_pull_request(_triggers(doc)):
@@ -622,6 +659,61 @@ def _validator_candidates(docs: dict[str, dict]) -> list[dict]:
     return candidates
 
 
+def _string_constants(source: str) -> list[str]:
+    """Every string literal in `source` (comments and non-literals excluded).
+
+    A path named only in a COMMENT is not a reference the program can read, so
+    the unioned-set check must not count it.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+
+def _source_can_fail(source: str) -> bool:
+    """True iff the module contains a statement that can exit non-zero.
+
+    An AST check, not a substring scan: a `raise`/`assert`/`return <nonzero>` or
+    `sys.exit(<nonzero>)` inside a STRING LITERAL or a comment must not count
+    (a no-op tool with the word "assert" in a message is not a validator).
+
+    Bound: a syntactically failing statement in unreachable code (`if False:`)
+    still counts — the validator's actual behaviour is #5570's
+    `test_validated_set_equals_unioned_set`, and this clause covers the
+    presence/placement vectors only.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Raise, ast.Assert)):
+            return True
+        if isinstance(node, ast.Return) and node.value is not None:
+            value = node.value
+            if not (isinstance(value, ast.Constant) and value.value in (0, None)):
+                return True
+        if isinstance(node, ast.Call):
+            func = node.func
+            is_exit = (
+                isinstance(func, ast.Attribute) and func.attr in ("exit", "_exit")
+            ) or (isinstance(func, ast.Name) and func.id == "exit")
+            if is_exit:
+                if not node.args:
+                    continue  # `sys.exit()` defaults to 0 — not a failure
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and first.value in (0, None):
+                    continue
+                return True
+    return False
+
+
 def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, str]:
     """Clause (vii): whenever `merge=union` is active, a fail-closed validator
     must be invoked as a step's SOLE, DIRECT command, ON THE REQUIRED PATH, and
@@ -636,9 +728,22 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
     unioned = _unioned_files(root)
     if not unioned:
         return EXIT_OK, "no managed attributes file sets merge=union — no validator required"
+    closures = _required_job_closures(docs)
+    if len(closures) != 1:
+        if not closures:
+            return EXIT_DIVERGED, (
+                "merge=union is active but no workflow defines a job id `python-ci-gate` "
+                "— the required gate cannot be located"
+            )
+        return EXIT_DIVERGED, (
+            "merge=union is active but job id `python-ci-gate` is defined in "
+            f"{len(closures)} workflows {[w for w, _ in closures]} — the required gate "
+            "is ambiguous, so an unrelated job could report it (#2055/#5649)"
+        )
+    required_workflow, closure = closures[0]
     problems: list[str] = []
     accepted = 0
-    for cand in _validator_candidates(docs):
+    for cand in _validator_candidates(docs, required_workflow, closure):
         step = cand["step"]
         job = cand["job_spec"]
         argv = cand["argv"]
@@ -690,7 +795,7 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         except GuardUnreadable as exc:
             problems.append(f"{label}: validator unreadable ({exc})")
             continue
-        named.update(p for p in unioned if p in source)
+        named.update(p for p in unioned if any(p in s for s in _string_constants(source)))
         missing = sorted(unioned - named)
         if missing:
             problems.append(
@@ -699,9 +804,9 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
             continue
         # A source that cannot fail is not a validator: it must contain at least
         # one statement capable of a non-zero exit (the plan's "no-op statement
-        # satisfies the shape rule while validating nothing").
-        fail_markers = ("return 1", "sys.exit", "SystemExit", "raise ", "assert ")
-        if not any(marker in source for marker in fail_markers):
+        # satisfies the shape rule while validating nothing"). Checked on the
+        # AST so a fail-word inside a string literal cannot satisfy it.
+        if not _source_can_fail(source):
             problems.append(
                 f"{label}: validator {cand['tool']} carries no failing statement"
             )
@@ -720,6 +825,30 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
 # ---------------------------------------------------------------------------
 
 
+def _names_settings_home(data: bytes) -> bool:
+    """Bytes that can build a path to `.github/settings.yml`.
+
+    Detects the forms a reader plausibly uses: the literal name (plain or
+    UTF-16), a concatenation (`"settings" + ".yml"`), or a glob
+    (`glob(".github/settings*")`). Bounded heuristic — it matches the NAME, not
+    data flow, so an indirect construction can still evade (declared residual).
+    """
+    for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+        try:
+            text = data.decode(encoding).lower()
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if "settings.yml" in text or "settings.yaml" in text:
+            return True
+        for match in re.finditer(r"settings", text):
+            window = text[match.start() : match.start() + 60]
+            if re.search(r"['\"]\s*\+\s*['\"]\.ya?ml", window):
+                return True
+        if re.search(r"(?:rglob|glob)\s*\([^)]*settings", text):
+            return True
+    return False
+
+
 def _settings_readers(root: Path) -> list[str]:
     """Readers of `.github/settings.yml` under `.github/`, `tests/`, `tools/`.
 
@@ -730,11 +859,6 @@ def _settings_readers(root: Path) -> list[str]:
     declared set (`.github/`, `tests/`, `tools/`); a reader elsewhere is a
     declared residual, not a silent pass.
     """
-    needles = (
-        b"settings.yml",
-        "settings.yml".encode("utf-16-le"),
-        "settings.yml".encode("utf-16-be"),
-    )
     readers: list[str] = []
     for directory in (".github", "tests", "tools"):
         base = root / directory
@@ -743,7 +867,11 @@ def _settings_readers(root: Path) -> list[str]:
         for path in sorted(base.rglob("*")):
             if not path.is_file() or ".git" in path.parts:
                 continue
-            if "__pycache__" in path.parts or path.suffix in (".pyc", ".pyo"):
+            # Skip only the interpreter's OWN cache directory. A stray compiled
+            # module checked into the tree (outside `__pycache__`) is scanned —
+            # its marshalled string constants can still name the declaration
+            # home, and skipping it by suffix is an evasion route.
+            if "__pycache__" in path.parts:
                 continue
             rel = path.relative_to(root).as_posix()
             if rel == SETTINGS_REL or rel in DECLARATION_HOME_CHECKERS:
@@ -752,7 +880,7 @@ def _settings_readers(root: Path) -> list[str]:
                 data = path.read_bytes()
             except OSError:
                 continue
-            if any(needle in data for needle in needles):
+            if _names_settings_home(data):
                 readers.append(rel)
     return readers
 
@@ -1125,8 +1253,11 @@ def run_live(
 ) -> tuple[int, list[str]]:
     """I1: the live required set vs the check names the queue config enforces.
 
-    UNAVAILABLE (no admin credential / read failure) is NON-CLEAN and is recorded
-    as such, never as satisfied.
+    UNAVAILABLE (no admin credential / read failure) is NON-CLEAN and is never
+    recorded as satisfied. An UNAVAILABLE or DIVERGED read with an EXISTING
+    record leaves `gate_digest`/`verified_at` intact and stores `live_result`.
+    With an ABSENT record there is no attestation to correct and nothing is
+    written — `--static` then reds clause (viii) until an admin re-cuts.
     """
     lines: list[str] = []
     root = Path(root)

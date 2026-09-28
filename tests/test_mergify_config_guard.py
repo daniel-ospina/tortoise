@@ -346,8 +346,11 @@ def union_tree(
     *,
     validator_src: str | None = VALIDATOR_SRC,
     container_ok: bool = True,
+    step_if: str | None = None,
 ) -> tuple[Path, dict]:
-    step = {"name": "Registry integrity", "run": step_run}
+    step: dict = {"name": "Registry integrity", "run": step_run}
+    if step_if is not None:
+        step["if"] = step_if
     jobs = {"manifest-integrity": {"runs-on": "ubuntu-latest", "steps": [step]}}
     if container_ok:
         jobs["python-ci-gate"] = {
@@ -932,3 +935,111 @@ def test_live_lhs_uses_only_positive_check_success(tmp_path: Path) -> None:
         write=False,
     )
     assert code == 0, lines
+
+
+# --- cycle-2 review regressions ---------------------------------------------
+
+
+def test_clause_vii_shadow_gate_workflow_is_red(tmp_path: Path) -> None:
+    """A second workflow defining a job id `python-ci-gate` must not shadow the
+    real gate: the required gate has to be unique, so the ambiguity is red."""
+    shadow_step = {"run": "python3 tools/registry_integrity.py"}
+    workflows = default_workflows(
+        python_ci_jobs={
+            "manifest-integrity": {"runs-on": "ubuntu-latest", "steps": [{"run": "true"}]},
+            "python-ci-gate": {
+                "runs-on": "ubuntu-latest",
+                "needs": ["manifest-integrity"],
+                "steps": [{"run": "true"}],
+            },
+        },
+        extra={
+            "aaa-decoy.yml": {
+                "on": "pull_request",
+                "jobs": {
+                    "python-ci-gate": {
+                        "if": "github.event.pull_request == null",
+                        "runs-on": "ubuntu-latest",
+                        "steps": [shadow_step],
+                    }
+                },
+            }
+        },
+    )
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        workflows=workflows,
+        attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_step_if_not_pull_request_is_red(tmp_path: Path) -> None:
+    """`!= 'pull_request'` never runs on a PR — an earlier substring test admitted it."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        step_if="github.event_name != 'pull_request'",
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_step_if_event_pull_request_null_is_red(tmp_path: Path) -> None:
+    """`github.event.pull_request == null` is false on a PR — must be rejected."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        step_if="github.event.pull_request == null",
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_step_if_not_push_is_green(tmp_path: Path) -> None:
+    """`!= 'push'` DOES run on a pull_request — the older test false-flagged it."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        step_if="github.event_name != 'push'",
+    )
+    assert clause(root, "vii") == 0
+
+
+def test_clause_vii_fail_marker_inside_a_string_is_red(tmp_path: Path) -> None:
+    """A no-op tool whose only 'assert' is a literal message is not a validator."""
+    src = '''\
+MSG = "assert config/ci-surfaces.yml is fine"
+print(MSG)
+'''
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_real_failing_statement_is_green(tmp_path: Path) -> None:
+    """A genuine `return 1` / `sys.exit(1)` satisfies the source check."""
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py")
+    assert clause(root, "vii") == 0
+
+
+def test_settings_reader_concatenated_name_is_not_exempt(tmp_path: Path) -> None:
+    """`"settings" + ".yml"` builds the same path and must still be a reader."""
+    root = make_tree(tmp_path, merge_config())
+    _write(root / "tools" / "evil.py", 'P = "settings" + ".yml"\n')
+    assert clause(root, "viii_b") == 1
+
+
+def test_settings_reader_glob_pattern_is_not_exempt(tmp_path: Path) -> None:
+    """A glob naming the stem must still be detected."""
+    root = make_tree(tmp_path, merge_config())
+    _write(root / "tools" / "evil.py", 'import glob\nG = glob.glob(".github/settings*")\n')
+    assert clause(root, "viii_b") == 1
+
+
+def test_settings_reader_stray_pyc_outside_cache_is_scanned(tmp_path: Path) -> None:
+    """A compiled module checked into the tree (outside `__pycache__`) is scanned."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "tools" / "legacy.pyc").write_bytes(b"\x00\x01settings.yml\x00")
+    assert clause(root, "viii_b") == 1
