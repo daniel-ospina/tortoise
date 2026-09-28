@@ -588,8 +588,15 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     n_sentences = 0
     for turn in conversation:
         # The ONE role-normalization funnel (#5445): a second, inline copy here
-        # was the session-`:Source` sink's bypass of it. On the capture path the
-        # conversation handed in is already role-scrubbed
+        # was redundant, and removing it fixed NOTHING on its own — the deleted
+        # form was semantically identical to `_normalize_turn_role` for every
+        # input (#5445 review round 12). What actually protects this sink is the
+        # SCRUB: the caller hands in a role that already passed `redact_secrets`
+        # at `_redact_turn_contents`, the one chokepoint. Do not read this funnel
+        # as the protection — deleting the scrub while keeping the normalization
+        # would reopen the sink.
+        #
+        # On the capture path the conversation handed in is already role-scrubbed
         # (``_materialize_session_source`` passes ``_redact_turn_contents``'s
         # output), so this consumes the redacted role rather than re-scrubbing.
         role = _normalize_turn_role(turn.get("role"))
@@ -642,6 +649,15 @@ def _capture_turn_window(
         raw = t.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         t["content"] = content[:cap]
+        # ⛔ The ROLE is capped here too (#5445 review round 12). It is persisted as
+        # text by the same frame AND scrubbed by ``_redact_turn_contents``, so a
+        # client-controlled role was the one scan on this path the cap did not
+        # reach: ``redact_secrets`` ran over the WHOLE role (measured ~2.7 s for a
+        # 500,000-char role, and ``cap`` changed nothing), and the module's own
+        # "``cap`` bounds the text scanned per turn" claim was false for it. Capping
+        # at the window keeps the scanned and the persisted role the SAME bytes.
+        if isinstance(t.get("role"), str):
+            t["role"] = t["role"][:cap]
         out.append(t)
     return out
 
@@ -727,8 +743,13 @@ def _redact_turn_contents(
             content = content[:cap]
             cut = True
         # #5445: the role is caller-controlled and persisted as text by three
-        # sinks, so it is coerced and scrubbed through this same chokepoint.
+        # sinks, so it is coerced and scrubbed through this same chokepoint. The
+        # cap applies to it as well — ``_capture_turn_window`` already truncated a
+        # string role, and re-applying here keeps the bound true for callers that
+        # pass a raw conversation with an explicit ``cap``.
         role = _normalize_turn_role(turn.get("role"))
+        if cap is not None and len(role) > cap:
+            role = role[:cap]
         scrubbed_role, role_counts = redact_secrets(role)
         if not had_content:
             # Genuinely-empty content: nothing in the body to scan. The role is
@@ -915,7 +936,14 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
 #: anything comparing a stored turn against a served one must go through the
 #: inverse — comparing the raw string never matches (#4675). One definition so
 #: the writer's format and the reader's split cannot drift.
-_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]+)\]\s*")
+_CAPTURE_ROLE_PREFIX = re.compile(r"^\[([^\]]*)\]\s*")
+#: ⛔ ``*``, not ``+`` (review round 12). A role can be EMPTY: ``_normalize_turn_role``
+#: passes ``""`` through, the writer emits the frame ``"[] <body>"``, and a ``+``
+#: quantifier refuses to match it — so the inverse returned the WHOLE string as the
+#: body (``("unknown", "[] hello world")``) and the served turn was corrupted with a
+#: stray ``[] `` prefix. That is the same corruption class round 11 closed for a role
+#: containing a bracket, on the one remaining way a role can break the frame. An empty
+#: role is recovered verbatim as ``""``, so writer and reader stay consistent.
 
 
 def _capture_turn_role_text(stored: str) -> tuple[str, str]:

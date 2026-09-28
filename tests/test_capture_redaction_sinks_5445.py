@@ -26,8 +26,10 @@ from __future__ import annotations
 import pytest
 
 from tortoise.sdk import (
+    _CAPTURE_TURN_CAP,
     TortoiseSDK,
     _capture_turn_role_text,
+    _capture_turn_window,
     _redact_summary_strings,
     _redact_turn_contents,
 )
@@ -131,6 +133,13 @@ def test_credential_in_role_is_redacted_in_all_three_sinks(sdk, monkeypatch):
     role0, body0 = _capture_turn_role_text(content0)
     assert body0 == "please review the attached patch", (
         f"the stored frame does not round-trip — the role scrub wrote a `]` that ends it early: {content0!r}")
+
+    # An EMPTY role is the other way the frame can break (review round 12):
+    # ``_CAPTURE_ROLE_PREFIX`` used a ``+`` quantifier, so ``"[] hello world"`` did not match
+    # and the inverse returned the WHOLE string as the body — the served turn gained a
+    # stray ``[] `` prefix. The reader now accepts an empty role.
+    assert _capture_turn_role_text("[] hello world") == ("", "hello world"), (
+        "an empty role must round-trip, not be returned as part of the body")
 
     # Sink 2 — :Point.speaker. It must be the role the read path parses (not a fragment), and it carries
     # no credential.
@@ -273,14 +282,61 @@ def test_summary_depth_guard_fails_closed_not_open():
     assert isinstance(_redact_summary_strings(deep), dict)
 
 
+def test_capture_caps_the_role_it_scrubs():
+    """The ``cap`` bounds the ROLE too — it was the one scan the cap did not reach.
+
+    Review round 12: ``_redact_turn_contents`` truncated only ``content``, so
+    ``redact_secrets`` ran over the WHOLE client-controlled role (measured ~2.7 s
+    for a 500,000-char role) while the module's own "``cap`` bounds the text
+    scanned per turn" claim stayed in the docstring. ``_capture_turn_window`` now
+    caps the role beside the content, and ``_redact_turn_contents`` re-applies it
+    for callers that pass a raw conversation with an explicit ``cap``.
+
+    REDs on removing the ``[:cap]`` in either place.
+    """
+    import time
+
+    huge = "a" * 200_000
+    started = time.perf_counter()
+    _redacted, _counts = _redact_turn_contents(
+        [{"role": huge, "content": "x"}], cap=10)
+    elapsed = time.perf_counter() - started
+    # The SCAN is what `cap` promises to bound (the docstring says so), and it is the
+    # [P2]: uncapped this measured ~1.1 s for this size. A generous 0.5 s threshold —
+    # well clear of timing noise and far below the uncapped cost.
+    assert elapsed < 0.5, f"the role scan was not bounded by cap=10: {elapsed:.2f}s"
+
+    # ...and the WINDOW caps the role it stores, so the scanned and the persisted role
+    # are the same bytes on every capture lane. (`_redact_turn_contents` deliberately
+    # does not rewrite an unmatched role — it leaves the turn object untouched when
+    # nothing was redacted and nothing was cut — so the bound lives at the window.)
+    windowed = _capture_turn_window([{"role": huge, "content": "x"}])
+    assert windowed[0]["role"] == "a" * _CAPTURE_TURN_CAP, (
+        "the window must cap the role, so the scanned and persisted role are the same bytes")
+    assert windowed[0]["content"] == "x"
+
+
 def test_summary_depth_guard_scrubs_a_deep_str_leaf():
-    """A ``str`` leaf past the bound is scrubbed, not merely dropped."""
+    """A ``str`` leaf at exactly the bound is SCRUBBED, not merely collapsed.
+
+    ⛔ DEPTH MATTERS (review round 12). The guard is ``_depth > 64``, and at that
+    depth a non-``str`` collapses to ``"[REDACTED:depth]"`` and the subtree is not
+    walked. The old fixture nested SEVENTY levels, so the secret sat behind a
+    container at depth 65 that was collapsed — the ``str`` branch was never
+    reached, and replacing it with the bare collapse left this test GREEN (a test
+    that could not fail for the reason it named). The leaf must sit at EXACTLY 65.
+    """
     secret = _secret()
     obj: object = secret
-    for _ in range(70):
+    for _ in range(65):
         obj = [obj]
     out = _redact_summary_strings(obj)
     assert secret not in str(out)
+    assert "[REDACTED:" in str(out), (
+        "the leaf must be SCRUBBED at depth 65 — collapsing the container also hides "
+        "the secret, which is why the 70-level fixture could not fail")
+    assert "[REDACTED:depth]" not in str(out), (
+        "depth 65 is the str-leaf branch, not the collapse branch")
 
 
 def test_summary_scrubs_a_non_str_key_recursively():

@@ -443,7 +443,19 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # would stop matching a real key glued to a ``_suffix`` — the recall
     # regression already rejected for the plain deepseek rule (#5470). The
     # greedy tail class IS the terminator here: it consumes to the end of the
-    # body alphabet, so no part of the token survives.
+    # BODY ALPHABET.
+    #
+    # ⛔ "to the end of the body alphabet" is the whole claim — NOT "no part of the
+    # token survives" (review round 12). The class is ``[A-Za-z0-9_-]*``, so it stops
+    # at ANY character outside it, and a key followed by such a character keeps its
+    # tail in cleartext while the count reports a redaction — #5470's class:
+    # ``redact_secrets("sk-" + "a"*32 + "." + "ABCDEFGH")`` →
+    # ``('[REDACTED:deepseek_api_key].ABCDEFGH', {'deepseek_api_key': 1})``. The same
+    # holds for the generic ``openai``/``anthropic`` rules, and for ``+ / = ! ~ : , ;``
+    # ``( [ ' | @ #`` and space. No known vendor body carries those after the key, and
+    # the sweep test only suffixes with ``-``/``_``, so this is recorded rather than
+    # silently relied on: widening the filler to the terminator's implicit alphabet is
+    # a recall/precision decision, not a comment fix.
     ("deepseek_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-[a-z0-9]{32,}[-_][A-Za-z0-9_-]*"),
      _REDACTION_VALUE.format(kind="deepseek_api_key")),
@@ -709,6 +721,16 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # positive costs a span of text and one count, a false negative leaks a
     # credential, and the two are not symmetric. The all-lowercase prose this
     # fix is FOR is spared; a mixed-case identifier still is not.
+    #
+    # ⛔ And the second signal reaches further than "uppercase": a >= 24-char run of
+    # ONLY hex letters and digits (``.``/``-``/``_`` allowed inside) also marks a
+    # candidate, so a lowercase, separator-joined identifier built from hex characters
+    # is redacted too — ``bearer deadbeefcafe-deadbeef-cafe-babe`` and
+    # ``bearer facade-decade-beaded-cafebabe`` both match. "All-lowercase prose is
+    # spared" is therefore not the whole story, and
+    # ``test_bare_bearer_does_not_redact_ordinary_identifiers`` cannot bind it (its
+    # words use ``g``-``z`` letters, so they are not hex). Read the sparing as
+    # "lowercase WORDS", not "lowercase".
     #
     # ⛔ THE BODY CLASS IS GREEDY, and that — not the lookahead — is what keeps
     # a long token from being redacted only as a 24-char prefix. An earlier
