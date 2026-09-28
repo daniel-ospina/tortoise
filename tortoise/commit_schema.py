@@ -451,7 +451,11 @@ class Point(BaseModel):
 
 
 class OperatorTarget(BaseModel):
-    """MITIGATES edge-identity triple — the operator MERGE key (PL1)."""
+    """MITIGATES edge-identity triple — the operator MERGE key (PL1).
+
+    #4937: this identifies the operator BRIDGE a mitigation attacks; it is
+    not a peer of the ``Operator`` it belongs to.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -461,8 +465,24 @@ class OperatorTarget(BaseModel):
 
 
 class Operator(BaseModel):
-    """Epistemic operator — IMPL / NAND (direction REQUIRED) / MITIGATES
-    (target + strength [0.10, 0.50] REQUIRED). No op_<sha> ids (PL1)."""
+    """Epistemic operator record — IMPL / NAND, or the MITIGATES bridge-attack.
+
+    ``op_type`` is the WIRE vocabulary of the commit payload's ``operators``
+    array. Its three values are NOT three operator kinds:
+
+    * ``IMPL`` / ``NAND`` — the two operator kinds (a reified operator Point,
+      ``is_operator: true``, carrying direction + an optional label).
+    * ``MITIGATES`` — the wire spelling of a **bridge-attack**: ``target``
+      names the operator bridge it damps and ``strength`` names the dampening
+      (``w_eff = w × (1 − strength)``, weights.py). The commit path routes this
+      record to ``mitigate_operator``, which writes a mitigation Point +
+      ``(op)-[:mitigated_by]->(m)`` — NEVER a generic operator (#4937, the F1
+      ruling on #2552). The spelling is retained for backward compatibility
+      with older clients/extractors; ``target``/``strength`` are REQUIRED on
+      it precisely because it is not a peer operator.
+
+    No op_<sha> ids (PL1).
+    """
 
     model_config = ConfigDict(extra="forbid")
 

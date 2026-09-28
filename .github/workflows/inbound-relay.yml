@@ -27,11 +27,31 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    # Safety: never process events from the repo owner/org members —
-    # those flow through normal development, not the intake relay.
+    # Safety: never process events from the repo owner/org members — those flow
+    # through normal development, not the intake relay. Owner-installed
+    # automation belongs to that same class, and one of them must be exempt
+    # EXPLICITLY: the Mergify merge queue (#3558).
+    #
+    # Mergify validates a queued pull request on a DRAFT "batch" PR it opens from
+    # `mergify/merge-queue/<hash>`, authored by `mergify[bot]`. That actor is not
+    # `daniel-ospina`, so this relay treated the batch PR as an external
+    # contribution and closed it ~11 s after it opened; Mergify then dequeued the
+    # pull request it was validating, reporting "The batch pull request has been
+    # closed". Every queued PR left that way, so no queue merge happened between
+    # 2026-09-24T17:10Z and this change. A bot PR is never an external
+    # contribution — the relay exists for external humans.
+    #
+    # `mergify[bot]` is the authoritative signal (an installed GitHub App cannot
+    # be spoofed by a contributor); the same-repo head-ref clause is a belt for
+    # the case where that actor login is renamed. The event allow-list is kept:
+    # this stays a strict NARROWING of the previous gate, never a widening.
     if: |
-      github.event_name == 'issues' && github.actor != 'daniel-ospina'
-      || github.event_name == 'pull_request_target' && github.actor != 'daniel-ospina'
+      (github.event_name == 'issues' || github.event_name == 'pull_request_target') &&
+      github.actor != 'daniel-ospina' &&
+      github.actor != 'mergify[bot]' &&
+      !(github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))
     steps:
       - name: "Comment and close — issue"
         if: github.event_name == 'issues'
@@ -150,9 +170,10 @@ jobs:
           script: |
             const inboundUrl = process.env.INBOUND_URL;
             const inboundSecret = process.env.INBOUND_SECRET_GITHUB;
-            // Pick the step output — whichever comment-and-close step ran
-            // Note: only one of the two comment steps will have run
-            const core = require('@actions/core');
+            // `actions/github-script` already injects `core` (@actions/core)
+            // into the script scope — redeclaring it here is a SyntaxError
+            // ("Identifier 'core' has already been declared") that aborted
+            // the whole step before the intake POST. Do not re-add (#5220).
 
             // Re-read the event to figure out what we're relaying
             const event = context.payload;

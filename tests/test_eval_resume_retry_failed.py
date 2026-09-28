@@ -249,6 +249,11 @@ def _resume_fingerprint() -> dict:
         # run_evaluation fingerprints the RESOLVED bool (always present on
         # the run path), so a hand-written resume checkpoint must carry it.
         entity_key_expansion=False,
+        # C6 (#2520, #2513): the time-aware query expansion arm —
+        # run_evaluation fingerprints the RESOLVED bool (always present on
+        # the run path), so a hand-written resume checkpoint must carry it
+        # or the load refuses as stale.
+        time_aware_qe=False,
         # C5 (#2521, #2513): the aggregative-intent coverage-check arm —
         # run_evaluation fingerprints the RESOLVED bool (always present on
         # the run path), so a hand-written resume checkpoint must carry it.

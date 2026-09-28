@@ -43,15 +43,19 @@ CANONICAL_OBJECT_KINDS = frozenset({
     # Core work concepts
     "Project", "WorkItem", "Problem",  # Problem: deviation from desired state — problem-family parent
     # Universal
-    "document", "tag", "user", "skill", "tool", "agent",
+    "tag", "user", "skill", "tool", "agent",
     "workflow", "agreement", "standard", "other",
     # Commitment-state family (ONTOLOGY §5, state-centric 2026-08-12): the STATE
     # objects commitments produce (lifecycle + derived confidence). Lowercase,
     # like the rest of the §5 object vocabulary. #2727 aligned this set with
     # ONTOLOGY §5 and extractor_v2.CORE_OBJECT_KEYS — the three-way diff is now
-    # empty (17 kinds each). `tag` was the other silent omission; both were
+    # empty (16 kinds each). `tag` was the other silent omission; both were
     # missing while the §5 doc + extractor already carried them, which is why a
     # pack could not declare `subclassOf: target`.
+    # `document` was removed from all three by D10 (#5013, ONTOLOGY v3.15, #5022):
+    # `objectKind: document` is retired — a document is a `:Source`, not a graph
+    # node, so it is not a subclassable object kind. §5 dropped it first; this set
+    # and extractor_v2.CORE_OBJECT_KEYS follow the doc (the doc is canonical).
     # NO §5 object kind is excluded from pack-subclassing: every member here is a
     # valid `subclassOf` parent (this set is the parent allowlist). Kinds the
     # ontology does NOT declare (e.g. `aggregate`/`cluster`) are deliberately
@@ -628,7 +632,15 @@ class PackRegistry:
                             f"ontology.{kind_field}: '{k}' should be camelCase "
                             f"(lowercase first letter)"
                         )
-                    elif k in CANONICAL_KINDS.get(kind_field, set()):
+                    # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from
+                    # the object-kind axis to the SOURCE-kind axis (a document is
+                    # a `:Source`), so the canonical-collision check must read that
+                    # vocabulary too. Without it a pack could re-register
+                    # `objectKinds: [document]`, and `pack.object_kinds` feeds
+                    # extractor_v2's writable kind forms and the classification
+                    # index — i.e. the retired kind would be writable again.
+                    elif k in CANONICAL_KINDS.get(kind_field, set()) \
+                            or k in registered_source_types():
                         errors.append(
                             f"ontology.{kind_field}: '{k}' is already in canonical "
                             f"vocabulary — no need to register"

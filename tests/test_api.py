@@ -428,7 +428,7 @@ def test_add_document_partial_update_preserves_capture_fields():
                      summary="Original summary", session_id="s9", event_id="e9")
     # Partial update — none of the capture fields provided
     api.add_document("doc-sp3", "Full", document_kind="transcript",
-                     doc_status="archived")
+                     needs_extraction=True)
     events = [e for e in log.read_all() if e["type"] == "DocumentCreated"]
     assert len(events) == 2
     e0, e1 = events

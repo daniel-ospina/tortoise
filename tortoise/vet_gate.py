@@ -27,13 +27,12 @@ records nothing for q2 — a disclosed omission, not an oversight.
 
 Scope boundary — a RECORDED-DECISION boundary, not a preference
 ----------------------------------------------------------------
-The **mechanical** rule set (file paths, ``the <X>`` definite descriptions,
-``#123`` references, CI vocabulary, test counts, hex hashes) belongs to
-**#4899**, which adds a 5th ``DISCARD(reason=...)`` outcome to
-``classify_consolidation``. That is the mechanism **owner decision #1509 §2.4**
-mandates — *"never create a parallel layer doing the same thing with redundant
-machinery"*. **This module deliberately does NOT reimplement those rules.**
-VET is the **adversarial half** the design names:
+The **mechanical** rule set belongs to **#4899**, and **#1509 §2.4** mandates
+the mechanism it uses — *"never create a parallel layer doing the same thing
+with redundant machinery"*. So the predicate is not written here: it lives in
+the leaf module :mod:`tortoise.value_gate` (stdlib-only, no pipeline
+vocabulary), and this module **calls** it. VET remains the **adversarial half**
+the design names:
 
     "#4899 specifies the mechanical DISCARD. Necessary, not sufficient: it
     cannot answer 'is this an entity or a reference?'"
@@ -41,12 +40,22 @@ VET is the **adversarial half** the design names:
 The two are complementary — the same policy source (the pack), different
 machinery (a regex predicate vs. a decision-only model).
 
-⚠️ **#4899 is the mechanical rule *source*, not the S2.2 mechanical *site*.** It
-places its DISCARD in ``classify_consolidation`` (E7), which runs inside
-``execute_embed`` — i.e. *after* both classify passes and after RESOLVE, the
-exact inverted position §4.2 diagnoses as the bug. Nothing in either change yet
-puts the mechanical predicate *before* S3; that placement is still unowned, and
-saying otherwise would let a recorded gap disappear.
+⚠️ **#4899's placement was DECIDED 2026-09-25: S2.2b, i.e. HERE.** The issue as
+first written put its ``DISCARD`` in ``classify_consolidation`` (E7), which runs
+inside ``execute_embed`` — *after* both classify passes and after RESOLVE, the
+exact inverted position §4.2 diagnoses as the bug; §4.3 names the step
+``S2.2b VET — the gate (identifier-only DISCARD) + adversarial``. The
+contradiction test settled it against the later record, and the predicate now
+runs at :func:`vet_candidates` Level-2 **before** S3.
+
+⚠️ **The predicate is IDENTIFIER-ONLY** (``#2453``: *"only INCIDENTAL process
+logistics remain droppable: ids, hashes, and ephemeral counters not central to a
+decision"*). It fires only when a candidate is *nothing but* an identifier. It
+does **not** discard definite descriptions, CI vocabulary, test counts or hex
+hashes — that is the semantic half, owned by ``#4894``. **The ``the <X>``
+question is NOT mechanical** and is left to the arbiter: ``the owner`` is a real
+entity, while ``the cycle-4 ruling`` is a definite description — telling them
+apart is exactly the question below.
 
 The arbiter seam is the point (§4.2)
 ------------------------------------
@@ -87,8 +96,10 @@ needs the union-of-attachments machinery and the high bar).
 Failure policy (§4.2): FAIL-OPEN
 --------------------------------
 A wrong keep is noise; a wrong drop is memory loss. Unknown ⇒ ``KEEP``. An
-arbiter that raises ⇒ all ``KEEP`` + a warning. The only path to ``DISCARD`` is
-an explicit arbiter verdict. The public functions are **total** on a malformed
+arbiter that raises ⇒ all ``KEEP`` + a warning. ``DISCARD`` has exactly **two**
+paths: an explicit arbiter verdict, or the ``#4899`` mechanical predicate when
+its flag is on — and every one records its ``rule_id`` and its counterfactual.
+The public functions are **total** on a malformed
 section shape — a non-sequence section, a non-sequence ``operators``, a
 non-mapping item, a non-iterable ``about_entities``, ``None`` — and on a
 malformed ``prior``/``decisions`` map,
@@ -114,7 +125,9 @@ import re
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
 
-# ── The outcome vocabulary (O4) ─────────────────────────────────────────────
+from . import value_gate
+
+# ── The outcome vocabulary (O4) ──────────────────────────────────────────────
 
 KEEP = "KEEP"
 NOOP = "NOOP"
@@ -388,6 +401,35 @@ def vet_candidates(embed_list: object, *,
     batch = check_batch(embed_list, narrative)
     arbiter_batch: dict = {}
 
+    # #4899 — the mechanical Level-2 predicate: identifier-only DISCARD.
+    #
+    # It runs BEFORE the arbiter, deliberately: the arbiter is an *injected*
+    # seam no production caller supplies yet, so an arbiter-only gate decides
+    # nothing today. Mechanical-first also makes the composition honest — the
+    # predicate is *necessary, not sufficient*, and an explicit arbiter verdict
+    # still overrides it below (``decisions[iid].update(...)``).
+    #
+    # Fail-open: a predicate that raises keeps everything. The rewrite back to
+    # ``KEEP`` is not decoration — a partial pass would otherwise leave a
+    # DISCARD with no recorded provenance, and a discard nobody can explain is
+    # indistinguishable from memory loss.
+    mechanical: dict[str, dict] = {}
+    if value_gate.value_gate_enabled() and candidates:
+        try:
+            for iid, decision in decisions.items():
+                verdict = value_gate.mechanical_verdict(decision["text"])
+                if verdict:
+                    decision.update(outcome=DISCARD, **verdict)
+                    mechanical[iid] = verdict
+        except Exception as e:
+            warnings.append(
+                f"value gate failed ({type(e).__name__}: {e}) — "
+                f"{len(candidates)} candidate(s) kept (fail-open)")
+            for iid in list(mechanical):
+                decisions[iid].update(outcome=KEEP, rule_id=RULE_FAIL_OPEN,
+                                      reason="value gate failed")
+            mechanical.clear()
+
     if arbiter is not None and candidates:
         try:
             verdicts, arbiter_batch = _parse_verdicts(
@@ -418,6 +460,16 @@ def vet_candidates(embed_list: object, *,
         else:
             d["counterfactual"] = ""
 
+    # An arbiter that overrode a mechanical hit means the predicate did NOT
+    # decide this candidate. Counting it as ``fired`` would attribute a discard
+    # to a rule that produced none (``fired`` > ``discarded``, unexplained) —
+    # the opposite of what the evidence key exists for. Prune, and report the
+    # overrides separately so the rescue is visible rather than hidden.
+    overridden = [iid for iid in mechanical
+                  if decisions[iid]["outcome"] != DISCARD]
+    for iid in overridden:
+        mechanical.pop(iid)
+
     by_outcome: dict[str, int] = {}
     for d in decisions.values():
         by_outcome[d["outcome"]] = by_outcome.get(d["outcome"], 0) + 1
@@ -426,6 +478,17 @@ def vet_candidates(embed_list: object, *,
         "by_outcome": by_outcome,
         "discarded": by_outcome.get(DISCARD, 0),
         "arbiter": "present" if arbiter is not None else "none",
+        # #4899: additive. ``enabled=False`` on every default run, so the flag
+        # is observable in the evidence surface without changing the rate.
+        "mechanical": {
+            "enabled": value_gate.value_gate_enabled(),
+            "fired": len(mechanical),
+            "overridden": len(overridden),
+            "by_rule": {
+                r: sum(1 for v in mechanical.values() if v["rule_id"] == r)
+                for r in value_gate.RULES
+            },
+        },
     }
     return {"decisions": decisions, "batch": batch, "stats": stats,
             "warnings": warnings}

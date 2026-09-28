@@ -50,11 +50,13 @@ export function wizardPromptText(harness, step, key, mode) {
   // the four config-writing prompts below inline it, and the two Claude
   // connector leaves (Claude Desktop/Web — which never ran the installer and
   // have no skills directory) get it in the workflows prompt body
-  // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2698 keeps
-  // it out of HARNESS_FAMILIES; a persisted 'chatgpt' is reset to 'pi' above),
+  // (wizardWorkflowsText). ChatGPT has NO surface in this chooser (#2912's
+  // HARNESS_FAMILIES excludes it — #2698 had already deleted its flat tab),
   // so its URL rides the exported UNIVERSAL_COMMAND.chatgpt for roundtrip/
-  // total-loop consumers only — not a live delivery path. One constant
-  // (harnesses.js) for the URL, one (ONBOARDING_INSTRUCTIONS) for the sentence.
+  // total-loop consumers only — not a delivery path in THIS wizard. Its LIVE
+  // carrier is the public setup docs page (#4836): website/docs.html#chatgpt.
+  // One constant (harnesses.js) for the URL, one (ONBOARDING_INSTRUCTIONS) for
+  // the sentence.
   const onboardingInstructions = ONBOARDING_INSTRUCTIONS
   if (harness === 'pi') {
     // #3218: MCP config → skills install → restart. The restart note used to

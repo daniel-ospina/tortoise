@@ -23,11 +23,21 @@ from tools.ci_selection import (  # noqa: I001
     SOURCE_PATTERNS, SHARED_MODULES, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
+    on_demand_files, leg_coverage_issues, push_legs, fast_pool,
+    duration_issues, TESTS_DIR,
 )
+
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 def _sel(changed, event="pull_request"):
     return select(changed, event, load_manifest())
+
+
+def _expand(legs: dict) -> dict:
+    """Compare leg membership without caring about the .py suffix."""
+    return {k: set(v) for k, v in legs.items()}
 
 
 def _tier1() -> set:
@@ -672,6 +682,56 @@ def test_slow_files_never_in_fast_gate_selections():
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
+def test_expensive_eval_integration_is_in_the_on_demand_lane():
+    """The suite's single most expensive file is OFF the merge gate.
+
+    SUPERSEDED PIN, deliberately repointed rather than deleted. The previous
+    version of this test (#4711/#4712) asserted the file must stay in
+    `slow_files`. That pin was created for a real reason and its docstring says
+    which: the file had been in the FAST lane, cost a MEASURED 1465.9s = 24.4
+    min, put half_a at 2956.5s (49.3 min) against a 55-minute watchdog with only
+    5.7 minutes of headroom, and moving it to slow_files restored a 1.05:1 split.
+    The decision was about WHERE the 24.4 minutes sat so the watchdog was not
+    blown — never about whether it had to gate a merge.
+
+    The `on_demand:` lane satisfies that intent strictly better: the 24.4
+    minutes leave the pre-merge gate entirely, so no fast or slow leg can be
+    blown by it at all. The pin is repointed, not removed, because the reason it
+    exists — "this file is enormous and must not sit in a fast lane" — is still
+    true and still needs to be loud.
+
+    The old assertion `f in m["slow_files"]` would now be wrong in the opposite
+    direction, and its sibling `test_slow_files_never_in_fast_gate_selections`
+    cannot catch a revert that ALSO drops the slow_files entry, which is exactly
+    what happened here. So this names the file.
+    """
+    m = load_manifest()
+    f = "eval/retrieval/test_integration.py"
+    assert f in on_demand_files(m), (
+        f"{f} is 24.4 min measured (1.71x its stale declared 855.2s) — it must "
+        "stay in the on_demand lane, or it is back on the merge gate (#4711)")
+    # Stronger than the pin it replaces: not merely absent from the fast gate
+    # for three sample diffs, but absent from EVERY pre-merge leg for ALL of
+    # them, because the exclusion is structural (fast_pool filters the lane).
+    lanes = push_legs(m)
+    bare = f[:-3]
+    for leg in ("half_a", "half_b", "slow", "carve_out", "env_broken"):
+        assert bare not in lanes[leg], (
+            f"{f} leaked into {leg!r} — the lane must exclude it from every "
+            f"pre-merge leg, not just the fast ones")
+    for changed in (["tortoise/graph.py"], ["docs/README.md"],
+                    ["tortoise/ranking.py"], ["tortoise/search_engine.py"]):
+        assert f not in set(_sel(changed)["test_files"]), (
+            f"{f} leaked into the fast gate for {changed}")
+    # The cost must stay DECLARED. It no longer re-packs the file anywhere
+    # (the lane is subtracted before any packing), but the value is what makes
+    # the lane's justification checkable, and dropping it would quietly turn
+    # "we measured 24.4 min" into folklore.
+    assert f in m["durations"], (
+        f"{f} must keep its measured duration — it is the entire justification "
+        "for the lane existing")
+
+
 def test_slow_files_emitted_on_every_return_path():
     # #1371: the changes job reads slow_files from every selection mode — a
     # missing key would KeyError the nightly/schedule run or empty test-slow.
@@ -1097,10 +1157,11 @@ def test_real_workflow_halves_are_consistent():
     # halves carry every fast file exactly once and tilt is bounded.
     # #3400: the tilt invariant is now DURATION, not count. The full-matrix
     # halves are packed by measured weight (LPT), so a correct split is
-    # duration-balanced while carrying very different file counts — the real
-    # pool splits 195/325 at 27.95m/27.95m (one 855s file + ~130 sub-second
-    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
-    # encoded the duration-blind parity split this issue exists to remove.
+    # duration-balanced while carrying very different file counts — the count
+    # difference is the design (a few multi-minute files against the long tail
+    # of sub-second ones), and the assertion below checks the balance, not the
+    # count. The old `abs(count_a - count_b) <= 3` assertion encoded the
+    # duration-blind parity split this issue exists to remove.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
                                     workflow_halves_issues,
                                     HALF_DURATION_IMBALANCE_RATIO)
@@ -1287,8 +1348,9 @@ def test_duration_integrity():
 
 # ── #3400: duration-balanced full-matrix halves + durations coverage ──────
 # The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
-# duration-blind, so half (b) collected the slow files by luck (37.1m vs
-# 18.8m on the real pool) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# duration-blind, so half (b) collected the slow files by luck, tilted the split
+# far past the ratio the assertion below allows, and blew the 55m watchdog
+# (#3400). These pin the LPT pack (#1473)
 # on the full-matrix path and the coverage floor that keeps the `durations`
 # map from rotting back to a handful of entries.
 
@@ -1309,7 +1371,7 @@ def test_full_matrix_split_is_duration_balanced():
 
     Four heavy files + many 2s files: parity can cluster the heavies on one
     half; LPT must not.  The assertion is the *duration* ratio, not a count
-    ratio — the correct duration split of the real pool is 195/325 files.
+    ratio — a correct pack of the real pool carries unequal counts.
     """
     from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
     heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
@@ -2188,58 +2250,168 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert "${{ join(needs.*.result, ' ') }}" in script, (
         "python-ci-gate must join `needs.*.result` — reading a subset means a "
         "red drift never reaches the check (#2656)")
+    # Defence in depth must not be deletable either: the per-leg rows below cover
+    # every declared leg, but the plain sweep is what catches a leg that reaches
+    # `needs:` WITHOUT a row (a shape the row-set assertion below forbids, so
+    # this is redundancy — deliberately kept and pinned rather than dropped).
+    assert re.search(r"grep -qE 'failure\|cancelled'", script), (
+        "the aggregate must keep the `failure|cancelled` sweep over "
+        "`needs.*.result` as defence in depth (#5219)")
 
-    # Render the GitHub expression into literal results and actually RUN the
+    # Render the GitHub expressions into literal results and actually RUN the
     # aggregate's script: this is what turns "the words are present" into "a
     # failed drift really exits non-zero". (Guarded: the assertion is about the
     # shell logic, which is the thing that has to be right on the runner.)
     if shutil.which("bash"):
-        def _verdict(*results: str) -> int:
-            rendered = script.replace("${{ join(needs.*.result, ' ') }}",
-                                      " ".join(results))
-            return subprocess.run(["bash", "-c", rendered],
+        job_names = list(jobs["python-ci-gate"].get("needs") or [])
+
+        # Derive each leg's selector from the WORKFLOW itself, not from a literal
+        # list here: a leg whose job-level `if:` reads a selector output may
+        # legitimately skip when that output is false; a leg with no diff gate
+        # (its `if:` names no selector output) must therefore ALWAYS be SUCCESS.
+        # Deriving it makes the rows and the jobs' own `if:`s unable to drift.
+        def _selector_of(leg: str) -> str:
+            outs = re.findall(r"needs\.changes\.outputs\.(\w+)",
+                              str(jobs[leg].get("if") or ""))
+            return outs[0] if outs else "-"
+
+        SELECTOR = {leg: _selector_of(leg) for leg in job_names}
+        DECLINABLE = {leg: sel for leg, sel in SELECTOR.items() if sel != "-"}
+        ALWAYS = [leg for leg, sel in SELECTOR.items() if sel == "-"]
+        # Default is "selected": an unexpected `skipped` is then a LOST shard,
+        # which is the polarity #5219 is about.
+        SELECTED = {out: "true" for out in DECLINABLE.values()}
+
+        # Every leg in `needs:` must have exactly ONE row, and that row's
+        # selector must be the output the job's own `if:` reads. Without this a
+        # shard added to `needs:` with no row — or with the wrong selector —
+        # would be certified green while `skipped` (the `lost-shard` shape).
+        rows: dict[str, str] = {}
+        for line in script.splitlines():
+            m = re.match(
+                r"^([\w-]+)\|\$\{\{\s*needs\.[\w-]+\.result\s*\}\}\|(.*)$",
+                line.strip())
+            if m:
+                rows[m.group(1)] = m.group(2).strip()
+        assert set(rows) == set(job_names), (
+            "every leg in `python-ci-gate.needs` must have exactly one row in "
+            "the aggregate's per-leg check; "
+            f"rows={sorted(rows)} vs needs={sorted(job_names)}")
+        for leg, selector in SELECTOR.items():
+            if selector == "-":
+                assert rows[leg] == "-", (
+                    f"`{leg}` has no diff gate, so its row must use `-` (must "
+                    f"always be SUCCESS); got {rows[leg]!r}")
+            else:
+                found = re.search(r"outputs\.(\w+)", rows[leg])
+                assert found and found.group(1) == selector, (
+                    f"`{leg}`'s row must gate on `{selector}` — the output its "
+                    f"own `if:` reads; got {rows[leg]!r}")
+
+        def _render(results: dict, selected: dict) -> str:
+            rendered = script.replace(
+                "${{ join(needs.*.result, ' ') }}",
+                " ".join(results.get(name, "skipped") for name in job_names))
+            # `needs.<job>.result` renders as EMPTY when <job> is absent from
+            # `needs:` — GitHub's own semantics, and the reason a leg dropped
+            # from the required check's list must fail closed here rather than
+            # quietly vanish.
+            rendered = re.sub(r"\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}",
+                              lambda m: results.get(m.group(1), ""), rendered)
+            rendered = re.sub(
+                r"\$\{\{\s*needs\.changes\.outputs\.(\w+)\s*\}\}",
+                lambda m: selected.get(m.group(1), ""), rendered)
+            unrendered = re.findall(r"\$\{\{[^}]*\}\}", rendered)
+            assert not unrendered, (
+                "this harness must render every GitHub expression the aggregate "
+                f"uses, or it proves nothing; unrendered: {unrendered}")
+            return rendered
+
+        def _verdict(results: dict, selected: dict | None = None) -> int:
+            sel = dict(SELECTED)
+            sel.update(selected or {})
+            return subprocess.run(["bash", "-c", _render(results, sel)],
                                   capture_output=True).returncode
 
-        count = len(jobs["python-ci-gate"].get("needs") or [])
-        green = ["success"] * count
-        assert _verdict(*green) == 0, (
+        green = {name: "success" for name in job_names}
+        assert _verdict(green) == 0, (
             "an all-green matrix must pass the required check")
+        # EVERY leg, not just the last one: a required check that cannot red on
+        # a given leg is a check that does not observe it (#5219).
         for red in ("failure", "cancelled"):
-            assert _verdict(*green[:-1], red) == 1, (
-                f"a `{red}` need must FAIL python-ci-gate — otherwise a drift "
-                "does not block the merge (#2656)")
-        assert _verdict(*green[:-1], "skipped") == 0, (
-            "a skipped need is not a failure (docs-only PRs skip the matrix)")
+            for leg in job_names:
+                bad = dict(green)
+                bad[leg] = red
+                assert _verdict(bad) == 1, (
+                    f"a `{red}` for `{leg}` must FAIL python-ci-gate — a leg "
+                    "the required check does not observe is a leg it cannot "
+                    "block (#5219)")
+        # An always-run leg has NO selector that can decline it, so a `skipped`
+        # one is a lost shard. This is the half of "`skipped` is not a pass"
+        # that covers the legs the gate cannot see skip: a silently skipped
+        # `changes`/`manifest-integrity`/`surface-guard` must red the check.
+        assert ALWAYS, "the aggregate must have always-run legs to assert on"
+        for leg in ALWAYS:
+            lost = dict(green)
+            lost[leg] = "skipped"
+            assert _verdict(lost) == 1, (
+                f"`{leg}` has no diff gate, so a `skipped` {leg} is a lost "
+                "shard and must red the required check")
+        # A leg the selector DID select reporting `skipped` is a lost shard...
+        for leg, selector in DECLINABLE.items():
+            lost = dict(green)
+            lost[leg] = "skipped"
+            assert _verdict(lost) == 1, (
+                f"`{leg}` skipped although the selector SELECTED it is a lost "
+                "shard — the required check must not certify it (#5219)")
+            # ... while one the selector DECLINED may skip: a diff that does not
+            # touch the leg must not be blocked by the gate's own shape.
+            declined = dict(green)
+            declined[leg] = "skipped"
+            assert _verdict(declined, {selector: "false"}) == 0, (
+                f"`{leg}` skipped because `{selector}` declined it must not "
+                "red the required check")
+        # A docs-only diff selects nothing at all.
+        declined_all = dict(green)
+        for leg in DECLINABLE:
+            declined_all[leg] = "skipped"
+        assert _verdict(declined_all,
+                        {sel: "false" for sel in DECLINABLE.values()}) == 0, (
+            "an all-declined (docs-only) diff must stay green")
+        # And the shape #5219 was actually about: a leg dropped from `needs:`
+        # must fail closed instead of vanishing — for EVERY leg, not just one.
+        for leg in job_names:
+            dropped = dict(green)
+            dropped.pop(leg)
+            assert _verdict(dropped) == 1, (
+                f"`{leg}` REMOVED from `needs:` must fail closed, not "
+                "disappear — that is the exact #5219 shape")
 
 
-def test_required_gate_excludes_the_long_legs():
-    """The required check's transitive `needs:` closure IS the merge-path
-    critical path (a job's `if:` is evaluated only AFTER its `needs` complete).
+def test_required_gate_covers_the_long_legs():
+    """#5219: the required check must OBSERVE every shard it certifies.
 
-    This repo merges via GitHub SERVER-SIDE auto-merge on the REQUIRED checks
-    (strict up-to-date protection + `gh pr merge --auto --merge`, see
-    commit-workflow `04-merge-deploy.md`), so `python-ci-gate` going green is
-    what releases the merge — the workflow run does not have to finish. When
-    the aggregate also waited on the long legs (measured 2026-09-24: `test (a)`
-    ~30m on a green run, against a ~20m main-merge cadence) the head went
-    BEHIND before the merge could land (0/41 PRs ever CLEAN). So the aggregate
-    must NOT depend on the >15m legs — directly OR transitively — and those legs
-    must still EXIST: they move out of the gate, they are not deleted, and they
-    keep running pre-merge (advisory) and post-merge on main.
+    `python-ci-gate` is a REQUIRED status check AND the only `merge_condition`
+    of the Mergify merge queue, so its `needs:` list IS its whole claim: a leg
+    absent from it is a leg the gate cannot block, however red the run is.
 
-    The TRANSITIVE half is load-bearing, not pedantry: an earlier version of
-    this change left the push-only `canary-streak` in `needs:`, and because
-    `canary-streak` `needs: test`, the *skipped* job still held the aggregate
-    for the whole ~30m `test` leg on every PR (run 35960027173: the gate was
-    not scheduled while `test (a)` ran, though every short leg had completed).
-    A direct-`needs` assertion cannot see that shape.
+    From 2026-09-24T15:25Z (#5017) until #5219 the list omitted `test`,
+    `test-slow` and `test-carve-out`, and the hole was not theoretical: on the
+    MERGED heads of #4838 (30c5b45) and #4633 (81401cc), `test (a)`, `test (b)`
+    and `test-carve-out` were all `completed/failure` while `python-ci-gate`
+    was `completed/success`. Across PRs at the time, the only thing separating
+    a gate that reddened on a failing `test` from one that passed was WHICH
+    VERSION of the workflow the PR head carried — heads with the pre-#5017 list
+    failed the gate, heads with the post-#5017 list passed it.
 
-    Keeping them running on the PR lane (rather than skipping them there) is
-    deliberate and belongs to the same contract: the `--admin` rail requires
-    the PR lane to EXECUTE every test shard main's lane executes
-    (`scripts/admin-merge.sh` lane parity, tortoise #4263/#4457) — a `skipped`
-    shard is not coverage — so a push-only leg would make every `--admin` merge
-    refuse `NOT COMPARABLE`. This test pins the CI half of that contract.
+    #5017 removed those legs DELIBERATELY to cut merge-path latency (`test (a)`
+    measured 30.0–31.5m against a ~20m main-merge cadence, so heads went BEHIND
+    before the merge could land — 0/41 PRs ever CLEAN). #5219 reverses that
+    trade on the owner's call: the integrity of the required check over
+    merge-path latency. This test pins the reversal so the shards cannot be
+    quietly dropped again — and it pins the DIRECT edge, not only the closure:
+    a transitive path is the `canary-streak` → `test` shape that satisfies a
+    closure-only assertion while nullifying the intent.
     """
     workflow = _load_python_ci()
     jobs = workflow["jobs"]
@@ -2258,21 +2430,40 @@ def test_required_gate_excludes_the_long_legs():
 
     for leg in ("test", "test-slow", "test-carve-out"):
         assert leg in jobs, (
-            f"{leg} must still RUN — the latency fix removes it from the "
-            "required aggregate, it does not delete the leg")
-        assert leg not in closure, (
-            f"{leg} is a >15m leg reachable from `python-ci-gate` through "
-            "`needs:` — directly or transitively — which re-adds the ~30m "
-            "merge-path latency this change removes. A skipped intermediate "
-            "job does NOT break the chain: its own `needs:` still hold the "
-            "aggregate (the `canary-streak` → `test` shape).")
+            f"{leg} must exist — the required check must aggregate it, not "
+            "replace it")
+        assert leg in direct, (
+            f"{leg} must be a DIRECT need of `python-ci-gate`. The required "
+            "check — and the merge queue, whose only `merge_condition` it is — "
+            "must observe the shard it certifies; a gate that goes green while "
+            "this leg is red is the #5219 defect")
+        assert leg in closure
     assert "manifest-integrity" in closure, (
         "the required aggregate must still include the manifest drift gate, "
         "or a drift stops blocking merges (#2656)")
 
-    # `leg in jobs` alone only proves the leg is DEFINED. The fix's disclosure
-    # leans on the legs still EXECUTING (advisory on PRs, detection on main), so
-    # pin that too: both triggers must remain, and no leg may be silenced.
+    # The OTHER half of the dropped-shard defence (#5219). The drift test pins
+    # rows -> needs; this pins needs -> the workflow's own universe of PR-lane
+    # jobs. Without it, deleting a leg from `needs:` AND its row is a
+    # self-consistent edit that passes every test while the shard sits outside
+    # the required check — and that pair is the NATURAL edit, because dropping
+    # the entry alone leaves an orphan row, which IS caught, so the author
+    # deletes both.
+    #
+    # A push-only job is exempt by DERIVATION, not by name: on a pull request it
+    # reports only `skipped`, so it carries no PR-lane signal.
+    push_only = {name for name, spec in jobs.items()
+                 if "github.event_name" in str(spec.get("if") or "")}
+    must_aggregate = set(jobs) - set(direct) - {"python-ci-gate"} - push_only
+    assert not must_aggregate, (
+        "every job in this workflow that reports on the PR lane must be a "
+        "`python-ci-gate` need — otherwise its failure cannot block a merge, "
+        f"which is the #5219 defect. Missing: {sorted(must_aggregate)}")
+
+    # `leg in jobs` alone only proves the leg is DEFINED. The contract leans on
+    # the legs still EXECUTING on the PR lane — the `--admin` rail's lane parity
+    # requires the PR lane to have run every shard main's lane runs — so pin
+    # that too: both triggers must remain, and no leg may be silenced.
     triggers = workflow.get("on", workflow.get(True)) or {}
     assert "push" in triggers and "pull_request" in triggers, (
         "the long legs must still run on push (post-merge detection on main) "
@@ -2482,6 +2673,24 @@ def test_tortoise_api_change_selects_api_and_core():
     assert "test_api.py" in selected, "api-registered pinner must run"
     assert "test_extractor.py" in selected, "core-registered pinner must run"
     assert "test_projection.py" in selected, "core slow-leg pinner must run"
+
+
+def test_tortoise_oauth_change_selects_api_and_core():
+    # #3036: `tortoise/oauth.py` is the hosted OAuth implementation. Its pinning
+    # tests are `api`-registered (test_oauth_mcp.py, test_oauth_token_fault.py,
+    # test_3036_oauth_retention.py, test_attribution_actor.py,
+    # test_user_identity_authority.py) and one is api+core
+    # (test_control_plane_offload_3498.py). Before #3036 mapped it, an
+    # oauth.py-only change fell through to `core` and silently skipped every
+    # api pinner — the #2938/#3154/#4367 silent-drop class, on the very file a
+    # retention or token-flow fix must change. CORE_ALSO keeps the core half.
+    r = _sel(["tortoise/oauth.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["api", "core"]
+    selected = set(r["test_files"]) | set(r["slow_selected"])
+    assert "test_3036_oauth_retention.py" in selected, "the sweep suite must run"
+    assert "test_oauth_mcp.py" in selected, "api-registered pinner must run"
+    assert "test_control_plane_offload_3498.py" in selected, "api+core pinner must run"
 
 
 def test_surface_audit_skips_removal_for_unmapped_surfaces(tmp_path):
@@ -4013,3 +4222,227 @@ def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
         f"all three orphan-assert steps must be handed {report_path}, the "
         f"path the empty-selection blocks write; found {len(handed)}"
     )
+
+
+# ── THE ON-DEMAND LANE ────────────────────────────────────────────────────
+# `config/ci-surfaces.yml` `on_demand:` lists files that RUN but do not GATE.
+# The lane exists because `fast_pool()` is "everything not slow / env-broken /
+# carve-out" — so deleting a file from `slow_files` moves it into the FAST
+# matrix and onto the gate. There is no "runs, but does not gate" state without
+# a lane, and the lane is only real if a runner actually runs it.
+
+THE_EXPENSIVE_EVAL = "eval/retrieval/test_integration.py"
+
+
+def test_the_on_demand_lane_excludes_its_file_from_every_pre_merge_leg():
+    # The whole point: absent from fast halves, slow, AND carve-out. Asserted
+    # per leg, because the failure that matters is "one leg forgot", and a
+    # set-level assertion reports that as an opaque union.
+    lanes = _expand(push_legs(load_manifest()))
+    name = THE_EXPENSIVE_EVAL
+    bare = name[:-3] if name.endswith(".py") else name
+    assert bare in lanes["on_demand"] or name in lanes["on_demand"], (
+        "the lane must own the file, or it is excluded and claimed by nothing")
+    for leg in ("half_a", "half_b", "slow", "carve_out", "env_broken"):
+        assert bare not in lanes[leg] and name not in lanes[leg], (
+            f"{THE_EXPENSIVE_EVAL} must NOT run in {leg!r}: the lane exists to "
+            f"keep it off the pre-merge gate")
+    assert bare not in {f[:-3] for f in fast_pool(load_manifest())}, (
+        "the lane must be filtered out of fast_pool — that filter is the only "
+        "reason the file is off the gate")
+
+
+def test_the_on_demand_lane_is_not_silently_empty():
+    # ABSENT != EMPTY. A repo that has not adopted the lane is fine (no key);
+    # a repo that declares the key and leaves it empty has a no-op exclusion —
+    # the expensive file is back on the merge path behind something that reads
+    # like a saving. Same polarity as the `durations` guard.
+    m = load_manifest()
+    assert "on_demand" in m, (
+        "this repo must declare the lane: the PR that created it removed the "
+        "25.4-min file from slow_files, and without the key that file is on "
+        "the gate again")
+    assert on_demand_files(m), "the declared lane must not be empty"
+
+    adopted = dict(m)
+    adopted.pop("on_demand")
+    issues = leg_coverage_issues(adopted)
+    assert not [i for i in issues if "on_demand lane is present but EMPTY" in i], (
+        "an ABSENT lane is 'not adopted', not a broken declaration — making it "
+        "red would break every repo that does not use the lane")
+
+    empty = dict(m, on_demand=[])
+    assert any("present but EMPTY" in i for i in leg_coverage_issues(empty)), (
+        "a declared-but-empty lane excludes nothing and must red")
+
+
+def test_a_lane_file_still_on_a_gated_leg_is_reported():
+    # The silent-and-expensive direction: a file in the lane AND in slow_files
+    # is still on the merge path, so the lane saves nothing while reading as if
+    # it did. leg_coverage_issues is the only thing that can see this.
+    m = load_manifest()
+    still_slow = dict(m, slow_files=[*list(m["slow_files"]), THE_EXPENSIVE_EVAL])
+    hits = [i for i in leg_coverage_issues(still_slow) if "on-demand/slow overlap" in i]
+    assert hits, "a lane file still in slow_files must be reported"
+    assert THE_EXPENSIVE_EVAL in hits[0]
+
+
+def test_the_lane_has_a_real_runner_and_reads_the_lane_from_config():
+    # A lane with no runner is strictly worse than no lane: the file is off the
+    # gate AND runs nowhere, so a calibration instrument silently stops being
+    # run while every guard reports green. Pin that the workflow exists, is
+    # manual (it must NOT gate), and does not keep a SECOND copy of the list —
+    # a second copy is a second place to forget, and the forgetting is silent.
+    wf = (REPO / ".github/workflows/evals-on-demand.yml").read_text()
+    import yaml
+    doc = yaml.safe_load(wf)
+    # `on:` parses as the boolean True key in YAML 1.1 — check both spellings
+    # rather than assuming, or this assertion silently tests nothing.
+    triggers = doc.get("on", doc.get(True))
+    assert list(triggers) == ["workflow_dispatch"], (
+        f"the lane's runner must be manual only, got {list(triggers)}")
+    assert "pull_request" not in triggers, "an on-demand runner must not gate a PR"
+    assert on_demand_files.__name__ in wf, (
+        "the workflow must resolve the lane through on_demand_files() — "
+        "hardcoding a second list here lets the two drift")
+
+
+def test_the_lane_files_duration_key_is_classified_not_drift():
+    # `duration_issues()` requires every `durations` key to be a CLASSIFIED
+    # test file. The lane file is classified into a LANE rather than a surface,
+    # so the lane must be added to that guard's `classified` set — otherwise
+    # `--integrity` reds on a manifest that is correct, and the obvious "fix"
+    # for the red is to delete the measured cost that justifies the lane.
+    #
+    # The counterfactual is the load-bearing half: with the lane removed the
+    # SAME key IS drift, which proves the assertion above is testing the lane
+    # and not merely an empty guard that would pass for any manifest.
+    m = load_manifest()
+    assert duration_issues(m) == [], (
+        "the lane's declared duration must not read as unclassified drift")
+    without = dict(m)
+    without.pop("on_demand")
+    assert any(THE_EXPENSIVE_EVAL in i for i in duration_issues(without)), (
+        "control: with the lane absent this key IS drift — if this passes too, "
+        "the guard above is vacuous")
+
+
+def test_the_lane_is_a_classification_for_integrity_too():
+    # Same defect, other guard: `integrity()` asks "is this test file
+    # classified?". A lane file is deliberately absent from every surface, so
+    # without the lane it reads as DRIFT (a test file nobody registered) and
+    # `--integrity` reds. This is the guard whose failure would be "fixed" by
+    # re-registering the file into a surface — silently putting it back on the
+    # gate. Counterfactual pinned the same way.
+    assert integrity(load_manifest()) == [], (
+        "the lane's file must not read as unregistered drift")
+    assert classify_test_file(THE_EXPENSIVE_EVAL, load_manifest()) is None, (
+        "the file is deliberately in NO surface — that is what makes the lane "
+        "necessary rather than decorative; if it acquires a surface, the "
+        "exclusion in fast_pool becomes the only thing keeping it off the gate")
+    # The counterfactual, ASSERTED. The docstring above claimed this test pinned
+    # one "the same way" as its sibling, and it did not — the sibling pops the
+    # lane and asserts drift while this test asserted only the clean direction.
+    # With the lane removed the file IS unregistered drift; without that half,
+    # a `integrity()` that simply returned [] for everything would pass here.
+    without = dict(load_manifest())
+    without.pop("on_demand")
+    assert THE_EXPENSIVE_EVAL in integrity(without), (
+        "control: with the lane absent the file really is unregistered drift — "
+        "if this also passes, the assertion above is vacuous")
+    assert THE_EXPENSIVE_EVAL not in integrity(load_manifest()), (
+        "and with the lane present it is classified, which is the actual claim")
+
+
+def test_a_null_on_demand_key_is_reported_not_a_traceback():
+    # `on_demand:` with NO entries parses to None — not to []. YAML's empty
+    # value. `manifest.get("on_demand", [])` returns that None (the key IS
+    # present, so the default is never used), and `set(None)` raises TypeError,
+    # so EVERY caller crashed before the guard that exists to name an empty
+    # lane could report it.
+    #
+    # This test uses None SPECIFICALLY. The rest of these tests spell it
+    # `on_demand=[]`, a Python list — a state a human editing the YAML can
+    # never produce. That is why the whole suite passed while the real bug
+    # lived: the empty-lane guard was verified against a state that never
+    # occurs, which is a false assurance and not coverage.
+    m = dict(load_manifest(), on_demand=None)
+    assert on_demand_files(m) == set(), "a null lane must read as empty, not raise"
+    assert any("present but EMPTY" in i for i in leg_coverage_issues(m)), (
+        "the guard must still FIRE for the state a human actually types")
+    # Every other consumer must survive the null form too — they each called
+    # on_demand_files() and each raised. They must RETURN (fail closed with a
+    # report), not merely not-crash: with the lane nulled the file is genuinely
+    # unclassified, so drift IS the correct answer here and asserting an empty
+    # list would pin the wrong behaviour.
+    assert isinstance(integrity(m), list), "must report drift, not raise"
+    assert any(THE_EXPENSIVE_EVAL in x for x in integrity(m)), (
+        "with the lane nulled the file really is unclassified — the guard must "
+        "say so rather than crash")
+    assert isinstance(duration_issues(m), list)
+    assert isinstance(fast_pool(m), list), "must not raise on a null lane"
+
+
+def test_the_surface_audit_separates_the_lane_from_drift():
+    # The lane file is unregistered ON PURPOSE — that is what the lane means.
+    # Listing it under "files in NO surface" reads as drift, and the obvious
+    # fix for that reading is to re-register the file into a surface, which
+    # silently puts it back on the merge gate. The two states are separated.
+    #
+    # Pinned against the RENDERED output as well as the report, because the
+    # first version of the render fix read `report["manifest"]` — a key the
+    # report does not carry — so it silently evaluated to an empty list and
+    # the note never appeared. A fix that cannot fail is not a fix.
+    r = surface_audit(load_manifest())
+    assert THE_EXPENSIVE_EVAL not in r["no_surface"], (
+        "a lane file is not drift — it is classified, into a lane")
+    assert THE_EXPENSIVE_EVAL in r["on_demand"], (
+        "the report must carry the lane, or the renderer cannot show it")
+    rendered = render_surface_audit(r)
+    assert "in the on_demand lane" in rendered, (
+        "the rendered audit must name the lane; the fix that read a missing key "
+        "produced no line at all and still passed its own test")
+    assert THE_EXPENSIVE_EVAL in rendered
+
+def test_a_dead_on_demand_entry_is_reported():
+    # The guard this replaces was VACUOUS: `classified` had just been updated
+    # with the lane itself, so `f not in classified` was tautologically False
+    # and the branch could never fire. Pinned with an entry that names a file
+    # which does not exist — a lane entry like that excludes nothing that runs,
+    # while the lane still reads as healthy.
+    m = dict(load_manifest(), on_demand=["bogus/nonexistent.py"])
+    hits = [i for i in leg_coverage_issues(m) if "on-demand" in i and "dead entry" in i]
+    assert hits, "a lane entry naming a missing file must be reported"
+    assert "bogus/nonexistent.py" in hits[0]
+
+
+def test_a_top_level_lane_file_is_not_re_registered_by_unlisted_tests():
+    # `--register` fixes "unlisted" files by registering them into a surface.
+    # For a lane file that fix is the BUG: it would silently put the file back
+    # on the merge gate.
+    #
+    # THE STATE THAT MATTERS is a file that is BOTH unregistered AND laned —
+    # only then does the lane skip change the answer. An earlier version of this
+    # test laned `test_billing.py`, which is registered under `api`, so
+    # `unlisted_tests()` never listed it either way and the test proved nothing
+    # (the reviewer's mutation — deleting the lane skip — left it GREEN).
+    # So: take a real registered file, REMOVE it from every surface, and show
+    # that the lane alone decides whether it reads as drift.
+    base = load_manifest()
+    stripped = {**base,
+                "surfaces": {s: [e for e in entries if e != "test_billing.py"]
+                             for s, entries in base["surfaces"].items()}}
+    assert classify_test_file("test_billing.py", stripped) is None, (
+        "setup: the file must be in NO surface, or the lane skip is not what "
+        "is being tested")
+    # Control: unregistered and NOT laned -> drift, so --register would take it.
+    assert "test_billing.py" in unlisted_tests(TESTS_DIR, stripped), (
+        "control: with no lane, an unregistered file IS unlisted — if this "
+        "fails the test below is vacuous")
+    # The guard: unregistered BUT laned -> not drift, so --register leaves it be.
+    laned = {**stripped, "on_demand": ["test_billing.py"]}
+    assert "test_billing.py" not in unlisted_tests(TESTS_DIR, laned), (
+        "a lane file must not read as unlisted, or --register would put it "
+        "back on the merge gate")
+    # And the real manifest must not report the currently-laned file either.
+    assert "eval/retrieval/test_integration.py" not in unlisted_tests(TESTS_DIR, base)

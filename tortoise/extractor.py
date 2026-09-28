@@ -354,10 +354,14 @@ class MockExtractor:
 _ISSUE_REF_RE = re.compile(r"([a-zA-Z0-9_-]+)#(\d+)")
 
 # objectKind vocab reuse (issue #782 complexity table + plan §4.1):
-# Project, WorkItem, Problem, document, tag, user, skill, tool, agent,
+# Project, WorkItem, Problem, tag, user, skill, tool, agent,
 # workflow, agreement, standard, other.
+# `document` is deliberately NOT here: D10 (#5013, ONTOLOGY v3.15, #5022) retired
+# `objectKind: document` — a document is a `:Source`, not a graph node, so it is
+# not an extractable object kind. Removing it from the canonical set without
+# removing it here would break the documented-subset relation in ONTOLOGY §5.
 _OBJECT_KIND_VOCAB = frozenset({
-    "project", "workitem", "problem", "document", "tag", "user", "skill", "tool",
+    "project", "workitem", "problem", "tag", "user", "skill", "tool",
     "agent", "workflow", "agreement", "standard", "other",
 })
 
@@ -831,7 +835,11 @@ class _SemanticStage:
         self.model = model
         self.subject_kinds = subject_kinds or ["organization", "team", "role",
                                                "legalPerson", "naturalPerson", "other"]
-        self.object_kinds = object_kinds or ["document", "product", "customer",
+        # `document` is absent per D10 (#5013, ONTOLOGY v3.15, #5022): a document
+        # is a `:Source`, not an object kind. (This legacy default list also
+        # carries non-canonical pack kinds — product/customer/competitor — and
+        # this fallback path does not normalize the model's objectKind output.)
+        self.object_kinds = object_kinds or ["product", "customer",
                                              "competitor", "user", "skill",
                                              "workflow", "tool", "agent", "indicator",
                                              "database", "api", "code", "software",
