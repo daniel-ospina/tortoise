@@ -356,6 +356,57 @@ class TestS2:
         assert "CLAUSE-LEVEL STRIP" not in s1
         assert "OPERATIONAL-VALUE" in s1
 
+    def test_short_session_fact_rule_reaches_every_stage(self):
+        """#1507: the SHORT-SESSION fact-retention clause — the granularity
+        bar is a predicate over CONTENT, never over session LENGTH.
+
+        The v2 pipeline's ONE clear regression in the #1350 measurement was
+        Information Extraction (76.5% vs the 84.7% deterministic baseline,
+        -8.2pp): the bar was calibrated on LONG design sessions, where the
+        narrative-first rule pays off, and read a short fact-dense session as
+        "too small to be worth a point" — so the facts the session existed to
+        record were never emitted (0-2 points against a 3-5 target).
+
+        The clause must reach BOTH registers, for the same reason the value
+        carve-out does (#2453): S1 (the story summarizer) decides what the
+        narrative carries and S2/S4 (the mapper) decides what becomes a
+        point. If only one carries it, the story keeps a fact the mapper then
+        discards and the regression survives.
+        """
+        rule = v2.SHORT_SESSION_FACT_RULE
+        assert "SHORT-SESSION FACT RETENTION" in rule
+        # The predicate framing IS the fix — lock it, not merely presence.
+        assert "NEVER over session length" in rule
+        # Anti-quota: a bare density target manufactures points (the #2424
+        # failure mode), so the "consequence, never a quota" edge must hold.
+        assert "CONSEQUENCE" in rule and "quota to fill" in rule
+        assert "mint kinds" in rule
+
+        # S1 (narrative register) gets it via the granularity slot.
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "SHORT-SESSION FACT RETENTION" in s1
+        assert "OPERATIONAL-VALUE" in s1   # still shares the slot (#2453)
+
+        # S2/S4 (mapping register) get it at the shared high-weight slot.
+        for prompt in (v2.render_s2_prompt(),
+                       v2.render_s2_prompt(core_only=True)):
+            assert "SHORT-SESSION FACT RETENTION" in prompt
+            assert "VALUE FIDELITY" in prompt   # #2453 rides the same slot
+
+        # Both master render modes carry it too (the S2/S4 master block).
+        for render in (v2._render_master_core_only(v2.build_master_list()),
+                       v2._render_master_verbose(v2.build_master_list())):
+            assert "SHORT-SESSION FACT RETENTION" in render
+
+        # The S1 asymmetry lock MUST survive: naming the anti-routine gate in
+        # S1 would import that register into the narrative stage. This is not
+        # hypothetical — the first draft of this clause did exactly that, and
+        # only this class's sibling test caught it.
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+
     def test_s4_prompt_anti_routine_exclusion(self):
         """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
         — it must not ADD true-but-routine content as gaps (its TASK's

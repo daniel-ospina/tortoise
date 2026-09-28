@@ -182,6 +182,46 @@ STATE_VALUE_CARVE_OUT = (
     "ephemeral counters not central to a decision."
 )
 
+# #1507: the SHORT-SESSION fact-retention clause. The granularity bar above was
+# calibrated on LONG design sessions, where the narrative-first rule pays off
+# (Multi-Session +2.6pp, Abstention +11.9pp). On a SHORT, fact-dense session it
+# misfires: the mapper reads the bar as "this turn is too small to be worth a
+# point" and under-extracts the very facts the session exists to record.
+# Measured (#1350, official judge, 500-Q): Information Extraction 76.5% vs the
+# deterministic baseline's 84.7% (-8.2pp) — the ONE clear regression of the v2
+# pipeline — with 0-2 points per short session against a 3-5 target.
+#
+# The rule below makes the bar a predicate over the CONTENT, never over the
+# session's LENGTH: a session that states N facts yields N points, however few
+# turns it took. It is deliberately phrased as a CONSEQUENCE ("typically 3 to
+# 5 where the turns previously yielded 0 to 2") rather than a quota, because a
+# density target invites the model to fill it — which is what
+# ANTI_ROUTINE_EXCLUSION exists to prevent. Same two seams as
+# STATE_VALUE_CARVE_OUT: S1 (_granularity_text) and S2/S4 (via _render_master
+# and the {anti_routine} slot), so the story summarizer and the point mapper
+# cannot disagree about whether a short session's facts are load-bearing.
+SHORT_SESSION_FACT_RULE = (
+    "SHORT-SESSION FACT RETENTION (the granularity bar is a predicate over "
+    "content, NEVER over session length): a session that states facts yields "
+    "a point per fact, however few turns it took. Do NOT read a short or "
+    "sparse conversation as 'too small to be worth a point' — brevity is not "
+    "insignificance, and the whole content of a short session is usually the "
+    "one or two facts in it. Every stated date, deadline, name, role, "
+    "quantity, version, threshold, commitment, decision, or stated "
+    "preference is its OWN durable point ('the freeze is October 5', 'the "
+    "TTL is ten minutes', 'Kai owns the migration') — emit each separately "
+    "and verbatim rather than folding them into one summary point.\n"
+    "A short, fact-dense session should therefore yield its facts — "
+    "typically 3 to 5 points where the same turns previously yielded 0 to 2 "
+    "— and that range is a CONSEQUENCE of emitting what is there, never a "
+    "quota to fill: a session with one fact yields one point. Do NOT invent "
+    "narrative, pad with routine asides, or mint kinds to reach a count "
+    "(true-but-routine content is not a fact and is still excluded), and do "
+    "not read this clause as a licence to drop the narrative-first or value "
+    "rules — it is about what is worth emitting, not about what may be "
+    "dropped."
+)
+
 
 # #2424 (compounds with #2453 — one PR): the ANTI-ROUTINE exclusion gate —
 # the mapper-level NOOP (Mem0 semantics: a per-candidate relevance decision,
@@ -316,7 +356,8 @@ def _s2s4_rules() -> str:
     (the #2424 residual clause-level strip and the operator rules live in
     the shared blocks, so every mapping stage carries them)."""
     return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
-            + "\n\n" + OPERATOR_SEMANTICS_RULE)
+            + "\n\n" + OPERATOR_SEMANTICS_RULE
+            + "\n\n" + SHORT_SESSION_FACT_RULE)
 
 
 CORE_OBJECT_KEYS = (
@@ -653,6 +694,7 @@ def _render_master_core_only(master: dict, rng=None) -> str:
         lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
         lines += [f"- {k}: {v}" for k, v in g.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
+    lines.append("\n" + SHORT_SESSION_FACT_RULE)
     return "\n".join(lines)
 
 
@@ -733,6 +775,7 @@ def _render_master_verbose(master: dict, rng=None) -> str:
         lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
         lines += [f"- {k}: {v}" for k, v in g.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
+    lines.append("\n" + SHORT_SESSION_FACT_RULE)
     return "\n".join(lines)
 def _render_chains(master: dict) -> str:
     return "\n".join(
@@ -807,7 +850,8 @@ def _granularity_text(master: dict | None = None) -> str:
     master = master or build_master_list()
     g = master.get("memory_granularity", {})
     out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
-    return f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
+    head = f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
+    return head + "\n" + SHORT_SESSION_FACT_RULE
 
 
 # ── Session-date anchoring (E1, #1533) ────────────────────────────────────
