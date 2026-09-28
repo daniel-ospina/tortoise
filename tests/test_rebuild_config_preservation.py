@@ -434,10 +434,14 @@ def test_planted_sidecar_nonprimitive_config_prop_refused_before_wipe(tmp_path):
 def test_config_registry_export_consistency():
     """`preserved ⊆ exported`, and the two facts that must NOT be inferred.
 
-    The reverse pin (export-skipped ⇒ preserved) is deliberately ABSENT:
-    export-skip is not a durability classifier — `:GraphEventMeta` is
-    export-skipped AND load-bearing (#4653) — so only the direction that holds
-    is asserted.
+    The reverse pin (`export-skipped ⇒ declared`) is deliberate NARROWER than
+    `export-skipped ⇒ preserved`, and lives in
+    `tests/test_rebuild_event_meta_watermark_4653.py`
+    (`test_export_skipped_classes_must_be_declared`): export-skip is not a
+    durability classifier — `:GraphEventMeta` is export-skipped AND
+    load-bearing (#4653) — so the direction that holds is "an export-skipped
+    class must be DECLARED somewhere in the posture doc", never "must be
+    preserved".
     """
     from tortoise import export, hosted_api
     from tortoise.projection import (
@@ -1144,9 +1148,17 @@ def test_config_registry_doc_consistency():
     unenrolled = _doc_block("unenrolled")
     assert "OnboardingState" in unenrolled and "#4641" in unenrolled
     assert "TeamMeta" in unenrolled
-    assert "GraphEventMeta" in unenrolled and "#4653" in unenrolled
-    for vehicle in ("OnboardingState", "TeamMeta", "GraphEventMeta"):
+    for vehicle in ("OnboardingState", "TeamMeta"):
         assert vehicle not in label_wide
+    # #4653: `:GraphEventMeta` LEFT this block — it now has a vehicle (the
+    # pre-wipe sidecar's `event_meta` section, re-derived after replay), so
+    # calling it "unenrolled" would understate what the code actually does.
+    # It is still NOT a config-registry class (no identity property), which is
+    # why it is declared in its own block rather than in `preserved`.
+    assert "GraphEventMeta" not in unenrolled
+    watermark = _doc_block("watermark")
+    assert "GraphEventMeta" in watermark and "#4653" in watermark
+    assert "GraphEventMeta" not in label_wide
 
     # The audit query names every declared class and key (one-directional).
     audit = _doc_block("audit-query")
