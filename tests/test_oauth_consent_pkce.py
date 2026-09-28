@@ -629,8 +629,11 @@ def test_inv7_item6_write_path_parity() -> None:
     write) AND reported on the page."""
     r = _run("item6")
     assert r["smallWritten"] is True, r
-    assert r["strippedWrites"] >= 1, (
-        f"no stripped write landed, so the token assertion below is vacuous: {r}"
+    assert r["strippedWrites"] == 1, (
+        "the oversized write must emit exactly ONE assignment: none means the "
+        "token assertion below is vacuous, and a second (under any name) would "
+        f"persist un-narrowed data this test reads past; got "
+        f"{r['strippedWrites']}: {r['strippedHeaders']}"
     )
     assert r["strippedHasToken"] is False, (
         f"the size guard did not strip provider tokens: {r}"
@@ -654,47 +657,35 @@ def test_inv7_item6_write_path_parity() -> None:
         except ValueError:
             continue
     assert sessions, f"no parseable session reached the cookie jar: {r}"
-    sess = sessions[-1]
-    assert isinstance(sess.get("user"), dict), (
-        f"the narrowing dropped the whole user object: {sorted(sess)}"
-    )
-    assert "identities" not in sess["user"], (
-        "`identities` survived the narrowing — the branch is not doing work "
-        f"(#3496 item 6): {sorted(sess['user'])}"
-    )
-    md = sess["user"].get("user_metadata") or {}
-    # EXACT allowlist → exact VALUES. Key-set plus truthiness still passes a
-    # right-key/wrong-value assignment (`keep.name = md.display_name`) — the
-    # fixture gives `name` and `display_name` distinct values precisely so a swap
-    # is observable — and a `keep = {...md}; delete keep.gigantic` DENYLIST keeps
-    # every un-kept key (the allowlist→denylist divergence from
-    # website/assets/supabase-session.js:116-128).
-    assert md == {
-        "display_name": "Ada Lovelace",
-        "avatar_url": "https://a.example/a.png",
-        "full_name": "Ada Lovelace",
-        "name": "ada",
-    }, f"user_metadata is not the narrowed allowlist: {md}"
 
-    # …and nothing un-narrowed survives anywhere ELSE on the written session,
-    # pinned by SHAPE rather than by scanning for the bloat's key names. A name
-    # scan is the same denylist spot-check this test just condemned: a re-attach
-    # that avoids the literals — `obj.user.extra = Object.values(md)` — ships the
-    # bloat VALUES with none of the keys that name them.
-    assert set(sess) == {"access_token", "expires_at", "refresh_token", "user"}, (
-        "an unexpected top-level property survived on the written session: "
-        f"{sorted(sess)}"
-    )
-    assert set(sess["user"]) == {"id", "user_metadata"}, (
-        f"an unexpected property survived on the written user: {sorted(sess['user'])}"
-    )
-    # …plus the bloat VALUES themselves, wherever a re-attach might park them.
-    blob = json.dumps(sess)
-    for marker in ("y" * 64, "z" * 64):
-        assert marker not in blob, (
-            "the un-narrowed metadata values survived on the written session "
-            f"(`{marker[:8]}…`): {blob[:300]}"
-        )
+    # The written session is characterised COMPLETELY — every key AND every value
+    # — rather than by enumerating the bad things we happened to think of. A
+    # negative check ("nothing un-narrowed survives anywhere") is a partial
+    # denylist: it goes false the moment a re-attach lands in a slot it does not
+    # name (`obj.user.id = md.<bloat>`) or a SECOND cookie carries the bloat past
+    # the one entry this reads. Two review rounds found precisely those holes.
+    # A complete positive assertion is defeated only by a mutation that writes a
+    # DIFFERENT artifact — which is exactly what it exists to catch. The fixture
+    # gives the kept and the non-kept values distinct contents, so a swap, a
+    # relocation and a partial narrowing are all visible.
+    #
+    # `strippedWrites == 1` above plus the non-empty `sessions` here is what makes
+    # this the ONLY write to characterise.
+    sess = sessions[0]
+    assert sess == {
+        "access_token": "a" * 100,
+        "refresh_token": "r" * 50,
+        "expires_at": 9,
+        "user": {
+            "id": "u-1",
+            "user_metadata": {
+                "display_name": "Ada Lovelace",
+                "avatar_url": "https://a.example/a.png",
+                "full_name": "Ada Lovelace",
+                "name": "ada",
+            },
+        },
+    }, f"the written session is not the fully-narrowed one: {sess}"
 
     assert r["overCapWrote"] is False, f"an over-cap write reached the cookie: {r}"
     assert r["overCapReported"] is True, f"the over-cap refusal was not reported: {r}"
@@ -1182,9 +1173,11 @@ function innerTarget(assignUrl) {
         user_metadata: {
           display_name: 'Ada Lovelace', avatar_url: 'https://a.example/a.png',
           full_name: 'Ada Lovelace', name: 'ada',
-          // THREE non-allowlisted keys. A deny-list naming one, or the two
-          // OBVIOUS bloat keys, still keeps the third — only the allowlist
-          // drops all three, which is the property this test is for.
+          // THREE non-allowlisted keys, so a deny-list must name ALL THREE to
+          // produce the same session; one that enumerates fewer keeps the
+          // third. (A deny-list naming all three writes a byte-identical
+          // session — equivalent to the allowlist, and therefore not something
+          // this test claims to distinguish.)
           gigantic: 'y'.repeat(1500),             // must NOT survive the narrowing
           legacy_blob: 'z'.repeat(400),           // must NOT survive the narrowing
           provider_claims_blob: 'w'.repeat(120),  // ditto — deliberately not an
