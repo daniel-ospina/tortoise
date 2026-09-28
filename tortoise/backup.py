@@ -134,7 +134,6 @@ def restore(backup_dir: str, db_path: str,
     # Restore into FalkorDB if requested
     if into_falkor:
         from tortoise.projection import (  # noqa: I001
-            _POINT_RESTAMP_EVENT_TYPES,
             FalkorProjection,
             journal_hard_delete_seqs,
             plan_point_restamp_folds,
@@ -178,8 +177,12 @@ def restore(backup_dir: str, db_path: str,
                 if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                     deferred_links.append((seq, ev))
                     continue
-                if (isinstance(ev, dict)
-                        and ev.get("type") in _POINT_RESTAMP_EVENT_TYPES):
+                # Keyed on the PLAN, not the raw envelope type — the plan
+                # selects by the NORMALIZED type (``_norm`` splices a nested
+                # payload), so a raw-type guard would let a ``type``-in-``point``
+                # terminalizer fall through to ``apply()``'s inline branch and
+                # its unshared selection (#325/#3722's raw-vs-normalized class).
+                if seq in restamp_plan:
                     proj.apply_journal_point_restamp(ev, seq, restamp_plan)
                     continue
                 proj.apply(ev)

@@ -1179,6 +1179,53 @@ def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
             f"{promote_type}: recover_from_log != rebuild_all")
 
 
+def test_apply_replay_routes_a_type_in_point_terminalizer_through_the_plan(
+        sup):
+    """#3305/#325: ``_norm`` splices a nested payload, so a record whose TYPE
+    lives inside ``point`` is planned by ``plan_point_restamp_folds``. The
+    engines must therefore dispatch on the PLAN, not the raw envelope type —
+    otherwise the record falls through to ``apply()``'s inline branch, which
+    folds EVERY terminalizer and re-introduces the ghost ``CORRECTS`` the
+    canonicalization exists to prevent."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    s1 = sdk.create_point("statement", "S1", status="live")["id"]
+    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    base = EventLog(str(events / "events.jsonl")).read_all()
+    synth_dir = events.parent / "synth-type-in-point"
+    synth_dir.mkdir()
+    ts = "2026-01-01T00:00:00+00:00"
+    _synthesize_journal(synth_dir / "events.jsonl", [
+        *base,
+        {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+         "projection_version": 2,
+         "point": {"type": "PointSuperseded", "id": a, "new_id": s1}},
+        {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+         "projection_version": 2,
+         "point": {"type": "PointSuperseded", "id": a, "new_id": s2}},
+    ])
+
+    def _successors(proj) -> list:
+        return sorted(r[0] for r in proj.g.query(
+            "MATCH (a:Point)-[r:CORRECTS]->(b:Point {id:$old}) RETURN a.id",
+            params={"old": a}).result_set)
+
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(synth_dir))
+    via_all = _point_state(sdk, a)
+    assert via_all["status"] == "superseded"
+    corr_all = _successors(proj)
+    assert corr_all == [s2], (
+        f"rebuild_all canonicalization dropped: {corr_all}")
+
+    _apply_replay(sdk, synth_dir)
+    assert _point_state(sdk, a)["status"] == "superseded"
+    assert _successors(sdk._get_proj()) == corr_all, (
+        "the apply() arm folded a non-canonical supersede — the shared "
+        "selection was bypassed (ghost CORRECTS)")
+
+
 def test_apply_replay_matches_rebuild_all_on_a_nested_terminalizer_payload(
         sup):
     """#3305/#325: ``_norm`` tolerates a NESTED terminalizer payload

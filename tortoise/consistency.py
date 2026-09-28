@@ -51,7 +51,6 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .projection import (
-    _POINT_RESTAMP_EVENT_TYPES,
     _apply_one,
     _load_prewipe_snapshot,
     _promotion_point_with_operator,
@@ -1135,9 +1134,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
             entity_link_events.append((seq, ev))
             continue
         try:
-            if (isinstance(ev, dict)
-                    and ev.get("type") in _POINT_RESTAMP_EVENT_TYPES):
-                projection.apply_journal_point_restamp(ev, seq, restamp_plan)
+            # Keyed on the PLAN, not the raw envelope type — the plan selects
+            # by the NORMALIZED type (``_norm`` splices a nested payload), so a
+            # raw-type guard would let a ``type``-in-``point`` terminalizer fall
+            # through to ``apply()``'s inline branch and its unshared selection
+            # (#325/#3722's raw-vs-normalized class).
+            if seq in restamp_plan:
+                projection.apply_journal_point_restamp(
+                    ev, seq, restamp_plan)
             else:
                 projection.apply(ev)
             applied += 1

@@ -3714,8 +3714,13 @@ class FalkorProjection(
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                 entity_link_events.append((seq, ev))
                 continue
-            if (isinstance(ev, dict)
-                    and ev.get("type") in _POINT_RESTAMP_EVENT_TYPES):
+            # Key the dispatch on the PLAN, not the raw envelope type: the plan
+            # selects by the NORMALIZED type (``_norm`` splices a nested
+            # payload), so a ``type``-in-``point`` record is planned here but
+            # would miss a raw-type guard and fall through to ``apply()``'s
+            # inline branch — which folds EVERY terminalizer, skipping this
+            # engine's selection (#325/#3722's raw-vs-normalized class).
+            if seq in restamp_plan:
                 self.apply_journal_point_restamp(ev, seq, restamp_plan)
                 continue
             self.apply(ev)
