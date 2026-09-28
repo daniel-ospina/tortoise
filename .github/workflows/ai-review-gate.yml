@@ -1,8 +1,19 @@
 name: ai-review-gate
 
-# Hard GitHub-enforced AI review merge gate (#2055, #2982).
-# Branch protection requires the `ai-review-gate` status check on every PR to
-# main. It passes only when the PR body carries a SIGNED AI-review evidence
+# AI review evidence gate (#2055, #2982).
+#
+# ⛔ WHAT THIS IS NOT — corrected 2026-09-28 (#5441, #5426). This check is NOT required
+# by `main` branch protection. The live required contexts are pricing-artifact,
+# docs, test-isolation, license-surface, legal-e2e and python-ci-gate
+# (branches/main/protection/required_status_checks.contexts; rulesets = []). The
+# review record is enforced on the LOCAL land paths only (`review-enforcer`,
+# `scripts/atomic-land.sh`) — Mergify merges server-side and reads none of it
+# (.mergify.yml, "WHAT STILL GATES A MERGE"; #5426, #5433). The status check is a
+# VISIBLE SIGNAL for reviewers on an author PR; by itself it gates nothing. Text
+# here and in docs/ai-review-gate.md claimed the opposite and was stale — do not
+# restore it. That is also why the merge-queue exclusion below is safe.
+#
+# It passes only when the PR body carries a SIGNED AI-review evidence
 # marker produced by record-review.sh, bound to this PR and repo and to
 # EITHER the PR's current head sha OR its current diff:
 #   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
@@ -88,7 +99,7 @@ name: ai-review-gate
 #   live_diff_hash_norm — the normalized digest (post-#1362 producers)
 #   live_diff_hash_raw  — the legacy raw digest (every marker already recorded)
 # The legacy arm is MANDATORY: without it every existing marker breaks and
-# the required check reddens fleet-wide. Consumer-first land order: this gate
+# the check reddens fleet-wide. Consumer-first land order: this gate
 # is safe to land before or after the producer and changes nothing until the
 # producer starts emitting the normalized digest.
 #
@@ -135,10 +146,13 @@ name: ai-review-gate
 # code-injection or secret-exfiltration vector. The diff is fetched and hashed
 # as bytes only; it is never evaluated.
 #
-# ⛔ FUTURE EDITORS: never add `if:` conditions, path filters, or `needs:` to
-# this job. A SKIPPED job reports as Success and would silently pass the
-# required check without any review evidence. This job must always run and
-# always evaluate the evidence itself.
+# FUTURE EDITORS — the ONE permitted `if:` is the merge-queue exclusion on
+# the job below (#5426); `needs:`/`continue-on-error:`/path filters must never
+# appear, and in particular this job must always run and evaluate the evidence
+# itself for every AUTHOR pull request. A SKIPPED job reports as Success, which
+# branch protection counts as a pass for a REQUIRED check — so if this check is
+# ever made required, DELETE that exclusion first. The predicate is pinned
+# EXACTLY by tests/test_ai_review_gate_contract.py; widening it fails the suite.
 
 on:
   pull_request_target:
@@ -154,6 +168,41 @@ concurrency:
 
 jobs:
   ai-review-gate:
+    # ── The ONE permitted condition: the merge-queue exclusion (#5426) ────
+    # Mergify's queue branch (`mergify/merge-queue/<sha>`) is not a PR an author
+    # reviewed — it is a synthetic composition whose body Mergify generates.
+    # This gate reads the PR body, so on that branch it can only ever answer
+    # "No AI review evidence found in PR <queue-pr> body". MEASURED 2026-09-28
+    # against the gate's WHOLE run history on `mergify/merge-queue/*`:
+    # 987 failure / 742 cancelled / 0 SUCCESS (the red count drifts as the queue
+    # retries; **zero successes** is the load-bearing fact). The batch is a
+    # composition of PRs, not itself a contribution: it has no review to find.
+    #
+    # THREE clauses, ANDed, following inbound-relay.yml's guard for the same
+    # queue (#3558): the ACTOR is the authoritative signal (`mergify[bot]` — an
+    # installed GitHub App login cannot be spoofed by a contributor), plus the
+    # same-repo and head-ref clauses as independent narrowings. A single
+    # head-ref clause would be author-controllable: any same-repo or fork PR
+    # opened from a branch named `mergify/merge-queue/*` would skip the check.
+    #
+    # All three must hold, so a renamed Mergify actor login makes the exclusion
+    # stop applying and the queue reds return. That failure direction is
+    # deliberate: a failed exclusion is a red check, never an unchecked PR.
+    # (Do NOT claim a "belt" here — inside a single negation the other two
+    # clauses cannot rescue a false actor clause. inbound-relay.yml CAN call
+    # its ref clause a belt, because there the actor test sits OUTSIDE the
+    # negation.)
+    #
+    # Safe because the check is NOT a required context (see header) and the
+    # queue's merge condition is `python-ci-gate` (.mergify.yml
+    # merge_conditions). A skipped job reports Success for a REQUIRED check — so
+    # if this check is ever made required, DELETE this `if:` first.
+    # tests/test_ai_review_gate_contract.py pins the predicate EXACTLY, so
+    # widening it (or substituting any other `if:`) fails the suite.
+    if: >-
+      !(github.actor == 'mergify[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))
     runs-on: ubuntu-latest
     steps:
       - name: Validate signed AI review evidence in PR body
@@ -192,8 +241,8 @@ jobs:
           # ⛔ Re-assert AFTER normalization (#3057 review): a whitespace-only
           # secret passes the `-z` guard above and then normalizes to the EMPTY
           # string. An empty HMAC key is public — any PR author could mint a
-          # marker (stale sha + the live `diff=`) and turn the required check
-          # green on an unreviewed diff. The guard above validates the RAW
+          # marker (stale sha + the live `diff=`) and turn this check green on
+          # an unreviewed diff. The guard above validates the RAW
           # value; the normalized value is what the HMAC actually uses, so it
           # must be validated too.
           if [ -z "$GATE_SECRET" ]; then
@@ -210,7 +259,7 @@ jobs:
           # before #2982 made the fetch live by adding GH_TOKEN — would assign
           # that error JSON to `body`, discard the PR_BODY fallback, and report
           # "No AI review evidence found" for a PR that carries valid evidence:
-          # an API blip turned into a red REQUIRED check with a diagnostic
+          # an API blip turned into a red check with a diagnostic
           # pointing the wrong way.
           body="${PR_BODY:-}"
           if fetched="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null)"; then
@@ -256,8 +305,8 @@ jobs:
           # differ` carries no content, so the `index` line is its ONLY
           # content-bearing field. An unconditional drop made two distinct
           # binary revisions normalize IDENTICALLY: review binary v1, sign the
-          # marker, swap in binary v2, and the required gate ACCEPTED an
-          # unreviewed binary (a fail-open). The ruling's premise is "the
+          # marker, swap in binary v2, and the gate ACCEPTED an unreviewed
+          # binary (a fail-open). The ruling's premise is "the
           # index line is redundant with hunk content" — false precisely when
           # there is no hunk content.
           #
@@ -550,7 +599,7 @@ jobs:
             # A trailing ` (text) sig=<hex>` on an otherwise-malformed line
             # (`@ not-a-sha`) must not hijack this branch and misattribute the
             # cause — that would suppress the accurate stale/diff diagnostic on
-            # a REQUIRED check (review finding, #3057).
+            # a check (review finding, #3057).
             latest_repo=""
             if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro|-low)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
               latest_repo="${BASH_REMATCH[3]}"

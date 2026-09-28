@@ -15,9 +15,12 @@ jobs:
   # `needs: changes` + `if:` on its surface. The 5 branch-protection REQUIRED
   # checks (pricing-artifact, docs, test-isolation, license-surface,
   # legal-e2e) deliberately keep NO needs/if — a SKIPPED required job reports
-  # as Success and would silently pass the required check (the ai-review-gate
-  # trap, #2055). Fail-closed on detection: an empty/erroneous diff emits ALL
+  # as Success and would silently pass the required check (#2055). Fail-closed
+  # on detection: an empty/erroneous diff emits ALL
   # surfaces true so every gated job runs — never a silent coverage loss.
+  #
+  # (`ai-review-gate` was cited here as that trap until 2026-09-28; it is NOT a
+  # required context — #5426/#5441 — so that example is gone.)
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -380,7 +383,7 @@ jobs:
                   isfile("product/pricing.json"),
                   isfile(".github/workflows/ci.yml"),
               ),
-              # ai-review-gate-tests (#2982): the signed-review merge gate's
+              # ai-review-gate-tests (#2982): the review-evidence gate's
               # shell harness. Gated on the workflow, the harness, and ci.yml
               # itself so a change to either side of the gate always exercises
               # its evidence-acceptance logic. Security-relevant: a regression
@@ -643,18 +646,22 @@ jobs:
     # harness extracts that run block and drives it with fabricated signed
     # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
     # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
-    # PR-body source. It ALSO asserts the non-runtime invariants the required
-    # job depends on: no if:/needs:/continue-on-error:, trigger stays
-    # pull_request_target with no paths: filter, permissions keep
-    # pull-requests: read, and GH_TOKEN is declared. Self-contained, no
-    # network, no secrets.
+    # PR-body source. It ALSO asserts the static invariants the job depends on:
+    # no needs:/continue-on-error:, trigger stays pull_request_target with no
+    # paths: filter, permissions keep pull-requests: read, and GH_TOKEN is
+    # declared. (The job's ONE permitted `if:` — the #5426 merge-queue
+    # exclusion — is deliberately NOT asserted here: a text matcher cannot say
+    # "this `if:` but no other". It is pinned EXACTLY by
+    # tests/test_ai_review_gate_contract.py, which runs in the python-ci lane.)
+    # Self-contained, no network, no secrets.
     #
     # ⚠️ This job is NOT a required status check: a red harness does not block a
-    # merge, so a regression here can land and then silently make the REQUIRED
-    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
-    # (add this job to branch protection, or move the harness into an
-    # always-run required job). The `if:` above is a complete per-surface guard:
-    # it fires on any change to the gate workflow, this harness, or ci.yml.
+    # merge, so a regression here can land and then silently stop the
+    # `ai-review-gate` check from evaluating evidence (it already enforces no
+    # merge — see .mergify.yml #5426/#5433). Tracked in #3091 (add this job to
+    # branch protection, or move the harness into an always-run required job).
+    # The `if:` above is a complete per-surface guard: it fires on any change to
+    # the gate workflow, this harness, or ci.yml.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

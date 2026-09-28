@@ -1,5 +1,5 @@
 ---
-title: "AI Review Merge Gate"
+title: "AI Review Evidence Gate"
 type: engineering
 domain: capability
 doc_status: live
@@ -10,12 +10,30 @@ aboutObjects: ai-review-gate
 ownedBy: epistemic-team
 ---
 
-# AI Review Merge Gate
+# AI Review Evidence Gate
 
-`main` branch protection requires the `ai-review-gate` status check on every
-pull request. It replaces the human-approval requirement: merges proceed when
-the code-review skill's AI review is recorded and all required checks are
-green.
+> Named for what it does, not what it was believed to do: it validates a signed
+> review marker in a PR body. It is **not** a merge gate — nothing on the merge
+> path reads it (#5426, #5433).
+
+`main` branch protection does **not** require the `ai-review-gate` status check
+(corrected 2026-09-28, #5441, #5426: the live required contexts are `pricing-artifact`,
+`docs`, `test-isolation`, `license-surface`, `legal-e2e` and `python-ci-gate`;
+rulesets are empty). The review record is enforced on the **local** land paths
+only (`review-enforcer`, `scripts/atomic-land.sh`) — Mergify merges server-side
+and reads none of it, and the queue's merge condition is `python-ci-gate`. So the
+check is a **visible signal** on an author PR, not a merge gate.
+
+For that reason the gate does **not** run on Mergify's queue branch
+(`mergify/merge-queue/<sha>`): its evidence lives in the PR body, and a synthetic
+queue PR's body is machine-generated, so the check could only ever answer "No AI
+review evidence found in PR <queue-pr> body" — measured 2026-09-28 against the
+gate's WHOLE history on `mergify/merge-queue/*`: 987 failure / 742 cancelled /
+0 success (the red count drifts as the queue retries; **zero successes** is the
+load-bearing fact). The exclusion is safe because the check is not a required
+context and the queue's merge condition is `python-ci-gate`; it is not a claim
+that every queued PR carries a marker — the queue auto-queues on the five entry
+checks alone and reads no evidence at merge (#5433).
 
 ## How it works
 
@@ -131,7 +149,7 @@ already carries the change.**
 > no hunks and `Binary files … differ` carries no content, so its `index` line
 > is the **only** content-bearing field. Dropping it made two *distinct* binary
 > revisions normalize identically: review binary v1, sign the marker, swap in
-> v2, and the required gate **accepted** an unreviewed binary — a fail-open.
+> v2, and the gate **accepted** an unreviewed binary — a fail-open.
 > The amendment is required by the ruling's own rationale ("the `index` line is
 > redundant with hunk content" — false precisely when there is no hunk content)
 > and is recorded on agent-infra#1362, comment 5806797023. The producer must
@@ -158,7 +176,7 @@ marker whose signed `diff=` equals either:
   recorded.
 
 The legacy arm is mandatory: without it every existing marker breaks and the
-required check reddens fleet-wide. This is a **consumer-first land order** —
+check reddens fleet-wide. This is a **consumer-first land order** —
 the gate is safe to land before or after the producer, and changes nothing
 until the producer starts emitting the normalized digest.
 
@@ -188,10 +206,12 @@ The gate's shell logic runs inline in the workflow (this workflow has no
 checkout step, so it cannot reference a repo script), so
 `.github/scripts/ai-review-gate.test.sh` **extracts the `run:` block verbatim**
 and drives it with a stubbed `gh` and a fabricated HMAC key. It also asserts the
-non-runtime invariants — the required job carries no
-`if:`/`needs:`/`continue-on-error:`, the trigger stays `pull_request_target`
+non-runtime invariants — the job carries no `needs:`/`continue-on-error:`, the
+trigger stays `pull_request_target`
 with no `paths:` filter, the permissions still grant `pull-requests: read`, and
-the step declares `GH_TOKEN`.
+the step declares `GH_TOKEN`. (The job's one permitted `if:` is asserted
+separately, and exactly, by `tests/test_ai_review_gate_contract.py` — this shell
+harness does not check it.)
 
 The harness is wired into `ci.yml` as `ai-review-gate-tests`. That job is **not
 (yet) a required check**, so a red harness does not block a merge — see #3091 to
@@ -228,7 +248,7 @@ moves after a record because of new review-fix commits, re-run the code-review
 skill and re-record at the new head. If it moves only because the branch was
 updated against `main` — whether by a merge commit or by a rebase plus
 `--force-with-lease` — the three-dot diff is unchanged and the recorded
-evidence remains valid **for this required check**.
+evidence remains valid **for this check**.
 
 > The local `review-enforcer` extension keeps its own, head-bound merge gate, so
 a plain local merge is still blocked after a merge-only update. That is tracked

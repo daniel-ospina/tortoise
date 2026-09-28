@@ -1,6 +1,6 @@
 """ai-review-gate ↔ record-review.sh signing-contract guard (#3076).
 
-The ``ai-review-gate`` required check (``.github/workflows/ai-review-gate.yml``)
+The ``ai-review-gate`` check (``.github/workflows/ai-review-gate.yml``)
 accepts a PR only when the body carries a signed evidence marker whose HMAC
 verifies against the ``AI_REVIEW_GATE_KEY`` secret::
 
@@ -42,6 +42,40 @@ import yaml
 
 _WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ai-review-gate.yml"
 _GATE_STEP_NAME = "Validate signed AI review evidence in PR body"
+
+# The gate job's ONLY permitted ``if:``, as a parsed value. It excludes
+# Mergify's synthetic queue branch — that PR's body is machine-generated, so the
+# gate, which reads the PR body, could only ever answer "No AI review evidence
+# found in PR <queue-pr> body" there. MEASURED 2026-09-28 against the gate's
+# WHOLE history on ``mergify/merge-queue/*``: 987 failure / 742 cancelled /
+# 0 success (#5426) — the red count drifts as the queue retries; **zero
+# successes** is the load-bearing fact.
+#
+# THREE clauses, ANDed, mirroring ``inbound-relay.yml``'s guard for the same
+# queue (#3558): ``github.actor`` is authoritative (an installed GitHub App
+# login cannot be spoofed by a contributor), and the same-repo + head-ref
+# clauses are independent NARROWINGS of it. A head-ref-only predicate would be
+# AUTHOR-CONTROLLABLE — any PR opened from a branch named
+# ``mergify/merge-queue/*`` would skip the check. Do not simplify it back to
+# one clause.
+#
+# All three must hold, so a renamed Mergify actor login makes the exclusion
+# stop applying and the queue reds return. That failure direction is
+# deliberate: a failed exclusion is a red check, never an unchecked PR.
+# (Do NOT claim a "belt" here — inside a single negation the other two clauses
+# cannot rescue a false actor clause. inbound-relay.yml CAN call its ref clause
+# a belt, because there the actor test sits OUTSIDE the negation.)
+#
+# Pinned EXACTLY — not merely "``if`` is absent". The check is not a required
+# context, so a skip cannot pass a merge requirement, but any OTHER condition
+# would silently change what the check means on an author PR. If this check is
+# ever made required, delete the exclusion first: a skipped required check
+# reports Success.
+_MERGE_QUEUE_EXCLUSION = (
+    "!(github.actor == 'mergify[bot]' && "
+    "github.event.pull_request.head.repo.full_name == github.repository && "
+    "startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))"
+)
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 # A fixture key, NOT the repo secret (which must never appear in the repo).
@@ -282,8 +316,10 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     The runtime tests inject env themselves, so they would still pass if the
     workflow stopped wiring GATE_SECRET to the repo secret or switched the
     head-sha source. Pin the wiring here. Also pin the skip-footgun: a job
-    `if:`/path filter would report SKIPPED — i.e. Success — for the required
-    check with no evidence evaluated.
+    `if:`/path filter reports SKIPPED — i.e. Success — for a REQUIRED check
+    with no evidence evaluated. This check is not required (.mergify.yml
+    #5426/#5433), so the ONE condition permitted is the #5426 merge-queue
+    exclusion, pinned exactly below.
     """
     env = _gate_step()["env"]
     assert env["GATE_SECRET"] == "${{ secrets.AI_REVIEW_GATE_KEY }}", env
@@ -292,8 +328,10 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     assert env["REPO_NAME"] == "${{ github.event.repository.full_name }}", env
     assert env["PR_BODY"] == "${{ github.event.pull_request.body }}", env
     job = _workflow()["jobs"]["ai-review-gate"]
-    assert "if" not in _gate_step() and "if" not in job, (
-        "a conditional/skipped gate reports Success — never gate this job"
+    assert "if" not in _gate_step(), "never gate the STEP"
+    assert job.get("if") == _MERGE_QUEUE_EXCLUSION, (
+        "the job's only permitted condition is the merge-queue exclusion; any other "
+        f"`if:` changes what the check means on an author PR: {job.get('if')!r}"
     )
 
 
@@ -318,18 +356,22 @@ def test_trigger_and_job_shape_are_pinned_from_parsed_yaml() -> None:
     assert isinstance(on, dict) and set(on) == {"pull_request_target"}, (
         "the gate must trigger on pull_request_target ONLY: under `pull_request` a "
         f"same-repo PR runs its own copy of the workflow and can self-certify the "
-        f"required check. Parsed trigger: {on!r}"
+        f"check. Parsed trigger: {on!r}"
     )
     trigger = on["pull_request_target"] or {}
     assert "paths" not in trigger and "paths-ignore" not in trigger, (
-        f"a path-filtered required check never runs, so it can never pass: {trigger!r}"
+        f"a path-filtered check never runs, so it can never pass: {trigger!r}"
     )
     job = doc["jobs"]["ai-review-gate"]
-    for banned in ("if", "needs", "continue-on-error"):
+    for banned in ("needs", "continue-on-error"):
         assert banned not in job, (
-            f"a {banned!r}-gated required job reports Success without evaluating any "
-            f"evidence — never make this job conditional or non-blocking: {job.get(banned)!r}"
+            f"a {banned!r}-gated job reports Success without evaluating any "
+            f"evidence — never make this job non-blocking: {job.get(banned)!r}"
         )
+    assert job.get("if") == _MERGE_QUEUE_EXCLUSION, (
+        "the merge-queue exclusion is the ONE permitted condition (#5426); any "
+        f"other `if:` is a silent change to what the check means: {job.get('if')!r}"
+    )
     assert "permissions" not in job, (
         "a job-level permissions: override supersedes the workflow grant for this "
         "job; one that drops pull-requests: read leaves the workflow-level grant "
