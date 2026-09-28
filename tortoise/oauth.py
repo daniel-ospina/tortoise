@@ -1966,10 +1966,15 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // payload of the REAL length under a THROWAWAY key — and that payload is a
   // DUMMY of the same length, never the credential itself: a store that accepts
   // the write but SILENTLY IGNORES removal would otherwise retain the verifier
-  // under `probeKey`, a key no path can ever clean. The probe proves a THROWAWAY
-  // key is removable; cleanability of the REAL key and value is proven
-  // separately below, because removal can discriminate by key or by stored value
-  // (a read-back alone proves write/read integrity, not removability).
+  // under `probeKey`, a key no path can ever clean. What that probe cannot prove is
+  // REMOVABILITY OF THE REAL KEY: the credential has to be WRITTEN before its
+  // removal can be observed, so a store that accepts the credential and then
+  // refuses to remove it keeps a copy no path can clean (recorded residual R21 —
+  // a store that discriminates by key is not a conforming browser store, and no
+  // probe can prevent this, only detect it after the fact). Re-proving removal on
+  // the real key would detect nothing the probe misses and would leave the
+  // credential in TWO stores; the writer therefore keeps the probe, and the real
+  // write is proven by its read-back alone.
   const writeAux = (key, value) => {
     const v = String(value);
     const probe = "x".repeat(v.length);
@@ -1980,12 +1985,6 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
         if (s.getItem(probeKey) !== probe) throw 0;
         s.removeItem(probeKey);
         if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
-        s.setItem(key, v);
-        if (s.getItem(key) !== v) throw 0;
-        // Prove the REAL key/value are removable too, then re-write: the proof
-        // deletes what it just stored.
-        s.removeItem(key);
-        if (s.getItem(key) !== null) throw 0;
         s.setItem(key, v);
         if (s.getItem(key) !== v) throw 0;
         return true;
@@ -2403,8 +2402,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     return out;
   };
   const LOAD_QUERY = loadParams();
+  // #3496: a provider round trip is evidenced only by PROVIDER-owned markers.
+  // `type` and `flow_id` are generic names a benign authorize GET can carry (the
+  // server ignores unknown params and `authorizeReturnTo` preserves the rest), so
+  // treating them as evidence told a first-time visitor who had done nothing that
+  // their sign-in failed. They stay in STRIP_PARAMS — stripping is cosmetic — and
+  // no longer make `present` true.
+  const TRANSIENT_MARKERS = ["code", "error", "error_code", "error_description",
+                             "error_uri", "sb_flow_id"];
   const LOAD_TRANSIENT = {
-    present: STRIP_PARAMS.some((k) => LOAD_QUERY.has(k)),
+    present: TRANSIENT_MARKERS.some((k) => LOAD_QUERY.has(k)),
     error_description: LOAD_QUERY.get("error_description"),
   };
   function boundedText(s) {
@@ -2421,16 +2428,23 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       const u = new URL(window.location.href);
       STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
       if (u.hash.length > 1) {
-        const h = new URLSearchParams(u.hash.slice(1));
-        // Touch the fragment ONLY when it is a pure param list — i.e. when
-        // re-serialising it round-trips byte-identically. `#section-2` and
-        // `#/route/x` are not param lists (they re-serialise to `section-2=` /
-        // `%2Froute%2Fx=`), and re-serialising one mangles an unrelated part of
-        // the URL this function does not own. A fragment that is not a pure
-        // param list is therefore left alone, transient included: that is
-        // cosmetic URL-bar residue, not page state (the page derives its own
-        // transient from `LOAD_QUERY`, which is captured before this runs).
-        if (h.toString() === u.hash.slice(1)) {
+        const raw = u.hash.slice(1);
+        // Touch the fragment ONLY when it is a pure param list: every
+        // `&`-separated part is `name=value` with a NON-EMPTY name. `#section-2`
+        // and `#/route/x` are not param lists, and re-serialising one mangles an
+        // unrelated part of the URL this function does not own. (Testing this by
+        // comparing `new URLSearchParams(raw).toString()` to `raw` is NOT the same
+        // test — that is byte-identity after NORMALISATION, which any value
+        // carrying an escaped character fails, so a provider `error_description`
+        // with a space (`boom%20boom`) took the left-alone branch and kept the
+        // transient on the URL, which is the one case this branch exists for.) A
+        // fragment that is not a param list is left alone, transient included:
+        // that is cosmetic URL-bar residue, not page state (the page derives its
+        // own transient from `LOAD_QUERY`, captured before this runs).
+        const isParamList = raw.indexOf("=") > 0 &&
+          raw.split("&").every((p) => p.indexOf("=") > 0);
+        if (isParamList) {
+          const h = new URLSearchParams(raw);
           STRIP_PARAMS.forEach((k) => h.delete(k));
           const rest = h.toString();
           u.hash = rest ? "#" + rest : "";

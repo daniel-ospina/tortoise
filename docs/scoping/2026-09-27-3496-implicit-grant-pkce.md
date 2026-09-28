@@ -139,9 +139,9 @@ trigger is `_removeSession` from an invalid/expired stored session, reached via
    suffix/pattern test on `key`.
 
 **Recorded residual:** full cross-language **executable** parity with blog-admin's TS driver is not
-in this diff (its adapter is declared via TS arrow properties that `_extract_fn_body` cannot parse,
-and executing it needs an ESM/strip-types loader + `import.meta.env` stubs — fragility in a P0
-lane). Bounded by mechanisms 1–3, and filed as a follow-up with three named gaps: (i) blog-admin's
+in this diff (executing it needs an ESM/strip-types loader + `import.meta.env` stubs — fragility in a
+P0 lane; `_extract_fn_body` now DOES parse the TS arrow-property form, so the static predicate
+assertion applies to it). Bounded by mechanisms 1–3, and filed as a follow-up with three named gaps: (i) blog-admin's
 adapter has **no CI-gated suite** (`ci.yml:166`); (ii) the parity suite **explicitly exempts**
 blog-admin from the helper/attribute/size-guard axes (`:225`, `:549`, `:600`) and it is **absent
 from the suite's `surfaces` table**, so its `document.cookie` writes are outside the completeness
@@ -194,9 +194,11 @@ the claim unit is the bullet **plus its continuation lines**, so:
 **Step 1 — pin the library version.** `:1883`: `…/@supabase/supabase-js@2/…` → `…@2.112.2/…`. SRI
 (`integrity`/`crossorigin`) stays **out** (item 5 → #3501). *Pin:* assert the page's specifier
 version equals the version parsed from
-`website/apps/dashboard/public/vendor/supabase-<ver>.min.js`. The **derived** assertion's home is
-`tests/test_oauth_mcp.py::TestAuthorizePage` (api-registered), beside the literal `@2.112.2` textual
-pin (a literal pin alone cannot catch a vendor bump); the new harness re-asserts it. Both
+`website/apps/dashboard/public/vendor/supabase-<ver>.min.js`. The **derived** assertion's home is the
+new harness (`test_page_specifier_matches_the_vendored_bundle_version`, which owns the vendor path);
+`tests/test_oauth_mcp.py::TestAuthorizePage` (api-registered) is deliberately the **shape-only
+tripwire** — one exact-version shape regex plus a mutable-form negative — so a version bump has
+exactly one derived place to satisfy. Both
 directions are wired: an `oauth.py`-only diff selects `api`; a vendor-only diff is made to select
 `api` by Step 9(b).
 
@@ -263,13 +265,6 @@ const writeAux = (key, value) => {
       if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
       s.setItem(key, v);
       if (s.getItem(key) !== v) throw 0;
-      // Prove the REAL key/value are removable too, then re-write: the proof
-      // deletes what it just stored. A read-back alone proves write/read
-      // integrity, not removability, and removal can discriminate by key or value.
-      s.removeItem(key);
-      if (s.getItem(key) !== null) throw 0;
-      s.setItem(key, v);
-      if (s.getItem(key) !== v) throw 0;
       return true;
     } catch (e) {
       // Clean BOTH keys: the failure can be the read-back AFTER a successful
@@ -285,7 +280,10 @@ const writeAux = (key, value) => {
 `removeAux` still scans EVERY aux store (it runs on paths where the guard never did, e.g. an
 invalid-session load), and `readAux` likewise (a verifier may live in either store). Residual R21: a
 store that discriminates by KEY (accepts/removes its own probe key but refuses the `sb-…` key) is
-not caught by either probe; no browser storage behaves that way, and a key-aware shim on the origin
+not caught by either probe, and the credential it accepts is RETAINED there until the tab closes —
+re-proving removal on the real key cannot help, because the credential must be written before its
+removal is observable, and the re-probe would leave the credential in two stores instead of one; no
+browser storage behaves that way, and a key-aware shim on the origin
 is already inside the declared out-of-scope "XSS on the origin" (#3559).
 ```js
 async function signInWithProvider(provider) {
@@ -396,8 +394,9 @@ patched → `['api']`; `oauth.py` → `['api','core']`; the derived ratchet
 
 **Step 10 — extend existing suites.**
 (a) `tests/test_oauth_mcp.py::TestAuthorizePage`: textual pins for the genuinely textual (explicit
-`flowType: "pkce"`, `SIZE_CAP`, the literal `@2.112.2` specifier) **plus the derived version
-assertion** (Step 1). The `authorizeReturnTo` **presence** pin is demoted to a secondary name check —
+`flowType: "pkce"`, `SIZE_CAP`) **plus the shape-only version tripwire** (an exact-semver shape regex
+and a mutable-form negative — the **derived** version assertion of Step 1 lives in the harness, which
+owns the vendor path). The `authorizeReturnTo` **presence** pin is demoted to a secondary name check —
 the behavioural proof of A2/A4 is **invariant 11**, not a grep (a presence pin cannot discriminate
 an emptied strip list or a helper that stopped being called).
 (b) `tests/test_cross_subdomain_cookie_sync.py`: **first extend `_extract_fn_body`'s optional sigil
@@ -456,8 +455,7 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
    `location.origin` back from the shim, which asserted the shim against itself and stayed green
    with the page returning `https://evil.example`; that is corrected.
 3. **Key-identity routing (set)** — verifier **absent from `document.cookie`**, present in
-   `sessionStorage`; a session-key read still returns the pre-seeded cookie byte-identically
-   (#1704); **`${KEY}-user` and a synthetic `${KEY}-unknown-aux` are written through the adapter and
+   `sessionStorage`; **`${KEY}-user` and a synthetic `${KEY}-unknown-aux` are written through the adapter and
    produce NO `document.cookie` write** — those two non-verifier shapes are what actually
    discriminates an allowlist from a denylist, since a suffix matcher routes verifier-shaped keys
    correctly by construction, and the cookie log is read by **key identity**, not a name substring.
@@ -499,7 +497,8 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
    control asserts the URL **does** become `code_challenge_method=plain`.
 10. **Aux-scope** — `${KEY}-code-verifier` is written **only** to `sessionStorage`/`localStorage`;
     with both stores unavailable the write is refused and the cookie jar receives **no** non-session
-    key.
+    key. (*§4 list item, not a separate test invariant*: the harness has no invariant 10 — its content
+    is covered by invariants 3 and 6, which is why the mutation table cites `#3 (and inv 12)` there.)
 11. **Return-target canonicalisation (A2 + A4)** — with a hostile initiating search
     `?client_id=x&redirect_uri=<registered>&code=STALE&error=access_denied&error_description=…&sb_flow_id=<id>`,
     parse the **nested** target the page hands to `signInWithOAuth`'s `redirectTo` (equivalently, the
@@ -517,16 +516,20 @@ line-number parenthetical rather than correcting it). Add `tests/test_no_legacy_
     removed; unknown params are preserved (an **allowlist** of the authorize params the page needs —
     `client_id, redirect_uri, response_type, code_challenge, code_challenge_method, state, scope,
     resource` — is the listed hardening if the denylist is later considered too open).
-12. **Aux-store removal (A5)** — after the library's `removeItem` calls (invalid-session load and a
-    failed exchange), assert the **aux stores** contain no verifier key for the removed flow, and
+12. **Aux-store removal (A5)** — after the library's `removeItem` calls on an invalid-session load,
+    assert the **aux stores** contain no verifier key for the removed flow, and
     that the cookie jar saw only the session-key expiry. The remaining case — a failed exchange that
     leaves *older* `${KEY}-flow-<id>-code-verifier` copies, or **all** `-flow-<id>-` copies when the
     return carries no `sb_flow_id`, plus `${KEY}-flows-code-verifier` — is a **library-owned**
     residual (R19), not a page defect, and is asserted as such. The two halves are seeded in turn —
     `sessionStorage` then `localStorage` — because "cleared from both aux stores" is only exercised on
     the non-default store by the second seed.
-13. **Write-time cleanability (A5, writer half)** — the credential must reach only a store proven able
-    to remove it. Pin the size-asymmetric divergence the pre-flight probe cannot see: a first store
+13. **Write-time cleanability (A5, writer half)** — the credential must reach only a store whose probe
+    cycle (a same-length DUMMY under a throwaway key: write, read back, remove, read back null)
+    completed, and whose real value was then read back. The writer cannot prove the REAL key is
+    removable before the credential is written to it, so a store that accepts the credential and then
+    refuses its removal keeps a copy (recorded residual R21). Pin the size-asymmetric divergence the
+    pre-flight probe cannot see: a first store
     whose accepted-size band sits BETWEEN the probe and the real value (so the guard skips it) and
     which refuses removal must NOT receive the verifier, which must instead be relocated to the next
     store — with a paired control (both stores un-cleanable) asserting the local refusal.
@@ -671,7 +674,7 @@ in the production change**:
 | 5 | `boundedText`'s bound and strip were unpinned — removing either left 10/10 green, and the doc's A3 row claimed otherwise | both asserted, with the control characters moved **inside** the 299-char window (at the tail the bound alone removes them) |
 | 6 | the terminal state read only `.search`, so a **fragment**-carried refusal still dead-ended | `loadParams()` merges both channels; `sanitiseUrl()` strips the fragment too; a fragment case and a benign-fragment control added |
 | 7 | `docs/auth-architecture.md` still carried a **wrong** line anchor (`tortoise/hosted_api.py:27035`, actually `28395`) in the very bullet whose stale line numbers this PR deletes | anchored to the symbol (`oauth_authorize`) |
-| 8 | `tests/test_cross_subdomain_cookie_sync.py`'s docstring still called oauth.py "a faithful inline port of the same adapter" after the routing divergence; the new test's docstring stated one operator where `_ROUTER_CASES` has two | both scoped to the session-cookie contract and to `_ROUTER_CASES` |
+| 8 | `tests/test_cross_subdomain_cookie_sync.py`'s docstring still called oauth.py "a faithful inline port of the same adapter" after the routing divergence; the new test's docstring stated one operator where `_ROUTER_CASES` has two | the two provenance sentences are scoped to the **session-cookie mechanics** the port still shares (the divergent key routing is named in the oauth.py comment), and the new test's docstring to `_ROUTER_CASES` |
 | 9 | `tests/test_oauth_mcp.py`'s class comment claimed the harness executes a class of behaviours it does not (the #1701 team-chooser / refresh / in-flight guard) | scoped to what the harness drives; the #1701 behaviours are named static-only |
 
 Also corrected in the harness itself: `_run` parsed stdout with `str.splitlines()`, which splits on
@@ -752,6 +755,39 @@ vulnerable) — recorded because a security harness that can false-green is wort
 recurs; and a cookie jar that silently drops a write whose *encoded length is ≤ SIZE_CAP* (the harness
 cannot model one) is outside A1–A7. The adversarial reviewer's key-prefix divergence is now R21.
 
+### diff-time code review ROUND 6 (re-review of `d687a9249`)
+Six fresh reviewers; two returned NO ISSUES FOUND. In-scope findings, all fixed: a provenance comment
+that contradicted itself; a surviving fragment-era claim; the A5 `catch` not cleaning the real key; an
+unpinned probe fix; doc drift (Step 2 / 3b / 7 / 10c); and a config duration row missing its
+`# unmeasured` marker. The round-5 terminal-state P1 was confirmed **PRE-EXISTING** — `origin/main`
+behaves identically, so it is not this diff's regression.
+
+### diff-time code review ROUND 7 (re-review of `ca8049bdc`)
+Six fresh reviewers; three returned NO ISSUES FOUND. Nine in-scope findings, all fixed — including two
+gaps in round 6's own additions: the `exchangeFails` case was inert (no seeded verifier meant the token
+endpoint was never called) and inv 11 proved transients dropped but not that required params survive;
+the catch's `removeItem(key)` was unpinned; the version regex missed `@2.x`/`@latest`; three more
+journey-phrase comments; and two doc errors introduced the round before (`A1–A5` for `A1–A7`, and a
+`#3701` citation that appears nowhere). The blog-admin follow-up was filed as **#5735**.
+
+### diff-time code review ROUND 8 (re-review of `118fa70fb`)
+Four fresh reviewers (correctness/logic, security, test-quality, doc-consistency). The security
+reviewer returned NO ISSUES FOUND. **Round 7's widened version negative was itself a P1 regression**:
+its unbounded `\d+(?:\.\d+){0,2}` arm also matched the allowed pinned form, so
+`test_authorize_renders_consent_html` went red — the round-7 commit's test run omitted
+`tests/test_oauth_mcp.py`, which is how it escaped. Also fixed: the A5 writer's real-key removal proof
+added in the same commit was net-negative (it detected nothing the probe misses and left the credential
+in TWO stores instead of one — reverted, with A5/R20/R21 and the Step-3b sketch corrected to state the
+residual instead of claiming a guarantee the writer cannot give); inv 13's `sessionVerifierKeys == []`
+assertions were satisfiable by a store never being in the chain (a **per-store attempt log** now pins
+that the store was TRIED); `strippedHasToken` could not see `provider_refresh_token`;
+`LOAD_TRANSIENT.present` was derived from the generic names `type`/`flow_id`, so a benign first load was
+told its sign-in had failed; and `sanitiseUrl()`'s fragment param-list test was byte-identity after
+normalisation, so an escaped provider `error_description` kept the transient on the URL. A pre-existing
+defect found on the way — a server value containing a literal `__SUPABASE_URL__` placeholder expands
+into the inline script and breaks it (attacker-triggerable page corruption, no secret leak) — is
+**not fixed here** (identical on `origin/main`) and is filed as **#6001**.
+
 ---
 
 **problem-verify** (2 problems-diverge / 2 problems-converge / 4 cycles × 2 verifiers):
@@ -789,7 +825,7 @@ recorded here rather than the gates being silently skipped.
 | **A2** spent-`code` re-forwarding | a stale `?code=` on the return URL | the returned target carries no transient | **inv 11** (+ Step 10(a) textual as secondary) |
 | **A3** reflected-content injection | `?error_description=<script>…` / a 10 kB payload with controls inside the bound window | rendered via `textContent`, bounded to 300 chars, stripped | **inv 5** (both mutations killed: unbounded, strip-removed) |
 | **A4** open redirect | a hostile `redirect_uri`/`next`/return target | origin+path are constants; strip only reduces | **inv 11** + **inv 2** (the built return target, with a foreign-host control) |
-| **A5** verifier orphaning | a store that fails mid-flow (including one that accepts a WRITE but refuses REMOVAL, and one whose accepted-size band sits between the pre-flight probe and the real value); an abandoned/failed exchange | no verifier copy in `document.cookie`; the credential is written only to a store proven able to remove it; removed keys cleared from both aux stores | **inv 3, 4, 12, 13** + R19 (library-owned copies); inv 6's `throw-remove` mode (the guard refuses a store the writer would pick but `removeAux` could not clean), inv 4's two halves (each store seeded in turn), inv 13's size-asymmetric relocation |
+| **A5** verifier orphaning | a store that fails mid-flow (including one that accepts a WRITE but refuses REMOVAL, and one whose accepted-size band sits between the pre-flight probe and the real value); an abandoned/failed exchange | no verifier copy in `document.cookie`; the credential is written to a store only after that store's write/read/remove cycle on a same-length dummy completed (a store that ACCEPTS the credential and then refuses its removal retains a copy — residual R21); removed keys cleared from both aux stores | **inv 3, 4, 12, 13** + R19 (library-owned copies); inv 6's `throw-remove` mode (the guard refuses a store the writer would pick but `removeAux` could not clean), inv 4's two halves (each store seeded in turn), inv 13's size-asymmetric relocation |
 | **A6** silent dead-end | a failed/declined/refused flow, in the **query OR the fragment**; a benign fragment; a mixed query-transient + non-param fragment | visible sign-in view + message; no spurious error; the benign fragment is not read as a transient and not mangled | inv 5 (both channels + the benign and mixed controls), 6, 9 |
 | **A7** weak-challenge downgrade | no `crypto.subtle` | refuse to initiate; never `plain` | inv 9 |
 
@@ -876,10 +912,12 @@ leave older `${KEY}-flow-<id>-code-verifier` copies (or all of them when the ret
 without the code, and are supabase-js's behaviour, not this page's (invariant 12 asserts the page's
 half). R20 the probe's sentinel is LONGER than the longest real verifier key and deliberately carries
 no `-code-verifier` suffix, so an item-size cap cannot slip through while the one entry an
-un-cleanable store leaks cannot be mistaken for a credential; the verifier is never written to an
-un-cleanable store because `writeAux` proves removal for the real value first (the guard refuses the
-FIRST uncleanable store early — inv 6's `throw-remove` mode — and inv 13 pins the relocation for the
-size-asymmetric and silent-remove cases the guard cannot see).
+un-cleanable store leaks cannot be mistaken for a credential; the credential is written to a store
+only after that store's write/read/remove cycle on a same-length dummy completed, and the guard
+refuses the FIRST uncleanable store early (inv 6's `throw-remove` mode), while inv 13 pins the
+relocation for the size-asymmetric and silent-remove cases the guard cannot see. What the writer
+cannot do is prove the REAL key is removable before writing the credential to it — a store that
+discriminates by key retains that copy (R21).
 
 ---
 
@@ -900,7 +938,7 @@ Landed files and what each carries. Evidence is stated as a command → observed
 **Verification (all run at base `5b6cb9367` + this diff).**
 
 - `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q -k "not Cimd"` → **326 passed, 2 xfailed**. `-k "not Cimd"` deselects 17 live-network CIMD classes in `test_oauth_mcp.py` (they fetch over the network and hang without it; CI runs them). Counts at the round-8 head.
-- `… pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py test_attribution_actor.py test_control_plane_offload_3498.py test_oauth_redemption_state.py test_user_identity_authority.py -q` → **413 passed**; the 4 reds in that batch (`test_mcp_route_challenge::test_unknown_credential_carries_challenge[tt_deadbeef]`, three in `test_cursor_mcp_exit_evidence.py`) are **reproduced on a clean `origin/main` worktree** — they are the embedded FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), not this diff. Separate failures, different identities on re-run, so not deterministic under this change.
+- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py tests/test_attribution_actor.py tests/test_control_plane_offload_3498.py tests/test_oauth_redemption_state.py tests/test_user_identity_authority.py -q` → **412 passed, 1 failed** (re-measured at the round-8 head). The red is `test_mcp_route_challenge::TestAuthChallenge::test_unknown_credential_carries_challenge[tt_deadbeef]` — the embedded-FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), **reproduced on a clean `origin/main` worktree**, not this diff; the failure's identity moves between runs, so it is not deterministic under this change. An earlier revision of this row printed the two bare `test_*.py` paths without their `tests/` prefix, recorded `413 passed`, and attributed extra reds to `test_cursor_mcp_exit_evidence.py`, which this command does not list — all three corrected. `TORTOISE_TEST_CARVE_OUT=1` is required; without it the URI gate errors the whole set.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
 - Mutation evidence: **the union table in the PR body — every row observed red, 0 survived.** The set now includes
   the two invariants the first round could not redden (inv 3's denylist row, inv 2's single-origin

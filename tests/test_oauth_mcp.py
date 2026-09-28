@@ -411,11 +411,15 @@ class TestAuthorizePage:
         # bump has exactly one derived place to satisfy.
         assert re.search(
             r"@supabase/supabase-js@\d+\.\d+\.\d+/dist/umd/supabase\.min\.js", r.text)
-        # The negative must name every mutable shape, not only the numeric ones:
-        # `@2.x` and `@latest` carry no bare digit run before the `/`. It must ALSO
-        # not match the pinned full semver, so the numeric arm is bounded to at most
-        # two components (plus an optional `.x`) — an unbounded `\d+(\.\d+){0,2}`
-        # swallows `2.112.2` itself and fails on the very page this guards.
+        # The negative adds coverage only when a SECOND reference coexists, so it
+        # pins the mutable shapes a numeric-only pattern misses: `@2.x` and
+        # `@latest` carry no bare digit run before the `/`. (Not "every mutable
+        # shape" — a caret/tilde range or a non-`latest` dist-tag such as `@next`
+        # is caught by the positive above, which requires three numeric
+        # components.) The numeric arm is bounded to at most two components plus an
+        # optional `.x`, so it does NOT match the pinned full semver — an unbounded
+        # `\d+(\.\d+){0,2}` swallows `2.112.2` itself and fails on the very page
+        # this guards.
         assert not re.search(
             r"@supabase/supabase-js@(?:latest|x|\d+(?:\.\d+)?(?:\.x)?)[/\"]", r.text)
         # #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a

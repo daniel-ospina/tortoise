@@ -48,9 +48,12 @@ Invariants pinned here:
 11 the return target is canonicalised (no transient echoed), with a
    guard-removed control that DOES carry it
 12 the aux stores hold no verifier after the removal path
-13 the WRITER proves, for the real key and the real value, that the store which
-   receives the verifier can also remove it — a store that fails that proof is
-   skipped, never written to (`test_inv13_...`, A5 writer half)
+13 the WRITER probes each store with a same-length dummy under a throwaway key
+   and selects a store only when the write/read/remove cycle completed AND the
+   real value was read back; a store that fails is skipped for USE
+   (`test_inv13_...`, A5 writer half). The writer cannot prove the REAL key is
+   removable before the credential is written to it, so a store that accepts the
+   credential and refuses its removal keeps a copy — the recorded residual R21.
 
 Every field the tests assert on is produced by the page's own code running in the
 context, never read back from a shim.
@@ -361,6 +364,18 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
         f"the transient survived in the sanitised URL: {frag['replaceStates']}"
     )
 
+    # …and the same fragment carrying an ESCAPED value. The param-list test used to
+    # be byte-identity after re-serialisation, which `%20` fails (URLSearchParams
+    # re-serialises a space as `+`), so the branch was skipped and the transient
+    # stayed on the URL — for exactly the provider `error_description` values that
+    # contain spaces.
+    frag_esc = _run("load", hash="#error=access_denied&error_description=boom%20boom")
+    assert frag_esc["viewSignin"] == "block", frag_esc
+    assert frag_esc["replaceStates"], "the escaped fragment transient was not sanitised"
+    assert all("error_description" not in u for u in frag_esc["replaceStates"]), (
+        f"an escaped transient survived in the sanitised URL: {frag_esc['replaceStates']}"
+    )
+
     # A reachable, non-provider cause of the SAME terminal state: the provider
     # returns `?code=`, and the code exchange inside createClient() is rejected.
     # This is the case the state exists to catch — it carries no
@@ -383,6 +398,18 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     assert clean["errorVisible"] is False, (
         f"a clean load showed an error: {clean['errorText']!r}"
     )
+
+    # A benign first load carrying a GENERIC param name must not be read as a
+    # completed provider round trip: `type`/`flow_id` stay in the strip list
+    # (stripping is cosmetic) but are not provider-owned markers, so treating them
+    # as evidence told a first-time visitor who had done nothing that their
+    # sign-in had failed.
+    for generic in ("?client_id=x&type=mcp", "?client_id=x&flow_id=abc"):
+        benign_first = _run("load", search=generic)
+        assert benign_first["errorVisible"] is False, (
+            f"a benign load with {generic} was reported as a failed sign-in: "
+            f"{benign_first['errorText']!r}"
+        )
 
     benign = _run("load", hash="#section-2")
     assert benign["errorVisible"] is False, (
@@ -434,12 +461,33 @@ def test_inv6_unavailable_store_refuses_locally() -> None:
         assert r["auxVerifierKeys"] == [], r
 
 
+def _assert_session_store_attempted(r: dict) -> None:
+    """The A5 writer must have TRIED the failing store. Without this every
+    `sessionVerifierKeys == []` assertion in inv13 is satisfied by the store never
+    being in the chain at all: dropping `sessionStorage` from `auxStores()` leaves
+    all of them green while `writeAux`'s per-store proof never runs."""
+    assert any(a.startswith("session:setItem:__tt_wprobe-") for a in r["attempts"]), (
+        f"the session store was never attempted by the A5 writer, so asserting it "
+        f"holds no verifier is vacuous: {r['attempts']}"
+    )
+
+
 def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     """Invariant 13 (A5, the WRITER half): the pre-flight probe writes its OWN key
     with a 160-byte payload, so it cannot prove that the store which will RECEIVE
-    the real verifier can also remove it. The writer therefore proves the invariant
-    per store, for the real key and the real value — write, read back, remove, read
-    back null, then write again — and skips a store that fails.
+    the real verifier can also remove it. The writer therefore probes per store on
+    every write — a same-length DUMMY under a throwaway key, written, read back,
+    removed and read back null — and writes the real value into the store only
+    once that cycle completed, then reads it back. A store that fails any step is
+    skipped for USE.
+
+    What the writer cannot do is prove the REAL key is removable before the
+    credential is written to it: the write has to happen first for removal to be
+    observable. A store that accepts the credential and then refuses to remove it
+    therefore keeps a copy no path can clean — the recorded residual R21, reachable
+    only by a store that discriminates by key, which is not a conforming browser
+    store (a re-probe on the real key would detect nothing extra and would leave
+    the credential in two stores instead of one).
 
     This pins the divergence the pre-flight guard cannot see: a first store
     whose accepted-size band sits BETWEEN the probe (rejected) and the real value
@@ -455,6 +503,7 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     `__tt_wprobe-*` key that nothing can clean — and the verifier-shaped filters
     used above cannot see a probe key at all."""
     r = _run("click", search="", sessionMode="throw-remove", sessionQuota=130)
+    _assert_session_store_attempted(r)
     assert r["navs"], f"the flow did not proceed although localStorage is usable: {r}"
     assert r["errorVisible"] is False, r
     assert r["cookieVerifierKeys"] == [], r
@@ -482,6 +531,7 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     # `localVerifierKeys` from populated to empty — the credential orphaned in the
     # store that cannot remove it.
     silent = _run("click", search="", sessionMode="silent-remove", sessionQuota=130)
+    _assert_session_store_attempted(silent)
     assert silent["navs"], f"the flow did not proceed although localStorage is usable: {silent}"
     assert silent["errorVisible"] is False, silent
     assert silent["sessionVerifierKeys"] == [], (
@@ -512,6 +562,7 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     # populated, so it is what pins the catch's `removeItem(key)`: without that
     # line the store keeps a copy while the writer relocates to the next store.
     norm = _run("click", search="", sessionMode="normalise")
+    _assert_session_store_attempted(norm)
     assert norm["navs"], (
         f"the flow did not proceed although localStorage is usable: {norm}"
     )
@@ -521,19 +572,6 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     )
     assert norm["localVerifierKeys"], (
         f"the verifier reached no store at all — the write was refused, not relocated: {norm}"
-    )
-
-    # A store whose removal discriminates by KEY — probe-shaped keys removable, the
-    # real credential key not — is outside the browser threat model (R21), but the
-    # writer must still refuse to treat it as PROVEN: it must relocate rather than
-    # return true. This is the only shape that reaches the writer's real-key removal
-    # proof; without it the writer would accept this store on the probe alone.
-    keyed = _run("click", search="", sessionMode="key-keep")
-    assert keyed["navs"], (
-        f"the flow did not proceed although localStorage is usable: {keyed}"
-    )
-    assert keyed["localVerifierKeys"], (
-        f"the writer accepted a store whose REAL key cannot be removed: {keyed}"
     )
 
     # …and a silent-remove store is not a way in when no store can be cleaned: the
@@ -672,17 +710,26 @@ function mkEl(id) {
   };
 }
 
-function makeStore(mode, quota) {
+// Per-store attempt log. A store that is never in the chain leaves an assertion
+// like `sessionVerifierKeys == []` green for the wrong reason — the store was not
+// CLEARED, it was never TRIED — so the tests assert the store was attempted.
+// Recorded BEFORE the method body runs, so a throwing method still counts.
+const storeAttempts = [];
+
+function makeStore(mode, quota, label) {
   const map = new Map();
+  function rec(op, k) { storeAttempts.push(label + ':' + op + ':' + String(k)); }
   return {
     _map: map,
     get length() { return map.size; },
     key: function (i) { const k = Array.from(map.keys())[i]; return k === undefined ? null : k; },
     getItem: function (k) {
+      rec('getItem', k);
       if (mode === 'throw-method') throw new Error('storage disabled');
       return map.has(String(k)) ? map.get(String(k)) : null;
     },
     setItem: function (k, v) {
+      rec('setItem', k);
       if (mode === 'throw-method') throw new Error('storage disabled');
       v = String(v);
       // 'normalise': accepts every write but stores a DIFFERENT string for any
@@ -698,13 +745,9 @@ function makeStore(mode, quota) {
       map.set(String(k), v);
     },
     removeItem: function (k) {
+      rec('removeItem', k);
       if (mode === 'throw-method' || mode === 'throw-remove') throw new Error('storage disabled');
       if (mode === 'silent-remove') return;   // accepted, but nothing happens
-      // 'key-keep': removal succeeds only for PROBE-shaped keys (both the guard's
-      // `__tt_probe-*` sentinel and the writer's `__tt_wprobe-*` payload contain
-      // "probe"), so the real `…-code-verifier` key survives. This is the only
-      // shape that reaches the writer's REAL-key removal proof.
-      if (mode === 'key-keep' && String(k).indexOf('probe') < 0) return;
       map.delete(String(k));
     },
     clear: function () { map.clear(); },
@@ -767,8 +810,8 @@ documentObj.body = mkEl('body');
 // Seed state BEFORE the page script runs (the library reads the cookie in
 // createClient()'s _initialize).
 if (opts.seedSession) { cookies.set(COOKIE_NAME, opts.seedSession); }
-const sessionStorage = makeStore(opts.sessionMode || 'ok', opts.sessionQuota);
-const localStorage = makeStore(opts.localMode || 'ok', opts.localQuota);
+const sessionStorage = makeStore(opts.sessionMode || 'ok', opts.sessionQuota, 'session');
+const localStorage = makeStore(opts.localMode || 'ok', opts.localQuota, 'local');
 if (opts.seedVerifier) {
   const target = (opts.seedVerifierStore === 'local') ? localStorage : sessionStorage;
   target.setItem(COOKIE_NAME + '-code-verifier', JSON.stringify(opts.seedVerifier));
@@ -902,6 +945,7 @@ function innerTarget(assignUrl) {
       .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
     out.localVerifierKeys = Array.from(localStorage._map.keys())
       .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
+    out.attempts = storeAttempts.slice();
     // RAW entries, unfiltered by key shape. The A5 probe writes a throwaway
     // `__tt_wprobe-*` key, so a verifier-shaped filter cannot see whether the
     // probe's PAYLOAD was the credential. Pinned by test_inv13.
@@ -1029,7 +1073,11 @@ function innerTarget(assignUrl) {
     storage.setItem(COOKIE_NAME, big);
     out.strippedWrites = cookieWrites.length;
     out.strippedHasToken = cookieWrites.some(function (w) {
-      return w.header.indexOf('provider_token') >= 0;
+      // BOTH: `provider_refresh_token` does not contain `provider_token`, so a
+      // single substring probe left the sibling `delete obj.provider_refresh_token`
+      // unguarded — deleting just that line kept this assertion green.
+      return w.header.indexOf('provider_token') >= 0 ||
+             w.header.indexOf('provider_refresh_token') >= 0;
     });
 
     cookieWrites.length = 0;
