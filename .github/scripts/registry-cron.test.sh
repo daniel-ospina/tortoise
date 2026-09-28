@@ -1869,8 +1869,6 @@ export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK
 export STUB_STATUS_BODY="$(analytics_status_body true true true 120 10000)"
 run_driver
 assert_eq "$RC" 0 "84. a fresh heartbeat stays green"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "84. a fresh heartbeat files nothing"
 assert_contains "$(cat "$LOG")" \
   "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
   "84. a fresh heartbeat self-heals the open incident"
@@ -2041,8 +2039,6 @@ export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK
 export STUB_STATUS_BODY="$(analytics_status_body true true true 900 10000 "" 900)"
 run_driver
 assert_eq "$RC" 0 "94. age == threshold is treated as healthy"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "94. age == threshold files nothing"
 assert_contains "$(cat "$LOG")" \
   "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
   "94. age == threshold self-heals (strict >, not >=)"
@@ -2100,11 +2096,13 @@ run_driver
 assert_eq "$RC" 0 "97. a 19-digit int64-fitting age changes nothing"
 assert_not_match "$OUT" "analytics sink silent" \
   "97. the 18-digit bound keeps an over-long magnitude unmeasurable (no FILE)"
-# NB: no separate 'files nothing' assertion here. #321 is ALREADY open in
-# this fixture, so file_alert creates nothing and a `GH POST .../issues `
-# regex (or an /issues/321/comments one) can never match — it would pass
-# even on a mutant that decides SILENT, i.e. false assurance. The decision
-# itself is pinned by the two assertions above (RC, and no 'sink silent').
+# NB: no separate 'files nothing' assertion in ANY case whose fixture holds
+# an OPEN #321 (84, 92, 93, 94, 95, 97): `file_alert` adopts it and creates
+# nothing, so a `GH POST .../issues ` regex can never match and would pass
+# even on a mutant that decides SILENT — false assurance. The decision is
+# pinned instead by RC + the no-'sink silent' assertion (+ the PATCH/unchanged
+# clause). Cases 85 and 87 KEEP the line: they set no search fixture, so a
+# wrong file would genuinely POST there and the line can fail.
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "97. an over-long magnitude never resolves the open incident"
 
