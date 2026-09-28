@@ -578,7 +578,10 @@ def test_invalidate_raw_producer_no_corrected_by_flag_still_folds(sup):
 
 def _apply_replay(sdk, events_dir) -> None:
     """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
-    engine ``recover_from_log`` / the backup JSONL restore use."""
+    canonical apply()-based engine. ``consistency.recover_from_log`` and
+    ``backup.restore`` are independent replay loops wired to the SAME shared
+    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``);
+    they are exercised by their own suites, not here."""
     sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
 
 

@@ -1419,17 +1419,19 @@ class _EntityHandlers:
         rid = ev.get("id")
         if not rid or not _writable_id(rid):
             return 0
+        t = ev.get("type")
+        if t == "PointSuperseded" and not ev.get("new_id"):
+            # The fold's OWN applicability guard (``_fold_point_superseded``
+            # returns 0 without ``new_id``) — and the belief decay must not
+            # fire for an event the fold ignores: live never decayed for one.
+            # Checked BEFORE the decay so the one-record default (``decay=True``)
+            # cannot clobber the target's belief for an ignored event; the
+            # plan already yields ``(decay=False, stamp=False)`` for it.
+            return 0
         matched = 0
         if stamp:
-            t = ev.get("type")
             if t == "PointSuperseded":
-                # ``new_id`` is the successor — the fold's own applicability
-                # guard (``_fold_point_superseded`` returns 0 without it) and
-                # the CORRECTS edge's endpoint. Mirrored here so the decay does
-                # not fire for an event the fold ignores: live never decayed
-                # for one.
-                if ev.get("new_id"):
-                    matched = self._fold_point_superseded(ev)
+                matched = self._fold_point_superseded(ev)
             elif t == "PointInvalidated":
                 matched = self._fold_point_invalidated(
                     ev, skip_updated_at=skip_updated_at)

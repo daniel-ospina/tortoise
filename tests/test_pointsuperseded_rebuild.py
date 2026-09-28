@@ -941,7 +941,10 @@ def test_delete_leg_skips_live_recreated_src(sup):
 
 def _apply_replay(sdk, events_dir) -> None:
     """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
-    engine ``recover_from_log`` / the backup JSONL restore use."""
+    canonical apply()-based engine. ``consistency.recover_from_log`` and
+    ``backup.restore`` are independent replay loops wired to the SAME shared
+    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``);
+    they are exercised by their own suites, not here."""
     sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
 
 
@@ -1107,4 +1110,37 @@ def test_plan_point_restamp_folds_pins_the_shared_selection():
         {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
     ])
     assert decisions[1] == (False, False)
+    assert fold_seq == {}
+
+    # PointPromoted is deliberately NOT a recreate boundary (same-node
+    # draft→live: it clears neither ``outdated`` nor CORRECTS), so the
+    # pre-promote invalidate SURVIVES and still decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointPromoted",
+         "point": {"id": "a", "content": "A", "status": "live"}},
+    ])
+    assert decisions[1] == (True, True), (
+        "PointPromoted must not advance the recreate boundary")
+    assert fold_seq == {}
+
+    # A forward-reference journal (the terminalizer precedes its target's
+    # creation) suppresses the DECAY so both engines agree — a chronological
+    # apply() arm would fold before the node exists, while rebuild_all's
+    # pass-1a hoist would land it.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointSuperseded", "id": "a", "new_id": "b"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+    ])
+    assert decisions[0] == (False, False)
+    assert fold_seq == {}
+
+    # An empty-string id is inapplicable (the plan's non-empty writable gate)
+    # and is reported, not silently dropped (#3299).
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointSuperseded", "id": "", "new_id": "b"},
+    ])
+    assert decisions[0] == (False, False)
     assert fold_seq == {}

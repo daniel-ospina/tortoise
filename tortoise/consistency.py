@@ -693,6 +693,19 @@ def _fold_journal(events: list[dict]) -> dict:
 
     The right long-term fix is the arms on `fold` itself and lives outside this
     lane's file family (#3692 covers the promotions).
+
+    #3305 KNOWN GAP: these terminalizer arms are NOT driven by
+    ``plan_point_restamp_folds``, the selection the replay engines obey, so this
+    reference fold can disagree with a correctly replayed graph. Measured on a
+    bare same-id ``PointAdded`` re-emit after an invalidate: the graph holds the
+    decayed belief (both engines keep it — a bare re-emit MERGEs live), while
+    this fold's ``_apply_one`` PointAdded arm REPLACES the entry and drops the
+    decay, so ``check_consistency`` reports ``divergence="content"`` on
+    ``confidence``/``posterior_alpha``/``posterior_beta`` for a healthy replay.
+    That disagreement with the ``rebuild_all`` graph predates #3305; the #3305
+    fix widened it to the apply() arm by making that arm agree with
+    ``rebuild_all``. Driving these arms from the plan is the durable fix and is
+    deliberately left to the consistency lane.
     """
     anchors = journal_hard_delete_seqs(events)
     by_id: dict = {}

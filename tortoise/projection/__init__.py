@@ -2061,8 +2061,10 @@ def plan_point_restamp_folds(
 
     * ``decisions`` — ``{journal seq: (apply_decay, apply_stamp)}`` for every
       event whose NORMALIZED type is in ``_POINT_RESTAMP_EVENT_TYPES``. A
-      record that is inapplicable (an id that is not a writable str) maps to
-      ``(False, False)``; no terminalizer seq is ever omitted.
+      record that is inapplicable — an id that is not a non-empty writable str
+      (``_writable_id`` rejects NUL/lone-surrogate but admits ``""``), or a
+      ``PointSuperseded`` with no ``new_id`` — maps to ``(False, False)`` and
+      is reported with a warning; no terminalizer seq is ever omitted.
     * ``fold_seq`` — ``{old_id: journal seq of the surviving supersede fold}``,
       the pass-2b operator/direct edge-transfer discriminator.
 
@@ -2080,6 +2082,13 @@ def plan_point_restamp_folds(
       the recreate boundary (as the stamp half does) would drop a decay live
       actually applied (#2884 A3 the two families cannot hold opposite
       policies for one journal shape).
+    * the decay also requires the target to EXIST at the record's seq: a
+      terminalizer that PRECEDES the id's first creation (a corrupt /
+      forward-reference journal) would fold before the node is replayed,
+      missing on the chronological apply() arm while ``rebuild_all``'s pass-1a
+      hoist lands it — so the decay is suppressed and both engines agree.
+      (There is no live truth to match: live cannot supersede a Point that does
+      not exist yet.)
     * a supersede is canonicalized per old id: only the LAST applicable
       supersede decays and only the LAST surviving supersede folds, so an
       earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``.
@@ -2091,6 +2100,7 @@ def plan_point_restamp_folds(
       sweep's fold-miss warning still fires for it exactly as before.
     """
     last_recreate: dict[tuple[str, str], int] = {}
+    first_create: dict[tuple[str, str], int] = {}
     last_drop: dict[tuple[str, str], int] = {}
     pending_deleted: set[tuple[str, str]] = set()
     terminalizers: list[tuple[int, dict]] = []
@@ -2112,6 +2122,7 @@ def plan_point_restamp_folds(
             if isinstance(p, dict) and isinstance(p.get("id"), str):
                 key = ("Point", p["id"])
                 last_recreate[key] = seq
+                first_create.setdefault(key, seq)
                 if key in pending_deleted:
                     last_drop[key] = seq
                     pending_deleted.discard(key)
@@ -2128,12 +2139,16 @@ def plan_point_restamp_folds(
         rid = ev.get("id")
         if not isinstance(rid, str) or not rid:
             continue
+        if ev.get("type") == "PointSuperseded" and not ev.get("new_id"):
+            continue
         drop = last_drop.get(("Point", rid))
         if drop is not None and seq <= drop:
             continue
+        # The target must exist at this seq — see the forward-reference rule.
+        first = first_create.get(("Point", rid))
+        if first is not None and seq < first:
+            continue
         if ev.get("type") == "PointSuperseded":
-            if not ev.get("new_id"):
-                continue
             supersede_decay[rid] = seq
         else:
             decays.add(seq)
@@ -2166,6 +2181,13 @@ def plan_point_restamp_folds(
     for seq, ev in terminalizers:
         rid = ev.get("id")
         if not isinstance(rid, str) or not rid:
+            # Empty/non-str id: inapplicable. Reported so the stricter gate
+            # (main classified "" as a str and let the fold-miss warning fire)
+            # does not make the drop SILENT (#3299).
+            logger.warning(
+                "plan_point_restamp_folds: %s has no writable id "
+                "(event_id=%s id=%r) — no terminalizer fold",
+                ev.get("type"), ev.get("event_id"), rid)
             decisions[seq] = (False, False)
             continue
         if ev.get("type") == "PointSuperseded":
