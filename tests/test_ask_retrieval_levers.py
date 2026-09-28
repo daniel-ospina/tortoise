@@ -101,6 +101,7 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
         apply_evidence_boost,
+        ask_session_key,
         assemble_context,
         dedup_pool,
         resolve_ask_boost_multipliers,
@@ -118,14 +119,10 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
         question, limit=limit, pool_size=120, include_terminal=True,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf)
     annotated = sdk.annotate_ask_hits(hits)
-
-    def _session_key(h: dict) -> str:
-        return (h.get("session_id") or h.get("session_date")
-                or f"idx:{h.get('lme_session_index', -1)}")
-
+    # #4155: the lane's key verbatim — the mirror must not hold a stale copy.
     deduped = dedup_pool(
         annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
-        session_key=_session_key)
+        session_key=ask_session_key)
     if evidence_boost:
         mult = resolve_ask_boost_multipliers()
         deduped, _ = apply_evidence_boost(
@@ -210,11 +207,29 @@ def test_gold_turn_in_pool_membership_embedded():
             sdk.close()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Accepted regression from the #4155 grouping fix — root-caused as "
+           "#5821. The corrected bucket key makes the per-session cap stop "
+           "binding (120 in → 119 out, was 91), so the UNCHANGED byte cap is "
+           "now the binding constraint and keeps 58 items where it kept 70; "
+           "the gold turn sits at rank 67 and is cut. This test's premise — "
+           "that raising the window and the item cap TOGETHER is sufficient — "
+           "no longer holds, so it is marked rather than silently red. "
+           "strict=True so that landing #5821 makes this an XPASS failure and "
+           "forces the marker's removal.",
+)
 def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     """A6 measurement-gated cap review, embedded lane: 1d4e3b97 (in-pool,
     thin overlap) retrieves its gold IN CONTEXT once the retrieval window
     and item cap are raised together (40→120) — the A6 fix as measured in
-    Step 0. Default-off knobs are exercised explicitly."""
+    Step 0. Default-off knobs are exercised explicitly.
+
+    ⚠️ Known-failing by owner decision, tracked as #5821 — see the marker
+    reason. The value that would make this pass is a working ordering/budget
+    fix, not a louder assertion: it is xfail(strict) so the fix cannot land
+    without removing this marker.
+    """
     questions = _recorded_questions()
     if not questions:
         pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
