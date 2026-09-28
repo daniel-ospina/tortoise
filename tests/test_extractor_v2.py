@@ -415,9 +415,11 @@ class TestS2:
             assert "SHORT-SESSION FACT RETENTION" in prompt
             assert "VALUE FIDELITY" in prompt   # #2453 rides the same slot
             # Emitted EXACTLY ONCE (review P2): the master render must NOT
-            # carry it too — a second ~957-byte copy inside one prompt. S4 is
-            # in this loop because the duplication defect was per S2/S4, so a
-            # lock covering only S2 would cover half the surface.
+            # carry it too. The figure is deliberately NOT quoted here — a byte
+            # count in a comment re-stales the moment the clause is edited (it
+            # did, twice); `count == 1` is the claim that cannot go stale.
+            # S4 is in this loop because the duplication defect was per S2/S4,
+            # so a lock covering only S2 would cover half the surface.
             assert prompt.count("SHORT-SESSION FACT RETENTION") == 1
 
         # Both master render modes must NOT carry it — the single-seam rule

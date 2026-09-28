@@ -217,9 +217,8 @@ STATE_VALUE_CARVE_OUT = (
 #
 # SEAMS: S1 (_granularity_text) and the S2/S4 {anti_routine} slot
 # (_s2s4_rules) — deliberately NOT the master render, which would emit it a
-# second time inside the same prompt (a second ~957-byte copy per S2/S4
-# prompt). The slot is the higher-recency write site, matching #2453's lesson
-# that the master block alone was too weak.
+# second time inside the same prompt. The slot is the higher-recency write
+# site, matching #2453's lesson that the master block alone was too weak.
 SHORT_SESSION_FACT_RULE = (
     "SHORT-SESSION FACT RETENTION (the granularity bar is a predicate over "
     "content, NEVER over session length): do NOT read a short or sparse "
