@@ -480,6 +480,29 @@ def _attributes_files(root: Path) -> list[Path]:
     return files
 
 
+def _class_body(body: str) -> str:
+    """Escape a git character-class body, over-approximating a reversed range.
+
+    Git matches the FIRST endpoint of `[z-a]` (undefined behaviour); emitting the
+    class as a never-match was a silent fail-open, so both endpoints are kept —
+    a superset that fails closed.
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(body):
+        if i + 2 < len(body) and body[i + 1] == "-":
+            lo, hi = body[i], body[i + 2]
+            parts.append(
+                re.escape(lo)
+                + (re.escape(hi) if ord(lo) > ord(hi) else "-" + re.escape(hi))
+            )
+            i += 3
+            continue
+        parts.append(re.escape(body[i]))
+        i += 1
+    return "".join(parts)
+
+
 def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
     """A regex reproducing gitattributes/.gitignore glob semantics.
 
@@ -509,17 +532,29 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
             out.append("[^/]")
             i += 1
             continue
+        if ch == "\\":
+            # git unescapes `\x` to a literal x (`\*.yml` names the file `*.yml`).
+            if i + 1 < len(pattern):
+                out.append(re.escape(pattern[i + 1]))
+                i += 2
+                continue
+            out.append(re.escape(ch))
+            i += 1
+            continue
         if ch == "[":
-            close = pattern.find("]", i + 1)
+            # `]` as the first member is a LITERAL member, not the class close.
+            j = i + 1
+            if j < len(pattern) and pattern[j] in ("]", "!"):
+                j += 1
+            close = pattern.find("]", j)
             content = pattern[i + 1 : close] if close != -1 else ""
-            if close == -1 or content in ("", "!"):
+            if close == -1 or content in ("", "!", "^"):
                 out.append(re.escape(ch))
                 i += 1
                 continue
-            negate = content.startswith("!") or content.startswith("^")
+            negate = content[0] in ("!", "^")
             body = content[1:] if negate else content
-            safe = body.replace("\\", "\\\\").replace("]", "\\]").replace("^", "\\^")
-            out.append("[" + ("^" if negate else "") + safe + "]")
+            out.append("[" + ("^" if negate else "") + _class_body(body) + "]")
             i = close + 1
             continue
         out.append(re.escape(ch))
@@ -560,7 +595,8 @@ def _unioned_files(root: Path) -> set[str]:
         return out
 
     for path in files:
-        base = path.parent.relative_to(root).as_posix()
+        # `$GIT_DIR/info/attributes` is scoped to the WORKTREE root, not `.git/info`.
+        base = "." if ".git" in path.parts else path.parent.relative_to(root).as_posix()
         for line in file_lines[path]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -582,6 +618,8 @@ def _unioned_files(root: Path) -> set[str]:
             if any(ch in pat for ch in "*?["):
                 regex = _attr_glob_regex(pat)
                 for match in sorted(root.rglob("*")):
+                    if ".git" in match.parts:
+                        continue
                     if match.is_file() and regex.match(
                         match.relative_to(root).as_posix()
                     ):
@@ -781,7 +819,9 @@ def _names_path(path: str, literal: str) -> bool:
         if start == 0 or literal[start - 1] in _PATH_DELIMS:
             return True
         if literal[start - 1] == "/" and (
-            start == 1 or literal[start - 2] in _PATH_DELIMS or literal[start - 2] == "."
+            start == 1
+            or literal[start - 2] in _PATH_DELIMS
+            or (start == 2 and literal[0] == ".")
         ):
             return True
     return False
@@ -810,6 +850,11 @@ def _nonzero_exit_arg(args: list[ast.expr]) -> bool:
         return False  # `sys.exit()` / `SystemExit()` defaults to 0
     first = args[0]
     return not (isinstance(first, ast.Constant) and first.value in (0, None))
+
+
+def _is_main_like(name: str) -> bool:
+    """A `main`-like entry function (not `domain`/`remainder`)."""
+    return name == "main" or name.startswith("main_") or name.endswith("_main")
 
 
 def _source_can_fail(source: str) -> bool:
@@ -918,6 +963,11 @@ def _source_can_fail(source: str) -> bool:
                 continue  # `raise SystemExit(0)` exits 0
             return True
         if isinstance(node, ast.Return) and node.value is not None:
+            fn = enclosing_function(node)
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not _is_main_like(fn.name):
+                continue  # a helper's data `return` is not an exit status
             value = node.value
             if not (isinstance(value, ast.Constant) and value.value in (0, None)):
                 return True

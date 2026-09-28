@@ -1441,11 +1441,59 @@ def test_gitattributes_caret_negation(tmp_path: Path) -> None:
     assert mcg._unioned_files(root) == {"cfg/!eg.yml", "cfg/seg.yml"}
 
 
-def test_gitattributes_reversed_range_does_not_raise(tmp_path: Path) -> None:
-    """`[z-a]` is git-legal and matches nothing; it must not make clause (vii) exit 2."""
+def test_gitattributes_reversed_range_is_a_superset(tmp_path: Path) -> None:
+    """`[z-a]` matches git's first endpoint; the guard must not fall open to {}."""
     root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "z.yml").write_text("a: 1\n", encoding="utf-8")
     (root / ".gitattributes").write_text("config/[z-a].yml merge=union\n", encoding="utf-8")
-    assert mcg._unioned_files(root) == set()
+    assert "config/z.yml" in mcg._unioned_files(root)
+
+
+def test_gitattributes_leading_close_bracket_member(tmp_path: Path) -> None:
+    """`[]a]` makes `]` a literal member of the class."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "cfg").mkdir(parents=True, exist_ok=True)
+    (root / "cfg" / "].yml").write_text("a: 1\n", encoding="utf-8")
+    (root / "cfg" / "a.yml").write_text("b: 1\n", encoding="utf-8")
+    (root / "cfg" / "b.yml").write_text("c: 1\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("cfg/[]a].yml merge=union\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"cfg/].yml", "cfg/a.yml"}
+
+
+def test_gitattributes_escaped_star_is_literal(tmp_path: Path) -> None:
+    """`\\*.yml` names the literal file `*.yml`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "*.yml").write_text("a: 1\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("\\*.yml merge=union\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"*.yml"}
+
+
+def test_git_dir_is_never_unioned(tmp_path: Path) -> None:
+    """A bare `*` pattern must not union files under `.git/`."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    (root / ".git" / "config").write_text("x\n", encoding="utf-8")
+    (root / ".gitattributes").write_text("* merge=union\n", encoding="utf-8")
+    assert not any(u.startswith(".git/") for u in mcg._unioned_files(root))
+
+
+def test_clause_vii_helper_data_return_is_red(tmp_path: Path) -> None:
+    """A helper's `return []` is data, not an exit status."""
+    src = (
+        'REG = "config/ci-surfaces.yml"\n'
+        "def load():\n    return []\n"
+        "print(load())\n"
+    )
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_names_path_rejects_parent_directory_prefix(tmp_path: Path) -> None:
+    assert mcg._names_path("config/ci-surfaces.yml", "../config/ci-surfaces.yml") is False
+    assert mcg._names_path("config/ci-surfaces.yml", "foo./config/ci-surfaces.yml") is False
 
 
 def test_names_path_rejects_a_directory_prefix(tmp_path: Path) -> None:
