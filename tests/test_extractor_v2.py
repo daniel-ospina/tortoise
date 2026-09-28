@@ -392,7 +392,7 @@ class TestS2:
         # (a range gets anchored on as a goal), not merely one punctuation of
         # it. The only number left in the clause is the descriptive
         # "one or two facts".
-        for variant in ("3 to 5", "3-5", "3–5", "0 to 2", "0-2"):
+        for variant in ("3 to 5", "3-5", "3–5", "0 to 2", "0-2", "0–2"):
             assert variant not in rule
         assert "quota" not in rule
 
@@ -423,10 +423,14 @@ class TestS2:
             # so a lock covering only S2 would cover half the surface.
             assert prompt.count("SHORT-SESSION FACT RETENTION") == 1
 
-        # Both master render modes must NOT carry it — the single-seam rule
-        # above is only real if this stays true.
+        # EVERY master render mode must NOT carry it — the single-seam rule
+        # above is only real if this stays true. All three modes are named:
+        # omitting _render_master_compact would leave the absence unguarded
+        # precisely in the mode the others were already verified against.
         for render in (v2._render_master_core_only(v2.build_master_list()),
-                       v2._render_master_verbose(v2.build_master_list())):
+                       v2._render_master_verbose(v2.build_master_list()),
+                       v2._render_master_compact(v2.build_master_list(),
+                                                 "a short story")):
             assert "SHORT-SESSION FACT RETENTION" not in render
 
         # The S1 asymmetry lock MUST survive: naming the anti-routine gate in
