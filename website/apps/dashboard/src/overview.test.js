@@ -254,13 +254,17 @@ function patternNames(node, out) {
       break
     case 'AssignmentPattern': patternNames(node.left, out); break
     case 'RestElement': patternNames(node.argument, out); break
+    // `constructor(private serverHarnessConnected)` — TypeScript wraps the pattern in a
+    // TSParameterProperty, so the parameter name sits one level deeper than every other case here
+    // and was invisible to the param loop (round 13, P1).
+    case 'TSParameterProperty': patternNames(node.parameter, out); break
     default: break
   }
   return out
 }
 
 /**
- * EVERY BINDING SITE of `name` in `src`, read off the AST, as `<kind>` labels.
+ * The binding KINDS of `name` in `src`, read off the AST, as `<kind>` labels.
  *
  * This exists because a guard that claims to pin an end must enumerate every way the end can be
  * reached. The assertion it replaced was a `(?:const|let|var|function)\s+name\b` regex, which sees
@@ -277,9 +281,21 @@ function patternNames(node, out) {
  *
  * A mutation using a parameter rebinds the name in an inner scope, so the outside `connected:`
  * arm can be made unconditional while the outer statement is untouched and the suite stays green —
- * the exact #4646 class this guard exists for. The count assertion above is a real net (a third
- * mention fails loud), but it is a net over TEXT; the binding question is a question about the
- * PARSE TREE, so it is answered from the parse tree.
+ * the exact #4646 class this guard exists for.
+ *
+ * ⛔ THE ENUMERATION IS THE EXHAUSTIVE NET FOR THE NAMES IT GUARDS (round 13, P1). For
+ * `harnessConnectionObserved` a raw mention count backstops it; for `serverHarnessConnected`
+ * nothing does, so a form this function does not know about is a form the guard cannot see. Round
+ * 12 read only `node.params` for function-like nodes and never `node.id`, and the mutant the round-13
+ * reviewer built on that — a nested `function serverHarnessConnected() { return true }` shadowing
+ * the real `const` — shipped a heading disagreeing with the h1 with all 688 tests green. That made
+ * this enumerator strictly WEAKER than the regex it replaced, which did catch `function name`.
+ *
+ * The list below is therefore every value-space binding form babel produces: declarations (all
+ * patterns), function/class names, function-like parameters (ordinary, private, TS-declare, and
+ * the TSParameterProperty wrapper), catch params, both for…of/for…in lefts, imports, and the
+ * TypeScript forms that create runtime bindings (enum, import-equals). A name bound by a construct
+ * not listed here must be added, not assumed harmless.
  */
 function identifierBindings(src, name, relPath = 'main.jsx') {
   const jsx = /\.[jt]sx$/.test(relPath)
@@ -300,9 +316,24 @@ function identifierBindings(src, name, relPath = 'main.jsx') {
       case 'ArrowFunctionExpression':
       case 'ObjectMethod':
       case 'ClassMethod':
+      case 'ClassPrivateMethod':
+      case 'TSDeclareMethod':
+      case 'TSDeclareFunction':
+        // The function's OWN name binds in the enclosing scope: `function serverHarnessConnected() {}`
+        // shadows the real `const` for everything after it. Missing `node.id` here is what made the
+        // round-13 mutant invisible.
+        if (node.id && node.id.name === name) found.push(`${node.type}(id)`)
         for (const p of node.params ?? []) {
           if (patternNames(p, []).includes(name)) found.push(`${node.type}(param)`)
         }
+        break
+      case 'ClassDeclaration':
+      case 'ClassExpression':
+        if (node.id && node.id.name === name) found.push(`${node.type}(id)`)
+        break
+      case 'TSEnumDeclaration':
+      case 'TSImportEqualsDeclaration':
+        if (node.id && node.id.name === name) found.push(node.type)
         break
       case 'CatchClause':
         if (patternNames(node.param, []).includes(name)) found.push('CatchClause(param)')
@@ -354,7 +385,10 @@ function wizardRenderSites(src, relPath = 'main.jsx') {
   })
   const sites = []
   visitNodes(ast.program, (node) => {
-    if (node.type !== 'CallExpression') return
+    // `wizardStageLabel?.(…)` parses as an OptionalCallExpression, not a CallExpression, so a
+    // heading written that way was invisible to this scan — the "Every … call" claim above was
+    // one node type wide (round 13, P3).
+    if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return
     if (node.callee?.type !== 'Identifier' || !WIZARD_RENDER_CALLEES.has(node.callee.name)) return
     sites.push({
       name: node.callee.name,
@@ -491,6 +525,12 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   for (const site of wizardSites) {
     const where = `${site.name}${site.line === null ? '' : ` (main.jsx:${site.line})`}`
     const binding = lastConnectedBinding(site.options)
+    // ⛔ FAIL-CLOSED, AND DELIBERATELY SO. `wizardStageLabel`/`wizardStepSub` both default
+    // `connected = false` (wizardFlow.js), so a site that simply omits the key is legitimate at
+    // runtime yet refused here. That is the intended direction — a heading whose connection state
+    // this guard cannot resolve must be written out, not assumed harmless — and a genuinely
+    // `connected`-free render site is a source change that should be stated here rather than
+    // silently exempted (round 13, P3).
     assert.ok(binding,
       `${where} must pass its options as an object literal that binds \`connected\` — an argument `
       + 'this guard cannot resolve is refused, not assumed harmless')
