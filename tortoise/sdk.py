@@ -712,16 +712,28 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
         # view blanks on, so the m2 lane and the default v2 lane cannot
         # disagree about which turns contribute a unit.
         #
-        # ⛔ A TURN WITH NO CONTENT OF ITS OWN YIELDS NO CLAIMS (#4897 review round 14, P1).
-        # The marker reserves 41 characters of the cap, so a turn whose real text sits in that
-        # band is stored as ``" " * keep + marker`` — its whole readable body IS the marker.
-        # ``_SENT`` parses ``…[truncated: original length 5971 chars]`` as a sentence, so the v1
-        # extractor minted a Point whose entire content was this module's own marker
+        # ⛔ A TURN WITH NO EXTRACTABLE CONTENT OF ITS OWN YIELDS NO CLAIMS (#4897 review
+        # round 14, P1; predicate corrected in review round 15). The appended marker reserves
+        # ``37 + len(str(total))`` characters of the cap, so a turn whose real text sits in
+        # that band is stored as ``" " * keep + marker`` — its whole readable body IS the
+        # marker. ``_SENT`` parses ``…[truncated: original length 5971 chars]`` as a sentence,
+        # so the v1 extractor minted a Point whose entire content was this module's own marker
         # (reproduced in review). That is not "the marker reaches the model" — which the CALLER
         # CONTRACT below requires for a turn that HAS content — it is a turn with nothing to say
         # creating a claim. Skipping it leaves the marker riding through untouched for every
         # turn that does have content.
-        if not _split_truncation_marker(content)[0].strip():
+        #
+        # ⛔ THE TEST IS EXTRACTABILITY, NOT WHITESPACE (#4897 review round 15, P1). Round 14
+        # skipped on a blank marker-free body, which let a clipped turn whose real body is
+        # non-whitespace but holds no >=3-char SENTENCE through: ``body`` is built from the
+        # WHOLE content (marker included), so ``_SENT`` then joined the 1-char body to the
+        # marker and turned the MARKER into the sentence — minting a synthetic claim again.
+        # Measured on a mixed 3-turn conversation with the m2 extractor: the whitespace-only
+        # test extracted 3 points where pre-#4897 extracted 1, the two extra being the two
+        # markers. Judging the MARKER-FREE body with ``_extractable_sentences`` — the SAME
+        # >=3-char predicate the sentence filter below applies, and #6246's ONE home for it —
+        # is what makes the skip agree with what the turn can contribute.
+        if not _extractable_sentences(_split_truncation_marker(content)[0]):
             continue
         # #4897: the extraction input is the SAME marked window the node
         # stores — the caller passes `_capture_turn_window`'s output (the
@@ -792,10 +804,37 @@ def _capture_truncation_marker(total: int) -> str:
     ``total`` is the ORIGINAL character count (before the cut) — the fact the
     cut itself destroys — so a reader can always tell how much conversation
     the stored turn no longer holds. The marker's length is a function of
-    ``total`` ALONE, which is what lets :func:`_clip_capture_turn_content`
-    reserve exactly its width without iterating to a fixpoint.
+    ``total`` ALONE (``37 + len(str(total))``), which is what lets
+    :func:`_clip_capture_turn_content` reserve exactly its width without
+    iterating to a fixpoint.
     """
     return f" {_CAPTURE_TRUNCATION_SENTINEL} original length {total} chars]"
+
+
+#: Code points treated as BLANK by :func:`_clip_capture_turn_content` — the set
+#: that decides "a whitespace-only retention is not marked" (#4897 review round
+#: 15, P3). Spelled out explicitly rather than left to ``str.strip()`` because
+#: this is the Python half of a TWO-LANGUAGE contract: JS
+#: ``String.prototype.trim`` strips U+FEFF but NOT U+001C-U+001F / U+0085, while
+#: Python's ``str.strip()`` does the reverse — so the two clippers disagreed on
+#: exactly those five code points and the "byte-identical stored turns" claim
+#: was false for them. This is the UNION of the two sets, so no input either side
+#: called blank becomes non-blank on the other. The identical literal lives in
+#: ``tortoise/pi-hooks/tortoise-capture.ts`` (``BLANK_CHARS``); it is pinned
+#: together with :data:`_CAPTURE_NONBLANK_RE` by the cross-language parity case
+#: in ``tests/test_pi_capture_hooks.py`` and by
+#: ``tests/test_capture_session.py::test_the_clippers_blank_set_is_explicit``.
+_CAPTURE_BLANK_CHARS = (
+    "\u0009\u000a\u000b\u000c\u000d"          # tab, LF, VT, FF, CR
+    "\u001c\u001d\u001e\u001f"                # file/group/record/unit separator
+    "\u0020\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+#: ``content`` is blank iff this finds nothing — one negated class rather than a
+#: per-character loop so the test stays C-fast on a multi-MB caller body.
+_CAPTURE_NONBLANK_RE = re.compile(f"[^{_CAPTURE_BLANK_CHARS}]")
 
 
 #: The FULL truncation marker, anchored at the tail (``_split_truncation_marker``
@@ -861,13 +900,17 @@ def _split_truncation_marker(content: str) -> tuple[str, str]:
     ``…[truncated: original length N chars]``, or the bare-sentinel fallback —
     or ``""`` when the turn was not cut.
 
-    ⛔ ``marker`` IS 40 CHARS, NOT 41 (#4897 review round 14, P3): the appended
-    text is `` …[truncated: …]`` with a LEADING SPACE, and ``rfind`` starts at the
-    sentinel, so that space stays in ``body``. ``body + marker == content`` still
-    holds (it is the whole reason the space is not lost), but the leading space is
-    handed to :func:`security.redact_secrets` along with the body — the marker
-    text proper is not. Callers that need the marker-free text must ``.strip()``
-    the body; both blank gates do.
+    ⛔ ``marker`` IS ONE CHARACTER SHORTER THAN THE APPENDED TEXT (#4897 review
+    round 14, P3; width corrected in round 15): the appended text is
+    `` …[truncated: …]`` with a LEADING SPACE, and ``rfind`` starts at the
+    sentinel, so that space stays in ``body``. The appended text is
+    ``37 + len(str(total))`` characters and ``marker`` is ``36 + len(str(total))``
+    — 41/40 only for a 4-digit total, and 42/41 for the ``"  .  " * 2000``
+    fixture whose total is 10000. ``body + marker == content`` still holds (it is
+    the whole reason the space is not lost), but the leading space is handed to
+    :func:`security.redact_secrets` along with the body — the marker text proper
+    is not. Callers that need the marker-free text must ``.strip()`` the body;
+    both blank gates do.
 
     ⛔ WHY SPLIT AT ALL: the marker must NEVER be part of the text handed to
     :func:`security.redact_secrets`. The ``private_key`` rule's fail-closed
@@ -964,11 +1007,21 @@ def _clip_capture_turn_content(
     # it is marked and ``keep`` is reserved for the marker.
     #
     # The residual: a turn whose only non-whitespace lives IN the band is marked
-    # and spends the band on the marker — the reserved width and the content
-    # compete for the same 41 characters. That turn is stored marker-only, which
-    # is why `_session_llm_transcript` skips a turn whose marker-stripped body is
-    # blank rather than minting the marker into a Point.
-    if not content.strip():
+    # and spends the band on the marker — the reserved width
+    # (``37 + len(str(total))``) and the content compete for the same characters.
+    # That turn is stored marker-only, which is why `_session_llm_transcript`
+    # skips a turn whose marker-free body holds no sentence rather than minting
+    # the marker into a Point.
+    #
+    # ⛔ THE PREDICATE IS ``_CAPTURE_NONBLANK_RE``, NOT ``str.strip()`` (#4897
+    # review round 15, P3). Blankness is a TWO-LANGUAGE contract with
+    # ``tortoise-capture.ts``, and ``str.strip()`` and JS ``trim()`` disagree on
+    # five code points (Python strips U+001C-U+001F and U+0085 where JS does not;
+    # JS strips U+FEFF where Python does not). ``_CAPTURE_BLANK_CHARS`` is the
+    # UNION of both sets and the TS side already uses it, so the Python side must
+    # use the SAME class or the two clippers store different turns for the same
+    # input — the parity the client/server contract promises.
+    if not _CAPTURE_NONBLANK_RE.search(content):
         return content[:cap]
     marker = _capture_truncation_marker(len(content))
     keep = cap - len(marker)

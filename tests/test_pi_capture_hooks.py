@@ -550,3 +550,89 @@ def test_extension_marker_output_matches_the_python_marker(tmp_path):
     assert out["length"] == _CAPTURE_TURN_CAP
     assert out["sentinelIn"] is True
     assert out["tail"].endswith(expected_marker)
+
+
+_BLANK_PROBE = r'''
+import { clipTurnContent, BLANK_CHARS, TRUNCATION_SENTINEL } from {{EXT_URI}};
+const inputs = JSON.parse(process.env.PROBE_INPUTS);
+const out = inputs.map((s) => {
+  const clipped = clipTurnContent(s);
+  return {
+    marked: clipped.includes(TRUNCATION_SENTINEL),
+    length: Array.from(clipped).length,
+  };
+});
+console.log("PROBE_JSON:" + JSON.stringify({
+  out,
+  blankChars: Array.from(BLANK_CHARS).map((c) => c.codePointAt(0)),
+}));
+'''
+
+
+def test_extension_clipper_blankness_matches_the_python_clipper(tmp_path):
+    """#4897 review round 15, P3: the two clippers must agree on BLANK.
+
+    ``_clip_capture_turn_content`` tested ``not content.strip()`` while the
+    shipped TS clipper tested ``!content.trim()``. Those builtins disagree on
+    exactly five code points — U+001C-U+001F and U+0085 (Python strips, JS keeps)
+    and U+FEFF (JS strips, Python keeps) — so a client-clipped blank turn could be
+    stored MARKER-ONLY on one side and blank on the other, and the module's claim
+    that both paths "produce byte-identical stored turns" was false for them. Both
+    sides now use the same explicit code-point set (the union of the two).
+
+    Mutation that REDs this: revert EITHER clipper to its builtin (``.strip()`` /
+    ``.trim()``) — the divergent code points then flip on one side only — or
+    delete the TS blank branch, when the marker appears on a blank input. The
+    exported ``BLANK_CHARS`` comparison additionally reds if the two exported
+    sets drift even while behavior happens to agree.
+    """
+    node = _require_node()
+    from tortoise.sdk import (
+        _CAPTURE_BLANK_CHARS,
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _clip_capture_turn_content,
+    )
+
+    over = _CAPTURE_TURN_CAP + 1
+    fixtures = [
+        " " * over,          # the plain blank case
+        "\u001c" * over,     # Python blank, JS trim() NOT blank
+        "\u001f" * over,
+        "\u0085" * over,
+        "\ufeff" * over,     # JS trim() blank, Python strip() NOT blank
+        "\u200b" * over,     # neither builtin calls it blank — still marked
+        "x" * over,          # non-blank control
+    ]
+    probe = tmp_path / "blank-probe.mjs"
+    probe.write_text(
+        _BLANK_PROBE.replace("{{EXT_URI}}", json.dumps(EXTENSION.as_uri())),
+        encoding="utf-8",
+    )
+    env = _scrubbed_env(str(tmp_path))
+    env["PROBE_INPUTS"] = json.dumps(fixtures)
+    proc = subprocess.run(
+        [node, "blank-probe.mjs"],
+        capture_output=True, text=True, cwd=str(tmp_path), timeout=120, env=env,
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    line = [ln for ln in proc.stdout.splitlines()
+            if ln.startswith("PROBE_JSON:")][-1]
+    payload = json.loads(line[len("PROBE_JSON:"):])
+    ts = payload["out"]
+    assert len(ts) == len(fixtures), (ts, fixtures)
+
+    # The exported TS set is character-for-character the Python set.
+    assert "".join(chr(cp) for cp in payload["blankChars"]) == _CAPTURE_BLANK_CHARS
+
+    for src, got in zip(fixtures, ts, strict=True):
+        py = _clip_capture_turn_content(src)
+        py_marked = _CAPTURE_TRUNCATION_SENTINEL in py
+        assert got["marked"] == py_marked, (
+            f"clippers disagree on {src[:1]!r}: TS marked={got['marked']}, "
+            f"Python marked={py_marked}")
+        assert got["length"] == len(py), (
+            f"clippers disagree on length for {src[:1]!r}: "
+            f"{got['length']} != {len(py)}")
+        if not py_marked:
+            assert got["length"] == _CAPTURE_TURN_CAP

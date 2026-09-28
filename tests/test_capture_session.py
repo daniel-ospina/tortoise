@@ -4698,17 +4698,28 @@ def test_content_past_the_cap_is_marked_not_dropped(sdk):
         f"the over-cap turn must be marked: {stored}")
 
 
-def test_a_marker_only_turn_yields_no_claim(sdk):
+def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
     """#4897 round-14 P1: the marker is EVIDENCE, never a CLAIM.
 
-    The marker reserves 41 characters of the cap, so a turn whose only
-    non-whitespace sits in that band is stored as ``" " * keep + marker`` — its
-    whole readable body IS the marker. ``_SENT`` parses the marker as a
-    sentence, so the v1 extractor minted a Point whose entire content was the
-    module's own marker (reproduced in review). Both directions are pinned here:
-    a marker-only turn contributes nothing, while a turn that HAS content still
-    carries its marker to the model — which is the recorded #4897 fidelity
-    decision and must not be traded away by this fix.
+    The marker reserves ``37 + len(str(total))`` characters of the cap, so a turn
+    whose only non-whitespace sits in that band is stored as
+    ``" " * keep + marker`` — its whole readable body IS the marker. ``_SENT``
+    parses the marker as a sentence, so the v1 extractor minted a Point whose
+    entire content was the module's own marker (reproduced in review). Both
+    directions are pinned here: a marker-only turn contributes nothing, while a
+    turn that HAS content still carries its marker to the model — which is the
+    recorded #4897 fidelity decision and must not be traded away by this fix.
+
+    ⛔ THE MIXED-CONVERSATION LEG BELOW IS WHAT BINDS THE ROUND-15 PREDICATE
+    (#4897 review round 15, P1). The round-14 skip tested the marker-free body
+    for BLANKNESS, which a clipped body of non-whitespace non-sentences passes:
+    ``body`` is then built from the WHOLE content (marker included), so ``_SENT``
+    joined the 1-char body to the marker and turned the MARKER into the sentence.
+    The single-turn fixtures above did not catch it because the entry gate refuses
+    these turns alone; a MIXED conversation admits them, and it is the extractor
+    transcript (not the gate's) that carries the markers. Measured end to end
+    through the m2 extractor on this exact conversation, before the fix: 3
+    extracted points — the two extras being this module's own markers.
     """
     from tortoise.sdk import (
         _CAPTURE_TRUNCATION_SENTINEL,
@@ -4729,6 +4740,55 @@ def test_a_marker_only_turn_yields_no_claim(sdk):
     real_transcript, _est = _session_llm_transcript(real)
     assert _CAPTURE_TRUNCATION_SENTINEL in real_transcript, (
         "a turn that HAS content must still carry its marker to the model")
+
+    # ⛔ A CLIPPED BODY OF NON-SENTENCES IS STILL NOTHING TO EXTRACT. Two
+    # fixtures: single dots (marker-free body has no >=3-char sentence) and a lone
+    # ``X`` followed by spaces. Both are non-whitespace, so the round-14 blank test
+    # let them through — and the marker then became the sentence.
+    mixed = [
+        {"role": "user", "content": "I think the auth dead-end is the top issue."},
+        {"role": "user", "content": "  .  " * 2000},
+        {"role": "user", "content": "X" + " " * 6000},
+    ]
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    res = sdk.capture_session(mixed)
+    assert res["ok"] is True, res["errors"]
+    marked = [p for p in res["points"]
+              if _CAPTURE_TRUNCATION_SENTINEL in (p.get("text") or "")]
+    assert not marked, f"a marker-only turn minted a synthetic claim: {marked}"
+    assert res["extracted"] >= 1, mixed  # the real turn still extracts
+
+
+def test_the_clippers_blank_set_is_explicit():
+    """#4897 review round 15, P3: blankness is an explicit code-point set.
+
+    ``_clip_capture_turn_content`` used ``not content.strip()`` while the shipped
+    TS clipper used ``!content.trim()``, and the two disagree on exactly five code
+    points — U+001C-U+001F and U+0085 (Python-stripped, JS-kept) and U+FEFF
+    (JS-stripped, Python-kept). The Python clipper now uses
+    ``_CAPTURE_BLANK_CHARS``, the union, so no input one side called blank becomes
+    non-blank on the other. This pins the Python side natively (so a revert to
+    ``.strip()`` reds even where Node is absent); the TS half is pinned to the
+    same set by the cross-language parity case in ``tests/test_pi_capture_hooks.py``.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_BLANK_CHARS,
+        _CAPTURE_NONBLANK_RE,
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _clip_capture_turn_content,
+    )
+    # Both directions of the divergence `str.strip()` got wrong.
+    for cp in ("\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "\ufeff"):
+        assert cp in _CAPTURE_BLANK_CHARS, hex(ord(cp))
+        assert not _CAPTURE_NONBLANK_RE.search(cp * 10), hex(ord(cp))
+        out = _clip_capture_turn_content(cp * (_CAPTURE_TURN_CAP + 1))
+        assert _CAPTURE_TRUNCATION_SENTINEL not in out, (
+            f"a blank retention must not be marked: {out[-60:]!r}")
+    # And a NON-blank whitespace-lookalike is still marked.
+    assert _CAPTURE_NONBLANK_RE.search("\u200b" * 10)
+    out = _clip_capture_turn_content("\u200b" * (_CAPTURE_TURN_CAP + 1))
+    assert _CAPTURE_TRUNCATION_SENTINEL in out
 
 
 def test_capture_writes_mitigates_artifact(sdk, monkeypatch):

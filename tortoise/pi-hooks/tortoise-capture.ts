@@ -103,6 +103,28 @@ export function truncationMarker(total: number): string {
 }
 
 /**
+ * Code points treated as BLANK by `clipTurnContent` — the exact Python set
+ * (`tortoise/sdk.py::_CAPTURE_BLANK_CHARS`). Spelled out explicitly instead of
+ * using `String.prototype.trim()` because this is the client half of a
+ * TWO-LANGUAGE contract (#4897 review round 15, P3): `trim()` strips U+FEFF but
+ * NOT U+001C-U+001F or U+0085, while Python's `str.strip()` does the reverse —
+ * so the two clippers disagreed on exactly those five code points and the
+ * "byte-identical stored turns" claim was false for them. This is the UNION of
+ * the two sets, so no input either side called blank becomes non-blank on the
+ * other. Pinned to the Python literal by the cross-language parity case in
+ * `tests/test_pi_capture_hooks.py`.
+ */
+export const BLANK_CHARS =
+  "\u0009\u000a\u000b\u000c\u000d" +          // tab, LF, VT, FF, CR
+  "\u001c\u001d\u001e\u001f" +                // file/group/record/unit separator
+  "\u0020\u0085\u00a0\u1680" +
+  "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
+  "\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+/** `content` is blank iff this finds nothing (see `BLANK_CHARS`). */
+const NON_BLANK_RE = new RegExp(`[^${BLANK_CHARS}]`);
+
+/**
  * `content` unchanged when it fits `cap`; otherwise cut AND marked (#4897).
  *
  * Code-point safe on purpose: iteration is over `Array.from(content)`, so a
@@ -122,15 +144,16 @@ export function clipTurnContent(
 ): string {
   const points = Array.from(content);
   if (points.length <= cap) return content;
-  // ⛔ A WHITESPACE-ONLY RETENTION IS NOT MARKED — mirrors the Python clipper
-  // (#4897 review round 14, P3). The marker means "there is more"; for a body
-  // that holds nothing that statement is misleading, and a marker-ONLY turn is
-  // what made the server's v1 extractor mint a Point whose entire content was
-  // the marker itself. The server now skips such a turn at extraction, but the
-  // two clippers are pinned byte-identical for NON-BLANK input only, so without
-  // this branch a client-clipped blank turn would be stored marker-only while
-  // the server-side clipper stores it blank — a divergence no test covers.
-  if (!content.trim()) return points.slice(0, cap).join("");
+  // ⛔ A BLANK RETENTION IS NOT MARKED — the SAME predicate as the Python
+  // clipper (#4897 review round 14, P3; blankness unified in round 15). The
+  // marker means "there is more"; for a body that holds nothing that statement
+  // is misleading, and a marker-ONLY turn is what made the server's v1 extractor
+  // mint a Point whose entire content was the marker itself. The server now skips
+  // such a turn at extraction, and `NON_BLANK_RE` keeps the two clippers
+  // byte-identical on blank input too — `trim()`/`strip()` disagree on five code
+  // points, so the blankness test is the explicit shared set, not either
+  // language's builtin.
+  if (!NON_BLANK_RE.test(content)) return points.slice(0, cap).join("");
   let marker = truncationMarker(points.length);
   let keep = cap - Array.from(marker).length;
   if (keep < 0) {
