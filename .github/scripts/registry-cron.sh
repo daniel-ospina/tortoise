@@ -963,22 +963,41 @@ ANALYTICS_THRESHOLD_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.silent_th
 ANALYTICS_ATTEMPTS="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.canary_attempts|type)=="number" then (.analytics.canary_attempts|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
 ANALYTICS_SILENT=0
 ANALYTICS_FRESH=0
-# R2/R3 (bug-scan P3 -> R3 P1): `${x%.*}` TRUNCATES, and truncation of a
-# non-plain-decimal operand is not a parse. jq prints 1.2e16 as `1.2E+16`,
-# whose integer part truncates to `1` — which compares under any threshold and
-# would resolve an open incident on a grossly STALE age (fail-open). Bash also
-# compares in signed 64-bit only: an all-digit operand longer than that makes
-# `[ -gt ]` ERROR (rc=2), and a failed comparison must never read as "fresh".
-# So the shape is validated explicitly — only `digits[.digits]` with at most 18
-# integer digits is comparable; everything else (empty, sign, exponent, hex,
-# whitespace, a second dot, an int64-overflowing magnitude) is unmeasurable and
-# leaves the kind untouched. Leading zeros cannot occur: jq never emits them.
+# A shape we cannot compare is NOT the same state as an ABSENT age. jq has
+# already proven `.analytics.age_s` is a number (or `unknown`); so:
+#
+#   absent           (`unknown`)  → "no delivery since boot"  → the UPTIME arm
+#   present+decimal  (digits[.digits], <=18 int digits)        → compare
+#   present+other    (sign, exponent, hex, whitespace, 2nd dot, int64 overflow)
+#                                → UNMEASURABLE  → change NOTHING
+#
+# Two reasons the third state must not fall through to the uptime arm. (1) A
+# PRESENT age proves a delivery happened, so the uptime arm's premise ("no
+# delivery since boot") is false by construction — and a NEGATIVE age (a stamp
+# at or after the snapshot, which the pre-clamp app revision could publish
+# during a rolling deploy) would then FILE a false incident on a healthy sink.
+# (2) Truncation is not a parse: jq prints 1.2e16 as `1.2E+16`, whose integer
+# part is `1` — it would compare under any threshold and RESOLVE an open
+# incident on a grossly stale age. Bash also compares signed 64-bit, so an
+# all-digit operand longer than that makes `[ -gt ]` ERROR, and a failed
+# comparison must never read as "fresh". A non-compliant /status therefore can
+# neither fabricate an incident nor resolve one. The app cannot emit such a
+# value: with the clamp, `age_s` is a plain decimal in [0, 1e16) — jq only
+# normalises a number to exponent form past 1e16 or below 1e-4, and neither is
+# a stale sink. Leading zeros cannot occur: jq never emits them.
+ANALYTICS_AGE_PRESENT=0
 ANALYTICS_AGE_INT=""
 case "$ANALYTICS_AGE_S" in
-  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  ''|unknown) : ;;
   *)
-    ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}"
-    [ "${#ANALYTICS_AGE_INT}" -le 18 ] || ANALYTICS_AGE_INT=""
+    ANALYTICS_AGE_PRESENT=1
+    case "$ANALYTICS_AGE_S" in
+      *[!0-9.]*|.|.*|*.|*.*.*) : ;;
+      *)
+        ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}"
+        [ "${#ANALYTICS_AGE_INT}" -le 18 ] || ANALYTICS_AGE_INT=""
+        ;;
+    esac
     ;;
 esac
 ANALYTICS_UPTIME_INT=""
@@ -1009,10 +1028,11 @@ if [ "$ANALYTICS_INTENDED" = "true" ] && [ -n "$ANALYTICS_THRESHOLD_INT" ]; then
       # a delivered write.
       ANALYTICS_FRESH=1
     fi
-  elif [ -n "$ANALYTICS_UPTIME_INT" ] \
+  elif [ "$ANALYTICS_AGE_PRESENT" = "0" ] && [ -n "$ANALYTICS_UPTIME_INT" ] \
        && [ "$ANALYTICS_UPTIME_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
-    # No delivered write SINCE BOOT, and the process is past the threshold —
-    # not a cold start. This is the "the emitter never ran" arm.
+    # No deliverED write SINCE BOOT (the age is genuinely ABSENT), and the
+    # process is past the threshold — not a cold start. This is the "the
+    # emitter never ran" arm.
     ANALYTICS_SILENT=1
   fi
   if [ "$ANALYTICS_SILENT" = "1" ]; then
@@ -1023,14 +1043,15 @@ if [ "$ANALYTICS_INTENDED" = "true" ] && [ -n "$ANALYTICS_THRESHOLD_INT" ]; then
     resolve_global ANALYTICS_SINK_DEGRADED "Resolved — the app delivered an analytics write within its Period+Grace threshold (age=${ANALYTICS_AGE_S}s <= ${ANALYTICS_THRESHOLD_S}s)."
   else
     # #3944 (bug-scan P1): a NON-SILENT but UNESTABLISHED heartbeat is NOT
-    # fresh. A cold start (no delivery yet, uptime under the threshold) and an
-    # unmeasurable/malformed block both land here. Resolving on either would
-    # close — and delete the dedup object of — a genuinely open incident with
-    # NO evidence of a delivered write; on a crash-looping deploy (which never
-    # reaches its first write) every hourly run would re-resolve it, keeping
-    # the absence alarm permanently silent on exactly the failure it exists to
-    # catch. Resolve ONLY on a measured age.
-    log "analytics heartbeat not yet established (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s) — leaving ANALYTICS_SINK_DEGRADED unchanged"
+    # fresh. Three shapes land here and none may resolve: a cold start (no
+    # delivery yet, uptime under the threshold); a genuinely unmeasurable age
+    # (present but not comparable); and an unmeasurable/malformed block.
+    # Resolving on any of them would close — and delete the dedup object of — a
+    # genuinely open incident with NO evidence of a delivered write; on a
+    # crash-looping deploy (which never reaches its first write) every hourly
+    # run would re-resolve it, keeping the absence alarm permanently silent on
+    # exactly the failure it exists to catch. Resolve ONLY on a measured age.
+    log "analytics heartbeat not established (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s) — leaving ANALYTICS_SINK_DEGRADED unchanged"
   fi
 else
   log "analytics heartbeat unknown/unconfigured (configured=${ANALYTICS_CONFIGURED} intended=${ANALYTICS_INTENDED}) — leaving ANALYTICS_SINK_DEGRADED unchanged"

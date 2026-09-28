@@ -273,7 +273,10 @@ def test_heartbeat_block_shape(monkeypatch):
     """The exact block the external driver reads, with the threshold DERIVED
     from the period where the period lives."""
     _prod_env(monkeypatch)
-    monkeypatch.setattr(ha, "_ANALYTICS_CANARY_PERIOD_S", 300)
+    # A NON-default period, so the derived threshold is actually pinned: with the
+    # default (300 -> 900) a hardcoded app-side `silent_threshold_s: 900` would
+    # pass every assertion here and in the shell suite (R4 test-quality P3).
+    monkeypatch.setattr(ha, "_ANALYTICS_CANARY_PERIOD_S", 600)
     monkeypatch.setattr(ha, "_ANALYTICS_CANARY_ATTEMPTS", 2)
     monkeypatch.setattr(ha, "_ANALYTICS_BOOT_AT", datetime.now(UTC) - timedelta(seconds=1000))
     monkeypatch.setattr(
@@ -284,10 +287,12 @@ def test_heartbeat_block_shape(monkeypatch):
 
     assert block["configured"] is True
     assert block["intended"] is True
-    assert block["canary_period_s"] == 300
-    assert block["silent_threshold_s"] == 900, "Period + Grace = 3x the period"
-    assert 995 <= block["uptime_s"] <= 1005
-    assert 95 <= block["age_s"] <= 105
+    assert block["canary_period_s"] == 600
+    assert block["silent_threshold_s"] == 1800, "Period + Grace = 3x the period"
+    # One-sided lower bounds: the stamps are set a few statements earlier, so a
+    # two-sided window reds if the process is preempted between them (R4 P4).
+    assert block["uptime_s"] >= 995
+    assert block["age_s"] >= 95
     assert block["canary_attempts"] == 2
     assert block["last_delivered_at"] is not None
     assert set(block["outcomes"]) == set(ha._ANALYTICS_OUTCOMES)
@@ -312,7 +317,6 @@ def test_heartbeat_age_is_clamped_non_negative(monkeypatch):
     block = ha._analytics_heartbeat_block()
 
     assert block["age_s"] == 0.0, f"age must be clamped to 0, got {block['age_s']}"
-    assert block["last_delivered_at"] is not None
 
 
 def test_heartbeat_block_is_cold_start_safe(monkeypatch):

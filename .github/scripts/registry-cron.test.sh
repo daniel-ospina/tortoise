@@ -140,6 +140,10 @@
 #  93. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
 #      `[ -gt ]` is not freshness)
 #  94. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
+#  95. #3944: a NEGATIVE age must not be read as "no delivery since boot" (a
+#      present age proves a delivery; the pre-clamp app can publish one)
+#  96. #3944: the threshold is the BODY's `silent_threshold_s`, not a hardcoded
+#      900 — a non-default threshold moves the verdict
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1956,8 +1960,8 @@ run_driver
 assert_eq "$RC" 0 "90. a cold start with an open incident stays green"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "90. a cold start does NOT resolve the open incident (no delivered write yet)"
-assert_contains "$OUT" "analytics heartbeat not yet established" \
-  "90. the log says the heartbeat is not yet established"
+assert_contains "$OUT" "analytics heartbeat not established" \
+  "90. the log says the heartbeat is not established"
 
 # ── 91. #3944: an UNMEASURABLE block must NOT RESOLVE an open incident ──────
 # `intended` true and a threshold present, but neither age_s nor uptime_s is a
@@ -1974,7 +1978,7 @@ run_driver
 assert_eq "$RC" 0 "91. an unmeasurable heartbeat stays green"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "91. an unmeasurable block does NOT resolve the open incident"
-assert_contains "$OUT" "analytics heartbeat not yet established" \
+assert_contains "$OUT" "analytics heartbeat not established" \
   "91. the log reports the record as unestablished, not fresh"
 
 # ── 92. #3944: an exponent-notation age is NOT a measurement ───────────────
@@ -1990,13 +1994,19 @@ export STUB_SWEEP_BODY='{"status":"backed_up"}'
 export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
 export STUB_STATUS_BODY="$(analytics_status_body true true true 1.2e16 10000)"
 run_driver
-assert_eq "$RC" 1 "92. an exponent-notation age reds the run (stale uptime)"
-# The open incident (#321) is adopted rather than re-filed, so assert the
-# DECISION from the log line, not a POST.
-assert_contains "$OUT" "analytics sink silent (age=" \
-  "92. an uncomparable age is not read as fresh"
+assert_eq "$RC" 0 "92. an exponent-notation age changes nothing"
+# R4: a PRESENT but unmeasurable age must not fall through to the uptime arm —
+# a present age proves a delivery happened, so the arm's premise ("no delivery
+# since boot") is false, and a pre-clamp app could publish a negative age (a
+# false FILE on a healthy sink). Unmeasurable changes nothing at all.
+assert_not_match "$OUT" "analytics sink silent" \
+  "92. an uncomparable age is not read as stale (no FILE decision)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "92. an uncomparable age files nothing"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "92. a truncated non-decimal age NEVER resolves the open incident"
+assert_contains "$OUT" "leaving ANALYTICS_SINK_DEGRADED unchanged" \
+  "92. an unmeasurable age leaves the kind untouched"
 
 # ── 93. #3944: an ALL-DIGIT age that overflows bash int64 must not resolve ──
 # R3 P1: `[ -gt ]` compares in signed 64-bit, so a longer all-digit operand
@@ -2011,7 +2021,11 @@ export STUB_SWEEP_BODY='{"status":"backed_up"}'
 export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
 export STUB_STATUS_BODY="$(analytics_status_body true true true 12000000000000000000000000 10000)"
 run_driver
-assert_eq "$RC" 1 "93. an int64-overflowing age reds the run (stale uptime)"
+assert_eq "$RC" 0 "93. an int64-overflowing age changes nothing"
+assert_not_match "$OUT" "analytics sink silent" \
+  "93. an uncomparable magnitude is not read as stale (no FILE decision)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "93. an uncomparable magnitude files nothing"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "93. an int64-overflowing age NEVER resolves the open incident"
 
@@ -2032,6 +2046,42 @@ assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
 assert_contains "$(cat "$LOG")" \
   "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
   "94. age == threshold self-heals (strict >, not >=)"
+
+# ── 95. #3944: a NEGATIVE age must not be read as "no delivery since boot" ──
+# R4 P3: a negative age is shape-rejected, and admitting it into the uptime arm
+# FILED a false incident on a demonstrably healthy sink (age_s is only non-null
+# when a write was DELIVERED, so a negative value means the delivery is at or
+# after the snapshot). A PRESENT-but-unmeasurable age now changes nothing; only
+# a genuinely ABSENT one may take the uptime arm.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true -0 10000)"
+run_driver
+assert_eq "$RC" 0 "95. a negative age does not red the run"
+assert_not_match "$OUT" "analytics sink silent" \
+  "95. a negative age must NOT file a false incident on a healthy sink"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "95. a negative age posts nothing"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "95. a negative age leaves an open incident untouched"
+
+# ── 96. #3944: the threshold comes from the BODY, not a hardcoded 900 ──────
+# The whole point of publishing `silent_threshold_s` is that bash never
+# re-types the period. The app derives it where the period lives (`3 x period`),
+# so a change to the period must move the driver's verdict. A body threshold of
+# 60 with an age of 120 files; a hardcoded 900 in the driver would not.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 120 10000 60)"
+run_driver
+assert_eq "$RC" 1 "96. a non-default threshold from the body reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "96. the driver uses the body's silent_threshold_s (not a hardcoded 900)"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

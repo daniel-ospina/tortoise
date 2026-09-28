@@ -43,9 +43,9 @@ Applied on the review pass (T13–T15 are new there):
   ``supabase_env_incomplete``, never ``unconfigured``. T13.
 * **P2-1/D2** — the alert trigger is a STREAK of ``_ANALYTICS_FALLBACK_ALERT_
   AFTER`` consecutive degraded writes, not "the first fallback after any
-  success" (which alerted on a single 5s timeout). Deferred deliberately and
-  recorded: D5b's ABSENCE half (a sink that silently stops emitting) needs a
-  heartbeat this sink does not emit — see the constants' comment.
+  success" (which alerted on a single 5s timeout). The D5b ABSENCE half (a
+  sink that silently stops emitting) LANDED in #3944 — see the constants'
+  comment. Exercised by tests/test_analytics_sink_absence.py.
 * **P2-2** — the episode latch is set only on a dispatch that did NOT raise.
 * **P2-3** — every non-dispatch leg (the outcome counter, and the detail build
   that takes the alert lock) now sits inside a never-raise guard. T16.
