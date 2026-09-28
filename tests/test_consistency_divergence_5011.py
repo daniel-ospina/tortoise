@@ -31,6 +31,9 @@ import pytest
 from tortoise.consistency import (
     _GRAPH_DEFAULTED_PROPS,
     _WRITER_DEFAULTS,
+    _compare_views,
+    _fold_journal,
+    _values_equal,
     check_consistency,
     read_projection_state,
     recover_from_log,
@@ -42,8 +45,12 @@ from tortoise.projection import FalkorProjection
 def _proj(tmp_path, tag: str) -> FalkorProjection:
     # graph_name starts with `test_` so the bulk-wipe guard passes on the
     # docker lane; unique so parallel workers never share a graph.
+    #
+    # The DB FILE is tag-scoped too: the embedded lane ignores `graph_name`
+    # (one store per file), so a second projection sharing `5011.db` would see
+    # the first one's points and the count assertions would fail there only.
     name = f"test_5011_{tag}_{uuid4().hex[:8]}"
-    return FalkorProjection(os.path.join(str(tmp_path), "5011.db"),
+    return FalkorProjection(os.path.join(str(tmp_path), f"5011_{tag}.db"),
                             graph_name=name)
 
 
@@ -408,13 +415,23 @@ def test_created_at_is_a_declared_undecidable_key(proj, tmp_path):
     assert "createdAt" in clean["excluded_fields"], clean["excluded_fields"]
 
     # ...and when the journal DOES carry it, it is compared like anything else.
+    # The SAME projection — and therefore a journal that describes the SAME
+    # graph: the embedded lane keeps one store per process, so a second
+    # projection would still see `c1`, and the count mismatch alone would
+    # satisfy `ok is False` without pinning the `createdAt` comparison.
     log_path2 = str(tmp_path / "ca2.jsonl")
-    _seed(proj, log_path2, [_pt("c2", "a")])
-    check_consistency(log_path2, proj)
-    proj.g.query("MATCH (n:Point {id:'c2'}) SET n.createdAt='1999-01-01T00:00:00Z'")
+    c1_no_ca = _pt("c1", "a")
+    c1_no_ca["point"].pop("createdAt")
+    _seed(proj, log_path2, [c1_no_ca, _pt("c2", "a")])
+    clean2 = check_consistency(log_path2, proj)
+    assert clean2["ok"] is True, clean2["divergent_points"]
+    proj.g.query("MATCH (n:Point {id:'c2'}) "
+                 "SET n.createdAt='1999-01-01T00:00:00Z'")
     r = check_consistency(log_path2, proj)
+    assert r["log_points"] == r["db_points"], r
     assert r["ok"] is False
-    assert "createdAt" in {f for d in r["divergent_points"] for f in d["fields"]}
+    assert "createdAt" in {f for d in r["divergent_points"]
+                           for f in d["fields"]}
 
 
 # ── the graph-only baseline covers the embedding ──────────────────────────
@@ -472,8 +489,8 @@ def test_duplicate_ids_do_not_collapse_the_node_count(proj, tmp_path):
     """``db_points`` must come from the GRAPH's count, not from
     ``len(by_id)``: two nodes sharing an id collapse in the dict, so a
     dict-derived count would report the same size and pass.
-    (1) The values are the duplicate node and the resulting ``delta``; the
-    old ``len(graph_by_id)`` path reads 1 and reports ``delta == 0``.
+    (1) The values are the duplicate node and the resulting ``delta``; a
+    dict-derived count reads 1 and reports ``delta == 0``.
     (2) Reachable: a raw Cypher duplicate of an existing id.
     """
     log_path = str(tmp_path / "dup.jsonl")
@@ -861,7 +878,10 @@ def test_one_sided_parity_field_is_reported_not_flagged(proj, tmp_path):
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, r["divergent_points"]
     assert "speaker" in r["one_sided_fields"], r
-    assert "speaker" in r["one_sided_fields"]["speaker"], r["one_sided_fields"]
+    # Reported, and NOT flagged on the point: a one-sided presence is an
+    # asymmetry, so it must not appear among any point's divergent fields.
+    assert not r["divergent_points"], r["divergent_points"]
+    assert r["one_sided_fields"]["speaker"], r["one_sided_fields"]
 
 
 def test_adopted_is_true_for_a_read_only_first_run(proj, tmp_path):
@@ -890,9 +910,10 @@ def test_adopted_is_true_for_a_read_only_first_run(proj, tmp_path):
      "valid_to": "2026-02-01T00:00:00Z", "expired_at": "2026-02-01T00:00:00Z"},
 ])
 def test_terminalizing_events_are_folded_like_the_writer(proj, tmp_path, terminal):
-    """`fold` has no arm for the four point-lifecycle types, but the writer's
-    repair path (`rebuild_all` — what `recover_from_log` / `tortoise rebuild`
-    run) folds them: status/validity stamps AND the `decay_clause` belief decay
+    """`fold` folds `PointRetracted` as a STATUS-ONLY write (no belief decay)
+    and has no arm at all for the other three lifecycle types, while the
+    writer's full-fidelity replay (`rebuild_all`) folds all four: status/validity
+    stamps AND the `decay_clause` belief decay
     (`confidence=0.5`, `posterior_alpha/beta=1.0`). A reference built on `fold`
     alone reports the writer's OWN graph as diverged.
     (1) Fails if the terminalizer is not folded on the journal side: with plain
@@ -1213,3 +1234,310 @@ def test_the_present_path_is_also_capped(proj, tmp_path):
     # (`delta`) rather than per-point.
     assert r["divergent_point_count"] == 60, r["divergent_point_count"]
     assert r["delta"] == 1 - 61
+
+
+# ── cycle-2 review findings: total comparisons, shapes, and the delete gate ──
+
+
+def test_a_bool_valued_prop_is_not_its_int_equivalent(proj, tmp_path):
+    """STRICT booleans. `isinstance(True, int)` is exactly why a flag must not go
+    through the numeric branch: `True == 1`, so a graph holding `1` where the
+    journal holds `True` was reported FAITHFUL — a fail-open on the check's own
+    job (the writer's `_belief_bool_value_ok` documents the same boundary).
+    (1) Fails if `_values_equal` short-circuits on `==` before the bool check.
+    (2) Reachable: a payload bool prop, tampered in the graph to an int.
+    """
+    assert _values_equal(True, 1) is False
+    assert _values_equal(1.0, True) is False
+    assert _values_equal(True, True) is True
+    assert _values_equal(1, 1.0) is True  # a real number is still a number
+    # ...at EVERY depth: `[True] == [1]` and `{"k": True} == {"k": 1}` are True
+    # in Python, and a list-valued prop is compared verbatim (`_POINT_HANDLED`,
+    # so `_uncarried` exempts it) — a top-level-only check left that open.
+    assert _values_equal([True], [1]) is False
+    assert _values_equal({"k": True}, {"k": 1}) is False
+    assert _values_equal([{"k": [True]}], [{"k": [1]}]) is False
+    assert _values_equal([True, 2], [True, 2.0]) is True
+    assert _values_equal({"k": 1}, {"k": 1.0}) is True
+    assert _values_equal({"k": 1}, {"j": 1}) is False
+    assert _values_equal([1, 2], [1]) is False
+
+    log_path = str(tmp_path / "bool.jsonl")
+    _seed(proj, log_path, [_pt("b1", "a", reviewed=True)])
+    assert check_consistency(log_path, proj)["ok"] is True
+    proj.g.query("MATCH (n:Point {id:'b1'}) SET n.reviewed=1")
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is False, r
+    assert "reviewed" in {f for d in r["divergent_points"] for f in d["fields"]}
+
+
+def test_a_bool_inside_a_list_prop_is_not_its_int_equivalent_either(
+        proj, tmp_path):
+    """The container case, end to end. A list-valued prop on a `_POINT_HANDLED`
+    key (here `pointKind`) is compared VERBATIM — `_uncarried` exempts it — so
+    `[True]` against `[1]` reaches `_values_equal`, where Python's `==` says they
+    are equal. Without the depth-aware rule the FIELD comparison never sees it
+    and only the post-baseline digest notices, i.e. the first run against a
+    tampered graph adopts it as healthy.
+    (1) Fails if the bool rule is top-level only: `ok` stays True on the first
+    run. (2) Reachable: a payload list prop, tampered in the graph to its int
+    form BEFORE the baseline is recorded.
+    """
+    log_path = str(tmp_path / "boollist.jsonl")
+    _seed(proj, log_path, [_pt("bl", "a", pointKind=[True])])
+    proj.g.query("MATCH (n:Point {id:'bl'}) SET n.pointKind=[1]")
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is False, r
+    assert "pointKind" in {f for d in r["divergent_points"] for f in d["fields"]}
+
+
+def test_an_over_range_int_is_a_divergence_not_a_crash(proj, tmp_path):
+    """A journal record is a FILE: a value no double can hold must compare
+    UNEQUAL, never raise — a raise here makes the gate un-runnable, durably, on
+    every retry (`_belief_prop_value_ok` documents the same class for the
+    writer: "a >308-digit journaled posterior raised OverflowError").
+    (1) Fails if `float()` is called unguarded: OverflowError instead of a
+    verdict. (2) Reachable: `update_point` journals the caller's props verbatim,
+    and FalkorDB CLAMPS the stored value, so both sides are present, both
+    numeric, and unequal.
+    """
+    assert _values_equal(10**400, 9223372036854775807) is False
+    assert _values_equal(10**400, 10**400) is True
+    # Two DISTINCT int64-range integers, where `float()` is lossy: the store
+    # holds an int64 exactly, so a float tolerance must not be applied to them
+    # at all (`2**53` and `2**53 + 1` are the same double).
+    assert _values_equal(2**53, 2**53 + 1) is False
+    assert _values_equal(1234567890123456789, 1234567890123456780) is False
+    assert _values_equal(2**53, 2**53) is True
+    # ...and an int/float PAIR is exact too. The tolerance is a float round-trip
+    # rule: a faithful replay of an int prop yields an int, so `1000000000`
+    # against `1000000001.0` is a divergence, not precision loss — `isclose`
+    # reported it faithful and the ADOPTION path then blessed the tamper.
+    assert _values_equal(1000000000, 1000000001.0) is False
+    assert _values_equal(1000000000, 1000000000.0) is True
+    assert _values_equal(10**19, float(10**19)) is True
+    assert not _values_equal(10**400, -10**400)
+
+    log_path = str(tmp_path / "big.jsonl")
+    _seed(proj, log_path, [_pt("big1", "a", big=10**400)])
+    r = check_consistency(log_path, proj)  # must not raise
+    # The store holds the clamped int64 while the journal holds the literal, so
+    # the honest verdict is a divergence — not a crash, and not a silent pass.
+    assert r["ok"] is False, r
+    assert "big" in {f for d in r["divergent_points"] for f in d["fields"]}
+
+
+def test_two_distinct_large_ints_are_caught_before_the_baseline_exists(
+        proj, tmp_path):
+    """The ADOPTION path — no baseline yet, so only the field comparison can
+    catch it. An int64-range pair that differs by a few units is the same double,
+    so a float tolerance made the tampered graph compare faithful AND recorded it
+    as the baseline, blessing the tamper permanently.
+    (1) Fails if the numeric branch routes two ints through `math.isclose`:
+    `2**53` equals `2**53 + 1` as doubles, and the first run reports `ok: True,
+    adopted: True`. (2) Reachable: a large int prop tampered by raw Cypher
+    BEFORE any baseline is recorded.
+    """
+    log_path = str(tmp_path / "bignum.jsonl")
+    _seed(proj, log_path, [_pt("bn", "a", bignum=1234567890123456789)])
+    proj.g.query("MATCH (n:Point {id:'bn'}) SET n.bignum=1234567890123456780")
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is False, r
+    assert r["adopted"] is False, r
+    assert "bignum" in {f for d in r["divergent_points"] for f in d["fields"]}
+
+    # ...and an int/FLOAT pair, where the tolerance was the whole reason a
+    # 1-unit change read as equal: `isclose(1e9, 1e9 + 1, rel_tol=1e-9)`.
+    log_path2 = str(tmp_path / "bigfloat.jsonl")
+    _seed(proj, log_path2, [_pt("bf", "a", bignum=1000000000)])
+    proj.g.query("MATCH (n:Point {id:'bf'}) SET n.bignum=1000000001.0")
+    r2 = check_consistency(log_path2, proj)
+    assert r2["ok"] is False, r2
+    assert "bignum" in {f for d in r2["divergent_points"] for f in d["fields"]}
+
+
+def test_a_malformed_verbatim_vector_does_not_crash_the_check():
+    """The verbatim branch compared with a bare `float()`, so a non-numeric or
+    non-finite element raised ValueError/TypeError and aborted the whole check —
+    durably, because the malformed record is a journal LINE. It now goes through
+    the writer's own `_writable_journalled_vector` and a total fallback.
+    (1) Fails with ValueError before the fix. (2) Reachable: a hand-edited
+    journal line, or an older/newer writer — the `#19/#5004` class.
+    """
+    def verdict(jvec, gvec):
+        mism, _, _, _, _ = _compare_views(
+            {"p": {"embedding": jvec, "embedding_verbatim": True}},
+            {"p": {"embedding": gvec, "embedding_verbatim": True}})
+        return [f for d in mism for f in d["fields"]]
+
+    # Neither side storable: raw comparison, no raise. Identical garbage is
+    # faithful (and `nan != nan` must not make it a permanent false positive).
+    assert verdict(["a", "b"], ["a", "b"]) == []
+    assert verdict([float("nan"), 1.0], [float("nan"), 1.0]) == []
+    assert verdict([float("inf")], [float("inf")]) == []
+    assert verdict([10**400], [10**400]) == []
+    # ...and a real difference in that garbage IS reported.
+    assert verdict(["a", "b"], ["a", "c"]) == ["embedding"]
+    assert verdict([float("nan"), 1.0], [float("nan"), 2.0]) == ["embedding"]
+    # A storable journal vector against an unstorable graph one is a difference
+    # too — the graph cannot hold what the journal records.
+    assert verdict([0.5], ["a"]) == ["embedding"]
+    # The fallback is bool-strict too: `True == 1`, so a flag vector must not
+    # compare faithful against its int form (same rule as `_values_equal`).
+    assert verdict([True, "x"], [True, "x"]) == []
+    assert verdict([True, "x"], [1, "x"]) == ["embedding"]
+    # ...at depth, where the fallback's own per-element `==` was bool-blind:
+    # `[[True]] == [[1]]` and `[{"k": True}] == [{"k": 1}]` in Python.
+    assert verdict([[True]], [[True]]) == []
+    assert verdict([[True]], [[1]]) == ["embedding"]
+    assert verdict([{"k": True}], [{"k": 1}]) == ["embedding"]
+    # NOT asserted: a non-finite element nested inside a container. It is
+    # reported as a divergence — the SAFE direction, and unreachable, because the
+    # store refuses a non-finite vector outright and the nested form is not a
+    # vector any writer can produce.
+    # NOT asserted: `[False]` against `[0]`. Both are STORABLE, so the comparison
+    # goes through the writer's own `_writable_journalled_vector`, which gives a
+    # bool its numeric value in a vector exactly as `vecf32` would — the bool
+    # rule belongs where the value is not a vector element.
+
+
+def test_a_journal_only_vector_of_the_wrong_width_is_a_declared_refusal(
+        proj, tmp_path):
+    """The `#5004` recorded decision: the writer REFUSES a journalled vector
+    whose width the store cannot hold rather than rewriting it, so a journal-only
+    vector of the wrong width is a declared refusal (reported, not flagged) —
+    while a journal-only vector of the RIGHT width is a lost write (a
+    divergence). Both arms of the direction-sensitive rule.
+    (1) Fails if the wrong-width arm is missing (false positive) or if the
+    right-width arm is (false negative). (2) Reachable: vectors at, and below,
+    the store's reported width on a journal-only side.
+    """
+    width = proj.required_embedding_dim
+    if not width:
+        pytest.skip("store reports no embedding width")
+    # The graph holds no vector for either point (a `strip`-era journal).
+    mism, _, _, one_sided, _ = _compare_views(
+        {"right": {"embedding": [0.5] * width},
+         "wrong": {"embedding": [0.5] * (width - 1)}},
+        {"right": {}, "wrong": {}},
+        projection=proj)
+    flagged = {d["id"] for d in mism}
+    assert "right" in flagged, mism
+    assert "wrong" not in flagged, mism
+    assert "embedding" in one_sided, one_sided
+
+
+def test_an_operator_promotion_without_a_snapshot_is_a_status_set(proj, tmp_path):
+    """`apply()`'s fallback arm for an `OperatorPromoted` that carries no `point`
+    snapshot: a MATCH-SET of `status='live'` on an existing node that no-ops
+    when the node is absent. The fold must mirror it (the arm was untested).
+    (1) Fails if the fold drops the id-less-without-snapshot promotion (the
+    graph then shows `live` where the fold shows `archived`) — and fails the
+    other way if the fold invents a node for a missing id.
+    (2) Reachable: a `status`-carrying `PointAdded` followed by a snapshot-less
+    `OperatorPromoted`.
+    """
+    log_path = str(tmp_path / "promo_nosnap.jsonl")
+    _seed(proj, log_path, [_pt("x", "a", status="archived"),
+                           {"type": "OperatorPromoted", "id": "x"}])
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r["divergent_points"]
+
+    # ...and for an id the graph never saw, the promotion is a no-op on BOTH
+    # sides: it must not conjure a point into the journal view. Asserted on the
+    # FOLD, not through a second graph — the embedded lane keeps one store per
+    # process, so a second projection would still see this test's `x`.
+    ghost = _fold_journal([{"type": "OperatorPromoted", "id": "never"}])
+    mism, count, _, _, _ = _compare_views(ghost, {})
+    assert ghost == {}, ghost
+    assert (mism, count) == ([], 0), (mism, count)
+
+
+def test_a_nested_envelope_terminalizer_is_folded_like_the_writer(proj, tmp_path):
+    """Envelope SHAPE is not a difference: both readers normalise (`_norm`), so a
+    terminalizer written as `{"type":…, "point":{…}}` must fold. Reading `id` off
+    the RAW envelope dropped it, so a healthy graph was reported as a `content`
+    divergence whose `action` advises a wipe+replay (#3722).
+    (1) Fails if the fold reads the raw envelope: the journal view keeps
+    `status='live'` while the graph holds `retracted`.
+    (2) Reachable: the script/nested producer shape.
+    """
+    log_path = str(tmp_path / "nested.jsonl")
+    _seed(proj, log_path, [
+        {"type": "PointAdded",
+         "point": {"id": "n1", "content": "a", "kind": "statement",
+                   "status": "live", "createdAt": "2026-01-01T00:00:00Z"}},
+        {"type": "PointRetracted", "point": {"id": "n1"}},
+    ])
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r["divergent_points"]
+
+
+def test_a_hard_deleted_id_is_gone_from_both_views(proj, tmp_path):
+    """`PointsMerged` removes the merged-away id (the writer replays it through
+    `_delete`), so the journal view must drop it too — otherwise the fold reports
+    a ghost point for ever. This is also the boundary the terminalizer gate
+    mirrors (`journal_hard_delete_seqs`), which is defence in depth rather than
+    load bearing, because the ordered pass has already discarded the entry.
+    (1) Fails if the fold keeps the merged-away id (a permanent ghost point) or
+    if the gate suppresses the wrong id.
+    (2) Reachable: the nested `PointsMerged` merge event, which `_apply_one`
+    folds (`tests/test_projection.py` pins this same shape, #325).
+    """
+    log_path = str(tmp_path / "merged.jsonl")
+    _seed(proj, log_path, [
+        _pt("keep", "a"), _pt("gone", "b"),
+        {"type": "PointsMerged",
+         "point": {"keep_id": "keep", "merge_ids": ["gone"]}},
+    ])
+    r = check_consistency(log_path, proj)
+    assert r["ok"] is True, r["divergent_points"]
+    assert r["log_points"] == r["db_points"] == 1, r
+
+
+def test_a_torn_sidecar_is_reported_and_never_re_baselined(proj, tmp_path):
+    """A sidecar that is not a REGULAR file must be REFUSED, not opened: a FIFO at
+    that path blocks `open()` FOREVER, so the check hangs with no timeout and no
+    verdict, and a symlink reads a file the sidecar does not own.
+    (1) Fails if `read_projection_state` opens the path blindly — the FIFO case
+    HANGS the run (a timeout, not merely a wrong assertion), the symlink case
+    returns a foreign baseline as trusted, and a torn state must never be
+    recorded over. (2) Reachable: the journal directory is writable by the
+    operator.
+    """
+    log_path = str(tmp_path / "torn.jsonl")
+    _seed(proj, log_path, [_pt("t1", "a")])
+    state_path = log_path + ".projection-state.json"
+
+    # A FIFO is the case that made the plain `open()` fatal (an unbounded block).
+    os.mkfifo(state_path)
+    r = check_consistency(log_path, proj)
+    assert r["state_error"], r
+    assert r["state_recorded"] is False, r
+    os.unlink(state_path)
+
+    # A SYMLINK to a valid sidecar elsewhere is not this journal's baseline.
+    foreign = str(tmp_path / "foreign.json")
+    with open(foreign, "w", encoding="utf-8") as fh:
+        fh.write('{"format_version": 1, "last_applied_seq": 0,'
+                 ' "projection_hash_sha256": "' + "0" * 64 + '"}')
+    os.symlink(foreign, state_path)
+    r2 = check_consistency(log_path, proj)
+    assert r2["state_error"], r2
+    assert r2["state_recorded"] is False, r2
+    os.unlink(state_path)
+
+    # A torn/corrupt sidecar, and a directory, are both refused and never
+    # replaced.
+    with open(state_path, "w", encoding="utf-8") as fh:
+        fh.write("{not json")
+    r3 = check_consistency(log_path, proj)
+    assert r3["state_error"], r3
+    assert r3["state_recorded"] is False, r3
+    os.unlink(state_path)
+
+    os.mkdir(state_path)
+    r4 = check_consistency(log_path, proj)
+    assert r4["state_error"], r4
+    assert r4["state_recorded"] is False, r4
+    assert os.path.isdir(state_path), "a mistrusted sidecar must not be replaced"
