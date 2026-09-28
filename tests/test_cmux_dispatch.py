@@ -107,7 +107,7 @@ SCREEN_QUEUED_MID_TURN = """\
 \u219119k \u2193577 R25k CH91.1% $0.003 3.8%/700k (auto)                          (deepseek) deepseek-flash \u2022 high
 
 Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292
-\u21b3 ctrl+e to edit all queued messages
+\u21b3 Option+Up to edit all queued messages
 
 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
@@ -517,11 +517,9 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertEqual(cd.recovery_action(screen, fp, PROBE), cd.R_RELEASE)
 
     def test_a_short_pending_line_WITHOUT_an_ellipsis_is_a_DIFFERENT_message(self):
-        """THE ADVERSARIAL FINDING. The first revision stripped `...` and then
-        accepted any prefix, so a DIFFERENT message that merely shares a head was
-        read as a truncation of ours: `Steering: 0123456789abcdef` confirmed a
-        dropped `0123456789abcdef more text`. A shorter line is only ours when the
-        renderer actually cut it, i.e. the raw text ends in `...`."""
+        """A shorter line is ours only when the renderer actually cut it (the raw
+        text ends in `...`). Otherwise it is a DIFFERENT message sharing our head,
+        and accepting it confirmed a dropped send against an unrelated queued one."""
         for queued in (
             "0123456789abcdef",
             "please run the full battery",
@@ -531,15 +529,43 @@ class TestPendingTurnDisplay(unittest.TestCase):
             self.assertIsNone(cd.pending_turn_identity(screen, message), queued)
             self.assertFalse(cd.pending_turn_matches(screen, message, self.BEFORE), queued)
 
-    def test_a_multi_line_message_matches_its_rendered_FIRST_line(self):
-        """pi renders a multi-line submission as one `Steering: <first line>`
-        (`TruncatedText` cuts at the first newline), so the first line IS the
-        identity for a multi-line message — the whole message never appears on one
-        line and would otherwise be a permanent false negative."""
+    def test_a_multi_line_message_does_NOT_match_on_its_first_line(self):
+        """pi renders only the first line of a multi-line submission, but a first
+        line is not message-unique — two briefs can share one — so accepting it
+        would confirm a DIFFERENT queued message (and could suppress the resend
+        that delivers a genuinely lost one). Fail closed instead: callers pass
+        flattened text, as `_read_message` does."""
         message = "Fix the bug\n\nMore detail follows in this brief."
         screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, "Fix the bug")
-        self.assertEqual(cd.pending_turn_identity(screen, message), "Fix the bug")
+        self.assertIsNone(cd.pending_turn_identity(screen, message))
+        self.assertFalse(cd.pending_turn_matches(screen, message, self.BEFORE))
+
+    def test_a_message_that_ITSELF_ends_in_an_ellipsis_matches_exactly(self):
+        """The renderer's `...` is stripped as truncation evidence, so a message
+        that legitimately ENDS in `...` must still match its own rendered line —
+        comparing only the stripped text made it a permanent false negative."""
+        message = "check the build..."
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, message)
+        self.assertEqual(cd.pending_turn_identity(screen, message), message)
         self.assertTrue(cd.pending_turn_matches(screen, message, self.BEFORE))
+
+    def test_an_ARBITRARY_arrow_line_does_not_forge_a_container(self):
+        """SECURITY. The bound requires pi's OWN hint text, not just the `↳` glyph:
+        a lane can print `↳` freely, but a `Steering: <our message>` line above an
+        arbitrary arrow line must never be read as a queued submission."""
+        forged = SCREEN_QUEUED_MID_TURN.replace(
+            "↳ Option+Up to edit all queued messages", "↳ see docs/notes.md"
+        )
+        self.assertIsNone(cd.pending_turn_identity(forged, PROBE))
+        self.assertFalse(cd.pending_turn_matches(forged, PROBE, self.BEFORE))
+
+    def test_a_container_that_has_SCROLLED_UP_is_not_the_live_queue(self):
+        """A container frame left in the transcript (a stale queue that drained)
+        must not be read as the live queue: the bound is the capture's tail."""
+        filler = [f"line {i}" for i in range(120)]
+        stale = "\n".join([*SCREEN_QUEUED_MID_TURN.splitlines(), *filler])
+        self.assertIsNone(cd.pending_turn_identity(stale, PROBE))
+        self.assertFalse(cd.pending_turn_matches(stale, PROBE, self.BEFORE))
 
     def test_a_Steering_shaped_line_in_SCROLLBACK_is_not_a_queue(self):
         """SECURITY. A capture contains the whole lane: transcript, model output,
@@ -571,10 +597,10 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertTrue(cd.pending_turn_matches(below, PROBE, self.BEFORE))
 
     def test_a_SHORT_pending_line_WITHOUT_an_ellipsis_does_not_block_the_resend(self):
-        """THE ADVERSARIAL UNDER-DELIVERY FINDING. `Steering: continue` while we
-        send `continue with the migration` is a DIFFERENT queued message, not a
-        truncation of ours, so it must not suppress the resend — otherwise a lost
-        send is undeliverable whenever the lane holds any head-sharing nudge."""
+        """`Steering: continue` while we send `continue with the migration` is a
+        DIFFERENT queued message, not a truncation of ours, so it must not suppress
+        the resend — otherwise a lost send is undeliverable whenever the lane holds
+        any head-sharing nudge."""
         fp = cd.fingerprint(PROBE)
         message = PROBE + " and then some more"
         screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:12])
@@ -712,6 +738,7 @@ class FakeCmux:
         pre_queued: str = "",
         drop_first_send: bool = False,
         fail_read_indices: frozenset[int] | set[int] = frozenset(),
+        shallow_screen_without_queue: bool = False,
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -745,6 +772,10 @@ class FakeCmux:
         #: 1-based `read_screen` call indices to fail, so a specific read can be
         #: made unreadable without blinding the pane for the whole dispatch.
         self.fail_read_indices = set(fail_read_indices)
+        #: A SHALLOW read (the readiness probe's window) that omits the pending
+        #: container while the DEEP read carries it. Models a stale queue entry
+        #: that only the deep window can see — the depth-mixing trap.
+        self.shallow_screen_without_queue = shallow_screen_without_queue
         self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
@@ -796,6 +827,8 @@ class FakeCmux:
         self.read_calls += 1
         if self.read_calls in self.fail_read_indices:
             return cd.CmuxResult(1, "", "cmux read-screen: command timed out")
+        if self.shallow_screen_without_queue and lines <= cd.DEFAULT_SCREEN_LINES:
+            return cd.CmuxResult(0, SCREEN_IDLE_READY)
         self._tick()
         if self.state == "boot_block":
             return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
@@ -1046,13 +1079,12 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.status, "sent-but-not-consumed")
 
     def test_a_TRUNCATED_pre_existing_pending_line_does_not_trigger_a_duplicate_resend(self):
-        """THE #5983 DUPLICATE FINDING. A mid-turn pane already holds OUR message
-        as a TRUNCATED queue entry (the normal shape on a narrow pane): the head is
-        below the 40-char fingerprint, so `text_on_screen` misses it, and at/above
-        `PENDING_MIN_CHARS`, so the ambiguity branch misses it too. The pre-fix
-        recovery then chose `resend` and queued a SECOND copy on every attempt.
-        Novelty correctly refuses to CONFIRM it; the recovery must not contradict
-        it. Exactly one `send_text` may happen."""
+        """A mid-turn pane already holds OUR message as a TRUNCATED queue entry: the
+        head is below the 40-char fingerprint (`text_on_screen` misses it) and
+        at/above `PENDING_MIN_CHARS` (the ambiguity branch misses it). Novelty
+        correctly refuses to CONFIRM it, and the recovery must not contradict that
+        by re-sending — each retry would queue another copy. Exactly one
+        `send_text` may happen."""
         fake = FakeCmux(
             drops_message=True, pre_queued="DISPATCH-PROBE-BOOTBLOCK-42..."
         )
@@ -1063,11 +1095,10 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(fake.sent_log.count(PROBE), 1)
 
     def test_a_lost_send_is_resent_when_an_UNRELATED_message_is_queued(self):
-        """UNDER-DELIVERY JOURNEY. The pane is mid-turn with another message
-        queued; OUR first send is lost. `Steering: <other>` shares no head with our
-        message, so our message is not queued and the resend is the recovery that
-        delivers it. Suppressing the resend for ANY pending line (the first
-        revision) left the dispatch permanently undeliverable."""
+        """The pane is mid-turn with another message queued and OUR first send is
+        lost. `Steering: <other>` shares no head with our message, so our message
+        is not queued and the resend is the recovery that delivers it. Suppressing
+        the resend for ANY pending line left the dispatch undeliverable."""
         fake = FakeCmux(drop_first_send=True, pre_queued="an unrelated brief")
         result = self._send(fake, consume_timeout=0.0, retries=1)
         self.assertTrue(result.ok, result.detail)
@@ -1083,6 +1114,30 @@ class TestDispatcherRecovery(unittest.TestCase):
         `sent-but-not-consumed`, never as `queued`."""
         # read #1 is the readiness probe; reads #2 and #3 are the baseline + retry.
         fake = FakeCmux(queued_turn=True, fail_read_indices={2, 3})
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
+
+    def test_a_transient_baseline_read_failure_still_confirms_the_queue(self):
+        """The pre-send baseline is read twice: a single transient `read-screen`
+        failure must not cost the `queued` verdict. Read #1 is the readiness probe,
+        #2 the baseline, #3 the retry."""
+        fake = FakeCmux(queued_turn=True, fail_read_indices={2})
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "queued")
+
+    def test_a_baseline_at_a_DIFFERENT_depth_than_the_confirmation_is_refused(self):
+        """DEPTH-MIXING. The readiness probe reads a shallower window than the
+        confirmation. If the baseline falls back to that shallower capture, a
+        pending line outside it reads as NOVEL — a stale queue entry would confirm
+        a send whose bytes never landed. With the deep baseline unreadable the
+        verdict must fail closed, never borrow the shallow capture."""
+        fake = FakeCmux(
+            queued_turn=True,
+            shallow_screen_without_queue=True,
+            fail_read_indices={2, 3},
+        )
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
@@ -1289,6 +1344,20 @@ class TestCliExitCodes(unittest.TestCase):
             "--ready-timeout", "0", "--consume-timeout", "0",
         )
         self.assertEqual(rc, 0, "a queued message is a success, not a failure")
+
+    def test_verify_is_SUBMITTED_only_and_diverges_from_send(self):
+        # The documented contract: on a mid-turn lane a message `send` correctly
+        # reports as `queued`/exit 0 still reads NOT-CONSUMED/exit 1 under
+        # `verify`, because `verify` has no dispatch to be novel against. Pinned so
+        # a future "consistency" change to `verify` cannot land silently.
+        fake = FakeCmux(queued_turn=True)
+        self.assertEqual(
+            self._main(
+                fake, "verify", "--workspace", "workspace:99", "--text", PROBE,
+                "--timeout", "0",
+            ),
+            1,
+        )
 
     def test_exit_one_when_a_stale_pending_line_does_not_confirm(self):
         # #5979: the pending line predates the send (a repeat dispatch of the same
