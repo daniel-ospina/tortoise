@@ -17,6 +17,12 @@ Pinned contracts here:
       unconditionally, so the pure fold must too);
   (b) the decay values are the ONE declaration ``decay_clause`` renders —
       a second hand-maintained copy is exactly how they drifted;
+  (b2) the copies that CANNOT be consolidated here stay pinned to the
+      declaration instead of silently drifting from it: ``consistency._DECAY``
+      (the journal side of the divergence detector) is asserted equal to it in
+      case (e). Consolidating that module belongs to the held #5011 lane, and
+      the ``assess_source`` payload in ``tortoise/sdk.py`` is a fourth copy
+      named in the PR body; neither is edited here.
   (c) ``fold()`` and ``rebuild_all()`` agree on a retract produced by the REAL
       emitters (``create_point`` + ``retract_point``), which is also what makes
       the synthetic shapes above reachable rather than invented;
@@ -191,3 +197,19 @@ def test_4542_fold_retract_before_a_recreate_leaves_the_fresh_incarnation_alone(
     assert pts["p1"]["content"] == "new"
     assert {k: pts["p1"].get(k) for k in BELIEF} == {k: None for k in BELIEF}, (
         f"the pre-recreate retract decayed the FRESH incarnation: {pts['p1']}")
+
+
+def test_4542_detector_journal_side_is_pinned_to_the_declaration():
+    """(e) `tortoise/consistency.py::_DECAY` is a THIRD hand-declared copy of
+    the same triple, and it is the JOURNAL side of the divergence detector that
+    measures this invariant — so a drift there would silently corrupt the
+    verdict (`check_consistency` would report the writer's own graph as
+    diverged, or a real divergence as clean). That module belongs to the held
+    #5011 lane, so it is not edited here; it is PINNED instead. If the
+    declaration moves, this reds and names the copy that must follow it.
+
+    (1) Fails if `_DECAY` drifts from the contract values below.
+    (2) Reachable: the object is imported from the shipped module.
+    """
+    from tortoise.consistency import _DECAY  # held #5011 lane — read only
+    assert dict(_DECAY) == VACUITY_LITERAL
