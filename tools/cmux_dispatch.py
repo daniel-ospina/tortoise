@@ -29,9 +29,11 @@ is a read of whether the message became a conversation message
 PENDING-TURN queue (the pane's `Steering:` / `Follow-up:` display), with the pane
 screen as the discriminator between "sitting unsent in the composer" (release
 with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
-confirmed exits non-zero with `sent-but-not-consumed`; it never reports success
-unless pi ACCEPTED the message — as the latest submitted message, or as a queued
-submission shown in the pending-turn display.
+confirmed exits non-zero with `sent-but-not-consumed`; it reports success only on
+POSITIVE artifact evidence — the message as the latest submitted message, or a
+NEW pending-turn entry carrying it. That evidence is pi's own render string, not
+a secret, so a verdict means pi's display showed acceptance, not proof of it (see
+RESIDUAL: a lane that deliberately prints pi's hint line can forge it).
 
 QUEUED IS NOT UNCONSUMED (#5979)
 --------------------------------
@@ -200,8 +202,9 @@ R_DISMISS_RESEND = "dismiss-and-resend"
 #: pi's input box is delimited by long horizontal rules; the composer is the
 #: region between the LAST TWO of them. A mid-turn editor draws its TOP border with
 #: the status label embedded (`── ⠼ Working ──…`), so a labelled border counts
-#: too — otherwise the top border is skipped and `composer_region` returns
-#: transcript text, reporting a plainly EMPTY composer as "cannot tell".
+#: too — otherwise the editor's two borders cannot be paired and `composer_region`
+#: either returns None (`cannot tell`) or spans rules across the transcript; either
+#: way an EMPTY composer is never positively identified.
 RULE_RE = re.compile(r"^\s*(?:[\u2500-]{8,}|[\u2500-]{2,}\s+\S.*[\u2500-]{8,})\s*$")
 
 #: pi's PENDING-TURN display, one line per queued submission (#5979).
@@ -220,8 +223,10 @@ PENDING_TURN_RE = re.compile(r"^\s*(?:Steering|Follow-up):\s*(?P<text>.*)$")
 #: just the `\u21b3` glyph — keeps ordinary scrollback (which can print `\u21b3`
 #: freely) from being read as a container. It is NOT a secret and so is not proof
 #: against a lane that deliberately renders pi's hint string; see the module
-#: docstring's residual note. `.*` absorbs the keybinding-dependent key display,
-#: and a right-truncated hint (a very narrow pane) fails closed.
+#: docstring's residual note. `.*` absorbs the keybinding-dependent key display.
+#: A right-truncated hint (a very narrow pane) is not parsed as a container, so the
+#: `queued` verdict fails closed there — and `pending_queue_unparsed` keeps the same
+#: unobservable queue from authorizing a duplicate re-send in recovery.
 PENDING_HINT_RE = re.compile(r"^\s*\u21b3.*to edit all queued messages\s*$")
 
 #: The ellipsis `truncateToWidth` appends to a cut line (its default).
@@ -232,8 +237,9 @@ TRUNCATION_ELLIPSIS = "..."
 #: roughly `pane_width - 2` (its horizontal padding) with a literal `...` appended.
 #: Measured on this box the fleet's cmux panes are ~142-217 columns, so a real
 #: truncated head is ~127-200 chars and this cap rarely binds: the identity floor
-#: is `max(4, min(PENDING_MIN_CHARS, (len(message) + 1) // 2))`, i.e. at least half
-#: the message, capped here, so a cut SHORT message on a narrow pane still matches.
+#: is `max(4, min(PENDING_MIN_CHARS, (len(message) + 1) // 2))` — half the message,
+#: capped here and floored at 4 — so a cut SHORT message on a narrow pane still
+#: matches, while a long message is identified by its first `PENDING_MIN_CHARS`.
 PENDING_MIN_CHARS = 16
 
 
@@ -495,9 +501,10 @@ def _entry_matches_message(raw: str, visible: str, truncated: bool, target: str)
     if not truncated or not visible:
         return False
     # A real cut head is STRICTLY shorter than the message (`len(visible) <
-    # len(target)`) and long enough to identify: at least half the message, capped
-    # at PENDING_MIN_CHARS and floored at 4, so a genuinely cut SHORT message (a
-    # very narrow pane) is still matchable while a 1-char remnant is not.
+    # len(target)`) and long enough to identify: half the message, CAPPED at
+    # PENDING_MIN_CHARS and floored at 4, so a genuinely cut SHORT message (a very
+    # narrow pane) is still matchable while a 1-char remnant is not and a long
+    # message is identified by its first PENDING_MIN_CHARS.
     floor = max(4, min(PENDING_MIN_CHARS, (len(target) + 1) // 2))
     return len(visible) >= floor and len(visible) < len(target) and target.startswith(visible)
 
@@ -586,9 +593,10 @@ def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
 
     A recovery HINT, never a success verdict. Only this narrow case suppresses the
     `resend` recovery: the pending text carries the renderer's `...`, is a head of
-    our message, and is too short to be an identity (shorter than
-    `min(len(message), PENDING_MIN_CHARS)`) — so it may be our own queue entry cut
-    on a narrow pane, where a re-send would enqueue a second copy.
+    our message, and is shorter than `min(len(message), PENDING_MIN_CHARS)`, the
+    threshold this hint exists for. (The identity floor is lower for messages under
+    32 chars, so an entry here may already be an identity — that is harmless, the
+    two branches both yield `release`.)
 
     The `...` requirement is load-bearing in the other direction too: a plain
     short line that merely shares a head with our message (`Steering: continue`
@@ -607,13 +615,30 @@ def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
     return False
 
 
+def pending_queue_unparsed(screen: str | None) -> bool:
+    """A pending-turn-shaped line is present, but no container could be parsed.
+
+    pi's hint line is right-truncated on a narrow pane, so `PENDING_HINT_RE`
+    cannot locate the container and `_pending_entries` returns nothing — the queue
+    is UNOBSERVABLE, not absent. Recovery must then fail closed: the composer reads
+    empty (pi cleared it), so a `resend` would queue a SECOND copy of a message pi
+    may already hold.
+    """
+    if not screen:
+        return False
+    if _pending_entries(screen):
+        return False
+    return any(PENDING_TURN_RE.match(row) for row in screen.splitlines())
+
+
 def recovery_action(screen: str | None, fp: str, message: str = "") -> str:
     """Choose the cheapest safe recovery for an unconsumed send.
 
-    Re-sending is only SAFE when the composer is positively shown to be empty.
-    Anything less — an unreadable pane, an unidentifiable composer, a screen that
-    merely fails to contain the text — falls back to `release-only`, because a
-    bare Enter can never duplicate while a blind re-send can: the composer would
+    Re-sending is only SAFE when the composer is positively shown to be empty AND
+    no queue is present that could hold our message. Anything less — an unreadable
+    pane, an unidentifiable composer, an unparseable pending container, a screen
+    that does not show the text — falls back to `release-only`, because a bare
+    Enter can never duplicate while a blind re-send can: the composer would hold
     hold the message twice and the next Enter would submit it doubled, which
     `is_consumed` would then report as success (the head is unchanged). The
     fail-closed direction costs a re-dispatch; the other corrupts the lane.
@@ -655,6 +680,13 @@ def recovery_action(screen: str | None, fp: str, message: str = "") -> str:
         # the ambiguity disjunct is here. With an unreadable baseline novelty
         # cannot be established at all, and failing closed here is what keeps the
         # stale-line false positive out.
+        return R_RELEASE
+    if pending_queue_unparsed(screen):
+        # A `Steering:`/`Follow-up:`-shaped line is on the pane but no container
+        # could be parsed (pi's hint is right-truncated on a narrow pane). The
+        # queue is unobservable, not absent, and the composer reads EMPTY because
+        # pi cleared it — so `composer_empty` would authorize a resend that queues
+        # a SECOND copy. Release instead.
         return R_RELEASE
     if composer_empty(screen):
         return R_RESEND

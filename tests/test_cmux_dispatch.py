@@ -35,11 +35,12 @@ import cmux_dispatch as cd  # noqa: E402
 PROBE = "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292"
 
 # --------------------------------------------------------------------------- #
-# Screen fixtures. Most are VERBATIM live captures (2026-09-20, pi 0.85.1).
-# `SCREEN_QUEUED_MID_TURN` is the exception: no live mid-turn capture with a
-# queued submission was obtainable, so it is DERIVED from the installed renderer
-# (`updatePendingMessagesDisplay` + `TruncatedText`/`truncateToWidth`, verified by
-# RUNNING the renderer, not by reading it) and labelled as such at its definition.
+# Screen fixtures. Most are VERBATIM live captures (2026-09-20, pi 0.85.1);
+# `SCREEN_QUEUED_MID_TURN` is a VERBATIM live capture of 2026-09-28 (a lane with
+# a queued submission), and `SCREEN_QUEUED_MID_TURN_TRUNCATED` is DERIVED from the
+# installed renderer (`updatePendingMessagesDisplay` + `TruncatedText`/
+# `truncateToWidth`, verified by RUNNING the renderer, not by reading it). Each
+# fixture's provenance is stated at its definition.
 # --------------------------------------------------------------------------- #
 
 #: A freshly-booted pi frozen on the deprecation prompt. Boot never completes.
@@ -128,6 +129,24 @@ SCREEN_QUEUED_MID_TURN = """\
 SCREEN_QUEUED_MID_TURN_TRUNCATED = SCREEN_QUEUED_MID_TURN.replace(
     PROBE, "DISPATCH-PROBE-BOOTBLOCK-42..."
 )
+
+#: A NARROW-pane mid-turn pane whose queue is present but UNPARSEABLE: pi's own
+#: hint line is itself right-truncated, so it no longer carries the full
+#: `to edit all queued messages` text `PENDING_HINT_RE` requires. The container is
+#: therefore invisible to the matcher while the composer IS positively empty (pi
+#: cleared it on submit) — the state in which recovery must not re-send. Shape
+#: derived from the live capture by truncating the hint and the entry, verified by
+#: running the matcher (not eyeballed).
+SCREEN_QUEUED_MID_TURN_NARROW_HINT = """\
+ Steering: DISPATCH-PROBE-BOOTBLOCK-42...
+ \u21b3 Option+Up to edit all queued me...
+
+\u2500\u2500 \u280c Working \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+/private/tmp
+\u2191242 \u2193180 R32k CH99.3% $0.000 86.0%/300k (auto)   (deepseek) deepseek-flash \u2022 high
+"""
 
 #: The CORRUPTION case: the prompt ate the pointer's prefix and the remainder
 #: was submitted as a real turn. Observed live: latest_submitted_message == "292".
@@ -590,6 +609,24 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertEqual(cd.pending_turn_identity(screen, PROBE), PROBE)
         self.assertTrue(cd.pending_turn_matches(screen, PROBE, self.BEFORE))
 
+    def test_a_QUEUE_WHOSE_HINT_IS_TRUNCATED_is_unparsed_fail_closed(self):
+        """On a narrow pane pi's OWN hint line is right-truncated, so the container
+        cannot be located: the queue is unobservable, not absent. The composer reads
+        empty, so recovery must NOT re-send (that would queue a second copy)."""
+        narrow = SCREEN_QUEUED_MID_TURN_NARROW_HINT
+        self.assertEqual(cd._pending_entries(narrow), [])
+        self.assertIsNone(cd.pending_turn_identity(narrow, PROBE))
+        self.assertTrue(cd.pending_queue_unparsed(narrow))
+        self.assertTrue(cd.composer_empty(narrow))
+        self.assertEqual(cd.recovery_action(narrow, cd.fingerprint(PROBE), PROBE), cd.R_RELEASE)
+
+    def test_a_parsed_queue_is_not_reported_as_unparsed(self):
+        """The fail-closed guard must not fire when the container DID parse: that
+        would strand a genuinely lost send whenever another lane's work was queued."""
+        self.assertFalse(cd.pending_queue_unparsed(SCREEN_QUEUED_MID_TURN))
+        self.assertFalse(cd.pending_queue_unparsed(SCREEN_IDLE_READY))
+        self.assertFalse(cd.pending_queue_unparsed(None))
+
     def test_an_ARBITRARY_arrow_line_does_not_forge_a_container(self):
         """SECURITY. The bound requires pi's OWN hint text, not just the `↳` glyph:
         a lane can print `↳` freely, but a `Steering: <our message>` line above an
@@ -779,6 +816,7 @@ class FakeCmux:
         drop_first_send: bool = False,
         fail_read_indices: frozenset[int] | set[int] = frozenset(),
         shallow_screen_without_queue: bool = False,
+        narrow_unparsed_queue: bool = False,
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -798,10 +836,10 @@ class FakeCmux:
         #: `composer_region` returns None ("cannot tell"). A pane in that state
         #: must never be read as a queued success.
         self.no_rules = no_rules
-        #: THE #5979 STATE. A MID-TURN pane that ACCEPTED the message into pi's
-        #: pending queue: the `Steering: <text>` display is up, the composer is
-        #: EMPTY, and the turn boundary has not arrived — so `latest_submitted_*`
-        #: never moves and the composer holds nothing.
+        #: A MID-TURN pane that ACCEPTED the message into pi's pending queue: the
+        #: `Steering: <text>` display is up, the composer is EMPTY, and the turn
+        #: boundary has not arrived — so `latest_submitted_*` never moves and the
+        #: composer holds nothing.
         self.queued_turn = queued_turn
         #: A pending line ALREADY on the pane before the send (a repeat dispatch of
         #: the same brief, or a stale scrollback line). Must NOT confirm THIS send.
@@ -816,6 +854,10 @@ class FakeCmux:
         #: container while the DEEP read carries it. Models a stale queue entry
         #: that only the deep window can see — the depth-mixing trap.
         self.shallow_screen_without_queue = shallow_screen_without_queue
+        #: A live queue that the matcher CANNOT observe: pi's hint line is itself
+        #: right-truncated on a narrow pane, so no container parses. Recovery must
+        #: not treat the empty composer as licence to re-send.
+        self.narrow_unparsed_queue = narrow_unparsed_queue
         self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
@@ -875,6 +917,8 @@ class FakeCmux:
         if self.state == "booting":
             return cd.CmuxResult(0, "[loop-enforcer] loaded\n[verification-gate] loaded\n")
         screen = SCREEN_IDLE_READY
+        if self.narrow_unparsed_queue:
+            return cd.CmuxResult(0, SCREEN_QUEUED_MID_TURN_NARROW_HINT)
         if self.queued:
             return cd.CmuxResult(
                 0,
@@ -919,7 +963,7 @@ class FakeCmux:
             return cd.CmuxResult(0, "OK")
         if self.drops_message:
             return cd.CmuxResult(0, "OK")
-        if self.queued_turn:
+        if self.queued_turn or self.narrow_unparsed_queue:
             # pi ACCEPTS the submission into its pending queue. The editor is
             # cleared, so the text is NOT in the composer — it is in the pending
             # display, and it becomes a turn only when the current turn ends.
@@ -937,7 +981,7 @@ class FakeCmux:
         if self.state == "boot_block":
             self.state = "booting"
             return cd.CmuxResult(0, "OK")
-        if self.queued_turn:
+        if self.queued_turn or self.narrow_unparsed_queue:
             # The turn boundary has not arrived: pi holds the submission in its
             # queue and a bare Enter cannot release it.
             return cd.CmuxResult(0, "OK")
@@ -1196,6 +1240,20 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertTrue(result.ok, result.detail)
         self.assertEqual(result.status, "queued")
         self.assertEqual(fake.queued, flat)
+
+    def test_an_UNPARSEABLE_queue_is_not_resent(self):
+        """End to end: pi holds the submission but pi's hint line is truncated, so
+        no container parses and the composer reads empty. The dispatcher must report
+        failure (exit 1) WITHOUT writing a second copy into the lane — the fail-open
+        duplicate this guard exists to prevent."""
+        fake = FakeCmux(narrow_unparsed_queue=True)
+        result = _dispatcher(fake).send_message(
+            "workspace:99", PROBE, label="B4", consume_timeout=0.0, retries=0,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertEqual(fake.sent_log.count(PROBE), 1)
+        self.assertEqual(fake.sent_log.count("\\n"), 1)
 
     def test_a_text_in_the_composer_is_not_queued(self):
         # `composer_region` -> None means "cannot tell", and an unsent composer
