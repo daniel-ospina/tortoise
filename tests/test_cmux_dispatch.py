@@ -373,6 +373,34 @@ class TestRecoveryDecision(unittest.TestCase):
         self.assertFalse(cd.composer_empty(SCREEN_COMPOSING_UNSENT))
 
 
+class TestQueuedInComposer(unittest.TestCase):
+    """`queued_in_composer` — the positive-evidence-only queue signal (#5979)."""
+
+    def test_text_in_the_composer_region_is_queued(self):
+        fp = cd.fingerprint(PROBE)
+        self.assertTrue(cd.queued_in_composer(SCREEN_COMPOSING_UNSENT, fp))
+
+    def test_unidentifiable_composer_is_never_queued(self):
+        fp = cd.fingerprint(PROBE)
+        no_rules = f"{PROBE}\n/private/tmp\n0.0%/700k (auto)\n"
+        self.assertIsNone(cd.composer_region(no_rules))
+        self.assertFalse(cd.queued_in_composer(no_rules, fp))
+        self.assertFalse(cd.queued_in_composer(None, fp))
+
+    def test_text_outside_the_composer_is_not_queued(self):
+        # A message visible only in the TRANSCRIPT is not evidence of a queue.
+        fp = cd.fingerprint(PROBE)
+        rule = "\u2500" * 40
+        transcript = f"{rule}\n{PROBE}\n{rule}\n\n{rule}\n/private/tmp\n0.0%/700k (auto)\n"
+        self.assertEqual(cd.composer_region(transcript), "")
+        self.assertFalse(cd.queued_in_composer(transcript, fp))
+
+    def test_a_different_message_in_the_composer_is_not_our_queue(self):
+        fp = cd.fingerprint(PROBE)
+        other = SCREEN_COMPOSING_UNSENT.replace(PROBE, "an unrelated brief")
+        self.assertFalse(cd.queued_in_composer(other, fp))
+
+
 #: A REAL, unedited `cmux list-workspaces --json --id-format both` capture
 #: (2026-09-20), trimmed to the fields the resolver reads. Embedding the real
 #: shape is the point: `--id-format uuids` OMITS `ref` entirely, so a fixture
@@ -484,6 +512,8 @@ class FakeCmux:
         never_consumes: bool = False,
         submit_lag_polls: int = 0,
         screen_unreadable: bool = False,
+        drops_message: bool = False,
+        no_rules: bool = False,
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -495,6 +525,14 @@ class FakeCmux:
         #: so a reader can observe a submission as absent for a beat.
         self.submit_lag_polls = submit_lag_polls
         self.screen_unreadable = screen_unreadable
+        #: cmux accepts the bytes but they surface NOWHERE — not in the composer,
+        #: not as a submitted turn. Models a send lost by the boot-block prompt
+        #: (or any silent drop). The fail-closed guard: this must never confirm.
+        self.drops_message = drops_message
+        #: Render the composer WITHOUT its enclosing horizontal rules, so
+        #: `composer_region` returns None ("cannot tell"). A pane in that state
+        #: must never be read as a queued success.
+        self.no_rules = no_rules
         self.lag_remaining = 0
         self.visible: str | None = None
 
@@ -549,10 +587,17 @@ class FakeCmux:
             return cd.CmuxResult(0, "[loop-enforcer] loaded\n[verification-gate] loaded\n")
         screen = SCREEN_IDLE_READY
         if self.pending:
-            screen = SCREEN_COMPOSING_UNSENT.replace(
-                "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292",
-                self.pending,
-            )
+            if self.no_rules:
+                screen = (
+                    self.pending
+                    + "\n/private/tmp\n0.0%/700k (auto)"
+                    "  (deepseek) deepseek-flash \u2022 high\n"
+                )
+            else:
+                screen = SCREEN_COMPOSING_UNSENT.replace(
+                    "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292",
+                    self.pending,
+                )
         return cd.CmuxResult(0, screen)
 
     def send_text(self, workspace: str, text: str, surface: str | None = None) -> cd.CmuxResult:
@@ -571,6 +616,8 @@ class FakeCmux:
             self.eaten.append(eaten)
             self.state = "booting"
             self.pending += remainder
+            return cd.CmuxResult(0, "OK")
+        if self.drops_message:
             return cd.CmuxResult(0, "OK")
         self.pending += text
         return cd.CmuxResult(0, "OK")
@@ -635,10 +682,28 @@ class TestDispatcherRecovery(unittest.TestCase):
 
     def test_race_the_composer_holds_the_text_and_release_recovers_it(self):
         # The 2026-09-17 incident: the Enter does not submit; the text sits in
-        # the composer. Correct recovery is a bare Enter, NOT a re-send.
+        # the composer. If the composer is IDENTIFIABLE, the queue-aware verdict
+        # reports `queued` (#5979) — the pane is mid-turn, pi holds the message
+        # and will turn it when the current turn ends. That is a DELIVERED
+        # message, and it must never be re-sent (a re-send would duplicate it).
         fake = FakeCmux(enter_is_noop=1)
         result = self._send(fake, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "queued")
+        self.assertIn("queued in the composer", result.detail)
+        self.assertEqual(fake.submitted, [], "a queued message has not turned yet")
+        self.assertEqual(
+            fake.sent_log.count(PROBE), 1, "a queued message must never be re-sent"
+        )
+
+    def test_release_recovers_when_the_composer_is_unidentifiable(self):
+        # The bare-Enter release must still work for the 2026-09-17 race when
+        # the composer region cannot be read (no rules): a release can never
+        # duplicate, and here it is what submits the message.
+        fake = FakeCmux(enter_is_noop=1, no_rules=True)
+        result = self._send(fake, consume_timeout=0.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
         self.assertEqual(result.recoveries, [cd.R_RELEASE])
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate the message")
 
@@ -698,12 +763,46 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate on lag")
 
     def test_never_consumed_fails_closed(self):
-        fake = FakeCmux(never_consumes=True)
+        # The send is lost: it surfaces NEITHER as a submitted turn NOR in the
+        # composer. A one-sided change that reported every miss as success would
+        # pass the queued tests and fail this one — this is the regression guard.
+        fake = FakeCmux(drops_message=True)
         result = self._send(fake, consume_timeout=0.0, retries=2)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
         self.assertIn("sent-but-not-consumed", result.detail)
         self.assertEqual(result.attempts, 3)  # initial + 2 retries
+
+    def test_busy_lane_message_in_the_composer_is_a_queued_success(self):
+        # THE #5979 DEFECT. `latest_submitted_message` only advances at a turn
+        # boundary, so on a mid-turn lane the strict check can never be
+        # satisfied: the message sits in the composer, accepted for the next
+        # turn. That is a DELIVERED message, and it must exit 0 — the old
+        # verdict spent the whole timeout and reported `sent-but-not-consumed`.
+        fake = FakeCmux(never_consumes=True)
+        result = self._send(fake, consume_timeout=0.0, retries=2)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "queued")
+        self.assertIn("queued in the composer", result.detail)
+        self.assertEqual(result.attempts, 1, "no need to wait out the retries")
+        self.assertEqual(fake.submitted, [], "queued is not yet consumed")
+
+    def test_eaten_message_is_not_queued_and_still_fails(self):
+        # The boot-block prompt ate the pointer and nothing retained the text:
+        # absent from BOTH the submitted message and the composer. Fail closed.
+        fake = FakeCmux(drops_message=True)
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertNotIn("queued", result.status)
+
+    def test_unidentifiable_composer_is_not_a_queued_success(self):
+        # `composer_region` -> None means "cannot tell", and "cannot tell" is
+        # NOT a queue. A None region must fail closed, never confirm a delivery.
+        fake = FakeCmux(never_consumes=True, no_rules=True)
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
 
     def test_refuses_to_send_into_a_prompt_that_never_yields(self):
         fake = FakeCmux(boot_block=True)
@@ -815,7 +914,7 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.attempts, 1)
 
     def test_failure_detail_carries_the_reason_not_a_placeholder(self):
-        fake = FakeCmux(never_consumes=True)
+        fake = FakeCmux(drops_message=True)
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
         self.assertNotIn("no confirmation)", result.detail)
@@ -883,12 +982,32 @@ class TestCliExitCodes(unittest.TestCase):
         self.assertEqual(fake.submitted, [PROBE])
 
     def test_exit_one_when_sent_but_never_consumed(self):
-        fake = FakeCmux(never_consumes=True)
+        fake = FakeCmux(drops_message=True)
         rc = self._main(
             fake, "send", "--workspace", "workspace:99", "--text", PROBE,
             "--ready-timeout", "0", "--consume-timeout", "0", "--retries", "0",
         )
         self.assertEqual(rc, 1, "an unconsumed send must NEVER exit 0")
+
+    def test_exit_zero_when_the_message_is_queued_for_the_next_turn(self):
+        # #5979: a queued message is delivered. The CLI contract is exit 0.
+        fake = FakeCmux(never_consumes=True)
+        rc = self._main(
+            fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+            "--ready-timeout", "0", "--consume-timeout", "0",
+        )
+        self.assertEqual(rc, 0, "a queued message is a success, not a failure")
+
+    def test_idle_lane_confirmation_is_unchanged(self):
+        # The idle path keeps today's exact success semantics: the message
+        # becomes the latest submitted message and exits 0 with `consumed`.
+        fake = FakeCmux()
+        rc = self._main(
+            fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+            "--ready-timeout", "0", "--consume-timeout", "0",
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.submitted, [PROBE])
 
     def test_exit_two_on_empty_message(self):
         self.assertEqual(

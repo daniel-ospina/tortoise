@@ -31,6 +31,23 @@ with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
 confirmed exits non-zero with `sent-but-not-consumed`; it never reports success
 on an unconsumed send.
 
+QUEUED IS NOT UNCONSUMED (#5979)
+--------------------------------
+`latest_submitted_message` only advances at a TURN BOUNDARY. On a lane that is
+mid-turn — i.e. every lane that is actually working — pi accepts a submission
+into its queue and the composer holds it until the current turn ends, so the
+strict "is it the latest submitted message?" test can never be satisfied inside
+any bounded wait. The old verdict called that `sent-but-not-consumed` and the
+message was in fact delivered; three callers (`ask-owner.py`, `turn-classify.py`,
+`turn-end.py`) each discovered this independently and worked around it.
+
+The verdict is therefore queue-aware: a message whose text sits in the pane's
+composer region after a failed submission check is reported `queued` (exit 0) —
+it was accepted and will become a turn. The fail-closed direction is unchanged:
+a text absent from the composer (eaten by a boot-block prompt, or never landed)
+still has to become the latest submitted message, and an UNIDENTIFIABLE composer
+(`composer_region` -> None) never counts as evidence of a queue.
+
 PREVENTION, then DETECTION
 --------------------------
 The confirmation check is a BACKSTOP. The boot-block case has already run a
@@ -50,7 +67,8 @@ USAGE
 
 EXIT CODES
 ----------
-    0  consumed — the message became a conversation message
+    0  consumed — the message became a conversation message, or
+       queued — the message is sitting in the composer, accepted for the next turn
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
@@ -311,6 +329,28 @@ def composer_empty(screen: str | None) -> bool:
     """True only when the composer is POSITIVELY shown to be empty."""
     region = composer_region(screen)
     return region is not None and not region.strip()
+
+
+def queued_in_composer(screen: str | None, fp: str) -> bool:
+    """True when the sent message is sitting in the pane's composer (#5979).
+
+    A message that IS visible in the input box but never became the latest
+    submitted message has been QUEUED: `latest_submitted_*` advances only at a
+    turn boundary, so a pane that is mid-turn accepts the submission without
+    surfacing it as the latest turn until the current turn ends. That is a
+    DELIVERED message, not a failed one, and reporting `sent-but-not-consumed`
+    for it is what silently dropped every nudge to a busy lane.
+
+    FAIL CLOSED. `composer_region` returning None means "cannot tell", and a
+    None region is NOT evidence of a queue: an unreadable composer, a message
+    eaten by the boot-block prompt, or a send that never landed must all keep
+    the existing failure. Only POSITIVE evidence — the fingerprint inside an
+    identifiable composer region — may report `queued`.
+    """
+    region = composer_region(screen)
+    if region is None:
+        return False
+    return text_on_screen(region, fp)
 
 
 def recovery_action(screen: str | None, fp: str) -> str:
@@ -720,10 +760,25 @@ class Dispatcher:
                 )
                 return result
 
+            # A message that never became the latest submission but IS in the
+            # input box has been QUEUED for the next turn (#5979): a mid-turn
+            # pane accepts the submission and only surfaces it as a turn when
+            # the current turn ends — later than any bounded wait. `queued` is a
+            # DELIVERED message (exit 0), not a failure.
+            screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
+            if queued_in_composer(screen, fp):
+                result.ok = True
+                result.status = "queued"
+                result.detail = (
+                    f"{tag}{workspace} confirmed: message is queued in the "
+                    f"composer for the next turn (attempt {attempt}, {reason})"
+                )
+                self.log(f"{tag}queued ({reason}) — the lane is mid-turn")
+                return result
+
             if attempt > retries:
                 break
 
-            screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
             action = recovery_action(screen, fp)
             result.recoveries.append(action)
             self.log(f"{tag}not consumed ({reason}) — recovery: {action}")
