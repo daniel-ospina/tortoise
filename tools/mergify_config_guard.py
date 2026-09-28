@@ -141,15 +141,22 @@ class _StrictLoader(yaml.SafeLoader):
     """
 
     def construct_mapping(self, node: yaml.Node, deep: bool = False) -> Any:
-        seen: set[str] = set()
+        seen: list[Any] = []
         for key_node, _ in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
                 raise GuardUnreadable("YAML merge key ('<<') is not permitted")
             if not isinstance(key_node, yaml.ScalarNode):
                 raise GuardUnreadable("non-scalar mapping key is not permitted")
-            if key_node.value in seen:
-                raise GuardUnreadable(f"duplicate mapping key {key_node.value!r}")
-            seen.add(key_node.value)
+            # Compare RESOLVED keys, not raw text: `on` and `true` both resolve
+            # to True in YAML 1.1, so a text-only check misses the collision that
+            # PyYAML then silently collapses.
+            try:
+                key = self.construct_object(key_node, deep=deep)
+            except yaml.YAMLError:
+                key = key_node.value
+            if key in seen:
+                raise GuardUnreadable(f"duplicate mapping key {key!r}")
+            seen.append(key)
         return super().construct_mapping(node, deep=deep)
 
 
@@ -211,39 +218,47 @@ def _load_record(root: Path, record_path: Path | None = None) -> dict | None:
 
 
 def _success_names(conditions: Iterable[str]) -> list[str]:
-    """The bare check names of `check-success=` conditions, in list order."""
+    """The bare names of POSITIVE `check-success=` conditions, in list order.
+
+    A NEGATED `-check-success=X` means "X must NOT succeed" (Mergify's grammar is
+    `[ "-" ] <attribute> ...`), so it is deliberately excluded here: including it
+    would let an inverted gate satisfy the requirement it inverts.
+    """
     names: list[str] = []
     for cond in conditions:
-        kind, name = _split_check(cond)
-        if kind == "check-success":
+        kind, name, negated = _split_check(cond)
+        if kind == "check-success" and not negated:
             names.append(name)
     return names
 
 
-def _split_check(cond: str) -> tuple[str | None, str | None]:
-    """(kind, name) for a check condition, else (None, None).
+def _split_check(cond: str) -> tuple[str | None, str | None, bool]:
+    """(kind, name, negated) for a check condition, else (None, None, False).
 
     Classification is by CONDITION PREFIX (`check-*` vs anything else), never by
-    an exception list of example non-check conditions (cycle 4): a future
-    legitimate `label=`/`files~=`/`base=` condition must not false-fail.
+    an exception list of example non-check conditions (cycle 4). The negation
+    flag is returned, not discarded: `-check-success=X` is the OPPOSITE of
+    `check-success=X`, and a guard that strips the `-` enforces the inverse of
+    what it claims.
     """
     if not isinstance(cond, str):
-        return None, None
-    body = cond[1:] if cond.startswith("-") else cond
+        return None, None, False
+    negated = cond.startswith("-")
+    body = cond[1:] if negated else cond
     if not body.startswith("check-"):
-        return None, None
+        return None, None, False
     kind, _, name = body.partition("=")
-    return kind, name
+    return kind, name, negated
 
 
-def _all_check_pairs(rules: Iterable[dict]) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
+def _all_check_pairs(rules: Iterable[dict]) -> list[tuple[str, str, bool]]:
+    pairs: list[tuple[str, str, bool]] = []
     for rule in rules:
         for key in ("queue_conditions", "merge_conditions"):
             for cond in rule.get(key) or []:
-                kind, name = _split_check(cond)
+                kind, name, negated = _split_check(cond)
                 if kind is not None:
-                    pairs.append((kind, name))
+                    pairs.append((kind, name, negated))
     return pairs
 
 
@@ -367,6 +382,11 @@ def _gate_projection(root: Path) -> dict:
                 "merge_conditions": list(rule.get("merge_conditions") or []),
                 "branch_protection_injection_mode": _effective_mode(rule),
                 "autoqueue": rule.get("autoqueue"),
+                # `allow_queue_branch_edit: true` makes Mergify trust the queue
+                # branch content, including commits never reviewed in a PR — a
+                # documented protection loss, so it is part of the digest. (Not
+                # named in §3's projection list; a safety-positive extension.)
+                "allow_queue_branch_edit": rule.get("allow_queue_branch_edit"),
             }
         )
     settings_path = root / SETTINGS_REL
@@ -475,17 +495,20 @@ def _unioned_files(root: Path) -> set[str]:
 
 
 def _if_excludes_pull_request(expr: Any) -> bool:
-    """True only for an `if:` that is literally false or schedule-only.
+    """True only for an `if:` that is literally false or non-PR-only.
 
     The plan's rule is "an `if:` that is NOT false/schedule-only" — an
-    unrecognised expression is allowed, so this is deliberately narrow.
+    unrecognised expression is allowed, so this is deliberately narrow. A bare
+    `github.event_name == 'push'` (or a schedule-only gate) is NOT a
+    pull_request-true path and must be excluded.
     """
     if expr is None:
         return False
     text = str(expr).strip().lower()
     if text in ("false", "${{ false }}"):
         return True
-    return "schedule" in text and "pull_request" not in text
+    non_pr = "schedule" in text or "'push'" in text or '"push"' in text
+    return non_pr and "pull_request" not in text
 
 
 def _job_reaches_pull_request(job: dict) -> bool:
@@ -521,18 +544,52 @@ def _single_command_run(run: str) -> list[str] | None:
         return None
 
 
+def _required_job_closure(docs: dict[str, dict]) -> tuple[str | None, set[str]]:
+    """(workflow, jobs reachable into `python-ci-gate` via `needs`).
+
+    §7 requires the union validator to run *inside a job in `python-ci-gate.needs`*:
+    a validator in an unrelated job satisfies the shape rules while never being
+    able to red the required aggregate.
+    """
+    for workflow, doc in docs.items():
+        jobs = doc.get("jobs")
+        if not isinstance(jobs, dict) or "python-ci-gate" not in jobs:
+            continue
+        closure: set[str] = set()
+        frontier = ["python-ci-gate"]
+        while frontier:
+            current = frontier.pop()
+            if current in closure or current not in jobs:
+                continue
+            closure.add(current)
+            job = jobs.get(current)
+            if isinstance(job, dict):
+                needs = job.get("needs") or []
+                if isinstance(needs, str):
+                    needs = [needs]
+                frontier.extend(str(n) for n in needs)
+        return workflow, closure
+    return None, set()
+
+
 def _validator_candidates(docs: dict[str, dict]) -> list[dict]:
-    """Fail-closed validator steps: a direct `python3 <tool>.py` in a PR-true job.
+    """Fail-closed validator steps: a direct `python3 <tool>.py` in a PR-true job
+    ON THE REQUIRED PATH (a job `python-ci-gate` reaches through `needs`).
 
     Excludes the guard itself and `ci_selection.py` (the drift gate is a
     different assertion). A candidate is still subject to the shape rules below.
     """
+    required_workflow, closure = _required_job_closure(docs)
     candidates: list[dict] = []
     for workflow, doc in docs.items():
+        if workflow != required_workflow or not _has_pull_request(_triggers(doc)):
+            continue
         jobs = doc.get("jobs")
         if not isinstance(jobs, dict):
             continue
         for job_id, job in jobs.items():
+            if str(job_id) not in closure:
+                continue
             if not isinstance(job, dict) or not _job_reaches_pull_request(job):
                 continue
             for step in job.get("steps") or []:
@@ -567,13 +624,14 @@ def _validator_candidates(docs: dict[str, dict]) -> list[dict]:
 
 def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, str]:
     """Clause (vii): whenever `merge=union` is active, a fail-closed validator
-    must be invoked as a step's SOLE, DIRECT command and must name the real
-    unioned set.
+    must be invoked as a step's SOLE, DIRECT command, ON THE REQUIRED PATH, and
+    must name the real unioned set.
 
     The validator's own correctness is #5570's
     `tests/test_registry_integrity.py::test_validated_set_equals_unioned_set`;
-    this clause covers the PRESENCE vector only and consumes that pairing by
-    requiring the invoked tool to reference every unioned path.
+    this clause covers the PRESENCE and PLACEMENT vectors only. It consumes that
+    pairing by requiring the invoked tool to reference every unioned path and to
+    contain a statement that can fail.
     """
     unioned = _unioned_files(root)
     if not unioned:
@@ -582,12 +640,13 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
     accepted = 0
     for cand in _validator_candidates(docs):
         step = cand["step"]
+        job = cand["job_spec"]
         argv = cand["argv"]
         label = f"{cand['workflow']}:{cand['job']}"
         if any(arg in ("-h", "--help") for arg in argv):
             problems.append(f"{label}: validator invocation is `--help`-only")
             continue
-        if "-c" in argv[:2]:
+        if "-c" in argv:
             problems.append(f"{label}: `python -c` payload is not a direct invocation")
             continue
         if step.get("shell"):
@@ -596,6 +655,12 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         if step.get("continue-on-error"):
             problems.append(f"{label}: validator step is `continue-on-error`")
             continue
+        if job.get("continue-on-error"):
+            problems.append(f"{label}: validator JOB is `continue-on-error`")
+            continue
+        if _if_excludes_pull_request(step.get("if")):
+            problems.append(f"{label}: validator step's `if:` excludes pull_request")
+            continue
         env = step.get("env") or {}
         if isinstance(env, dict):
             shadow = sorted(k for k in env if k in _PYTHON_ENV_SHADOWS)
@@ -603,13 +668,19 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
                 problems.append(f"{label}: validator step shadows env {shadow}")
                 continue
         # (c) the invocation must name the REAL path/config set, never /dev/null.
+        # If `--paths` is given it must COVER the unioned set; otherwise the tool
+        # source must reference every unioned path (the #5570 CLI shape).
         named: set[str] = set()
         if "--paths" in argv:
             values = [a for a in argv[argv.index("--paths") + 1 :] if not a.startswith("-")]
-            if not values or any(v == "/dev/null" for v in values):
+            if not values or any(v.startswith("/dev/null") for v in values):
                 problems.append(f"{label}: `--paths` names no real file (got {values})")
                 continue
             named.update(values)
+            missing = sorted(unioned - named)
+            if missing:
+                problems.append(f"{label}: `--paths` does not cover the unioned set {missing}")
+                continue
         tool_path = root / cand["tool"]
         if not tool_path.is_file():
             problems.append(f"{label}: validator {cand['tool']} does not exist")
@@ -624,6 +695,15 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         if missing:
             problems.append(
                 f"{label}: validator {cand['tool']} does not name the unioned set {missing}"
+            )
+            continue
+        # A source that cannot fail is not a validator: it must contain at least
+        # one statement capable of a non-zero exit (the plan's "no-op statement
+        # satisfies the shape rule while validating nothing").
+        fail_markers = ("return 1", "sys.exit", "SystemExit", "raise ", "assert ")
+        if not any(marker in source for marker in fail_markers):
+            problems.append(
+                f"{label}: validator {cand['tool']} carries no failing statement"
             )
             continue
         accepted += 1
@@ -641,10 +721,20 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
 
 
 def _settings_readers(root: Path) -> list[str]:
-    """In-repo readers of `.github/settings.yml`, excluding the declaration-home
-    checkers (the guard and its test). A new reader makes the stale one-context
-    declaration authoritative, which is the failure I11 exists to catch.
+    """Readers of `.github/settings.yml` under `.github/`, `tests/`, `tools/`.
+
+    Excludes the declaration-home CHECKERS (the guard and its test) by EXACT
+    repo-relative path — a basename match would exempt any file that merely
+    shares the name. Files are scanned as BYTES (plain/UTF-16LE/UTF-16BE) so a
+    reader in a non-UTF-8 file is not silently skipped. Scope is the plan's
+    declared set (`.github/`, `tests/`, `tools/`); a reader elsewhere is a
+    declared residual, not a silent pass.
     """
+    needles = (
+        b"settings.yml",
+        "settings.yml".encode("utf-16-le"),
+        "settings.yml".encode("utf-16-be"),
+    )
     readers: list[str] = []
     for directory in (".github", "tests", "tools"):
         base = root / directory
@@ -653,16 +743,16 @@ def _settings_readers(root: Path) -> list[str]:
         for path in sorted(base.rglob("*")):
             if not path.is_file() or ".git" in path.parts:
                 continue
+            if "__pycache__" in path.parts or path.suffix in (".pyc", ".pyo"):
+                continue
             rel = path.relative_to(root).as_posix()
             if rel == SETTINGS_REL or rel in DECLARATION_HOME_CHECKERS:
                 continue
-            if path.name in {Path(p).name for p in DECLARATION_HOME_CHECKERS}:
-                continue
             try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+                data = path.read_bytes()
+            except OSError:
                 continue
-            if "settings.yml" in text:
+            if any(needle in data for needle in needles):
                 readers.append(rel)
     return readers
 
@@ -712,7 +802,7 @@ def _clause_i(doc: dict) -> tuple[int, str]:
                 if cond in seen_conditions:
                     problems.append(f"{rule['name']}.{key}: condition {cond!r} appears twice")
                 seen_conditions.add(cond)
-                _, name = _split_check(cond)
+                _, name, _ = _split_check(cond)
                 if name is not None:
                     if name in seen_names:
                         problems.append(f"{rule['name']}.{key}: check {name!r} named twice")
@@ -763,9 +853,11 @@ def _clause_iii(doc: dict) -> tuple[int, str]:
     for rule in doc["queue_rules"]:
         for key in ("queue_conditions", "merge_conditions"):
             for cond in rule.get(key) or []:
-                kind, _ = _split_check(cond)
-                if kind is not None and kind != "check-success":
-                    problems.append(f"{rule['name']}.{key}: {cond!r} is not `check-success`")
+                kind, _, negated = _split_check(cond)
+                if kind is not None and (kind != "check-success" or negated):
+                    problems.append(
+                        f"{rule['name']}.{key}: {cond!r} is not a POSITIVE `check-success`"
+                    )
     if problems:
         return EXIT_DIVERGED, "; ".join(problems)
     return EXIT_OK, "every check-* condition is check-success"
@@ -781,9 +873,35 @@ def _clause_iv(doc: dict, record: dict | None) -> tuple[int, str]:
     if record is None:
         raise GuardUnreadable("merge injection is active but the gate record is absent")
     required = record.get("required_contexts")
-    if not isinstance(required, list) or not required:
-        raise GuardUnreadable("the gate record carries no required_contexts")
-    cheap = sorted(set(required) - {HEAVY_CONTEXT})
+    if not isinstance(required, list) or not all(isinstance(c, str) for c in required):
+        raise GuardUnreadable("the gate record's required_contexts is not a list of strings")
+    required_set = set(required)
+    if HEAVY_CONTEXT not in required_set:
+        return (
+            EXIT_DIVERGED,
+            f"the record's required set omits {HEAVY_CONTEXT} — clause (iv) would be vacuous",
+        )
+    # Ground truth: the record's required set must AGREE with the check names the
+    # config actually enforces (the .mergify.yml contract's own invariant). Without
+    # this agreement a record edit alone silences this clause — the vacuity the
+    # reviewers measured (`cheap == []` => `PASS`).
+    config_checks: set[str] = set()
+    for rule in doc["queue_rules"]:
+        for key in ("queue_conditions", "merge_conditions"):
+            config_checks.update(_success_names(rule.get(key) or []))
+    if config_checks != required_set:
+        return (
+            EXIT_DIVERGED,
+            f"the record's required set {sorted(required_set)} != the config's "
+            f"check-success set {sorted(config_checks)} (I1 agreement)",
+        )
+    cheap = sorted(required_set - {HEAVY_CONTEXT})
+    if not cheap:
+        return (
+            EXIT_DIVERGED,
+            "merge injection is active but the record names no cheap contexts — "
+            "the clause would pass vacuously",
+        )
     problems: list[str] = []
     for rule in active:
         entry = set(_success_names(rule.get("queue_conditions") or []))
@@ -816,7 +934,7 @@ def _clause_v(doc: dict) -> tuple[int, str]:
 def _clause_vi(doc: dict, emitters: list[dict]) -> tuple[int, str]:
     """Emission (structural): every check named in either list maps to a job's
     effective name in a workflow with a `pull_request` trigger."""
-    required = sorted({name for _, name in _all_check_pairs(doc["queue_rules"])})
+    required = sorted({name for _, name, _ in _all_check_pairs(doc["queue_rules"])})
     pr_names = {e["name"] for e in emitters if e["has_pr"]}
     missing = [name for name in required if name not in pr_names]
     if missing:
@@ -841,6 +959,12 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
         )
     verified_at = _parse_iso(record.get("verified_at"), f"{RECORD_REL}.verified_at")
     age = _now() - verified_at
+    if age < -timedelta(days=1):
+        return (
+            EXIT_DIVERGED,
+            f"record verified_at {_iso(verified_at)} is in the future — a hand-set "
+            "timestamp must not defeat the freshness window",
+        )
     if age > timedelta(days=RECORD_FRESH_DAYS):
         return (
             EXIT_DIVERGED,
@@ -863,7 +987,7 @@ def _clause_viii_b(root: Path, record: dict | None) -> tuple[int, str]:
     try:
         declared = sorted(_settings_contexts(root))
     except GuardUnreadable as exc:
-        return EXIT_DIVERGED, f"settings_home_consistent=true but {exc}"
+        raise GuardUnreadable(f"settings_home_consistent=true but {exc}") from exc
     required = sorted(record.get("required_contexts") or [])
     if declared != required:
         return (
@@ -891,7 +1015,7 @@ def run_static(root: Path, record_path: Path | None = None) -> tuple[int, list[s
         record = _load_record(root, record_path)
         docs = _workflow_docs(root)
         emitters = _emitters(docs)
-    except GuardUnreadable as exc:
+    except Exception as exc:
         lines.append(f"(config) FAIL [2] {exc}")
         return EXIT_UNAVAILABLE, lines
 
@@ -915,7 +1039,7 @@ def run_static(root: Path, record_path: Path | None = None) -> tuple[int, list[s
     for clause_id, fn in clauses:
         try:
             code, detail = fn()
-        except GuardUnreadable as exc:
+        except Exception as exc:
             code, detail = EXIT_UNAVAILABLE, str(exc)
         worst = max(worst, code)
         lines.append(f"{clause_id} {'PASS' if code == 0 else 'FAIL'} [{code}] {detail}")
@@ -1009,10 +1133,35 @@ def run_live(
     fetch = fetch or _gh_api
     try:
         doc = _load_mergify(root)
-    except GuardUnreadable as exc:
+    except Exception as exc:
         lines.append(f"(config) FAIL [2] {exc}")
         return EXIT_UNAVAILABLE, lines
-    lhs = sorted({name for _, name in _all_check_pairs(doc["queue_rules"])})
+    prior_record: dict | None = None
+    if record_path is not None:
+        try:
+            prior_record = _load_record(root, record_path)
+        except Exception:
+            prior_record = None
+    if prior_record:
+        prior = prior_record.get("live_verified_at")
+        if isinstance(prior, str):
+            try:
+                prior_age = _now() - _parse_iso(prior, "live_verified_at")
+                if prior_age > timedelta(days=LIVE_FRESH_DAYS):
+                    lines.append(
+                        f"prior live attestation was {prior_age.days}d old "
+                        f"(> {LIVE_FRESH_DAYS}d I1 window) — re-attesting now"
+                    )
+            except GuardUnreadable:
+                pass
+    lhs = sorted(
+        {
+            name
+            for rule in doc["queue_rules"]
+            for key in ("queue_conditions", "merge_conditions")
+            for name in _success_names(rule.get(key) or [])
+        }
+    )
     try:
         resolved = _repo_slug(slug)
         live = sorted(set(_live_required_contexts(fetch, resolved)))
@@ -1039,10 +1188,16 @@ def _record_live_attempt(
     observed: list[str] | None,
     slug: str | None,
 ) -> None:
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        record = {}
+    record: dict = {}
+    if path.is_file():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            if result != "SATISFIED":
+                # A failed read must never launder an unreadable authoritative
+                # record: skip the write rather than replace it with a stub.
+                return
+            record = {}
     record["live_result"] = result
     record["live_checked_at"] = _iso(_now())
     if observed is not None:
@@ -1053,6 +1208,7 @@ def _record_live_attempt(
         record["live_verified_at"] = _iso(_now())
         record["verified_at"] = _iso(_now())
         record["gate_digest"] = gate_digest(root)
+        record["emitters"] = _emitter_map(_emitters(_workflow_docs(root)))
         record["read_sha"] = _main_sha(slug) if slug else None
     _write_record(path, record)
 
@@ -1069,6 +1225,7 @@ def run_recut(root: Path, record_path: Path | None = None) -> tuple[int, list[st
         return EXIT_UNAVAILABLE, [str(exc)]
     assert record is not None
     record["gate_digest"] = gate_digest(root)
+    record["emitters"] = _emitter_map(_emitters(_workflow_docs(root)))
     record["verified_at"] = _iso(_now())
     record.setdefault("settings_home_consistent", False)
     _write_record(path, record)
@@ -1103,7 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_digest:
         try:
             print(gate_digest(root))
-        except GuardUnreadable as exc:
+        except Exception as exc:
             print(f"UNREADABLE: {exc}", file=sys.stderr)
             return EXIT_UNAVAILABLE
         return EXIT_OK
@@ -1121,9 +1278,9 @@ def main(argv: list[str] | None = None) -> int:
         code, lines = run_static(root, record_path)
         _print_result("STATIC", code, lines)
         return code
-    except GuardUnreadable as exc:
+    except Exception as exc:
         # Fail closed: an exception on any path is UNREADABLE evidence, never a
-        # pass and never a traceback that a caller could mistake for a crash.
+        # pass and never a traceback a caller could mistake for a crash.
         _print_result("LIVE" if args.live else "STATIC", EXIT_UNAVAILABLE, [str(exc)])
         return EXIT_UNAVAILABLE
 

@@ -330,15 +330,14 @@ jobs:
         run: python3 tools/ci_selection.py --integrity
       - name: "Mergify protection invariants (config guard, #5215)"
         # #5215 Task 4: the merge-throughput plan's safety contract is mechanical.
-        # This runs the static clauses (i)-(viii) of
-        # docs/plans/2026-09-26-5215-merge-throughput.md §3 — exit 0 SATISFIED,
-        # 1 DIVERGED, 2 UNAVAILABLE. Fail-closed: an unrecognised injection mode,
-        # a duplicate YAML key, an unresolvable workflow parse, or an absent gate
-        # record is NEVER a pass. It is REQUIRED from its landing commit (no
-        # continue-on-error, no soak): its clauses are green on the current tree,
-        # so a red here is a real divergence, not a rollout problem. A wrong
-        # clause is fixed by an ordinary PR (edit the clause body; the clause
-        # inventory is unchanged), never by `--admin` (§2.2 T-K).
+        # This runs the static clauses (i)-(viii) the plan's §3 asserts — exit 0
+        # SATISFIED, 1 DIVERGED, 2 UNAVAILABLE. Fail-closed: an unrecognised
+        # injection mode, a duplicate YAML key, an unresolvable workflow parse, or
+        # an absent gate record is NEVER a pass. It is REQUIRED from its landing
+        # commit (no continue-on-error, no soak): its clauses are green on the
+        # current tree, so a red here is a real divergence, not a rollout problem.
+        # A wrong clause is fixed by an ordinary PR (edit the clause body; the
+        # clause inventory is unchanged), never by `--admin` (§2.2 T-K).
         #
         # A DIRECT invocation with no shell operator, so a non-zero exit
         # propagates (§11.1: `|| true` / `; exit 0` would make the criterion

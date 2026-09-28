@@ -1,5 +1,463 @@
 {
-  "gate_digest": "38002c804068bf26c6919345d4e31357fadeb5e9a7d56b0252f6a2064e3b96c9",
+  "emitters": {
+    "agent-infra-ci": [
+      [
+        "ci.yml",
+        "agent-infra-ci"
+      ]
+    ],
+    "ai-review-gate": [
+      [
+        "ai-review-gate.yml",
+        "ai-review-gate"
+      ]
+    ],
+    "ai-review-gate-tests": [
+      [
+        "ci.yml",
+        "ai-review-gate-tests"
+      ]
+    ],
+    "attach": [
+      [
+        "attach-tortoise-domain.yml",
+        "attach"
+      ]
+    ],
+    "availability-record": [
+      [
+        "ci.yml",
+        "availability-record"
+      ]
+    ],
+    "availability-watchdog": [
+      [
+        "ci.yml",
+        "availability-watchdog"
+      ]
+    ],
+    "backup-driver-scripts": [
+      [
+        "ci.yml",
+        "backup-driver-scripts"
+      ]
+    ],
+    "build": [
+      [
+        "publish-pypi.yml",
+        "build"
+      ]
+    ],
+    "build-and-publish": [
+      [
+        "publish-selfhost.yml",
+        "build-and-publish"
+      ]
+    ],
+    "build-client": [
+      [
+        "publish-pypi.yml",
+        "build-client"
+      ]
+    ],
+    "canary-streak": [
+      [
+        "python-ci.yml",
+        "canary-streak"
+      ]
+    ],
+    "changes": [
+      [
+        "ci.yml",
+        "changes"
+      ],
+      [
+        "python-ci.yml",
+        "changes"
+      ]
+    ],
+    "check": [
+      [
+        "skip-bypass-expiry.yml",
+        "check"
+      ]
+    ],
+    "check-drift": [
+      [
+        "supabase-deploy.yml",
+        "check-drift"
+      ]
+    ],
+    "client-build": [
+      [
+        "ci.yml",
+        "client-build"
+      ]
+    ],
+    "dashboard-e2e": [
+      [
+        "ci.yml",
+        "dashboard-e2e"
+      ]
+    ],
+    "dashboard-js-tests": [
+      [
+        "ci.yml",
+        "dashboard-js-tests"
+      ]
+    ],
+    "dedup-check": [
+      [
+        "post-merge-validation.yml",
+        "dedup-check"
+      ]
+    ],
+    "deploy": [
+      [
+        "deploy-pages.yml",
+        "deploy"
+      ],
+      [
+        "supabase-deploy.yml",
+        "deploy"
+      ]
+    ],
+    "deploy-api": [
+      [
+        "deploy-hosted.yml",
+        "deploy-api"
+      ]
+    ],
+    "deploy-bypass-report": [
+      [
+        "ci.yml",
+        "deploy-bypass-report"
+      ]
+    ],
+    "deploy-dashboard": [
+      [
+        "deploy-pages.yml",
+        "deploy-dashboard"
+      ]
+    ],
+    "deploy-health-gate": [
+      [
+        "ci.yml",
+        "deploy-health-gate"
+      ]
+    ],
+    "docs": [
+      [
+        "ci.yml",
+        "docs"
+      ]
+    ],
+    "drift-check": [
+      [
+        "ci.yml",
+        "drift-check"
+      ]
+    ],
+    "drift-guard": [
+      [
+        "drift-guard.yml",
+        "drift-guard"
+      ]
+    ],
+    "drill": [
+      [
+        "registry-drill-cron.yml",
+        "drill"
+      ],
+      [
+        "registry-restore-drill.yml",
+        "drill"
+      ]
+    ],
+    "drive": [
+      [
+        "registry-backup-cron.yml",
+        "drive"
+      ]
+    ],
+    "entrypoint-guards": [
+      [
+        "ci.yml",
+        "entrypoint-guards"
+      ]
+    ],
+    "evals": [
+      [
+        "evals-on-demand.yml",
+        "evals"
+      ]
+    ],
+    "flip-gate": [
+      [
+        "ci.yml",
+        "flip-gate"
+      ]
+    ],
+    "hosted-e2e": [
+      [
+        "ci.yml",
+        "hosted-e2e"
+      ]
+    ],
+    "legal-e2e": [
+      [
+        "ci.yml",
+        "legal-e2e"
+      ]
+    ],
+    "license-surface": [
+      [
+        "ci.yml",
+        "license-surface"
+      ]
+    ],
+    "lifecycle": [
+      [
+        "blog-write-e2e.yml",
+        "lifecycle"
+      ]
+    ],
+    "lint": [
+      [
+        "post-merge-validation.yml",
+        "lint"
+      ]
+    ],
+    "manifest-integrity": [
+      [
+        "python-ci.yml",
+        "manifest-integrity"
+      ]
+    ],
+    "measure": [
+      [
+        "ci-timing.yml",
+        "measure"
+      ]
+    ],
+    "migration-append-only": [
+      [
+        "ci.yml",
+        "migration-append-only"
+      ]
+    ],
+    "migration-unique-prefix": [
+      [
+        "ci.yml",
+        "migration-unique-prefix"
+      ]
+    ],
+    "monitor": [
+      [
+        "tenant-provision-monitor.yml",
+        "monitor"
+      ]
+    ],
+    "orphan-bound-gate": [
+      [
+        "ci.yml",
+        "orphan-bound-gate"
+      ]
+    ],
+    "packaging-smoke": [
+      [
+        "ci.yml",
+        "packaging-smoke"
+      ],
+      [
+        "deploy-hosted.yml",
+        "packaging-smoke"
+      ],
+      [
+        "publish-selfhost.yml",
+        "packaging-smoke"
+      ]
+    ],
+    "packs-compile": [
+      [
+        "python-ci.yml",
+        "packs-compile"
+      ]
+    ],
+    "post-deploy-verify": [
+      [
+        "deploy-hosted.yml",
+        "post-deploy-verify"
+      ]
+    ],
+    "pricing-artifact": [
+      [
+        "ci.yml",
+        "pricing-artifact"
+      ]
+    ],
+    "probe": [
+      [
+        "availability-watchdog.yml",
+        "probe"
+      ]
+    ],
+    "provenance": [
+      [
+        "finding-provenance.yml",
+        "provenance"
+      ]
+    ],
+    "publish": [
+      [
+        "publish-pypi.yml",
+        "publish"
+      ]
+    ],
+    "publish-client": [
+      [
+        "publish-pypi.yml",
+        "publish-client"
+      ]
+    ],
+    "purge": [
+      [
+        "blog-write-e2e.yml",
+        "purge"
+      ]
+    ],
+    "python-ci-gate": [
+      [
+        "python-ci.yml",
+        "python-ci-gate"
+      ]
+    ],
+    "reconcile": [
+      [
+        "e2e-live-reconcile.yml",
+        "reconcile"
+      ]
+    ],
+    "record": [
+      [
+        "availability-record.yml",
+        "record"
+      ]
+    ],
+    "redis-guard": [
+      [
+        "redis-guard.yml",
+        "redis-guard"
+      ]
+    ],
+    "refresh": [
+      [
+        "ci-timing.yml",
+        "refresh"
+      ]
+    ],
+    "relay": [
+      [
+        "inbound-relay.yml",
+        "relay"
+      ]
+    ],
+    "schema-drill": [
+      [
+        "ci.yml",
+        "schema-drill"
+      ]
+    ],
+    "smoke": [
+      [
+        "publish-selfhost.yml",
+        "smoke"
+      ]
+    ],
+    "surface-guard": [
+      [
+        "python-ci.yml",
+        "surface-guard"
+      ]
+    ],
+    "test (${{ matrix.half }})": [
+      [
+        "python-ci.yml",
+        "test"
+      ]
+    ],
+    "test-carve-out": [
+      [
+        "python-ci.yml",
+        "test-carve-out"
+      ]
+    ],
+    "test-concurrency-falkor": [
+      [
+        "python-ci.yml",
+        "test-concurrency-falkor"
+      ]
+    ],
+    "test-d14-hosted-api": [
+      [
+        "python-ci.yml",
+        "test-d14-hosted-api"
+      ]
+    ],
+    "test-isolation": [
+      [
+        "ci.yml",
+        "test-isolation"
+      ]
+    ],
+    "test-slow (${{ matrix.half }})": [
+      [
+        "python-ci.yml",
+        "test-slow"
+      ]
+    ],
+    "test-track-b": [
+      [
+        "python-ci.yml",
+        "test-track-b"
+      ]
+    ],
+    "uv-lock-check": [
+      [
+        "ci.yml",
+        "uv-lock-check"
+      ]
+    ],
+    "validate": [
+      [
+        "post-merge-validation.yml",
+        "validate"
+      ]
+    ],
+    "verify-blog": [
+      [
+        "deploy-pages.yml",
+        "verify-blog"
+      ]
+    ],
+    "verify-legal": [
+      [
+        "deploy-pages.yml",
+        "verify-legal"
+      ]
+    ],
+    "welcome-e2e": [
+      [
+        "ci.yml",
+        "welcome-e2e"
+      ],
+      [
+        "welcome-e2e-monitor.yml",
+        "welcome-e2e"
+      ]
+    ]
+  },
+  "gate_digest": "72d7ab2c83d4d3deff574a268b206b44dc010474728eacd28e16e994d0160556",
   "live_checked_at": "2026-09-28T05:36:59Z",
   "live_observed_contexts": [
     "docs",
@@ -21,5 +479,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-28T05:36:59Z"
+  "verified_at": "2026-09-28T06:10:18Z"
 }

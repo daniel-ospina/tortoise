@@ -325,7 +325,16 @@ def test_clause_vi_push_only_workflow_does_not_emit(tmp_path: Path) -> None:
 
 
 VALIDATOR_SRC = """\
+import sys
+
 REGISTRIES = ("config/ci-surfaces.yml",)
+
+
+def main() -> int:
+    return 1
+
+
+raise SystemExit(main())
 """
 
 UNION_ATTRS = "config/ci-surfaces.yml merge=union\n"
@@ -341,7 +350,11 @@ def union_tree(
     step = {"name": "Registry integrity", "run": step_run}
     jobs = {"manifest-integrity": {"runs-on": "ubuntu-latest", "steps": [step]}}
     if container_ok:
-        jobs["python-ci-gate"] = {"runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}
+        jobs["python-ci-gate"] = {
+            "runs-on": "ubuntu-latest",
+            "needs": ["manifest-integrity"],
+            "steps": [{"run": "true"}],
+        }
     workflows = default_workflows()
     workflows["python-ci.yml"]["jobs"].update(jobs)
     files = {}
@@ -422,6 +435,11 @@ def test_clause_vii_env_shadowing_is_red(tmp_path: Path) -> None:
     workflows["python-ci.yml"]["jobs"]["manifest-integrity"] = {
         "runs-on": "ubuntu-latest",
         "steps": [step],
+    }
+    workflows["python-ci.yml"]["jobs"]["python-ci-gate"] = {
+        "runs-on": "ubuntu-latest",
+        "needs": ["manifest-integrity"],
+        "steps": [{"run": "true"}],
     }
     root = make_tree(
         tmp_path,
@@ -731,3 +749,186 @@ def test_static_is_hermetic_head_only(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(mcg.subprocess, "run", boom)
     assert mcg.run_static(root)[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Review-cycle regressions — the defects a fresh-context review found
+# ---------------------------------------------------------------------------
+
+
+def test_clause_i_negated_check_success_is_red(tmp_path: Path) -> None:
+    """P0: `-check-success=python-ci-gate` requires the OPPOSITE of the invariant.
+
+    Mergify's grammar is `[ "-" ] <attribute> ...`; stripping the `-` made an
+    inverted merge gate say "python-ci-gate gates every merge".
+    """
+    config = merge_config(rule={"merge_conditions": ["-check-success=python-ci-gate"]})
+    root = make_tree(tmp_path, config)
+    assert clause(root, "i") == 1
+
+
+def test_clause_iii_negated_check_success_is_red(tmp_path: Path) -> None:
+    entry = [f"check-success={c}" for c in CHEAP_FIVE if c != "docs"]
+    config = merge_config(rule={"queue_conditions": ["base=main", "-draft", "-check-success=docs", *entry]})
+    root = make_tree(tmp_path, config)
+    assert clause(root, "iii") == 1
+
+
+def test_clause_iv_shrunk_record_is_red(tmp_path: Path) -> None:
+    """P1: the record's required set must agree with the config's check set."""
+    config = merge_config(rule={"queue_conditions": ["base=main", "-draft"]})
+    root = make_tree(tmp_path, config, record_overrides={"required_contexts": ["python-ci-gate"]})
+    assert clause(root, "iv") == 1
+
+
+def test_clause_iv_cheap_set_cannot_be_empty(tmp_path: Path) -> None:
+    config = merge_config(rule={"merge_conditions": [], "queue_conditions": ["base=main", "-draft"]})
+    root = make_tree(tmp_path, config, record_overrides={"required_contexts": ["python-ci-gate"]})
+    assert clause(root, "iv") == 1
+
+
+def test_clause_vii_validator_outside_required_needs_is_red(tmp_path: Path) -> None:
+    """§7: the validator must run in a job `python-ci-gate` reaches via `needs`."""
+    workflows = default_workflows()
+    workflows["python-ci.yml"]["jobs"]["stray"] = {
+        "runs-on": "ubuntu-latest",
+        "steps": [{"run": "python3 tools/registry_integrity.py"}],
+    }
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        workflows=workflows,
+        attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_job_continue_on_error_is_red(tmp_path: Path) -> None:
+    step = {"name": "Registry integrity", "run": "python3 tools/registry_integrity.py"}
+    workflows = default_workflows()
+    workflows["python-ci.yml"]["jobs"]["manifest-integrity"] = {
+        "runs-on": "ubuntu-latest",
+        "continue-on-error": True,
+        "steps": [step],
+    }
+    workflows["python-ci.yml"]["jobs"]["python-ci-gate"] = {
+        "runs-on": "ubuntu-latest",
+        "needs": ["manifest-integrity"],
+        "steps": [{"run": "true"}],
+    }
+    root = make_tree(
+        tmp_path, merge_config(), workflows=workflows, attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_step_if_push_is_red(tmp_path: Path) -> None:
+    step = {
+        "name": "Registry integrity",
+        "run": "python3 tools/registry_integrity.py",
+        "if": "github.event_name == 'push'",
+    }
+    workflows = default_workflows()
+    workflows["python-ci.yml"]["jobs"]["manifest-integrity"] = {
+        "runs-on": "ubuntu-latest",
+        "steps": [step],
+    }
+    workflows["python-ci.yml"]["jobs"]["python-ci-gate"] = {
+        "runs-on": "ubuntu-latest",
+        "needs": ["manifest-integrity"],
+        "steps": [{"run": "true"}],
+    }
+    root = make_tree(
+        tmp_path, merge_config(), workflows=workflows, attrs=UNION_ATTRS,
+        files={"tools/registry_integrity.py": VALIDATOR_SRC},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_paths_not_covering_the_union_is_red(tmp_path: Path) -> None:
+    root, _ = union_tree(tmp_path, "python3 tools/registry_integrity.py --paths README.md")
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_naming_only_without_a_failing_statement_is_red(tmp_path: Path) -> None:
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        validator_src='REGISTRIES = ("config/ci-surfaces.yml",)\n',
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_viii_a_future_verified_at_is_red(tmp_path: Path) -> None:
+    root = make_tree(
+        tmp_path, merge_config(), record_overrides={"verified_at": "2099-01-01T00:00:00Z"}
+    )
+    assert clause(root, "viii_a") == 1
+
+
+def test_clause_viii_a_second_queue_rule_is_red(tmp_path: Path) -> None:
+    """The plan's named fixture: a second `queue_rule` => 1."""
+    root = make_tree(tmp_path, merge_config())
+    config = merge_config()
+    first = config["queue_rules"][0]
+    config["queue_rules"] = [first, dict(first, name="other")]
+    _write(root / ".mergify.yml", _dump(config))
+    assert clause(root, "viii_a") == 1
+
+
+def test_clause_viii_a_allow_queue_branch_edit_changes_digest(tmp_path: Path) -> None:
+    root = make_tree(tmp_path, merge_config())
+    before = mcg.gate_digest(root)
+    _write(root / ".mergify.yml", _dump(merge_config(rule={"allow_queue_branch_edit": True})))
+    assert mcg.gate_digest(root) != before
+    assert clause(root, "viii_a") == 1
+
+
+def test_clause_viii_b_absent_settings_with_consistent_flag_exits_2(tmp_path: Path) -> None:
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        settings=None,
+        record_overrides={"settings_home_consistent": True},
+    )
+    assert mcg.run_static(root)[0] == 2
+
+
+def test_settings_reader_basename_collision_is_not_exempt(tmp_path: Path) -> None:
+    """Exemption is by exact repo-relative path, never by basename."""
+    root = make_tree(tmp_path, merge_config())
+    _write(root / "tests" / "e2e" / "test_mergify_config_guard.py", "# reads .github/settings.yml\n")
+    assert clause(root, "viii_b") == 1
+
+
+def test_static_unexpected_error_exits_2(tmp_path: Path) -> None:
+    """A malformed record must be UNAVAILABLE (2), never a traceback with exit 1."""
+    root = make_tree(
+        tmp_path, merge_config(), record_overrides={"required_contexts": ["python-ci-gate", 5]}
+    )
+    assert mcg.run_static(root)[0] == 2
+
+
+def test_live_lhs_uses_only_positive_check_success(tmp_path: Path) -> None:
+    """I1's LHS is `check-success` only — a `check-pending` name is not a gate."""
+    config = merge_config(
+        rule={
+            "queue_conditions": [
+                "base=main",
+                "-draft",
+                "check-pending=extra",
+                *[f"check-success={c}" for c in CHEAP_FIVE],
+            ]
+        }
+    )
+    root = make_tree(tmp_path, config)
+    code, lines = mcg.run_live(
+        root,
+        root / mcg.RECORD_REL,
+        slug="o/r",
+        fetch=lambda _: {"required_status_checks": {"contexts": SIX}},
+        write=False,
+    )
+    assert code == 0, lines
