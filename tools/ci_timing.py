@@ -19,8 +19,11 @@ Task 4b it is also the SOLE WRITER of `config/ci-surfaces.yml:durations` — the
 weights `ci_selection.split_fast_gate` packs the push halves by — so a stale or
 wrong weight can red `python-ci-gate` with zero test failures (#3395). The gate
 is still `ci_selection.py --integrity`; this tool only writes the map it reads.
-Stdlib only (Python 3.12). Deterministic output (sorted, stable JSON) so the
-refresh job's no-diff check works.
+Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYAML
+(the manifest-side checks load the refreshed text through `yaml.safe_load`) —
+`ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
+does. Deterministic output (sorted, stable JSON) so the refresh job's no-diff
+check works.
 """
 from __future__ import annotations
 
@@ -211,9 +214,9 @@ def parse_log(path: Path) -> dict:
 # collector's measurements into it: the map was a one-off 2026-09-22 sweep.
 # `--refresh-durations` is now the ONLY path that may emit into that key. It is
 # text-preserving (line edits, never a whole-file `yaml.safe_dump` —
-# `ci_selection.register_tests` set exactly that discipline at `:1024`/`:1063`,
-# and a safe_dump would strip the hand-curated sweep-basis comment header), and
-# it is FAIL-CLOSED:
+# `ci_selection.register_tests` set exactly that discipline at its two
+# `manifest_path.write_text` sites, and a safe_dump would strip the
+# hand-curated sweep-basis comment header), and it is FAIL-CLOSED:
 #
 #   * a collector key not already classified in the manifest is refused (exit
 #     2) — the bridge never invents a key, so a new test file is registered
@@ -363,10 +366,15 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
 
 
 def validate_refreshed_manifest(manifest_text: str) -> list[str]:
-    """The manifest-side gate (`--integrity`'s own checks) over the NEW text.
+    """The DURATION subset of `--integrity`'s checks over the NEW text.
 
-    This is where the 0.90 coverage floor lives — on the RESULTING manifest,
-    not on the partial collector projection.
+    Runs `cs.duration_issues` + `cs.duration_coverage_issues` — this is where
+    the 0.90 coverage floor lives, on the RESULTING manifest rather than on the
+    partial collector projection. `--integrity` additionally runs `integrity`,
+    `slow_file_issues`, `leg_coverage_issues`, `workflow_matrix_issues` and
+    `workflow_halves_issues`; the halves-balance recomputation is NOT run here,
+    so a refresh that would unbalance the pack is caught one step later by the
+    refresh PR's `manifest-integrity` job, not by this pre-write gate.
     """
     import yaml
 
