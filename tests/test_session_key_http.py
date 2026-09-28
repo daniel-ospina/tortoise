@@ -290,6 +290,69 @@ class TestRecoveryMint:
         assert by_id["other-new"] is None       # newest other survives
         assert _count_active_keys(reg, "team-a") == 2  # revoke + mint = 2
 
+    def test_lost_revoke_claim_never_resurrects_a_concurrently_revoked_victim(
+            self, client, reg, monkeypatch):
+        """#1879 P2: the registry lane's at-cap revoke is a CLAIM and the
+        compensation is gated on it.
+
+        Reachable interleave: a non-lock-holding writer (rotate's claim-revoke)
+        revokes the SAME oldest-other victim between our SELECT and our SET, and
+        a concurrent ADD consumes the freed slot so the fail-closed re-check
+        still reads cap. Under the pre-fix UNCONDITIONAL revoke, our SET
+        OVERWRITES the other writer's timestamp with `$now`; the compensation
+        CAS (`WHERE k.revoked_at = $now`) then matches and sets NULL — UNDOING
+        their deliberate revoke. With the claim the WHERE matches nothing,
+        `claimed_revoke` is False, and no compensation runs.
+        """
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        # free tier max_api_keys == 2 — two OTHER live keys fill the cap.
+        _seed_api_key(reg, tid, "other-old", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, tid, "other-new", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(1))
+        assert _count_active_keys(reg, tid) == 2
+
+        other_now = "2026-08-01T00:00:00+00:00"
+        injected = {"done": False}
+        # The production mint builds its OWN registry handle, so patching the
+        # test's instance would not be seen — patch the shared graph CLASS
+        # (both handles are instances of it). The spy injects only on the
+        # revoke of `other-old`, so every other query passes through untouched.
+        graph_cls = type(reg)
+        orig_query = graph_cls.query
+
+        def _spy(self, cypher, params=None, **kwargs):
+            p = params or {}
+            if (not injected["done"] and "SET k.revoked_at" in cypher
+                    and p.get("id") == "other-old"):
+                injected["done"] = True
+                # the concurrent writer's revoke lands FIRST, with ITS stamp…
+                orig_query(self,
+                           "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $r",
+                           params={"id": "other-old", "r": other_now})
+                # …and a concurrent ADD consumes the slot it freed, so our
+                # fail-closed re-check still sees the org at cap.
+                _seed_api_key(reg, tid, "concurrent-add", created_by=_U2,
+                              created_via="recovery", created_at=_hours_ago(0.5))
+            return (orig_query(self, cypher, params=params, **kwargs)
+                    if params is not None else orig_query(self, cypher, **kwargs))
+
+        monkeypatch.setattr(graph_cls, "query", _spy)
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 402, r.text
+
+        assert injected["done"], "the spy never saw the at-cap revoke"
+        rows = orig_query(
+            reg,
+            "MATCH (k:APIKey {id:'other-old'}) RETURN k.revoked_at",
+        ).result_set
+        assert rows[0][0] is not None, (
+            "the revoke compensation RESURRECTED a row another writer "
+            "deliberately revoked — a lost claim wrote nothing, so there is "
+            "nothing to restore")
+
     def test_at_cap_keeps_own_keys_and_402s_when_nothing_else_to_revoke(
             self, client, reg):
         """#750.10 + #1828 fail-closed: recovery never dead-ends by killing
