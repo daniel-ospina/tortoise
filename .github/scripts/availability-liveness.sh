@@ -184,6 +184,11 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
       mm="${off##*:}"
       hh="$(printf '%s' "$hh" | sed 's/^0*//')"; [ -n "$hh" ] || hh=0
       mm="$(printf '%s' "$mm" | sed 's/^0*//')"; [ -n "$mm" ] || mm=0
+      # RFC 3339 bounds. Without these, `+99:99` / `+05:60` resolve to a
+      # plausible-but-wrong epoch, which is the class this function refuses to
+      # emit — fail closed instead.
+      [ "$hh" -le 14 ] 2>/dev/null || { printf ''; return 0; }
+      [ "$mm" -le 59 ] 2>/dev/null || { printf ''; return 0; }
       off=$(( hh * 3600 + mm * 60 ))
       [ "$sign" = "-" ] && off=$(( 0 - off ))
       iso="$tail" ;;
@@ -202,6 +207,11 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
   case "$iso" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) : ;;
     *.*)
+      # A SECOND dot means `${iso%%.*}` / `${iso##*.}` would silently discard the
+      # segment between the first and the last — `…:01.000.5Z` would return a
+      # plausible epoch instead of "". Refuse it up front; checking `dt` for a
+      # dot is too late, the middle is already gone by then.
+      case "${iso#*.}" in *.*) printf ''; return 0 ;; esac
       frac="${iso##*.}"; dt="${iso%%.*}"
       case "$dt" in
         [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) : ;;
@@ -214,6 +224,14 @@ iso_to_epoch() { # <iso|epoch:n> -> epoch or ""
 
   # GNU date first (the production runner), BSD second (the harness). The `Z`
   # makes GNU's reading explicitly UTC, matching BSD's `-u`.
+  #
+  # ⚠️ SCOPE: this validates the SHAPE and the offset RANGE. It does NOT validate
+  # calendar or clock FIELD ranges — `…T03:15:60Z` normalises to +1 min and
+  # `2026-02-30T…` to Mar 2, because `date` normalises rather than refusing. That
+  # is pre-existing (unchanged here) and unreachable from both call sites: the
+  # Actions API emits real instants, and `heartbeat_at` is machine-written by
+  # fmt_iso. Refusing invalid calendar days in shell would need leap-year and
+  # month-length logic — not worth it for an input no producer can emit.
   e="$(date -u -d "${iso}Z" +%s 2>/dev/null || true)"
   if [ -z "$e" ]; then
     e="$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "$iso" +%s 2>/dev/null || true)"

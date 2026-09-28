@@ -93,6 +93,14 @@ ok()  { PASS=$((PASS + 1)); echo "  ✅ $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "  ❌ $1"; }
 assert_eq() { if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi; }
 assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3 (missing '$2')" ;; esac; }
+
+# Ask the PARSER itself, not the checker's exit code. iso_to_epoch's contract is
+# "a plausible epoch or ''", and a WRONG epoch also drives the checker to STALE —
+# so an exit-code assertion cannot tell "refused" from "parsed to a wrong value".
+# This seam observes the returned value directly (the script is source-guarded).
+iso_epoch() { # <value> -> iso_to_epoch's raw return
+  LIVENESS_LIB_ONLY=1 "$BASH_BIN" -c '. "$1"; iso_to_epoch "$2"' _ "$CHECKER" "$1"
+}
 assert_not_contains() { case "$1" in *"$2"*) bad "$3 (unexpectedly found '$2')" ;; *) ok "$3" ;; esac; }
 
 FIX="$(mktemp -d)"
@@ -789,6 +797,29 @@ for bad in "2026-09-13T03:15:01.000+05:00garbage" "2026-09-13T03:15:01.000garbag
   run_checker
   assert_eq "$RC" "1" "50: '$bad' → STALE (a trailing token is refused, not trimmed)"
 done
+# 51. PARSER-LEVEL table. An exit-code assertion cannot distinguish "refused" from
+# "parsed to a wrong epoch" — both end in STALE — so these assert the RETURNED
+# value. Every refused shape must be "" (a wrong-but-plausible epoch is the one
+# outcome this function exists to avoid), and every valid shape must be the exact
+# instant. (Cases 50's offset arms were vacuous for exactly this reason.)
+assert_eq "$(iso_epoch "2026-09-13T03:15:01Z")" "$LIVENESS_T" "51: a plain Z instant parses"
+assert_eq "$(iso_epoch "2026-09-12T22:15:01.000-05:00")" "$LIVENESS_T" "51: the API's real shape parses to the same instant"
+assert_eq "$(iso_epoch "2026-09-13T08:45:01+05:30")" "$LIVENESS_T" "51: a +05:30 offset is applied"
+assert_eq "$(iso_epoch "2026-09-13T03:15:01+14:00")" "1789218901" "51: +14:00 is the inclusive boundary and parses"
+assert_eq "$(iso_epoch "2026-09-12T13:15:01-14:00")" "1789269301" "51: -14:00 is the inclusive boundary and parses"
+assert_eq "$(iso_epoch "2026-09-13T03:20:01+00:05")" "$LIVENESS_T" "51: a small positive offset is applied"
+assert_eq "$(iso_epoch "epoch:12345")" "12345" "51: epoch:<n> still passes through"
+assert_eq "$(iso_epoch "epoch:1234567890123")" "" "51: an over-long epoch run is refused"
+
+for bad in "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
+           "2026-09-13T03:15:01+99:99" "2026-09-13T03:15:01+05:60" \
+           "2026-09-13T03:15:01+15:00" "2026-09-12T03:15:01-15:00" \
+           "2026-09-13T03:15:01.000+05:00garbage" "2026-09-13T03:15:01.000garbage" \
+           "2026-09-13T03:15:01.5.Z" "2026-09-13T03:15:01+banana" "2026-09-13 03:15:01" \
+           "2026-09-13T03:15:01+5:00" "2026-09-13T03:15:01Z0" "epoch:1.5" "epoch:" "not-a-date"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (not a plausible epoch)"
+done
+
 # …while a plain fractional part with an offset still parses (the real shape).
 reset_case
 export LIVENESS_NOW_EPOCH="$((LIVENESS_T + 1800))"
