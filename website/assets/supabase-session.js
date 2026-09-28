@@ -153,6 +153,87 @@
     },
   };
 
+  // #3951: confirm the cookie ACTUALLY carries this session after a write. The
+  // size guard may TRANSFORM the value (strip provider tokens / identities /
+  // metadata bloat) while still writing it, so byte-equality against the legacy
+  // string asks the wrong question: it is false for every large session, and the
+  // old early return read that as "nothing was stored". What matters is that the
+  // cookie now durably holds a CONSUMABLE session carrying THIS session's
+  // credential — the two fields the size guard preserves. The changed-cookie
+  // check in `writeLegacyToCookie` is the decisive guard that a dropped write is
+  // not a landing; this identity comparison is the corroborating half — it
+  // rejects a changed value that is not ours (a concurrent writer), a case the
+  // single-threaded test harness cannot stage, so no test exercises it directly.
+  var writeLanded = function (legacySession) {
+    try {
+      var raw = readCookie(COOKIE_NAME);
+      if (!raw) return false;
+      var stored = JSON.parse(raw);
+      return isConsumableSession(stored) &&
+        stored.access_token === legacySession.access_token &&
+        stored.refresh_token === legacySession.refresh_token;
+    } catch (e) { return false; }
+  };
+
+  // #3951: a legacy copy is retained ONLY when its write was refused — the
+  // session then has nowhere else to live, and destroying it would strand the
+  // visitor (#3503). The stale provider tokens are the secret the hygiene step
+  // exists to remove and no post-migration path reads them, so they are stripped
+  // from the retained copy in place; the access/refresh credential survives, so
+  // the state is recoverable rather than stranded. The raw string is left
+  // byte-identical when there is nothing to strip.
+  var scrubLegacySecrets = function (legacyKey, raw) {
+    try {
+      // Compare-and-set (#3951 review): localStorage is shared across tabs, and
+      // this migration already assumes a stale cached tab can write a NEWER
+      // legacy session (that is why the "cookie present + newer legacy" branch
+      // exists). Act only on the value actually inspected — writing the scrubbed
+      // SNAPSHOT back over a concurrent tab's newer session would destroy the
+      // only copy of that credential (#3503). A value we did not read is left
+      // alone; it is scrubbed by its own migration attempt.
+      if (window.localStorage.getItem(legacyKey) !== raw) return;
+      var obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return;
+      var changed = false;
+      if (Object.prototype.hasOwnProperty.call(obj, 'provider_token')) {
+        delete obj.provider_token;
+        changed = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(obj, 'provider_refresh_token')) {
+        delete obj.provider_refresh_token;
+        changed = true;
+      }
+      if (!changed) return;
+      window.localStorage.setItem(legacyKey, JSON.stringify(obj));
+    } catch (e) { /* ignore */ }
+  };
+
+  // #3951: perform the legacy→cookie migration write and report whether the
+  // cookie now durably holds THIS session. The write counts as landed only when
+  // the cookie CHANGED — a browser enforcing a smaller per-cookie cap than the
+  // code's derived limit drops an issued write and leaves the PRE-EXISTING value
+  // in place, and that value can share this session's tokens while being
+  // expired, so treating it as a landing would destroy the only gate-usable copy
+  // (#3503) — and `writeLanded` confirms the changed value carries this
+  // session's credential rather than a concurrent writer's. Every non-landed
+  // outcome keeps the legacy key (it is then the only copy of the credential)
+  // and scrubs its stale provider tokens — the scrub is ATTEMPTED on every
+  // non-landed outcome, so a provider token is not left readable by this path (a
+  // localStorage rewrite that itself fails — quota, private-mode storage limits
+  // — cannot be helped, and deleting the sole credential instead is exactly what
+  // #3503 forbids).
+  var writeLegacyToCookie = function (legacyKey, legacy, legacySession) {
+    var before = readCookie(COOKIE_NAME);
+    try {
+      supabaseStorage.setItem(COOKIE_NAME, legacy);
+    } catch (e) {
+      /* the write threw — nothing was stored; the unchanged cookie below decides */
+    }
+    if (readCookie(COOKIE_NAME) !== before && writeLanded(legacySession)) return true;
+    scrubLegacySecrets(legacyKey, legacy);
+    return false;
+  };
+
   // ── Legacy localStorage migration (#1225) ─────────────────────────────────
   // supabase-js derives its DEFAULT storage key from the Supabase URL hostname:
   //   'sb-' + new URL(supabaseUrl).hostname.split('.')[0] + '-auth-token'
@@ -169,8 +250,10 @@
       if (!legacy) return;
       var alreadyShared = readCookie(COOKIE_NAME);
       // #3485 review: the shared cookie may only ever receive a real session,
-      // and every write is confirmed (readCookie equality) before the legacy
-      // key is dropped — the same discipline as migrateLegacyKeysToCookie.
+      // and every write is confirmed by writeLegacyToCookie — the cookie CHANGED
+      // and the new value carries this session's access_token/refresh_token —
+      // before the legacy key is dropped. The same discipline governs
+      // migrateLegacyKeysToCookie.
       var legacyOk = false, legacyExp = 0, cookieOk = false, cookieExp = 0;
       try {
         var lo = JSON.parse(legacy);
@@ -189,11 +272,13 @@
       // legacy key is dropped. Do not reinstate a host-only guard here — it
       // bounces preview users who are signed in and protects nothing.
       if (!alreadyShared) {
-        // Copy + confirm write before clearing (never destroy the only copy).
-        // readCookie returns the DECODED value; equality holds unless the size
-        // guard stripped provider tokens — in that case keep the legacy copy.
-        supabaseStorage.setItem(COOKIE_NAME, legacy);
-        if (readCookie(COOKIE_NAME) !== legacy) return;
+        // #3951: the write must LAND (see writeLegacyToCookie), not merely
+        // round-trip byte-identically — the size guard makes the stored value a
+        // different string for every large session. A lossy-but-landed write is
+        // a landed write; the legacy copy is then the stale-secret copy and must
+        // go. Only a REFUSED write leaves the legacy copy as the sole credential
+        // (#3503), so it stays — with its stale provider tokens scrubbed.
+        if (!writeLegacyToCookie(legacyKey, legacy, lo)) return;
       } else {
         // Both cookie and legacy exist (review P3-3): a stale cached tab may
         // hold a NEWER legacy session than the cookie — compare expires_at and
@@ -208,8 +293,7 @@
         // reads. When the cookie is unusable the legacy session is the only
         // candidate, so it is carried over regardless of freshness.
         if (!cookieOk || (legacyExp * 1000 > Date.now() && legacyExp > cookieExp)) {
-          supabaseStorage.setItem(COOKIE_NAME, legacy);
-          if (readCookie(COOKIE_NAME) !== legacy) return;
+          if (!writeLegacyToCookie(legacyKey, legacy, lo)) return;
         }
       }
       // Stale-secret hygiene: the new client never reads the legacy key; drop
@@ -296,10 +380,11 @@
       // written AND read on the SAME host — `website/functions/` deploys with the
       // `premise-labs` Pages project, so a *.pages.dev preview runs the same gate
       // and reads this very cookie — and the write below is CONFIRMED by
-      // readCookie equality, so a host-only cookie is a faithful copy rather than
-      // a lost one. Declining to migrate here would instead bounce a preview user
-      // who had been signed in and working, while leaving behind a localStorage
-      // key that no current path reads.
+      // writeLegacyToCookie (the cookie changed and it carries this session's
+      // tokens), so a host-only cookie is a faithful copy rather than a lost one.
+      // Declining to migrate here would instead bounce a
+      // preview user who had been signed in and working, while leaving behind a
+      // localStorage key that no current path reads.
       var existing = readCookie(COOKIE_NAME);
       // #3485 review P3: parse the legacy value ONCE and require a real session
       // shape (a non-empty access_token AND refresh_token — isConsumableSession)
@@ -320,17 +405,20 @@
           try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) { /* ignore */ }
           continue;
         }
-        // Copy + confirm the write BEFORE clearing the only copy. readCookie
-        // returns the DECODED value; equality fails when the size guard
-        // stripped provider tokens — then keep the legacy copy.
-        supabaseStorage.setItem(COOKIE_NAME, legacy);
-        if (readCookie(COOKIE_NAME) !== legacy) continue;
+        // Copy + confirm the write BEFORE clearing the only copy. #3951: the
+        // confirmation is whether the write LANDED (see writeLegacyToCookie),
+        // not byte-equality — the size guard makes the stored value a different
+        // string for every large session, and equality would then skip the drop
+        // and leave the untransformed copy (with its provider tokens) behind. A
+        // REFUSED write keeps the copy (the sole credential, #3503) but scrubs
+        // its stale provider tokens.
+        if (!writeLegacyToCookie(LEGACY_KEYS[i], legacy, lo)) continue;
       } else {
         // Both present (review P3-3): a stale cached tab may hold a NEWER
         // legacy session — compare expires_at and keep the newer one before
-        // clearing the legacy key. #3485 review P2: the write is CONFIRMED
-        // (readCookie equality) before the legacy copy is dropped, and a
-        // legacy value that is not a session never overwrites the cookie.
+        // clearing the legacy key. #3485 review P2: the write is CONFIRMED by
+        // writeLegacyToCookie before the legacy copy is dropped, and a legacy
+        // value that is not a session never overwrites the cookie.
         var cookieExp = 0, cookieOk = false;
         try {
           var co = JSON.parse(existing);
@@ -345,8 +433,7 @@
         // cycle 4).
         if (legacyOk && (!cookieOk ||
             (legacyExp * 1000 > Date.now() && legacyExp > cookieExp))) {
-          supabaseStorage.setItem(COOKIE_NAME, legacy);
-          if (readCookie(COOKIE_NAME) !== legacy) continue;
+          if (!writeLegacyToCookie(LEGACY_KEYS[i], legacy, lo)) continue;
         }
       }
       // The new client never reads the legacy key — drop it once it is shared.

@@ -1,0 +1,18 @@
+{
+  "_note": "A COMMITTED record of the rail's surface token sets, read from agent-infra scripts/admin-merge.sh (the authority for the evaluated-tree surface). The instrument's constants are pinned against THIS file by test_surface_token_sets_match_the_committed_rail_record, which always runs. When the rail is resolvable on the host, test_rail_surface_token_sets_match additionally asserts this record still matches the live rail; that half FAILS (rather than skipping a set) if any declared set is no longer found in the rail, so an unparsable or renamed arm cannot silently retire the pin. A set may only change together with the rail change AND this record, in one commit.",
+  "_source": "scripts/admin-merge.sh (symlinked from $AGENT_INFRA_PATH/scripts/admin-merge.sh)",
+  "_read_at_rail_lines": {
+    "NON_RED_CONC": 1762,
+    "NON_RED_STATE": 1763,
+    "MEASURING_CONC": 1780,
+    "MEASURING_STATE": 1781,
+    "IN_FLIGHT_STATUS": 1904,
+    "NON_CODE_EVENTS": "2075 (a `case` arm — `schedule|issues|issue_comment) noncode=1` — not a set assignment, so the live half parses the arm rather than a `NAME = {...}` line)"
+  },
+  "NON_RED_CONC": ["cancelled", "neutral", "skipped", "stale", "success"],
+  "NON_RED_STATE": ["success"],
+  "MEASURING_CONC": ["action_required", "failure", "success", "timed_out"],
+  "MEASURING_STATE": ["error", "failure", "success"],
+  "IN_FLIGHT_STATUS": ["in_progress", "pending", "queued", "requested", "waiting"],
+  "NON_CODE_EVENTS": ["issue_comment", "issues", "schedule"]
+}
