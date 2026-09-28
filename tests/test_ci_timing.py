@@ -743,14 +743,38 @@ def test_refresh_durations_preserves_unknown_top_level_keys(tmp_path: Path) -> N
 
 
 def test_refresh_durations_on_the_real_manifest_of_record() -> None:
-    """The committed 688-entry map is refreshed without corruption: comments
-    survive, a sampled value changes, and the manifest gate stays green."""
+    """The committed durations map is refreshed without corruption: comments
+    survive, a sampled value changes, and the manifest gate stays green.
+
+    The map's SIZE is data, not a constant. Pinning it absolutely (688) went
+    stale the moment the map gained an entry — measured at `HEAD` it is **689**,
+    so this test was red against its own manifest before this fix, and it would
+    red the next unrelated lane to register a test file too. Deriving the count
+    from the SAME parser the refresh uses removes the way it can rot, and the
+    output key-set assertion below is what actually pins the drop/invent
+    property (the count assertions alone cannot — see the comments there).
+    """
     manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
     before = manifest_path.read_text()
+    _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
     new_text, stats = ci_timing.render_refreshed_manifest(
         before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
-    assert stats["manifest_keys"] == 688
-    assert stats["carried_forward"] == 687
+    # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
+    # parse (`before`), so on their own they cannot fail when the refresh drops
+    # an entry from the OUTPUT — asserting only these two is a tautology. They
+    # are kept because they still state the transform's contract (one weight in,
+    # one entry resolved, the rest carried forward), but the DROP/INVENT property
+    # has to be asserted on the RESULT:
+    assert stats["manifest_keys"] == len(entries_before)
+    assert stats["carried_forward"] == len(entries_before) - 1
+    # THE assertion that can fail on a refresh that loses data. Mutation proof
+    # (#6155 review): a post-parse `lines.pop(...)` inside
+    # `render_refreshed_manifest`, which drops an entry from `new_text` while
+    # `stats` still reports the input count, passes every other line in this
+    # test — and on the real ~690-entry map the 90% coverage floor cannot see a
+    # single drop (0.14%). Key-set identity can.
+    _, entries_after = ci_timing._locate_durations_block(new_text.split("\n"))
+    assert set(entries_after) == set(entries_before)
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
