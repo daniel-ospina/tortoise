@@ -37,7 +37,7 @@ live on `api.premiselabs.co`) — requests its access token with the **Implicit*
   accept it) with **no grandfathering**, and §6.3.2.1 requires PKCE; §1/§7.1 do not exclude this
   surface (two verifiers could not falsify this ruling);
 - the flow **already initiates and completes on one origin** (in `_CONSENT_HTML`, the pre-fix form read
-  `redirectTo = window.location.origin + AUTHORIZE_PATH + window.location.search`; it is landed as
+  `redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search`; it is landed as
   `redirectTo: authorizeReturnTo()`, which returns that same origin+path with the transient params
   stripped), so the #1566
   constraint ("a PKCE verifier is origin-scoped and cannot cross subdomains") is **not violated by a
