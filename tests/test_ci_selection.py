@@ -2693,6 +2693,45 @@ def test_tortoise_oauth_change_selects_api_and_core():
     assert "test_control_plane_offload_3498.py" in selected, "api+core pinner must run"
 
 
+def test_vendored_bundle_change_selects_api_and_runs_the_version_pin():
+    # #3496: the consent page pins its browser auth client to a CDN specifier
+    # whose version must equal the VENDORED bundle the behavioural harness
+    # EXECUTES. `website/` is in NON_PYTHON_PREFIXES, so before this entry a
+    # vendor-only bump matched no pattern and fell through to tier-1 smoke: the
+    # version pin (test_oauth_consent_pkce.py::
+    # test_page_specifier_matches_the_vendored_bundle_version) and the harness
+    # that executes the very file being bumped would never run on the PR that
+    # can break them — the #1349/#3332/#4171 silent-drop class.
+    #
+    # Asserted on the SURFACE, not only on the test-file list: the two derived
+    # ratchets (test_every_source_pattern_is_selectable,
+    # test_source_patterns_all_name_something_real) accept ANY non-empty
+    # surface, so re-pointing this entry at another surface list (e.g.
+    # `onboarding`) keeps them green while the api-registered pin silently
+    # stops running. Same hole `test_tortoise_oauth_change_selects_api_and_core`
+    # closes for tortoise/oauth.py, and the reason it asserts the surface too.
+    #
+    # The filename is DERIVED from the vendor dir, not written down: the pin is
+    # bumped in place, and a hardcoded version would red on every legitimate
+    # bump while pinning nothing about the wiring this test is for.
+    vendor = REPO / "website" / "apps" / "dashboard" / "public" / "vendor"
+    bundle = sorted(vendor.glob("supabase-*.min.js"))
+    assert bundle, f"no vendored bundle under {vendor} — the page executes it"
+    changed = str(bundle[0].relative_to(REPO))
+
+    r = _sel([changed])
+    assert r["surfaces"] == ["api"], (
+        f"a vendored-bundle bump ({changed}) must select `api` — that is the "
+        "surface the version pin and the harness that executes the bundle are "
+        f"registered on; got {r['surfaces']}"
+    )
+    assert r["full"] is False
+    assert "test_oauth_consent_pkce.py" in r["test_files"], (
+        "the behavioural harness that EXECUTES the bumped bundle must run on "
+        f"the bump; selected {sorted(r['test_files'])}"
+    )
+
+
 def test_surface_audit_skips_removal_for_unmapped_surfaces(tmp_path):
     # classify/core have no SOURCE_PATTERNS entry: "pins nothing from it" is
     # undefined, so the audit must not propose emptying classify

@@ -610,9 +610,23 @@ def test_inv13_the_write_lands_only_after_a_probe_cycle() -> None:
     assert both_silent["auxVerifierKeys"] == [], both_silent
 
 
+def _cookie_value(header: str) -> str:
+    """Decode the VALUE out of one raw `document.cookie` assignment.
+
+    `cookieWrites[].header` is the full assignment string
+    (`name=<encoded-value>; Path=/; ...`), so the value is the first
+    `;`-segment after the first `=`. `unquote`, NOT `unquote_plus`: the page's
+    `encodeURIComponent` renders a space as `%20` and never as `+`.
+    """
+    _, _, value = header.split(";", 1)[0].partition("=")
+    return urllib.parse.unquote(value)
+
+
 def test_inv7_item6_write_path_parity() -> None:
     """Invariant 7: ≤SIZE_GUARD is written byte-identically; over SIZE_GUARD is
-    stripped; over SIZE_CAP is refused (no write) AND reported on the page."""
+    stripped — provider tokens dropped AND the non-essential-claim narrowing
+    (`user.identities` / `user_metadata`) applied; over SIZE_CAP is refused (no
+    write) AND reported on the page."""
     r = _run("item6")
     assert r["smallWritten"] is True, r
     assert r["strippedWrites"] >= 1, (
@@ -621,6 +635,40 @@ def test_inv7_item6_write_path_parity() -> None:
     assert r["strippedHasToken"] is False, (
         f"the size guard did not strip provider tokens: {r}"
     )
+
+    # Non-vacuity for the `if (obj.user)` narrowing (#3496 item 6): the payload
+    # above carries a `user` object, so a dropped or misspelled branch is
+    # OBSERVABLE here. Without it the provider-token deletes alone clear
+    # SIZE_GUARD, and every assertion below stayed green on a page whose whole
+    # identities/user_metadata narrowing block had been deleted — the real
+    # GitHub-session case (#1835), the reason the block exists.
+    sessions = []
+    for header in r["strippedHeaders"]:
+        value = _cookie_value(header)
+        if not value:
+            continue
+        try:
+            sessions.append(json.loads(value))
+        except ValueError:
+            continue
+    assert sessions, f"no parseable session reached the cookie jar: {r}"
+    sess = sessions[-1]
+    assert isinstance(sess.get("user"), dict), (
+        f"the narrowing dropped the whole user object: {sorted(sess)}"
+    )
+    assert "identities" not in sess["user"], (
+        "`identities` survived the narrowing — the branch is not doing work "
+        f"(#3496 item 6): {sorted(sess['user'])}"
+    )
+    md = sess["user"].get("user_metadata") or {}
+    assert "gigantic" not in md, (
+        f"un-narrowed user_metadata survived the narrowing: {sorted(md)}"
+    )
+    for kept in ("display_name", "avatar_url", "full_name", "name"):
+        assert md.get(kept), (
+            f"the narrowing dropped the essential `{kept}` claim: {md}"
+        )
+
     assert r["overCapWrote"] is False, f"an over-cap write reached the cookie: {r}"
     assert r["overCapReported"] is True, f"the over-cap refusal was not reported: {r}"
     assert r["overCapText"].strip(), (
@@ -1095,9 +1143,27 @@ function innerTarget(assignUrl) {
     const big = JSON.stringify({
       access_token: 'a'.repeat(100), refresh_token: 'r'.repeat(50), expires_at: 9,
       provider_token: 'p'.repeat(2000), provider_refresh_token: 'q'.repeat(2000),
+      // #3496 item 6: a REAL GitHub session carries a `user`, and the provider
+      // tokens alone already clear SIZE_GUARD — so without this object the
+      // `if (obj.user)` narrowing below is DEAD in every run, and deleting the
+      // whole identities/user_metadata block left this test green.
+      user: {
+        id: 'u-1',
+        identities: Array.from({ length: 40 }, function (_, i) {
+          return { provider: 'github', identity_id: 'id-' + i, id: 'x'.repeat(40) };
+        }),
+        user_metadata: {
+          display_name: 'Ada Lovelace', avatar_url: 'https://a.example/a.png',
+          full_name: 'Ada Lovelace', name: 'ada',
+          gigantic: 'y'.repeat(1500),  // must NOT survive the narrowing
+        },
+      },
     });
     storage.setItem(COOKIE_NAME, big);
     out.strippedWrites = cookieWrites.length;
+    // The raw per-assignment write log IS the artifact — assert on it rather
+    // than re-deriving the page's stripping decision in the test.
+    out.strippedHeaders = cookieWrites.map(function (w) { return w.header; });
     out.strippedHasToken = cookieWrites.some(function (w) {
       // BOTH: `provider_refresh_token` does not contain `provider_token`, so a
       // single substring probe left the sibling `delete obj.provider_refresh_token`
