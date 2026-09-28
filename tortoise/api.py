@@ -393,6 +393,7 @@ class EventAPI:
                      governing_agreement: str = "",
                      format: str = "markdown",
                      version: str = "",
+                     content_hash: str | None = None,
                      createdAt: str | None = None,
                      updatedAt: str | None = None,
                      corrects: str | None = None,
@@ -423,6 +424,16 @@ class EventAPI:
         (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
+        #5422: ``content_hash`` is the document's **version anchor** on the
+        extraction path — the SHA-256 of the ingested text (callers pass
+        ``tortoise.ids.content_hash(text)``). It rides the JOURNALED event so
+        the projection fold writes it replayably, and it is what gives a
+        document-derived Point a version to anchor on (ONTOLOGY §4.6: the
+        hash identifies a version; identity is ``url``). The JSONL field is
+        snake_case (``content_hash``) like every sibling on this event — the
+        projection normalizes it to ``contentHash`` on the node. Absent/None
+        is the back-compat shape — the fold PRESERVES the stored hash rather
+        than clearing it, so a metadata-only re-emit cannot wipe an anchor.
         """
         self._emit("DocumentCreated",
                    corrects=corrects,
@@ -437,6 +448,7 @@ class EventAPI:
                    governing_agreement=governing_agreement,
                    format=format,
                    version=version,
+                   content_hash=content_hash,
                    createdAt=createdAt or now_iso(),
                    updatedAt=updatedAt or now_iso(),
                    topics=topics or [],

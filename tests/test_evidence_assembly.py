@@ -172,6 +172,78 @@ def test_own_source_collapse_is_session_scoped():
     assert stats["collapsed_duplicates"] == 0
 
 
+def _camel_only(h: dict, sid: str) -> dict:
+    """The shape the point fetch actually populates: ONLY the camel
+    ``sessionId``, no snake ``session_id`` (#4155). ``session_date`` is left
+    in place deliberately, so the camel branch is reached BEFORE the date
+    fallback and therefore decides the bucket."""
+    h.pop("session_id", None)
+    h["sessionId"] = sid
+    return h
+
+
+def test_camel_only_session_id_still_collapses_the_points_own_source():
+    """#4155 — the camel ``sessionId`` identifies the session for the packaging
+    collapse too, not only for pool dedup.
+
+    Value that makes it fail: a key that does not group the point with its own
+    session's chunks at all — one bucket per hit, which is what the
+    ``_pkg_session`` mutation does. The fixture reaches it: both hits carry
+    ONLY ``sessionId`` (the shape the point fetch produces) plus a matching
+    quote, which is what makes collapse possible in the first place.
+
+    ⚠️ Removing the camel branch does NOT red this test, and that is why the
+    sibling below exists. ``_camel_only`` pops only ``session_id`` and leaves
+    ``session_date`` in place, so without the branch both hits fall through to
+    that SHARED date and still collapse. The camel spelling's absence is caught
+    by the sibling; what this test catches is a grouping that broke outright.
+    """
+    quote = "I bought the tea set from cousin Rachel for 300 dollars"
+    pool = [
+        _camel_only(_point("pt:1", "I bought the tea set from cousin "
+                           "Rachel for 300 dollars", quote=quote), "sess-own"),
+        _camel_only(_chunk("lme:0:c2", [f"User: {quote}"]), "sess-own"),
+        # a SECOND own-session chunk: without it there is nothing to drop and
+        # ``collapsed_duplicates`` is 0 whatever the bucket key did, so the
+        # count below would not discriminate anything.
+        _camel_only(_chunk("lme:0:c3", [f"User: {quote}, yeah"]), "sess-own"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "lme:0:c2"]
+    assert stats["pool_items"] == 3
+    assert stats["packages"] == 1
+    assert stats["collapsed_duplicates"] == 1
+
+
+def test_different_camel_only_session_ids_do_not_collapse():
+    """#4155 — a chunk from a DIFFERENT camel-identified session must not be
+    absorbed as the point's own source.
+
+    Value that makes it fail: the camel branch. Both hits carry only
+    ``sessionId``; dropping the camel lookup leaves both keying on the SAME
+    ``session_date`` (``_camel_only`` pops only ``session_id`` and leaves the
+    date in place, so the date fallback is the drift vector), so the foreign
+    session's chunk is judged the point's own source and dropped — the
+    over-collapse this change exists to prevent. The fixture reaches it: the
+    chunk repeats the point's quote verbatim, which is what makes absorption
+    possible at all.
+    """
+    quote = "the trip to the lake cost 200 dollars"
+    pool = [
+        _camel_only(_point("pt:1", "I paid for the trip to the lake, "
+                           "200 dollars total", quote=quote,
+                           source_turn="lme:0:t3"), "sess-A"),
+        _camel_only(_chunk("lme:1:c1", [f"User: {quote}"]), "sess-B"),
+    ]
+    packaged, stats = package_evidence_pool(pool)
+    assert [h["id"] for h in packaged] == ["pt:1", "lme:1:c1"], (
+        "a foreign camel-identified session's chunk was absorbed into the "
+        f"point: {[h['id'] for h in packaged]}"
+    )
+    assert stats["packages"] == 2
+    assert stats["collapsed_duplicates"] == 0
+
+
 # ── (b) cross-item near-dupe dedup (before the window fill) ───────────────
 
 def test_two_points_restating_same_fact_collapse_to_one_slot():
