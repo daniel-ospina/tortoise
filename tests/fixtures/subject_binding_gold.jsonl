@@ -1,0 +1,24 @@
+{"id": "g01", "name": "the team", "kind": "core:team", "confidence": 0.95, "gold_subject": "the team", "resolvable": true, "graph_nodes": [{"name": "the team", "kind": "core:team"}]}
+{"id": "g02", "name": "alice", "kind": "core:naturalPerson", "confidence": 0.9, "gold_subject": "alice", "resolvable": true, "graph_nodes": [{"name": "alice", "kind": "core:naturalPerson"}]}
+{"id": "g03", "name": "acme", "kind": "core:organization", "confidence": 0.85, "gold_subject": "acme", "resolvable": true, "graph_nodes": [{"name": "acme", "kind": "core:organization"}]}
+{"id": "g04", "name": "the owner", "kind": "core:role", "confidence": 0.8, "gold_subject": "the owner", "resolvable": true, "graph_nodes": [{"name": "the owner", "kind": "core:role"}]}
+{"id": "g05", "name": "the lane", "kind": "core:team", "confidence": 0.75, "gold_subject": "the lane", "resolvable": true, "graph_nodes": [{"name": "the lane", "kind": "core:team"}]}
+{"id": "g06", "name": "acme llc", "kind": "core:legalPerson", "confidence": 0.7, "gold_subject": "acme llc", "resolvable": true, "graph_nodes": [{"name": "acme llc", "kind": "core:legalPerson"}]}
+{"id": "g07", "name": "beta corp", "kind": "core:organization", "confidence": 0.93, "gold_subject": "beta corp", "resolvable": true, "graph_nodes": [{"name": "beta corp", "kind": "core:organization"}]}
+{"id": "g08", "name": "carol", "kind": "core:naturalPerson", "confidence": 0.94, "gold_subject": "carol", "resolvable": true, "graph_nodes": [{"name": "carol", "kind": "core:naturalPerson"}]}
+{"id": "g09", "name": "the reviewers", "kind": "core:team", "confidence": 0.83, "gold_subject": "the reviewers", "resolvable": true, "graph_nodes": [{"name": "the reviewers", "kind": "core:team"}]}
+{"id": "g10", "name": "the operator", "kind": "core:role", "confidence": 0.78, "gold_subject": "the operator", "resolvable": true, "graph_nodes": [{"name": "the operator", "kind": "core:role"}]}
+{"id": "g11", "name": "gamma llc", "kind": "core:legalPerson", "confidence": 0.74, "gold_subject": "gamma llc", "resolvable": true, "graph_nodes": [{"name": "gamma llc", "kind": "core:legalPerson"}]}
+{"id": "g12", "name": "dave", "kind": "core:naturalPerson", "confidence": 0.71, "gold_subject": "dave", "resolvable": true, "graph_nodes": [{"name": "dave", "kind": "core:naturalPerson"}]}
+{"id": "g13", "name": "the wrong entity", "kind": "core:team", "confidence": 0.72, "gold_subject": "the team", "resolvable": true, "graph_nodes": [{"name": "the wrong entity", "kind": "core:team"}]}
+{"id": "g14", "name": "the team", "kind": "core:team", "confidence": 0.6, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "the team", "kind": "core:team"}]}
+{"id": "g15", "name": "bob", "kind": "core:naturalPerson", "confidence": 0.5, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "bob", "kind": "core:naturalPerson"}]}
+{"id": "g16", "name": "the team", "kind": "core:team", "confidence": 0.4, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "the team", "kind": "core:team"}]}
+{"id": "g17", "name": "the team", "kind": "core:team", "confidence": 0.3, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "the team", "kind": "core:team"}]}
+{"id": "g18", "name": "the team", "kind": "core:team", "confidence": 0.0, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "the team", "kind": "core:team"}]}
+{"id": "g19", "name": "the plan", "kind": "core:plan", "confidence": 0.9, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "the plan", "kind": "core:plan"}]}
+{"id": "g20", "name": "ghost", "kind": "core:team", "confidence": 0.9, "gold_subject": null, "resolvable": false, "graph_nodes": []}
+{"id": "g21", "name": "the team", "kind": "core:team", "confidence": null, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "the team", "kind": "core:team"}]}
+{"id": "g22", "name": "the lost team", "kind": "core:team", "confidence": 0.95, "gold_subject": "the team", "resolvable": false, "graph_nodes": []}
+{"id": "g23", "name": "casey", "kind": "core:organization", "confidence": 0.95, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "casey", "kind": "core:naturalPerson"}]}
+{"id": "g24", "name": "acme:team", "kind": "acme:team", "confidence": 0.99, "gold_subject": null, "resolvable": true, "graph_nodes": [{"name": "acme:team", "kind": "acme:team"}]}
