@@ -16370,6 +16370,7 @@ class TortoiseSDK:
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
+                include_terminal=include_superseded,
                 leg_trace=leg_trace)
             if object_centric else []
         )
