@@ -1,0 +1,25 @@
+{
+  "gate_digest": "38002c804068bf26c6919345d4e31357fadeb5e9a7d56b0252f6a2064e3b96c9",
+  "live_checked_at": "2026-09-28T05:36:59Z",
+  "live_observed_contexts": [
+    "docs",
+    "legal-e2e",
+    "license-surface",
+    "pricing-artifact",
+    "python-ci-gate",
+    "test-isolation"
+  ],
+  "live_result": "SATISFIED",
+  "live_verified_at": "2026-09-28T05:36:59Z",
+  "read_sha": "0469ed1bad8734249081c431b649b6fe455953e2",
+  "required_contexts": [
+    "docs",
+    "legal-e2e",
+    "license-surface",
+    "pricing-artifact",
+    "python-ci-gate",
+    "test-isolation"
+  ],
+  "settings_home_consistent": false,
+  "verified_at": "2026-09-28T05:36:59Z"
+}

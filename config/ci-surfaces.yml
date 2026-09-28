@@ -728,6 +728,10 @@ surfaces:
   # Hermetic (no DB, no network) — it pins tools/merge_throughput.py, which
   # `core` runs on engine-wide changes.
   - test_merge_throughput.py
+  # #5215 (merge-throughput plan, Task 4): the protection-invariant guard. Hermetic
+  # (scratch trees; the live I1 read is injected) — it pins
+  # tools/mergify_config_guard.py, which `core` runs on engine-wide changes.
+  - test_mergify_config_guard.py
   - test_shared_state_concurrency.py
   - test_shared_state_events.py
   - test_shared_state_events_claim.py

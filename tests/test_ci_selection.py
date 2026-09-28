@@ -4446,3 +4446,38 @@ def test_a_top_level_lane_file_is_not_re_registered_by_unlisted_tests():
         "back on the merge gate")
     # And the real manifest must not report the currently-laned file either.
     assert "eval/retrieval/test_integration.py" not in unlisted_tests(TESTS_DIR, base)
+
+
+def test_mergify_guard_step_is_wired_fail_closed():
+    """#5215 Task 4: the protection-invariant guard is REQUIRED and unsilenceable.
+
+    The guard runs the static clauses (i)-(viii) of the merge-throughput plan's
+    §3. It lives in `manifest-integrity`, a job `python-ci-gate` (the required
+    aggregate) lists in `needs`, so a divergence blocks the merge. This pins the
+    invocation SHAPE: a direct call with no shell operator, not
+    `continue-on-error`, and unconditional. `|| true` / `; exit 0` /
+    `continue-on-error` would each turn a real divergence into a green required
+    check (the #2656 class this file already pins for the drift gate).
+    """
+    workflow = _load_python_ci()
+    steps = workflow["jobs"]["manifest-integrity"]["steps"]
+    matching = [s for s in steps if "mergify_config_guard.py" in (s.get("run") or "")]
+    assert len(matching) == 1, (
+        "#5215: the mergify config guard must be invoked exactly once in "
+        f"manifest-integrity; found {len(matching)}")
+    step = matching[0]
+    first_line = (step["run"] or "").splitlines()[0].strip()
+    assert first_line.startswith("python3 tools/mergify_config_guard.py --static"), (
+        f"the guard must be invoked directly (#5215); got {step['run']!r}")
+    assert not any(op in step["run"] for op in ("||", "&&", ";", "`", "$(")), (
+        "no shell operator may follow the guard — `|| true` / `; exit 0` makes a "
+        f"real divergence report green (#5215); got {step['run']!r}")
+    assert not step.get("continue-on-error"), (
+        "the guard step must not be continue-on-error: a divergence would report "
+        "success and the required aggregate would go green (#5215)")
+    assert not step.get("shell"), (
+        "the guard step must not override `shell:` — that can swallow the exit "
+        "code (#5215)")
+    assert step.get("if", "always()") in ("always()", "${{ always() }}"), (
+        "the guard step must be unconditional: any other `if:` drops enforcement "
+        "on the events it excludes")
