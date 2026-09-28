@@ -228,8 +228,15 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
     """T12/S15 cycle-21: a journal with a TORN TRAILING line (SIGKILL
     mid-append) → EventLog.read_all() succeeds (line-tolerance, skipped +
     counted, never raised) AND rebuild_all recovers to the crash-free
-    structural state (the wipe-after-parse pin: ALL jsonl parsed BEFORE the
-    wipe, so a torn line is a survivable skip, not total loss)."""
+    structural state (a torn line is a survivable skip, not total loss).
+
+    Scope note (#3316): this pins the TOLERANCE, not the wipe-after-parse
+    ORDERING. A tolerated tear never makes the parse raise, so this pin CANNOT
+    observe when the wipe happens. The ordering is pinned where it IS
+    observable: an engine that refuses a torn tail must leave a
+    wipe-observable sentinel (a ``:Canary`` node) intact — see
+    tests/test_ops_safety.py's ``test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe``
+    and ``test_rebuild_all_refuses_a_torn_tail_in_any_journal_file``."""
     events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
@@ -249,7 +256,7 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
         events = log.read_all()          # must NOT raise
         assert log.torn_trailing_count == 1
         assert len(events) >= 3
-        # rebuild survives the torn tail (parse-all-then-wipe)
+        # rebuild survives the torn tail (a tolerant tear must not abort)
         proj = sdk._get_proj()
         proj.rebuild_all(str(events_dir))
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == n_sources

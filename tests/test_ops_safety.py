@@ -622,6 +622,17 @@ def test_inmemory_rebuild_refuses_a_torn_removal_tail():
         proj.rebuild(EventLog(journal))
     assert proj.points == {}, "the fold ran despite the refusal"
 
+    # No over-correction on THIS engine: the guard the other four paths carry.
+    # Without it a blanket refusal of every torn tail passes the assertions
+    # above.
+    journal2 = os.path.join(tmp, "events_harmless.jsonl")
+    _write_journal(journal2, _point_added("kept-1"),
+                   '{"type": "PointAdded", "point": {"id": "torn-1", ',
+                   torn_last=True)
+    proj2 = InMemoryProjection()
+    proj2.rebuild(EventLog(journal2))
+    assert "kept-1" in proj2.points, "a harmless torn tail must still replay"
+
 
 def test_recover_from_log_refuses_mid_file_corruption():
     """The reader swap in ``recover_from_log``: a malformed MID-FILE line is
@@ -746,6 +757,24 @@ def test_backup_restore_refuses_a_torn_removal_tail():
         assert live == 0, "the restore resurrected the hard-deleted Point"
     finally:
         proj.close()
+
+    # No over-correction on this engine either: a harmless tear still restores.
+    backup2 = os.path.join(tmp, "backup_harmless")
+    os.makedirs(backup2, exist_ok=True)
+    _write_journal(os.path.join(backup2, "events.jsonl"),
+                   _point_added("kept-1"),
+                   '{"type": "PointAdded", "point": {"id": "torn-1", ',
+                   torn_last=True)
+    db2 = os.path.join(work, "restored_harmless.db")
+    restore(backup2, db2, events_path=os.path.join(work, "events2.jsonl"),
+            into_falkor=True)
+    proj2 = FalkorProjection(db2)
+    try:
+        kept = proj2.g.query(
+            "MATCH (n:Point {id:'kept-1'}) RETURN count(n)").result_set[0][0]
+        assert kept == 1, "a harmless torn tail must still restore"
+    finally:
+        proj2.close()
 
 
 def test_rebuild_cli_reports_the_refusal_as_a_message(capsys, monkeypatch):
@@ -890,6 +919,47 @@ def test_recover_from_log_pending_snapshot_route_refuses_a_torn_tail():
         assert live == 0, "the pending-snapshot route replayed over the tear"
     finally:
         proj.close()
+
+    # No over-correction on THIS route either: the same sidecar over a journal
+    # whose torn tail is harmless still recovers through the pending arm.
+    log_dir2 = os.path.join(tmp, "log_harmless")
+    os.makedirs(log_dir2, exist_ok=True)
+    _write_journal(os.path.join(log_dir2, "events.jsonl"),
+                   _point_added("kept-1"),
+                   '{"type": "PointAdded", "point": {"id": "torn-1", ',
+                   torn_last=True)
+    _write_prewipe_snapshot(prewipe_snapshot_path(log_dir2), {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        # Non-empty: an entry-less sidecar does not divert this path at all
+        # (the loader returns None), so it could not exercise the pending arm.
+        "synthetic_events": [{
+            "type": "PointAdded",
+            "projection_version": 2,
+            "point": {"id": "sidecar-kept-1", "content": "[user] hi",
+                      "pointKind": "event", "speaker": "user",
+                      "is_episodic": True, "status": "draft"},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+    proj3 = FalkorProjection(os.path.join(tmp, "pending_harmless.db"))
+    try:
+        proj3.g.query("MATCH (n) DETACH DELETE n")
+        ok = recover_from_log(log_dir2, proj3)
+        assert ok["recovered"] is True, ok
+        assert "pending pre-wipe snapshot" in ok["reason"], ok
+        kept = proj3.g.query(
+            "MATCH (n:Point {id:'kept-1'}) RETURN count(n)").result_set[0][0]
+        assert kept == 1, "a harmless torn tail must not block the pending route"
+        side = proj3.g.query(
+            "MATCH (n:Point {id:'sidecar-kept-1'}) RETURN count(n)"
+        ).result_set[0][0]
+        assert side == 1, "the pending sidecar still merged"
+    finally:
+        proj3.close()
 
 
 def test_rebuild_cli_inmemory_fallback_keeps_a_harmless_tear(capsys, monkeypatch):

@@ -577,7 +577,13 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
     }
     offenders = sorted(destructive & TORN_TAIL_HARMLESS_EVENT_TYPES)
     assert not offenders, f"destructive types in the allowlist: {offenders}"
-    assert all(isinstance(t, str) and t for t in TORN_TAIL_HARMLESS_EVENT_TYPES)
+    # …and the vocabulary check above is not enough on its own: a future
+    # SPECIAL-CASE tolerance inside the classifier (exactly the shape of the two
+    # disclosed ``PointAdded``/``OperatorAdded`` exceptions) would leave the set
+    # literal untouched. Assert the behaviour for every name.
+    for t in sorted(destructive):
+        assert torn_record_may_revive_state('{"type": "' + t + '", "id": "x"'), \
+            f"the classifier no longer refuses a torn {t}"
     print("PASS test_torn_tail_allowlist_holds_no_destructive_type")
 
 
