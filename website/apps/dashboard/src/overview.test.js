@@ -234,6 +234,98 @@ function visitNodes(node, fn) {
   }
 }
 
+/**
+ * Every identifier BOUND by a binding pattern. A single spelling of `name` can be bound by any of
+ * these shapes, and the regex this replaced only knew about one of them (a declaration keyword).
+ */
+function patternNames(node, out) {
+  if (!node) return out
+  switch (node.type) {
+    case 'Identifier': out.push(node.name); break
+    case 'ObjectPattern':
+      for (const p of node.properties) {
+        // RestElement (`{ ...rest }`) binds `argument`; ObjectProperty (`{ a: b }`) binds `value`.
+        if (p.type === 'RestElement') patternNames(p.argument, out)
+        else patternNames(p.value, out)
+      }
+      break
+    case 'ArrayPattern':
+      for (const el of node.elements) patternNames(el, out)
+      break
+    case 'AssignmentPattern': patternNames(node.left, out); break
+    case 'RestElement': patternNames(node.argument, out); break
+    default: break
+  }
+  return out
+}
+
+/**
+ * EVERY BINDING SITE of `name` in `src`, read off the AST, as `<kind>` labels.
+ *
+ * This exists because a guard that claims to pin an end must enumerate every way the end can be
+ * reached. The assertion it replaced was a `(?:const|let|var|function)\s+name\b` regex, which sees
+ * exactly ONE of the ways a name can be bound: a declaration keyword. These all introduce a
+ * shadowing binding and NONE of them is a declaration keyword, so all of them escaped (review
+ * round 8, P1):
+ *
+ *   ((harnessConnectionObserved) => <jsx>)      // function parameter
+ *   try { … } catch (harnessConnectionObserved) // catch parameter
+ *   for (const harnessConnectionObserved of xs) // for…of  (the VariableDeclaration form)
+ *   for (harnessConnectionObserved of xs)       // for…of  (the assignment form)
+ *   const { harnessConnectionObserved } = props // destructuring
+ *   import harnessConnectionObserved from '…'   // a SECOND import binding
+ *
+ * A mutation using a parameter rebinds the name in an inner scope, so the outside `connected:`
+ * arm can be made unconditional while the outer statement is untouched and the suite stays green —
+ * the exact #4646 class this guard exists for. The count assertion above is a real net (a third
+ * mention fails loud), but it is a net over TEXT; the binding question is a question about the
+ * PARSE TREE, so it is answered from the parse tree.
+ */
+function identifierBindings(src, name, relPath = 'main.jsx') {
+  const jsx = /\.[jt]sx$/.test(relPath)
+  const ast = parse(src, {
+    sourceType: 'module',
+    plugins: jsx ? ['typescript', 'jsx'] : ['typescript'],
+  })
+  const found = []
+  visitNodes(ast.program, (node) => {
+    switch (node.type) {
+      case 'VariableDeclaration':
+        for (const decl of node.declarations) {
+          if (patternNames(decl.id, []).includes(name)) found.push(`VariableDeclaration(${node.kind})`)
+        }
+        break
+      case 'FunctionDeclaration':
+      case 'FunctionExpression':
+      case 'ArrowFunctionExpression':
+      case 'ObjectMethod':
+      case 'ClassMethod':
+        for (const p of node.params ?? []) {
+          if (patternNames(p, []).includes(name)) found.push(`${node.type}(param)`)
+        }
+        break
+      case 'CatchClause':
+        if (patternNames(node.param, []).includes(name)) found.push('CatchClause(param)')
+        break
+      case 'ForOfStatement':
+      case 'ForInStatement':
+        // The `VariableDeclaration` form is already caught above; this is the assignment form.
+        if (node.left && node.left.type !== 'VariableDeclaration' && patternNames(node.left, []).includes(name)) {
+          found.push(`${node.type}(left)`)
+        }
+        break
+      case 'ImportSpecifier':
+      case 'ImportDefaultSpecifier':
+      case 'ImportNamespaceSpecifier':
+        if (node.local && node.local.name === name) found.push(node.type)
+        break
+      default:
+        break
+    }
+  })
+  return found
+}
+
 const WIZARD_RENDER_CALLEES = new Set(['wizardStageLabel', 'wizardStepSub'])
 
 /**
@@ -342,17 +434,33 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   assert.equal(mainJsxSrc.split('harnessConnectionObserved').length - 1, 2,
     'main.jsx must mention harnessConnectionObserved EXACTLY twice — its import and its one call. '
     + 'A third mention is a shadowing duplicate (local declaration, destructuring, or parameter default).')
-  assert.doesNotMatch(mainJsxSrc,
-    /(?:^|[^\w$.])(?:const|let|var|function)\s+harnessConnectionObserved\b/,
-    'main.jsx must not locally declare/shadow the shared helper — it must IMPORT it')
+  // Every way the name can be BOUND — not just a declaration keyword (round 8, P1). A function
+  // parameter, a catch binding, a for…of left, a destructuring pattern and a second import all
+  // introduce a shadowing binding and NONE matches a `(?:const|let|var|function)\s+` regex, so a
+  // mutation using one rebound the name in an inner scope and made the connected arm unconditional
+  // while this guard stayed green. The binding question is a question about the PARSE TREE, so it is
+  // answered from the parse tree.
+  const helperBindings = identifierBindings(mainJsxSrc, 'harnessConnectionObserved')
+  assert.equal(helperBindings.length, 1,
+    'main.jsx must bind harnessConnectionObserved EXACTLY once — the IMPORT — whatever the binding '
+    + 'site, not only a declaration keyword. Found: ' + JSON.stringify(helperBindings))
+  assert.equal(helperBindings[0], 'ImportSpecifier',
+    'and that single binding must be the named import from ./connectionObservation.js')
   // The extractor's marker is whitespace-sensitive (`const X =`), so a SECOND
   // declaration written `const serverHarnessConnected=...` escapes its count and
   // can shadow the real binding in another scope while the sliced statement is
   // untouched — the poll effect's promise is then silenced for exactly the
   // grandfathered population (round 5, P2). Count the DECLARATION itself,
   // spacing-agnostically, on the raw source.
-  assert.equal((mainJsxSrc.match(/\b(?:const|let|var)\s+serverHarnessConnected\s*=/g) ?? []).length, 1,
-    'main.jsx must DECLARE serverHarnessConnected exactly once, whatever the spacing')
+  // Same reasoning as above, from the same parse-tree enumerator: the declaration must be the ONLY
+  // binding, and it must be a `const`. A parameter, a `catch` binding, a `for…of` left or a second
+  // import would all shadow it while a declaration-keyword regex still counted exactly one.
+  const derivedBindings = identifierBindings(mainJsxSrc, 'serverHarnessConnected')
+  assert.equal(derivedBindings.length, 1,
+    'main.jsx must bind serverHarnessConnected EXACTLY once, whatever the spacing and whatever the '
+    + 'binding site — found: ' + JSON.stringify(derivedBindings))
+  assert.equal(derivedBindings[0], 'VariableDeclaration(const)',
+    'and that single binding must be one `const` declaration')
   const code = stripComments(mainJsxSrc)
   assert.match(code,
     /import\s*\{[^}]*\bharnessConnectionObserved\b[^}]*\}\s*from\s*'\.\/connectionObservation\.js'/,
