@@ -1426,3 +1426,57 @@ def test_static_reds_on_a_recorded_live_divergence(tmp_path: Path) -> None:
         tmp_path, merge_config(), record_overrides={"live_result": "DIVERGED"}
     )
     assert mcg.run_static(root)[0] == 1
+
+
+# --- cycle-8 review regressions ---------------------------------------------
+
+
+def test_gitattributes_caret_negation(tmp_path: Path) -> None:
+    """`[^r]` is negation too (git wildmatch), not a literal caret."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".gitattributes").write_text("cfg/[^r]eg.yml merge=union\n", encoding="utf-8")
+    (root / "cfg").mkdir(parents=True, exist_ok=True)
+    for name in ("!eg.yml", "seg.yml", "reg.yml"):
+        (root / "cfg" / name).write_text("a: 1\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == {"cfg/!eg.yml", "cfg/seg.yml"}
+
+
+def test_gitattributes_reversed_range_does_not_raise(tmp_path: Path) -> None:
+    """`[z-a]` is git-legal and matches nothing; it must not make clause (vii) exit 2."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / ".gitattributes").write_text("config/[z-a].yml merge=union\n", encoding="utf-8")
+    assert mcg._unioned_files(root) == set()
+
+
+def test_names_path_rejects_a_directory_prefix(tmp_path: Path) -> None:
+    """`backup/config/ci-surfaces.yml` is a different file; `./config/...` is the same."""
+    assert mcg._names_path("config/ci-surfaces.yml", "backup/config/ci-surfaces.yml") is False
+    assert mcg._names_path("config/ci-surfaces.yml", "x/config/ci-surfaces.yml") is False
+    assert mcg._names_path("config/ci-surfaces.yml", "./config/ci-surfaces.yml") is True
+    assert mcg._names_path("config/ci-surfaces.yml", "'config/ci-surfaces.yml'") is True
+
+
+def test_clause_vii_bare_systemexit_is_red(tmp_path: Path) -> None:
+    """`raise SystemExit` (no call) exits 0."""
+    src = 'REG = "config/ci-surfaces.yml"\nraise SystemExit\n'
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_nested_scope_failure_is_red(tmp_path: Path) -> None:
+    """A call inside a never-invoked nested function is not live."""
+    src = (
+        'REG = "config/ci-surfaces.yml"\n'
+        "def live_main():\n"
+        "    def inner():\n"
+        "        helper()\n"
+        '    print("ok")\n'
+        "def helper():\n    return 1\n"
+        "live_main()\n"
+    )
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1

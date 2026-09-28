@@ -516,7 +516,7 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
                 out.append(re.escape(ch))
                 i += 1
                 continue
-            negate = content.startswith("!")
+            negate = content.startswith("!") or content.startswith("^")
             body = content[1:] if negate else content
             safe = body.replace("\\", "\\\\").replace("]", "\\]").replace("^", "\\^")
             out.append("[" + ("^" if negate else "") + safe + "]")
@@ -525,7 +525,12 @@ def _attr_glob_regex(pattern: str) -> re.Pattern[str]:
         out.append(re.escape(ch))
         i += 1
     out.append("$")
-    return re.compile("".join(out))
+    try:
+        return re.compile("".join(out))
+    except re.error:
+        # A reversed range (`[z-a]`) is git-legal and matches nothing; compile it
+        # as a never-match rather than raising (which made clause (vii) UNAVAILABLE).
+        return re.compile(r"(?!)")
 
 
 def _unioned_files(root: Path) -> set[str]:
@@ -759,14 +764,27 @@ def _validator_candidates(docs: dict[str, dict], required_workflow: str, closure
     return candidates
 
 
-def _names_path(path: str, literal: str) -> bool:
-    """True iff `literal` names `path` as a whole path, not as a substring.
+_PATH_DELIMS = set(" \t\r\n'\"()[]{},;:=<>|&")
 
-    A substring test accepted `backup/config/ci-surfaces.yml.bak` as naming the
-    unioned `config/ci-surfaces.yml` — a validator that never opens the real file.
+
+def _names_path(path: str, literal: str) -> bool:
+    """True iff `literal` names `path` as a whole path token, not as a substring.
+
+    A substring test accepted `backup/config/ci-surfaces.yml` as naming the unioned
+    `config/ci-surfaces.yml` — a validator that never opens the real file. A
+    leading `./` or a bare `/` (an f-string segment) still counts.
     """
-    pattern = r"(?<![\w.\-])" + re.escape(path) + r"(?=$|[\s'\"()\[\]{},;:=<>|&])"
-    return re.search(pattern, literal) is not None
+    for match in re.finditer(re.escape(path), literal):
+        start, end = match.start(), match.end()
+        if end != len(literal) and literal[end] not in _PATH_DELIMS:
+            continue
+        if start == 0 or literal[start - 1] in _PATH_DELIMS:
+            return True
+        if literal[start - 1] == "/" and (
+            start == 1 or literal[start - 2] in _PATH_DELIMS or literal[start - 2] == "."
+        ):
+            return True
+    return False
 
 
 def _string_constants(source: str) -> list[str]:
@@ -820,13 +838,20 @@ def _source_can_fail(source: str) -> bool:
 
     def _called_names(scope: ast.AST) -> set[str]:
         names: set[str] = set()
-        for sub in ast.walk(scope):
-            if isinstance(sub, ast.Call):
-                func = sub.func
+        stack = list(ast.iter_child_nodes(scope))
+        while stack:
+            node = stack.pop()
+            # A nested scope's calls belong to THAT scope; descending into them
+            # credited a failure in a never-invoked inner function as live.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(node, ast.Call):
+                func = node.func
                 if isinstance(func, ast.Name):
                     names.add(func.id)
                 elif isinstance(func, ast.Attribute):
                     names.add(func.attr)
+            stack.extend(ast.iter_child_nodes(node))
         return names
 
     functions = {
@@ -883,6 +908,8 @@ def _source_can_fail(source: str) -> bool:
             return True
         if isinstance(node, ast.Raise):
             exc = node.exc
+            if isinstance(exc, ast.Name) and exc.id == "SystemExit":
+                continue  # `raise SystemExit` (no call) exits 0
             if (
                 isinstance(exc, ast.Call)
                 and isinstance(exc.func, ast.Name)
