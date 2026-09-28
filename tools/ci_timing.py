@@ -172,10 +172,23 @@ def parse_log(path: Path) -> dict:
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
-        # stdout AFTER pytest's output is redirected, so the artifact never
-        # contains it. pytest's own interrupt summary (KeyboardInterrupt) is
-        # the reliable in-log signal for a watchdog-killed run.
-        if "KeyboardInterrupt" in line or "WATCHDOG:" in line:
+        # stdout AFTER pytest's output is redirected, so the ARTIFACT this
+        # function reads can never contain it. pytest's own interrupt summary
+        # (KeyboardInterrupt) is the reliable in-artifact signal for a
+        # watchdog-killed run.
+        #
+        # #6145: matching the banner string anyway was not a fallback — it was a
+        # live FALSE-POSITIVE channel. A predicate that can never be true of a
+        # real artifact can still be true of pytest's own OUTPUT, which quotes
+        # the string whenever a workflow-guard test prints or diffs the workflow
+        # text containing it. That set killed=True on runs that were never
+        # killed, and this flag feeds the flake/kill counters every triage
+        # decision rests on. Deleted rather than narrowed: the signal does not
+        # exist in this input, so the clause could only misfire.
+        # The wall evidence a kill DOES leave in the artifact (/tmp/step_wall.txt,
+        # uploaded beside this log) is consumed by testdb_canary_classify.py's
+        # step-wall gate; it is deliberately not re-derived here.
+        if "KeyboardInterrupt" in line:
             killed = True
         if "slowest" in line and "durations" in line:
             in_durations = True

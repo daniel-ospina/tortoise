@@ -125,21 +125,34 @@ def test_parse_log_durations_and_counts(tmp_path: Path) -> None:
     assert not parsed["killed"]
 
 
-def test_parse_log_watchdog_and_variants(tmp_path: Path) -> None:
-    # watchdog kill: the summary banner is replaced by the WATCHDOG banner,
-    # which still carries the counts (parsed from it — 10 passed, 1 failed,
-    # 2 errored). No pytest summary line survives.
+def test_parse_log_detects_a_kill_from_pytest_interrupt_summary(tmp_path: Path) -> None:
+    # A watchdog kill (SIGINT) leaves pytest's OWN interrupt summary in the
+    # artifact; that is the in-artifact signal parse_log reads (#1477 P2).
+    log = FIXTURE_LOG.splitlines()
+    log[-1] = "!!! KeyboardInterrupt !!!"
+    parsed = ci_timing.parse_log(write_log(tmp_path, "killed.log", "\n".join(log)))
+    assert parsed["killed"] is True
+
+
+def test_parse_log_ignores_a_quoted_watchdog_banner(tmp_path: Path) -> None:
+    # #6145 regression. The workflow echoes the WATCHDOG banner to the STEP's
+    # stdout AFTER pytest's output is redirected into the log, so the uploaded
+    # artifact never contains it — parse_log reads artifacts only (--logs-dir).
+    # Matching the string used to set killed=True, which fired on any pytest
+    # OUTPUT that QUOTES it (a workflow-guard test printing or diffing the
+    # workflow text). A run that was not killed must not be reported as killed:
+    # this flag feeds the flake/kill counters.
     log = FIXTURE_LOG.splitlines()
     log[-1] = (
         "============================ WATCHDOG: pytest killed after 45m "
         "(10 passed, 1 failed, 2 errored so far) — last test lines above "
         "================================"
     )
-    parsed = ci_timing.parse_log(write_log(tmp_path, "killed.log", "\n".join(log)))
-    assert parsed["killed"] is True
+    parsed = ci_timing.parse_log(write_log(tmp_path, "quoted.log", "\n".join(log)))
+    assert parsed["killed"] is False
+    # the counts on that line are still parsed (pytest's own summary shape) —
+    # the kill FLAG is what must not be inferred from it
     assert parsed["counts"]["passed"] == 10
-    assert parsed["counts"]["failed"] == 1
-    assert parsed["counts"]["error"] == 2
 
 
 def test_parse_log_missing_file(tmp_path: Path) -> None:
