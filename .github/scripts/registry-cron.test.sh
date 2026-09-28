@@ -160,6 +160,8 @@
 #  102. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
 #  103. #3944: an exponent-notation age is NOT a measurement (truncation must
 #      not read as fresh) — it files on the stale uptime and never resolves
+#      not read as fresh) — changes NOTHING: no file, no resolve (R4: a
+#      present-but-unmeasurable age must not take the 'no delivery' arm)
 #  93. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
 #      `[ -gt ]` is not freshness)
 #  94. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
@@ -169,7 +171,6 @@
 #      900 (the period is never re-typed in bash)
 #  97. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
 #      19-digit magnitude compares successfully, so without the bound it files
-#      900 — a non-default threshold moves the verdict
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -2273,8 +2274,9 @@ assert_contains "$OUT" "analytics heartbeat not established" \
 # R2 (bug-scan P3): `${x%.*}` truncates, and jq prints 1.2e16 as `1.2E+16` —
 # whose integer part truncates to `1` and would compare UNDER any threshold,
 # RESOLVING an open incident on a grossly stale age. The operand shape is now
-# validated, so this reads as unmeasurable-for-age and the stale `uptime_s`
-# supplies the verdict: file, never resolve.
+# validated, so this reads as unmeasurable-for-age and changes NOTHING — R4
+# removed the fall-through to the uptime arm, which would FILE on a healthy
+# sink whose delivery is merely un-measurable.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -2297,6 +2299,7 @@ assert_not_match "$OUT" "analytics sink silent" \
   "103. an uncomparable age is not read as stale (no FILE decision)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
   "103. an uncomparable age files nothing"
+
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "103. a truncated non-decimal age NEVER resolves the open incident"
 # ── 104. #3944: an ALL-DIGIT age that overflows bash int64 must not resolve ──
@@ -2320,6 +2323,7 @@ assert_not_match "$OUT" "analytics sink silent" \
   "104. an uncomparable magnitude is not read as stale (no FILE decision)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
   "104. an uncomparable magnitude files nothing"
+
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "104. an int64-overflowing age NEVER resolves the open incident"
 
@@ -2358,6 +2362,7 @@ assert_not_match "$OUT" "analytics sink silent" \
   "106. a negative age must NOT file a false incident on a healthy sink"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
   "106. a negative age posts nothing"
+
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "106. a negative age leaves an open incident untouched"
 
@@ -2396,6 +2401,11 @@ assert_not_match "$OUT" "analytics sink silent" \
   "108. the 18-digit bound keeps an over-long magnitude unmeasurable (no FILE)"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
   "108. an over-long magnitude files nothing"
+# NB: no separate 'files nothing' assertion here. #321 is ALREADY open in
+# this fixture, so file_alert creates nothing and a `GH POST .../issues `
+# regex (or an /issues/321/comments one) can never match — it would pass
+# even on a mutant that decides SILENT, i.e. false assurance. The decision
+# itself is pinned by the two assertions above (RC, and no 'sink silent').
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "108. an over-long magnitude never resolves the open incident"
 echo ""
