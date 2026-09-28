@@ -618,8 +618,10 @@ def test_capped_reapplication_preserves_the_true_total():
     This is the reviewer's reproduction — ``("xapp-1-A-1-Z " * 600)[:6000]``,
     the most-expanding rule (slack ``xapp-``, 12 in → 22 out, space-separated):
     pass 1 windows to 5,000 (marker reports the true total 6,000), then the
-    scrub grows the body to **8,810** chars — 1.768x, the measured
-    max-density packing recorded on ``_redact_turn_contents``.
+    scrub grows the STORED turn to **8,810** chars — 1.762x on the 5,000-char
+    window. (The 1.768x max-density figure recorded on ``_redact_turn_contents``
+    is the MARKER-FREE ratio, 8,769 / 4,959 — a different quantity; do not
+    conflate the two.)
 
     This test binds the NEW invariant — the redactor is REDACTION-ONLY, so
     re-applying it to its own output is byte-identical and can never recount a

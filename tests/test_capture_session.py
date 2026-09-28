@@ -1169,7 +1169,7 @@ def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     lead = "I believe the root cause is known. "
     pad = "plain filler text without triggers. "
     assert not re.search(r"(?:let'?s|we will|we should|I will|I'm going to|decided|decision|I think|I believe|my understanding is|the problem is|the key insight|evidence suggests|data shows|we found that|this means|plan is|next steps?:|action item:)", pad, re.I)
-    before = lead + pad * 145  # 5113 chars > 5000
+    before = lead + pad * 145  # past the cap, see the assert below
     assert len(before) > 5000
     past_cut = "evidence suggests the fix landed."
     content = before + past_cut
@@ -4177,8 +4177,8 @@ def test_an_expanding_redaction_keeps_stored_and_extraction_markers_in_parity():
     and the SAME scrub, so their markers must report the SAME true length. The
     pre-fix re-clip gave the NODE the scrubbed length while the transcript still
     carried the window's true length, so the two disagreed exactly when the
-    marker mattered (the review's 6923-vs-5006 divergence). The existing parity
-    test used NO credential, which made its claim vacuously true.
+    marker mattered. The existing parity test used NO credential, which made its
+    claim vacuously true.
     """
     from tortoise.sdk import (
         _capture_turn_texts,
