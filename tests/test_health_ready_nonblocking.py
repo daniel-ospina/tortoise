@@ -184,6 +184,11 @@ _KNOWN_ON_LOOP_RESIDUAL = frozenset({
     "reserve_unlink", "revoke_api_key", "set_graph_name",
     "set_graph_recording", "set_membership", "set_org_onboarding_email_sent",
     "signup_token_row", "soft_delete_graph", "store_github_credentials",
+    # #4946: the disconnect credential clear. Reached from the async
+    # `github_disconnect` route through the sync `_clear_github_credentials`
+    # seam helper, so the async-body walk above cannot surface it — declared
+    # here with the same write-path caveat as store_github_credentials.
+    "clear_github_credentials",
     "store_link_intent", "user_identity_inventory", "webhook_event_marker",
 })
 
@@ -617,6 +622,7 @@ _ONBOARDING_BLOCKING_HELPERS = frozenset({
     "_get_onboarding_state",       # teams.onboarding_state (PostgREST) / Team node
     "_get_onboarding_projection",  # the merged jsonb + graph projection
     "_update_onboarding_state",    # READ side (the WRITE path is the residual below)
+    "_clear_github_credentials",   # #4946: the disconnect credential clear (sync seam write)
     "_org_email",                  # teams.email (PostgREST)
     "_session_recording_allowed",  # #4625 leg 12 — now off-loop
     "_graph_recording_override",   # per-graph recording override (graph read)
@@ -667,6 +673,10 @@ _KNOWN_ONBOARDING_INLINE_RESIDUAL = frozenset({
     "patch_onboarding_state", "onboarding_checkpoint",
     "set_session_recording", "create_onboarding_org",
     "_create_onboarding_org_lane", "public_demo", "github_callback",
+    # #4946: the GitHub disconnect route — like github_callback a jsonb WRITE
+    # path ("github_connected": False) reached inline, so the same bounded-
+    # mutation caveat applies.
+    "github_disconnect",
     # install probe + indexing lanes (write-side onboarding mirrors).
     "session_install_probe", "_run_indexing", "_run_docs_indexing",
     # sync seed helpers reached ON-LOOP from their async routes.
