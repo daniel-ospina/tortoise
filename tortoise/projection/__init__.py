@@ -2038,6 +2038,144 @@ def _owns_point(label: object) -> bool:
     return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
+def plan_point_restamp_folds(
+    events,
+) -> tuple[dict[int, tuple[bool, bool]], dict[str, int]]:
+    """#3305: the ONE whole-journal plan for the Point lifecycle terminalizer
+    folds — the survivor rule, the supersede canonicalization and BOTH belief
+    anchors, computed once and obeyed by every replay engine.
+
+    The two replay algorithm families cannot share a *schedule*: ``apply()``
+    replays ONE record at a time in journal order (so it folds at the event's
+    own position), while ``rebuild_all`` hoists every creation into pass-1a and
+    must reconstruct chronology in a trailing sweep. What they CAN and MUST
+    share is the fold *selection* — before this plan, the sweep's survivor
+    rule and supersede canonicalization lived only in ``rebuild_all``, so an
+    ``apply()``-based replay (``rebuild(EventLog)``, ``recover_from_log``, the
+    backup JSONL restore) folded terminalizers ``rebuild_all`` deliberately
+    drops: a ghost ``S1→A`` CORRECTS beside the canonical ``S2→A`` for a raw
+    double supersede, and a pre-re-emit invalidate that a bare same-id
+    ``PointAdded`` supersedes.
+
+    Returns ``(decisions, fold_seq)``:
+
+    * ``decisions`` — ``{journal seq: (apply_decay, apply_stamp)}`` for every
+      event whose NORMALIZED type is in ``_POINT_RESTAMP_EVENT_TYPES``. A
+      record that is inapplicable (an id that is not a writable str) maps to
+      ``(False, False)``; no terminalizer seq is ever omitted.
+    * ``fold_seq`` — ``{old_id: journal seq of the surviving supersede fold}``,
+      the pass-2b operator/direct edge-transfer discriminator.
+
+    The rules, each mirrored from ``rebuild_all``'s pass-1a/pass-1b contract:
+
+    * ``last_recreate_seq[(Point, id)]`` — the id's LAST ``PointAdded`` /
+      ``OperatorAdded`` — bounds the STAMP half. A fold at or before it died
+      with the replaced node. ``PointPromoted`` is deliberately NOT a boundary
+      (same-node draft→live: it clears neither ``outdated`` nor CORRECTS), so
+      seeding from it would silently drop a pre-promote invalidate fold.
+    * ``last_ann_drop_seq[(Point, id)]`` — the id's last REAL
+      delete→recreate (``EntityMutated op=delete`` / ``PointsMerged`` followed
+      by a creation of the same kind) — bounds the BELIEF half. A bare same-id
+      re-emit MERGEs live and KEEPS the decayed belief, so gating the decay on
+      the recreate boundary (as the stamp half does) would drop a decay live
+      actually applied (#2884 A3 the two families cannot hold opposite
+      policies for one journal shape).
+    * a supersede is canonicalized per old id: only the LAST applicable
+      supersede decays and only the LAST surviving supersede folds, so an
+      earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``.
+      Invalidates are NOT canonicalized (#2498) — every survivor folds and
+      every applicable one decays.
+    * a ``PointSuperseded`` with no ``new_id`` is inapplicable to the fold
+      (``_fold_point_superseded`` no-ops): it never decays. It is still a STAMP
+      candidate when it is the id's last recreate-surviving supersede, so the
+      sweep's fold-miss warning still fires for it exactly as before.
+    """
+    last_recreate: dict[tuple[str, str], int] = {}
+    last_drop: dict[tuple[str, str], int] = {}
+    pending_deleted: set[tuple[str, str]] = set()
+    terminalizers: list[tuple[int, dict]] = []
+    for seq, raw in enumerate(events):
+        ev = _norm(raw) if isinstance(raw, dict) else {}
+        t = ev.get("type")
+        if t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str) and _owns_point(ev.get("label")):
+                pending_deleted.add(("Point", rid))
+            continue
+        if t == "PointsMerged":
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    pending_deleted.add(("Point", mid))
+            continue
+        if t in ("PointAdded", "OperatorAdded"):
+            p = ev.get("point")
+            if isinstance(p, dict) and isinstance(p.get("id"), str):
+                key = ("Point", p["id"])
+                last_recreate[key] = seq
+                if key in pending_deleted:
+                    last_drop[key] = seq
+                    pending_deleted.discard(key)
+            continue
+        if t in _POINT_RESTAMP_EVENT_TYPES:
+            terminalizers.append((seq, ev))
+
+    # BELIEF half. A supersede's decay is the LAST applicable supersede's
+    # (canonicalization subsumes the earlier instance); EVERY applicable
+    # invalidate decays.
+    supersede_decay: dict[str, int] = {}
+    decays: set[int] = set()
+    for seq, ev in terminalizers:
+        rid = ev.get("id")
+        if not isinstance(rid, str) or not rid:
+            continue
+        drop = last_drop.get(("Point", rid))
+        if drop is not None and seq <= drop:
+            continue
+        if ev.get("type") == "PointSuperseded":
+            if not ev.get("new_id"):
+                continue
+            supersede_decay[rid] = seq
+        else:
+            decays.add(seq)
+    decays |= set(supersede_decay.values())
+
+    # STAMP half: the recreate boundary, then the supersede canonicalization.
+    recreate_ok: dict[int, bool] = {}
+    for seq, ev in terminalizers:
+        rid = ev.get("id")
+        if not isinstance(rid, str) or not rid:
+            recreate_ok[seq] = False
+            continue
+        anchor = last_recreate.get(("Point", rid))
+        recreate_ok[seq] = anchor is None or seq > anchor
+    # Only the LAST recreate-surviving supersede per old id folds, so an
+    # earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``. The
+    # canonicalization is on the FOLD, not on ``new_id``: a later supersede
+    # that carries no ``new_id`` still supersedes the earlier one as the id's
+    # last published successor event (it folds 0 rows and is warned about
+    # exactly as before). Invalidates are NOT canonicalized (#2498).
+    supersede_last_seq: dict[str, int] = {}
+    for seq, ev in terminalizers:
+        if ev.get("type") != "PointSuperseded":
+            continue
+        rid = ev.get("id")
+        if not isinstance(rid, str) or not rid or not recreate_ok.get(seq):
+            continue
+        supersede_last_seq[rid] = seq
+    decisions: dict[int, tuple[bool, bool]] = {}
+    for seq, ev in terminalizers:
+        rid = ev.get("id")
+        if not isinstance(rid, str) or not rid:
+            decisions[seq] = (False, False)
+            continue
+        if ev.get("type") == "PointSuperseded":
+            stamp = supersede_last_seq.get(rid) == seq
+        else:
+            stamp = recreate_ok.get(seq, False)
+        decisions[seq] = (seq in decays, stamp)
+    return decisions, dict(supersede_last_seq)
+
+
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
     ev = _norm(ev)
     t = ev.get("type")
@@ -3214,15 +3352,23 @@ class FalkorProjection(
                         params={"id": oid},
                     )
         elif t in _POINT_RESTAMP_EVENT_TYPES:
-            # #3305: the Point-lifecycle terminalizer fold. This engine replays
-            # ONE record at a time in journal order, so the fold runs at the
-            # event's own position — exactly live chronology. Before this
-            # branch the type fell through to the ``unrecognized event type``
-            # warning below, so ``recover_from_log`` / the backup JSONL
-            # restore re-materialized a superseded or invalidated Point as
-            # ``status='live'`` with the CORRECTS edge and belief decay gone.
-            # The fold itself is shared with ``rebuild_all``'s sweep via
-            # ``_fold_point_restamp`` (the ONE home for the selection).
+            # #3305: the Point-lifecycle terminalizer fold, for the ONE-RECORD
+            # contract (a live caller, or any whole-journal engine that has not
+            # been wired to the shared plan). This engine has no journal view,
+            # so it folds the record at its position — chronology, so the belief
+            # decay rides along, and the fold can never be applied with a
+            # survivor decision the journal would contradict.
+            #
+            # The apply()-based REPLAY engines do NOT use this branch: they call
+            # ``apply_journal_point_restamp`` with the plan
+            # ``plan_point_restamp_folds`` builds, because folding EVERY
+            # terminalizer here would diverge from ``rebuild_all``'s selection
+            # (a pre-recreation fold, or a non-canonical supersede, must not
+            # fold). Before this branch existed the type fell through to the
+            # ``unrecognized event type`` warning below, so
+            # ``recover_from_log`` / the backup JSONL restore re-materialized a
+            # superseded or invalidated Point as ``status='live'`` with the
+            # CORRECTS edge and belief decay gone.
             return self._fold_point_restamp(ev)
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
@@ -3474,9 +3620,20 @@ class FalkorProjection(
         # link whose endpoint was hard-deleted AFTER it must not resurrect.
         hard_delete_seqs = journal_hard_delete_seqs(events)
         entity_link_events: list[tuple[int, dict]] = []
+        # #3305: compute the shared terminalizer SELECTION once for the whole
+        # journal. This engine replays one record at a time, so it cannot use
+        # ``apply()``'s inline branch for these two types — that branch folds
+        # EVERY terminalizer, while ``rebuild_all`` deliberately drops the
+        # pre-recreation ones and canonicalizes supersedes. Feeding each
+        # record through the plan keeps the two engines on ONE selection.
+        restamp_plan, _ = plan_point_restamp_folds(events)
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                 entity_link_events.append((seq, ev))
+                continue
+            if (isinstance(ev, dict)
+                    and ev.get("type") in _POINT_RESTAMP_EVENT_TYPES):
+                self.apply_journal_point_restamp(ev, seq, restamp_plan)
                 continue
             self.apply(ev)
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
@@ -4325,34 +4482,22 @@ class FalkorProjection(
         #
         # Resolve, PER OLD-ID, the surviving supersede whose decay applies —
         # the LAST event not obsoleted by a REAL hard-delete boundary. The
-        # anchor is ``last_ann_drop_seq`` (advanced only by a real
-        # ``EntityMutated op=delete`` / ``PointsMerged`` creation), NOT the
-        # terminalizing ``last_recreate_seq``: a bare same-id re-emit MERGEs
-        # live and keeps belief state, so gating the decay on it would drop a
-        # decay live actually applied. Pass 1a has populated both anchors
-        # before this runs, over the SAME ``events`` list the sweep enumerates.
-        supersede_decay_seq: dict[str, int] = {}
-        for seq, ev in enumerate(events):
-            ev = self._norm(ev)
-            if ev.get("type") != "PointSuperseded":
-                continue
-            _sd_rid = ev.get("id")
-            # Mirror ``_fold_point_superseded``'s applicability guard
-            # (``if not oid or not new_id: return 0``) EXACTLY: the sweep fold
-            # IGNORES an event that lacks ``new_id``, so the inline decay must
-            # not fire for one either — live never decayed for such an event,
-            # and a decay here would be a belief write the graph never
-            # received. The falsy-id test matters as much as the type test: an
-            # EMPTY-STRING id passes ``isinstance(..., str)`` (and
-            # ``_writable_id``) but is skipped by the fold, so a type-only gate
-            # would decay a node the fold ignores.
-            if (not isinstance(_sd_rid, str) or not _sd_rid
-                    or not ev.get("new_id")):
-                continue
-            _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
-            if _sd_drop is not None and seq <= _sd_drop:
-                continue
-            supersede_decay_seq[_sd_rid] = seq
+        # anchor is the REAL delete→recreate boundary (advanced only by an
+        # ``EntityMutated op=delete`` / ``PointsMerged`` followed by a
+        # creation), NOT the terminalizing recreate anchor: a bare same-id
+        # re-emit MERGEs live and keeps belief state, so gating the decay on it
+        # would drop a decay live actually applied. Pass 1a has populated the
+        # anchors before this runs, over the SAME ``events`` list the sweep
+        # enumerates.
+        #
+        # #3305: the WHOLE selection — both belief anchors, the recreate
+        # survivor rule and the supersede canonicalization, for both families —
+        # is now computed by ``plan_point_restamp_folds`` and obeyed by the
+        # apply()-based engines too (``rebuild(EventLog)``/``recover_from_log``
+        # /the backup JSONL restore), so the two algorithm families cannot pick
+        # different terminalizers from one journal. See that function for the
+        # rules.
+        restamp_plan, _ = plan_point_restamp_folds(events)
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
@@ -4722,15 +4867,16 @@ class FalkorProjection(
                 #
                 # #2884 A3: the BELIEF-decay half (`decay_clause`) folds INLINE
                 # HERE too, at the surviving event's own journal seq (resolved
-                # by the ``supersede_decay_seq`` pre-pass above) — NOT in the
-                # trailing sweep. The sweep fold below no longer writes any
-                # belief prop, so inline and sweep are mutually exclusive by
-                # construction for the same event (only this branch writes the
-                # decay). The anchor is ``last_ann_drop_seq``, NOT
-                # ``last_recreate_seq`` (see the pre-pass).
-                if isinstance(ev.get("id"), str):
-                    if supersede_decay_seq.get(ev["id"]) == seq:
-                        self._decay_point_belief(ev["id"])
+                # by ``plan_point_restamp_folds``) — NOT in the trailing sweep.
+                # The sweep fold below no longer writes any belief prop, so
+                # inline and sweep are mutually exclusive by construction for
+                # the same event (only this branch writes the decay). The anchor
+                # is the REAL delete→recreate boundary, NOT the terminalizing
+                # recreate anchor (see the plan).
+                _sd_decay, _sd_stamp = restamp_plan.get(seq, (False, False))
+                if _sd_decay:
+                    self._decay_point_belief(ev["id"])
+                if _sd_stamp:
                     point_re_stamp_folds.append((seq, ev))
             elif t == "PointInvalidated":
                 # #2488 pass-1b rebuild parity: the POINT-side invalidate
@@ -4769,11 +4915,12 @@ class FalkorProjection(
                 # decayed one. The two families cannot hold opposite policies
                 # for one journal shape.
                 if isinstance(ev.get("id"), str):
-                    _inv_rid = ev["id"]
-                    _inv_anchor = last_ann_drop_seq.get(("Point", _inv_rid))
-                    if _inv_anchor is None or seq > _inv_anchor:
-                        self._decay_point_belief(_inv_rid)
-                    point_re_stamp_folds.append((seq, ev))
+                    _inv_decay, _inv_stamp = restamp_plan.get(
+                        seq, (False, False))
+                    if _inv_decay:
+                        self._decay_point_belief(ev["id"])
+                    if _inv_stamp:
+                        point_re_stamp_folds.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
                 # DirectEdgeRepoint descriptor {src, tgt, edge_type, attrs}
@@ -4922,22 +5069,17 @@ class FalkorProjection(
         # journal it, so every survivor folds (distinct corrected_by → 2
         # CORRECTS, acceptance b).
         # Chains A→B→C have distinct old ids — each link folds independently.
-        supersede_last: dict[str, tuple[int, dict]] = {}
-        invalidate_survivors: list[tuple[int, dict]] = []
-        for fsq, ev in point_re_stamp_folds:
-            anchor = last_recreate_seq.get(("Point", ev["id"]))
-            if anchor is not None and fsq <= anchor:
-                # Pre-re-creation fold — dropped (id-reuse survivor rule).
-                continue
-            if ev["type"] == "PointSuperseded":
-                supersede_last[ev["id"]] = (fsq, ev)
-            else:
-                invalidate_survivors.append((fsq, ev))
-        # Journal-append order (ascending event index). Do NOT sort by ts —
-        # ts collides within the same ms and the JSONL carries no seq.
-        point_sweep = sorted(
-            [*supersede_last.values(), *invalidate_survivors],
-            key=lambda pair: pair[0])
+        # #3305: the survivor rule and the supersede canonicalization already
+        # ran in ``plan_point_restamp_folds`` (shared with the apply()-based
+        # engines), so ``point_re_stamp_folds`` holds ONLY the survivors, in
+        # journal-append order (pass-1b collected them in seq order). Do NOT
+        # re-sort by ts — ts collides within the same ms and the JSONL carries
+        # no seq. ``supersede_last`` is re-derived here because pass-2b's edge
+        # transfer discriminates on the supersede-kind survivors.
+        supersede_last: dict[str, tuple[int, dict]] = {
+            ev["id"]: (fsq, ev) for fsq, ev in point_re_stamp_folds
+            if ev.get("type") == "PointSuperseded"}
+        point_sweep = point_re_stamp_folds
         for fsq, ev in point_sweep:
             if ev["type"] == "PointInvalidated":
                 # #2488 updatedAt seq-gate (NOT clock comparison): pass-1a's

@@ -51,10 +51,12 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .projection import (
+    _POINT_RESTAMP_EVENT_TYPES,
     _apply_one,
     _load_prewipe_snapshot,
     _promotion_point_with_operator,
     journal_hard_delete_seqs,
+    plan_point_restamp_folds,
     prewipe_snapshot_path,
 )
 from .projection.entities import (
@@ -1109,12 +1111,22 @@ def recover_from_log(events_dir: str, projection) -> dict:
     applied = 0
     hard_delete_seqs = journal_hard_delete_seqs(events)
     entity_link_events: list[tuple[int, dict]] = []
+    # #3305: the Point lifecycle terminalizers are folded by the SHARED
+    # whole-journal plan, not by ``apply()``'s inline branch — that branch
+    # folds every terminalizer, while ``rebuild_all`` deliberately drops the
+    # pre-recreation ones and canonicalizes supersedes. Computing the plan
+    # here keeps this recovery engine on the same selection.
+    restamp_plan, _ = plan_point_restamp_folds(events)
     for seq, ev in enumerate(events):
         if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
             entity_link_events.append((seq, ev))
             continue
         try:
-            projection.apply(ev)
+            if (isinstance(ev, dict)
+                    and ev.get("type") in _POINT_RESTAMP_EVENT_TYPES):
+                projection.apply_journal_point_restamp(ev, seq, restamp_plan)
+            else:
+                projection.apply(ev)
             applied += 1
         except Exception:
             torn += 1

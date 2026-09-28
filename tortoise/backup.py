@@ -134,8 +134,10 @@ def restore(backup_dir: str, db_path: str,
     # Restore into FalkorDB if requested
     if into_falkor:
         from tortoise.projection import (  # noqa: I001
+            _POINT_RESTAMP_EVENT_TYPES,
             FalkorProjection,
             journal_hard_delete_seqs,
+            plan_point_restamp_folds,
         )
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
@@ -166,9 +168,19 @@ def restore(backup_dir: str, db_path: str,
             records = EventLog(events_path).read_all()
             hard_delete_seqs = journal_hard_delete_seqs(records)
             deferred_links: list[tuple[int, dict]] = []
+            # #3305: the Point lifecycle terminalizers fold through the SHARED
+            # whole-journal plan (the same selection ``rebuild_all`` uses),
+            # not through ``apply()``'s inline branch — that branch folds every
+            # terminalizer, including the pre-recreation ones ``rebuild_all``
+            # drops and the non-canonical supersedes it collapses.
+            restamp_plan, _ = plan_point_restamp_folds(records)
             for seq, ev in enumerate(records):
                 if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                     deferred_links.append((seq, ev))
+                    continue
+                if (isinstance(ev, dict)
+                        and ev.get("type") in _POINT_RESTAMP_EVENT_TYPES):
+                    proj.apply_journal_point_restamp(ev, seq, restamp_plan)
                     continue
                 proj.apply(ev)
             if deferred_links:

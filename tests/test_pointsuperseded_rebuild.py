@@ -1015,3 +1015,96 @@ def test_apply_replay_keeps_a_live_point_live(sup):
     assert post["status"] == "live"
     assert post["outdated"] is None
     assert post["validTo"] is None
+
+
+def test_apply_replay_shares_rebuild_all_selection_on_double_supersede(sup):
+    """#3305 (review P1): the apply() arm must obey the SAME SELECTION as
+    rebuild_all, not merely the same fold body. A raw id-reusing producer can
+    journal TWO PointSuperseded events for one old id; rebuild_all
+    CANONICALIZES them (only the last folds) so the earlier ``S1→A`` CORRECTS
+    cannot ghost beside the final ``S2→A``. Folding every terminalizer inline
+    would re-introduce that ghost on the recovery path."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    s1 = sdk.create_point("statement", "S1", status="live")["id"]
+    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    sdk.supersede_point(a, s1)
+    # A second fold for the SAME old id — the SDK's terminal guard refuses a
+    # live second supersede, so journal it the way a raw producer would.
+    with open(events / "events.jsonl", "a") as fh:
+        fh.write(json.dumps({
+            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "type": "PointSuperseded", "initiated_by": "raw-producer",
+            "projection_version": 2, "id": a, "new_id": s2,
+        }) + "\n")
+
+    _rebuild(sdk, events)
+    via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_all = (sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$new})-[r:CORRECTS]->(b:Point {id:$old}) "
+        "RETURN a.id",
+        params={"new": s2, "old": a}).result_set)
+    _apply_replay(sdk, events)
+    via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_apply = (sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$new})-[r:CORRECTS]->(b:Point {id:$old}) "
+        "RETURN a.id",
+        params={"new": s2, "old": a}).result_set)
+
+    assert via_all["status"] == "superseded"
+    # expiredAt is the ``_now_iso()`` fallback for a raw line that carries no
+    # ``expired_at`` — a replay-time clock, so the comparison is on the fold's
+    # SEMANTIC fields (the selection is what must agree), not on wall clock.
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all on double supersede: "
+        f"{via_apply} != {via_all}")
+    assert _corr(sdk._get_proj(), a, s2) == 1
+    assert _corr(sdk._get_proj(), a, s1) == 0, (
+        "ghost CORRECTS from the earlier, non-canonical supersede")
+    assert corr_apply == corr_all
+
+
+def test_plan_point_restamp_folds_pins_the_shared_selection():
+    """#3305: the plan is the ONE home for the terminalizer SELECTION (the
+    survivor rule + supersede canonicalization + both belief anchors) that
+    every replay engine obeys. Pinned directly — the two DB-level parity tests
+    above pin the engines' agreement, this pins the contract itself."""
+    from tortoise.projection import plan_point_restamp_folds
+
+    # Two supersedes for ONE old id, no delete/recreate: only the LAST is a
+    # stamp survivor (canonicalization), and only the LAST decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "s1", "content": "S1"}},
+        {"type": "PointAdded", "point": {"id": "s2", "content": "S2"}},
+        {"type": "PointSuperseded", "id": "a", "new_id": "s1"},
+        {"type": "PointSuperseded", "id": "a", "new_id": "s2"},
+    ])
+    assert decisions[3] == (False, False), (
+        "the non-canonical supersede must neither fold nor decay")
+    assert decisions[4] == (True, True)
+    assert fold_seq == {"a": 4}
+
+    # A bare same-id PointAdded RE-EMIT advances the recreate boundary, so the
+    # pre-re-emit invalidate must NOT stamp — but the belief decay is anchored
+    # on the REAL delete→recreate boundary, so it MUST still fold (#2884 A3).
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[1] == (True, False), (
+        "re-emit: decay folds, the pre-recreation stamp is dropped")
+    assert fold_seq == {}
+
+    # A REAL delete→recreate moves BOTH boundaries: nothing about the dead
+    # incarnation folds or decays.
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "EntityMutated", "id": "a", "op": "delete",
+         "label": "Point"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[1] == (False, False)
+    assert fold_seq == {}

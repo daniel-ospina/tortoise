@@ -651,3 +651,37 @@ def test_apply_replay_keeps_a_clean_point_clean(sup):
     assert post["outdated"] is None
     assert post["status"] == "live"
     assert post["validTo"] is None
+
+
+def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
+    """#3305 (review P1): the apply() arm must obey the SAME SELECTION as
+    rebuild_all. A bare same-id ``PointAdded`` re-emit ADVANCES the recreate
+    boundary, so the pre-recreation invalidate fold must be DROPPED — while the
+    belief decay, which is anchored on the real delete→recreate boundary, must
+    STILL fire (#2884 A3). An inline fold that ignores this re-introduces the
+    outdated flag + ghost CORRECTS on the recovery path."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A v1", status="live")["id"]
+    b = sdk.create_point("statement", "B (corrector)", status="live")["id"]
+    sdk.invalidate_point(a, b)
+    _raw_append(events, sdk, "PointAdded", point={
+        "id": a, "content": "A v2 (recreated)", "status": "live",
+        "pointKind": "statement"})
+
+    _rebuild(sdk, events)
+    via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_all = _corr_total(sdk._get_proj(), a)
+    _apply_replay(sdk, events)
+    via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
+    corr_apply = _corr_total(sdk._get_proj(), a)
+
+    assert via_all["outdated"] is not True, (
+        "rebuild_all follows the re-emission — the pre-recreation fold drops")
+    # updatedAt is the re-emission's replay-time stamp — each replay runs at a
+    # different wall clock, so the comparison is on the fold's SEMANTIC fields,
+    # not on wall clock.
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all on same-id re-emission: "
+        f"{via_apply} != {via_all}")
+    assert corr_apply == corr_all == 0, (
+        "pre-recreation CORRECTS died with the node")

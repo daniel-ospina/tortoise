@@ -1362,8 +1362,9 @@ class _EntityHandlers:
 
     def _fold_point_restamp(self, ev: dict, *,
                             skip_updated_at: bool = False,
-                            decay: bool = True) -> int:
-        """#3305: ONE home for the Point-lifecycle terminalizer fold.
+                            decay: bool = True,
+                            stamp: bool = True) -> int:
+        """#3305: ONE home for the Point-lifecycle terminalizer fold body.
 
         Two replay engines must reach the same graph fold for a journaled
         Point terminalizer, and before this method the fold SELECTION lived in
@@ -1380,11 +1381,11 @@ class _EntityHandlers:
             invalidated Point with no ``outdated`` flag) — a dead claim served
             as current, with the CORRECTS edge and the belief decay gone too.
 
-        Declaring the selection ONCE (here) is what stops the two engines
-        drifting: a member of ``_POINT_RESTAMP_EVENT_TYPES`` is dispatched to
-        the same ``_fold_point_superseded`` / ``_fold_point_invalidated`` call
-        by both.
+        The SELECTION (survivor rule + supersede canonicalization + both
+        belief anchors) is shared through ``plan_point_restamp_folds``; this
+        method is the shared BODY it drives.
 
+        ``stamp`` folds the status/flag/validity/CORRECTS half.
         ``PointSuperseded`` → ``_fold_point_superseded`` (status='superseded'
         + outdated + validTo/expiredAt + successor CORRECTS).
         ``PointInvalidated`` → ``_fold_point_invalidated`` (outdated +
@@ -1397,45 +1398,76 @@ class _EntityHandlers:
         ``rebuild_all`` sweep passes ``decay=False``: pass-1b already applied
         the decay inline at the surviving event's seq, and re-applying it in
         the trailing sweep would clobber every later same-id belief writer.
+        A record the plan rejects for the STAMP half can still decay (a bare
+        same-id re-emit advances the recreate boundary but not the
+        delete/recreate one), which is why the two halves are separate flags.
 
         ``skip_updated_at`` is the invalidate family's seq gate (see
-        ``_fold_point_invalidated``); the chronological ``apply()`` path never
-        needs it — a later same-id revision simply folds later.
+        ``_fold_point_invalidated``); a chronological replay never needs it —
+        a later same-id revision simply folds later.
 
         Returns the fold's matched-row count (the #2164/#2423 fold-miss
         signal). 0 for an inapplicable record: an empty id, an id the driver
-        cannot take as a query parameter, or a ``PointSuperseded`` with no
-        ``new_id``. The id gate is ``_writable_id`` — the gate
-        ``_decay_point_belief`` / ``_fold_confidence_changed`` already use —
-        so a corrupt line degrades to a dropped fold instead of aborting a
-        post-wipe recovery at parameter encode.
+        cannot take as a query parameter, a ``PointSuperseded`` with no
+        ``new_id``, or a ``stamp=False`` call (the decay-only half). The id
+        gate is ``_writable_id`` — the gate ``_decay_point_belief`` /
+        ``_fold_confidence_changed`` already use — so a corrupt line degrades
+        to a dropped fold instead of aborting a post-wipe recovery at
+        parameter encode.
         """
         from tortoise.projection import _writable_id
         rid = ev.get("id")
         if not rid or not _writable_id(rid):
             return 0
-        t = ev.get("type")
-        if t == "PointSuperseded":
-            # ``new_id`` is the successor — the fold's own applicability guard
-            # (``_fold_point_superseded`` returns 0 without it) and the CORRECTS
-            # edge's endpoint. Mirrored here so the decay does not fire for an
-            # event the fold ignores: live never decayed for one.
-            if not ev.get("new_id"):
+        matched = 0
+        if stamp:
+            t = ev.get("type")
+            if t == "PointSuperseded":
+                # ``new_id`` is the successor — the fold's own applicability
+                # guard (``_fold_point_superseded`` returns 0 without it) and
+                # the CORRECTS edge's endpoint. Mirrored here so the decay does
+                # not fire for an event the fold ignores: live never decayed
+                # for one.
+                if ev.get("new_id"):
+                    matched = self._fold_point_superseded(ev)
+            elif t == "PointInvalidated":
+                matched = self._fold_point_invalidated(
+                    ev, skip_updated_at=skip_updated_at)
+            else:
+                # Unreachable while ``_POINT_RESTAMP_EVENT_TYPES`` and these
+                # arms agree (pinned by tests). Warn rather than no-op: a
+                # vocabulary member with no arm must be audible, not a fresh
+                # silent drop.
+                logger.warning(
+                    "_fold_point_restamp: no fold arm for %r — skipped", t)
                 return 0
-            matched = self._fold_point_superseded(ev)
-        elif t == "PointInvalidated":
-            matched = self._fold_point_invalidated(
-                ev, skip_updated_at=skip_updated_at)
-        else:
-            # Unreachable while ``_POINT_RESTAMP_EVENT_TYPES`` and these arms
-            # agree (pinned by tests). Warn rather than no-op: a vocabulary
-            # member with no arm must be audible, not a fresh silent drop.
-            logger.warning(
-                "_fold_point_restamp: no fold arm for %r — skipped", t)
-            return 0
         if decay:
             self._decay_point_belief(rid)
         return matched
+
+    def apply_journal_point_restamp(
+            self, ev: dict, seq: int,
+            plan: dict[int, tuple[bool, bool]]) -> None:
+        """#3305: apply the shared whole-journal plan to ONE terminalizer.
+
+        The apply()-based whole-journal engines (``rebuild(EventLog)``,
+        ``consistency.recover_from_log``, ``backup.restore``) replay a journal
+        record at a time, so they cannot call ``apply()``'s inline branch for
+        these two types — that branch folds EVERY terminalizer, which is not
+        ``rebuild_all``'s selection (see ``plan_point_restamp_folds``). They
+        call this instead, with the record's journal ``seq`` and the plan, so
+        both engines obey one selection.
+
+        ``plan`` is keyed by the SAME ``enumerate`` seq the caller passes; a
+        seq absent from it means the record's id is not a writable str (both
+        halves are skipped). The belief half folds here, at the record's own
+        position — chronological, so it cannot clobber a later writer.
+        """
+        apply_decay, apply_stamp = plan.get(seq, (False, False))
+        if not apply_decay and not apply_stamp:
+            return
+        self._fold_point_restamp(
+            ev, decay=apply_decay, stamp=apply_stamp)
 
     def _fold_point_superseded(self, ev: dict) -> int:
         """#2423: fold a PointSuperseded event into Point.status/validity +
