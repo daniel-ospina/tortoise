@@ -608,13 +608,33 @@ class SupersessionRecord(BaseModel):
     for POINT-level refs (E5 #1537 — ``superseded``/``supersedes_by`` are
     content-addressed ``pt_<sha>`` ids, dispatched by prefix at the write
     sites), as a CORRECTS edge via the canonical ``supersede()``. Additive-
-    optional so old clients' payloads still validate (no migration)."""
+    optional so old clients' payloads still validate (no migration) — with
+    ONE deliberate exception (#2243): ``evidence`` is capped at 200 chars, so
+    a client that previously sent longer evidence now gets a 422. The two ref
+    fields stay uncapped on purpose (see the note below)."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # ⛔ ``superseded``/``supersedes_by`` are DELIBERATELY UNCAPPED (#2243):
+    # they carry entity NAMES, and an Object name is IDENTITY — the write
+    # path MERGEs on it and stores it VERBATIM. #5370/#5390 removed the
+    # fold's own 200-char cap on the successor name precisely because it was
+    # LOSSY (a >200-char successor folded to a prefix that names NO Object,
+    # so a live successor rendered "no successor record found"). A
+    # ``max_length`` here would 422 that reproduced, supported case instead.
+    # ``evidence`` is free text (no identity role) and IS capped, mirroring
+    # ``Point.quote`` (≤200, :382) so a malformed batch cannot embed MBs
+    # inside the 8 MiB body cap.
+    #
+    # RESIDUAL (known, deliberate): the uncapped ref fields are interpolated
+    # into the per-record WARN lines (commit_ops.py:525/551/596/633), so a
+    # single WARN can still be body-cap-scale. What the caps DO bound is the
+    # WARN COUNT (≤ MAX_OPERATORS records), which is the amplification the
+    # issue describes; per-WARN size stays bounded only by the 8 MiB request
+    # cap.
     superseded: str = Field(min_length=1)   # existing entity id OR name
     supersedes_by: str = Field(min_length=1)  # the new entity's name
-    evidence: str = Field(default="")
+    evidence: str = Field(default="", max_length=200)
 
 
 class CommitPayload(BaseModel):
@@ -854,6 +874,15 @@ def validate_layer1(
     if len(payload.operators) > MAX_OPERATORS:
         add("operators", f"operator count {len(payload.operators)} exceeds "
             f"MAX_OPERATORS ({MAX_OPERATORS})")
+    # Supersessions (#2243): bound the batch too. The write path's
+    # ``apply_supersessions`` emits ONE WARN PER RECORD (fail-open), so an
+    # unbounded batch amplifies into a warning storm; this count cap is the
+    # load-bearing half of the fix. It mirrors the operators cap (also
+    # MAX_OPERATORS=500) and is the same order as entities (MAX_ENTITIES=500).
+    if len(payload.supersessions) > MAX_OPERATORS:
+        add("supersessions", f"supersession count "
+            f"{len(payload.supersessions)} exceeds MAX_OPERATORS "
+            f"({MAX_OPERATORS})")
 
     # Atomicity shape (per point).
     for i, pt in enumerate(payload.points):
