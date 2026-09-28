@@ -261,6 +261,9 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/_redirects",
                    "website/apps/dashboard/public/404.html",
                    "website/apps/dashboard/src/",
+                   # #3048: `functions/assets/[[path]].ts` (the missing-asset 404)
+                   # is already covered by the `website/apps/dashboard/functions/`
+                   # directory entry above, so no entry is added for it here.
                    # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
                    # the Stripe ?session_id= return) are BUILT here, so a change to
                    # the server-side return path must run the guard too — otherwise
