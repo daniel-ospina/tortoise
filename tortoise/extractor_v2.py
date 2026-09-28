@@ -2591,6 +2591,51 @@ def _norm_kind(k: str) -> str:
     return str(k or "").strip().rsplit(":", 1)[-1].lower()
 
 
+#: The write path's identity content cap — the three sites ``execute_embed``
+#: keys content identities on (event content, point content, minted endpoint
+#: refs) all truncate with ``str(x).strip()[:1000]``. Other fields carry their
+#: own, unrelated caps (a point's 200-char ``quote``, a summary's 2000).
+#: ``vet_gate._MAX_CONTENT`` mirrors this value (that module must not import
+#: this one — see its header), and a parity test pins the two together.
+_MAX_CONTENT = 1000
+
+
+def _endpoint_keys(ref: object) -> frozenset[str]:
+    """Every ENTITY-NAME identity the mint's entity guard keys a ref under.
+
+    The mint keys a ref's content with ``M(x) = _norm(x.strip()[:_MAX_CONTENT])``.
+    A ref names an entity in one of two spellings a model writes — the entity's
+    name, or its whitespace-collapsed re-typing — so the guard's key set is ``M``
+    applied to both: ``{M(x), M(_norm(x))}``. This is the guard's set only; the
+    mint separately registers the untruncated ``_norm(ref)`` as a RESOLUTION alias
+    (``_full``), which is why ``vet_gate._norm_variants`` is a superset.
+
+    ⚠️ Scope: the two SPELLINGS, not every truncation of them — and the
+    boundary is bidirectional. A sub-cap prefix of a name whose ``_norm`` window
+    is NOT that name's own ``_MAX_CONTENT`` window keys apart and would still be
+    minted; closing that needs prefix matching, which would refuse legitimate
+    edges whose text merely STARTS with an entity name. Conversely a ref that
+    merely COINCIDES with the name's own truncated window while naming something
+    else is refused — e.g. entity ``"pytest" + " "*1200 + "suffix"`` with ref
+    ``"pytest"`` (the window ``_norm(name[:_MAX_CONTENT])`` is ``"pytest"``):
+    a legitimate edge ``main`` kept, now dropped. That is the accepted trade-off
+    of a finite key set pending prefix matching, NOT a correctness claim — the
+    residual is recorded on #5069. Keying the
+    entity-name sets on the FULL name while ``_mint_endpoint`` keyed the
+    truncated ref let a >1000-char participant name be minted as a claim Point
+    (the OPERATOR REFERENCING hard rule's own failure mode); keying them on the
+    truncated form ALONE dropped the collapsed arm. The mint's entity sets are
+    built from THIS key set; ``vet_gate._norm_variants`` is the mirror for the
+    prune and is a superset of it (it also carries the untruncated
+    resolution alias), and a test pins that containment.
+    """
+    raw = str(ref or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset({_norm(raw[:_MAX_CONTENT]),
+                      _norm(_norm(raw)[:_MAX_CONTENT])})
+
+
 # E5 (#1537) — a single shared content token is never a revision; the
 # length guard ratio is against the LONGER side (max-denominator).
 _MIN_OVERLAP_TOKENS = 2
@@ -5769,7 +5814,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # #2552 mint-before-wire guard: an operator endpoint that names an
     # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
     # must never be materialized as a claim Point (see `_mint_endpoint`).
-    emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
+    # #5069: keyed through `_endpoint_keys` — the SAME transform the mint's
+    # guard applies to a ref — because a key built from the full normalised
+    # name alone did not match the mint's truncated ref, so the guard missed
+    # for a >1000-char entity name (and for its collapsed spelling when that
+    # spelling is itself past the cap, where the old full-name key was a
+    # different string).
+    emitted_entity_names = {k for name, _ in emitted_entity_keys
+                            for k in _endpoint_keys(name)}
     # #4716 Part 2 (Defect A / #4656 gap 1) — the mint's entity guard also
     # consults the S3 index's entity rows, not just this session's payload
     # entities: an Object that already exists in the graph but was NOT
@@ -5788,8 +5840,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # outside it is still mintable; closing that needs an authoritative
     # query-independent entity lookup, which is deliberately out of #4716's
     # scope (see the issue's "the candidate set cannot carry correctness").
-    graph_entity_names = {_norm(str(e.get("name") or ""))
-                          for e in idx["entities"] if e.get("name")}
+    graph_entity_names = {k for e in idx["entities"] if e.get("name")
+                          for k in _endpoint_keys(e.get("name"))}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -5799,7 +5851,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(ev, dict):
             warnings.append(f"non-dict event entry {ev!r} skipped")
             continue
-        content = str(ev.get("content", "")).strip()[:1000]
+        content = str(ev.get("content", "")).strip()[:_MAX_CONTENT]
         if not content:
             continue
         ekind = str(ev.get("eventKind", "")).strip() or "core:occurrence"
@@ -5874,7 +5926,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
             continue
-        content = str(p.get("content", "")).strip()[:1000]
+        content = str(p.get("content", "")).strip()[:_MAX_CONTENT]
         if not content:
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
@@ -6076,13 +6128,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
-        content = str(ref or "").strip()[:1000]
+        content = str(ref or "").strip()[:_MAX_CONTENT]
         if not content:
             return ""
+        # `n` is the RESOLUTION key (`point_ids`/`event_ids` are keyed on the
+        # minted content). The ENTITY guard is the same key-set transform the
+        # sets above were built with (#5069): a ref naming a participant in
+        # either of the two SPELLINGS `_endpoint_keys` keys is refused — other
+        # truncations of the name are out of scope (the residual on #5069).
         n = _norm(content)
         if n in point_ids:
             return point_ids[n]
-        if n in emitted_entity_names or n in graph_entity_names:
+        if _endpoint_keys(ref) & (emitted_entity_names | graph_entity_names):
             # The hard rule is explicit — "NEVER use an entity name as an
             # operator endpoint — entities are wired through
             # about_entities". Minting one would fabricate a degenerate claim
