@@ -557,6 +557,13 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
+  # read is injected through a fixture), so `core` can run it on engine-wide
+  # changes; it pins tools/queue_conflict_census.py, the instrument that makes
+  # the conflicting share of the open queue a reproducible number instead of a
+  # hand count. Same surface as its siblings test_merge_throughput.py /
+  # test_queue_window_observe.py.
+  - test_queue_conflict_census.py
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
