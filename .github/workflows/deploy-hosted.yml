@@ -912,6 +912,38 @@ jobs:
             --variable-fired "$BYPASS_VARIABLE_FIRED" \
             --set-at "$SKIP_DB_HEALTH_GATE_SET_AT" \
             --effect "the release health check does not run, so a live release with a dead graph DB plane is not detected here"
+      - name: Assert the RUNNING machine env honours every fly-toml-env declaration (#5656)
+        # The second half of #4568. `check-fly-secret-drift.py` proves every name
+        # has a declared managing source, and that no Fly SECRET shadows a
+        # declared `[env]` name — all BUILD-TIME surfaces. Nothing read the
+        # machine's own `config.env`, so a declared `[env]` value the running
+        # machine did not carry passed every gate there is.
+        #
+        # The incident: an out-of-band `fly.toml [env]` deploy was silently
+        # reverted by the next `deploy-hosted` run, and
+        # TORTOISE_MANUAL_LINKING_ENABLED (declared, live at `1`) was absent on
+        # the machine for ~5 h → `is_truthy(None)` → `_linking_available()`
+        # False — a product flag off, with no way for the operator to learn that
+        # the value they applied was not the value the machine ran.
+        #
+        # POST-RELEASE on purpose: a machine's env is only the *deployed* env
+        # after `flyctl deploy` has released it. This job is skipped unless
+        # `deploy-api` succeeded, so there is always a release to read.
+        #
+        # A FAILURE HERE MEANS: THE RELEASE IS LIVE AND ITS ENV IS WRONG. It does
+        # NOT mean the deploy failed (there is no rollback) — the same posture as
+        # the DB health step above. Exit 2 (could-not-determine: API error,
+        # malformed shape, missing token) is never bypassable; exit 1 names every
+        # absent/divergent name AND the machine carrying it.
+        #
+        # `FLY_API_TOKEN` (read-only listing), NOT `FLY_API_TOKEN_DEPLOY` — this
+        # step only reads. Logic lives in the script so it is testable; its
+        # harness is tests/test_fly_machine_env.py (run by ci.yml).
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: tortoise-y4mjjq
+        run: python3 .github/scripts/check-fly-machine-env.py
+        shell: bash
       - name: Deploy gate audit — post-deploy-verify (#4759)
         # This job's only bypassable gate, stated as bypassed or not even when an
         # earlier step failed — so "no bypass block" is never the reader's only
