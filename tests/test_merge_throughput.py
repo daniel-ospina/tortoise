@@ -2119,9 +2119,16 @@ def test_report_does_not_launder_a_failed_collector(monkeypatch):
                "api_main_sha", "fetch_check_runs"):
         monkeypatch.setattr(mt, fn, lambda *a, **k: {})
     monkeypatch.setattr(mt, "live_main_sha", lambda *a, **k: mt.UNKNOWN)
+    # Task 4b: the shard/durations collectors are live reads too, so a failed
+    # one must stay UNKNOWN and must not be laundered.
+    monkeypatch.setattr(mt, "collect_shard_balance", lambda *a, **k: {})
+    monkeypatch.setattr(mt, "collect_durations_map", lambda *a, **k: {})
     report = mt.build_report(fixture=None)
     assert report["fast_files_unclassified"] is mt.UNKNOWN
     assert report["durations_map"]["sampled_keys"] is mt.UNKNOWN
+    assert report["shard_imbalance_minutes"] is mt.UNKNOWN
+    assert report["legs"] is mt.UNKNOWN
+    assert report["diverged"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -3572,3 +3579,112 @@ def test_cli_triage_refuses_a_failed_conflict_sweep_through_main(monkeypatch):
     monkeypatch.setattr(mt, "_gh_api", lambda *a, **k: prs)
     monkeypatch.setattr(mt, "collect_triage_conflicts", lambda *a, **k: None)
     assert mt._cli_triage([]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 4b (#5215 M8): live shard-balance + durations-map collectors.
+#
+# The instrument already owns the exit-code contract for these checks; these
+# tests pin the DATA SOURCE — `shard-balance` is observed Jobs-API wall time
+# (never the map), `durations-map`'s age comes from `durations_captured_at`, and
+# an absent collector observation is UNKNOWN, never "no divergence".
+# ---------------------------------------------------------------------------
+
+
+def test_job_wall_seconds_defers_to_the_jobs_api_timestamps():
+    assert mt._job_wall_seconds({
+        "started_at": "2026-09-27T16:00:00Z",
+        "completed_at": "2026-09-27T16:01:00Z",
+    }) == 60.0
+    assert mt._job_wall_seconds({"started_at": None, "completed_at": None}) is None
+
+
+def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
+    import ci_timing
+
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    payload = mt.collect_shard_balance()
+    assert payload["legs"]["a"]["wall_seconds"] == 2190.0
+    assert payload["legs"]["b"]["wall_seconds"] == 1607.0
+    # the observed split is 9.72 min — NOT the map's 0.00 min
+    assert round(payload["shard_imbalance_minutes"], 2) == 9.72
+    assert mt.run_check("shard-balance", json=payload, max=3) == 1
+
+
+def test_collect_shard_balance_requires_both_legs(monkeypatch):
+    import ci_timing
+
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_diverged_duration_keys_flags_only_observed_overshoot():
+    durations = {"test_a.py": 10.0, "test_b.py": 100.0, "test_c.py": 5.0}
+    observed = {"test_a.py": 12.0, "test_b.py": 40.0}  # test_c not observed
+    assert mt._diverged_duration_keys(durations, observed) == ["test_b.py"]
+
+
+def test_collect_durations_map_reports_age_and_divergence(monkeypatch):
+    import ci_selection
+
+    now = mt.datetime.now(mt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    monkeypatch.setattr(ci_selection, "load_manifest", lambda: {
+        "surfaces": {"core": ["test_a.py"]},
+        "durations": {"test_a.py": 10.0},
+        "durations_captured_at": now,
+    })
+    monkeypatch.setattr(mt, "_collector_observed_weights",
+                        lambda: {"test_a.py": 12.0})
+    payload = mt.collect_durations_map()
+    assert payload["durations_map"]["sampled_keys"] == 1
+    assert payload["durations_map"]["compared_keys"] == 1
+    assert 0 <= payload["durations_map"]["age_days"] < 0.01
+    assert payload["diverged"] == []
+    assert mt.run_check("durations-map", json=payload, max_age_days=14) == 0
+
+
+def test_collect_durations_map_absent_capture_age_is_unknown(monkeypatch):
+    import ci_selection
+
+    monkeypatch.setattr(ci_selection, "load_manifest", lambda: {
+        "surfaces": {"core": ["test_a.py"]},
+        "durations": {"test_a.py": 10.0},
+    })
+    monkeypatch.setattr(mt, "_collector_observed_weights", lambda: None)
+    payload = mt.collect_durations_map()
+    assert payload["durations_map"]["age_days"] is mt.UNKNOWN
+    assert "diverged" not in payload, "an absent comparison must not read as clean"
+    assert mt.run_check("durations-map", json=payload, max_age_days=14) == 2
+
+
+def test_collect_durations_map_disjoint_keys_is_unknown(monkeypatch):
+    """A non-empty observation that shares NO basename with the map compared
+    ZERO keys; `diverged: []` would read as `0` — a false green on an
+    unobserved read."""
+    import ci_selection
+
+    now = mt.datetime.now(mt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    monkeypatch.setattr(ci_selection, "load_manifest", lambda: {
+        "surfaces": {"core": ["test_a.py"]},
+        "durations": {"test_a.py": 10.0},
+        "durations_captured_at": now,
+    })
+    monkeypatch.setattr(mt, "_collector_observed_weights",
+                        lambda: {"test_other.py": 10.0})
+    payload = mt.collect_durations_map()
+    assert payload["durations_map"]["compared_keys"] == 0
+    assert "diverged" not in payload
+    assert mt.run_check("durations-map", json=payload, max_age_days=14) == 2

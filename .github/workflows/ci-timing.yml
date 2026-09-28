@@ -1,14 +1,21 @@
 name: CI Timing Measurement
 
-# #1477 — measurement artifact only. NEVER a gate: nothing here is in
-# python-ci-gate's needs, no step here can red a required check, and the
-# refresh path opens a PR (branch-protection safe, auto-merge repo policy)
-# only when the committed artifact content actually changed — zero bot spam.
+# #1477 — measurement artifact only. NEVER a required check: nothing here is in
+# python-ci-gate's needs, and the refresh path opens a PR (branch-protection safe,
+# auto-merge repo policy) only when the committed artifact content actually changed
+# — zero bot spam.
+#
+# #5215 Task 4b: it is also the SOLE WRITER of `config/ci-surfaces.yml:durations`
+# (via `tools/ci_timing.py --refresh-durations`) — the weights `split_fast_gate`
+# packs the push halves by. So a stale/wrong weight can red `python-ci-gate` with
+# zero test failures (#3395); the workflow itself is still not a gate, but its
+# output feeds one, and the refresh is fail-closed.
 #
 # Weekly (Monday 04:30 UTC) + on demand: samples the latest completed
 # push-to-main Python CI run, extracts real per-step durations (Jobs API)
-# + per-file durations (uploaded /tmp/pytest.log artifacts), and refreshes
-# docs/ci-timing.md + docs/ci-timing.json.
+# + per-file durations (uploaded /tmp/pytest.log artifacts), refreshes
+# docs/ci-timing.md + docs/ci-timing.json, and writes those per-file durations
+# into the selection manifest's `durations:` map.
 
 on:
   schedule:
@@ -38,6 +45,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # PyYAML only: the durations bridge validates the refreshed manifest with
+      # `ci_selection.duration_issues()` + `duration_coverage_issues()`. Pinned
+      # for the same reason `manifest-integrity` pins it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyyaml
+        run: pip install pyyaml==6.0.2
 
       - name: Find latest completed push-to-main Python CI run
         id: find
@@ -134,6 +150,29 @@ jobs:
           echo "=== ci-timing.md (head) ==="
           head -30 docs/ci-timing.md
 
+      - name: Refresh the durations map from the collector (Task 4b bridge)
+        # #5215 Task 4b / T-B: the bridge from the collector into
+        # `config/ci-surfaces.yml:durations` — the ONE map `split_fast_gate`
+        # packs the push halves by. Before this step the map was a one-off
+        # 2026-09-22 hand sweep (#3395); this step is now its only writer.
+        #
+        # Fail-closed: a zero-key projection, a collector key not classified in
+        # the manifest, or a refresh that would fail the manifest's own
+        # duration gate writes NOTHING and exits non-zero.
+        #
+        # `if` mirrors the assert step: an empty RUN_ID means nothing was
+        # sampled, and a missing-log run has nothing to measure.
+        if: ${{ steps.find.outputs.run_id != '' }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci_timing.py --refresh-durations \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "${{ steps.find.outputs.run_id }}" \
+            --logs-dir logs \
+            --manifest config/ci-surfaces.yml
+          echo "=== durations_captured_at ==="
+          grep -m1 '^durations_captured_at:' config/ci-surfaces.yml || true
+
       - name: Upload generated timing files
         if: always()
         uses: actions/upload-artifact@v4
@@ -142,6 +181,7 @@ jobs:
           path: |
             docs/ci-timing.md
             docs/ci-timing.json
+            config/ci-surfaces.yml
           if-no-files-found: ignore
 
   refresh:
@@ -173,7 +213,8 @@ jobs:
           set -e
           BRANCH="chore/ci-timing-refresh-$(git rev-parse --short HEAD)"
           if git diff --no-index --quiet docs/ci-timing.md generated/ci-timing.md \
-             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json; then
+             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json \
+             && git diff --no-index --quiet config/ci-surfaces.yml generated/ci-surfaces.yml; then
             echo "timing artifact unchanged — no PR needed"
             exit 0
           fi
@@ -181,14 +222,19 @@ jobs:
           git switch -c "$BRANCH"
           cp generated/ci-timing.md docs/ci-timing.md
           cp generated/ci-timing.json docs/ci-timing.json
-          git add docs/ci-timing.md docs/ci-timing.json
+          # #5215 Task 4b: the durations map is refreshed by the bridge, and the
+          # refresh PR is gated by `manifest-integrity` (python-ci-gate.needs),
+          # which runs `ci_selection.py --integrity` — so a refresh that would
+          # unbalance the halves fails the PR rather than landing.
+          cp generated/ci-surfaces.yml config/ci-surfaces.yml
+          git add docs/ci-timing.md docs/ci-timing.json config/ci-surfaces.yml
           git -c user.name="tortoise-ci[bot]" -c user.email="actions@github.com" \
-            commit -m "chore(ci): refresh CI timing artifact (#1477)"
+            commit -m "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)"
           git push -u origin "$BRANCH"
           if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')" = "0" ]; then
             gh pr create --base main --head "$BRANCH" \
-              --title "chore(ci): refresh CI timing artifact (#1477)" \
-              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json). No code changes — measurement data only. Auto-merged per repo policy."
+              --title "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)" \
+              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json) and, since #5215 Task 4b, the per-file \`durations\` map in config/ci-surfaces.yml — the weights the push split packs by. Measurement data only; no code changes. Gated by manifest-integrity. Auto-merged per repo policy."
           else
             echo "refresh PR already open for $BRANCH — skipping"
           fi

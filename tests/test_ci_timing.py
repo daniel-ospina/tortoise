@@ -607,3 +607,159 @@ def test_assert_step_distinguishes_fetch_failure_from_absent_artifact(
     if expected_rc == 1:
         assert "::error::" in proc.stdout, proc.stdout
         assert "not an absent artifact" in proc.stdout, proc.stdout
+
+
+# ── durations bridge (#5215 Task 4b / T-B): collector → the map ──────────────
+#
+# `--refresh-durations` is the only path that may emit into
+# `config/ci-surfaces.yml:durations`. These tests pin the contract: text-
+# preserving line edits (never a whole-file safe_dump), one-way key agreement,
+# the zero-key refusal, carry-forward merge, and the manifest-side 0.90 floor.
+
+BRIDGE_MANIFEST = """\
+# hand-curated sweep-basis header — a safe_dump would strip this
+surfaces:
+  core:
+    - test_alpha.py
+    - test_gamma.py
+    - test_untouched.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+# the #3395 authority comment — must survive the refresh
+  test_alpha.py: 99.0  # unmeasured
+  test_gamma.py: 1.0  # a preserved comment
+  test_untouched.py: 5.0
+"""
+
+
+def _bridge_manifest(tmp_path: Path, text: str = BRIDGE_MANIFEST) -> Path:
+    path = tmp_path / "ci-surfaces.yml"
+    path.write_text(text)
+    return path
+
+
+def _bridge_weights(**weights: float) -> dict:
+    return {f"{name}.py": value for name, value in weights.items()}
+
+
+def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path) -> None:
+    path = _bridge_manifest(tmp_path)
+    text, stats = ci_timing.render_refreshed_manifest(
+        path.read_text(), _bridge_weights(test_alpha=12.34, test_gamma=4.5),
+        "2026-09-28T00:00:00Z",
+    )
+    # measured keys get the new value; a `# unmeasured` marker is dropped
+    assert "  test_alpha.py: 12.3" in text
+    assert "test_alpha.py: 12.3  # unmeasured" not in text
+    # an unrelated trailing comment is preserved verbatim
+    assert "  test_gamma.py: 4.5  # a preserved comment" in text
+    # an un-sampled key is CARRIED FORWARD untouched (merge, not replace)
+    assert "  test_untouched.py: 5.0" in text
+    # the header comment survives (never a safe_dump)
+    assert "# hand-curated sweep-basis header" in text
+    assert "# the #3395 authority comment" in text
+    # the machine-readable capture age is written
+    assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
+    assert stats == {"sampled_keys": 2, "manifest_keys": 3,
+                     "carried_forward": 1, "captured_at": "2026-09-28T00:00:00Z"}
+    # the result is still valid YAML and still passes the manifest-side gate
+    manifest = yaml.safe_load(text)
+    assert manifest["durations"]["test_alpha.py"] == 12.3
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:
+    path = _bridge_manifest(tmp_path)
+    weights = _bridge_weights(test_alpha=12.34, test_gamma=4.5)
+    a, _ = ci_timing.render_refreshed_manifest(path.read_text(), weights, "T")
+    b, _ = ci_timing.render_refreshed_manifest(path.read_text(), weights, "T")
+    assert a == b
+
+
+def test_refresh_durations_zero_key_projection_is_unknown(tmp_path: Path) -> None:
+    path = _bridge_manifest(tmp_path)
+    before = path.read_text()
+    assert ci_timing.refresh_durations(path, {}, "T") == 2
+    assert path.read_text() == before, "a zero-key read must never write"
+
+
+def test_refresh_durations_rejects_a_collector_key_absent_from_the_manifest(
+    tmp_path: Path,
+) -> None:
+    # ONE-WAY key agreement: a collector key not already in the manifest is a
+    # refusal (register the test file first), never an invented row.
+    path = _bridge_manifest(tmp_path)
+    before = path.read_text()
+    assert ci_timing.refresh_durations(
+        path, {"test_brand_new.py": 3.0}, "T") == 2
+    assert path.read_text() == before
+
+
+def test_refresh_durations_refuses_an_ambiguous_basename(tmp_path: Path) -> None:
+    text = BRIDGE_MANIFEST.replace(
+        "    - test_gamma.py",
+        "    - sub/test_gamma.py\n    - test_gamma.py",
+    ).replace("  test_gamma.py: 1.0  # a preserved comment",
+              "  test_gamma.py: 1.0  # a preserved comment\n  sub/test_gamma.py: 2.0")
+    path = _bridge_manifest(tmp_path, text)
+    before = path.read_text()
+    assert ci_timing.refresh_durations(path, _bridge_weights(test_gamma=9.0), "T") == 2
+    assert path.read_text() == before
+
+
+def test_refresh_durations_dry_run_does_not_write(tmp_path: Path) -> None:
+    path = _bridge_manifest(tmp_path)
+    before = path.read_text()
+    assert ci_timing.refresh_durations(
+        path, _bridge_weights(test_alpha=1.0), "T", dry_run=True) == 0
+    assert path.read_text() == before
+
+
+def test_refresh_durations_refuses_a_refresh_that_breaks_coverage(
+    tmp_path: Path,
+) -> None:
+    # Carry-forward is what keeps coverage from falling; a manifest that is
+    # ALREADY below the 0.90 floor must not be written as-is either.
+    text = BRIDGE_MANIFEST.replace(
+        "  test_untouched.py: 5.0", "")
+    path = _bridge_manifest(tmp_path, text)
+    before = path.read_text()
+    # alpha+gamma measured, untouched absent from the map → coverage 2/3 < 0.90
+    assert ci_timing.refresh_durations(
+        path, _bridge_weights(test_alpha=1.0, test_gamma=2.0), "T") == 1
+    assert path.read_text() == before
+
+
+def test_refresh_durations_preserves_unknown_top_level_keys(tmp_path: Path) -> None:
+    text = BRIDGE_MANIFEST.replace(
+        "push_extra: []", "push_extra: []\nfuture_key: a-value")
+    path = _bridge_manifest(tmp_path, text)
+    new_text, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(), _bridge_weights(test_alpha=1.0), "T")
+    assert "future_key: a-value" in new_text
+
+
+def test_refresh_durations_on_the_real_manifest_of_record() -> None:
+    """The committed 688-entry map is refreshed without corruption: comments
+    survive, a sampled value changes, and the manifest gate stays green."""
+    manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
+    before = manifest_path.read_text()
+    new_text, stats = ci_timing.render_refreshed_manifest(
+        before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
+    assert stats["manifest_keys"] == 688
+    assert stats["carried_forward"] == 687
+    assert "  test_bridge_table.py: 123.4" in new_text
+    assert "# #3395: per-file CI wall time" in new_text
+    assert ci_timing.validate_refreshed_manifest(new_text) == []
+
+
+def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
+    """Task 4b makes this tool the writer of the weights the balancer packs by,
+    so the old unconditional 'never gates CI' invariant was false (#3395)."""
+    doc = ci_timing.__doc__ or ""
+    assert "never gates CI directly" in doc
+    assert "durations" in doc
+    assert "3395" in doc
