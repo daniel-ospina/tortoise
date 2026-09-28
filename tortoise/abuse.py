@@ -77,23 +77,49 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+#: #5493 review P2-3: window misconfigurations already warned about, keyed
+#: ``(name, raw_env_value)``. These readers sit on request hot paths — the
+#: unauthenticated signup limiter re-reads its window 2-3x per request — so an
+#: unlatched warning lets a misconfig be driven to arbitrary log volume by
+#: traffic. The operator needs the FIRST occurrence of each distinct
+#: misconfiguration, not one line per read (mirrors ``_WIDTH_MISMATCH_WARNED``
+#: in ``embeddings.py`` and ``_DEV_PEPPER_WARNED`` in ``auth.py``).
+_WINDOW_WARNED: set[tuple[str, str | None]] = set()
+_WINDOW_WARN_LOCK = threading.Lock()
+
+
 def _window_env(name: str, default: int) -> int:
     """Env-tunable rate-limit WINDOW, floored so a non-positive value can
     never fail OPEN (#5493).
 
-    A window is the one limiter knob whose non-positive value *disables* the
-    limiter instead of tightening it. The sliding-window test is
-    ``now - t < window_s``; for ``window_s <= 0`` that is never true, so the
-    bucket is pruned to empty on EVERY request, ``len(bucket) >= limit`` is
-    never reached, and every request is allowed, forever. ``0`` is exactly the
-    value an operator reaches for when a limiter misbehaves, so it must not be
-    a second, undocumented off-switch — the intended one is
-    ``RATE_LIMIT_DISABLED=1``.
+    A window is the one limiter knob whose non-positive value *disables*
+    protection instead of tightening it — and it does so in one of two
+    shapes, depending on where the window is applied:
 
-    A non-positive window therefore falls back to the knob's DEFAULT (the
-    #2866/D6 convention for an out-of-range value) — always at least one
-    second — and a warning names the variable and the value, so the operator
-    who set it is told what happened and why.
+    * **Hosted bucket limiter** (``_check_ip_bucket_rate_limit``): the bucket
+      is pruned (``now - t < window_s``) and THEN compared to the limit. A
+      non-positive window empties it on every request, ``len(bucket) >=
+      limit`` is never reached, and every request is allowed, FOREVER — the
+      fail-open this floor exists to remove.
+    * **In-process velocity trackers** (``ReadVelocityTracker``,
+      ``SignupVelocityTracker``, ``RecoveryVelocityTracker``): the prune runs
+      BEFORE the append and the comparison runs AFTER it, so a non-positive
+      window never prunes and the bucket collapses to this request's sample.
+      ``len(bucket) >= threshold`` is then ``1 >= threshold``: for the
+      configured thresholds (>1) the breach signal NEVER FIRES — silently
+      disabled — and the notify-dedup test ``now - last < window_s`` is never
+      true, so the once-per-window dedup is defeated too. (Not an
+      allow-everything fail-open here; a lose-the-signal one.)
+
+    Either way ``0`` is a second, undocumented off-switch — the intended one
+    is ``RATE_LIMIT_DISABLED=1`` — so a non-positive window falls back to the
+    knob's DEFAULT (always at least one second). The precedent for an
+    out-of-range env value degrading to its default is the ``max(1,
+    _int_env(...))`` guard on the capture/dream/scorecard executors
+    (``hosted_api.py:210``, and the same pattern at 223/1589/1599). A warning
+    names the variable, the raw value, and the value actually used, and is
+    emitted ONCE per distinct misconfiguration (see ``_WINDOW_WARNED``) —
+    never once per read.
 
     Do NOT "simplify" this back to ``_int_env``. ``_int_env`` is shared with
     the THRESHOLD/limit knobs, where a non-positive value is a legitimate
@@ -109,10 +135,15 @@ def _window_env(name: str, default: int) -> int:
     if value > 0:
         return value
     fallback = default if default > 0 else 1
-    logger.warning(
-        "%s=%r is not a valid rate-limit window (must be a positive number "
-        "of seconds); using %d so the limiter cannot fail open (#5493)",
-        name, os.environ.get(name), fallback)
+    raw = os.environ.get(name)
+    with _WINDOW_WARN_LOCK:
+        first = (name, raw) not in _WINDOW_WARNED
+        _WINDOW_WARNED.add((name, raw))
+    if first:
+        logger.warning(
+            "%s=%r is not a valid rate-limit window (must be a positive number "
+            "of seconds); using %d so the limiter cannot fail open (#5493)",
+            name, raw, fallback)
     return fallback
 
 

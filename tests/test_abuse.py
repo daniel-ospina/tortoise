@@ -48,10 +48,12 @@ T0 = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch):
-    """Fresh signal set + geo cache + engine per test; no kill-switch."""
+    """Fresh signal set + geo cache + engine + warn latch per test; no
+    kill-switch."""
     monkeypatch.delenv("TORTOISE_ABUSE_DISABLED", raising=False)
     with abuse._SIGNAL_LOCK:
         abuse._SUSPENDED_SIGNAL.clear()
+    abuse._WINDOW_WARNED.clear()
     reset_geo_cache()
     abuse.set_engine(None)
     yield
@@ -1140,13 +1142,19 @@ class TestDecisionPathObservability:
 #
 # `_int_env` returns the parsed int for a digit string, so `TORTOISE_*_WINDOW_S=0`
 # reaches a limiter as ``window_s=0``. The sliding-window test is
-# ``now - t < window_s``: with 0 (or a negative) it is NEVER true, so the bucket
-# is pruned to empty on EVERY request, ``len(bucket) >= limit`` is never reached,
-# and every request is allowed, forever. The window knobs therefore read through
-# ``_window_env`` (default-fallback + a warning naming the variable). The
-# THRESHOLD/limit knobs keep ``_int_env`` on purpose — a non-positive threshold
-# is a legitimate fail-CLOSED deny-all (``len(bucket) >= 0`` is always true), so
-# the floor belongs to the windows alone.
+# ``now - t < window_s``: with 0 (or a negative) it is NEVER true, and the two
+# limiter families then lose protection in two different shapes:
+#   * hosted bucket limiter — prune THEN compare: the bucket is emptied on
+#     every request, ``len(bucket) >= limit`` is never reached, and every
+#     request is allowed, forever;
+#   * in-process velocity trackers — prune, append, THEN compare: the bucket
+#     collapses to this request's sample, so for the configured thresholds (>1)
+#     the breach signal never fires, silently disabled.
+# The window knobs therefore read through ``_window_env`` (default-fallback + a
+# once-per-misconfig warning naming the variable). The THRESHOLD/limit knobs
+# keep ``_int_env`` on purpose — a non-positive threshold is a legitimate
+# fail-CLOSED deny-all (``len(bucket) >= 0`` is always true), so the floor
+# belongs to the windows alone.
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -1172,6 +1180,23 @@ _WINDOW_KNOBS = [
 ]
 
 _WINDOW_FILES = ("tortoise/abuse.py", "tortoise/hosted_api.py")
+
+# Product-wide scan (P2-1): the guard must NOT be a hardcoded file pair, or a
+# window knob added in a new module ships unfloored — the review measured a
+# new `tortoise/operator_alert.py` with `_int_env("TORTOISE_MUT3_WINDOW_S", 900)`
+# leaving the suite green (61 passed). `_WINDOW_ENV_CALL` finds the floored
+# accessor; `_INT_ENV_CALL` finds the raw one. `_WINDOWISH_NAME` is the naming
+# heuristic: a var is window-shaped if it says WINDOW, or follows the `_S`
+# seconds-suffix the window knobs use — so a knob "named without WINDOW"
+# (`..._INTERVAL_S`, the other measured blind spot) is caught too.
+_WINDOW_ENV_CALL = re.compile(r'_window_env\(\s*"([A-Z][A-Z0-9_]*)"')
+_INT_ENV_CALL = re.compile(r'_int_env\(\s*"([A-Z][A-Z0-9_]*)"')
+_WINDOWISH_NAME = re.compile(r"WINDOW|_S$")
+
+
+def _tortoise_sources() -> list[Path]:
+    """Every Python module in the product — the guard's true scope."""
+    return sorted((_ROOT / "tortoise").rglob("*.py"))
 
 
 class _FakeReq:
@@ -1213,6 +1238,37 @@ class TestWindowFloor:
         assert got == default and got > 0
         assert name in caplog.text  # the operator is told which knob was ignored
 
+    def test_misconfig_warns_once_per_setting_not_per_read(
+            self, monkeypatch, caplog):
+        """#5493 review P2-3: the warning is per distinct MISCONFIG, not per
+        READ. `TORTOISE_ABUSE_READ_WINDOW_S=0` read 1000x must emit ONE record
+        — these accessors are request hot paths (the unauthenticated signup
+        limiter re-reads its window 2-3x/request), so an unlatched warning lets
+        traffic drive arbitrary log volume while the misconfig stands."""
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "0")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            for _ in range(1000):
+                assert abuse._window_env(
+                    "TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+        records = [r for r in caplog.records if "is not a valid rate-limit"
+                   in r.getMessage()]
+        assert len(records) == 1, (
+            f"expected 1 warning for 1000 reads, got {len(records)}")
+
+    def test_warn_latch_is_keyed_on_the_distinct_value(self, monkeypatch,
+                                                       caplog):
+        """A second DISTINCT misconfiguration is still surfaced — the latch is
+        keyed on (name, raw value), not the name alone."""
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "0")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300)
+            abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300)
+            monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "00")
+            abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300)
+        records = [r for r in caplog.records if "is not a valid rate-limit"
+                   in r.getMessage()]
+        assert len(records) == 2, [r.getMessage() for r in records]
+
     @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
     def test_negative_window_falls_back_to_default(self, name, default,
                                                    monkeypatch):
@@ -1237,23 +1293,41 @@ class TestWindowFloor:
         assert abuse._window_env("TORTOISE_X_WINDOW_S", 0) == 1
 
     def test_no_window_is_read_with_int_env(self):
-        """No env-tunable window may be read with the UNFLOORED `_int_env`."""
-        for rel in _WINDOW_FILES:
-            src = (_ROOT / rel).read_text(encoding="utf-8")
-            bad = re.findall(r'_int_env\(\s*"[A-Z_]*WINDOW[A-Z_]*"', src)
-            assert bad == [], f"{rel} reads a window via _int_env: {bad}"
+        """No window-shaped env knob may be read with the UNFLOORED
+        `_int_env`, anywhere in the product. Scans `tortoise/**/*.py` (not a
+        hardcoded pair) using the WINDOW + `_S`-suffix heuristic, so it
+        catches BOTH measured blind spots: a knob named without WINDOW
+        (`..._INTERVAL_S`) and a knob added in a new module."""
+        bad = []
+        for path in _tortoise_sources():
+            rel = str(path.relative_to(_ROOT))
+            src = path.read_text(encoding="utf-8")
+            for name in _INT_ENV_CALL.findall(src):
+                if _WINDOWISH_NAME.search(name):
+                    bad.append(f"{rel}: {name}")
+        assert bad == [], (
+            "window-shaped env read via the UNFLOORED _int_env: "
+            + ", ".join(bad))
 
     def test_every_window_site_is_covered(self):
-        """The list above must name EVERY `_window_env` site in the product,
-        so a new window knob fails this test until it is floored AND listed."""
-        found = set()
-        for rel in _WINDOW_FILES:
-            src = (_ROOT / rel).read_text(encoding="utf-8")
-            found |= set(re.findall(
-                r'_window_env\(\s*"([A-Z_]*WINDOW[A-Z_]*)"', src))
+        """Every `_window_env` site in the PRODUCT must be listed in
+        `_WINDOW_KNOBS`, and every module that reads a window through it must
+        be a registered `_WINDOW_FILES` entry — so a new window knob (or a new
+        module holding one) fails this test until it is floored AND listed."""
+        found: set[str] = set()
+        modules: set[str] = set()
+        for path in _tortoise_sources():
+            rel = str(path.relative_to(_ROOT))
+            src = path.read_text(encoding="utf-8")
+            found |= set(_WINDOW_ENV_CALL.findall(src))
+            if "_window_env(" in src:
+                modules.add(rel)
         assert found == {n for n, _ in _WINDOW_KNOBS}, (
             f"window knobs in source not in _WINDOW_KNOBS: "
             f"{found.symmetric_difference({n for n, _ in _WINDOW_KNOBS})}")
+        assert modules == set(_WINDOW_FILES), (
+            f"modules reading _window_env not in _WINDOW_FILES: "
+            f"{modules.symmetric_difference(set(_WINDOW_FILES))}")
 
 
 class TestWindowFloorBehaviour:
@@ -1277,6 +1351,9 @@ class TestWindowFloorBehaviour:
         # second mint still breaches (the farming signal is not silently lost).
         monkeypatch.setenv("TORTOISE_ABUSE_SIGNUP_WINDOW_S", "0")
         tr = SignupVelocityTracker(threshold=2)
+        # Pin the SOURCE default: the param tests pass the list's default in,
+        # so without this a call-site default change (86400 -> 1000) is green.
+        assert tr.window_s == 86400
         assert tr.record_signup("1.2.3.4", org_id="t1", now=1000.0) is None
         assert tr.record_signup("1.2.3.4", org_id="t2", now=1001.0) == (
             "ip", "1.2.3.4")
