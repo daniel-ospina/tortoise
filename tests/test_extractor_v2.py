@@ -437,6 +437,10 @@ class TestS2:
         # S1 would import that register into the narrative stage.
         assert "ANTI-ROUTINE EXCLUSION" not in s1
         assert "NOOP" not in s1
+        # CLAUSE-LEVEL STRIP is part of the anti-routine block, so it must be
+        # absent from S1 too. Asserted HERE as well as in the sibling test, so
+        # the whole asymmetry lock lives with the clause that could break it.
+        assert "CLAUSE-LEVEL STRIP" not in s1
 
     def test_s4_prompt_anti_routine_exclusion(self):
         """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
