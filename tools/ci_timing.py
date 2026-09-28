@@ -367,28 +367,84 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     return "\n".join(lines), stats
 
 
-def validate_refreshed_manifest(manifest_text: str) -> list[str]:
-    """The DURATION subset of `--integrity`'s checks over the NEW text.
-
-    Runs `cs.duration_issues` + `cs.duration_coverage_issues` — this is where
-    the 0.90 coverage floor lives, on the RESULTING manifest rather than on the
-    partial collector projection. `--integrity` additionally runs `integrity`,
-    `slow_file_issues`, `leg_coverage_issues`, `workflow_matrix_issues` and
-    `workflow_halves_issues`; the halves-balance recomputation is NOT run here
-    (it needs the workflow's matrix halves, so a full run of it stays in
-    `--integrity`), and the refresh PR that would run `--integrity` does not
-    currently open — the `refresh` job calls `gh` with no token in scope
-    (#3092). A refresh that would unbalance the pack is therefore NOT refused
-    before the write today; the map's basis and its pack impact are tracked on
-    #5050.
-    """
+def _manifest_of(manifest_text: str) -> dict:
+    """Parse refreshed text for the checks. Import is local so the module
+    stays stdlib-only until the bridge actually runs (see the docstring)."""
     import yaml
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection as cs
 
-    manifest = cs._normalize_surfaces(yaml.safe_load(manifest_text))
+    return cs._normalize_surfaces(yaml.safe_load(manifest_text))
+
+
+def validate_refreshed_manifest(manifest_text: str) -> list[str]:
+    """The DURATION subset of `--integrity`'s checks over the NEW text.
+
+    Runs `cs.duration_issues` + `cs.duration_coverage_issues` — this is where
+    the 0.90 coverage floor lives, on the RESULTING manifest rather than on the
+    partial collector projection. PURE and repo-independent, so a synthetic
+    fixture manifest can use it; it is deliberately NOT the whole gate, and a
+    caller that trusts it alone would accept a refresh that tilts the pack
+    (see :func:`integrity_problems`, which `refresh_durations` also runs).
+    """
+    import ci_selection as cs
+
+    manifest = _manifest_of(manifest_text)
     return cs.duration_issues(manifest) + cs.duration_coverage_issues(manifest)
+
+
+def integrity_problems(manifest_text: str) -> list[str]:
+    """The FULL problem list `ci_selection.py --integrity` composes.
+
+    Composed by CALLING the same `ci_selection` functions, in the same order,
+    as the `--integrity` entry point — never a re-derived subset, so the two
+    cannot disagree about what a valid manifest is. The duration subset alone
+    is not enough: it is blind to `workflow_halves_issues`, so a refresh that
+    skews a weight hard enough to tilt the push halves (the #3395
+    starved-shard shape) would be accepted here and only surface later, with
+    no diagnosis, as a red `python-ci-gate` with zero test failures.
+
+    Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
+    checks read `python-ci.yml`, so this is defined only over this repo's own
+    manifest — the refresh's only production target.
+    """
+    import ci_selection as cs
+
+    manifest = _manifest_of(manifest_text)
+    problems = (cs.integrity(manifest)
+                + cs.slow_file_issues(manifest)
+                + cs.duration_issues(manifest)
+                + cs.leg_coverage_issues(manifest)
+                + cs.duration_coverage_issues(manifest))
+    wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
+    problems += wf_issues
+    if not wf_issues:
+        legs = cs.push_legs(manifest)
+        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        problems += cs.workflow_halves_issues(manifest, halves)
+    else:
+        problems += cs.workflow_halves_issues(
+            manifest, cs.parse_matrix_halves(cs.WORKFLOW.read_text()))
+    return problems
+
+
+def _is_the_repo_manifest(manifest_path: Path) -> bool:
+    """True when `manifest_path` IS this repo's `config/ci-surfaces.yml`.
+
+    The `--integrity` composition is repo-scoped, so it is only defined for
+    this repo's own manifest (a synthetic fixture would read every real test
+    file as unclassified). Guarding on the identity of the path — not on a
+    caller-supplied flag — means the full gate cannot be forgotten by a future
+    refresh caller: the production target always gets it.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection as cs
+
+    try:
+        return Path(manifest_path).resolve() == Path(cs.MANIFEST).resolve()
+    except OSError:
+        return False
 
 
 def refresh_durations(manifest_path: Path, weights: dict[str, float],
@@ -409,9 +465,14 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
         print(f"2: {exc}", file=sys.stderr)
         return 2
     issues = validate_refreshed_manifest(new_text)
+    if not issues and _is_the_repo_manifest(manifest_path):
+        # The repo's own manifest is held to the WHOLE `--integrity` gate —
+        # most importantly its halves-duration balance, which the per-key
+        # duration checks cannot see (#3395).
+        issues = integrity_problems(new_text)
     if issues:
         print("1: refusing to write — the refreshed manifest would fail the "
-              "duration gate:", file=sys.stderr)
+              "integrity gate:", file=sys.stderr)
         for issue in issues:
             print(f"   - {issue}", file=sys.stderr)
         return 1

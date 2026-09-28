@@ -754,6 +754,56 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
+    # ... and the FULL `--integrity` gate, not just its duration subset: the
+    # refresh must not tilt the push halves or unclassify a file (#3395).
+    assert ci_timing.integrity_problems(new_text) == []
+
+
+def test_refresh_durations_refuses_a_pack_tilt_the_subset_cannot_see() -> None:
+    """MUTATION PROOF (the discriminating mutation).
+
+    Skewing one sampled weight to 90000 s drives the LPT split to ~25.7x, far
+    past the 1.25x tolerance. The duration-only subset is BLIND to it — the
+    tilt is a property of the whole manifest, not of the changed key — so a
+    bridge that validated with the subset alone would happily write a map that
+    starves a shard. `refresh_durations` must refuse it (exit 1, no write)."""
+    manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
+    before = manifest_path.read_text()
+    weights = {"test_fly_secret_drift.py": 90000.0}
+    rendered, _ = ci_timing.render_refreshed_manifest(before, weights, "T")
+    # the subset sees nothing wrong — this is precisely why it is not enough
+    assert ci_timing.validate_refreshed_manifest(rendered) == []
+    problems = ci_timing.integrity_problems(rendered)
+    assert any("duration-imbalanced" in p for p in problems), problems
+    assert ci_timing.refresh_durations(
+        manifest_path, weights, "T", dry_run=True) == 1
+    assert manifest_path.read_text() == before
+
+
+def test_integrity_problems_agrees_with_the_integrity_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MUTATION PROOF (parity with the gate of record).
+
+    :func:`integrity_problems` is only trustworthy if it says the same thing
+    as `ci_selection.py --integrity`. Clean on the real manifest both ways;
+    skew a COPY, point the CLI's `MANIFEST` at it, and both must go red."""
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+    assert ci_timing.integrity_problems(real) == []
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+    assert cs.main() == 0
+
+    skewed, _ = ci_timing.render_refreshed_manifest(
+        real, {"test_fly_secret_drift.py": 90000.0}, "T")
+    tmp_manifest = tmp_path / "ci-surfaces.yml"
+    tmp_manifest.write_text(skewed)
+    monkeypatch.setattr(cs, "MANIFEST", tmp_manifest)
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+    assert cs.main() == 1
+    assert any("duration-imbalanced" in p
+               for p in ci_timing.integrity_problems(skewed))
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
@@ -763,3 +813,40 @@ def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
     assert "never gates CI directly" in doc
     assert "durations" in doc
     assert "3395" in doc
+
+
+def test_ci_timing_workflow_is_the_durations_bridge_scheduler() -> None:
+    """SHELL BEHAVIOUR, pinned structurally (the shell itself is not unit-testable).
+
+    `ci-timing.yml` is the bridge's ONLY scheduler, and the refreshed map must
+    actually reach the weekly refresh PR: it rides its OWN artifact (the
+    `ci-timing` artifact roots at `docs/`, so adding a repo-root path would
+    move its root and break every `generated/<file>` read), is diffed, and is
+    copied next to the other refreshed files. Each assertion below is one half
+    of a mutation that would silently sever the bridge.
+    """
+    wf = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "ci-timing.yml").read_text())
+    measure = wf["jobs"]["measure"]["steps"]
+    refresh_step = next(
+        s for s in measure if s.get("name", "").startswith("Refresh the durations map"))
+    # the bridge is actually invoked, against the repo manifest
+    assert "--refresh-durations" in refresh_step["run"]
+    assert "--manifest config/ci-surfaces.yml" in refresh_step["run"]
+    assert "--logs-dir logs" in refresh_step["run"]
+    # a run with no pytest-log artifacts is a legitimate absence, not a failure
+    assert "find logs -name '*.log'" in refresh_step["run"]
+    # the refreshed map rides its OWN artifact (its own root), not `ci-timing`
+    upload = next(s for s in measure
+                  if s.get("with", {}).get("name") == "ci-durations-map")
+    assert upload["with"]["path"] == "config/ci-surfaces.yml"
+    refresh = wf["jobs"]["refresh"]["steps"]
+    download = next(s for s in refresh
+                    if s.get("with", {}).get("name") == "ci-durations-map")
+    assert download["with"]["path"] == "generated-map"
+    open_pr = next(s for s in refresh if "refresh PR" in s.get("name", ""))
+    # diffed (no bot spam) and copied into the PR
+    assert "generated-map/ci-surfaces.yml" in open_pr["run"]
+    assert "cp generated-map/ci-surfaces.yml config/ci-surfaces.yml" in open_pr["run"]
+    assert ("git add docs/ci-timing.md docs/ci-timing.json "
+            "config/ci-surfaces.yml" in open_pr["run"])
