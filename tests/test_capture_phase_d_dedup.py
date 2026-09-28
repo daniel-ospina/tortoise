@@ -186,6 +186,72 @@ def test_m2_operator_wired_repeat_kept_distinct_with_warning(sdk, monkeypatch):
     assert len(_claim_nodes(sdk._get_proj())) == 2, "operator-wired duplicate kept — 2 claim nodes"
 
 
+def test_m2_one_sided_state_drop_keeps_both_claims(sdk, monkeypatch):
+    """A one-sided state word is a RIVAL, so the in-capture seam must not fold
+    it (#5134).
+
+    "the flag for the rollout is off" / "the flag for the rollout" carries one
+    content multiset once the state word is read as a detail added to the
+    prior, so `rephrase_hit` returned a hit and the seam then `DETACH DELETE`d
+    the folded rival — the state was destroyed.  Both claims must now survive
+    as NEW; the assertion is on the NODE COUNT, which is what the seam
+    destroys.
+
+    The m2 lane is the one that resolves through `rephrase_hit` — the v2
+    content-addressed seam folds only byte-identical content, so a v2-lane pin
+    would pass with the fix reverted and assert nothing (it was written that
+    way first, and the sabotage run caught it).
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The flag for the rollout is off."},
+        {"role": "assistant", "content": "The flag for the rollout."},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == [DEDUP_NEW, DEDUP_NEW], (verdicts, res["points"])
+    claims = _claim_nodes(sdk._get_proj())
+    assert len(claims) == 2, f"the rival must not be deleted — got {len(claims)}"
+
+
+@pytest.mark.parametrize(("prior", "rival"), [
+    ("The cat chased the dog.", "The dog chased the cat."),
+    # The middle is a frame RELATOR and no content token at all (`is`/`in` are
+    # frame), so the exchange is read from the raw gap; the seam must keep
+    # both here too.
+    ("The key is in the lock.", "The lock is in the key."),
+])
+def test_m2_role_inversion_keeps_both_claims(sdk, monkeypatch, prior, rival):
+    """An inverted ROLE is a RIVAL, so the in-capture seam must not fold it
+    (#5131).
+
+    ``the cat chased the dog`` / ``the dog chased the cat`` carries ONE content
+    multiset — the skeleton is a set — so before the pair-level exchange check
+    `rephrase_hit` returned a hit and the seam then `DETACH DELETE`d the folded
+    rival: the inversion was destroyed rather than kept as a rival.  Both
+    claims must now survive as NEW; the assertion is on the NODE COUNT, which
+    is what the seam destroys.  The same holds when the two blocks trade slots
+    around a frame relator rather than a content predicate.
+
+    The m2 lane is the one that resolves through `rephrase_hit` — the v2
+    content-addressed seam folds only byte-identical content, so a v2-lane pin
+    would pass with the fix reverted and assert nothing (the same sabotage run
+    that caught the state-drop pin's first draft).
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": prior},
+        {"role": "assistant", "content": rival},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == [DEDUP_NEW, DEDUP_NEW], (verdicts, res["points"])
+    claims = _claim_nodes(sdk._get_proj())
+    assert len(claims) == 2, f"the rival must not be deleted — got {len(claims)}"
+
+
 # ── v2 lane: content-addressed re-ingest idempotency ───────────────────────
 
 

@@ -52,7 +52,11 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from tortoise.sdk import _capture_turn_role_text, _capture_turn_texts
+from tortoise.sdk import (
+    _capture_turn_role_text,
+    _capture_turn_texts,
+    _capture_turn_window,
+)
 
 __all__ = [
     "FILED",
@@ -118,8 +122,17 @@ def expected_turns(session_id: str,
     the ``[role] `` prefix STRIPPED. Comparing the raw stored string against a
     served row therefore never matches — which is how a confirmation can look
     correct in tests whose fakes echo the writer and be inert in production.
+
+    #4911: the turns are WINDOWED FIRST (``sdk._capture_turn_window``), because
+    that is the order the server applies — it captures ``_capture_turn_window``
+    and the writer then scrubs what is left. Handing ``_capture_turn_texts`` the
+    raw conversation instead would make the client scrub-then-cut while the
+    server cuts-then-scrubs, so any turn over 5,000 chars containing a
+    credential would compare unequal, never confirm, and defer its spool entry
+    FOREVER. Both sides must apply the same sequence to the same text.
     """
-    texts = _capture_turn_texts([dict(t) for t in turns])
+    windowed = _capture_turn_window([dict(t) for t in turns])
+    texts = _capture_turn_texts(windowed)
     return {turn_point_id(session_id, i): _capture_turn_role_text(text)
             for i, text in enumerate(texts)}
 

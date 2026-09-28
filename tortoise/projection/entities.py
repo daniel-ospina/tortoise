@@ -449,6 +449,13 @@ class _EntityHandlers:
     # previously-handled key becomes an accidental passthrough key.
     _DOC_RETIRED: frozenset = _DOCUMENT_HANDLED | frozenset({
         "needs_extraction",
+        # #5422: the snake_case spelling of the version anchor. The fixed
+        # clause above writes `contentHash` from `ev["content_hash"]`; the
+        # raw journal spelling must therefore ALSO be denied by the
+        # passthrough, or it would persist verbatim as a second, unread
+        # `s.content_hash` property beside the camelCase the readers use
+        # (the same snake-door class as `needs_extraction` below).
+        "content_hash",
         # D10 B6: snake/camel synonyms of the retired props. ``object_kind``
         # (synonym of ``objectKind``) and ``docStatus`` (synonym of
         # ``doc_status``) are the two the write path can actually produce;
@@ -1107,11 +1114,29 @@ class _EntityHandlers:
         # fold would faithfully replay an edge the ontology does not have.
         if (rel, src_label, tgt_label) not in self._ENTITY_LINKED_TRIPLES:
             return _malformed("not a permitted ONTOLOGY §3.2 triple")
-        r = self.g.query(
-            f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
-            f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
-            params={"sid": sid, "tid": tid},
-        )
+        # #1370: the binding confidence is OPTIONAL on the record. It is SET
+        # only when present, mirroring the live writer's conditional SET — so
+        # a later no-confidence EntityLinked for the same edge cannot clear a
+        # confident one on replay (the live pre-probe short-circuits, and this
+        # fold must agree). The value is coerced fail-closed by the SHARED
+        # helper: non-numeric, bool, NaN/±inf, overflow (10**400) and
+        # out-of-[0,1] values all become None — no SET, no FalkorDB parameter
+        # rejection (a raise here would abort rebuild_all AFTER the wipe).
+        from tortoise.session_link import coerce_confidence
+        conf = coerce_confidence(ev.get("confidence"))
+        if conf is None:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
+                params={"sid": sid, "tid": tid},
+            )
+        else:
+            r = self.g.query(
+                f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+                f"MERGE (s)-[e:{rel}]->(t) SET e.confidence=$conf "
+                "RETURN count(s)",
+                params={"sid": sid, "tid": tid, "conf": float(conf)},
+            )
         n = int(r.result_set[0][0]) if r.result_set else 0
         return (1, "ok") if n else (0, "absent")
 
@@ -1203,20 +1228,29 @@ class _EntityHandlers:
         NO-OP (return 0); a malformed field is OMITTED, never bound.
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
-        SECOND ``SessionRecorded`` the capture emits after the link pass
-        (``sdk.capture_session``), so the counters the live raw SET writes are
-        durable too — ``recover_from_log`` / a journal-only ``rebuild()``
-        otherwise came back with them null (review P2, #3722).
+        ``SessionRecorded`` the capture emits after the link pass
+        (``sdk.capture_session``) — the THIRD of the four, after the turn
+        write's own trailing record (#4911) — so the counters the live raw SET
+        writes are durable too — ``recover_from_log`` / a journal-only
+        ``rebuild()`` otherwise came back with them null (review P2, #3722).
 
-        ``capture_ok`` / ``capture_extractor`` ride a THIRD, TRAILING
+        ``capture_ok`` / ``capture_extractor`` ride the last, TRAILING
         ``SessionRecorded`` the capture emits right after the live
-        ``SET s.capture_ok / s.capture_extractor``. Without it those two came
+        ``SET s.capture_ok / s.capture_extractor`` — the FOURTH record. Without it those two came
         back null on a journal-only rebuild, and null is CONSUMED by the
         #2335 WI-2b TRUE-retry gate as the legacy "presumed captured" case — a
         session whose capture FAILED stopped retrying (review P2, #3722).
         Same overwrite semantics as the live SET (these are not
         coalesce-preserved); a NUL-laden string is OMITTED by the shared value
         gate, never bound.
+
+        ``capture_redactions`` (#4911) rides the trailing record
+        ``sdk._write_capture_turns`` emits after its live
+        ``SET s.capture_redactions`` — the SECOND of the four, emitted right
+        after the capture's opening record and BEFORE the link pass, same
+        reason as the pair below: a
+        journal-only rebuild must not restore the Session as though nothing
+        was ever redacted. Overwrite semantics, like ``turn_count``.
         """
         from tortoise.projection import _annotator_value_ok, _writable_id
 
@@ -1233,7 +1267,7 @@ class _EntityHandlers:
             params["created_at"] = created_at
         for prop in ("turn_count", "harness", "entity_links_attempted",
                      "entity_links_created", "capture_ok",
-                     "capture_extractor"):
+                     "capture_extractor", "capture_redactions"):
             val = ev.get(prop)
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
@@ -1872,6 +1906,14 @@ class _EntityHandlers:
         doc unit permanently incomplete. `content`, `doc_status` and
         `objectKind` are RETIRED and are never written (nor re-admissible via
         the open passthrough).
+
+        #5422: ``contentHash`` is the node's **version anchor** on the
+        extraction path (ONTOLOGY §4.6 — the hash identifies a version;
+        identity is ``url``). It is written by the fixed clause above, gated
+        so a hash-less write preserves it, and stays out of the open
+        passthrough because BOTH spellings (``contentHash`` via
+        ``_SOURCE_HANDLED``, ``content_hash`` via ``_DOC_RETIRED``) are
+        denied. ``version`` is advanced in the same clause, per §4.6.
         """
         did = ev.get("id")
         if not did:
@@ -1907,6 +1949,18 @@ class _EntityHandlers:
         # #133: needs_extraction — explicit signal for --upgrade-all discovery.
         # coalesce-null sentinel: None default so partial updates preserve.
         nx = ev.get("needs_extraction")
+        # #5422: the document's contentHash — the version anchor on the
+        # extraction path. None (absent key, or a metadata-only re-emit) is
+        # the preserve sentinel: the clause below must never clear an anchor
+        # a prior write established, so a hash-less DocumentCreated is a
+        # no-op on it (the same back-compat shape #5256's anchor reader and
+        # the corpus index path already depend on). BOTH spellings are read:
+        # the journal contract is snake_case (§4.3, matching every sibling
+        # field on this event) while hand-written JSONL and older producers
+        # may carry camelCase, and either must land on the node rather than
+        # one of them silently no-opping the anchor.
+        _ch_snake = ev.get("content_hash")
+        ch = _ch_snake if _ch_snake is not None else ev.get("contentHash")
         # _searchText computed only when the event carries meaningful text
         has_text = bool(ev.get("title") or summary or topics)
         st = (_build_search_text(ev.get("title", ""), summary, topics)
@@ -1926,6 +1980,33 @@ class _EntityHandlers:
             "MERGE (s:Source {url:$id}) " + embed_clear +
             "SET s.id=coalesce(s.id, $id), "
             "    s.title=coalesce($title, s.title), "
+            # #5422: the document :Source's version anchor (ONTOLOGY §4.6 —
+            # the hash names a version, identity is `url`). Gated so a write
+            # that CARRIES no hash ($ch IS NULL) or an EMPTY one ($ch = '' —
+            # the spelling `_mint_source_stub`/`_materialize_session_source`/
+            # `hosted_api` use for "no hash") PRESERVES the stored value: a
+            # metadata-only re-emit and the #900 index path's `_doc_write`
+            # cannot un-anchor a document. An empty STORED hash (a
+            # `_mint_source_stub` stub, or a pre-#5422 document node) is
+            # COMPLETED by a real hash; a DIFFERING hash REPLACES it on the
+            # SAME node (never a second `:Source`).
+            # `version` advances with the hash exactly as §4.6 specifies
+            # ("1 at creation, +1 on each content-hash change") and exactly
+            # as `_upsert_source` does — so the pair is never half-written,
+            # and because the gate can only move the hash to a value it does
+            # not already hold, running BOTH folds over one url cannot
+            # double-bump (the second sees stored == $ch).
+            "    s.contentHash=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch THEN $ch "
+            "        ELSE s.contentHash END, "
+            "    s.version=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN coalesce(s.version, 1) "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch "
+            "             THEN coalesce(s.version, 0) + 1 "
+            "        ELSE coalesce(s.version, 1) END, "
             # D10 B3 (adversarial): the three-argument coalesce gives a
             # document node a NON-NULL kind on CREATE. `$dk` is Cypher null
             # for an explicit `document_kind: null` (ingest's YAML `type:`
@@ -1970,6 +2051,7 @@ class _EntityHandlers:
                     "fmt": ev.get("format", "markdown"),
                     "topics": topics, "summary": summary, "sid": sid,
                     "eid": eid, "nx": nx, "st": st, "sp": sp,
+                    "ch": ch,
                     "embedding": embedding,
                     "now": _now_iso()},
         )
@@ -2407,7 +2489,12 @@ class _EntityHandlers:
         full = dict(props)
         skip = self._META_KEYS | self._EVENT_HANDLED
         for k, v in inner.items():
-            if k not in skip and v is not None and k not in full:
+            # #2962: this inline site builds its own extras, so it must apply
+            # the SAME `_is_persistable_prop_value` filter `_persist_extra_props`
+            # uses — a dict/nested-valued unknown prop would otherwise reach
+            # the engine and crash `SET e += $props` (no crash, dropped).
+            if k not in skip and v is not None and k not in full \
+                    and _is_persistable_prop_value(v):
                 full[k] = v
         # (1) MERGE candidate — creates if absent, no-op if present (ON CREATE
         # SET is the supported directive; the props NEVER land on a colliding
@@ -2483,8 +2570,11 @@ class _EntityHandlers:
             is completed — the JOINT-E2E sweep's stub-handling);
           - ``s.sourcePath = coalesce($sp, s.sourcePath)`` (§4.1 — the
             sanctioned source_path route maps to camelCase on the node);
-          - ``s._searchText`` — coalesce ON CREATE, OVERWRITE on hash-diff
-            MERGE (§4.1 cycle-4 merge semantics; E2E-5 retitle refresh);
+          - ``s._searchText`` — coalesce ON CREATE, and on a hash-diff MERGE
+            overwrite only when the incoming text is present (``coalesce($st,
+            s._searchText)``, #3518: a text-less write must never NULL the
+            value a prior capture/index write established); E2E-5 retitle
+            refresh still overwrites.
           - ``s.__runId = $rid`` on the ON CREATE branch ONLY when
             ``merge_run_id`` is given — the creator's per-run token. The
             embedded FalkorDBLite reports ``Nodes created: 1`` for BOTH of two
@@ -2559,7 +2649,13 @@ class _EntityHandlers:
             "               ELSE coalesce(s.urlAliases, []) + [$raw_url] END, "
             "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
             "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                        THEN $st ELSE s._searchText END, "
+            # #3518: coalesce — a hash-diff write that carries NO searchable
+            # text ($st IS NULL, the commit path's session Source) must not
+            # ERASE the text a prior capture/index write established. A write
+            # that does carry text (the indexer's retitle) still overwrites,
+            # so the #900 T3 cycle-4 retitle-refresh semantics are unchanged.
+            "                        THEN coalesce($st, s._searchText) "
+            "                        ELSE s._searchText END, "
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
