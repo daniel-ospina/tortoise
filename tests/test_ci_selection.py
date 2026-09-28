@@ -2711,9 +2711,12 @@ def test_vendored_bundle_change_selects_api_and_runs_the_version_pin():
     # stops running. Same hole `test_tortoise_oauth_change_selects_api_and_core`
     # closes for tortoise/oauth.py, and the reason it asserts the surface too.
     #
-    # The filename is DERIVED from the vendor dir, not written down: the pin is
-    # bumped in place, and a hardcoded version would red on every legitimate
-    # bump while pinning nothing about the wiring this test is for.
+    # The bundle name is DERIVED from the vendor dir, not written down. The
+    # version in the path is irrelevant to what this test pins — `select()`
+    # matches SOURCE_PATTERNS by prefix and never touches the filesystem, so a
+    # stale or even bogus version still selects the same surface. The derivation
+    # is what makes the `assert bundle` below bite: a hardcoded path would keep
+    # passing against a vendor dir that no longer holds a bundle.
     vendor = REPO / "website" / "apps" / "dashboard" / "public" / "vendor"
     bundle = sorted(vendor.glob("supabase-*.min.js"))
     assert bundle, f"no vendored bundle under {vendor} — the page executes it"

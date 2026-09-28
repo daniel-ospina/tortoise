@@ -640,8 +640,10 @@ def test_inv7_item6_write_path_parity() -> None:
     # above carries a `user` object, so a dropped or misspelled branch is
     # OBSERVABLE here. Without it the provider-token deletes alone clear
     # SIZE_GUARD, and every assertion below stayed green on a page whose whole
-    # identities/user_metadata narrowing block had been deleted — the real
-    # GitHub-session case (#1835), the reason the block exists.
+    # identities/user_metadata narrowing block had been deleted — the case the
+    # size guard exists for (#1225, the citation the page's own comment carries
+    # and the shared bridge's header does too; a bare #1835 here resolved to an
+    # unrelated merged PR).
     sessions = []
     for header in r["strippedHeaders"]:
         value = _cookie_value(header)
@@ -661,12 +663,24 @@ def test_inv7_item6_write_path_parity() -> None:
         f"(#3496 item 6): {sorted(sess['user'])}"
     )
     md = sess["user"].get("user_metadata") or {}
-    assert "gigantic" not in md, (
-        f"un-narrowed user_metadata survived the narrowing: {sorted(md)}"
+    # EXACT allowlist, not a deny-list spot-check. A `keep = {...md}; delete
+    # keep.gigantic` implementation — the allowlist→denylist divergence from
+    # website/assets/supabase-session.js:116-124 — KEEPS every un-kept key, so
+    # asserting only the absence of known bloat passes it while the bloat ships.
+    assert set(md) == {"display_name", "avatar_url", "full_name", "name"}, (
+        f"user_metadata is not narrowed to the essential claims: {sorted(md)}"
     )
     for kept in ("display_name", "avatar_url", "full_name", "name"):
-        assert md.get(kept), (
-            f"the narrowing dropped the essential `{kept}` claim: {md}"
+        assert md[kept], (
+            f"the narrowing kept a falsy essential `{kept}` claim: {md}"
+        )
+    # …and no un-narrowed data survives ANYWHERE on the written session: a
+    # re-attach (`obj.user.legacy_blob = md`) leaves user_metadata narrowed
+    # while shipping the un-narrowed object on a sibling property.
+    blob = json.dumps(sess)
+    for marker in ("identities", "gigantic", "legacy_blob"):
+        assert marker not in blob, (
+            f"un-narrowed data survived on the written session (`{marker}`): {blob}"
         )
 
     assert r["overCapWrote"] is False, f"an over-cap write reached the cookie: {r}"
@@ -1155,7 +1169,10 @@ function innerTarget(assignUrl) {
         user_metadata: {
           display_name: 'Ada Lovelace', avatar_url: 'https://a.example/a.png',
           full_name: 'Ada Lovelace', name: 'ada',
-          gigantic: 'y'.repeat(1500),  // must NOT survive the narrowing
+          // TWO distinct non-allowlisted keys: one large, one small. A single
+          // one is satisfied by a deny-list `delete keep.gigantic`.
+          gigantic: 'y'.repeat(1500),      // must NOT survive the narrowing
+          legacy_blob: 'z'.repeat(400),    // must NOT survive the narrowing
         },
       },
     });
