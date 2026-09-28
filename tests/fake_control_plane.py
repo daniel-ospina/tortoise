@@ -349,6 +349,41 @@ class FakeControlPlane:
                              "capture_calls": calls,
                              "capture_cost_usd": cost})
             return None
+        if fn == "metering_set_graph_storage":
+            # #5331: migration 20260926000002 — a GAUGE SETTER mirroring the SQL
+            # RPC. The fake must OVERWRITE (``= EXCLUDED`` semantics), not add:
+            # a test that cannot tell a gauge from an increment cannot catch the
+            # double-count defect the gauge design exists to avoid.
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r.get("period_start") == p.get("p_period_start")),
+                       None)
+            total = float(p.get("p_total_mb") or 0.0)
+            values = {
+                "graph_storage_mb": total,
+                "graph_storage_indices_mb": p.get("p_indices_mb"),
+                "graph_storage_samples": int(p.get("p_samples") or 0),
+                "graph_storage_repeats": int(p.get("p_repeats") or 0),
+                "graph_storage_min_mb": (
+                    float(p["p_min_mb"])
+                    if p.get("p_min_mb") is not None else total),
+                "graph_storage_max_mb": (
+                    float(p["p_max_mb"])
+                    if p.get("p_max_mb") is not None else total),
+                "graph_storage_spread_mb": float(p.get("p_spread_mb") or 0.0),
+                "graph_storage_measured_at": p.get("p_measured_at"),
+            }
+            if row:
+                row.update(values)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period_start": p.get("p_period_start"),
+                             "period_end": p.get("p_period_end"),
+                             "period": _metering_period_label(
+                                 p.get("p_period_start")),
+                             **values})
+            return None
         if fn == "metering_cohort_spend":
             # #3665/#3825: the SQL aggregate — one scalar, so no row cap can
             # truncate it (the reason it is an RPC and not a filtered read).
