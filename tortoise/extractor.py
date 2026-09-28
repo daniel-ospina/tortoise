@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from .api import EventAPI, provenance
 
@@ -27,6 +27,22 @@ _SUPPORT_PHRASES = ("given that",)
 _REFUTE_SINGLE_RE = re.compile(r'\b(but|however|although)\b', re.IGNORECASE)
 _REFUTE_PHRASES = ("not relevant", "doesn't follow", "on the contrary", "except that")
 _PUNC = re.compile(r'[,.!?;:\'\"()\[\]{}]')  # strip before phrase-matching (#8)
+
+def _attach_partial_subjects(exc: BaseException, names: list[str]) -> None:
+    """Carry the Subjects already minted on a propagating extraction error.
+
+    #4938: ``EventAPI._emit`` journals an event before it projects it, so an
+    error part-way through the mint loop leaves the earlier ``SubjectAdded``
+    events durable. ``extract_entities`` attaches the names of the Subjects
+    whose ``add_subject`` call had already RETURNED, and the document path's
+    fail-open ``except`` wires those — so they are not left unpointed-at.
+    Exactly what is guaranteed, no more: a name whose ``add_subject`` returned
+    is in the list (``seen_subjects`` is written only after the call returns).
+    A call that raises after its MERGE has already committed is not in the
+    list, and can still leave a durable Subject unwired.
+    """
+    cast(Any, exc).partial_subject_names = names
+
 
 def _classify_point_kind(text: str) -> str:
     """Keyword-based pointKind classifier (#784 — the rule extractor must
@@ -1169,11 +1185,20 @@ class LLMExtractor:
         Emits SubjectAdded/ObjectAdded events via the API. Deduplicates by name
         within a run (idempotent across runs via IngestKey in begin_ingest).
 
-        Returns: {"subjects": N, "objects": M, "entities": [names...]}
+        Returns: {"subjects": N, "objects": M, "subject_names": [...],
+                  "entities": [names...], "failed_sections": [titles...]}
+
+        ``subject_names`` (#4938) are the names that actually produced a
+        ``SubjectAdded`` — the document path wires its ``aboutSubject`` edges
+        from this list via ``add_document(about_entities=...)``. The stage
+        itself writes NO ``aboutSubject`` edge (the edge is the caller's to
+        wire: ONTOLOGY §3.2's ``Document/Point/Event → Subject``).
+        ``failed_sections`` is non-empty only under ``skip_on_failure=True``.
         """
         is_doc, sections = _document_sections(text)
         if not is_doc:
-            return {"subjects": 0, "objects": 0, "entities": []}
+            return {"subjects": 0, "objects": 0, "subject_names": [],
+                    "entities": [], "failed_sections": []}
 
         # Build kind vocabularies from the domain_loader adapter (#951):
         # domain_kinds()/known_kinds(bucket) previously did not exist — the
@@ -1202,12 +1227,16 @@ class LLMExtractor:
         seen_objects: dict[str, str] = {}   # name → id
         all_entity_names: set[str] = set()
         n_subjects, n_objects = 0, 0
+        failed: list[str] = []
 
         for title, body, span in sections:  # noqa: B007
             try:
                 entities = stage.run(title, body, context)
             except Exception:
                 if skip_on_failure:
+                    # #4938: report WHICH sections were skipped, so a fail-open
+                    # caller can warn rather than silently return 0 Subjects.
+                    failed.append(title)
                     continue
                 raise
 
@@ -1215,7 +1244,16 @@ class LLMExtractor:
                 name = s["name"].strip()
                 if not name or name in seen_subjects:
                     continue
-                sid = api.add_subject(name, s["subjectKind"])
+                try:
+                    sid = api.add_subject(name, s["subjectKind"])
+                except Exception as exc:
+                    # #4938: hand the caller the Subjects already created in
+                    # this run (each name is added to seen_subjects only once
+                    # its add_subject returned), so the fail-open caller still
+                    # wires the document to them instead of leaving Subjects
+                    # with no document pointing at them.
+                    _attach_partial_subjects(exc, sorted(seen_subjects))
+                    raise
                 seen_subjects[name] = sid
                 all_entity_names.add(name)
                 n_subjects += 1
@@ -1224,7 +1262,12 @@ class LLMExtractor:
                 name = o["name"].strip()
                 if not name or name in seen_objects:
                     continue
-                oid = api.add_object(name, o["objectKind"])
+                try:
+                    oid = api.add_object(name, o["objectKind"])
+                except Exception as exc:
+                    # Same partial-result contract as the Subject write above.
+                    _attach_partial_subjects(exc, sorted(seen_subjects))
+                    raise
                 seen_objects[name] = oid
                 all_entity_names.add(name)
                 n_objects += 1
@@ -1237,7 +1280,15 @@ class LLMExtractor:
         return {
             "subjects": n_subjects,
             "objects": n_objects,
+            # #4938: the created Subject names, so the document path can wire
+            # (document Source)-[:aboutSubject]->(Subject) from the Subjects
+            # this run actually minted — never from an uncreated name, which
+            # would fall through to _create_about_edges' Subject-stub fallback.
+            "subject_names": sorted(seen_subjects),
             "entities": sorted(all_entity_names),
+            # #4938: the sections this run skipped (only non-empty when the
+            # caller passed skip_on_failure=True) — the caller warns on these.
+            "failed_sections": failed,
         }
 
     def extract_conversation_entities(self, transcript: str, source_id: str, api: EventAPI, *,

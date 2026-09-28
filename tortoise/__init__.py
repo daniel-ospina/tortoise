@@ -36,14 +36,16 @@ __version__ = "0.2.0"
 
 import os
 
-from tortoise.config import RELATIVE_PATH_ERROR  # noqa: I001
+from tortoise.config import RELATIVE_PATH_ERROR
+
+# #1371/#5386: the eager import binds `atexit_fast_close` (used at the
+# registration seam below) and arms the redislite guard finder at
+# module-import time, before any client construction.
+from tortoise.embedded_lifecycle import atexit_fast_close
 from tortoise.fork_safety import (
     enforce_embedded_fork_safety,
     fork_safe_serverconfig,
 )
-# #1371: eager import registers the batch atexit flush (module-import time,
-# before any client construction) so LIFO ordering runs it LAST.
-from tortoise.embedded_lifecycle import atexit_fast_close
 
 
 def _build_guarded_falkordb(_OriginalFalkorDB):
@@ -54,7 +56,7 @@ def _build_guarded_falkordb(_OriginalFalkorDB):
     import cost. The class body is the pre-existing guard, unchanged.
     """
 
-    class FalkorDB(_OriginalFalkorDB):
+    class FalkorDB(_OriginalFalkorDB):  # type: ignore[valid-type]  # a class object, not a type alias (#5414)
         """Guarded subclass of redislite's FalkorDB.
 
         Raises RuntimeError when `path` is relative (never permitted — relative
@@ -182,8 +184,8 @@ def _build_guarded_falkordb(_OriginalFalkorDB):
             _atexit.register(self._atexit_close)
 
         def _atexit_close(self) -> None:
-            """#1371: atexit seam — collect ephemeral test servers for the
-            batch flush first.
+            """#1371: atexit seam — collect ephemeral test servers so interpreter
+            exit takes the fast close.
 
             Falls through to the normal _t_close when the fast path does not
             apply (non-ephemeral path, flag unset, other clients connected,
