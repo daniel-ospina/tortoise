@@ -1655,7 +1655,7 @@ def update_onboarding_state(cp, org_id: str, state_dict: dict) -> None:
 
 def cas_update_onboarding_state(cp, org_id: str, state_dict: dict,
                                 expected_version: int) -> bool:
-    """#3553: conditional (compare-and-set) PATCH of ``teams.onboarding_state``.
+    """#3553: conditional (compare-and-set) PATCH of ``organizations.onboarding_state``.
 
     A TRUE atomic CAS on the Supabase leg: ONE PostgREST PATCH whose WHERE
     carries the version guard, with ``Prefer: return=representation`` (a
