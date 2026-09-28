@@ -2100,7 +2100,17 @@ def plan_point_restamp_folds(
       missed): the shape has no live truth to match — live cannot supersede a
       Point that does not exist yet — and engine agreement is the contract this
       plan exists to enforce. The STAMP half was already dropped for it in both
-      versions.
+      versions. The STAMP half needs the SAME existence gate — on a
+      promote-materialized node (``PointPromoted`` is not a recreate boundary,
+      so no ``PointAdded`` follows to suppress the stamp) it would otherwise
+      land on ``rebuild_all``'s trailing sweep while missing on the
+      chronological apply() arm. Both halves are therefore gated on
+      ``first_materialize``, and "EXIST" is any replay MATERIALIZATION, not
+      just the recreate boundary: a ``PointPromoted`` / ``OperatorPromoted``
+      snapshot counts, because the capture path can journal the promote as the
+      node's ONLY durable record (#2256) and ``apply()`` upserts it. Promote
+      seeds the existence map ONLY; the survivor boundary above stays
+      promote-free.
     * a supersede is canonicalized per old id: only the LAST applicable
       supersede decays and only the LAST surviving supersede folds, so an
       earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``.
@@ -2112,7 +2122,12 @@ def plan_point_restamp_folds(
       sweep's fold-miss warning still fires for it exactly as before.
     """
     last_recreate: dict[tuple[str, str], int] = {}
-    first_create: dict[tuple[str, str], int] = {}
+    # EXISTENCE map (distinct from the survivor boundary above): the first seq at
+    # which the replay MATERIALIZES the node. A promote snapshot is the capture
+    # path's only durable record for some nodes (#2256), and ``apply()`` upserts
+    # it — so a promote makes the node exist for the forward-reference gate below
+    # even though it is deliberately NOT a ``last_recreate`` boundary.
+    first_materialize: dict[tuple[str, str], int] = {}
     last_drop: dict[tuple[str, str], int] = {}
     pending_deleted: set[tuple[str, str]] = set()
     terminalizers: list[tuple[int, dict]] = []
@@ -2134,10 +2149,19 @@ def plan_point_restamp_folds(
             if isinstance(p, dict) and isinstance(p.get("id"), str):
                 key = ("Point", p["id"])
                 last_recreate[key] = seq
-                first_create.setdefault(key, seq)
+                first_materialize.setdefault(key, seq)
                 if key in pending_deleted:
                     last_drop[key] = seq
                     pending_deleted.discard(key)
+            continue
+        if t in ("PointPromoted", "OperatorPromoted"):
+            p = ev.get("point")
+            if isinstance(p, dict) and isinstance(p.get("id"), str):
+                # Existence only — NOT a recreate boundary (#2256): a promote
+                # re-applies a snapshot of an existing node, so seeding a
+                # survivor anchor from it would wrongly clear a pending
+                # terminalizer's recreate gate.
+                first_materialize.setdefault(("Point", p["id"]), seq)
             continue
         if t in _POINT_RESTAMP_EVENT_TYPES:
             terminalizers.append((seq, ev))
@@ -2166,7 +2190,7 @@ def plan_point_restamp_folds(
         if drop is not None and seq <= drop:
             continue
         # The target must exist at this seq — see the forward-reference rule.
-        first = first_create.get(("Point", rid))
+        first = first_materialize.get(("Point", rid))
         if first is not None and seq < first:
             continue
         if ev.get("type") == "PointSuperseded":
@@ -2175,7 +2199,8 @@ def plan_point_restamp_folds(
             decays.add(seq)
     decays |= set(supersede_decay.values())
 
-    # STAMP half: the recreate boundary, then the supersede canonicalization.
+    # STAMP half: the recreate boundary, the EXISTENCE gate, then the supersede
+    # canonicalization.
     recreate_ok: dict[int, bool] = {}
     for seq, ev in terminalizers:
         if not eligible[seq]:
@@ -2183,7 +2208,14 @@ def plan_point_restamp_folds(
             continue
         rid = ev.get("id")
         anchor = last_recreate.get(("Point", rid))
-        recreate_ok[seq] = anchor is None or seq > anchor
+        first = first_materialize.get(("Point", rid))
+        # A fold at or before the recreate anchor died with the replaced node;
+        # a fold BEFORE the node's first materialization has nothing to fold
+        # into on the chronological apply() arm (the promote case above — a
+        # node whose only durable record is ``PointPromoted``). Both gates are
+        # what make the two engines agree.
+        recreate_ok[seq] = (anchor is None or seq > anchor) and (
+            first is None or seq >= first)
     # Only the LAST recreate-surviving supersede per old id folds, so an
     # earlier ``S1→A`` CORRECTS cannot ghost beside the final ``S2→A``. The
     # canonicalization is on the FOLD, not on ``new_id``: a later supersede

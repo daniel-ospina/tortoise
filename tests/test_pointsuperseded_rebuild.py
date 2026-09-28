@@ -1111,7 +1111,76 @@ def test_apply_one_record_folds_a_terminalizer(sup):
     assert sdk.get_point(c)["status"] == "live"
 
 
-def test_plan_point_restamp_folds_pins_the_shared_selection():
+def _synthesize_journal(path, entries) -> None:
+    """Replace the journal with an explicit ordered list (a raw producer can
+    journal in any order; the SDK's guards refuse some of these)."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+
+def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
+        sup):
+    """#3305 (review P1), #2256: a node whose ONLY durable journal record is a
+    ``PointPromoted`` snapshot still EXISTs for the fold's existence gate. A
+    terminalizer journaled before that promote must be inert on BOTH engines —
+    folding it on ``rebuild_all``'s trailing sweep while the chronological
+    apply() arm misses is the divergence this pins. Same for
+    ``OperatorPromoted``."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    for promote_type in ("PointPromoted", "OperatorPromoted"):
+        b = sdk.create_point("statement", f"B {promote_type}",
+                             status="draft")["id"]
+        c = sdk.create_point("statement", f"C {promote_type}",
+                             status="live")["id"]
+        added_c = next(
+            e for e in EventLog(str(events / "events.jsonl")).read_all()
+            if e.get("type") == "PointAdded" and e["point"]["id"] == c)
+        snap = dict(sdk.get_point(b))
+        snap["status"] = "live"
+        ts = "2026-01-01T00:00:00+00:00"
+        # A DEDICATED log dir: the sdk's own journal still holds the
+        # ``PointAdded`` for ``b`` (which is exactly the record this shape
+        # removes), and its buffered writes would land in the fixture's log.
+        synth_dir = events.parent / f"synth-{promote_type}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", [
+            {"event_id": sdk.ulid(), "ts": ts, "type": "PointSuperseded",
+             "initiated_by": "raw-producer", "projection_version": 2,
+             "id": b, "new_id": c},
+            {"event_id": sdk.ulid(), "ts": ts, "type": promote_type,
+             "initiated_by": "raw-producer", "projection_version": 2,
+             "point": snap},
+            added_c,
+        ])
+        proj = sdk._get_proj()
+
+        # ``rebuild_all`` snapshots GRAPH-ONLY nodes and injects them as
+        # synthetic ``PointAdded`` (#548) — which would restore exactly the
+        # ``PointAdded`` for ``b`` this shape removes. Empty the graph first.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _point_state(sdk, b)
+        assert via_all["status"] == "live", (
+            f"{promote_type}: a terminalizer before the node existed must not "
+            f"fold after the promote: {via_all}")
+
+        _apply_replay(sdk, synth_dir)
+        via_apply = _point_state(sdk, b)
+        assert via_apply == via_all, (
+            f"{promote_type}: apply() replay != rebuild_all: "
+            f"{via_apply} != {via_all}")
+
+        # The DB-loss recovery engine shares the same plan.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        assert _point_state(sdk, b) == via_all, (
+            f"{promote_type}: recover_from_log != rebuild_all")
+
+
+def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
     """#3305: the plan is the ONE home for the terminalizer SELECTION (the
     survivor rule + supersede canonicalization + both belief anchors) that
     every replay engine obeys. Pinned directly — the two DB-level parity tests
@@ -1181,15 +1250,22 @@ def test_plan_point_restamp_folds_pins_the_shared_selection():
     assert decisions[0] == (False, False)
     assert fold_seq == {}
 
-    # An empty-string id is inapplicable (the plan's non-empty writable gate)
-    # and is reported, not silently dropped (#3299). The SAME gate the fold
-    # applies, so the plan never schedules a fold the body would refuse.
+    # An empty-string / unwritable id is inapplicable (the plan's non-empty
+    # writable gate) and is REPORTED, not silently dropped (#3299) — the plan is
+    # the only audibility for such a record (it returns (False, False), so
+    # apply_journal_point_restamp's own fold-miss warning never runs).
+    import logging
+
     for bad_id in ("", "nul\x00id", "lone\ud800id"):
-        decisions, fold_seq = plan_point_restamp_folds([
-            {"type": "PointSuperseded", "id": bad_id, "new_id": "b"},
-        ])
+        with caplog.at_level(logging.WARNING):
+            decisions, fold_seq = plan_point_restamp_folds([
+                {"type": "PointSuperseded", "id": bad_id, "new_id": "b"},
+            ])
         assert decisions[0] == (False, False), bad_id
         assert fold_seq == {}
+        assert any("has no writable non-empty id" in r.message
+                   for r in caplog.records), (
+            f"ineligible id {bad_id!r} was dropped silently")
 
     # A supersede with NO new_id still STAMPS when it is the id's last
     # recreate-surviving supersede (the fold returns 0 and the consumer warns),
