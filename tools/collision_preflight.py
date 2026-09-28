@@ -1861,6 +1861,21 @@ def _worktree_blocks(porcelain: str) -> list[dict]:
                 "worktree porcelain: a record has neither HEAD nor 'bare' — "
                 "refusing a partial scan"
             )
+        # ⛔ `branch` IS REQUIRED TOO, for every NON-BARE record, because it is
+        # one of the two fields the hit test reads (`number_present(path, issue)
+        # or number_present(branch, issue)`) and a worktree whose only
+        # issue-naming field is its branch is reported as NO HIT when the field
+        # is absent — read as the empty string and silently dropped. Requiring
+        # `path` and HEAD while leaving `branch` optional applied the "a parse
+        # loss is a REFUSAL" rule to two of the three fields it covers.
+        # `--porcelain` emits `branch <ref>` OR the literal `detached` for every
+        # non-bare record, so absence here is a parse loss, not a shape.
+        if not record.get("bare") and not record.get("branch"):
+            raise SurfaceError(
+                "worktree porcelain: a non-bare record has neither a 'branch' "
+                "line nor 'detached' — the parse lost the field the worktree hit "
+                "test reads; refusing a partial scan"
+            )
     return blocks
 
 
@@ -2040,7 +2055,7 @@ def _require_issue_payload(data: dict, where: str) -> None:
         )
 
 
-def _require_pr_dicts(prs: list, where: str) -> None:
+def _require_pr_dicts(prs: list, where: str, required: tuple = ()) -> None:
     """Every element of a PR list must be a JSON object.
 
     ⛔ THE CONTAINER WAS TYPE-CHECKED AND ITS ELEMENTS WERE NOT. A list holding a
@@ -2061,46 +2076,72 @@ def _require_pr_dicts(prs: list, where: str) -> None:
                 "as if it were empty (NOT clean)"
             )
         # Checking only that the element was an object left the string fields it
-        # carries (title / body / headRefName / state) to raise inside whatever
-        # read them — a traceback with no VERDICT line and exit 1, which callers
-        # read as COLLISION.
+        # carries to raise inside whatever read them — a traceback with no
+        # VERDICT line and exit 1, which callers read as COLLISION.
         #
-        # REQUIRED AND A STRING: `title`, `headRefName`, `state`. REQUIRED AND
-        # NULLABLE: `body` and `mergedAt`/`merged_at` (GitHub types those string
-        # or null, and both are present on every payload this reads).
+        # WHAT IS REQUIRED IS DECIDED BY ABSENCE LOSING INFORMATION, and the
+        # decisive case is not obvious: a field that reads as the empty string
+        # turns into "no problem here" on a surface that can BLOCK. A required
+        # field whose absence only removes an ADVISORY demotion is not the same
+        # thing, and requiring it would trade a real refusal for a cosmetic one.
         #
-        # The requiredness rule is whether ABSENCE LOSES INFORMATION, and it is
-        # not obvious, so it is stated where it bites:
-        #
-        #   ⛔ `state` — REQUIRED. Its absence removes the `state in ("open",
-        #   "opened")` short-circuit, which is the ONLY thing keeping a live open
-        #   PR from being demoted: a payload with no `state` and a truthy
-        #   `mergedAt` was read as MERGED, and every match on the BLOCKING open-PR
-        #   surface went out as `weak` → CLEAN. An earlier version of this comment
-        #   called `state` optional because absence loses nothing; it loses the
-        #   liveness signal, which is the whole difference between COLLISION and
-        #   CLEAN.
-        #   ⛔ `mergedAt`/`merged_at` — it GATES A DOWNGRADE, so a non-string
-        #   (e.g. `1`, which is truthy) silently demoted a live PR.
-        for key in ("title", "headRefName", "state"):
+        # Two classes sit behind that rule:
+        #   * the fields every payload of this shape carries, checked here;
+        #   * the fields only ONE transport projects, which the caller names in
+        #     `required` — a field the other transport never sends cannot be
+        #     required of it.
+        for key in ("title", "headRefName", "body", "mergedAt"):
             if key not in pr:
                 raise SurfaceError(
                     f"{where} returned an element with no {key!r} at index "
-                    f"{index} — refusing a malformed PR list (NOT clean)"
+                    f"{index} — absence reads as empty, and a reader consumes it "
+                    "on a BLOCKING surface, so a missing key would silently drop "
+                    "that signal (NOT clean)"
                 )
-            if not isinstance(pr[key], str):
-                raise SurfaceError(
-                    f"{where} returned a non-string {key!r} at index {index} "
-                    f"({type(pr[key]).__name__}) — refusing (NOT clean)"
-                )
-        for key in ("body",):
-            if key not in pr:
+        # ⛔ `number` is the field the hit test compares against the issue. It is
+        # an INTEGER on the wire, and `_is_issue_number` also rejects `bool`
+        # (`isinstance(True, int)` is True).
+        if "number" not in pr:
+            raise SurfaceError(
+                f"{where} returned an element with no 'number' at index {index} "
+                "— refusing a malformed PR list (NOT clean)"
+            )
+        if not _is_issue_number(pr["number"]):
+            raise SurfaceError(
+                f"{where} returned a non-integer 'number' at index {index} "
+                f"({type(pr['number']).__name__}) — refusing (NOT clean)"
+            )
+        # ⛔ `state` is REQUIRED, STRING, AND NON-BLANK. The blank case is the
+        # fail-OPEN one: `_pr_terminal_state` strips it, `""` is not in
+        # ("open", "opened"), and a truthy `mergedAt` then marks a LIVE PR
+        # terminal — every match on the BLOCKING open-PR surface goes out as
+        # `weak` and the run reports CLEAN. A blank `state` is not a value either
+        # transport produces, so it is a malformed payload, not a state.
+        if "state" not in pr:
+            raise SurfaceError(
+                f"{where} returned an element with no 'state' at index {index} — "
+                "refusing a malformed PR list (NOT clean)"
+            )
+        if not isinstance(pr["state"], str) or not pr["state"].strip():
+            raise SurfaceError(
+                f"{where} returned a blank or non-string 'state' at index "
+                f"{index} ({pr['state']!r}) — a blank state is not a state: it "
+                "drops the liveness short-circuit and demotes a live PR to "
+                "immutable history (NOT clean)"
+            )
+        for key in ("merged_at", *required):
+            if key not in pr and key in required:
                 raise SurfaceError(
                     f"{where} returned an element with no {key!r} at index "
-                    f"{index} — a reader consumes it on a BLOCKING surface, so "
-                    "absence would silently drop that signal (NOT clean)"
+                    f"{index} — this transport projects it, so its absence means "
+                    "the payload is malformed, not that the value is empty "
+                    "(NOT clean)"
                 )
-        for key in ("body", "mergedAt", "merged_at"):
+        # The TYPE half. `title`/`headRefName` are in it as well as the presence
+        # loop above: `isinstance(5, str)` is False and the value would reach
+        # `_one_line(...)`/`re.search`, so presence alone is not the check.
+        for key in ("title", "headRefName", "body", "mergedAt", "merged_at",
+                    *required):
             if key in pr and pr[key] is not None and not isinstance(pr[key], str):
                 raise SurfaceError(
                     f"{where} returned a non-string {key!r} at index {index} "
@@ -2926,7 +2967,8 @@ def run_preflight(
                 )
                 # Before the harvest AND the scan, so a malformed element cannot
                 # reach `.get()` on either path.
-                _require_pr_dicts(prs, f"the closed-PR sample for {slug}")
+                _require_pr_dicts(prs, f"the closed-PR sample for {slug}",
+                                  required=("headSha",))
                 for _pr in prs:
                     if _pr.get("merged_at") or _pr.get("mergedAt"):
                         # `headSha` is the PROJECTED key this sample actually

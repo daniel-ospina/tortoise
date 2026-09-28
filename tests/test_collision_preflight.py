@@ -261,6 +261,15 @@ if os.environ.get("JEV_STUB_NO_ANSWERS") == "1":
 if os.environ.get("JEV_STUB_GARBAGE") == "1":
     sys.stdout.write("not-json")
     sys.exit(0)
+if os.environ.get("JEV_STUB_NON_OBJECT") == "1":
+    # VALID JSON THAT IS NOT AN OBJECT. `_jev_transport` refuses it, and that
+    # guard is the only thing standing between this response and an uncaught
+    # AttributeError in `_decide_chunk` (which immediately calls
+    # `response.get(...)`) — a traceback with no VERDICT line and exit 1, the
+    # code callers read as COLLISION. No other stub mode produced it, so the
+    # guard was unfailable.
+    sys.stdout.write(json.dumps([1, 2]))
+    sys.exit(0)
 
 SENTINELS = {
     "nan": float("nan"), "inf": float("inf"), "-inf": float("-inf"),
@@ -490,6 +499,7 @@ class CollisionPreflightTest(unittest.TestCase):
                 # normalized in rather than left to each call site.
                 pr.setdefault("state", "open")
                 pr.setdefault("body", "")
+                pr.setdefault("mergedAt", None)
                 normalized.append(pr)
             (self.gh_dir / "open_prs.json").write_text(json.dumps(normalized))
         if closed_prs is not None:
@@ -510,6 +520,18 @@ class CollisionPreflightTest(unittest.TestCase):
                 pr = dict(pr)
                 pr.setdefault("state", "closed")
                 pr.setdefault("body", "")
+                # `mergedAt` is the PROJECTED key (`mergedAt: .merged_at`), and
+                # the harvest that feeds the squash-merge demotion is gated on
+                # it, so absence is information loss rather than a shape.
+                pr.setdefault("mergedAt", None)
+                # `headSha` is the PROJECTED key (`headSha: (.head.sha // "")`),
+                # and it is the DATA the `mergedAt` gate is gating — the harvest
+                # reads it to decide whether a branch tip was landed by a merge
+                # GitHub did not keep as an ancestor. It is normalized in for the
+                # same reason as `mergedAt`: the projection always emits it, so
+                # omitting it models a payload the wire cannot produce. A test
+                # that wants the refusal DELETES the key.
+                pr.setdefault("headSha", "")
                 normalized.append(pr)
             (self.gh_dir / "closed_prs.json").write_text(json.dumps(normalized))
         if issue is not None:
@@ -900,6 +922,77 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn(f"non-string '{key}'", out)
                 self.assertNotIn("Traceback", out)
 
+    def test_closed_pr_without_head_sha_cannot_demote_a_branch(self):
+        # ⛔ THE CONTRACT REQUIRED THE HARVEST'S GATE AND NOT ITS DATA.
+        # `mergedAt` was required; `headSha` — the field the harvest actually
+        # READS to populate `merged_head_shas` — was not. Absence read as the
+        # empty string, `if _sha:` was False, the set stayed empty, and the
+        # squash-merge demotion simply did not run: #5186's resignal died
+        # silently while the run reported a clean surface. This is the same
+        # class of hole `_merged_pr_fixture`'s docstring records one key over
+        # (the wrong-key version of it, which made the predicate dead code in
+        # production while every test passed).
+        #
+        # The control is `test_squash_merged_branch_is_terminal_and_cannot_block`
+        # — the identical fixture, with `headSha` present, is CLEAN. Deleting the
+        # key must not produce the same answer.
+        ref = f"docs/research-{ISSUE}-4333"
+        _git(self.repo, "branch", ref)
+        self.gh_fixtures(closed_prs=[self._merged_pr_fixture(ref)])
+        prs = json.loads((self.gh_dir / "closed_prs.json").read_text())
+        del prs[0]["headSha"]
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool(issue=ISSUE)
+        self.assertIn("no 'headSha'", out)
+        # And the DIRECTION is the safe one: with no evidence to demote on, the
+        # branch keeps blocking. The defect was never a wrong verdict on the
+        # happy path — it was a mechanism that had stopped running.
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_blank_state_with_a_truthy_merged_at_is_incomplete_not_clean(self):
+        # ⛔ THE DEMONSTRATED FAIL-OPEN OF THE CYCLE-11 CONTRACT. `state` was
+        # required to be a `str`, which accepts `""` — and `_pr_terminal_state`
+        # STRIPS it, so `""` is not in ("open", "opened"), the liveness
+        # short-circuit does not fire, and a truthy `mergedAt` then marks a LIVE
+        # PR terminal. Every title/head match on the BLOCKING open-PR surface
+        # goes out as `weak` and the run reports CLEAN.
+        #
+        # A blank `state` is not a state either transport produces, so it is a
+        # malformed payload rather than a value, and the refusal has to catch it
+        # where the null case is caught.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": f"guard retrieval ({ISSUE})", "body": "",
+            "headRefName": "feat/9999-other", "state": "",
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("blank or non-string 'state'", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        # The counterfactual, stated as an assertion: this exact fixture WITHOUT
+        # the blank-state refusal is CLEAN, because the truthy `mergedAt` demotes
+        # the hit. Pin it so a future relaxation has to delete this line.
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_pr_payload_missing_number_is_incomplete_not_clean(self):
+        # `number` is the field the hit test compares against the issue
+        # (`str(pr.get("number")) == str(issue)`), so its absence is not a
+        # cosmetic `?` in the label: the "this PR IS the issue" demotion stops
+        # matching. Both transports project it, so absence is malformed.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated", "body": "",
+            "headRefName": "feat/9999-other", "state": "open",
+            "mergedAt": None,
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["number"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("no 'number'", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+
     def test_pr_payload_missing_state_is_incomplete_not_clean(self):
         # ⛔ THE VERIFIED FAIL-OPEN. `state` is what `_pr_terminal_state` reads to
         # decide a PR is still LIVE: `state in ("open", "opened")` returns None
@@ -961,6 +1054,48 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: INCOMPLETE", out)
                 self.assertNotIn("VERDICT: CLEAN", out)
 
+    def test_pr_payload_missing_merged_at_is_incomplete_not_clean(self):
+        # ⛔ THE CONTRACT SAID "REQUIRED AND NULLABLE" AND THE CODE ACCEPTED
+        # ABSENCE. `mergedAt` is the key the squash-merge harvest is GATED on
+        # (`if _pr.get("merged_at") or _pr.get("mergedAt")`), so a payload that
+        # omits it contributes NO head SHA — the #5186 demotion silently stops
+        # firing for that PR and the branch stays blocking. Fail-closed, so not a
+        # safety hole, but it is a written contract the code did not implement,
+        # in the function written specifically to stop exactly that.
+        # On the BLOCKING open-PR surface, where a malformed payload is a
+        # NAMED INCOMPLETE and exit 2.
+        self.gh_fixtures(open_prs=[{
+            "number": 5150, "title": "unrelated", "body": "",
+            "headRefName": "feat/9999-other", "state": "open",
+            "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        prs = json.loads((self.gh_dir / "open_prs.json").read_text())
+        del prs[0]["mergedAt"]
+        (self.gh_dir / "open_prs.json").write_text(json.dumps(prs))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("no 'mergedAt'", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+
+        # On the ADVISORY closed-PR surface the SAME refusal is still stated, but
+        # #5251 keeps it out of the exit code: the surface cannot conceal a
+        # collision. Asserting both halves is what distinguishes "the guard
+        # fired" from "the guard fired AND the authority split still holds".
+        self.gh_fixtures(closed_prs=[{
+            "number": 4242, "title": "land it", "body": "", "state": "closed",
+            "headRefName": "feat/9999-other",
+            "headSha": "0" * 40, "mergedAt": "2026-09-01T00:00:00Z",
+        }])
+        prs = json.loads((self.gh_dir / "closed_prs.json").read_text())
+        del prs[0]["mergedAt"]
+        (self.gh_dir / "closed_prs.json").write_text(json.dumps(prs))
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([]))
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("no 'mergedAt'", out)
+        self.assertIn("ADVISORY SURFACES", out)
+        self.assertNotIn("VERDICT: INCOMPLETE", out)
+
     def test_pr_payload_missing_body_is_incomplete_not_clean(self):
         # ⛔ `body` is READ on the blocking open-PR surface: the body-regex union
         # exists precisely because GitHub's `closingIssuesReferences` can miss a
@@ -981,6 +1116,41 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("no 'body'", out)
         self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_worktree_porcelain_without_a_branch_line_is_refused(self):
+        # ⛔ THE SHAPE CHECK COVERED TWO OF THE THREE FIELDS THE HIT TEST READS.
+        # `path` was required, HEAD-or-`bare` was required, and `branch` was not
+        # — yet `scan_worktree_surface` tests `number_present(path, issue) or
+        # number_present(branch, issue)`, so a record with no `branch` line was
+        # accepted, the field read as the EMPTY string, and a worktree whose ONLY
+        # issue-naming field is its branch was reported as no hit at all. That is
+        # the silently-smaller answer this check exists to refuse.
+        mod = _tool_module()
+        with self.assertRaises(mod.SurfaceError):
+            mod._worktree_blocks(
+                "worktree /tmp/wt/fix-3061-mine\n"
+                "HEAD 0123456789abcdef0123456789abcdef01234567\n"
+            )
+        # A `bare` record legitimately has neither, so it must still parse.
+        self.assertEqual(
+            len(mod._worktree_blocks("worktree /tmp/wt/bare\nbare\n")), 1
+        )
+
+    def test_unattributable_assignee_is_a_blocking_hit(self):
+        # ⛔ THE ARM WITH NO COVERAGE, and it is the FAIL-CLOSED one. The claim
+        # gate deliberately moved the SHARED account to advisory (#3504 class 3),
+        # and kept the UNATTRIBUTABLE case blocking — "we cannot tell" is not
+        # "it is not ours". Nothing exercised it: every fixture supplied a
+        # concrete login, so folding this branch into `shared` (an easy
+        # refactor) turned a blocking assignee into a non-blocking one with the
+        # suite still green.
+        for login in ("ghost", None):
+            with self.subTest(login=login):
+                self.gh_fixtures(issue=self.issue_payload(assignees=(login,)))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("could not be attributed", out)
 
     def test_worktree_porcelain_with_a_newline_in_the_path_is_refused(self):
         # ⛔ THE PARSER SILENTLY TRUNCATED. `git worktree list --porcelain` does
@@ -2712,9 +2882,9 @@ class CollisionPreflightTest(unittest.TestCase):
         # surface would report no hit at all.
         (self.gh_dir / "closed_prs.json").write_text(json.dumps([
             {"number": 1, "title": "a", "body": "", "headRefName": "chore/a",
-             "state": "OPEN"},
+             "state": "OPEN", "mergedAt": None, "headSha": ""},
             {"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2",
-             "state": "OPEN"},
+             "state": "OPEN", "mergedAt": None, "headSha": ""},
         ]))
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)  # advisory: reported, never blocking
@@ -3590,6 +3760,13 @@ class CollisionPreflightTest(unittest.TestCase):
             ("JEV_STUB_EMPTY", "uncertain ownership"),
             ("JEV_STUB_NO_ANSWERS", "JEV UNAVAILABLE"),
             ("JEV_STUB_GARBAGE", "JEV UNAVAILABLE"),
+            # ⛔ VALID JSON, NOT AN OBJECT. `_jev_transport` refuses this, and
+            # that guard is the ONLY thing between it and an uncaught
+            # AttributeError in `_decide_chunk` — which escapes `classify`'s
+            # documented "never raises" as a traceback with no VERDICT line and
+            # exit 1, the code callers read as COLLISION. No other stub mode
+            # produced this shape, so the guard could not be failed by any test.
+            ("JEV_STUB_NON_OBJECT", "JEV UNAVAILABLE"),
         ):
             with self.subTest(flag=flag):
                 self.jev_rules(default=0.99)
