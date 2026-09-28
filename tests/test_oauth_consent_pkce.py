@@ -222,10 +222,11 @@ def test_inv2_single_origin_completion_and_pkce_exchange() -> None:
         foreign host;
       * the token POST captured from the running client.
     The INITIATION half — the `redirect_to` supabase-js puts on the authorize URL
-    — is observed by `test_inv11_...`, which parses it off the assign URL. An
-    earlier revision reported `location.origin` back from the driver here, which
-    asserted the shim against itself and stayed green even with the page
-    returning `https://evil.example`."""
+    — is observed by `test_inv11_...`, which parses it off the assign URL. The
+    return target here is read from what the page BUILDS, never read back from
+    the driver: reading `location.origin` back from the shim asserts the shim
+    against itself and stays green even with the page returning
+    `https://evil.example`."""
     r = _run("single_origin", search="?code=THECODE&state=st-1",
              seedVerifier="verifier-abc")
     assert r["exchangeGrant"] == "pkce", f"token POST was not grant_type=pkce: {r}"
@@ -359,6 +360,17 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
         f"the transient survived in the sanitised URL: {frag['replaceStates']}"
     )
 
+    # A reachable, non-provider cause of the SAME terminal state: the provider
+    # returns `?code=`, and the code exchange inside createClient() is rejected.
+    # This is the case the state exists to catch — it carries no
+    # `error_description`, so the generic message is the entire report.
+    failed = _run("load", search="?code=THECODE&state=st-1", exchangeFails=True)
+    assert failed["viewSignin"] == "block", failed
+    assert failed["errorVisible"] is True, (
+        f"a rejected code exchange produced no message: {failed}"
+    )
+    assert failed["errorText"].strip(), failed
+
     clean = _run("load", search="")
     assert clean["viewSignin"] == "block", clean
     assert clean["errorVisible"] is False, (
@@ -369,9 +381,10 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     assert benign["errorVisible"] is False, (
         f"a benign fragment was read as a transient: {benign['errorText']!r}"
     )
-    assert benign["replaceStates"] == [], (
-        f"a benign fragment was rewritten: {benign['replaceStates']}"
-    )
+    # Deliberately NO `replaceStates == []` assertion here: `sanitiseUrl()` runs
+    # only on the transient-present/no-session branch, so a benign load reports
+    # no replaceState whatever the fragment logic does — the assertion could not
+    # fail. The `mixed` case below DOES run it and is the real discriminator.
 
     # Mixed case: a transient in the QUERY and a NON-param fragment. The
     # fragment is not a param list, so stripping must leave it byte-identical
@@ -408,6 +421,9 @@ def test_inv6_unavailable_store_refuses_locally() -> None:
         r = _run("click", search="", **mode)
         assert r["navs"] == [], f"navigated despite an unusable store: {r} ({mode})"
         assert r["errorVisible"] is True, f"no refusal reported: {r} ({mode})"
+        assert r["errorText"].strip(), (
+            f"the refusal was visible but carried no message: {r} ({mode})"
+        )
         assert r["cookieVerifierKeys"] == [], r
         assert r["auxVerifierKeys"] == [], r
 
@@ -419,12 +435,19 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     per store, for the real key and the real value — write, read back, remove, read
     back null, then write again — and skips a store that fails.
 
-    This pins the divergence that survived the round-2 guard fix: a first store
+    This pins the divergence the pre-flight guard cannot see: a first store
     whose accepted-size band sits BETWEEN the probe (rejected) and the real value
-    (accepted) and which refuses removal passed the guard on the second store while
-    `writeAux` wrote the credential to the first. Measured before the writer fix:
+    (accepted) and which refuses removal passed the guard on the second store,
+    so only the writer could keep the credential out of the first. Without the
+    writer's proof the outcome is
     `sessionVerifierKeys == [sb-tortoise-auth-token-code-verifier]` with
-    `localVerifierKeys == []` — a credential in an un-cleanable store."""
+    `localVerifierKeys == []` — a credential in an un-cleanable store.
+
+    The probe's own payload is asserted too, over the RAW store entries: a store
+    that accepts the write but silently ignores removal RETAINS its probe entry,
+    so a probe payload of `v` would leave the credential under a random
+    `__tt_wprobe-*` key that nothing can clean — and the verifier-shaped filters
+    used above cannot see a probe key at all."""
     r = _run("click", search="", sessionMode="throw-remove", sessionQuota=130)
     assert r["navs"], f"the flow did not proceed although localStorage is usable: {r}"
     assert r["errorVisible"] is False, r
@@ -461,6 +484,21 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
     assert silent["localVerifierKeys"], (
         f"the verifier reached no store at all — the write was refused, not relocated: {silent}"
     )
+    # The A5 probe must never carry the CREDENTIAL. Asserted over the raw entries,
+    # because the verifier-shaped filters above do not see a `__tt_wprobe-*` key.
+    verifier_values = {
+        e["value"] for e in silent["auxRawEntries"] if e["key"].endswith("-code-verifier")
+    }
+    assert verifier_values, (
+        f"no stored verifier value found, so the probe-leak assertion is vacuous: {silent}"
+    )
+    leaked = [
+        e for e in silent["auxRawEntries"]
+        if not e["key"].endswith("-code-verifier") and e["value"] in verifier_values
+    ]
+    assert not leaked, (
+        f"the A5 probe retained the credential under a non-credential key: {leaked}"
+    )
 
     # …and a silent-remove store is not a way in when no store can be cleaned: the
     # guard's read-back-null refuses it too (fail closed).
@@ -485,6 +523,9 @@ def test_inv7_item6_write_path_parity() -> None:
     )
     assert r["overCapWrote"] is False, f"an over-cap write reached the cookie: {r}"
     assert r["overCapReported"] is True, f"the over-cap refusal was not reported: {r}"
+    assert r["overCapText"].strip(), (
+        f"the over-cap refusal was visible but carried no message: {r}"
+    )
 
 
 def test_inv9_weak_challenge_refused_with_a_guard_removed_control() -> None:
@@ -498,6 +539,9 @@ def test_inv9_weak_challenge_refused_with_a_guard_removed_control() -> None:
     r = _run("click", search="", noSubtle=True)
     assert r["navs"] == [], f"initiated without WebCrypto: {r}"
     assert r["errorVisible"] is True, r
+    assert r["errorText"].strip(), (
+        f"the refusal was visible but carried no message: {r}"
+    )
 
     page = _render_page().replace("const incap = pkceIncapable();", "const incap = null;")
     ctl = _run("grant", page=page, noSubtle=True)
@@ -798,6 +842,16 @@ function innerTarget(assignUrl) {
       .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
     out.localVerifierKeys = Array.from(localStorage._map.keys())
       .filter(function (k) { return k.indexOf('code-verifier') >= 0; });
+    // RAW entries, unfiltered by key shape. The A5 probe writes a throwaway
+    // `__tt_wprobe-*` key, so a verifier-shaped filter cannot see whether the
+    // probe's PAYLOAD was the credential. Pinned by test_inv13.
+    const rawEntries = function (store, label) {
+      return Array.from(store._map.entries()).map(function (e) {
+        return { store: label, key: e[0], value: String(e[1]) };
+      });
+    };
+    out.auxRawEntries = rawEntries(sessionStorage, 'session')
+      .concat(rawEntries(localStorage, 'local'));
     if (navs.length) {
       const inner = innerTarget(navs[navs.length - 1]);
       out.assign = navs[navs.length - 1];

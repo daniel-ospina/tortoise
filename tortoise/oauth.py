@@ -1912,8 +1912,9 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // dashboard's supabaseStorage (website/assets/supabase-session.js). #3496
   // SPLITS the provenance: the KEY-IDENTITY ROUTING below is ported from the
   // blog-admin console's authStorage (website/apps/blog-admin/src/lib/
-  // supabase.ts) — that bridge has no key routing at all, it writes whatever
-  // key it is handed to the cookie, which is the hole this adapter now closes.
+  // supabase.ts) — the DASHBOARD bridge (website/assets/supabase-session.js)
+  // has no key routing at all: it writes whatever key it is handed to the
+  // cookie, which is the hole this adapter now closes.
   // Method shorthand so `this` binds to the object (arrow functions
   // would bind window). Size guard + localhost-aware domain/secure
   // attributes mirror the canonical adapter.
@@ -1981,8 +1982,14 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
         if (s.getItem(key) !== v) throw 0;
         return true;
       } catch (e) {
-        // Best effort: leave no probe entry behind if the store will let us.
+        // Best-effort cleanup — BOTH keys. `key` must be cleaned too: the failure
+        // can be the read-back AFTER a successful `setItem(key, v)` (a store that
+        // truncates or normalises what it accepted), and this loop then writes the
+        // same credential into the NEXT store, so without this the first store
+        // would retain a copy in a store that failed verification. Cleanup is not
+        // proof — the read-back above is — so a store reaching here is still skipped.
         try { s.removeItem(probeKey); } catch (e2) { /* ignore */ }
+        try { s.removeItem(key); } catch (e3) { /* ignore */ }
       }
     }
     return false;   // refuse — never fall through to the cookie jar
@@ -2361,7 +2368,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
   // #1701 R1: auto-advance when a session lands after an initial null
-  // (provider redirect hash ingestion / cookie session). runConsentFlow is
+  // (provider redirect `?code` exchange / cookie session). runConsentFlow is
   // in-flight guarded, so a double fire never runs two overlapping previews.
   // #3496: one terminal state for a failed/declined/refused sign-in. Capture
   // the load-time transient ONCE, read-only — the library has already consumed

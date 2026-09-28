@@ -1929,7 +1929,7 @@ durations:
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 5.9
   test_oauth_mcp.py: 16.1
-  test_oauth_consent_pkce.py: 8.0
+  test_oauth_consent_pkce.py: 8.0  # unmeasured — added by #3496, so no leg of the four documented source runs could collect it; refresh from CI junit.
   test_mcp_server.py: 4.4
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7

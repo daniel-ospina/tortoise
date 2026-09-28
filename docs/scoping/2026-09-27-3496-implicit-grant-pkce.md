@@ -200,9 +200,13 @@ pin (a literal pin alone cannot catch a vendor bump); the new harness re-asserts
 directions are wired: an `oauth.py`-only diff selects `api`; a vendor-only diff is made to select
 `api` by Step 9(b).
 
-**Step 2 — explicit PKCE.** `:1969-1976`: add `flowType: "pkce"`. **Unchanged:** `storageKey`,
-`persistSession: true`, `autoRefreshToken: false`, **`detectSessionInUrl: true`** (the library stays
-the single fragment consumer; `test_one_fragment_consumer_per_page` pins this string).
+**Step 2 — explicit PKCE.** Add `flowType: "pkce"`. **Unchanged:** `storageKey`,
+`persistSession: true`, `autoRefreshToken: false`, **`detectSessionInUrl: true`** — retained because
+the library gates the PKCE `?code` exchange on it (`_initialize` → `_getSessionFromURL`), NOT to
+ingest a token fragment: with `flowType: "pkce"` an implicit-style fragment return is refused by the
+bundle. `test_one_fragment_consumer_per_page` pins the string; its assertion MESSAGE still carries
+the older fragment-ingestion rationale, which is stale but lives outside this PR's diff (tracked
+with the dashboard-bridge comment item).
 
 **Step 3 — the key-identity router.** `:1929-1964`. **Keep the same three method names and
 signatures** (`getItem(key) {`, `setItem(key, value) {`, `removeItem(key) {`) and keep **every**
@@ -243,22 +247,30 @@ The guard is an early-failure optimisation: it must never *be* the invariant, be
 throwaway key with a payload sized for the verifier, and the writer's own choice can differ (a store
 whose accepted-size band sits between the probe and the real value). The invariant is enforced where
 the real key and value are known — in `writeAux`, which re-proves writability AND cleanability on
-each candidate store at write time, with a payload of the REAL length under a throwaway key, and
-only then writes the credential (invariant 13):
+each candidate store at write time, with a payload of the REAL length under a throwaway key — a
+DUMMY of that length, never the credential itself — and only then writes the credential
+(invariant 13):
 ```js
 const writeAux = (key, value) => {
   const v = String(value);
+  const probe = "x".repeat(v.length);   // DUMMY, same length — never the credential
   const probeKey = "__tt_wprobe-" + Math.random().toString(16).slice(2).padEnd(32, "0");
   for (const s of auxStores()) {
     try {
-      s.setItem(probeKey, v);
-      if (s.getItem(probeKey) !== v) throw 0;
+      s.setItem(probeKey, probe);
+      if (s.getItem(probeKey) !== probe) throw 0;
       s.removeItem(probeKey);
       if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
       s.setItem(key, v);
       if (s.getItem(key) !== v) throw 0;
       return true;
-    } catch (e) { try { s.removeItem(probeKey); } catch (e2) { /* ignore */ } }
+    } catch (e) {
+      // Clean BOTH keys: the failure can be the read-back AFTER a successful
+      // `setItem(key, v)` (a store that truncates what it accepted), and the
+      // next iteration writes the same credential into the next store.
+      try { s.removeItem(probeKey); } catch (e2) { /* ignore */ }
+      try { s.removeItem(key); } catch (e3) { /* ignore */ }
+    }
   }
   return false;   // refuse — never fall through to the cookie jar
 };
@@ -328,16 +340,20 @@ same condition (`signup.html:697`); the two are separate apps (dashboard `public
 FastAPI-rendered consent page — a shared message module is not feasible), so the separation is
 recorded and the condition words kept consistent where a user may see both.
 
-**Step 7 — item 6 write-path parity.** `:1946-1956`: keep the strip **conditional on
+**Step 7 — item 6 write-path parity.** In `cookieStorage.setItem`: keep the strip **conditional on
 `encoded.length > SIZE_GUARD`** (exactly `website/assets/supabase-session.js:111-135`; `SIZE_GUARD`
-at `:1916`); port the non-essential-claim narrowing (`user.identities`; `user_metadata` reduced to
+in the adapter above); port the non-essential-claim narrowing (`user.identities`; `user_metadata` reduced to
 the fields the UI reads; keep `app_metadata`); keep `SIZE_GUARD + 100`; add `COOKIE_LIMIT`/`SIZE_CAP`
 **derived** exactly as `supabase-session.js:46-47` (`SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1`,
 text-extractable by the same regex the bridge suite uses at `:408`) and the **refuse-and-report**
-branch (no write). Surface the refusal: read the cookie back, compare the credential pair
-(`access_token`+`refresh_token`) — a guard-transformed write still counts as landed, like the
-bridge's `writeLanded()` (#3503) — and render the Step-6 terminal state with a session-too-large
-message (the console-vs-UI split from the bridge's `:142` is deliberate: different audience).
+branch (no write). **The landed form of the refusal differs from this sketch:** the branch
+`console.warn`s AND reports on the page (`showSignin()` + `showError("Your sign-in session is too
+large…")`) and returns — it does NOT read the cookie back, does NOT compare the credential pair, and
+does NOT route through the Step-6 terminal state (`showTerminalFallback()` also calls
+`sanitiseUrl()`; this branch never does). The bridge's `writeLanded()` read-back (#3503) was **not**
+ported. Whether a refused write should render through the terminal state, and that its message
+SURVIVES the consent view (a stale session currently lets `showConsentOnce()` `hideError()` it), is
+#5734 (per-cause refusal UX).
 
 **Step 8 — harness `tests/test_oauth_consent_pkce.py`.** Render with `consent_page_html(...)`
 **directly** (pure function; no app boot, no fixture refactor); extract the inline block from the
@@ -406,9 +422,12 @@ static predicate assertion, **read path excluded**:
   Add the **`COOKIE_LIMIT`/`SIZE_CAP` derivation agreement** assertion for oauth.py (mirroring
   `tests/test_session_bridge_fragment_retention.py:408`) **without** re-asserting the bridge's own
   derivation.
-(c) `tests/test_session_bridge_fragment_retention.py` joins the affected-tests list: it reads
-`tortoise/oauth.py` as text (`:80`, `:493`), it is the home of `_require_node` the harness imports,
-and it is `onboarding`-registered alongside the bridge asset.
+(c) `tests/test_session_bridge_fragment_retention.py`: it reads `tortoise/oauth.py` as text
+(`:80`, `:493`) and is the home of `_require_node` the harness imports. It is **`onboarding`-only**
+in `tools/ci_selection.py`, so it does NOT join the affected-tests list when `tortoise/oauth.py`
+changes — the `api`-registered harness (Step 8) is what actually runs on an oauth change, and it
+exercises the same page. Its assertion MESSAGE still states the pre-#3496 fragment-ingestion
+rationale; that text is stale but sits outside this PR's diff.
 
 **Step 11 — the docs passage.** Append to the `- **OVERRIDES:**` bullet at
 `docs/auth-architecture.md:93-98` per §1 above (continuation sentences only — no new list item at
