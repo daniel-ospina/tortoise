@@ -10,6 +10,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+// #4637: the two empty states' lead-ins moved into the note module (one home
+// for the copy whose route clause the fork decides), so the copy sweep reads
+// the constant itself rather than main.jsx's prose.
+import { GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(__dirname, 'main.jsx'), 'utf8')
@@ -95,7 +99,14 @@ test('DE2E-2 copy sweep: new Overview/Settings copy says Organization, never wor
   // graph while `harness-connected` is absent), never the graph fact.
   assert.ok(src.includes("We haven't seen your agent's first write through its Tortoise tools yet"), 'wizard done copy (not-connected screen)')
   assert.ok(src.includes('Settings → Setup guide'), 'wizard done copy points at Settings')
-  assert.ok(src.includes('Your Organization is live — connect your agent below'), 'overview graph-missing copy')
+  // #4637: this assertion is the DE2E-2 COPY sweep (vocabulary on the touched
+  // surfaces), not the wiring pin — the literal moved into the note module when
+  // the shared lead-ins were extracted, and `onboardingEmptyStateKeyNote.test.js`
+  // owns the pin that the graph-missing MEMBER arm renders this exact constant
+  // next to the note. Asserting the constant's text here keeps the copy sweep
+  // meaningful without duplicating the wiring claim.
+  assert.equal(GRAPH_MISSING_SELF_LEAD_IN,
+    'Your Organization is live — connect your agent below. ', 'overview graph-missing copy')
   // no workspace in the SettingsTab component or the populated-Overview
   // branch (user-facing surfaces only; code comments elsewhere are out of
   // the DE2E-2 Overview/Settings surface scope)

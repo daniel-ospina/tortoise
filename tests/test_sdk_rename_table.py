@@ -233,7 +233,7 @@ CITATION_REGION_LITERAL: dict[str, str] = {
     'w4_index_sessions': '| `index_sessions` / `ingest_corpus` → `index_directory` | `file_type` | both self-declared DEPRECATED in their own docstrings |',
     'w4_mine': '| `mine_corpus` | 1 | → `mine_knowledge_from_directory`. It is the **batch form of `mine_knowledge_from_session`**, not a kind of indexing. |',
     'w4_rename': '| `index_sources` (bare) | 1 | Renamed → `index_sources_from_directory`, so the index/mine distinction is unmissable. |',
-    'w5': '- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the\n  **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`\n  parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**\n  today. **Filed post-beta** (issue to be created) and **unlisted** until then.',
+    'w5': '- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the\n  **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`\n  parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**\n  today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire\n  undecided; a surface decision).',
     'w6': "| `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. |",
     'w8': '| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |',
     'w8_backfill': '| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` | 4 | One-shot migrations. Run once, then dead code carrying a public promise. |',
@@ -268,7 +268,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'calibration_passed': ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence` for the confidence view; **`recall_subgraph` is dropped, not folded** — `explore_connections` answers that question. The gaps question is flagged in "Named but not solved". \\|”'),
     'capture_session': ('mine_knowledge_from_session', "`beta-sdk-surface.md` — “\\| `capture_session` / `commit_session` \\| → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. \\|”"),
     'check_structure': ('graph_overview', '`beta-sdk-surface.md` — “\\| narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. \\|”'),
-    'checkpoint': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Filed post-beta** (issue to be created) and **unlisted** until then.”'),
+    'checkpoint': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire undecided; a surface decision).”'),
     'cleanup_expired_invitations': ('', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.** Never product surface. \\|”'),
     'close': ('close', "`beta-sdk-surface.md` — “> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 26 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only **4** (`create_entity`, `get_entity`, `approve_merge`, `graph_set_recording`) have a prefixed equivalent. So it is **26 of 26 by name**, or **22 of 26** if you normalise the prefix. > The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it. Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every *current* tool to its destination but does not name the target's replacing name.”"),
     'commit_session': ('mine_knowledge_from_session', "`beta-sdk-surface.md` — “\\| `capture_session` / `commit_session` \\| → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. \\|”"),
@@ -291,8 +291,8 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     'delete_entity': ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
     'delete_point': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
     'delete_point_wrapped': ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
-    'diary_read': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Filed post-beta** (issue to be created) and **unlisted** until then.”'),
-    'diary_write': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Filed post-beta** (issue to be created) and **unlisted** until then.”'),
+    'diary_read': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire undecided; a surface decision).”'),
+    'diary_write': ('', '`beta-sdk-surface.md` — “- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room` parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server** today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire undecided; a surface decision).”'),
     'dream': ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` \\| keep — **`compute_confidence` mislabelled read** \\|”'),
     'dream_health_check': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
     'dream_health_state': ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview` where they are orientation. The diagnostics are the held question above. \\|”'),
@@ -1800,7 +1800,7 @@ def test_a_truncated_anchor_cannot_shorten_the_region() -> None:
     # P1-1a: a bullet anchor truncated at a source line wrap.
     bullet_anchor = "- **The journal capability**"
     full_bullet = _derive_region(beta, Region(bullet_anchor))
-    assert "Filed post-beta" in full_bullet and "unlisted" in full_bullet
+    assert "Post-beta" in full_bullet and "unlisted" in full_bullet
     line_wrapped = (
         "- **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. "
         "They arrived in the\n  **initial codebase commit** (`a02ab48c7`) with no "
@@ -2296,3 +2296,62 @@ def test_table_header_rows_are_read() -> None:
     ]
     missing = [h for h in headers if h not in doc]
     assert not missing, f"a table header row changed or was dropped: {missing}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# COMMENT CITATION ANCHORS (#4748)
+# ─────────────────────────────────────────────────────────────────────
+# Six test/helper COMMENTS cited `sdk.py:<N>` at a line that did not point at the
+# code the comment claimed. Nothing failed, because a comment's target can drift
+# with any docstring insertion — and by the time #4748 was worked, all six had
+# rotted AGAIN (e.g. `sdk.py:744` was a blank line at the issue's commit and
+# unrelated prose at the work commit). The fix is a SYMBOL (`file.py::symbol`),
+# which a line shift cannot invalidate. A rename can still dangle an anchor, so
+# this is its liveness guard: each must resolve to a real def in the file it
+# names. It pins NO line numbers — that is the thing proven to rot.
+# Every anchor is fully QUALIFIED (`Class.method`): a bare method name would let a
+# rename pass this gate whenever any other def of the same name survived anywhere
+# in the file — including a helper nested inside another function (#4748 review).
+# Requiring the real qualified path makes the check exact by construction.
+_CITATION_ANCHORS: tuple[tuple[str, str], ...] = (
+    ("tortoise/sdk.py", "TortoiseSDK.create_point"),             # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK.create_source"),            # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK.ingest"),                   # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK._extract_session_v2"),      # test_no_tests_imports…
+    ("tortoise/sdk.py", "TortoiseSDK.tortoise_fts_query"),       # eval/retrieval/run.py
+    ("tortoise/sdk.py", "TortoiseSDK.file_human_approval"),      # test_ranking.py
+    ("tortoise/sdk.py", "TortoiseSDK.capture_session"),          # test_ingest_v2_parallel.py
+    ("tortoise/projection/entities.py", "_EntityHandlers._event_plain_merge"),
+    ("tortoise/ranking.py", "GraphRanker._fetch_event_signals"),
+)
+
+
+def _defined_symbols(path: Path) -> set[str]:
+    """Function/method symbols defined in `path`, by a fresh AST walk.
+
+    Module-level functions and the direct methods of a top-level class are
+    collected. A function nested INSIDE another function is deliberately not
+    added under its bare name: the anchor exists so a reader can land on the
+    real symbol, and a nested helper that happens to share a name would let a
+    RENAMED method keep this gate green while the comment's referent is gone
+    (#4748 review). Class-qualified anchors are likewise collision-proof.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in tree.body:  # module level only — nested defs do not qualify
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out.add(f"{node.name}.{sub.name}")
+    return out
+
+
+def test_citation_anchors_resolve_to_real_symbols() -> None:
+    """Every symbol a test/helper comment cites must still exist (#4748)."""
+    for rel, symbol in _CITATION_ANCHORS:
+        assert symbol in _defined_symbols(ROOT / rel), (
+            f"{rel}::{symbol} no longer exists — a test-suite comment anchor "
+            f"dangles. Update the comment(s) citing it (issue #4748)."
+        )
