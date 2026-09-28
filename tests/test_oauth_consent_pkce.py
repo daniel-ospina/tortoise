@@ -1,10 +1,10 @@
 """Behavioural harness for the MCP consent page's browser auth client (#3496).
 
 The page (`tortoise/oauth.py::consent_page_html`) is a FastAPI-rendered HTML
-document whose inline script drives supabase-js. Historically its hardening was
-pinned only by static-string assertions ("the page JS has no jsdom harness in
-this repo" — see `tests/test_oauth_mcp.py`), which cannot discriminate the
-behaviour this issue changes: the grant type actually used, where the PKCE
+document whose inline script drives supabase-js. Before this harness, its
+hardening was pinned only by static-string assertions on the server-rendered
+markup (`tests/test_oauth_mcp.py`), which cannot discriminate the behaviour this
+issue changes: the grant type actually used, where the PKCE
 `code_verifier` is stored, whether a sign-in refusal reaches the user, and
 whether a transient is echoed back to the provider.
 
@@ -298,8 +298,9 @@ def test_inv4_removal_path_writes_only_the_session_key() -> None:
 
     # The SECOND store too: with sessionStorage unwilling to take a write, the
     # verifier lives in localStorage and the removal path must clear it THERE.
-    # Without this half, "removed from both aux stores" was only ever exercised
-    # on the first store. (The library's getItemAsync JSON-parses what it reads,
+    # Without this half only the first store is ever cleared, so a `removeAux`
+    # that skipped `localStorage` would leave the verifier behind and this test
+    # would stay green. (The library's getItemAsync JSON-parses what it reads,
     # so the seed uses the shape its own writer produces.)
     second = _run("removal", seedSession='{"access_token":"a"}',
                   seedVerifier="verifier-abc", sessionMode="throw-method",
@@ -522,6 +523,19 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
         f"the verifier reached no store at all — the write was refused, not relocated: {norm}"
     )
 
+    # A store whose removal discriminates by KEY — probe-shaped keys removable, the
+    # real credential key not — is outside the browser threat model (R21), but the
+    # writer must still refuse to treat it as PROVEN: it must relocate rather than
+    # return true. This is the only shape that reaches the writer's real-key removal
+    # proof; without it the writer would accept this store on the probe alone.
+    keyed = _run("click", search="", sessionMode="key-keep")
+    assert keyed["navs"], (
+        f"the flow did not proceed although localStorage is usable: {keyed}"
+    )
+    assert keyed["localVerifierKeys"], (
+        f"the writer accepted a store whose REAL key cannot be removed: {keyed}"
+    )
+
     # …and a silent-remove store is not a way in when no store can be cleaned: the
     # guard's read-back-null refuses it too (fail closed).
     both_silent = _run("click", search="", sessionMode="silent-remove",
@@ -686,6 +700,11 @@ function makeStore(mode, quota) {
     removeItem: function (k) {
       if (mode === 'throw-method' || mode === 'throw-remove') throw new Error('storage disabled');
       if (mode === 'silent-remove') return;   // accepted, but nothing happens
+      // 'key-keep': removal succeeds only for PROBE-shaped keys (both the guard's
+      // `__tt_probe-*` sentinel and the writer's `__tt_wprobe-*` payload contain
+      // "probe"), so the real `…-code-verifier` key survives. This is the only
+      // shape that reaches the writer's REAL-key removal proof.
+      if (mode === 'key-keep' && String(k).indexOf('probe') < 0) return;
       map.delete(String(k));
     },
     clear: function () { map.clear(); },

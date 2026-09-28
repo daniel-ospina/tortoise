@@ -263,6 +263,13 @@ const writeAux = (key, value) => {
       if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
       s.setItem(key, v);
       if (s.getItem(key) !== v) throw 0;
+      // Prove the REAL key/value are removable too, then re-write: the proof
+      // deletes what it just stored. A read-back alone proves write/read
+      // integrity, not removability, and removal can discriminate by key or value.
+      s.removeItem(key);
+      if (s.getItem(key) !== null) throw 0;
+      s.setItem(key, v);
+      if (s.getItem(key) !== v) throw 0;
       return true;
     } catch (e) {
       // Clean BOTH keys: the failure can be the read-back AFTER a successful
@@ -892,7 +899,7 @@ Landed files and what each carries. Evidence is stated as a command → observed
 
 **Verification (all run at base `5b6cb9367` + this diff).**
 
-- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q` → **341 passed, 2 xfailed**.
+- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q -k "not Cimd"` → **326 passed, 2 xfailed**. `-k "not Cimd"` deselects 17 live-network CIMD classes in `test_oauth_mcp.py` (they fetch over the network and hang without it; CI runs them). Counts at the round-8 head.
 - `… pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py test_attribution_actor.py test_control_plane_offload_3498.py test_oauth_redemption_state.py test_user_identity_authority.py -q` → **413 passed**; the 4 reds in that batch (`test_mcp_route_challenge::test_unknown_credential_carries_challenge[tt_deadbeef]`, three in `test_cursor_mcp_exit_evidence.py`) are **reproduced on a clean `origin/main` worktree** — they are the embedded FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), not this diff. Separate failures, different identities on re-run, so not deterministic under this change.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
 - Mutation evidence: **the union table in the PR body — every row observed red, 0 survived.** The set now includes

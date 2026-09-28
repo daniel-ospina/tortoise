@@ -412,10 +412,12 @@ class TestAuthorizePage:
         assert re.search(
             r"@supabase/supabase-js@\d+\.\d+\.\d+/dist/umd/supabase\.min\.js", r.text)
         # The negative must name every mutable shape, not only the numeric ones:
-        # `@2.x` and `@latest` carry no bare digit run before the `/`, so an
-        # alternation of `\d+`/`\d+.\d+` misses exactly the forms named above.
+        # `@2.x` and `@latest` carry no bare digit run before the `/`. It must ALSO
+        # not match the pinned full semver, so the numeric arm is bounded to at most
+        # two components (plus an optional `.x`) — an unbounded `\d+(\.\d+){0,2}`
+        # swallows `2.112.2` itself and fails on the very page this guards.
         assert not re.search(
-            r"@supabase/supabase-js@(?:\d+(?:\.\d+){0,2}|latest|x|\d+\.x)[/\"]", r.text)
+            r"@supabase/supabase-js@(?:latest|x|\d+(?:\.\d+)?(?:\.x)?)[/\"]", r.text)
         # #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
         # browser-based client, so the flow type is explicit. The behaviour
         # (code_challenge_method=s256, verifier routed off the cookie) is pinned

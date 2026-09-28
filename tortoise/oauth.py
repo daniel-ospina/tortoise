@@ -1966,8 +1966,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // payload of the REAL length under a THROWAWAY key — and that payload is a
   // DUMMY of the same length, never the credential itself: a store that accepts
   // the write but SILENTLY IGNORES removal would otherwise retain the verifier
-  // under `probeKey`, a key no path can ever clean. Cleanability of the real
-  // value is still proven separately, by the read-back of the real key below.
+  // under `probeKey`, a key no path can ever clean. The probe proves a THROWAWAY
+  // key is removable; cleanability of the REAL key and value is proven
+  // separately below, because removal can discriminate by key or by stored value
+  // (a read-back alone proves write/read integrity, not removability).
   const writeAux = (key, value) => {
     const v = String(value);
     const probe = "x".repeat(v.length);
@@ -1978,6 +1980,12 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
         if (s.getItem(probeKey) !== probe) throw 0;
         s.removeItem(probeKey);
         if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
+        s.setItem(key, v);
+        if (s.getItem(key) !== v) throw 0;
+        // Prove the REAL key/value are removable too, then re-write: the proof
+        // deletes what it just stored.
+        s.removeItem(key);
+        if (s.getItem(key) !== null) throw 0;
         s.setItem(key, v);
         if (s.getItem(key) !== v) throw 0;
         return true;
