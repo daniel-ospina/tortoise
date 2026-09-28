@@ -743,14 +743,29 @@ def test_refresh_durations_preserves_unknown_top_level_keys(tmp_path: Path) -> N
 
 
 def test_refresh_durations_on_the_real_manifest_of_record() -> None:
-    """The committed 688-entry map is refreshed without corruption: comments
-    survive, a sampled value changes, and the manifest gate stays green."""
+    """The committed durations map is refreshed without corruption: comments
+    survive, a sampled value changes, and the manifest gate stays green.
+
+    The map's SIZE is data, not a constant. Pinning it absolutely (688) went
+    stale the moment the map gained an entry — measured at `HEAD` it is **689**,
+    so this test was red against its own manifest before this fix, and it would
+    red the next unrelated lane to register a test file too. Deriving the count
+    from the SAME parser the refresh uses keeps every property the pin existed
+    for (a refresh that drops or invents entries still fails) and removes the
+    way it can rot: the assertion is now about the TRANSFORMATION, not about how
+    many test files the repo happens to have today.
+    """
     manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
     before = manifest_path.read_text()
+    _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
     new_text, stats = ci_timing.render_refreshed_manifest(
         before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
-    assert stats["manifest_keys"] == 688
-    assert stats["carried_forward"] == 687
+    assert stats["manifest_keys"] == len(entries_before)
+    # Exactly ONE key is supplied, and `_resolve_to_manifest_keys` refuses an
+    # unclassified key, so it resolves to exactly one entry and every OTHER
+    # entry must be carried forward untouched. A refresh that silently dropped
+    # entries would move this below `len(entries_before) - 1`.
+    assert stats["carried_forward"] == len(entries_before) - 1
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
