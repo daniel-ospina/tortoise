@@ -195,11 +195,11 @@ STATE_VALUE_CARVE_OUT = (
 # ("emit each qualifying claim separately rather than folding it") is
 # length-INDEPENDENT, and that is deliberate: the failure it repairs is a FOLD,
 # and a fold loses a short session's facts far more often than a long one's
-# (there is nothing else in the session to fall back on). But only the IE
-# figure above is MEASURED. The long-session gains are guarded by the existing
-# narrative-first rules and MUST NOT regress (the issue's indicator (b)); no
-# long-session metric is claimed here, and the code comment says so rather than
-# implying the +2.6pp/+11.9pp arms were re-measured.
+# (there is nothing else in the session to fall back on). No figure above
+# measures THIS clause's long-session effect: the +2.6pp/+11.9pp arms were
+# measured on the PRE-CHANGE pipeline and are not re-measured here. They MUST
+# NOT regress (the issue's indicator (b)), which is a no-regression
+# requirement, not a claim this change improved them.
 #
 # QUALIFICATION is load-bearing, not decoration. "Every stated quantity is
 # durable" would re-admit exactly what S2_TMPL's VALUE FILTER and
@@ -217,7 +217,7 @@ STATE_VALUE_CARVE_OUT = (
 #
 # SEAMS: S1 (_granularity_text) and the S2/S4 {anti_routine} slot
 # (_s2s4_rules) — deliberately NOT the master render, which would emit it a
-# second time inside the same prompt (measured 1239 redundant bytes per S2/S4
+# second time inside the same prompt (a second ~957-byte copy per S2/S4
 # prompt). The slot is the higher-recency write site, matching #2453's lesson
 # that the master block alone was too weak.
 SHORT_SESSION_FACT_RULE = (
@@ -231,7 +231,7 @@ SHORT_SESSION_FACT_RULE = (
     "facts into one summary point: a stated date, deadline, name, role, "
     "quantity, version, threshold, commitment, decision, or stated "
     "preference is its OWN point WHEN it is the subject of a decision, "
-    "observation, or plan — the OPERATIONAL-VALUE CARVE-OUT above decides "
+    "observation, or plan — the OPERATIONAL-VALUE CARVE-OUT decides "
     "WHICH; this clause decides only WHERE a qualifying value is emitted, "
     "never WHETHER it qualifies. A routine readout that is not a thing being "
     "fixed or a chosen target is still a no-op, so do not pad with routine "

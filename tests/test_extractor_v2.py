@@ -388,9 +388,13 @@ class TestS2:
         # mode a density instruction invites.
         assert "mint kinds" in rule
         assert "no-op" in rule
-        # No numeric range: a range contradicts "a point per fact" and gets
-        # anchored on as the quota the clause disclaims (review P2).
-        assert "3 to 5" not in rule and "quota" not in rule
+        # No numeric density target. Pins the removed RANGE in every spelling
+        # (a range gets anchored on as a goal), not merely one punctuation of
+        # it. The only number left in the clause is the descriptive
+        # "one or two facts".
+        for variant in ("3 to 5", "3-5", "3–5", "0 to 2", "0-2"):
+            assert variant not in rule
+        assert "quota" not in rule
 
         # S1 (narrative register) gets it via the granularity slot.
         s1 = (v2.S1_TMPL
@@ -406,11 +410,14 @@ class TestS2:
         assert "SHORT-SESSION FACT RETENTION" in v2._s2s4_rules()
 
         for prompt in (v2.render_s2_prompt(),
-                       v2.render_s2_prompt(core_only=True)):
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {"results": []}, {})):
             assert "SHORT-SESSION FACT RETENTION" in prompt
             assert "VALUE FIDELITY" in prompt   # #2453 rides the same slot
             # Emitted EXACTLY ONCE (review P2): the master render must NOT
-            # carry it too — that duplicated 1239 bytes inside one prompt.
+            # carry it too — a second ~957-byte copy inside one prompt. S4 is
+            # in this loop because the duplication defect was per S2/S4, so a
+            # lock covering only S2 would cover half the surface.
             assert prompt.count("SHORT-SESSION FACT RETENTION") == 1
 
         # Both master render modes must NOT carry it — the single-seam rule
