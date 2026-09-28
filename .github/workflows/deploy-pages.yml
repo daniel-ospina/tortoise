@@ -635,6 +635,128 @@ jobs:
           echo "::error::dashboard bundle not live after $MAX_ATTEMPTS attempts (~10 min) — expected: $EXPECTED"
           exit 1
 
+      # #3048: the dashboard's ASSET fallback must be an honest 404.
+      #
+      # Measured defect (2026-09-11, pre-#4006): a request for a NONEXISTENT
+      # hashed chunk answered `200 text/html` — the SPA shell — so a deleted or
+      # rotated chunk looked PRESENT. Deploy verification false-positived on
+      # asset existence, missing-asset 404s were invisible, and a client holding
+      # a stale shell died on "Unexpected token '<'" instead of failing cleanly.
+      # #4006 gave this host a real 404 for unknown paths; `/assets/*` needed
+      # more than the generic 404 page, because an HTML body for a missing `.js`
+      # is still an HTML document where JavaScript was asked for.
+      #
+      # WHY THIS IS A LIVE CHECK AND NOT A REPO TEST. The routing that decides
+      # this is only HALF in the repo. `public/404.html` (the status) is in-repo
+      # and already guarded by `tests/test_dashboard_unknown_address.py`; the
+      # missing-asset CONTENT TYPE is decided by
+      # `functions/assets/[[path]].ts` at deploy time, and the project-level
+      # not-found behaviour of the `tortoise-dashboard` Pages project lives in
+      # the Cloudflare dashboard/API — outside every checkout. A repo-file guard
+      # therefore cannot see the regression it exists to catch: an out-of-repo
+      # flip back to SPA mode re-widens the fallback with NO DIFF AT ALL. Only
+      # the deployed host can answer this, so it is asserted here, on the same
+      # post-deploy surface as the sibling bundle poll above.
+      #
+      # It POLLS, for the same reason the sibling probes do: Pages can briefly
+      # serve the PREVIOUS deployment after an upload, and that cuts both ways —
+      # a single-shot probe would red the deploy that FIXES a regression and
+      # silently PASS the deploy that introduces one. `|| rc=$?` is required
+      # because GitHub's default shell is `bash -e`: a bare `$(curl …)` whose
+      # substitution fails aborts the step and every remaining path goes
+      # unchecked. A transport failure is recorded, never treated as a pass.
+      - name: Post-deploy — missing assets 404, real routes still serve the app (#3048)
+        run: |
+          base=https://app.premiselabs.co
+          MAX_ATTEMPTS=10
+          miss="/assets/index-DOES-NOT-EXIST-abc123.js"
+          unknown="/nonsense-probe-3048"
+          # The REAL bundle THIS deploy built, read from dist/ — the build step
+          # above is its only producer. If the /assets/* Function shadowed real
+          # assets instead of passing them through, THIS is what goes red; a
+          # check that only proved "missing assets 404" would happily ship a site
+          # that serves no bundle at all.
+          index_html="website/apps/dashboard/dist/index.html"
+          real=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' "$index_html" | head -1 || true)
+          if [ -z "$real" ]; then
+            echo "::error::no bundle ref in $index_html — cannot verify the real-asset half of #3048"
+            exit 1
+          fi
+          SHELL_MARKER='<title>Tortoise Dashboard</title>'
+          echo "probing missing=$miss real=/$real unknown=$unknown"
+
+          failures=""
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            failures=""
+
+            # Status + content type + body for one path on this host.
+            fetch() {
+              local out rc=0
+              out=$(curl -s -o /tmp/d3048.body -w '%{http_code}|%{content_type}' -m 20 "$base$1") || rc=$?
+              if [ "$rc" -ne 0 ]; then out="curl-failed(rc=$rc)|"; fi
+              printf '%s' "$out"
+            }
+
+            # ── (a) a missing asset is an honest 404, NOT an HTML document ──
+            meta=$(fetch "$miss")
+            code=${meta%%|*}; ctype=${meta#*|}
+            if [ "$code" != "404" ]; then
+              failures="$failures missing-asset=HTTP:$code"
+            elif printf '%s' "$ctype" | grep -qi 'text/html'; then
+              failures="$failures missing-asset=HTML-body:$ctype"
+            elif grep -qF "$SHELL_MARKER" /tmp/d3048.body 2>/dev/null; then
+              failures="$failures missing-asset=served-the-shell"
+            fi
+
+            # ── the REAL bundle still serves (the Function must pass it through) ──
+            meta=$(fetch "/$real")
+            code=${meta%%|*}; ctype=${meta#*|}
+            if [ "$code" != "200" ]; then
+              failures="$failures real-asset=HTTP:$code"
+            elif ! printf '%s' "$ctype" | grep -qE '^(application/javascript|text/css)'; then
+              failures="$failures real-asset=$ctype"
+            fi
+
+            # ── (b) the app's shell routes still serve the app document at 200 ──
+            # `/` and `/team` are the two 200 shell routes (the app is
+            # hash-routed; /team carries the Stripe ?session_id= return).
+            # `/welcome` is owned by functions/welcome.ts (302 when anonymous)
+            # and is deliberately not asserted here.
+            for p in / /team; do
+              meta=$(fetch "$p")
+              code=${meta%%|*}; ctype=${meta#*|}
+              if [ "$code" != "200" ]; then
+                failures="$failures $p=HTTP:$code"
+              elif ! printf '%s' "$ctype" | grep -qi 'text/html'; then
+                failures="$failures $p=$ctype"
+              elif ! grep -qF "$SHELL_MARKER" /tmp/d3048.body 2>/dev/null; then
+                failures="$failures $p=missing-shell"
+              fi
+            done
+
+            # ── the fallback must not have WIDENED again: unknown path is 404 ──
+            meta=$(fetch "$unknown")
+            code=${meta%%|*}
+            if [ "$code" != "404" ]; then
+              failures="$failures unknown-path=HTTP:$code"
+            fi
+
+            [ -z "$failures" ] && break
+            echo "attempt $attempt/$MAX_ATTEMPTS not yet clean:$failures"
+            # No sleep after the FINAL attempt — it would delay the failure by
+            # 15s for nothing.
+            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep 15
+          done
+
+          if [ -n "$failures" ]; then
+            echo "::error::dashboard asset routing is wrong after $MAX_ATTEMPTS attempts:$failures (#3048)"
+            echo '::error::a missing /assets/* path must answer 404 with a NON-HTML body,'
+            echo '::error::the real bundle must still serve, / and /team must still serve the app shell at 200,'
+            echo '::error::and an unknown path must 404.'
+            exit 1
+          fi
+          echo "✅ missing assets 404 (non-HTML), real bundle serves, / and /team serve the shell, unknown path 404"
+
   # ── Post-deploy verification: legal pages E2E suite (#677) ───────────
   verify-legal:
     needs: deploy
