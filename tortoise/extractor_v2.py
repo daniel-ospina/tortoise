@@ -182,7 +182,7 @@ STATE_VALUE_CARVE_OUT = (
     "ephemeral counters not central to a decision."
 )
 
-# #1507: the SHORT-SESSION fact-retention clause. The granularity bar above was
+# #1507: the SHORT-SESSION fact-retention clause. The granularity bar was
 # calibrated on LONG design sessions, where the narrative-first rule pays off
 # (Multi-Session +2.6pp, Abstention +11.9pp). On a SHORT, fact-dense session it
 # misfires: the mapper reads the bar as "this turn is too small to be worth a
@@ -191,35 +191,51 @@ STATE_VALUE_CARVE_OUT = (
 # deterministic baseline's 84.7% (-8.2pp) — the ONE clear regression of the v2
 # pipeline — with 0-2 points per short session against a 3-5 target.
 #
-# The rule below makes the bar a predicate over the CONTENT, never over the
-# session's LENGTH: a session that states N facts yields N points, however few
-# turns it took. It is deliberately phrased as a CONSEQUENCE ("typically 3 to
-# 5 where the turns previously yielded 0 to 2") rather than a quota, because a
-# density target invites the model to fill it — which is what
-# ANTI_ROUTINE_EXCLUSION exists to prevent. Same two seams as
-# STATE_VALUE_CARVE_OUT: S1 (_granularity_text) and S2/S4 (via _render_master
-# and the {anti_routine} slot), so the story summarizer and the point mapper
-# cannot disagree about whether a short session's facts are load-bearing.
+# SCOPE — what this clause does and does NOT assert. The operative instruction
+# ("emit each qualifying claim separately rather than folding it") is
+# length-INDEPENDENT, and that is deliberate: the failure it repairs is a FOLD,
+# and a fold loses a short session's facts far more often than a long one's
+# (there is nothing else in the session to fall back on). But only the IE
+# figure above is MEASURED. The long-session gains are guarded by the existing
+# narrative-first rules and MUST NOT regress (the issue's indicator (b)); no
+# long-session metric is claimed here, and the code comment says so rather than
+# implying the +2.6pp/+11.9pp arms were re-measured.
+#
+# QUALIFICATION is load-bearing, not decoration. "Every stated quantity is
+# durable" would re-admit exactly what S2_TMPL's VALUE FILTER and
+# VALUE_FIDELITY_RULE exclude (test counts, routine readouts), and S1 carries
+# NO anti-routine gate to catch it — so the enumeration is qualified by the
+# SAME test the carve-out uses ("the subject of a decision, observation, or
+# plan"). This clause changes WHERE a qualifying value is emitted, never
+# WHETHER it qualifies.
+#
+# NO NUMERIC RANGE. An earlier draft said "typically 3 to 5 points where the
+# turns previously yielded 0 to 2". Dropped: it contradicts "a point per fact"
+# (if a short session holds one or two facts, 3-5 is reachable only by
+# splitting or hoarding) and models anchor on ranges — it would have
+# functioned as the quota the same sentence disclaimed.
+#
+# SEAMS: S1 (_granularity_text) and the S2/S4 {anti_routine} slot
+# (_s2s4_rules) — deliberately NOT the master render, which would emit it a
+# second time inside the same prompt (measured 1239 redundant bytes per S2/S4
+# prompt). The slot is the higher-recency write site, matching #2453's lesson
+# that the master block alone was too weak.
 SHORT_SESSION_FACT_RULE = (
     "SHORT-SESSION FACT RETENTION (the granularity bar is a predicate over "
-    "content, NEVER over session length): a session that states facts yields "
-    "a point per fact, however few turns it took. Do NOT read a short or "
-    "sparse conversation as 'too small to be worth a point' — brevity is not "
-    "insignificance, and the whole content of a short session is usually the "
-    "one or two facts in it. Every stated date, deadline, name, role, "
+    "content, NEVER over session length): do NOT read a short or sparse "
+    "conversation as 'too small to be worth a point' — brevity is not "
+    "insignificance, and the whole content of a short session is often the "
+    "one or two facts in it. The bar asks whether a claim is DURABLE, not "
+    "how long the session was.\n"
+    "Emit each qualifying claim SEPARATELY rather than folding the session's "
+    "facts into one summary point: a stated date, deadline, name, role, "
     "quantity, version, threshold, commitment, decision, or stated "
-    "preference is its OWN durable point ('the freeze is October 5', 'the "
-    "TTL is ten minutes', 'Kai owns the migration') — emit each separately "
-    "and verbatim rather than folding them into one summary point.\n"
-    "A short, fact-dense session should therefore yield its facts — "
-    "typically 3 to 5 points where the same turns previously yielded 0 to 2 "
-    "— and that range is a CONSEQUENCE of emitting what is there, never a "
-    "quota to fill: a session with one fact yields one point. Do NOT invent "
-    "narrative, pad with routine asides, or mint kinds to reach a count "
-    "(true-but-routine content is not a fact and is still excluded), and do "
-    "not read this clause as a licence to drop the narrative-first or value "
-    "rules — it is about what is worth emitting, not about what may be "
-    "dropped."
+    "preference is its OWN point WHEN it is the subject of a decision, "
+    "observation, or plan — the OPERATIONAL-VALUE CARVE-OUT above decides "
+    "WHICH; this clause decides only WHERE a qualifying value is emitted, "
+    "never WHETHER it qualifies. A routine readout that is not a thing being "
+    "fixed or a chosen target is still a no-op, so do not pad with routine "
+    "asides or mint kinds to reach a count."
 )
 
 
@@ -694,7 +710,6 @@ def _render_master_core_only(master: dict, rng=None) -> str:
         lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
         lines += [f"- {k}: {v}" for k, v in g.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
-    lines.append("\n" + SHORT_SESSION_FACT_RULE)
     return "\n".join(lines)
 
 
@@ -775,7 +790,6 @@ def _render_master_verbose(master: dict, rng=None) -> str:
         lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
         lines += [f"- {k}: {v}" for k, v in g.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
-    lines.append("\n" + SHORT_SESSION_FACT_RULE)
     return "\n".join(lines)
 def _render_chains(master: dict) -> str:
     return "\n".join(

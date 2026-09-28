@@ -377,10 +377,20 @@ class TestS2:
         assert "SHORT-SESSION FACT RETENTION" in rule
         # The predicate framing IS the fix — lock it, not merely presence.
         assert "NEVER over session length" in rule
-        # Anti-quota: a bare density target manufactures points (the #2424
-        # failure mode), so the "consequence, never a quota" edge must hold.
-        assert "CONSEQUENCE" in rule and "quota to fill" in rule
+        # QUALIFICATION is load-bearing (review P1): an unqualified "every
+        # stated quantity is durable" re-admits what VALUE_FIDELITY_RULE and
+        # S2_TMPL's VALUE FILTER exclude (test counts, routine readouts), and
+        # S1 carries NO anti-routine gate to catch it. The enumeration must
+        # stay tied to the SAME test the carve-out uses.
+        assert "subject of a decision" in rule
+        assert "never WHETHER it qualifies" in rule
+        # Anti-hoarding edge must survive: padding to a count is the failure
+        # mode a density instruction invites.
         assert "mint kinds" in rule
+        assert "no-op" in rule
+        # No numeric range: a range contradicts "a point per fact" and gets
+        # anchored on as the quota the clause disclaims (review P2).
+        assert "3 to 5" not in rule and "quota" not in rule
 
         # S1 (narrative register) gets it via the granularity slot.
         s1 = (v2.S1_TMPL
@@ -389,16 +399,25 @@ class TestS2:
         assert "SHORT-SESSION FACT RETENTION" in s1
         assert "OPERATIONAL-VALUE" in s1   # still shares the slot (#2453)
 
-        # S2/S4 (mapping register) get it at the shared high-weight slot.
+        # The S2/S4 {anti_routine} slot is its OWN seam and must be pinned
+        # directly (review P1): rendering S2 also carries the clause via
+        # {master_list}, so asserting on the PROMPT alone let this wiring be
+        # deleted while the suite stayed green.
+        assert "SHORT-SESSION FACT RETENTION" in v2._s2s4_rules()
+
         for prompt in (v2.render_s2_prompt(),
                        v2.render_s2_prompt(core_only=True)):
             assert "SHORT-SESSION FACT RETENTION" in prompt
             assert "VALUE FIDELITY" in prompt   # #2453 rides the same slot
+            # Emitted EXACTLY ONCE (review P2): the master render must NOT
+            # carry it too — that duplicated 1239 bytes inside one prompt.
+            assert prompt.count("SHORT-SESSION FACT RETENTION") == 1
 
-        # Both master render modes carry it too (the S2/S4 master block).
+        # Both master render modes must NOT carry it — the single-seam rule
+        # above is only real if this stays true.
         for render in (v2._render_master_core_only(v2.build_master_list()),
                        v2._render_master_verbose(v2.build_master_list())):
-            assert "SHORT-SESSION FACT RETENTION" in render
+            assert "SHORT-SESSION FACT RETENTION" not in render
 
         # The S1 asymmetry lock MUST survive: naming the anti-routine gate in
         # S1 would import that register into the narrative stage. This is not
