@@ -1067,6 +1067,50 @@ def test_apply_replay_shares_rebuild_all_selection_on_double_supersede(sup):
     assert corr_apply == corr_all
 
 
+def test_apply_replay_warns_when_a_fold_matches_no_point(sup, caplog):
+    """#3305/#3299: a terminalizer whose target was never created is a
+    dropped fold — the whole-journal apply() arm must SAY SO, like the
+    one-record branch and rebuild_all's sweep already do."""
+    import logging
+
+    _, events, sdk = sup
+    sdk.create_point("statement", "kept", status="live")
+    EventLog(str(events / "events.jsonl")).append(
+        {"type": "PointSuperseded", "id": "never-created-id",
+         "new_id": "also-never-created", "event_id": "ghost-1",
+         "ts": "2026-01-02T00:00:00+00:00"})
+    with caplog.at_level(logging.WARNING):
+        _apply_replay(sdk, events)
+    assert any("matched no Point" in r.message for r in caplog.records), (
+        "an apply()-based replay silently dropped a terminalizer fold: "
+        + repr([r.message for r in caplog.records if "fold" in r.message]))
+
+
+def test_apply_one_record_folds_a_terminalizer(sup):
+    """#3305: the ``apply()`` ONE-RECORD default (no journal view) folds a
+    terminalizer at the record's own position — the branch a live caller or an
+    unwired engine uses. Also pins that a ``PointSuperseded`` with no ``new_id``
+    neither folds nor decays."""
+    _, _events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    s = sdk.create_point("statement", "S", status="live")["id"]
+    proj = sdk._get_proj()
+    proj.apply({"type": "PointSuperseded", "id": a, "new_id": s,
+                "ts": "2026-01-02T00:00:00+00:00"})
+    post = _point_state(sdk, a)
+    assert post["status"] == "superseded"
+    assert post["outdated"] is True
+    assert _corr(proj, a, s) == 1
+
+    # An inapplicable supersede (no successor) must not decay the target — the
+    # guard runs BEFORE the belief half on the one-record default.
+    c = sdk.create_point("statement", "C", status="live")["id"]
+    before = (sdk.get_point(c) or {}).get("confidence")
+    proj.apply({"type": "PointSuperseded", "id": c})
+    assert (sdk.get_point(c) or {}).get("confidence") == before
+    assert sdk.get_point(c)["status"] == "live"
+
+
 def test_plan_point_restamp_folds_pins_the_shared_selection():
     """#3305: the plan is the ONE home for the terminalizer SELECTION (the
     survivor rule + supersede canonicalization + both belief anchors) that
@@ -1138,9 +1182,22 @@ def test_plan_point_restamp_folds_pins_the_shared_selection():
     assert fold_seq == {}
 
     # An empty-string id is inapplicable (the plan's non-empty writable gate)
-    # and is reported, not silently dropped (#3299).
+    # and is reported, not silently dropped (#3299). The SAME gate the fold
+    # applies, so the plan never schedules a fold the body would refuse.
+    for bad_id in ("", "nul\x00id", "lone\ud800id"):
+        decisions, fold_seq = plan_point_restamp_folds([
+            {"type": "PointSuperseded", "id": bad_id, "new_id": "b"},
+        ])
+        assert decisions[0] == (False, False), bad_id
+        assert fold_seq == {}
+
+    # A supersede with NO new_id still STAMPS when it is the id's last
+    # recreate-surviving supersede (the fold returns 0 and the consumer warns),
+    # but it never decays.
     decisions, fold_seq = plan_point_restamp_folds([
-        {"type": "PointSuperseded", "id": "", "new_id": "b"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+        {"type": "PointSuperseded", "id": "a"},
     ])
-    assert decisions[0] == (False, False)
-    assert fold_seq == {}
+    assert decisions[2] == (False, True)
+    assert fold_seq == {"a": 2}

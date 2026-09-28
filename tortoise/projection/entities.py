@@ -1464,12 +1464,26 @@ class _EntityHandlers:
         seq absent from it means the record's id is not a writable str (both
         halves are skipped). The belief half folds here, at the record's own
         position — chronological, so it cannot clobber a later writer.
+
+        A fold that matches NO Point warns (#3299): the apply() one-record
+        branch and ``rebuild_all``'s sweep both emit a fold-miss line, and
+        before this one the whole-journal apply() arm was quieter than both —
+        a ``rebuild(EventLog)`` replay of a terminalizer whose target was never
+        created said nothing, while ``rebuild_all`` warned.
         """
         apply_decay, apply_stamp = plan.get(seq, (False, False))
         if not apply_decay and not apply_stamp:
+            # Ineligible (a non-non-empty-writable id): the plan already warned.
             return
-        self._fold_point_restamp(
+        matched = self._fold_point_restamp(
             ev, decay=apply_decay, stamp=apply_stamp)
+        if apply_stamp and matched == 0:
+            logger.warning(
+                "apply_journal_point_restamp: %s fold matched no Point "
+                "(event_id=%s id=%r new_id=%r) — the target was never "
+                "created, or the record carries no successor",
+                ev.get("type"), ev.get("event_id"), ev.get("id"),
+                ev.get("new_id"))
 
     def _fold_point_superseded(self, ev: dict) -> int:
         """#2423: fold a PointSuperseded event into Point.status/validity +
