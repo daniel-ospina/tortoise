@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 
@@ -925,3 +926,92 @@ def test_delete_leg_skips_live_recreated_src(sup):
     assert _struct_edges(proj, x) == {("extractedFrom", s)}, (
         "delete-leg must NOT fire against a live src — the edge is legit"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #3305 — the apply() replay arm must fold PointSuperseded too
+#
+# ``rebuild(EventLog)`` is the one-record engine behind ``recover_from_log``
+# (DB-loss recovery) and the backup JSONL restore. It had NO branch for
+# PointSuperseded, so the record fell through to the ``unrecognized event
+# type`` warning and a superseded Point re-materialized as status='live' with
+# the CORRECTS edge + belief decay gone. The fold is now shared with
+# ``rebuild_all``'s sweep through ``_fold_point_restamp``.
+# ══════════════════════════════════════════════════════════════════════
+
+def _apply_replay(sdk, events_dir) -> None:
+    """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
+    engine ``recover_from_log`` / the backup JSONL restore use."""
+    sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
+
+
+def test_apply_replay_folds_supersede(sup):
+    """#3305: an apply()-based replay of a superseded Point must end
+    'superseded' — asserted as the literal live status, not something read
+    back from the replay it is testing."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live",
+                            valid_from="2026-01-01T00:00:00+00:00")["id"]
+    sdk.supersede_point(a, succ)
+    pre = _point_state(sdk, a)
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["status"] == "superseded", (
+        f"apply() replay resurrected a dead Point: {post}")
+    assert post["outdated"] is True
+    assert post["validTo"] and post["expiredAt"]
+    assert post == pre, (
+        f"apply() replay drifted from live: {pre} != {post}")
+    assert _corr(sdk._get_proj(), a, succ) == 1, (
+        "CORRECTS edge dropped by the apply() arm")
+
+
+def test_apply_replay_folds_the_supersede_belief_decay(sup):
+    """#3305: the terminalizer's BELIEF half rides the same record — an
+    apply()-based replay must decay the claim to the vacuous posterior, or
+    the restored Point keeps a frozen promoted posterior."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    _apply_replay(sdk, events)
+    decayed = sdk.get_point(a)
+    assert decayed["confidence"] == 0.5, (
+        f"belief decay not folded by the apply() arm: {decayed.get('confidence')}")
+    assert decayed["posterior_alpha"] == 1.0
+    assert decayed["posterior_beta"] == 1.0
+
+
+def test_apply_replay_matches_rebuild_all_on_supersede(sup):
+    """#3305: the two replay engines must converge on the same Point state —
+    the shared ``_fold_point_restamp`` dispatch is what keeps them from
+    drifting."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
+    sdk.supersede_point(a, succ)
+    live = _point_state(sdk, a)
+    assert live["status"] == "superseded"
+
+    _rebuild(sdk, events)
+    via_all = _point_state(sdk, a)
+    _apply_replay(sdk, events)
+    via_apply = _point_state(sdk, a)
+
+    assert via_all == live, f"rebuild_all drifted from live: {via_all}"
+    assert via_apply == via_all, (
+        f"apply() replay != rebuild_all: {via_apply} != {via_all}")
+
+
+def test_apply_replay_keeps_a_live_point_live(sup):
+    """#3305 no-over-correction: a Point with no terminalizer in the journal
+    stays live across the apply() arm — the fix must not fold anything onto
+    an ordinary claim."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "never touched", status="live")["id"]
+    _apply_replay(sdk, events)
+    post = _point_state(sdk, a)
+    assert post["status"] == "live"
+    assert post["outdated"] is None
+    assert post["validTo"] is None

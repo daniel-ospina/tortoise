@@ -1881,6 +1881,26 @@ _NO_PROJECTION_FOLD = frozenset({
     "EntityBindingRefused",
 })
 
+# #3305: the Point-lifecycle terminalizers whose replay fold is a per-event
+# status/validity/CORRECTS re-stamp (+ the belief decay at the event's own
+# position). Declared ONCE so the two replay dispatchers cannot drift apart:
+# ``FalkorProjection.apply()`` — the ONE-RECORD engine behind ``rebuild()``,
+# ``recover_from_log()`` and the backup JSONL restore — and
+# ``FalkorProjection.rebuild_all()``'s pass-1b trailing sweep, which folds the
+# id-reuse SURVIVORS of the same family. Before this declaration ``apply()``
+# had no branch for either type, so an apply()-based replay dropped the fold
+# and served a dead Point as ``status='live'``. (Neither type belongs in
+# ``_NO_PROJECTION_FOLD`` above: it is the set of records folded NOWHERE.)
+#
+# A type added here is dispatched to ``_fold_point_restamp``; that fold's own
+# dispatch is exhaustive over this set (a member with no arm warns rather than
+# silently no-op'ing), and ``tests/test_pointsuperseded_rebuild.py`` /
+# ``tests/test_pointinvalidated_rebuild.py`` pin BOTH engines on each member.
+_POINT_RESTAMP_EVENT_TYPES = frozenset({
+    "PointSuperseded",
+    "PointInvalidated",
+})
+
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
 # every recognized non-point record is a no-op there as well: the non-point
 # entities and the flat edge descriptor have no representation in that index.
@@ -3193,6 +3213,17 @@ class FalkorProjection(
                         "MATCH (n:Point {id:$id}) SET n.status = 'live'",
                         params={"id": oid},
                     )
+        elif t in _POINT_RESTAMP_EVENT_TYPES:
+            # #3305: the Point-lifecycle terminalizer fold. This engine replays
+            # ONE record at a time in journal order, so the fold runs at the
+            # event's own position — exactly live chronology. Before this
+            # branch the type fell through to the ``unrecognized event type``
+            # warning below, so ``recover_from_log`` / the backup JSONL
+            # restore re-materialized a superseded or invalidated Point as
+            # ``status='live'`` with the CORRECTS edge and belief decay gone.
+            # The fold itself is shared with ``rebuild_all``'s sweep via
+            # ``_fold_point_restamp`` (the ONE home for the selection).
+            return self._fold_point_restamp(ev)
         elif t == "PointsMerged":
             # #331 (review r2): `or []` also covers "merge_ids": null.
             for mid in ev.get("merge_ids") or []:
@@ -3260,9 +3291,11 @@ class FalkorProjection(
         else:
             # P2-1 (#3299): a record type outside the recognized vocabulary
             # must not be dropped silently. A type that IS recognized but has
-            # no branch HERE — e.g. PointSuperseded / PointInvalidated /
-            # DirectEdgeRepoint, folded only by rebuild_all's deferred pass —
-            # still warns: that is a genuine rebuild-parity gap, not noise.
+            # no branch HERE — e.g. DirectEdgeRepoint, replayed only by
+            # rebuild_all's pass-2b — still warns: that is a genuine
+            # rebuild-parity gap, not noise. (PointSuperseded /
+            # PointInvalidated were the other two until #3305 gave them the
+            # branch above.)
             logger.warning("unrecognized event type %r — skipped", t)
 
     def _episodic_point_ids(self) -> set[str]:
@@ -4924,8 +4957,12 @@ class FalkorProjection(
                 # UNCONDITIONALLY (exact live parity, supersede's precedent).
                 later_inline = max_inline_seq.get(ev["id"])
                 skip_ua = later_inline is not None and later_inline > fsq
-                matched = self._fold_point_invalidated(
-                    ev, skip_updated_at=skip_ua)
+                # #3305: the shared home for both lifecycle families — the
+                # SAME dispatch ``apply()`` calls, so the two engines cannot
+                # drift. ``decay=False``: pass-1b already applied the belief
+                # half inline at the surviving event's seq.
+                matched = self._fold_point_restamp(
+                    ev, skip_updated_at=skip_ua, decay=False)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointInvalidated fold matched no Point "
@@ -4936,7 +4973,10 @@ class FalkorProjection(
                         ev.get("event_id"), ev.get("id"),
                         ev.get("corrected_by"))
             else:
-                matched = self._fold_point_superseded(ev)
+                # #3305: same shared dispatch as the invalidate arm above (and
+                # as ``apply()``). ``decay=False`` — pass-1b already applied
+                # the decay inline at the surviving supersede's seq.
+                matched = self._fold_point_restamp(ev, decay=False)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointSuperseded fold matched no Point "
