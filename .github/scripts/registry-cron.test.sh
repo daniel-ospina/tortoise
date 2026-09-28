@@ -136,7 +136,8 @@
 #      write yet — resolving would delete the dedup object on zero evidence)
 #  91. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
 #  92. #3944: an exponent-notation age is NOT a measurement (truncation must
-#      not read as fresh) — it files on the stale uptime and never resolves
+#      not read as fresh) — changes NOTHING: no file, no resolve (R4: a
+#      present-but-unmeasurable age must not take the 'no delivery' arm)
 #  93. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
 #      `[ -gt ]` is not freshness)
 #  94. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
@@ -146,7 +147,6 @@
 #      900 (the period is never re-typed in bash)
 #  97. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
 #      19-digit magnitude compares successfully, so without the bound it files
-#      900 — a non-default threshold moves the verdict
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -1988,8 +1988,9 @@ assert_contains "$OUT" "analytics heartbeat not established" \
 # R2 (bug-scan P3): `${x%.*}` truncates, and jq prints 1.2e16 as `1.2E+16` —
 # whose integer part truncates to `1` and would compare UNDER any threshold,
 # RESOLVING an open incident on a grossly stale age. The operand shape is now
-# validated, so this reads as unmeasurable-for-age and the stale `uptime_s`
-# supplies the verdict: file, never resolve.
+# validated, so this reads as unmeasurable-for-age and changes NOTHING — R4
+# removed the fall-through to the uptime arm, which would FILE on a healthy
+# sink whose delivery is merely un-measurable.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -2004,8 +2005,6 @@ assert_eq "$RC" 0 "92. an exponent-notation age changes nothing"
 # false FILE on a healthy sink). Unmeasurable changes nothing at all.
 assert_not_match "$OUT" "analytics sink silent" \
   "92. an uncomparable age is not read as stale (no FILE decision)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "92. an uncomparable age files nothing"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "92. a truncated non-decimal age NEVER resolves the open incident"
 assert_contains "$OUT" "leaving ANALYTICS_SINK_DEGRADED unchanged" \
@@ -2027,8 +2026,6 @@ run_driver
 assert_eq "$RC" 0 "93. an int64-overflowing age changes nothing"
 assert_not_match "$OUT" "analytics sink silent" \
   "93. an uncomparable magnitude is not read as stale (no FILE decision)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "93. an uncomparable magnitude files nothing"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "93. an int64-overflowing age NEVER resolves the open incident"
 
@@ -2066,8 +2063,6 @@ run_driver
 assert_eq "$RC" 0 "95. a negative age does not red the run"
 assert_not_match "$OUT" "analytics sink silent" \
   "95. a negative age must NOT file a false incident on a healthy sink"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "95. a negative age posts nothing"
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "95. a negative age leaves an open incident untouched"
 
@@ -2105,8 +2100,11 @@ run_driver
 assert_eq "$RC" 0 "97. a 19-digit int64-fitting age changes nothing"
 assert_not_match "$OUT" "analytics sink silent" \
   "97. the 18-digit bound keeps an over-long magnitude unmeasurable (no FILE)"
-assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
-  "97. an over-long magnitude files nothing"
+# NB: no separate 'files nothing' assertion here. #321 is ALREADY open in
+# this fixture, so file_alert creates nothing and a `GH POST .../issues `
+# regex (or an /issues/321/comments one) can never match — it would pass
+# even on a mutant that decides SILENT, i.e. false assurance. The decision
+# itself is pinned by the two assertions above (RC, and no 'sink silent').
 assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
   "97. an over-long magnitude never resolves the open incident"
 
