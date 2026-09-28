@@ -651,9 +651,11 @@ def docker_resolver_port(sdk) -> ResolverPort:
     def fts_objects(term: str, limit: int = 8) -> list[dict]:
         # raises on embedded (no fulltext index) — the resolver degrades
         #
-        # #4061 R2: the exclusion cannot be pushed into the SDK query
-        # (``search_engine``'s terminal-status clause is Point-gated), so the
-        # rows arrive ALREADY truncated by the SDK's own LIMIT. Filtering
+        # #4061 R2: the exclusion cannot be pushed into the SDK query — the
+        # SDK exposes only the all-or-nothing ``include_terminal`` opt-in for
+        # the canonical OBJECT set, so this port's deliberately NARROWER
+        # ``{retracted}`` exclusion has no query-level predicate — and the
+        # rows therefore arrive ALREADY truncated by the SDK's own LIMIT. Filtering
         # only those rows let >=limit excluded Objects consume the window and
         # starve a live candidate out of the leg. The window therefore GROWS
         # until ``limit`` LIVE rows are found or the index is exhausted, so

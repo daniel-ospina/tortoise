@@ -166,6 +166,22 @@ def seeded_sdk(monkeypatch):
 
 # ── (a) cross-session surface: the expansion contract ─────────────────────
 
+def test_expansion_still_resolves_a_terminal_object_anchor(seeded_sdk):
+    """#3301: C2's anchor resolution is a RESOLUTION path (the anchor Object is
+    never surfaced), so a terminal Object anchor must still resolve. Without
+    the ``excluded_statuses=()`` opt-out the widened Object exclusion makes
+    the anchor unresolvable, the pass returns None, and the cross-session
+    join is silently dropped."""
+    proj = seeded_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:$n}) SET o.status='superseded'",
+                 params={"n": ENTITY_ANCHOR})
+    on_ids = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+        QUESTION, limit=20, pool_size=60, entity_key_expansion=True)]
+    assert JOIN_ID in on_ids, (
+        "a terminal Object anchor must still resolve so the key expansion "
+        "reaches the joined cross-session point")
+
+
 def test_expansion_surfaces_same_entity_point_from_other_session(seeded_sdk):
     """Plain top-k misses the same-entity point from session B (its content
     shares no query token); the entity/fact-augmented key expansion surfaces

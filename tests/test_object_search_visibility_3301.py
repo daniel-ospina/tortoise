@@ -33,6 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.embeddings import EMBEDDING_DIM
 from tortoise.search_engine import (
+    MECHANISM_INDEX,
+    MECHANISM_SCAN_FALLBACK,
+    VECTOR_MECHANISM_KEY,
     reset_circuit_breakers,
     run_fts_query,
     run_structural_query,
@@ -145,9 +148,18 @@ def test_fts_leg_returns_only_visible_objects(graph):
 
 @_docker_only
 def test_vector_index_leg_returns_only_visible_objects(graph):
-    assert _ids(run_vector_query(
+    trace: list = []
+    rows = run_vector_query(
         graph, _VEC, entity_type="object", is_embedded=False,
-        limit=50)) == set(VISIBLE_IDS)
+        limit=50, leg_trace=trace)
+    assert _ids(rows) == set(VISIBLE_IDS)
+    # `is_embedded=False` must ATTEMPT the index: both the index path and a
+    # failed-attempt fallback mean the docker branch ran; the plain `scan`
+    # mechanism would mean the embedded path ran instead (`scan_fallback` is
+    # legitimate here — the fixture's index creation is best-effort).
+    mechanisms = {e.get(VECTOR_MECHANISM_KEY) for e in trace}
+    assert mechanisms <= {MECHANISM_INDEX, MECHANISM_SCAN_FALLBACK}, (
+        f"is_embedded=False must attempt the vector index: {mechanisms}")
 
 
 @_docker_only

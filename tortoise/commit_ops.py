@@ -45,7 +45,8 @@ OBJECT_TERMINAL_STATUSES = frozenset(
     {"superseded", "deprecated", "archived", "retracted"})
 
 # The recall view's name for the same set — an ALIAS, never a second literal
-# (``sdk.recall_state`` and ``projection/entities.py`` consume it). A
+# (``commit_ops.apply_supersessions`` and ``projection/entities.py`` consume
+# it; ``sdk.recall_state`` consumes ``OBJECT_TERMINAL_STATUSES`` itself). A
 # supersession fold is only valid when a successor VISIBLE to that view
 # remains.
 _RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
@@ -936,12 +937,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         #       rows before presenting results; a raw graph name probe
         #       returns an id-less node only as an id=None row (which the
         #       gate filters), never as a usable successor; and
-        #   (b) status not in recall's object exclusion tuple
-        #       {"superseded", "deprecated", "archived", "retracted"}
-        #       (verified live: a deprecated Object enters the FTS pool but
-        #       never the recall state view; "outdated" IS visible — it is
-        #       not in the object exclusion, only in the POINT-terminal
-        #       vocabulary set).
+        #   (b) status not in the canonical OBJECT vocabulary
+        #       (``OBJECT_TERMINAL_STATUSES`` — superseded, deprecated,
+        #       archived, retracted): after #3301 BOTH the four search legs
+        #       and the recall view exclude it; "outdated" IS visible — it is
+        #       not in the object vocabulary, only in the POINT-terminal
+        #       set).
         # Folding a live target onto a display name whose remaining carriers
         # are all id-less or recall-excluded leaves NO visible successor =
         # the exact dangling-successor harm this lane exists to prevent.

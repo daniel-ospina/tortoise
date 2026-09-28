@@ -205,6 +205,22 @@ def seeded_sdk(monkeypatch):
 
 # ── (a) the end-to-end contract ───────────────────────────────────────────
 
+def test_terminal_object_anchor_still_resolves(seeded_sdk):
+    """#3301: the facet census anchor resolution is a RESOLUTION path, never a
+    surfaced result, so a terminal Object anchor must still resolve. Without
+    the ``excluded_statuses=()`` opt-out the widened Object exclusion leaves
+    the census with no anchor and the loop silently no-ops."""
+    from tortoise.coverage_loop import facet_census
+
+    proj = seeded_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:$n}) SET o.status='superseded'",
+                 params={"n": ENTITY_ANCHOR})
+    facets = facet_census(proj, QUESTION)
+    assert any(f.key == f"entity:{ENTITY_ANCHOR}" for f in facets), (
+        "a terminal Object anchor must still resolve for the census "
+        "(resolution is not a surfaced search)")
+
+
 def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     """Plain top-k misses the same-subject point from session B (its
     content shares no query token and it is not structural-scanned); the
