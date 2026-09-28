@@ -33,7 +33,13 @@ USAGE
         re-cut, never a `--admin` merge).
 
     python3 tools/mergify_config_guard.py --staleness
-        NON-GATING freshness query: 0 = fresh, 1 = stale, 2 = unreadable/absent.
+        NON-GATING, DIGEST-AWARE freshness query. It distinguishes a stale
+        record that still attests HEAD (safe: only the timestamp moves) from a
+        stale record whose digest DISAGREES with HEAD (NOT safe: an automatic
+        re-cut would launder a real gate-definition change).
+        exit 0 = fresh; 1 = stale, digest matches HEAD; 2 = unreadable/absent
+        (UNKNOWN, never a pass); 3 = stale and gate_digest != gate_digest(HEAD)
+        (a human must decide — the automatic re-cut is refused).
         The weekly `mergify-guard-recut` workflow uses it to decide whether a
         refresh is needed; it never gates a pull request.
 
@@ -44,7 +50,13 @@ I10 FRESHNESS IS SELF-HEALING (never a timer that freezes the repo)
 -------------------------------------------------------------------
 I10 BLOCKS on exactly one condition: `record.gate_digest != gate_digest(HEAD)` —
 the record no longer attests the gate definition. Staleness ALONE does not
-block. When the digest still matches HEAD but `verified_at` is older than
+block. `--staleness` consults that SAME comparison before it reports anything
+refreshable: a stale record whose digest matches HEAD is a safe refresh (exit
+1), while a stale record whose digest DISAGREES with HEAD is a real gate change
+in progress and is reported as its own state (exit 3, `STALE-DIVERGED`) that
+forbids the automatic re-cut — otherwise the weekly self-healer would overwrite
+the divergent digest with HEAD's and launder the very bypass the guard exists
+to catch. When the digest still matches HEAD but `verified_at` is older than
 RECORD_FRESH_DAYS, `--static` re-derives the digest and reports AUTO-REFRESHED:
 a matching digest IS a current attestation, so the only field a re-cut moves is
 the timestamp. A required job that reds on a wall clock would freeze every pull
@@ -54,7 +66,12 @@ failure is attributed to STALENESS on the digest and names the exact `--recut`
 command — never a bare red a lane has to reverse-engineer.
 
 RESULT TOKENS (S12 asserts each is reachable, and that UNAVAILABLE is
-distinguishable from DIVERGED): SATISFIED / DIVERGED / UNAVAILABLE.
+distinguishable from DIVERGED): SATISFIED / DIVERGED / UNAVAILABLE. The
+`--staleness` mode carries its own token map (FRESH / STALE / UNKNOWN /
+STALE-DIVERGED) because its states are not the three-way clause outcome: a
+stale-but-matching record and a stale-and-diverged record are both "not fresh"
+yet demand opposite callers' actions, so the shared DIVERGED token cannot name
+them.
 
 FAIL-CLOSED POLARITY
 --------------------
@@ -133,6 +150,21 @@ DECLARATION_HOME_CHECKERS = (
 
 EXIT_OK, EXIT_DIVERGED, EXIT_UNAVAILABLE = 0, 1, 2
 RESULT_TOKEN = {0: "SATISFIED", 1: "DIVERGED", 2: "UNAVAILABLE"}
+
+# `--staleness` needs a FOURTH state the three-way clause outcome cannot express:
+# a stale record whose digest STILL MATCHES HEAD (safe — a re-cut moves only the
+# timestamp) must be distinguishable, by exit code alone, from a stale record
+# whose digest DISAGREES with HEAD (NOT safe — a re-cut would launder a real gate
+# change). Both are non-zero and both are "not fresh", so `EXIT_DIVERGED` is the
+# wrong code for the safe one and, used for both, makes the workflow's shell
+# check undecidable without parsing prose.
+EXIT_STALE_DIVERGED = 3
+STALENESS_TOKEN = {
+    EXIT_OK: "FRESH",
+    EXIT_DIVERGED: "STALE",
+    EXIT_UNAVAILABLE: "UNKNOWN",
+    EXIT_STALE_DIVERGED: "STALE-DIVERGED",
+}
 
 # Shell operators that make a step a COMPOUND command. Clause (vii) requires the
 # validator invocation to be the step's SOLE command: `python3 tool || true`,
@@ -1600,10 +1632,13 @@ def _combine(*results: tuple[int, str]) -> tuple[int, str]:
     return worst, detail
 
 
-def _print_result(mode: str, code: int, lines: list[str]) -> None:
+def _print_result(
+    mode: str, code: int, lines: list[str], tokens: dict[int, str] | None = None
+) -> None:
     for line in lines:
         print(line)
-    print(f"{mode} RESULT: {RESULT_TOKEN[code]}")
+    table = RESULT_TOKEN if tokens is None else tokens
+    print(f"{mode} RESULT: {table[code]}")
 
 
 # ---------------------------------------------------------------------------
@@ -1768,11 +1803,24 @@ def _record_live_attempt(
 
 
 def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, list[str]]:
-    """NON-GATING I10 freshness query: 0 = fresh, 1 = stale, 2 = unreadable.
+    """NON-GATING, DIGEST-AWARE I10 freshness query.
+
+    0 = fresh (digest matches HEAD, within the window)
+    1 = stale, digest matches HEAD (SAFE: a re-cut moves only the timestamp)
+    2 = unreadable/absent (UNKNOWN — never a pass, never auto-refreshed)
+    3 = stale, digest DISAGREES with HEAD (NOT safe: the gate definition changed;
+        an automatic re-cut would launder it, so the caller must refuse)
 
     Used by the weekly `mergify-guard-recut` workflow to make the refresh
     change-gated (no weekly PR when the record is fresh, so no bot spam). It is
     never run in the required path and can never red a pull request.
+
+    The digest check runs FIRST and independently of age: age says whether an
+    attestation is due for renewal, the digest says whether the record still
+    attests anything HEAD can honour. A record that fails the second must never
+    be renewed by the first, or the self-healer `--recut` (which overwrites
+    `gate_digest` with HEAD's unconditionally) becomes the bypass the guard
+    exists to catch.
     """
     root = Path(root)
     try:
@@ -1781,6 +1829,28 @@ def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, lis
         return EXIT_UNAVAILABLE, [str(exc)]
     if record is None:
         return EXIT_UNAVAILABLE, [f"{RECORD_REL} is absent — no freshness to report"]
+    recorded = record.get("gate_digest")
+    if not isinstance(recorded, str) or not recorded.strip():
+        return EXIT_UNAVAILABLE, [
+            f"UNKNOWN: {RECORD_REL}.gate_digest is absent or not a string — the "
+            "record attests no gate definition; refusing to re-cut"
+        ]
+    try:
+        head_digest = gate_digest(root)
+    except Exception as exc:
+        return EXIT_UNAVAILABLE, [
+            f"UNKNOWN: could not compute gate_digest(HEAD): {type(exc).__name__}: "
+            f"{exc} — refusing to re-cut"
+        ]
+    if recorded != head_digest:
+        return EXIT_STALE_DIVERGED, [
+            f"STALE-DIVERGED: {RECORD_REL}.gate_digest {recorded[:12]}… != "
+            f"gate_digest(HEAD) {head_digest[:12]}… — the gate DEFINITION changed, "
+            "so an automatic re-cut would launder a real gate change as a "
+            "timestamp-only refresh. Refusing to re-cut; a human must review the "
+            "gate diff and then re-cut with "
+            "`python3 tools/mergify_config_guard.py --recut`"
+        ]
     try:
         verified_at = _parse_iso(record.get("verified_at"), f"{RECORD_REL}.verified_at")
     except GuardUnreadable as exc:
@@ -1789,11 +1859,13 @@ def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, lis
     if age > timedelta(days=RECORD_FRESH_DAYS):
         return EXIT_DIVERGED, [
             f"STALE: {RECORD_REL}.verified_at is {age.days}d old "
-            f"(> {RECORD_FRESH_DAYS}d); refresh with "
-            "`python3 tools/mergify_config_guard.py --recut`"
+            f"(> {RECORD_FRESH_DAYS}d) and gate_digest matches HEAD "
+            f"({recorded[:12]}…) — only the attestation timestamp moves; refresh "
+            "with `python3 tools/mergify_config_guard.py --recut`"
         ]
     return EXIT_OK, [
-        f"FRESH: {RECORD_REL}.verified_at is {age.days}d old (<= {RECORD_FRESH_DAYS}d)"
+        f"FRESH: {RECORD_REL}.verified_at is {age.days}d old (<= {RECORD_FRESH_DAYS}d) "
+        f"and gate_digest matches HEAD ({recorded[:12]}…)"
     ]
 
 
@@ -1830,7 +1902,10 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--staleness",
         action="store_true",
-        help="I10 freshness query (non-gating): 0=fresh, 1=stale, 2=unreadable",
+        help=(
+            "I10 freshness query (non-gating, digest-aware): 0=fresh, "
+            "1=stale/digest-matches, 2=unreadable, 3=stale/digest-diverged"
+        ),
     )
     mode.add_argument("--print-digest", action="store_true", help="print the head gate_digest")
     mode.add_argument("--clause-inventory", action="store_true", help="print the clause ids")
@@ -1862,7 +1937,7 @@ def main(argv: list[str] | None = None) -> int:
             return code
         if args.staleness:
             code, lines = run_staleness(root, record_path)
-            _print_result("STALENESS", code, lines)
+            _print_result("STALENESS", code, lines, STALENESS_TOKEN)
             return code
         if args.recut:
             code, lines = run_recut(root, record_path)

@@ -653,6 +653,190 @@ def test_staleness_query_is_non_gating(tmp_path: Path) -> None:
     assert mcg.run_staleness(absent)[0] == 2
 
 
+def test_staleness_tokens_are_explicit() -> None:
+    """Every staleness state is named, so a caller reads a state not prose."""
+    assert mcg.STALENESS_TOKEN == {
+        0: "FRESH",
+        1: "STALE",
+        2: "UNKNOWN",
+        3: "STALE-DIVERGED",
+    }
+
+
+def test_staleness_is_digest_aware_and_never_launders(tmp_path: Path) -> None:
+    """A stale record whose digest DISAGREES with HEAD is its own state (3).
+
+    THE LAUNDERING CASE (mutation proof for the new state): `--recut` overwrites
+    `gate_digest` with HEAD's UNCONDITIONALLY, so a digest-blind staleness query
+    would let the weekly workflow 'refresh' a genuine gate change as if only the
+    timestamp moved — the guard laundering the bypass it exists to catch. The
+    refreshable state (1) must therefore assert the digest matches HEAD too.
+    """
+    stale_safe = make_tree(
+        tmp_path / "safe", merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 3
+    )
+    code, lines = mcg.run_staleness(stale_safe)
+    assert code == 1, lines
+    assert mcg.STALENESS_TOKEN[code] == "STALE"
+
+    diverged = make_tree(
+        tmp_path / "diverged",
+        merge_config(),
+        verified_days_ago=mcg.RECORD_FRESH_DAYS + 3,
+        record_overrides={"gate_digest": "0" * 64},
+    )
+    code, lines = mcg.run_staleness(diverged)
+    assert code == 3, lines
+    assert mcg.STALENESS_TOKEN[code] == "STALE-DIVERGED"
+    assert "STALE-DIVERGED" in lines[0]
+    assert "gate DEFINITION changed" in lines[0]
+    assert "human" in lines[0]
+    # Divergence is a real gate change, so it must NOT be the refreshable state.
+    assert code != 1
+
+
+def test_staleness_divergence_is_age_independent(tmp_path: Path) -> None:
+    """A FRESH timestamp cannot hide a diverged digest.
+
+    Age asks whether an attestation is due for renewal; the digest asks whether
+    the record attests anything HEAD can honour. The second question is not
+    answered by the first, so a diverged record is reported as such even when
+    the freshness window has not elapsed.
+    """
+    diverged = make_tree(
+        tmp_path,
+        merge_config(),
+        verified_days_ago=0,
+        record_overrides={"gate_digest": "f" * 64},
+    )
+    code, lines = mcg.run_staleness(diverged)
+    assert code == 3, lines
+    assert "STALE-DIVERGED" in lines[0]
+
+
+def test_staleness_unreadable_digest_is_unknown_never_a_pass(tmp_path: Path) -> None:
+    """UNKNOWN is never a pass — including when the digest itself is unreadable."""
+    missing = make_tree(
+        tmp_path / "missing",
+        merge_config(),
+        verified_days_ago=mcg.RECORD_FRESH_DAYS + 3,
+        record_overrides={"gate_digest": None},
+    )
+    code, lines = mcg.run_staleness(missing)
+    assert code == 2, lines
+    assert "UNKNOWN" in lines[0]
+    assert mcg.STALENESS_TOKEN[code] == "UNKNOWN"
+
+    non_string = make_tree(
+        tmp_path / "weird",
+        merge_config(),
+        verified_days_ago=mcg.RECORD_FRESH_DAYS + 3,
+        record_overrides={"gate_digest": ["not", "a", "digest"]},
+    )
+    assert mcg.run_staleness(non_string)[0] == 2
+
+
+def test_staleness_cli_reports_divergence_with_its_own_token(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The caller distinguishes the states by EXIT CODE and token, not prose."""
+    diverged = make_tree(
+        tmp_path,
+        merge_config(),
+        verified_days_ago=mcg.RECORD_FRESH_DAYS + 3,
+        record_overrides={"gate_digest": "0" * 64},
+    )
+    assert mcg.main(["--staleness", "--root", str(diverged)]) == 3
+    out = capsys.readouterr().out
+    assert "STALENESS RESULT: STALE-DIVERGED" in out
+
+
+def test_recut_would_launder_a_diverged_digest(tmp_path: Path) -> None:
+    """The demonstrated failure, kept as the mutation proof for the gate.
+
+    `--recut` is digest-UNCONDITIONAL (it is the documented human fix path for a
+    real gate change), so a record carrying a diverged digest is overwritten
+    with HEAD's and `--static` then reports SATISFIED. That is exactly why
+    `run_staleness` must refuse to report this record as merely stale: without
+    the new state the weekly job would run this and merge the launder.
+    """
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        verified_days_ago=mcg.RECORD_FRESH_DAYS + 3,
+        record_overrides={"gate_digest": "0" * 64},
+    )
+    # The staleness gate refuses to call this refreshable.
+    assert mcg.run_staleness(root)[0] == 3
+    # And `--static` is red on the same record (the required path is unchanged).
+    assert mcg.run_static(root)[0] == 1
+    # The vector the gate blocks: re-cutting erases the divergence.
+    mcg.run_recut(root)
+    assert json.loads((root / mcg.RECORD_REL).read_text())["gate_digest"] == mcg.gate_digest(root)
+    assert mcg.run_static(root)[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# The weekly refresher (`.github/workflows/mergify-guard-recut.yml`)
+# ---------------------------------------------------------------------------
+
+RECUT_WORKFLOW = ROOT / ".github/workflows/mergify-guard-recut.yml"
+
+
+def _recut_run_step() -> str:
+    doc = yaml.safe_load(RECUT_WORKFLOW.read_text())
+    for step in doc["jobs"]["recut"]["steps"]:
+        run = step.get("run", "")
+        if "--staleness" in run and "--recut" in run:
+            return run
+    raise AssertionError("the recut workflow has no staleness/recut step")
+
+
+def test_recut_workflow_refuses_to_launder_a_diverged_digest() -> None:
+    """The workflow must not recut when `gate_digest != gate_digest(HEAD)`.
+
+    It has to refuse on the EXIT CODE (3), before any re-cut runs, and say why —
+    the gate definition changed and a human must decide.
+    """
+    run = _recut_run_step()
+    divergence = run.index("3)")
+    fallthrough = run.index("*)")
+    recut_exec = run.index("tools/mergify_config_guard.py --recut\n")
+    # The divergence branch exists, is dispatched before the fallthrough, and
+    # runs strictly before the re-cut command itself.
+    assert divergence < fallthrough, run
+    assert divergence < recut_exec, run
+    branch = run[divergence:fallthrough]
+    assert "exit 1" in branch
+    assert "gate DEFINITION changed" in branch
+    assert "human" in branch
+
+
+def test_recut_workflow_never_claims_an_unchecked_digest() -> None:
+    """The PR body's 'digest unchanged' claim follows an actual comparison."""
+    run = _recut_run_step()
+    # The digest is captured before AND after the re-cut, and compared.
+    assert 'before="' in run and 'after="' in run
+    assert run.index("before=") < run.index("tools/mergify_config_guard.py --recut\n")
+    assert run.index("after=") > run.index("tools/mergify_config_guard.py --recut\n")
+    assert '"$after" != "$before"' in run
+    assert "before and after the re-cut" in run
+
+
+def test_recut_workflow_is_never_required() -> None:
+    """The refresher stays non-required and absent from python-ci-gate's needs."""
+    doc = yaml.safe_load(RECUT_WORKFLOW.read_text())
+    # PyYAML parses the YAML 1.1 `on:` key as boolean True.
+    triggers = doc.get("on") or doc.get(True) or {}
+    assert "pull_request" not in triggers, triggers
+    assert "pull_request_target" not in triggers, triggers
+
+    ci = (ROOT / ".github/workflows/python-ci.yml").read_text()
+    gate = ci[ci.index("\n  python-ci-gate:"):]
+    needs_line = next(line for line in gate.splitlines() if line.strip().startswith("needs:"))
+    assert "mergify-guard-recut" not in needs_line, needs_line
+
+
 def test_clause_viii_a_duplicate_yaml_key_exits_2(tmp_path: Path) -> None:
     duplicate = (
         "queue_rules:\n"
