@@ -601,9 +601,11 @@ def pending_turn_ambiguous(screen: str | None, message: str) -> bool:
     `resend` recovery: the pending text carries the renderer's `...`, is a head of
     our message, and is shorter than `min(len(message), PENDING_MIN_CHARS)`, the
     threshold this hint exists for. (The identity floor is at or below this one for
-    messages of at least 4 chars; for a 1-3-char message the hard floor of 4 puts it
-    above, so the ambiguity branch can fire on an entry that is not an identity —
-    harmless, both branches still yield `release`.)
+    messages of at least 4 chars. For a 1-char message the ambiguity branch cannot
+    fire at all (its threshold is 1 and the guard needs `0 < len(visible) < 1`); for
+    a 2-3-char message the hard floor of 4 puts the identity floor above, so an
+    entry there is not an identity. Harmless either way — both branches yield
+    `release`.)
 
     The `...` requirement is load-bearing in the other direction too: a plain
     short line that merely shares a head with our message (`Steering: continue`
