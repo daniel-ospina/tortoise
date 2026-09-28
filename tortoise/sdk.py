@@ -898,6 +898,18 @@ def _clip_capture_turn_content(
     """
     if len(content) <= cap:
         return content
+    # ⛔ A WHITESPACE-ONLY RETENTION IS NOT MARKED (#4897 review round 12). The
+    # marker means "there is more", and for a blank body that statement is
+    # misleading: the retaining window holds nothing, so the marker is the ONLY
+    # text the turn carries. That mattered — the gate reads a marker-STRIPPED
+    # view, so an all-blank conversation is refused, but a MIXED one
+    # (a real turn plus a blank over-cap turn) still STORED a marker-only turn,
+    # and the v1 extractor then turned that marker into a Point whose entire
+    # content was synthetic (reproduced in review). Returning the blank
+    # retention silently is the same value the store would hold minus the
+    # misleading sentence, and it keeps the window idempotent.
+    if not content[:max(cap - len(_capture_truncation_marker(len(content))), 0)].strip():
+        return content[:cap]
     marker = _capture_truncation_marker(len(content))
     keep = cap - len(marker)
     if keep < 0:
@@ -6640,8 +6652,20 @@ class TortoiseSDK:
         # redaction while storing the credential verbatim in a non-episodic
         # Point. Live at the time of writing: see issue #5294.
         conversation, _ = _redact_turn_contents(conversation)
-        transcript, _est = _session_llm_transcript(conversation)
-        if not transcript.strip():
+        # ⛔ The same marker-stripped view as the two entry gates (#4897 review round 12). This
+        # defence-in-depth guard judged the MARKED window, so a blank past-cap turn read as
+        # non-blank here while the entry gates refused it: the guard was reachable on this path
+        # (defence-in-depth only — both outer gates run first) and turned a blank conversation
+        # into a Point whose whole content was the synthetic marker.
+        #
+        # ⛔ The GATE and the EXTRACTOR cannot share one transcript here: the gate needs the
+        # marker STRIPPED (that is the fix), while the extractor must KEEP it — the marker is the
+        # evidence of what was cut, and `test_extract_session_llm_windows_a_raw_over_cap_conversation`
+        # binds exactly that. The entry gates do not have this problem because they gate on the
+        # stripped window and hand the MARKED `windowed` onward; here the transcript is both the
+        # gate signal AND the extractor's input, so it is built twice. Both builds are O(turn
+        # window) and this path is already the one the docstrings keep off the event loop.
+        if not _session_llm_transcript(_capture_gate_window(conversation))[0].strip():
             # P1 #1529 (D2): the internal defense-in-depth empty guard must be
             # self-consistent — mode="empty" WITH an error entry, so a caller
             # mapping empty→ok=False can never compute ok=True on this path.
@@ -6654,6 +6678,7 @@ class TortoiseSDK:
                 "errors": ["no extractable content — empty or blank conversation"],
                 "warnings": [], "mode": "empty", "stats": {},
             }
+        transcript, _est = _session_llm_transcript(conversation)
 
         from tortoise.api import EventAPI
         from tortoise.projection import fold, split

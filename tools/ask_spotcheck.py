@@ -368,7 +368,10 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     turn to an ``:Event`` — in capture either.
     """
     windowed = _capture_turn_window(conversation or [])
-    transcript, _est = _session_llm_transcript(windowed)
+    # Same marker-stripped view as capture's own gates (#4897 review round 12): this mirror
+    # previously admitted an over-cap blank turn and seeded a marker-only session, while capture
+    # refused it — contradicting this function's own docstring ("exactly as in capture").
+    transcript, _est = _session_llm_transcript(sdk._capture_gate_window(windowed))
     if not transcript.strip():
         return []
     proj = sdk._get_proj()

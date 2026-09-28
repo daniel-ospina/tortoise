@@ -3543,18 +3543,27 @@ def test_capture_session_blank_conversation_fails_closed(sdk):
     gate must judge the marker-free body. Before the fix, `" " * 5001` was
     admitted and stored as a marker-only turn, where main had refused it.
     """
+    from tortoise.sdk import _capture_truncation_marker
     blank_convos = (
         [{"role": "user", "content": "ok"}],
         [{"role": "user", "content": " "}],
         [{"role": None, "content": None}],
         [{"role": "user"}],                      # missing content key
-        [{"role": "user", "content": " " * 5000}],  # validator's upper bound, whitespace
+        [{"role": "user", "content": " " * 5000}],  # the window cap, whitespace
         [{"role": "user", "content": 0}],         # str() = "0", below floor
         [{"role": "user", "content": "ab"}],      # 2 chars < floor
-        # over-cap blanks: the clipped body is marked, and must STILL be blank
+        # over-cap blanks: the clipped body must STILL read as blank
         [{"role": "user", "content": " " * 5001}],   # cap + 1
         [{"role": "user", "content": "\n" * 6000}],  # newlines survive the clip
         [{"role": "user", "content": "\t" * 6000}],  # tabs survive the clip
+        # ⛔ A CLIENT-SUPPLIED MARKER LOOKALIKE — the row that isolates `_capture_gate_window`.
+        # The rows above are ALSO covered by "a blank retention is not marked" (round 12), so with
+        # only those, reverting the gate left this test GREEN (verified — the mutation survived).
+        # A caller can paste marker-shaped text as CONTENT: the window does not clip it (it is
+        # under the cap), so the marker is genuine text and only the gate's strip makes it read as
+        # the nothing it is.
+        [{"role": "user", "content": _capture_truncation_marker(5001)}],
+        [{"role": "user", "content": _capture_truncation_marker(10 ** 9)}],
     )
     for conv in blank_convos:
         res = sdk.capture_session(conv)
@@ -4290,7 +4299,7 @@ def test_the_marker_survives_the_servers_cap_reapplication():
         _capture_turn_texts,
         _capture_turn_window,
     )
-    # 400 x 25 chars = 10,000, clipped to the cap; the 20-char AWS keys inside
+    # 400 x 21 chars (4 + 16 + 1) = 8,400, clipped to the cap; the 20-char AWS keys inside
     # the stored window each expand to a 28-char marker, pushing it past the cap.
     content = ("AKIA" + "ABCDEFGHIJKLMNOP" + " ") * 400
     once = _capture_turn_window([{"role": "user", "content": content}])
@@ -4497,7 +4506,57 @@ def test_extract_session_llm_windows_a_raw_over_cap_conversation(
     assert seen, "the transcript builder was never called"
     assert all(len(c) <= _CAPTURE_TURN_CAP for c in seen[0]), (
         "the M2 extractor received an unclipped body from a raw caller")
-    assert _CAPTURE_TRUNCATION_SENTINEL in seen[0][0]
+    # ⛔ The GATE and the EXTRACTOR build the transcript SEPARATELY now (#4897 review round 12):
+    # the gate needs the marker STRIPPED (a blank past-cap turn must read as blank), the extractor
+    # needs it KEPT (it is the evidence of what was cut). So the marker is no longer on the FIRST
+    # call — asserting `seen[0]` made this test bind the gate's call instead of the extractor's.
+    assert any(_CAPTURE_TRUNCATION_SENTINEL in c[0] for c in seen if c), (
+        "the extractor must see the cut marked — the marker is the evidence of what was removed")
+    assert all(len(c) <= _CAPTURE_TURN_CAP for call in seen for c in call), (
+        "EVERY builder call must receive a clipped body, gate included")
+
+
+def test_a_blank_over_cap_turn_is_not_marked(sdk):
+    """A blank past-cap turn stores NO synthetic marker (#4897 review round 12).
+
+    The marker means "there is more", and for a whitespace-only retention that is
+    misleading: the window holds nothing, so the marker is the ONLY text the turn
+    carries. It mattered in a MIXED conversation — the entry gates refuse an
+    all-blank one, so a real turn plus a blank over-cap turn was ADMITTED and the
+    blank turn was stored as a marker-only turn, which the v1 extractor then turned
+    into a Point whose whole content was synthetic (reproduced in review).
+
+    REDs on restoring the unconditional marker: the stored turn then contains
+    ``truncated:`` and a marker-only turn exists again.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _clip_capture_turn_content,
+    )
+    # At the helper level, both directions.
+    blank = _clip_capture_turn_content(" " * (_CAPTURE_TURN_CAP + 1000), _CAPTURE_TURN_CAP)
+    assert _CAPTURE_TRUNCATION_SENTINEL not in blank, (
+        f"a blank retention must not be marked; got {blank[-60:]!r}")
+    real = _clip_capture_turn_content("hello " * 2000, _CAPTURE_TURN_CAP)
+    assert _CAPTURE_TRUNCATION_SENTINEL in real, (
+        "a turn with REAL content past the cap must still be marked")
+    assert len(real) == _CAPTURE_TURN_CAP
+
+    # And end to end: a mixed conversation stores no synthetic marker.
+    sdk.capture_session(
+        [{"role": "user", "content": "real content here"},
+         {"role": "user", "content": " " * 6000}],
+        session_id="sess-4897-blank-marker")
+    stored = [
+        row[0]
+        for row in sdk._get_proj().g.query(
+            "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+        ).result_set
+    ]
+    assert stored, "the real turn must still be stored"
+    assert not any(_CAPTURE_TRUNCATION_SENTINEL in (row or "") for row in stored), (
+        f"no marker-only turn may be stored: {stored}")
 
 
 def test_capture_writes_mitigates_artifact(sdk, monkeypatch):
