@@ -22,7 +22,8 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
-                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS)
+                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
+                          _supersede_window_end, _now_iso)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -648,6 +649,65 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
             f"Graph-scoped keys cannot access {surface}.")
 
 
+#: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to
+#: the ``_SENSITIVE_OP_LIMITS`` entry the op is governed by. Enforced at the
+#: dispatch point below, NEVER inside a handler: a handler that charges its own
+#: limit is the second implementation of one budget that this seam exists to
+#: prevent, and it is the entry point the REST twin cannot see.
+_MCP_BUDGETED_OPS: dict[str, str] = {
+    # tortoise_pack_install reaches pack_manifest_store.upsert_tenant_manifest
+    # directly (no HTTP), so #2038's per-IP budget on the REST twin
+    # POST /v1/packs/manifests never applied to it.
+    "tortoise_pack_install": "pack_manifest",
+}
+
+
+async def _check_mcp_op_budget(name: str, org_id: str) -> None:
+    """#2050: charge the sensitive-op budget for an MCP tool, or refuse.
+
+    `tortoise_pack_install` is the cheapest path to the same expensive
+    operation the REST surface bounds: it calls `upsert_tenant_manifest`
+    in-process, consuming no `pack_manifest` budget at all and bounded only by
+    the generic 100/min per-key middleware — a ~1200x looser bound than the
+    REST twin's 5/hr. The dispatch point is the ONE funnel every client tool
+    call passes through on every transport, so the budget is applied HERE.
+
+    Team scope, not IP: the caller is an authenticated agent server, and a
+    per-IP frame would be both wrong (shared egress addresses) and unavailable
+    (no Request at this seam). The team-scoped bucket is charged through
+    `hosted_api._check_sensitive_op_budget` — the SAME shared
+    `_SENSITIVE_BUCKETS` store, the SAME `_SENSITIVE_OP_LIMITS` table and the
+    SAME refusal contract the REST arm uses.
+
+    Ordering mirrors the REST twin (`upload_pack_manifest` charges before its
+    scope check), so a scope-denied call still consumes budget there and here.
+    Refusal is RAISED, not returned as a `{"installed": False}` dict: a dict
+    would read to the caller as a completed call, not a refusal. Auth (401) is
+    excluded by construction — transport middleware rejects it before this
+    seam, exactly as the REST dependency does.
+
+    No scope (stdio / operator) or the selfhost placeholder org → skip: there
+    is no tenant registry to bill, mirroring `_enforce_quota`.
+    """
+    op = _MCP_BUDGETED_OPS.get(name)
+    if op is None:
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if not org_id or org_id == SELFHOST_ORG_ID:
+        return
+    from fastapi import HTTPException
+
+    from tortoise.hosted_api import _check_sensitive_op_budget
+    try:
+        await _check_sensitive_op_budget(op, org_id)
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        raise ToolError(
+            f"{exc.detail} (Retry-After: {exc.headers.get('Retry-After', '3600')}s)",
+        ) from None
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -664,6 +724,9 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     org_id = _current_org_id.get() or ""
+    # #2050: budget BEFORE the scope gate — the REST twin charges before its
+    # scope check too, so the two surfaces agree on what consumes budget.
+    await _check_mcp_op_budget(name, org_id)
     _enforce_mcp_tool_scope(name)
     maybe_record_mcp_read(
         name, org_id, _current_org_limits.get(),
@@ -2371,7 +2434,16 @@ def tortoise_health() -> dict:
     tight fast-degrade bound. The allowance is resolved at CALL time
     (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
     set in the repo-root ``.env`` — loaded after this module imports
-    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
+    ``tortoise.monitoring`` — is honoured instead of frozen at import.
+
+    #3253 (health-truthful): the ``graph_size`` taxonomy count is bounded by
+    ``monitoring.GRAPH_SIZE_TIMEOUT`` on its own worker, so this tool's total
+    is ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT`` at
+    worst — never as long as a half-broken server stalls. When the count
+    cannot be measured, the report carries the per-call ``graph_size_error``
+    marker (``None`` when ``graph_size`` was really measured, so a 0 is a
+    genuinely empty graph; a string otherwise), instead of the previous
+    indistinguishable ok/0."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
@@ -2985,6 +3057,128 @@ _OVERVIEW_SECTIONS = (
 )
 
 
+#: #3510 — the no-arg combined summary reports DATA-PROPORTIONAL orient
+#: sections as bounded counts, never as their full row array. A section is
+#: data-proportional when it yields one row per graph row rather than one row
+#: per graph-shape token (a fixed vocabulary) AND IS UNCAPPED — four qualify:
+#: `sources` (one row per registered URL), `tags` (one row per :Tag node),
+#: `pointkinds` (one row per pointKind PRESENT) and `structure_check` (one row
+#: per violating Point). `stale` is also one row per graph row, but it is
+#: CAPPED by the caller's `limit` (default 50 rows; still only ~3,000 rows at
+#: limit=5000), so it is not folded here. Returning any of the four wholesale
+#: made the orientation call more expensive than the list_* calls it was built
+#: to replace — measured on an embedded graph: `sources` 35,190 of 36,498 bytes
+#: (96.4%) at 300 sources, `tags` 14,000 of 15,187 bytes (92.2%) at 400 tags,
+#: `structure_check` 73,490 of 93,829 bytes (78.3%) at 400 orphaned drafts,
+#: `pointkinds` 19,200 bytes at 400 distinct kinds. Each wrapped section keeps
+#: its full array reachable via its own section=.
+_OVERVIEW_SUMMARY_TOP = 20
+
+
+#: #3510 review (P2) — the folded remainder is a SIBLING field of the summary,
+#: never a key inside the group map. `group_field` is free-form graph text (a
+#: tag name, a `sourceKind` string), so there is no in-map sentinel string a
+#: real group cannot produce: a genuine group named "other" used to be merged
+#: with the remainder (3 real `sourceKind="other"` rows reported 14). Kept out
+#: of the map, the collision is impossible by construction.
+_OVERVIEW_SUMMARY_OTHER = "other"
+
+
+def _overview_summary(rows: Any, group_field: str, out_field: str,
+                      count_field: str | None = None, *,
+                      unit: str = "rows") -> Any:
+    """Bounded summary of a data-proportional orient section (#3510).
+
+    Returns {total, <out_field>[, with_points][, other]} — never the rows.
+    `<out_field>` groups the rows by `group_field`, keeps the
+    _OVERVIEW_SUMMARY_TOP largest groups and reports the folded remainder as the
+    sibling `other`. The bound is _OVERVIEW_SUMMARY_TOP, NOT the group
+    vocabulary: `group_field` is graph text a caller can invent on every row, so
+    the vocabulary is unbounded and the top-N cut is what bounds the map (see
+    tests/test_orient_direct_consolidation.py::
+    test_fold_is_bounded_when_the_group_vocabulary_is_unbounded).
+
+    THE UNIT IS THE POINT — `unit` fixes what every number means (each
+    `<out_field>` value, `total` and `other`), or the summary misinforms:
+
+    * ``unit="magnitude"`` — the group's summed `count_field`. Used by `tags`
+      and `pointkinds`, where a group is exactly ONE row, so a row count would
+      report a literal 1 for every group while throwing away the count the row
+      carries (`tortoise_list_tags` reports {"hot": 50}; the summary must say
+      50, not 1).
+    * ``unit="rows"`` — the group's row count. Used by `sources`, where a group
+      aggregates many registered Sources, so the row count (how many sources of
+      this kind) is a real magnitude and keeps the registry's mostly-`points:0`
+      emptiness visible; and by `structure_check`, whose rows carry no separate
+      magnitude, so a violation row's count IS its count of violations.
+
+    The fold is a partition in that unit:
+    ``sum(<out_field>.values()) + other == total``, always.
+
+    `with_points` is emitted only when the unit is rows and a `count_field` was
+    given: it counts rows whose magnitude is positive — the SAME row unit as
+    `total` (e.g. "how many registered sources actually extracted points"). It
+    is omitted for a magnitude section, where a row count stranded beside a
+    magnitude `total` would be the very unit confusion this parameter exists to
+    stop.
+
+    A non-list input is an error envelope from _safe (or a mocked shape) and is
+    passed through unchanged.
+    """
+    if not isinstance(rows, list):
+        return rows
+    if unit not in ("rows", "magnitude"):
+        raise ValueError(f"_overview_summary: unknown unit {unit!r}")
+    if unit == "magnitude" and count_field is None:
+        raise ValueError("_overview_summary: unit='magnitude' needs a count_field")
+    with_points = 0
+    groups: dict[str, list[int]] = {}
+    for row in rows:
+        row = row if isinstance(row, dict) else {}
+        magnitude = 0
+        if count_field is not None:
+            value = row.get(count_field)
+            if isinstance(value, (int, float)) and value > 0:
+                with_points += 1
+                magnitude = int(value)
+        raw = row.get(group_field)
+        # "" is the group key for a row whose group value is absent or blank —
+        # a real blank value and a missing one describe the same thing, so they
+        # are the same group. (The previous "unknown" fallback was a synthetic
+        # key a real group literally named "unknown" merged into: the same
+        # collision class as the `other` remainder this function now keeps out
+        # of the map.)
+        key = raw if isinstance(raw, str) and raw else ""
+        bucket = groups.setdefault(key, [0, 0])
+        bucket[0] += 1
+        bucket[1] += magnitude
+
+    def _unit_value(bucket: list[int]) -> int:
+        return bucket[1] if unit == "magnitude" else bucket[0]
+
+    # The section's own unit ranks first: for `sources` the row count decides
+    # (how many sources of this kind), for `tags`/`pointkinds` the row counts all
+    # tie at 1 so the summed magnitude is the only thing that can order them
+    # (most-used tags first).
+    if unit == "magnitude":
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][0], kv[0]))
+    else:
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][1], kv[0]))
+    bounded = {k: _unit_value(b) for k, b in top[:_OVERVIEW_SUMMARY_TOP]}
+    other = sum(_unit_value(b) for _, b in top[_OVERVIEW_SUMMARY_TOP:])
+    total = sum(_unit_value(b) for _, b in top)
+    summary: dict[str, Any] = {"total": total}
+    if unit == "rows" and count_field is not None:
+        summary["with_points"] = with_points
+    summary[out_field] = bounded
+    # SIBLING field, never a key in `<out_field>` — see _OVERVIEW_SUMMARY_OTHER.
+    if other:
+        summary[_OVERVIEW_SUMMARY_OTHER] = other
+    return summary
+
+
 def _overview_section(section: str, entity_id: str | None,
                       days: int, limit: int) -> Any:
     """Dispatch one overview section to its original tool body."""
@@ -3031,7 +3225,19 @@ def tortoise_overview(section: str | None = None,
     Each section returns exactly what the legacy tool returned.
 
     Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id).
+    section except topics (which requires entity_id). The UNCAPPED sections
+    whose size grows with the graph's ROWS rather than its shape (a fixed
+    vocabulary) are reported as bounded counts, never as rows, so the summary
+    stays compact as the graph grows (#3510). Each number in a section's
+    summary is in that section's OWN unit:
+      `sources`         → {total, with_points, by_kind} in SOURCES (a group is
+                          many source rows, so `by_kind` counts sources)
+      `tags`            → {total, by_name} in TAGGED-POINT counts
+      `pointkinds`      → {total, by_kind} in POINT counts
+      `structure_check` → {total, by_rule} in VIOLATIONS
+    Each `by_*` map keeps its top 20 groups and reports the folded remainder as
+    the sibling `other`, in the same unit. Pass the matching section= for the
+    full array.
 
     topics: entityProfile lite for an entity — requires entity_id.
     stale: Points not updated in N days — honors days/limit.
@@ -3041,7 +3247,24 @@ def tortoise_overview(section: str | None = None,
         for sec in _OVERVIEW_SECTIONS:
             if sec == "topics":
                 continue  # requires entity_id — not part of the default summary
-            combined[sec] = _overview_section(sec, entity_id, days, limit)
+            result = _overview_section(sec, entity_id, days, limit)
+            # #3510: every data-proportional section is folded to bounded
+            # counts here — the rows themselves stay behind the explicit
+            # section= calls. `tags`/`pointkinds` fold in their section's own
+            # magnitude (each group is one row, so a row count would be a
+            # literal 1); `sources`/`structure_check` fold in rows.
+            if sec == "sources":
+                result = _overview_summary(result, "sourceKind", "by_kind",
+                                           "points")
+            elif sec == "tags":
+                result = _overview_summary(result, "name", "by_name", "count",
+                                           unit="magnitude")
+            elif sec == "pointkinds":
+                result = _overview_summary(result, "kind", "by_kind", "count",
+                                           unit="magnitude")
+            elif sec == "structure_check":
+                result = _overview_summary(result, "type", "by_rule")
+            combined[sec] = result
         return combined
     if not isinstance(section, str):
         return {"error": f"overview: section must be a string, got {type(section).__name__}"}
@@ -3950,6 +4173,268 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
+# ── #3656: say WHY a `tools/call` is rejected ────────────────────
+# The ONLY producer of the observed signature -- HTTP 200 carrying
+# ``-32602 "Invalid request parameters"`` with ``data: ""`` -- is the MCP SDK's
+# session receive loop (``mcp/shared/session.py``), whose blanket
+# ``except Exception`` around request admission converts EVERY failure there
+# into that one message. Two consequences follow, and both are tortoise's to
+# fix:
+#
+#   1. The reason is DISCARDED. The SDK logs it (``Failed to validate
+#      request: ...``) and puts nothing actionable on the wire, which is
+#      exactly the harm #3656 reports -- "the client learns nothing
+#      actionable".
+#   2. The signature is unclassifiable after the fact. #3656 could only be
+#      reported as an observation because no artifact said which member the
+#      server objected to.
+#
+# Because a ``tools/call`` rejected here is one the SDK had already admitted at
+# the transport layer, the only way this signature appears is the request
+# reaching the session and being rejected there.
+#
+# WHAT THIS CANNOT REACH (measured, not assumed): the same ``except Exception``
+# has a SECOND arm -- any exception escaping ``ServerSession._handle_incoming``
+# (demonstrated: ``anyio.BrokenResourceError`` when the session's
+# incoming-message stream is already broken) is ALSO answered with this exact
+# ``-32602`` / ``data: ""``, for a perfectly well-formed request, with no
+# validator involved. That arm is reproduced at the SDK-session level (see
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary::
+# test_second_arm_of_the_signature_is_a_broken_incoming_stream), where the
+# session's write stream is alive and the error IS written back; it is NOT
+# reproduced through the HTTP surface, and nothing here shows the transport can
+# reach that state -- so whether it is client-visible on ``/mcp`` is
+# unestablished. It is therefore reported rather than papered over -- there is
+# no "member" to name in that arm, and inventing one would be a lie. The
+# underlying defect there is the SDK's, not tortoise's: an internal failure is
+# reported as INVALID_PARAMS.
+#
+# The fix runs the SDK's OWN model for the ENVELOPE VERDICT, so an envelope is
+# never refused that the session would serve. That guarantee is exact for the
+# envelope and is pinned against a live ``ServerSession`` in
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary. It is NOT a claim about
+# the transport gates, which are a transcription with a documented drift edge --
+# see `_transport_would_dispatch_jsonrpc_post`.
+def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
+    """The SDK's own validation errors for a ``tools/call`` envelope, or None.
+
+    Gate 3 is the producer of the arm this guard names (the receive loop is the
+    one exception SITE, and it has a second arm this guard cannot reach -- see
+    the module comment above). These are the SDK's own expressions, in the
+    order the SDK runs them:
+
+    1. ``JSONRPCMessage.model_validate(raw)`` -- the transport's pure-format
+       check. On failure the transport owns the answer (its 400 carrying
+       ``-32602 Validation error: ...``; ``-32700`` is the earlier
+       ``json.loads`` failure), so this returns None and the request passes
+       through untouched.
+    2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
+       ONLY a request; a notification / response / error body is answered
+       ``202 Accepted`` (`mcp/server/streamable_http.py`). This gate is
+       load-bearing for a body carrying ``method``/``id`` **and an ``error``
+       member**, which the union resolves to ``JSONRPCError`` (measured: a
+       ``result`` member instead resolves to a REQUEST, which always has a real
+       rejection reason and is handled by gate 3). Without this gate the guard
+       would replace that body's 202 with a ``-32602`` -- the over-strict
+       direction, which breaks a working caller.
+    3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
+       -- what ``BaseSession._receive_loop`` runs, and the producer of the
+       opaque ``-32602 "Invalid request parameters"`` this guard exists to
+       replace.
+
+    Those three gates gate the arm this guard is for: an envelope the SDK
+    rejects. The same SDK ``except`` also answers a well-formed request when
+    ``_handle_incoming`` raises, and there is no member to name in that arm --
+    the caller passes through and the SDK keeps the last word, which is why this
+    guard is a message fix and not a fix for #3656's transient (see the module
+    comment above).
+
+    The REASON comes from ``CallToolRequest``, the one variant that
+    ``method == "tools/call"`` discriminates to. A union failure reports every
+    variant's errors (a 30-entry dump naming ``PingRequest``, ``GetTaskRequest``
+    and the rest), which is noise on the wire; the concrete variant reports only
+    the members of THIS call -- ``params.name``, ``params.arguments``, ... If the
+    concrete variant unexpectedly validates anyway, the union's own errors are
+    used rather than a fabricated reason.
+
+    Returns None when the envelope is one the SDK admits -- and ALSO whenever
+    the reproduction cannot be made (models unavailable, an unexpected
+    exception). A guard that cannot reproduce the SDK's verdict must never
+    invent one: pass-through is the fail-safe direction, and it is why a stale
+    copy of these expressions can rename an error but can never refuse a
+    request the SDK would have served.
+    """
+    try:
+        from mcp.types import (CallToolRequest, ClientRequest,  # noqa: I001
+                               JSONRPCRequest, JSONRPCMessage)
+        from pydantic import ValidationError as _PydanticValidationError
+    except Exception:  # pragma: no cover - import guard, never a request failure
+        return None
+
+    def _errors(exc) -> list[dict[str, Any]]:
+        return [
+            {
+                "loc": [str(part) for part in err.get("loc", ())],
+                "msg": str(err.get("msg", "invalid")),
+                "type": str(err.get("type", "value_error")),
+            }
+            for err in exc.errors()
+        ]
+
+    try:
+        message = JSONRPCMessage.model_validate(raw)
+        # Gate 2: the transport dispatches only a REQUEST. A notification /
+        # response / error body is answered 202, not "invalid params".
+        if not isinstance(message.root, JSONRPCRequest):
+            return None
+        dumped = message.root.model_dump(by_alias=True, mode="json",
+                                        exclude_none=True)
+    except Exception:
+        return None  # the transport owns this failure; do not pre-empt it
+    try:
+        ClientRequest.model_validate(dumped)
+    except _PydanticValidationError as union_exc:
+        try:
+            CallToolRequest.model_validate(dumped)
+        except _PydanticValidationError as concrete_exc:
+            return _errors(concrete_exc)
+        except Exception:  # pragma: no cover - fall back to the union dump
+            return _errors(union_exc)
+        return _errors(union_exc)  # pragma: no cover - unreachable in practice
+    except Exception:  # pragma: no cover - never invent a reason
+        return None
+    return None
+
+
+def _routed_path(request: Any) -> str:
+    """The request path AS THE ROUTER SEES IT.
+
+    A middleware inside a MOUNTED app receives the full path with the mount
+    prefix still on it, plus ``root_path``: a POST to ``/mcp`` arrives as
+    ``path='/mcp/'`` with ``root_path='/mcp'`` (measured — Starlette's ``Mount``
+    leaves the prefix in place and the router strips it while matching). So a
+    check against the transport's own endpoint has to strip it too, or the guard
+    would never fire in production (mounted at ``/mcp``) while firing in a test
+    that mounts at the root.
+    """
+    root = request.scope.get("root_path") or ""
+    path = request.url.path
+    if root and path.startswith(root):
+        return path[len(root):] or "/"
+    return path
+
+
+def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
+                                          headers: Any) -> bool:
+    """True when the SDK's transport would DISPATCH this POST to the session.
+
+    Every gate listed below is reproduced from the transport, so the guard
+    speaks only where the SDK speaks. The middleware wraps the ROUTER, so
+    without this predicate it can answer ``200 -32602`` for a request no part of
+    the SDK ever saw. Each clause closes a MEASURED divergence of that kind:
+
+    * ``endpoint`` -- the route. A POST to a path this app does not route is a
+      404; the caller passes the same string it gives ``mcp.http_app(path=...)``
+      and the request's path as the router sees it (``_routed_path``), so the
+      guard's idea of "the endpoint" cannot drift from the route table.
+    * ``TransportSecurityMiddleware._validate_content_type`` -- the raw header
+      must START WITH ``application/json`` (its 400). This is a different and
+      STRICTER gate than the transport's own part match below: ``text/plain,
+      application/json`` is a 400, not a 415.
+    * ``StreamableHTTPServerTransport._check_content_type`` -- an EXACT
+      ``application/json`` part in the ``;``/``,``-split (its 415), so
+      ``application/jsonx`` keeps the 415 that the prefix gate above let
+      through.
+    * ``_check_accept_headers`` -- both media types, because this app is built
+      with ``json_response=False`` (SSE responses); otherwise the transport
+      answers 406.
+    * ``_validate_protocol_version`` -- absent means the negotiated default, an
+      unsupported value is the transport's 400 ``-32600``.
+    * ``RequestBodyLimitMiddleware`` -- a DECLARED length within
+      ``DEFAULT_MAX_REQUEST_BODY_SIZE``; without the bound this middleware would
+      buffer an unbounded body and then replace that limit's 413. In THIS app
+      ``mcp_auth.RequestBodySizeMiddleware`` (1 MB) binds first, so this clause
+      is the belt to that braces: it keeps the guard's own memory bounded if
+      that cap is ever reordered or removed. A chunked POST declares no length,
+      so it is passed straight through to the limiter that counts bytes.
+
+    NOT reproduced, deliberately, because each is answered before this
+    middleware or is a no-op here -- named rather than silently assumed:
+
+    * ``TransportSecurityMiddleware``'s **Host** (421) and **Origin** (403)
+      checks: ``HostOriginGuardMiddleware`` sits OUTSIDE this middleware with
+      the same allowlists and answers both
+      (``test_origin_and_host_refusals_still_precede_the_guard``).
+    * ``_validate_session``: a no-op under ``stateless_http=True``
+      (``mcp_session_id`` is None), and the initialize-only session-id 404
+      cannot apply to ``tools/call``.
+
+    The order of the header clauses here is this function's, not the SDK's
+    (the transport checks accept before content-type); each is independently
+    decisive, so the order cannot admit a request the SDK refuses.
+
+    Being STRICTER than the transport is always safe here: the request simply
+    passes through and the SDK answers, so relaxing a gate, changing the
+    response mode or raising a limit makes the guard stop intercepting rather
+    than mislabel -- and an import failure returns False for the same reason
+    (never pre-empt on a broken assumption). The converse does NOT hold, and is
+    this design's known edge: a gate the SDK ADDS, or one narrowed here by
+    mistake, makes the guard LOOSER and it would answer for a request the
+    transport refuses. The tests pin the gates enumerated below; a new upstream
+    gate is not detectable from here.
+    """
+    try:
+        from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
+        from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
+        from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+        from mcp.types import DEFAULT_NEGOTIATED_VERSION
+    except Exception:  # pragma: no cover - never pre-empt on an import failure
+        return False
+    if path != endpoint:  # ── the route: anything else is the router's 404
+        return False
+    # ── the transport's own gates, in its own order ──
+    content_type = headers.get("content-type", "")
+    if not content_type.lower().startswith(CONTENT_TYPE_JSON):
+        return False  # TransportSecurityMiddleware: 400
+    parts = [p.strip() for p in content_type.split(";")[0].split(",")]
+    if not any(p == CONTENT_TYPE_JSON for p in parts):
+        return False  # _check_content_type: 415
+    accepted = [m.strip() for m in headers.get("accept", "").split(",")]
+    has_json = any(m.startswith(CONTENT_TYPE_JSON) for m in accepted)
+    has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
+    if not (has_json and has_sse):
+        return False  # _validate_accept_header: 406
+    # The SDK substitutes the default only when the header is ABSENT (`is
+    # None`), so a present-but-empty value is its 400 -- `.get(k, default)`, not
+    # `or`, or an empty header would be silently upgraded to the default.
+    version = headers.get("mcp-protocol-version", DEFAULT_NEGOTIATED_VERSION)
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return False  # _validate_protocol_version: 400 -32600
+    declared = headers.get("content-length")
+    if declared is None:
+        return False  # chunked: RequestBodyLimitMiddleware counts the bytes
+    try:
+        if int(declared) > DEFAULT_MAX_REQUEST_BODY_SIZE:
+            return False  # RequestBodyLimitMiddleware: 413
+    except ValueError:  # pragma: no cover - a malformed length is not ours
+        return False
+    return True
+
+
+def _tools_call_rejection_message(errors: list[dict[str, Any]]) -> str:
+    """Render the field locations the SDK rejected, in the client's language.
+
+    ``loc`` from a pydantic union error is the offending MEMBER PATH (e.g.
+    ``params.name``), which is precisely what the discarded reason held and
+    what a client needs to repair the call.
+    """
+    parts = []
+    for err in errors:
+        member = ".".join(err.get("loc") or []) or "<request>"
+        parts.append(f"{member}: {err.get('msg', 'invalid')}")
+    return "Invalid params: " + "; ".join(parts)
+
+
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     allowed_hosts: list[str] | None = None,
                     rate_limit: int = 100,
@@ -3987,11 +4472,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     (route unused) and coexists with the POST/DELETE streamable-http route.
     """
     from starlette.middleware import Middleware  # noqa: I001
+    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
     from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # The transport's endpoint INSIDE this sub-app. One value, used both to
+    # build the route and to gate the #3656 admission guard -- so the guard can
+    # never intercept a path the route table does not serve (its 404).
+    mcp_path = "/"
 
     # auth_mode middleware selection. OrgResolutionMiddleware (tenant mode) is
     # imported here but only ever INSTANTIATED in the tenant branch — static/none
@@ -4057,6 +4548,76 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
             return [t for t in tools if _visible(t)]
 
+    class ToolCallAdmissionMiddleware(BaseHTTPMiddleware):
+        """Answer a rejected ``tools/call`` with the SDK's OWN reason (#3656).
+
+        See ``_tools_call_rejection`` above for why this surface has one producer
+        SITE of the OPAQUE ``-32602`` signature -- this middleware, when it
+        answers, is a second producer of ``-32602`` with a real reason -- and one
+        validator for the envelope verdict (the SDK's own model, which the guard
+        runs rather than replaces). Scope is deliberately narrow, and each
+        narrowing is a case where the SDK does NOT emit the opaque signature:
+
+        * ``POST`` only, and only to the transport's own endpoint
+          (``mcp_path``), and only when the SDK's own gates would let the body
+          through -- see ``_transport_would_dispatch_jsonrpc_post`` and
+          ``_routed_path``. Everything the transport would answer itself (404
+          for another path, 400/403/406/413/415 for its own refusals) stays the
+          transport's answer.
+        * ``jsonrpc == "2.0"`` and an ``id`` present -- so a
+          ``tools/call`` NOTIFICATION passes through (the SDK only logs those)
+          and a body missing ``jsonrpc`` passes through (the transport rejects
+          it first, with a different message).
+        * ``method == "tools/call"`` only -- every other method is untouched.
+        * A JSON object only -- a batch array is left to the transport.
+        * A body ``JSONRPCMessage`` resolves to a REQUEST -- a notification /
+          response / error root is answered 202 by the transport, and this
+          middleware must not turn that into a ``-32602``.
+
+        As the transport does, this marks the response uncacheable and
+        unbuffered (``Cache-Control: no-cache, no-transform`` and
+        ``X-Accel-Buffering: no``): a proxy must not store or coalesce a
+        JSON-RPC error, and the frame is one event long. The body framing is the
+        transport's SSE event; the headers are pinned by
+        ``test_the_named_error_is_uncacheable_and_unbuffered``.
+        """
+
+        async def dispatch(self, request, call_next):
+            if request.method != "POST":
+                return await call_next(request)
+            if not _transport_would_dispatch_jsonrpc_post(
+                    _routed_path(request), mcp_path, request.headers):
+                return await call_next(request)
+            try:
+                raw = json.loads(await request.body())
+            except Exception:
+                # The transport owns parse errors (it answers -32700), and it
+                # must still see the body -- BaseHTTPMiddleware replays it.
+                return await call_next(request)
+            if not isinstance(raw, dict):
+                return await call_next(request)
+            if (raw.get("jsonrpc") != "2.0" or "id" not in raw
+                    or raw.get("method") != "tools/call"):
+                return await call_next(request)
+            errors = _tools_call_rejection(raw)
+            if errors is None:
+                return await call_next(request)
+            from starlette.responses import Response
+            # The auth plane's one envelope builder (#5281 house primitive),
+            # framed here as the transport's SSE event instead of a JSON
+            # HTTP error. Same code, same shape, one definition.
+            body = json.dumps(_mcp_auth._jsonrpc_error_body(
+                # The SDK's own code for this failure class -- unchanged.
+                -32602,
+                _tools_call_rejection_message(errors),
+                {"method": "tools/call", "errors": errors},
+                request_id=raw["id"],
+            ))
+            return Response(f"event: message\ndata: {body}\n\n",
+                            status_code=200, media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache, no-transform",
+                                     "X-Accel-Buffering": "no"})
+
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
     # new _HTTPToolFilter to the shared module-level mcp instance (code-review
@@ -4103,13 +4664,19 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         # Sets the curation-group ContextVar for the tools/list transform.
         middleware.append(group_mw)
 
+    # #3656: INNERMOST — it runs after security headers / body-size / auth /
+    # rate-limit have each had their say, immediately before the MCP transport,
+    # so the reason it reports is the LAST word on the request rather than a
+    # substitute for an auth or quota refusal. See the class docstring.
+    middleware.append(Middleware(ToolCallAdmissionMiddleware))
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         allowed_hosts=allowed_hosts or [],
-        path="/",
+        path=mcp_path,
         middleware=middleware,
     )
 
@@ -4484,6 +5051,31 @@ def _preview_supersede(sdk, old_id: str, new_id: str,
             created.append({"type": rtype, "from": op_id, "to": new_id})
             handled_old_edge_ids.add(op_rid)
 
+    # #4021 parity — a window whose resolved END precedes the predecessor's own
+    # validFrom is refused by the writer before it mutates anything, so the
+    # preview must refuse it too (a `dry_run` that reports success on a write
+    # that will raise is the fail-open direction of the same defect).
+    # Placed AFTER the 2a loop and BEFORE `succ_rows`: the writer validates
+    # every relationship type before its window guard, so an undeclared rel
+    # type must win in BOTH. Own queries — `succ_rows` returns ID(n) only and
+    # its `[0]` indexing is relied on by every pass below.
+    win_rows = proj.g.query(
+        "MATCH (o:Point {id:$old}), (n:Point {id:$new}) "
+        "RETURN o.validFrom, n.validFrom, n.createdAt",
+        params={"old": old_id, "new": new_id},
+    ).result_set
+    if win_rows:
+        _supersede_window_end(
+            old_id=old_id, new_id=new_id,
+            # EVERY node carrying the id — the writer stamps them all, so a
+            # first-row-only read would preview success on a write the
+            # writer refuses (the fail-open direction of this same defect).
+            old_vfs=[r[0] for r in win_rows],
+            valid_from=None,  # the MCP surface exposes no valid_from kwarg
+            stored_vf=win_rows[0][1],
+            successor_created_at=win_rows[0][2],
+            now=_now_iso(),   # the writer's clock, not a new one
+        )
     succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
                             params={"id": new_id}).result_set
     # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a

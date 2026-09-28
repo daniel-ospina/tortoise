@@ -1181,7 +1181,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_operator_action
 - name: tortoise_overview
-  served_from: tortoise/mcp_server.py:13bccb87584e2779
+  served_from: tortoise/mcp_server.py:84c7d0ba4cc19b63
   family: reasoning
   family_rank: 3
   served: http
