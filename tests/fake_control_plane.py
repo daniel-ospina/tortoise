@@ -326,18 +326,26 @@ class FakeControlPlane:
                              "ask_tokens_out": tout, "ask_cost_usd": cost})
             return None
         if fn == "metering_increment_capture_cost":
-            # #3665: migration 20260917000001 — additive upsert mirroring
-            # metering_increment_capture_cost (the capture lane's twin),
-            # re-keyed onto the window start by 20260918000001 (#3825).
+            # #3665/#5045: migrations 20260917000001 then 20260926000001 —
+            # additive upsert mirroring metering_increment_capture_cost (the
+            # capture lane's twin), re-keyed onto the window start by
+            # 20260918000001 (#3825) and carrying the extraction TOKEN
+            # counters as of 20260926000001 (#5045).
             p = body or {}
             rows = self.tables.setdefault("metering_records", [])
             row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
                         and r.get("period_start") == p.get("p_period_start")),
                        None)
             calls = int(p.get("p_calls") or 0)
+            tin = int(p.get("p_tokens_in") or 0)
+            tout = int(p.get("p_tokens_out") or 0)
             cost = float(p.get("p_cost_usd") or 0.0)
             if row:
                 row["capture_calls"] = row.get("capture_calls", 0) + calls
+                row["capture_tokens_in"] = (
+                    int(row.get("capture_tokens_in") or 0) + tin)
+                row["capture_tokens_out"] = (
+                    int(row.get("capture_tokens_out") or 0) + tout)
                 row["capture_cost_usd"] = (
                     float(row.get("capture_cost_usd") or 0.0) + cost)
             else:
@@ -347,6 +355,8 @@ class FakeControlPlane:
                              "period": _metering_period_label(
                                  p.get("p_period_start")),
                              "capture_calls": calls,
+                             "capture_tokens_in": tin,
+                             "capture_tokens_out": tout,
                              "capture_cost_usd": cost})
             return None
         if fn == "metering_cohort_spend":
