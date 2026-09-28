@@ -665,9 +665,12 @@ def test_graph_script_helpers_decode_credentials(module_name):
     Five of the six (``audit_graph``, ``audit_graph_deep``,
     ``context_removal_audit``, ``parity_sample``, ``pre_migration_snapshot``)
     forward ``cfg["password"]`` to ``FalkorDB(...)``. ``rdb_snapshot_restore``
-    is pinned for consistency with the shared rule only: its callers discard
-    the dict (``# noqa: F841``) and drive the instance through
-    ``docker exec … redis-cli`` without credentials (#3089).
+    consumes the decoded ``cfg["password"]``/``cfg["username"]`` instead, and
+    feeds them to its authenticated ``docker exec … redis-cli`` transport
+    (``REDISCLI_AUTH`` + ``--user``) — see
+    ``tests/test_restore_container_recovery.py`` for the end-to-end pin. This
+    test pins the shared decode rule at the parse boundary the caller now
+    relies on (#3089).
     """
     import importlib.util
     import sys

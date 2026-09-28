@@ -748,10 +748,14 @@ def run_fts_query(
         logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
         _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
-    label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, so the FTS leg reads
+    # the Source label (`_searchText`) — there is no :Document index. The
+    # caller-facing entity_type stays "document".
+    # point→Point, event→Event, subject→Subject
+    label = "Source" if entity_type == "document" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -769,9 +773,23 @@ def run_fts_query(
         expansion_terms=expansion_terms)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
+    # D10 (#5026): the :Source label holds BOTH the document node
+    # (documentKind non-NULL) and the corpus/provenance Source (documentKind
+    # NULL), and the fulltext index is on Source._searchText for EVERY Source.
+    # Without a discriminator, entity_type="document" retrieves non-document
+    # Sources (and entity_type="source" retrieves documents) and they occupy
+    # pool slots before LIMIT. The predicate lands in the post-YIELD WHERE —
+    # i.e. at the retrieval layer, ahead of ORDER BY/LIMIT — on the SAME axis
+    # as quota.py's `documents` meter (documentKind IS NOT NULL) and
+    # sdk.list_sources() (documentKind IS NULL). All three legs mean one
+    # thing: document ⟺ documentKind non-NULL, source ⟺ documentKind NULL.
     if label == "Point":
         status_filter = ("" if excluded_statuses == ()
                          else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+    elif entity_type == "document":
+        status_filter = "WHERE node.documentKind IS NOT NULL "
+    elif entity_type == "source":
+        status_filter = "WHERE node.documentKind IS NULL "
     else:
         status_filter = ""
     try:
@@ -908,10 +926,16 @@ def run_vector_query(
 
     # Operators are Points with is_operator=true — match the Point label
     # (consistent with run_fts_query / run_structural_query). (#172)
-    label = "Point" if entity_type == "operator" else entity_type.capitalize()
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source — the vector leg
+    # reads the Source label, never a Document label. The caller-facing
+    # entity_type stays "document".
+    if entity_type == "document":
+        label = "Source"
+    else:
+        label = "Point" if entity_type == "operator" else entity_type.capitalize()
     # #448: three-way id_field — source→url (canonical key, #149),
-    # event→eventId, else→id
-    if entity_type == "source":
+    # event→eventId, else→id. D10: a document Source resolves by url too.
+    if entity_type in ("source", "document"):
         id_field = "url"
     elif entity_type == "event":
         id_field = "eventId"
@@ -928,9 +952,18 @@ def run_vector_query(
     if not is_embedded:
         index_attempted = True
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): the Source label holds both the document node
+        # (documentKind non-NULL) and the corpus/provenance Source
+        # (documentKind NULL); the predicate lands post-YIELD, ahead of the
+        # outer LIMIT, so a document query never fuses a non-document Source
+        # (and vice versa). Same axis on all three legs.
         if label == "Point":
             vec_status_filter = ("" if excluded_statuses == ()
                                  else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
+        elif entity_type == "document":
+            vec_status_filter = "WHERE node.documentKind IS NOT NULL "
+        elif entity_type == "source":
+            vec_status_filter = "WHERE node.documentKind IS NULL "
         else:
             vec_status_filter = ""
         try:
@@ -997,19 +1030,39 @@ def run_vector_query(
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
             if sig == "B":
-                # Engine-native scores: cosine similarity in (-1, 1] on
-                # similarityFunction:'cosine' indexes — clamp to [0, 1]
-                # and pass through in index rank order.
+                # #5583: the engine's value here is a DISTANCE (lower is
+                # better), NOT a similarity. `db.idx.vector.queryNodes`
+                # returns `1 - cosine` for a
+                # `similarityFunction: 'cosine'` index: a PERFECT match comes
+                # back as 0.0 and an orthogonal one as 1.0. Passing that
+                # through as a similarity inverted this leg exactly — the
+                # WORST row scored highest, and every `min_similarity` floor
+                # discarded the rows it exists to keep. Measured on the
+                # docker lane (falkordb-server, module ver 42004): a query
+                # identical to the stored vector scored 0.0, an orthogonal
+                # one scored 1.0.
+                #
+                # The conversion mirrors this function's own scan fallback
+                # below (`1.0 / (1.0 + distance)`): both branches derive a
+                # similarity from a distance, so they agree on polarity.
+                # Cosine distance lies in [0, 2], so `1 - d` lies in [-1, 1]
+                # and the [0, 1] clamp still maps a perfect match to 1.0.
+                # The engine's row order is ALREADY best-first, so only the
+                # value changes here; the order is passed through untouched.
                 out = []
                 for row in rows:
                     try:
-                        score = float(row[1])
+                        distance = float(row[1])
                     except (IndexError, TypeError, ValueError):
-                        score = 0.0
+                        distance = None
+                    # An unreadable score carries no evidence of similarity —
+                    # send it to the floor (0.0), never to the ceiling.
+                    score = 0.0 if distance is None else 1.0 - distance
                     out.append((row[0], max(0.0, min(1.0, score))))
                 if min_similarity is not None and out:
-                    # Score IS cosine here — filter directly. Only claim the
-                    # FLOOR when there was something to filter: a zero-row
+                    # Score is a true cosine similarity now — filter directly.
+                    # Only claim the FLOOR when there was something to filter: a
+                    # zero-row
                     # index result is `empty_results`, not a relevance verdict
                     # (claiming the floor there would suppress the caller's
                     # legitimate degraded fallback, #4028 review P1).
@@ -1061,9 +1114,17 @@ def run_vector_query(
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
+        # D10 (#5026): discriminate the document Source from the
+        # corpus/provenance Source in the MATCH's WHERE — the brute-force
+        # retrieval layer, ahead of the ORDER BY/LIMIT. Same axis as the FTS
+        # and structural legs (documentKind IS NOT NULL ⟺ document).
         if label == "Point":
             bf_status_clause = ("" if excluded_statuses == ()
                                 else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+        elif entity_type == "document":
+            bf_status_clause = " AND n.documentKind IS NOT NULL"
+        elif entity_type == "source":
+            bf_status_clause = " AND n.documentKind IS NULL"
         else:
             bf_status_clause = ""
         cypher = (
@@ -1173,7 +1234,9 @@ def run_structural_query(
         label_str = "Source"
         kind_field = "sourceKind"
     elif entity_type == "document":
-        label_str = "Document"
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source. The structural
+        # leg reads the Source label with the documentKind genre filter.
+        label_str = "Source"
         kind_field = "documentKind"
     elif entity_type == "object":
         label_str = "Object"
@@ -1207,6 +1270,18 @@ def run_structural_query(
             _record(ran=True, degraded=False, reason="empty_results", count=0)
             return []
 
+        # D10 (#5026): entity_type="source" is the PROVENANCE Source — the
+        # same partition as sdk.list_sources() (documentKind IS NULL). A D10
+        # document node is a :Source too, so sourceKind alone does not
+        # separate them; the discriminator must be part of the retrieval
+        # WHERE. Placed AFTER the no-filters gate (exactly like the status
+        # clause below) so a kind-less structural call keeps main's
+        # early-return — this clause must never be the sole condition that
+        # fires a full-label scan. The document arm needs no equivalent: its
+        # kind_field IS documentKind, so `n.documentKind = $kind` already
+        # implies non-NULL. All three legs now mean one thing.
+        if entity_type == "source":
+            conditions.append("n.documentKind IS NULL")
         # #1391: terminal-status exclusion (after the no-filters gate so a
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
@@ -2230,15 +2305,19 @@ def get_relationships_bounded(
 #: read-only 2026-09-23: the whole edge inventory of the dogfood graph
 #: (37,535 Points) holds **0** ``aboutSubject`` edges and **1** ``:Subject``
 #: node, because the capture entity spine stores SUBJECT-kind entities as
-#: ``:Object`` (issue #4934) and the only document-path Subject writer is
-#: behind the opt-in ``--semantic-extract`` flag (issue #4938).
-#: Tracked producers: #1370, #1509. The marker self-clears as soon as any
-#: ``aboutSubject`` edge exists on the graph.
+#: ``:Object`` (issue #4934) and the document-path Subject writer is ON by
+#: default since #4938 — but it writes ``(document :Source)-[:aboutSubject]->
+#: (:Subject)`` edges, which this probe deliberately does NOT count because
+#: they cannot resolve a Point's ``subject`` field. Tracked producers for the
+#: Point/Event-sourced shapes: #1370, #1509. The marker self-clears as soon as
+#: any Point/Event-sourced ``aboutSubject`` edge exists.
 SUBJECT_BINDING_UNAVAILABLE = (
     "aboutSubject has no reachable producer for Points or Events on this "
     "graph, so 'subject' is structurally empty rather than unknown: the "
     "capture entity spine writes SUBJECT-kind entities as :Object (#4934), "
-    "and the document extractor's Subject writer is opt-in (#4938). "
+    "and the document extractor's Subject writer — on by default since "
+    "#4938 — writes document-Source-sourced edges only, which cannot "
+    "resolve a Point's subject. "
     "Tracked producers: #1370, #1509."
 )
 
