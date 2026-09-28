@@ -51,8 +51,10 @@ from contextlib import suppress
 from datetime import datetime, timezone
 
 from .projection import (
+    _annotator_value_ok,
     _apply_one,
     _load_prewipe_snapshot,
+    _norm,
     _promotion_point_with_operator,
     journal_hard_delete_seqs,
     prewipe_snapshot_path,
@@ -753,6 +755,27 @@ def _fold_journal(events: list[dict]) -> dict:
                     entry["expiredAt"] = ev["expired_at"]
             continue
         _apply_one(by_id, ev)
+        # #4208: a content EDIT re-derives the vector. The live `update_point`
+        # and the replay's `_revise_point` both re-encode from the new content,
+        # so the journal states no vector for the edited point — yet the entry
+        # `_apply_one` just mutated still carries the CREATION vector, which the
+        # graph no longer holds. Dropping it keeps this reference honest: the
+        # comparison's own embedding arm already declares a graph-only vector
+        # faithful for the recompute path (see the `jvec_present and not
+        # gvec_present` note), while leaving the stale creation vector in made a
+        # healthy content edit read as a `content` divergence on EVERY update.
+        # Mirrors the static `content_hash` exclusion ("pure f(content) —
+        # RECOMPUTE"): the gate is `_apply_one`'s OWN content gate (normalize,
+        # then `new_content is not None and _annotator_value_ok`), read from the
+        # same projection function rather than re-spelled, so a content value
+        # the fold refused cannot drop a vector here.
+        if t == "PointRevised":
+            _nev = _norm(ev)
+            _nc = _nev.get("new_content")
+            if _nc is not None and _annotator_value_ok(_nc):
+                _entry = by_id.get(_nev.get("id"))
+                if isinstance(_entry, dict):
+                    _entry.pop("embedding", None)
     return by_id
 
 
