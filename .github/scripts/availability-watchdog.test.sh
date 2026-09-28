@@ -3008,6 +3008,20 @@ assert_contains "$(hb_created)" "verdict=UP" "hb1: heartbeat records the verdict
 assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "hb1: the heartbeat did NOT go through the incident create path"
 assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb1: exactly one heartbeat record written"
 
+# (hb1-q) the heartbeat SEARCH carries every constraint. This is the half that
+# decides create-vs-UPDATE, and `is:open` is load-bearing: without it a CLOSED
+# heartbeat issue is re-adopted and PATCHed (it stays closed), so the checker —
+# which requires `is:open` — sees no open record and alarms "pager dead" on EVERY
+# run, the false-alarm class this issue exists to prevent. `is:issue` keeps a bot
+# PR that shares the title from being adopted; `in:title` targets the phrase;
+# `author:app/github-actions` plus the login re-check resist a look-alike.
+HB_QUERY_WD="$(grep -m1 'GH-HEARTBEAT-Q' "$STUB_TMP/calls.log" || true)"
+assert_contains "$HB_QUERY_WD" "is%3Aopen" "hb1-q: the heartbeat search is constrained to OPEN issues (a closed record must not be re-adopted)"
+assert_contains "$HB_QUERY_WD" "in%3Atitle" "hb1-q: …searches the TITLE"
+assert_contains "$HB_QUERY_WD" "author%3Aapp%2Fgithub-actions" "hb1-q: …and to the Actions app"
+assert_contains "$HB_QUERY_WD" "repo%3A" "hb1-q: …and is scoped to THIS repo"
+assert_contains "$HB_QUERY_WD" "is%3Aissue" "hb1-q: …and to issues, so a bot PR with the same title is never adopted"
+
 # (hb2) a DOWN run ALSO heartbeats. This is the assertion that distinguishes
 # "the monitor ran" from "the service was up": emitting only on success would
 # page about the pager during every real outage (a working pager is red then).
