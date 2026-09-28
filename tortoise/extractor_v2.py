@@ -2824,14 +2824,12 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
 
     Deterministic and CARRY-ONLY — this never binds (threshold gating is
     the #1370 write path's job): non-dict entries dropped, blank names/
-    kinds dropped, minted kinds repaired to the family fallback. The ENTITY
-    lane applies the write gate's ``_object_kind_forms`` vocabulary (matching
-    S5's entity gate). The EVENT lane is NARROWER — core ``EVENTS`` only — so a
-    kindDefs-less declared ``eventKinds`` entry is repaired here while S5's
-    ``_event_kind_forms`` gate would accept it; that asymmetry is tracked as
-    #5806 and was not introduced by this comment:
-    subject/object kinds gate against the entity vocabulary, event kinds
-    against the core event vocabulary. Confidence coerced to float and clamped to [0,1]
+    kinds dropped, minted kinds repaired to the family fallback. BOTH slot
+    lanes apply the write gate's own vocabulary — subject/object kinds
+    against ``_object_kind_forms`` and event kinds against
+    ``_event_kind_forms`` — so a slot referencing a kind the write gate
+    accepts is never repaired to a fallback (#5806). Confidence coerced to
+    float and clamped to [0,1]
     (non-numeric → 0.0), unknown role keys and non-list role values dropped
     with a warning. The classify-later ``unclassified`` sentinel is carried
     WITHOUT the minted-kind repair warning (FIX G — it is a terminal, not a
@@ -2850,9 +2848,15 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
     # referencing an emitted pack-kind entity (e.g. dev:apiSpec) must keep
     # its kind and resolve, not be repaired to core:other and dropped.
     entity_forms = _object_kind_forms(master) if master else None
-    event_forms = {k.lower() for k in master.get("events", {})}
-    event_forms_bare = {k.lower().rsplit(":", 1)[-1]
-                        for k in master.get("events", {})}
+    # FIX M's event-side mirror (#5806): the event lane gates against the
+    # SAME widened vocabulary as execute_embed's event gate
+    # (_event_kind_forms — master forms plus pack DECLARED eventKinds,
+    # themselves full + bare and case-folded), so a slot referencing an
+    # emitted pack-declared event kind keeps its kind and resolves instead
+    # of being repaired to _EVENT_FALLBACK and dropped. Previously this
+    # lane read only master["events"] (core EVENTS), which is narrower
+    # than the gate that admits the point.
+    event_forms = _event_kind_forms(master) if master else None
     out: dict[str, list[dict]] = {}
     for role in ("subject", "object", "event"):
         raw_refs = raw.get(role)
@@ -2886,8 +2890,7 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
                     # to the event fallback SILENTLY (a terminal, not a
                     # minted kind — FIX G's no-noise intent).
                     kind = _EVENT_FALLBACK["kind"]
-                elif kind.lower() not in event_forms and \
-                        kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
+                elif event_forms and kind.lower() not in event_forms:
                     warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
                                     f") → repaired to {_EVENT_FALLBACK['kind']}")
                     kind = _EVENT_FALLBACK["kind"]
