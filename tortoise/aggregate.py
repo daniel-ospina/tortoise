@@ -474,7 +474,10 @@ def collect_anchor_census(
     try:
         anchor_rows = run_fts_query(
             proj.g, query, entity_type="object",
-            limit=_ANCHOR_CANDIDATES)
+            limit=_ANCHOR_CANDIDATES,
+            # #3301: anchor RESOLUTION only (the names feed the coverage
+            # census, never a caller) — terminal Objects stay resolvable.
+            excluded_statuses=())
     except Exception:
         _logger.warning(
             "aggregative anchor resolution failed — no coverage signal",

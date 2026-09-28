@@ -2008,7 +2008,17 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
     fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
              if (entity_type == "point" and session_id
                  and 0 < limit <= _FTS_LIMIT_MAX) else limit)
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
+    # #3301: the four search legs now exclude terminal Objects by DEFAULT,
+    # so the S3 entity/subject prior set must opt back INTO the
+    # terminal-inclusive view. This leg is a link-before-create /
+    # supersession-RESOLUTION prior, never a surfaced search result, and
+    # ``commit_ops.apply_supersessions``' documented entity-terminal
+    # idempotency branch is reachable through it — hiding terminal Objects
+    # here would silently drop that prior set. The POINT leg keeps the
+    # default (terminal Points stay out of capture priors, as before).
+    rows = sdk.tortoise_fts_query(
+        query, entity_type=entity_type, limit=fetch,
+        include_terminal=entity_type in ("object", "subject"))
     out = []
     for r in rows or []:
         # #4511: the callee returns ``SearchResult.to_dict()`` rows, which key

@@ -182,12 +182,28 @@ def test_no_leg_over_hides_the_live_positive_controls(graph):
 
 
 @_docker_only
-def test_audit_opt_out_still_sees_the_hidden_objects(graph):
+@pytest.mark.parametrize("leg", [
+    "fts", "vector_index", "vector_bruteforce", "structural"])
+def test_audit_opt_out_still_sees_the_hidden_objects(graph, leg):
     """``excluded_statuses=()`` (the audit/history opt-in) must still return
-    the terminal Objects — the exclusion is a default, not a data filter."""
-    assert _ids(run_fts_query(
-        graph, "widget", entity_type="object", limit=50,
-        excluded_statuses=())) == set(ALL_IDS)
+    the terminal Objects on EVERY leg — the exclusion is a per-leg default, not
+    a data filter, and each leg short-circuits on its OWN guard (a single-leg
+    test cannot catch one leg regressing)."""
+    if leg == "fts":
+        rows = run_fts_query(graph, "widget", entity_type="object", limit=50,
+                             excluded_statuses=())
+    elif leg == "vector_index":
+        rows = run_vector_query(graph, _VEC, entity_type="object",
+                                is_embedded=False, limit=50,
+                                excluded_statuses=())
+    elif leg == "vector_bruteforce":
+        rows = run_vector_query(graph, _VEC, entity_type="object",
+                                is_embedded=True, limit=50,
+                                excluded_statuses=())
+    else:
+        rows = run_structural_query(graph, "thing", entity_type="object",
+                                    limit=50, excluded_statuses=())
+    assert _ids(rows) == set(ALL_IDS), leg
 
 
 # ── The vocabulary has ONE declaration ───────────────────────────────────

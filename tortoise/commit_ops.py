@@ -24,8 +24,9 @@ _logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════
 # #3301 — THE canonical OBJECT terminal vocabulary. ONE declaration; nothing
-# re-literals it. The OBJECT family is NOT the Point family: an Object has no
-# ``outdated`` concept (no writer sets ``outdated`` on an Object) and no
+# re-literals it (``TortoiseSDK.recall_state`` and the four search legs both
+# consume THIS object). The OBJECT family is NOT the Point family: an Object
+# has no ``outdated`` concept (no writer sets ``outdated`` on an Object) and no
 # ``draft`` state, so this set is the recall/read-surface tuple and it is
 # deliberately narrower than ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds
 # ``outdated``). A retracted/superseded/deprecated/archived Object is a dead
@@ -36,10 +37,8 @@ _logger = logging.getLogger(__name__)
 OBJECT_TERMINAL_STATUSES = frozenset(
     {"superseded", "deprecated", "archived", "retracted"})
 
-# Statuses excluded from recall_state's default OBJECT view (the #1350 fold
-# consumer, sdk.py — "(o.get('status') or '') not in (superseded, deprecated,
-# archived, retracted)"). An ALIAS, never a second literal: the recall view
-# and the search legs must agree, and a copy is exactly how they drift. A
+# The recall view's name for the same set — an ALIAS, never a second literal
+# (``sdk.recall_state`` and ``projection/entities.py`` consume it). A
 # supersession fold is only valid when a successor VISIBLE to that view
 # remains.
 _RECALL_OBJECT_EXCLUDED_STATUS = OBJECT_TERMINAL_STATUSES
@@ -599,11 +598,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     terminal ENTITY olds warn keep-first when the claimed successor
     diverges from the stored one. The entity terminal branch is
     REACHABLE, not out-of-band-only: the extractor's S3 search_graph
-    calls tortoise_fts_query(entity_type='object') directly, and that
-    surface does NOT exclude terminal Objects (the terminal-status
-    clause in search_engine applies to label == 'Point' only; recall's
-    #1350 object filter runs after retrieval inside recall_state
-    alone) — so overlapping capture (session 2 re-derives a
+    calls tortoise_fts_query(entity_type='object', include_terminal=True)
+    directly — #3301 made the four search legs exclude terminal Objects by
+    DEFAULT, and this prior/RESOLUTION leg opts back into the
+    terminal-inclusive view (a prior set is never a surfaced result; the
+    same reasoning as assembly's resolver) — so overlapping capture
+    (session 2 re-derives a
     supersession whose target session 1 already folded) routes a real
     entity record against a terminal target, and this branch is the
     idempotency mechanism (dedup same-successor / keep-first

@@ -24,12 +24,17 @@ from .env_truthy import is_truthy
 # via include_terminal (tortoise_fts_query), sdk.query/paginated_query
 # (include_retracted=True) or an explicit status= filter.
 #
-# #2490: the terminal VOCABULARY + WHERE composition live in tortoise/live.py
-# (single source of truth — live.py:44 TERMINAL_EXCLUDED_STATUSES +
-# live.py `_terminal_excluded`). This module REBINDS the exported name so
-# downstream consumers (fallback_snapshot) keep importing from here while
-# the vocabulary itself never has a second literal definition (grep: no
-# second literal terminal vocabulary in this file).
+# #2490: the POINT terminal VOCABULARY + WHERE composition live in
+# tortoise/live.py (single source of truth — live.py:44
+# TERMINAL_EXCLUDED_STATUSES + live.py `_terminal_excluded`). This module
+# REBINDS the exported name so downstream consumers (fallback_snapshot) keep
+# importing from here while the vocabulary itself never has a second literal
+# definition (grep: no second literal terminal vocabulary in this file).
+# #3301: the OBJECT family's canonical set is a DIFFERENT vocabulary
+# (commit_ops.OBJECT_TERMINAL_STATUSES — no `outdated` member and no Point
+# `draft`); `_status_vocab_for` below is the ONE dispatcher between the two
+# families, so neither leg re-states the mapping.
+from .commit_ops import OBJECT_TERMINAL_STATUSES
 from .live import (
     TERMINAL_EXCLUDED_STATUSES,
     _terminal_excluded,
@@ -74,9 +79,9 @@ def _status_vocab_for(label: str) -> tuple[frozenset, bool]:
     """
     if label == "Point":
         return TERMINAL_EXCLUDED_STATUSES, True
-    # Function-level import: commit_ops has no module-level tortoise imports,
-    # so there is no cycle (the same pattern entities.py uses).
-    from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
+    # #3301: the OBJECT family's canonical set, imported at MODULE level —
+    # commit_ops imports only ``.live`` and never ``search_engine``, so this
+    # edge is acyclic (a module-level import, not a defensive lazy one).
     return OBJECT_TERMINAL_STATUSES, False
 
 
