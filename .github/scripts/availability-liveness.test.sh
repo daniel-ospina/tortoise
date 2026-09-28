@@ -69,6 +69,12 @@
 #         and fall back to the real clock
 #     43. a leading-zero workflow created_at     → STALE + the alert IS filed
 #     47. a failed heartbeat search IN ISOLATION → exit 1 + NO false page
+#     48a/48b. a Z vs ±HH:MM created_at          → the same instant, offset APPLIED
+#     49. an unrecognised created_at shape       → STALE (fail closed, no prefix guess)
+#     50/50b. a trailing token / a bare fraction → refused / accepted (exact instant)
+#     51. the iso_to_epoch TABLE                 → each shape's RETURNED VALUE ("" or
+#         the exact epoch), grouped (c1)…(c7) by the guard that REFUSES it — an
+#         exit-code assertion cannot tell "refused" from "parsed to a wrong epoch"
 #   Parity
 #     20. the heartbeat TITLE + MARKER match the watchdog's byte-for-byte
 #         (a rename on one side would otherwise alarm forever)
