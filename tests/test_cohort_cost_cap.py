@@ -822,24 +822,308 @@ def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
 
 def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
     """The capture lane reaches the durable ledger through the ATOMIC RPC (not
-    a read-modify-write), carrying the measured charge.
+    a read-modify-write), carrying the measured charge AND (#5045) the
+    extraction token workload.
 
     REDs on: swapping the RPC for a plain table write (``plane.rpcs`` would be
-    empty) or dropping the charge from the body (``p_cost_usd`` → 0.0).
+    empty) or dropping any of ``p_cost_usd`` / ``p_tokens_in`` /
+    ``p_tokens_out`` from the body.
 
-    GREEN legitimate form: the measured charge, verbatim."""
+    GREEN legitimate form: the measured charge and tokens, verbatim."""
     from tortoise.supabase_control import metering_increment_capture_cost
 
     plane = _StubPlane()
     metering_increment_capture_cost(plane, "cohort-a", *WINDOW,
-                                    calls=1, cost_usd=0.004321)
+                                    calls=1, tokens_in=321, tokens_out=45,
+                                    cost_usd=0.004321)
 
     assert plane.rpcs == [("metering_increment_capture_cost", {
         "p_org_id": "cohort-a", "p_period_start": WINDOW[0],
         "p_period_end": WINDOW[1], "p_calls": 1,
+        "p_tokens_in": 321, "p_tokens_out": 45,
         "p_cost_usd": 0.004321})], plane.rpcs
     assert plane.queries == [], (
         "the ledger write must be the atomic RPC, never a read-modify-write")
+
+
+def test_spend_ceiling_is_blind_to_the_capture_token_columns():
+    """#5045 CONSTRAINT 1: the token counters are WORKLOAD, never price. The
+    spend ceiling must not be able to see them — BY CONSTRUCTION, not by
+    convention.
+
+    Scans for definitions of ``metering_cohort_spend`` across the migration
+    files and asserts NONE reads a workload counter (a token count, an
+    ops/edge/call counter, or one of the ``nodes_written`` / ``embed_*`` /
+    ``graph_storage_*`` families). NOT a claim of exhaustiveness, and the two
+    limits are stated at the strength the code supports rather than hidden:
+
+    * a counter invented OUTSIDE those families is not recognised;
+    * the scan reads the TEXT OF THE CEILING'S OWN DEFINITION — it does not
+      resolve INDIRECTION. A ceiling that joins a VIEW whose body selects
+      ``capture_tokens_in`` laundered as an innocuous name passes: the guarantee
+      is about what the ceiling itself writes, and each such read is caught in
+      the object that actually names the column if that object is itself a
+      ``metering_cohort_spend`` definition. Measured, not assumed.
+
+    See the enumeration's own comment for what is and is not covered.
+    This is deliberately not a
+    single-file read: the function is defined in 20260917000001 and
+    **DROPPED/replaced** by the LIVE body in 20260918000001, and a guard that
+    reads only the first file is blind to the deployed body — a trap already
+    sprung in this lane (an ``embed_*`` term added to the LIVE body once left
+    138 tests green). The ``len(defs) > 1`` assertion below is the guard
+    against this test silently narrowing to one file.
+
+    Also pins the EMBEDDED twin (``get_cohort_spend_usd``'s Cypher), so the
+    two substrates cannot drift apart on the ceiling.
+
+    REDs on: adding a token term to the LIVE body of ``metering_cohort_spend``
+    (or to any other definition), or to the embedded cohort Cypher.
+    """
+    from pathlib import Path
+
+    migdir = (Path(__file__).resolve().parent.parent / "supabase"
+              / "migrations")
+    files = sorted(migdir.glob("*.sql"))
+    defs: list[tuple[str, str]] = []
+    _IDENT = "metering_cohort_spend"
+    # ⛔ MATCH THE SHAPES THAT CAN OCCUR, AND FAIL CLOSED ON A MATCHED OPENER
+    # WHOSE BODY CANNOT BE BOUND. Stated at the strength the code supports — a
+    # heading claiming it accepts EVERY shape would be false, because the
+    # enumeration is still driven by an opener: a shape that produces NO opener
+    # (e.g. a block comment between FUNCTION and the name) is skipped silently.
+    # What IS guaranteed is the part that was broken:
+    #
+    #   (a) BODY NOT BOUND TO ITS OPENER. The old pattern was
+    #       ``opener + ".*?AS\s+\$(...)\$(.*?)\$\1;"``. With ``re.S`` and a
+    #       non-greedy ``.*?``, a definition whose body is NOT written as
+    #       ``AS $tag$ … $tag$;`` (e.g. the modern ``LANGUAGE sql RETURN (…)``
+    #       short form) ran PAST the end of its own definition and captured the
+    #       NEXT function's body — so ``len(parsed) == openers`` held and the
+    #       token assertion inspected the wrong function.
+    #   (b) A MATCHED OPENER THAT IS STILL INVISIBLE. The old opener required a
+    #       BARE identifier, so a definition written as
+    #       ``public."metering_cohort_spend"(...)`` yielded ZERO matches, hit
+    #       ``continue``, and was never enumerated. (Measured: the SPACED form
+    #       ``public . metering_cohort_spend`` ALSO matched the old opener via
+    #       its empty-qualifier branch — so it was not a second instance of this
+    #       shape; only the quoted name was.)
+    #
+    # So: match the qualifier and the name LOOSELY (quoted or not, spaced or
+    # not), bind each body to its OWN opener bounded by the next definition of
+    # ANY name, and make an unbindable body a hard failure rather than a skip.
+    #
+    # ⛔ CASE-INSENSITIVE, and that is a SEMANTICS fact, not a style choice:
+    # Postgres FOLDS an unquoted identifier to lower case, so
+    # ``CREATE FUNCTION public.METERING_COHORT_SPEND(…)`` IS a redefinition of
+    # the live ceiling (proved in ``pg_proc.proname``). Matched case-sensitively
+    # that file yielded ZERO openers and hit ``continue`` — a token read written
+    # in upper case passed silently, which is exactly the silent-narrowing class
+    # this guard exists to prevent. (The ``len(defs) > 1`` floor does not alarm
+    # either: the two historical definitions still satisfy it.)
+    # The flag is applied to QUOTED names too, which OVER-INCLUDES: a quoted
+    # ``public."METERING_COHORT_SPEND"`` is genuinely a DIFFERENT function from
+    # the unquoted name, yet it is flagged. That direction is deliberate and
+    # safe — the guard can only ever flag MORE, never silently clear a real
+    # ceiling read, and no migration in this repo uses a quoted case-variant.
+    # A per-file "mentions the identifier but yields no opener ⇒ fail" net was
+    # REJECTED: ``20260926000001`` names the function in prose/comments, so the
+    # net false-positives on a file that defines nothing. Case-folding removes
+    # the shape the net was proposed for; the residual (a block comment between
+    # FUNCTION and the name) is disclosed above.
+    _RE_I = re.IGNORECASE
+    _OPENER = (
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+        r'(?:(?:"?[A-Za-z_][A-Za-z_0-9]*"?)\s*\.\s*)?"?' + _IDENT + r'"?\s*\('
+    )
+    _ANY_DEF = r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
+    _BODY = r"\bAS\s+\$(\$|[A-Za-z_][A-Za-z_0-9]*\$)(.*?)\$\1;"
+    # ⛔ The workload DENYLIST — over IDENTIFIERS, not raw substrings. A
+    # substring scan is both too loose and too tight: it flagged the word
+    # ``ledger`` (which CONTAINS ``edge``) and it missed ``capture_tokens_in_v2``
+    # (a trailing ``\b`` cannot close before a digit). So each identifier in the
+    # text is extracted and tested against anchored family rules. The limit is
+    # stated at the strength the code supports: these are the workload families
+    # this schema has or is about to grow — the token counters, the ops/edge/call
+    # counters, and the ones already on main or named by this lane:
+    # ``nodes_written`` (20260813000002), the ``embed_*`` family (the incident
+    # that motivated this guard), and ``graph_storage_*`` (the #5331 sibling). A
+    # counter invented OUTSIDE these families still passes; that is the disclosed
+    # residual, and it is why the embedded twin below shares this ONE predicate
+    # rather than keeping a weaker one of its own. The ceiling must see ONLY the
+    # cost lanes: a token count is extraction workload, and explicitly not the
+    # resource the ceiling meters.
+    _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+    _WORKLOAD_FAMILIES = (
+        re.compile(r"tok(?:en)?s?(_|$)", re.I),
+        re.compile(r"(^|_)ops?(_|$)", re.I),
+        re.compile(r"(^|_)edge(?:s)?(_|$)", re.I),
+        re.compile(r"(^|_)call(?:s)?(_|$)", re.I),
+        re.compile(r"(^|_)nodes_written(_|$)", re.I),
+        re.compile(r"(^|_)embed(_|$)", re.I),
+        re.compile(r"(^|_)graph_storage(_|$)", re.I),
+    )
+
+    def _workload_hit(where: str) -> str | None:
+        """The first workload identifier in *where*, or None.
+
+        Identifier-anchored: families match a whole identifier (or an
+        underscore-delimited part of one), so ``ledger`` is not an ``edge`` and
+        ``capture_tokens_in_v2`` IS a token counter.
+        """
+        for ident in _IDENT_RE.findall(where):
+            if any(fam.search(ident) for fam in _WORKLOAD_FAMILIES):
+                return ident
+        return None
+
+    def _strip_sql_comments(s: str) -> str:
+        """Drop SQL comments WITHOUT eating a ``--`` that sits inside a literal.
+
+        This closes the residual: ``CREATE /* c */ FUNCTION
+        public.metering_cohort_spend(...)`` is ACCEPTED by Postgres and resolves
+        to the LIVE name, but produced NO opener because the comment sat between
+        FUNCTION and the name — so the file hit ``continue`` and was skipped
+        silently, with neither the ``len(defs) > 1`` floor nor the LIVE-file
+        assertion able to alarm. Stripping comments first makes the opener
+        match, so that definition is enumerated and the workload check applies
+        to it like any other.
+
+        ⛔ QUOTE-AWARE, because a naive ``--`` rule is a FALSE NEGATIVE: the
+        sequence ``'--'`` inside a string literal is not a comment, and a naive
+        strip deletes the rest of that LINE — which was measured to remove a
+        ``capture_tokens_in`` read from the very text the workload scan inspects,
+        while the file deploys it. So the scan walks the text and skips over
+        string literals ('...' with '' escapes), quoted identifiers ("...") and
+        dollar-quoted blocks ($$...$$ / $tag$...$tag$) before it will treat
+        ``--`` or ``/*`` as a comment. Literal CONTENT is preserved, so a read
+        written inside one is still visible to the check.
+
+        A mention test was tried instead and REJECTED: it fired on prose in a
+        string literal (``COMMENT ON TABLE t IS 'metering_cohort_spend'``) and on
+        a longer name (``metering_cohort_spend_archive``, a substring match).
+        """
+        out: list[str] = []
+        i, n = 0, len(s)
+        while i < n:
+            ch = s[i]
+            if ch == "'":
+                j = i + 1
+                while j < n:
+                    if s[j] == "'":
+                        if j + 1 < n and s[j + 1] == "'":
+                            j += 2
+                            continue
+                        j += 1
+                        break
+                    j += 1
+                out.append(s[i:j])
+                i = j
+                continue
+            if ch == '"':
+                j = s.find('"', i + 1)
+                j = n if j < 0 else j + 1
+                out.append(s[i:j])
+                i = j
+                continue
+            if ch == "$":
+                tag = re.match(r"\$[A-Za-z_0-9]*\$", s[i:])   # $$ or $tag$
+                if tag:
+                    j = s.find(tag.group(0), i + len(tag.group(0)))
+                    j = n if j < 0 else j + len(tag.group(0))
+                    out.append(s[i:j])
+                    i = j
+                    continue
+            if s.startswith("--", i):
+                j = s.find("\n", i)
+                out.append(" ")
+                i = n if j < 0 else j
+                continue
+            if s.startswith("/*", i):
+                j = s.find("*/", i + 2)
+                out.append(" ")
+                i = n if j < 0 else j + 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    for f in files:
+        text = _strip_sql_comments(f.read_text())
+        # Count OPENERS, not mere mentions: a migration that only names the
+        # function in a comment or a string defines nothing and must not trip
+        # this.
+        starts = [m.start() for m in re.finditer(_OPENER, text, _RE_I)]
+        if not starts:
+            continue
+        bounds = [m.start() for m in re.finditer(_ANY_DEF, text, _RE_I)]
+        for start in starts:
+            # Bound this definition's window at the NEXT definition of any
+            # name, so a body can never be borrowed from a following function.
+            end = next((b for b in bounds if b > start), len(text))
+            m = re.search(_BODY, text[start:end], re.S | _RE_I)
+            assert m is not None, (
+                f"{f.name}: an opener for {_IDENT} at offset {start} has no "
+                f"parseable 'AS $$ … $$;' body before the next definition — "
+                f"the scan cannot bind a body to it, so it cannot clear it")
+            defs.append((f.name, " ".join(m.group(2).split())))
+
+    # The ceiling's definition is re-issued at least once. If this ever fails,
+    # the enumeration narrowed and every assertion below became evidence about
+    # a file nobody deploys.
+    assert len(defs) > 1, (
+        f"metering_cohort_spend must be defined in MORE THAN ONE migration "
+        f"(the LIVE body replaces an earlier one); the guard enumerated "
+        f"{len(defs)} definition(s) across {len(files)} migration file(s)")
+    assert "20260918000001_metering_period_window.sql" in {n for n, _ in defs}, (
+        "the guard must enumerate the LIVE re-issue in 20260918000001 — the "
+        "one file a single-file read is blind to")
+
+    for name, body in defs:
+        assert "ask_cost_usd" in body and "capture_cost_usd" in body, (
+            f"metering_cohort_spend in {name} no longer sums the cost lanes: "
+            f"{body}")
+        offender = _workload_hit(body)
+        assert offender is None, (
+            f"metering_cohort_spend in {name} reads the workload counter "
+            f"{offender!r} — the spend ceiling must never see "
+            f"extraction workload: {body}")
+
+    # The embedded twin. Read the LIVE Cypher — the string CONSTANTS of
+    # ``get_cohort_spend_usd``, with its docstring excluded — rather than a text
+    # slice, which included the docstring's PROSE and flagged the English word
+    # "edge" ("a cohort row straddling an edge") as an edge counter.
+    # ⛔ It shares the SQL half's predicate. Keeping its own "token" substring
+    # here left the WORSE half unguarded: the embedded SUM could fold in
+    # ``nodes_written`` or an ``embed_*`` counter with the guard still green,
+    # while the SQL half caught the same edit — one substrate hardened, the
+    # other not.
+    import ast
+
+    import tortoise.metering as _m
+    src = Path(_m.__file__).read_text()
+    _tree = ast.parse(src)
+    _fn = next(
+        n for n in ast.walk(_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "get_cohort_spend_usd")
+    _body = _fn.body
+    if (_body and isinstance(_body[0], ast.Expr)
+            and isinstance(_body[0].value, ast.Constant)
+            and isinstance(_body[0].value.value, str)):
+        _body = _body[1:]  # drop the docstring: it is prose, not Cypher
+    embedded = "\n".join(
+        n.value for st in _body for n in ast.walk(st)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    assert "ask_cost_usd" in embedded and "capture_cost_usd" in embedded, (
+        "get_cohort_spend_usd's Cypher must sum both cost lanes — if this "
+        "fails the extraction above stopped finding the query, and every "
+        "assertion on it became evidence about nothing: "
+        f"{embedded!r}")
+    offender = _workload_hit(embedded)
+    assert offender is None, (
+        f"get_cohort_spend_usd reads the workload counter "
+        f"{offender!r} — the spend ceiling must never see extraction "
+        f"workload: {embedded}")
+
 
 
 def test_cohort_larger_than_the_priced_bound_fails_closed(monkeypatch):
