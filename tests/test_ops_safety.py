@@ -432,27 +432,37 @@ def test_complete_log_with_a_removal_still_replays_identically():
         proj.close()
 
 
-def test_rebuild_all_refuses_a_torn_tail_in_any_journal_file():
-    """The refusal is PER FILE, not just for the first/only journal.
+@pytest.mark.parametrize("torn_file", ["a.jsonl", "b.jsonl"])
+def test_rebuild_all_refuses_a_torn_tail_in_any_journal_file(torn_file):
+    """The refusal is PER FILE, not just for the first or last journal.
 
     ``rebuild_all`` iterates every adjacent ``.jsonl`` and classifies each
     file's own ``torn_trailing_raw``. A refactor that hoisted the refusal out of
-    that loop and classified only one file's tear would pass every other test
-    here while replaying a removal away in the second file.
+    that loop and classified only ONE file's tear would pass every other test
+    here while replaying a removal away in the other file — so the tear is
+    placed in ``a.jsonl`` AND in ``b.jsonl`` in turn (a single placement misses
+    the hoist that keeps the loop's final binding).
     """
     tmp = _mk_tmp()
-    db_path = os.path.join(tmp, "multi_torn.db")
+    db_path = os.path.join(tmp, f"multi_torn_{torn_file}.db")
     log_dir = os.path.join(tmp, "log")
     os.makedirs(log_dir, exist_ok=True)
-    # a.jsonl is COMPLETE and allowlisted; b.jsonl holds the torn removal.
-    _write_journal(os.path.join(log_dir, "a.jsonl"), _point_added("ka-1"),
-                   _point_added("ka-2"))
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
         "op": "delete", "seq": 2,
     })
-    _write_journal(os.path.join(log_dir, "b.jsonl"), _point_added("gone-1"),
-                   full[:full.index('"op"')], torn_last=True)
+    torn = full[:full.index('"op"')]
+    if torn_file == "a.jsonl":
+        _write_journal(os.path.join(log_dir, "a.jsonl"),
+                       _point_added("got-1"), _point_added("gone-1"), torn,
+                       torn_last=True)
+        _write_journal(os.path.join(log_dir, "b.jsonl"),
+                       _point_added("kb-1"), _point_added("kb-2"))
+    else:
+        _write_journal(os.path.join(log_dir, "a.jsonl"),
+                       _point_added("ka-1"), _point_added("ka-2"))
+        _write_journal(os.path.join(log_dir, "b.jsonl"),
+                       _point_added("gone-1"), torn, torn_last=True)
 
     proj = FalkorProjection(db_path)
     try:
@@ -460,13 +470,60 @@ def test_rebuild_all_refuses_a_torn_tail_in_any_journal_file():
         with pytest.raises(RuntimeError, match="resurrect"):
             proj.rebuild_all(log_dir)
         # Refused BEFORE the wipe: the canary is untouched and nothing from
-        # either file (including the COMPLETE a.jsonl) was replayed.
+        # either file (including the COMPLETE one) was replayed.
         assert proj.g.query(
             "MATCH (n:Canary) RETURN count(n)").result_set[0][0] == 1
         assert proj.g.query(
             "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
     finally:
         proj.close()
+
+
+def test_recover_from_log_refuses_a_torn_session_recorded():
+    """A torn trailing ``SessionRecorded`` must not replay (#3316).
+
+    It is the capture's TRAILING record and carries ``capture_ok=False`` on a
+    failed capture; dropping the tear restores ``capture_ok=NULL``, which the
+    hosted retry gate reads as "presumed captured" — so the failed session
+    silently stops being re-attempted. Final status: recovery does not report
+    success and the Session was not rebuilt.
+    """
+    tmp = _mk_tmp()
+    db_path = os.path.join(tmp, "torn_session.db")
+    torn = '{"type": "SessionRecorded", "id": "sess-1", "capture_ok": false'
+    _write_journal(os.path.join(tmp, "events.jsonl"),
+                   _point_added("kept-1"), torn, torn_last=True)
+
+    proj = FalkorProjection(db_path)
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")   # the 0-node "lost DB" case
+        result = recover_from_log(tmp, proj)
+        assert result["recovered"] is False, result
+        assert "SessionRecorded" in result["reason"], result
+        assert proj.g.query(
+            "MATCH (n:Session) RETURN count(n)").result_set[0][0] == 0
+        assert proj.g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
+    finally:
+        proj.close()
+
+
+def test_born_terminal_creation_is_a_supported_write():
+    """PREMISE of the disclosed #5921 tolerance — pinned so it cannot rot.
+
+    The disclosure says a torn born-terminal ``PointAdded`` is tolerated. That
+    is only *a disclosure* while ``create_point`` really accepts a terminal
+    status and the terminal vocabulary really contains it; if a future change
+    refuses born-terminal creates, the disclosure must be revisited rather than
+    left standing. Asserted against hard-coded literals.
+    """
+    from tortoise.live import TERMINAL_EXCLUDED_STATUSES
+    from tortoise.sdk import POINT_STATUS_VALUES
+
+    assert "superseded" in POINT_STATUS_VALUES
+    assert "retracted" in POINT_STATUS_VALUES
+    assert "superseded" in TERMINAL_EXCLUDED_STATUSES
+    assert "retracted" in TERMINAL_EXCLUDED_STATUSES
 
 
 def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():

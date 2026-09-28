@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tortoise.log import (  # noqa: E402, RUF100
     TORN_TAIL_HARMLESS_EVENT_TYPES,
     EventLog,
+    describe_torn_tail_revival,
     torn_record_may_revive_state,
 )
 
@@ -372,6 +373,75 @@ def test_a_torn_event_recorded_is_refused_however_it_was_cut():
     print("PASS test_a_torn_event_recorded_is_refused_however_it_was_cut")
 
 
+def test_a_torn_session_recorded_is_refused():
+    """``SessionRecorded`` is NOT allowlisted: its fold OVERWRITES
+    ``capture_ok`` / ``capture_extractor`` / ``capture_redactions`` straight
+    from the payload (projection/entities.py:1261-1266) and the SDK emits it as
+    a capture's TRAILING record with ``capture_ok=False`` on a failed or keyless
+    capture (sdk.py:4844).
+
+    Dropping that tear restores ``capture_ok=NULL``, which ``hosted_api`` reads
+    as the legacy "presumed captured" replay case (hosted_api.py:10041-10065),
+    so the failed session silently stops being re-attempted while recovery
+    reports success — a payload-only lifecycle property, exactly the
+    ``EventRecorded`` shape, with a payload that is the COMMON case.
+    """
+    assert torn_record_may_revive_state(
+        '{"type": "SessionRecorded", "id": "sess_1", "capture_ok": false')
+    # Even with no lifecycle property legible, the type alone is refused.
+    assert torn_record_may_revive_state(
+        '{"type": "SessionRecorded", "id": "sess_1"}')
+    print("PASS test_a_torn_session_recorded_is_refused")
+
+
+def test_torn_record_with_a_truncated_envelope_type_is_refused():
+    """A ``"type"`` KEY whose VALUE did not survive must not be masked.
+
+    A payload-first record (``append`` is public and a journal is
+    operator-editable) can carry a nested complete ``"type"`` BEFORE the
+    envelope's, and a tear inside the envelope value leaves the key with no
+    complete match — so a plain ``findall`` classifier sees only the innocuous
+    nested type and TOLERATES a record whose real type is a removal.
+    """
+    # nested allowlisted type + envelope value cut mid-identifier
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded", "id": "x"}, '
+        '"type": "EntityMuta')
+    # the same shape with the envelope value cut entirely away
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded", "id": "x"}, "type": "')
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded", "id": "x"}, "type":')
+    # An ESCAPED occurrence inside a string value is not a key and must not
+    # make a benign record unreadable.
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "x", '
+        '"content": "said \\"type\\": \\"EntityMu')
+    print("PASS test_torn_record_with_a_truncated_envelope_type_is_refused")
+
+
+def test_describe_torn_tail_revival_names_every_legible_type():
+    """The operator message must name EVERY legible type, not the first.
+
+    Classification refuses when ANY legible type is outside the allowlist, so a
+    message built from ``types[0]`` could print an allowlisted type beside the
+    refusal it is explaining. An unreadable type is named too.
+    """
+    msg = describe_torn_tail_revival(
+        ['{"type": "EntityMutated", "point": {"type": "PointAdded"}, '
+         '"op": "del'])
+    assert "EntityMutated" in msg, msg
+    assert "PointAdded" in msg, msg
+    # A truncated type VALUE is reported as unreadable, alongside what survived.
+    msg2 = describe_torn_tail_revival(
+        ['{"point": {"type": "PointAdded"}, "type": "EntityMuta'])
+    assert "<unreadable>" in msg2, msg2
+    assert "PointAdded" in msg2, msg2
+    # Nothing legible at all.
+    assert describe_torn_tail_revival(["{\"event_id\": \"01J"]) == "<unreadable>"
+    print("PASS test_describe_torn_tail_revival_names_every_legible_type")
+
+
 def test_torn_born_terminal_point_added_is_a_disclosed_tolerance():
     """DISCLOSED EXCEPTION to the allowlist criterion — see tortoise/log.py.
 
@@ -414,8 +484,8 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         # point / operator lifecycle additions and updates (MERGE + SET)
         "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
         "PointPromoted", "OperatorPromoted",
-        # object / subject / session lane additions (+ a derived-embedding clear)
-        "ObjectRegistered", "SubjectAdded", "SessionRecorded",
+        # object / subject lane additions (+ a derived-embedding clear)
+        "ObjectRegistered", "SubjectAdded",
         # source lane addition
         "SourceCreated",
         # additive edge write

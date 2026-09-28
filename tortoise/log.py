@@ -74,20 +74,26 @@ from pathlib import Path
 # the operator.
 #
 # ONE DISCLOSED EXCEPTION to "never terminalize a lifecycle" — read before
-# trusting the criterion above:
-#   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold writes
-#     ``n.status = coalesce($st, n.status, 'live')`` straight from the payload
-#     (projection/entities.py:770, :795) and ``create_point`` accepts every
-#     value in ``POINT_STATUS_VALUES`` (sdk.py:3489) — a BORN-TERMINAL create
-#     (``_born_terminal``, sdk.py:3655, a first-class case: see #2422) journals
-#     ``status`` in its ``PointAdded`` point snapshot (sdk.py:3828). A torn
-#     born-terminal ``PointAdded`` for an id an EARLIER record left live is
+# trusting the criterion above. Root cause in one line: a fold that writes a
+# lifecycle property STRAIGHT from the record's payload is payload-dependent,
+# and a torn prefix cannot prove that payload absent.
+#   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold reaches
+#     ``n.status = coalesce($st, n.status, 'live')`` with ``$st`` taken from the
+#     payload (projection/entities.py:770, :795) and ``create_point`` accepts
+#     every value in ``POINT_STATUS_VALUES`` (sdk.py:3489) — a BORN-TERMINAL
+#     create (``_born_terminal``, sdk.py:3655, a first-class case: see #2422)
+#     journals ``status`` in its ``PointAdded`` point snapshot (sdk.py:3828). A
+#     torn born-terminal ``PointAdded`` for an id an EARLIER record left live is
 #     therefore a resurrection this classifier tolerates. It is NOT a
 #     first-order path (unlike ``EventRecorded``'s connector leg, which every
-#     connector ingest reaches): it needs a second ``PointAdded`` for an
-#     EXISTING id with an explicit TERMINAL status, and excluding the two types
-#     would refuse the most common torn record of all. Filed as #5921 with the
-#     reproduction rather than silently tolerated.
+#     connector ingest reaches, or ``SessionRecorded`` above): it needs a second
+#     ``PointAdded`` for an EXISTING id with an explicit TERMINAL status, and
+#     excluding the two types would refuse the most common torn record of all.
+#     Filed as #5921 with the reproduction. The SAME root cause also reaches the
+#     ``PointPromoted`` / ``OperatorPromoted`` ``get_point`` snapshots, which
+#     share ``_upsert_point_props``; no writer path can put a terminal status in
+#     one (promotion is terminal-guarded), so the reachable composition is the
+#     create path above.
 #
 # ⛔ THE POLARITY IS DELIBERATE: a NEW event type defaults to REFUSED, not
 # tolerated. Adding one here is the claim that its loss cannot revive state —
@@ -98,9 +104,9 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # Point / operator lifecycle additions and updates (MERGE + SET only).
     "PointAdded", "OperatorAdded", "PointRevised", "OperatorAnnotated",
     "PointPromoted", "OperatorPromoted",
-    # Object / subject / session lane additions (MERGE + SET; an object or
-    # subject upsert clears the DERIVED embedding so it is recomputed).
-    "ObjectRegistered", "SubjectAdded", "SessionRecorded",
+    # Object / subject lane additions (MERGE + SET; an object or subject
+    # upsert clears the DERIVED embedding so it is recomputed).
+    "ObjectRegistered", "SubjectAdded",
     # Source lane addition (MERGE + SET only).
     "SourceCreated",
     # Bookkeeping records: ``_NO_PROJECTION_FOLD`` (projection/__init__.py:
@@ -123,6 +129,19 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #   ConfidenceChanged — can carry ``outdated=true``, an EP-terminal flag.
 #   DirectEdgeRepoint — its ``delete_only=true`` leg removes an edge.
 #   EventRecorded — additive ONLY in the common case; see below.
+#   SessionRecorded — ``_fold_session_recorded`` writes ``capture_ok`` /
+#                     ``capture_extractor`` / ``capture_redactions`` STRAIGHT
+#                     from the payload (projection/entities.py:1261-1266, an
+#                     unconditional overwrite), and the SDK emits it as one of
+#                     the capture's TRAILING records (sdk.py:4844) with
+#                     ``capture_ok=False`` on a failed or keyless capture. A
+#                     dropped tear restores ``capture_ok=NULL``, which
+#                     ``hosted_api`` reads as the legacy "presumed captured"
+#                     replay case (hosted_api.py:10041-10065) — so the failed
+#                     session silently STOPS being re-attempted while recovery
+#                     reports success. Same root cause as #5921 (a payload-only
+#                     lifecycle property), but its harmful payload is COMMON and
+#                     it is a trailing record, so it is refused outright.
 #
 # ⛔ ``EventRecorded`` IS NOT IN THE SET, although its loss is the data-LOSS
 # direction for most records. ``_upsert_event`` →
@@ -145,6 +164,10 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 # ``event_id`` / ``ts`` / ``type`` / …), so a tear after the type field is
 # legible; one before it is not, and an unlegible type is NOT assumed harmless.
 _RECORD_TYPE_RE = re.compile(r'"type"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+# A ``"type"`` KEY, complete or not — see :func:`has_truncated_type_value`.
+# Deliberately stops at the COLON (not the opening quote): a tear can land
+# between ``:`` and the quote, and that is still "the value did not survive".
+_TYPE_KEY_RE = re.compile(r'"type"\s*:')
 
 
 def record_types_from_partial(raw: str) -> list[str]:
@@ -158,15 +181,23 @@ def record_types_from_partial(raw: str) -> list[str]:
     return _RECORD_TYPE_RE.findall(raw)
 
 
-def record_type_from_partial(raw: str) -> str | None:
-    """Best-effort ``type`` of a possibly-truncated JSONL record.
+def has_truncated_type_value(raw: str) -> bool:
+    """True when a ``"type"`` KEY survived the tear but its VALUE did not.
 
-    Returns ``None`` when the type did not survive the tear. For an operator
-    message only — classification must use
-    :func:`record_types_from_partial`.
+    ``_RECORD_TYPE_RE`` only matches a COMPLETE identifier, so a tear inside an
+    envelope ``type`` value leaves the key legible with no match — and a later
+    or nested complete ``"type"`` (e.g. a payload-first record's inner dict)
+    would then mask it, classifying a record with an unreadable type as
+    harmless. Counting the keys (up to the COLON, so a tear between ``:`` and
+    the opening quote counts too) against the matches closes that: an extra key
+    means a value did not survive, and an unreadable type is refused, never
+    assumed harmless.
+
+    (An ESCAPED ``\"type\": \"X\"`` inside a string value matches neither
+    pattern — the backslash breaks the ``"`` - ``:`` - ``"`` shape — so a value
+    that merely mentions the key is not miscounted.)
     """
-    types = record_types_from_partial(raw)
-    return types[0] if types else None
+    return len(_TYPE_KEY_RE.findall(raw)) > len(_RECORD_TYPE_RE.findall(raw))
 
 
 def torn_record_may_revive_state(raw: str) -> bool:
@@ -181,7 +212,7 @@ def torn_record_may_revive_state(raw: str) -> bool:
     record being written (this is why ``EventRecorded`` is not in the set).
     """
     types = record_types_from_partial(raw)
-    if not types:
+    if not types or has_truncated_type_value(raw):
         return True
     return any(t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types)
 
@@ -197,13 +228,22 @@ def describe_torn_tail_revival(revival_records) -> str:
     EVERY legible type per record, not just the first: classification refuses
     when ANY legible type is outside the allowlist, so a message naming only
     the first could contradict the decision it reports (an allowlisted envelope
-    type beside a non-allowlisted nested one). A tear before the ``type`` field
-    is named ``<unreadable>`` — the state it dropped cannot even be identified,
-    so it is reported as such rather than omitted.
+    type beside a non-allowlisted nested one). A type KEY whose VALUE did not
+    survive the tear — and a record with no type at all — is also named
+    ``<unreadable>``: the state it dropped cannot even be identified, so it is
+    reported as such rather than omitted.
     """
     kinds: set[str] = set()
     for raw in (revival_records or []):
-        kinds.update(record_types_from_partial(raw) or ["<unreadable>"])
+        if has_truncated_type_value(raw) or not record_types_from_partial(raw):
+            # Either the record carried no type at all, or a type KEY whose
+            # VALUE did not survive: the state it dropped cannot even be
+            # identified, so it is reported as such rather than as the
+            # remaining legible type alone.
+            kinds.update(record_types_from_partial(raw) or [])
+            kinds.add("<unreadable>")
+        else:
+            kinds.update(record_types_from_partial(raw))
     return ", ".join(sorted(kinds))
 
 
