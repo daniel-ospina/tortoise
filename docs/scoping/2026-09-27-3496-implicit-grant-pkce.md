@@ -27,16 +27,16 @@ decisions passed (below).
 ## Confirmed Problem (frozen; problem-verify gate PASSED)
 
 The repository's **only live browser OAuth client** — the FastAPI-served MCP consent page
-(`GET /oauth/authorize`, `tortoise/hosted_api.py:28395` → `tortoise/oauth.py::consent_page_html`,
+(`GET /oauth/authorize` (`oauth_authorize` in `tortoise/hosted_api.py`) → `tortoise/oauth.py::consent_page_html`,
 live on `api.premiselabs.co`) — requests its access token with the **Implicit** grant:
 
-- the inline supabase-js client (`tortoise/oauth.py:1969-1980`) sets no explicit `flowType`, so it
+- the inline supabase-js client (in `tortoise/oauth.py::consent_page_html`) sets no explicit `flowType`, so it
   inherits the library default `DEFAULT_AUTH_OPTIONS.flowType = 'implicit'` (verified by executing
   `website/apps/dashboard/public/vendor/supabase-2.112.2.min.js`);
 - RFC 10017 §7.2 is two-sided (`MUST NOT` use implicit for browser-based clients; the AS `MUST NOT`
   accept it) with **no grandfathering**, and §6.3.2.1 requires PKCE; §1/§7.1 do not exclude this
   surface (two verifiers could not falsify this ruling);
-- the flow **already initiates and completes on one origin** (`:2134`:
+- the flow **already initiates and completes on one origin** (in `consent_page_html`, the
   `redirectTo = window.location.origin + AUTHORIZE_PATH + window.location.search`), so the #1566
   constraint ("a PKCE verifier is origin-scoped and cannot cross subdomains") is **not violated by a
   migration on that origin**.
@@ -316,7 +316,8 @@ the session key. *Why:* makes A1 true by construction, removes the `aux → cook
 re-entrancy trap, and honours the verifier-home decision. There is **no latch and no cookie
 last resort**.
 
-**Step 5 — `authorizeReturnTo()` (defence-in-depth).** New helper; `signInWithProvider` (`:2131`)
+**Step 5 — `authorizeReturnTo()` (defence-in-depth).** New helper; `signInWithProvider` (in
+`consent_page_html`)
 uses it instead of the raw `window.location.search`. Strips
 `code`,`error`,`error_code`,`error_description`,`error_uri`,`sb_flow_id`,`flow_id`,`type`; origin
 and path remain constants. **Not** presented as fixing a confirmed sticky loop: GoTrue's
@@ -637,7 +638,7 @@ better for.
 | Touch Point | Type | Covered By | Status |
 |---|---|---|---|
 | MCP consent page inline auth client (`tortoise/oauth.py::consent_page_html`) | UI / auth | **this change** (Steps 1–7) | ✅ |
-| `GET /oauth/authorize` (FastAPI, `tortoise/hosted_api.py:28395`) | API endpoint | **this change** (page render only; no route change) | ✅ |
+| `GET /oauth/authorize` (FastAPI, `oauth_authorize` in `tortoise/hosted_api.py`) | API endpoint | **this change** (page render only; no route change) | ✅ |
 | CSP `connect-src` for the Supabase token POST | cross-cutting | the CSP built in `oauth_authorize` (anchored to the symbol, not an offset) **already** emits `connect-src 'self' <supabase_origin>` — no change | ✅ |
 | Parent-domain session cookie `sb-tortoise-auth-token` write path | data | `tests/test_cross_subdomain_cookie_sync.py` (extended, Step 10(b)); semantics unchanged for normal sessions | ✅ |
 | Verifier storage (aux chain) | data | the router (Step 3) + harness invariants 3, 4, 12, 13 | ✅ |
@@ -660,6 +661,13 @@ No wiring gap is unresolved: every un-covered touch point is either **filed** as
 ---
 
 ## Review Cycle Log
+
+> **Frozen at round 11.** This log narrates the review's own rounds, and a claim about process has no
+> artifact to check it against: rounds 9, 10, 11 and 12 each found defects in the previous round's
+> account of itself (mis-attributed findings, miscounted lists, stale offsets), so the narration is a
+> defect source in its own right. Later rounds' findings and fixes are recorded where they are
+> checkable — the commit messages on `fix/3496-implicit-grant` — and the LOG is not extended further.
+> What the review *changed* is in the code and in the invariant/A/R tables above.
 
 ### diff-time code review (commit-workflow Step 3, standard tier)
 Seven fresh-context reviewers were dispatched against the pushed head: guidance/comments, bug scan
@@ -716,7 +724,8 @@ them a reproduced production gap**:
 
 | # | Finding | Fix |
 |---|---|---|
-| 15 | **The round-2 guard fix did not close A5.** The guard probes with its own key and a 160-byte payload, so it cannot know whether the store the WRITER will pick can be cleaned *for the real key and value*. Reproduced by execution: a first store that rejects the 160-byte probe on size but accepts the ~114-byte verifier **and** refuses removal → the guard skips it and accepts the next store, while `writeAux` writes the credential to the first → the credential is orphaned in the store that cannot remove it (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). The absolute claim in A5/R3/R20 ("a store that refuses REMOVAL is refused by the guard") was therefore false. | The invariant is now enforced **where the real key and value are known**: `writeAux` re-proves writability AND cleanability on each candidate store at write time, with a payload of the REAL length under a throwaway key, and only then writes the credential — so an uncleanable store never receives it. Invariant 13 pins the exact divergence (with a both-un-cleanable control); R21 records the residual (a store that discriminates by key). The doc's A5 row, R3/R20 and the Step 3b sketch now state the guard's true role (early-failure optimisation, never the invariant). *(Superseded in round 9: the writer-side real-key re-prove described here was reverted as net-negative — it detected the key-discriminating store only after the credential was written, and copied the residue into the next store. See R21 and the round-9 log entry.)* |
+| 15 | **The round-2 guard fix did not close A5.** The guard probes with its own key and a 160-byte payload, so it cannot know whether the store the WRITER will pick can be cleaned *for the real key and value*. Reproduced by execution: a first store that rejects the 160-byte probe on size but accepts the ~114-byte verifier **and** refuses removal → the guard skips it and accepts the next store, while `writeAux` writes the credential to the first → the credential is orphaned in the store that cannot remove it (`sessionVerifierKeys` non-empty, `localVerifierKeys` empty). The absolute claim in A5/R3/R20 ("a store that refuses REMOVAL is refused by the guard") was therefore false. | The invariant is now enforced **where the real key and value are known**: `writeAux` re-proves writability AND cleanability on each candidate store at write time, with a payload of the REAL length under a throwaway key, and only then writes the credential — so a store whose accepted-size band admits the real value but which refuses removal is skipped BEFORE
+the credential is written (a store that discriminates by KEY still receives it — that is R21). Invariant 13 pins the exact divergence (with a both-un-cleanable control); R21 records the residual (a store that discriminates by key). The doc's A5 row, R3/R20 and the Step 3b sketch now state the guard's true role (early-failure optimisation, never the invariant). *(Superseded in round 9: the writer-side real-key re-prove described here was reverted as net-negative — it detected the key-discriminating store only after the credential was written, and copied the residue into the next store. See R21 and the round-9 log entry.)* |
 | 16 | the doc's Step 3b sketch still showed the **pre-round-2** guard (`padEnd(49) + "-code-verifier"`, a bare `catch` that fell through to the next store) and its comment ("a remove failure is INCAPABLE, never silently skipped") was false of the code below it — a reader copying the sketch would reintroduce the hole | the sketch is replaced with the landed guard and the writer-side proof |
 | 17 | the coverage map cited **inv 10**, which does not exist (the free 10th numbering slot was never written; its content is covered by inv 3 + inv 6) | the A1/A5 rows now cite the tests that exist |
 
@@ -781,7 +790,8 @@ its unbounded `\d+(?:\.\d+){0,2}` arm also matched the allowed pinned form, so
 `test_authorize_renders_consent_html` went red — the round-7 commit's test run omitted
 `tests/test_oauth_mcp.py`, which is how it escaped. Also fixed: the A5 writer's real-key removal proof
 was incomplete (it proved remove/read-back-null only for the throwaway probe key, never for the real
-key it stored, so its own comment overclaimed — the proof was **extended** to the real key), the
+key it stored, so its own comment overclaimed — the proof was **extended** to the real key — *superseded in round 9, which reverted that real-key
+re-prove as net-negative: see R21*), the
 scoping doc's 341-count verification row (whose command omits `tests/test_oauth_mcp.py`'s
 `-k "not Cimd"` requirement), and two comments that described earlier revisions of this PR's own test
 file. (The blog-admin follow-up mentioned above was filed in round 7, as **#5735**.)
@@ -796,7 +806,7 @@ sketch corrected to state the residual instead of claiming a guarantee the write
 two real behaviour bugs, each verified by execution before and after, were `LOAD_TRANSIENT.present`
 (derived from the generic names `type`/`flow_id`, so a benign first load was told its sign-in had
 failed) and `sanitiseUrl()`'s fragment param-list test (byte-identity after normalisation, so an escaped
-provider `error_description` kept the transient on the URL). Three assertions that could not fail for
+provider `error_description` kept the transient on the URL). Two assertions that could not fail for
 the reason they claimed were pinned: inv 13's `sessionVerifierKeys == []` assertions were satisfiable
 by a store never being in the chain (a **per-store attempt log** now pins that the store was TRIED),
 and `strippedHasToken` could not see `provider_refresh_token` (deleting only the sibling strip kept it
@@ -818,6 +828,15 @@ rows still stated the reverted real-key proof as current behaviour; the invarian
 claimed the reverted guarantee and is renamed to the operation actually pinned; and the doc's
 "13 invariants", the dead `authorizeReturnTo` presence-pin sentence, the R19 "asserted as such"
 wording, R21's tab-close bound and the `round-8 head` verification labels were all corrected.
+
+### diff-time code review ROUND 11 (re-review of `5856ad4a5`)
+Three fresh reviewers (correctness/logic, test-quality, doc-consistency). No behaviour changed.
+Findings, all fixed in `c156d7571`: R3's tail, and the invariant-13 test docstring's stated reason for
+the revert, still contradicted the reverted real-key removal proof; the A2 coverage row still promised a Step 10(a)
+textual secondary that no longer exists; this log's ROUND 9 entry mis-counted its own findings and
+ROUND 8 carried a sentence belonging to round 7; the CIMD deselection shape and a CSP line anchor
+were wrong; and the round-10 router-fragment pin asserted a `%2F` proxy that the mangling it guards
+against does not produce, and lacked the non-empty `replaceStates` guard its sibling pins carry.
 
 ---
 

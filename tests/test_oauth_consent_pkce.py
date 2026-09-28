@@ -377,9 +377,11 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     )
 
     # The stricter param-list test must not now MANGLE a fragment it used to leave
-    # alone: `#/route/x?a=1` and `#settings?tab=x` both contain `=`, so a bare
-    # "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
-    for router_frag in ("#/route/x?a=1", "#settings?tab=x&foo=bar"):
+    # alone: `#/route/x?a=1` and `#settings?tab=x&foo=bar` both contain `=`, so a
+    # bare "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
+    # `#view:detail=1` covers the `:` arm of the param-name shape test, which
+    # neither of the other two exercises.
+    for router_frag in ("#/route/x?a=1", "#settings?tab=x&foo=bar", "#view:detail=1"):
         routed = _run("load", search="?error=access_denied&error_description=boom",
                       hash=router_frag)
         assert routed["errorVisible"] is True, routed
@@ -388,8 +390,11 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
         )
         # Compare the FRAGMENT itself, not a whole-URL substring: the mangling this
         # guards against re-serialises `#settings?tab=x&foo=bar` to
-        # `settings%3Ftab=x&foo=bar`, which contains no `%2F` at all.
-        assert all(u.split("#", 1)[1] == router_frag[1:] for u in routed["replaceStates"]), (
+        # `settings%3Ftab=x&foo=bar`, which contains no `%2F` at all. `partition`
+        # rather than `split(...)[1]`, so a fragment-less URL (which the page does
+        # emit once a param-list fragment is fully stripped) fails the assertion
+        # cleanly instead of raising IndexError.
+        assert all(u.partition("#")[2] == router_frag[1:] for u in routed["replaceStates"]), (
             f"a router-shaped fragment was re-encoded: {routed['replaceStates']}"
         )
 
