@@ -535,6 +535,11 @@ surfaces:
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
+  # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
+  # `commit_ops.apply_payload_operators` — the helper is core engine code, and
+  # the re-key regression drives the real embedded capture commit, so this is
+  # the `core` surface (same home as test_4716 above).
+  - test_operator_idempotency_4971.py
   - test_ask_eval_only.py
   - test_backfill_ghost_members_guard.py
   # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
@@ -2066,6 +2071,7 @@ durations:
   test_assembly_fixtures.py: 2.2
   test_epic903_hosted.py: 2.2
   test_operator_dedup_parity.py: 1.4
+  test_operator_idempotency_4971.py: 95.0  # unmeasured — local embedded/carve-out measurement (8 tests, ~79s); refresh from CI junit
   test_search_promoted_fields.py: 1.5
   test_selfhost_rest.py: 1.4
   test_volunteer_reflex_harness_seam.py: 1.5
