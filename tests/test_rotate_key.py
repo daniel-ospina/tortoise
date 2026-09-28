@@ -550,10 +550,12 @@ def test_create_leg_failure_leaves_the_old_key_live(client, fake, monkeypatch):
     """T3: if the replacement cannot be created, NOTHING may be revoked."""
     org = _signup_org(client, fake)
 
-    def _boom(_cp, _row):
+    def _boom(_cp, _row, **_kw):
         raise RuntimeError("Supabase unreachable (simulated)")
 
-    monkeypatch.setattr(sc, "insert_api_key", _boom)
+    # #1879: the Supabase insert now runs inside the `provision_api_key` RPC
+    # (one transaction with the cap gate), so THIS is the create-leg seam.
+    monkeypatch.setattr(sc, "mint_provisioned_key", _boom)
     # The insert failure propagates as a 500 (mirroring the plain mint path).
     with pytest.raises(RuntimeError):
         _rotate(client, org["key_id"], _auth(org["key"]))

@@ -8885,9 +8885,10 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
     # occupy a slot); the RPC never 402s.
     from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
+        KeyCapRefusal,
         get_control_plane,
-        insert_api_key,
         is_supabase_enabled,
+        mint_provisioned_key,
     )
     max_keys = _org_node_sync_limits(org_id).get("max_api_keys")
     if max_keys is not None:
@@ -8935,23 +8936,34 @@ def _mint_key(org_id: str, *, graph_id: str | None = None,
         # created_by as user-UUID-or-"api" (first_api_call distinct_id,
         # the session-login exchange tree).
         created_by = session_user_id or "api"
-        insert_api_key(cp, {
-            "id": kid,
-            "org_id": org_id,
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": key_prefix,
-            "created_via": created_via,
-            "created_by": created_by,
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": expires_at,
-            "name": name,
-            # C1 columns: graph scope + allowlist + mint lineage
-            "graph_id": graph_id,
-            "scopes": final_scopes,
-            "created_by_key_id": caller_key_id,
-            "delegation_depth": delegation_depth,
-        })
+        # #1879: the cap gate and the INSERT are ONE transaction inside the
+        # `provision_api_key` RPC, serialized on the org row — the pre-check
+        # above is fast-fail + defense-in-depth ONLY (it is a check-then-act
+        # across a separate PostgREST request, so two workers can both pass
+        # it). The RPC re-applies `count - cap_slot_credit >= max` (#4355)
+        # under the lock and is the AUTHORITATIVE refusal.
+        try:
+            mint_provisioned_key(cp, {
+                "id": kid,
+                "org_id": org_id,
+                "lookup_hash": lookup_hash(api_key),
+                "key_prefix": key_prefix,
+                "created_via": created_via,
+                "created_by": created_by,
+                "created_at": now,
+                "revoked_at": None,
+                "expires_at": expires_at,
+                "name": name,
+                # C1 columns: graph scope + allowlist + mint lineage
+                "graph_id": graph_id,
+                "scopes": final_scopes,
+                "created_by_key_id": caller_key_id,
+                "delegation_depth": delegation_depth,
+            }, max_keys=max_keys, cap_slot_credit=cap_slot_credit)
+        except KeyCapRefusal:
+            # Same class the caller's pre-check raises → the identical 402/409
+            # mapping, just decided inside the serialized transaction.
+            raise _KeyCapExceeded() from None
     else:
         sdk = _make_sdk(namespace="registry")
         # apikey_create generates its OWN id (ulid) AND plaintext for the
@@ -20620,7 +20632,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# ── #1855: per-org session-key mint lock ────────────────────────────────────
+# ── #1855/#1879: per-org session-key mint lock ─────────────────────────────────
 # The session-key mint critical section (cap read → revoke → recheck → insert)
 # is atomic in the DOCUMENTED single-worker deployment only because it is
 # all-sync (no await between control-plane calls). Under --workers > 1, two
@@ -20634,15 +20646,23 @@ def _now_iso() -> str:
 # guaranteed to reuse — neither serializes a multi-call critical section. The
 # durable multi-worker fix is a single SQL mint RPC that runs the whole
 # cap/revoke/recheck/insert in ONE transaction (the recover_team_key pattern,
-# migration 20260814000001 — SELECT ... FOR UPDATE); out of scope for this
-# micro fix and tracked in #1855.
+# migration 20260814000001 — SELECT ... FOR UPDATE).
+#
+# ⛔ #1879 LANDED: the SUPABASE lane now does exactly that —
+# `_session_key_supabase` runs the whole section inside `session_key_mint`
+# (migration 20260927000001), serialized on the `organizations` row, and
+# `_mint_key`'s Supabase branch runs inside `provision_api_key` under the same
+# lock. This in-process lock is retained as belt-and-braces for the Supabase
+# lane and is still the ONLY guard for the REGISTRY lane (embedded FalkorDB is
+# single-process by construction — #1879 scope item 4).
 #
 # threading.Lock (not asyncio.Lock): loop-agnostic (tests spin fresh asyncio
 # loops; asyncio.Lock caches its loop on first acquire) and the section is
 # all-sync, so acquire() never blocks the event loop in the current
 # architecture. ⛔ If an await is ever introduced INSIDE the section, switch to
-# an asyncio.Lock (same per-org keying) — or port the mint to the SQL RPC.
-# Cross-process (--workers > 1) serialization STILL requires the SQL RPC.
+# an asyncio.Lock (same per-org keying) — or route the lane through the SQL RPC,
+# as the Supabase lane now does. Cross-process (--workers > 1) serialization
+# requires that SQL RPC.
 _ORG_MINT_LOCKS: dict[str, threading.Lock] = {}
 _ORG_MINT_LOCKS_GUARD = threading.Lock()
 
@@ -20809,10 +20829,64 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"tid": tid, "uid": user_id, "now": now},
                 ).result_set
                 if oldest:
-                    reg.query(
-                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    # #1879 P2: the revoke is a CLAIM, not a blind write —
+                    # `WHERE k.revoked_at IS NULL` makes it the Cypher twin of
+                    # `_claim_key_revocation`, so a concurrent revoke of the
+                    # SAME victim (rotate's claim-revoke, or any other
+                    # non-lock-holding writer) is never OVERWRITTEN. The
+                    # returned rows are what THIS call claimed; the
+                    # compensation below is gated on it — a lost claim wrote
+                    # nothing, so there is nothing to restore.
+                    claimed_revoke = bool(reg.query(
+                        "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL "
+                        "SET k.revoked_at = $now RETURN k.id",
                         params={"id": oldest[0][0], "now": now},
-                    )
+                    ).result_set)
+                    # #1879: FAIL-CLOSED RE-CHECK (parity with the rotation
+                    # branch below). The revoke above frees a slot ONLY if the
+                    # count did not move underneath it: this lane's lock is
+                    # per-PROCESS and the mint gate is not the only writer
+                    # (`_mint_key`'s callers — create_api_key, the per-graph
+                    # mint, rotate_api_key's create leg — take no
+                    # `_org_mint_lock`; recorded residual). A concurrent ADD
+                    # by any of those consumes the slot this revoke frees, so
+                    # the count can still be at the cap AFTER the revoke —
+                    # inserting then would take the org to cap+1. Same
+                    # invariant the rotation branch already enforces (P2-1):
+                    # a revoke that freed no counted slot must NOT mint.
+                    # (A concurrent REVOKE is harmless here: it lowers the
+                    # count this re-check then reads.)
+                    recheck_other = reg.query(
+                        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
+                        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                        "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
+                        params={"tid": tid, "now": now},
+                    ).result_set[0][0]
+                    if max_keys is not None and recheck_other >= max_keys:
+                        # COMPENSATE before refusing: the revoke above is a
+                        # committed write in THIS lane (unlike the Supabase lane,
+                        # where the same re-check runs inside one transaction and
+                        # its RAISE ROLLS THE REVOKE BACK). Refusing without
+                        # undoing it would destroy another user's live key and
+                        # return no key at all — a refusal that loses data is
+                        # strictly worse than the overshoot it prevents.
+                        #
+                        # #1879 P2: gated on `claimed_revoke` — restoring is
+                        # only correct when THIS call's claim actually wrote
+                        # the row. A lost claim (another writer revoked the
+                        # victim first) freed no slot, so the revoke is left
+                        # exactly as that writer made it. The restore itself is
+                        # a compare-and-swap on the exact timestamp WE wrote,
+                        # so it can never resurrect a row another writer
+                        # deliberately revoked (`SET k.revoked_at = NULL` only
+                        # WHERE k.revoked_at = $now).
+                        if claimed_revoke:
+                            reg.query(
+                                "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now "
+                                "SET k.revoked_at = NULL",
+                                params={"id": oldest[0][0], "now": now},
+                            )
+                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
                 else:
                     # #1828: at max_api_keys with no OTHER key to revoke, the
                     # recovery fallback dead-locks on the user's OWN persistent
@@ -20932,9 +21006,13 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     with reads/writes on org_memberships / orgs / api_keys. The minted key
     lands in api_keys with lookup_hash + created_via + expires_at, so
     get_current_org / MCP resolve it via the unique lookup_hash index, and
-    api_keys.revoked_at is the authoritative revoke. #1855: the whole
-    cap/revoke/recheck/insert section runs under the per-org in-process lock
-    (see _org_mint_lock above — same lock as the registry lane). #2380 (P1):
+    api_keys.revoked_at is the authoritative revoke. #1879: the whole
+    cap/revoke/recheck/insert section runs as ONE Postgres transaction inside
+    the `session_key_mint` RPC (migration 20260927000001), which serializes on
+    the `organizations` row (`FOR NO KEY UPDATE`) — so the cap holds ACROSS
+    worker processes, not just within this one. The per-org in-process lock
+    (see _org_mint_lock above) is retained as belt-and-braces: a second worker
+    has its own lock table, so it was never the guarantee. #2380 (P1):
     the registry-lane recovery role gate has its byte-parity twin here
     (owner/admin on the RESOLVED tid, after THIS lane's own suspension check
     — see the gate below); bootstrap stays member-open.
@@ -20945,12 +21023,11 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     from tortoise.auth import lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
-        active_api_keys,
+        SessionKeyMintRefusal,
         get_control_plane,
-        insert_api_key,
         membership_for_user_org,
+        mint_session_key,
         org_by_id,
-        revoke_api_key,
         user_memberships,
     )
 
@@ -20999,6 +21076,18 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
     now = datetime.now(UTC).isoformat()
+    # #750.8: .get() so a pricing.json key drift never 500s the mint (pricing.py
+    # validates required keys at load; belt-and-braces). Hoisted ABOVE the lock:
+    # the #1879 RPC takes the cap as a caller-supplied param (pricing lives in
+    # app code, never SQL).
+    lim = tier_limits(tier)
+    max_keys = lim.get("max_api_keys")
+    # #1879: computed ONCE and used for BOTH the RPC argument and the response —
+    # a second `now()+24h` after the mint would advertise an `expires_at` a few
+    # milliseconds LATER than the row's (the row is authoritative; the response
+    # must not disagree with it).
+    expires_at = ((datetime.now(UTC) + timedelta(hours=24)).isoformat()
+                  if purpose == "bootstrap" else None)
     # #1828 review P3-2: True when the recovery fallback rotated a session
     # credential to make room — the dashboard shows a one-time banner.
     rotated = False
@@ -21007,132 +21096,46 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     rotated_key_prefix = None
 
     with _org_mint_lock(tid):
+        # #1879: the ENTIRE critical section (bootstrap 3-active check / cap
+        # count -> oldest-OTHER revoke -> fail-closed re-check -> 3-tier
+        # rotation -> fail-closed re-check -> INSERT) runs in ONE Postgres
+        # transaction via the `session_key_mint` RPC, which serializes on the
+        # `organizations` row (`FOR NO KEY UPDATE`). This in-process lock is now
+        # belt-and-braces ONLY: it cannot exclude a second worker process, and
+        # PostgREST gives each statement its own transaction, so no
+        # application-level lock can span the section.
+        try:
+            minted = mint_session_key(
+                cp,
+                org_id=tid,
+                user_id=user_id,
+                purpose=purpose,
+                key_id=kid,
+                lookup_hash=lookup_hash(api_key),
+                key_prefix=api_key[:10],
+                created_at=now,
+                expires_at=expires_at,
+                max_api_keys=max_keys,
+            )
+        except SessionKeyMintRefusal as e:
+            # Semantic refusal from the serialized transaction — the SAME
+            # status/details the pre-#1879 in-Python section raised.
+            if e.code == "bootstrap_cap":
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many active session keys — wait for expiry",
+                ) from None
+            raise HTTPException(
+                status_code=402, detail=_key_limit_refusal()) from None
+        rotated = bool(minted.get("rotated"))
+        rotated_key_prefix = minted.get("rotated_key_prefix")
 
-        if purpose == "bootstrap":
-            active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
-            if len(active_boot) >= 3:
-                raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
-            expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
-            created_via = "bootstrap"
-        else:
-            lim = tier_limits(tier)
-            # #750.8: .get() so a pricing.json key drift never 500s the mint.
-            max_keys = lim.get("max_api_keys")
-            # Legacy rows may have created_via NULL — NULL <> 'bootstrap' counts
-            # against the cap, matching the registry predicate.
-            active = [r for r in active_api_keys(cp, tid)
-                      if r.get("created_via") != "bootstrap"]
-            if max_keys is not None and len(active) >= max_keys:
-                # #750.10: never auto-revoke a key the current user created —
-                # recovery must not dead-end by killing the user's own key.
-                # #1859 P3-1 (lane parity): exclude LEGACY keys (created_by
-                # IS NULL) from the others list — the registry predicate is
-                # `created_by <> $uid`, whose Cypher NULL semantics EXCLUDE
-                # unowned rows, so a legacy key must fall to the rotation
-                # branch (rotated=True), not be revoked via the others branch
-                # (rotated=False). Python's `None != user_id` is True, which
-                # inverted the semantics for exactly the orgs where legacy
-                # keys exist (pre-created_by session credentials).
-                others = [r for r in active
-                          if r.get("created_by") is not None
-                          and r.get("created_by") != user_id]
-                others.sort(key=lambda r: r.get("created_at") or "")
-                if others:
-                    revoke_api_key(cp, others[0]["id"], now)
-                else:
-                    # #1828: at max_api_keys with no OTHER key to revoke, the
-                    # recovery fallback dead-locks on the user's OWN persistent
-                    # keys (#750.10 refuses to touch them). Rotate a session
-                    # credential instead, in 3 tiers (each frees a slot or is
-                    # re-checked fail-closed):
-                    #   1. a LEGACY org-scoped unowned key (created_by IS NULL
-                    #      — a pre-created_by session credential by construction;
-                    #      it COUNTS against the cap, so rotating it frees a real
-                    #      slot and is preferred),
-                    #   2. the user's own LEAST-RECENTLY-USED recovery key
-                    #      (#1830 — system-minted fallback credentials, NOT
-                    #      deliberate user-created keys (those are
-                    #      created_via='provisioned' via create_api_key); they
-                    #      count against max_api_keys, so rotating one frees a
-                    #      REAL persistent slot — this is the escape hatch that
-                    #      un-deadlocks an org whose own recovery keys fill the
-                    #      cap; #1854: ordered by last_used_at ASC with never-
-                    #      used (NULL) keys first, so a live persistent
-                    #      credential another agent/device uses is NOT the one
-                    #      rotated), then
-                    #   3. the user's own OLDEST bootstrap key (24h ephemeral,
-                    #      re-minted per login; Review P3: expired own bootstraps
-                    #      are rotatable too (the row scan below drops the expiry
-                    #      filter; #742 auth remains unaffected — expired keys
-                    #      still never authenticate).
-                    # Own PROVISIONED keys (deliberate user-created keys) are
-                    # NEVER rotation candidates (#750.10).
-                    # Review P2-1: RE-CHECK the persistent count after the
-                    # revoke — a rotated modern bootstrap was never in the count,
-                    # so a rotation that doesn't free a slot fails CLOSED (402)
-                    # instead of minting cap+1 persistent keys (unbounded growth
-                    # per login).
-                    cands = cp.query(
-                        "api_keys",
-                        select=["id", "key_prefix", "created_at", "created_by",
-                                "created_via", "last_used_at"],
-                        filters=[("org_id", "eq", tid), ("revoked_at", "is", None)],
-                    )
-                    legacy = [r for r in cands
-                              if r.get("created_by") is None
-                              and r.get("created_via") != "bootstrap"]
-                    own_recovery = [r for r in cands
-                                    if r.get("created_by") == user_id
-                                    and r.get("created_via") == "recovery"]
-                    own_boot = [r for r in cands
-                                if r.get("created_by") == user_id
-                                and r.get("created_via") == "bootstrap"]
-                    legacy.sort(key=lambda r: r.get("created_at") or "")
-                    # #1854: own_recovery is rotated least-recently-used FIRST.
-                    # Sort key: (last_used_at IS NULL, last_used_at, created_at).
-                    # NULL last_used_at = never used = an unused credential —
-                    # the SAFEST rotation target (nothing live depends on it),
-                    # so NULLs sort first; then least-recently-used; created_at
-                    # breaks ties so an all-NULL set keeps the pre-#1854
-                    # oldest-created behavior.
-                    own_recovery.sort(
-                        key=lambda r: (r.get("last_used_at") is not None,
-                                       r.get("last_used_at") or "",
-                                       r.get("created_at") or ""))
-                    own_boot.sort(key=lambda r: r.get("created_at") or "")
-                    rotatable = legacy if legacy else (own_recovery if own_recovery else own_boot)
-                    if rotatable:
-                        revoke_api_key(cp, rotatable[0]["id"], now)
-                        rotated_key_prefix = rotatable[0].get("key_prefix")
-                        # P2-1: only mint when a persistent slot actually opened
-                        # (legacy rotation frees one; a modern bootstrap never
-                        # counted against max_api_keys).
-                        recheck = [r for r in active_api_keys(cp, tid)
-                                   if r.get("created_via") != "bootstrap"]
-                        if max_keys is not None and len(recheck) >= max_keys:
-                            raise HTTPException(status_code=402, detail=_key_limit_refusal())
-                        rotated = True
-                    else:
-                        raise HTTPException(status_code=402, detail=_key_limit_refusal())
-            expires_at = None
-            created_via = "recovery"
-
-        insert_api_key(cp, {
-            "id": kid,
-            "org_id": tid,
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": api_key[:10],
-            "created_via": created_via,
-            "created_by": user_id,
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": expires_at,
-        })
     await _async_audit(request, tid, "api_key_mint", resource_type="api_key", resource_id=kid)
     # #308 (R2): evaluate key-create velocity after a successful mint.
     await _abuse_evaluate_keys(tid)
 
-    return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
+    return {"key": api_key, "key_prefix": api_key[:10],
+            "expires_at": expires_at,
             "org_id": tid, "purpose": purpose, "rotated": rotated,
             "rotated_key_prefix": rotated_key_prefix}
 

@@ -977,3 +977,210 @@ class TestSessionKeyMintConcurrency:
                   and k.get("created_via") != "bootstrap"]
         assert len(active) <= 2, \
             f"cap overshot: {len(active)} active non-bootstrap keys"
+
+
+class TestSessionKeyMintSerialization1879:
+    """#1879 — a Supabase session-key mint is ONE `session_key_mint` RPC.
+
+    Migration 20260927000001 opens that RPC with
+    ``SELECT id FROM organizations WHERE id = p_org_id FOR NO KEY UPDATE``, so
+    the whole cap/revoke/recheck/insert section runs in ONE transaction that
+    holds the org row — the serialization point that survives a second worker
+    process. The in-process `_org_mint_lock` cannot (each worker has its own
+    lock table) and PostgREST cannot (one transaction per HTTP request, so a
+    lock taken by a WRAPPER RPC is released before the section runs).
+
+    ⚠️ What these tests can and cannot show: the FakeControlPlane's per-org
+    lock MODELS the row lock (acquired and released inside one `rpc()` call,
+    exactly like a transaction), so these tests prove the LANE routes through
+    one serialized transaction and that the emulation is load-bearing — they
+    are not a two-connection Postgres contention test. The SQL itself (lock
+    mode, lock scope, re-check order) is covered by the PGlite suite
+    `supabase/tests/20260927000001_api_key_mint_serialization.sql`, which is
+    single-connection BY CONSTRUCTION and therefore also cannot show
+    contention.
+    """
+
+    @pytest.fixture
+    def authed_user(self):
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": _USER1}
+        yield
+        app.dependency_overrides.pop(get_current_user, None)
+
+    def test_mint_routes_through_one_rpc_and_no_direct_row_write(
+            self, monkeypatch, rest_client, authed_user):
+        """The mint is ONE RPC and touches api_keys through NO direct
+        PostgREST write. Pre-#1879 the section was a Python check-then-act
+        (GET count → PATCH revoke → POST insert): four separate requests, each
+        its own transaction, so two workers could both pass the count and both
+        insert. Fails if the lane ever goes back to direct api_keys writes.
+        """
+        tc, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id=tid)])
+        fake.tables["api_keys"] = []
+
+        direct_writes: list[str] = []
+        orig_query = fake.query
+
+        def _spy(table, *, method="GET", **kw):
+            if table == "api_keys" and method in ("POST", "PATCH", "DELETE"):
+                direct_writes.append(method)
+            return orig_query(table, method=method, **kw)
+
+        monkeypatch.setattr(fake, "query", _spy)
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+
+        rpcs = [fn for fn, _ in fake.rpc_calls]
+        assert rpcs.count("session_key_mint") == 1, (
+            f"the mint must be exactly ONE session_key_mint RPC, got: {rpcs}")
+        assert direct_writes == [], (
+            f"the mint still writes api_keys through direct PostgREST "
+            f"requests ({direct_writes}) — that is the racy shape #1879 "
+            f"replaces (each request its own transaction)")
+        # the RPC really is the writer: the returned plaintext resolves to the
+        # row it created (lookup_hash + created_via + created_by parity).
+        assert len(fake.tables["api_keys"]) == 1
+        row = fake.tables["api_keys"][0]
+        assert row["lookup_hash"] == lookup_hash(r.json()["key"])
+        assert row["created_by"] == _USER1
+        assert row["created_via"] == "recovery"
+        assert row["revoked_at"] is None
+
+    def test_two_concurrent_mints_serialize_and_never_overshoot_cap(
+            self, supabase_fake):
+        """A REAL two-thread interleave at the transaction seam: two mints for
+        the SAME org, cap=2, with two OTHER users' live keys occupying both
+        slots. Both must take the 'revoke the oldest OTHER key' path (the
+        losing interleaving when unserialized is: both read count=2, both pick
+        the SAME oldest key, both revoke it — the second revoke frees nothing
+        — both re-check and still see a free slot, and both insert → cap+1).
+
+        The rendezvous runs INSIDE the emulated transaction (org lock held), so
+        an unserialized critical section is detected directly (two threads
+        inside at once) rather than inferred from a count. Mutation: make
+        `FakeControlPlane._mint_org_lock` hand out a fresh lock per call (i.e.
+        no serialization) → `overlaps` becomes non-empty and this fails.
+        """
+        import threading
+        import time
+
+        fake = supabase_fake
+        tid = "team-free-001"
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id=tid)])
+        fake.seed("api_keys", [
+            _key_row(id="other-old", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-old", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="other-new", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-new", created_at="2026-08-02T00:00:00Z"),
+        ])
+
+        inside = threading.Event()
+        overlaps: list[str] = []
+
+        def _rendezvous():
+            # inside the transaction, holding the org row
+            if inside.is_set():
+                overlaps.append("second thread inside the critical section")
+            inside.set()
+            time.sleep(0.05)  # widen the window a non-serialized impl exploits
+            inside.clear()
+
+        fake.mint_rendezvous = _rendezvous
+        results: list[object] = []
+        errors: list[str] = []
+
+        def _mint(i: int):
+            try:
+                results.append(fake.rpc_value("session_key_mint", {
+                    "p_org_id": tid,
+                    "p_user_id": _USER1,
+                    "p_purpose": "recovery",
+                    "p_key_id": f"session-{i}",
+                    "p_lookup_hash": f"h-session-{i}",
+                    "p_key_prefix": f"tt_session{i}"[:10],
+                    "p_created_at": f"2026-08-1{i}T00:00:00Z",
+                    "p_expires_at": None,
+                    "p_max_api_keys": 2,
+                    "p_bootstrap_cap": 3,
+                }))
+            except Exception as e:  # pragma: no cover - diagnostic only
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=_mint, args=(i,), daemon=True)
+                   for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert not any(t.is_alive() for t in threads), "a mint thread hung"
+
+        assert errors == [], errors
+        assert len(results) == 2, results
+        assert overlaps == [], (
+            "two mints were inside the critical section at once — the "
+            "per-org serialization point is gone")
+        # and the cap INVARIANT, which is what the serialization buys. The
+        # serialized outcome is DETERMINISTIC: each mint finds a live OTHER key
+        # (other-old, then other-new) and takes the revoke path, so both succeed
+        # and exactly the two new keys survive.
+        live = [k for k in fake.tables["api_keys"]
+                if k.get("org_id") == tid and k.get("revoked_at") is None
+                and k.get("created_via") != "bootstrap"]
+        assert len(live) <= 2, (
+            f"cap overshot under concurrent mints: {len(live)} live keys "
+            f"(ids={[k['id'] for k in live]})")
+        assert {k["id"] for k in live} == {"session-0", "session-1"}, (
+            "both serialized mints must take the 'revoke the oldest OTHER key' "
+            f"path and land their own key: live={sorted(k['id'] for k in live)}")
+        # ...and neither fell through to the ROTATION branch (which reports
+        # rotated=True): this pins that the interleave really exercises the
+        # `others` branch — the branch that loses the race when unserialized.
+        assert results == [{"rotated": False, "rotated_key_prefix": None}] * 2, results
+
+    def test_at_cap_others_revoke_emits_no_phantom_key_create_event(
+            self, rest_client, authed_user):
+        """#1879 P2(a) pin: the at-cap `others`-branch mint emits exactly ONE
+        `key_create` abuse event — for the key it CREATED, and NONE for the row
+        it REVOKED. The real trigger is `AFTER INSERT ON public.api_keys` only
+        (0015_abuse_events.sql), so a revoke is not a create.
+        `_abuse_evaluate_keys` consumes these events, so a phantom event would
+        silently inflate key_create telemetry.
+
+        Mutation pin: re-adding `self._trigger_key_create(org_id,
+        others[0]["id"], None)` after the revoke in
+        `FakeControlPlane.session_key_mint` makes the count 2 and this REDs.
+        """
+        tc, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id=tid)])
+        # free tier max_api_keys == 2: two OTHER live keys fill the cap, so the
+        # mint MUST take the `others` revoke path.
+        fake.seed("api_keys", [
+            _key_row(id="other-old", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-old", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="other-new", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-new", created_at="2026-08-02T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+
+        created = next(k for k in fake.tables["api_keys"]
+                       if k.get("lookup_hash") == lookup_hash(r.json()["key"]))
+        assert created["id"] != "other-old"
+        revoked = next(k for k in fake.tables["api_keys"]
+                       if k["id"] == "other-old")
+        assert revoked["revoked_at"] is not None, (
+            "this test is only meaningful if the mint really took the "
+            "others-branch revoke")
+
+        events = [e for e in fake.tables.get("abuse_events", [])
+                  if e.get("event_type") == "key_create"]
+        assert len(events) == 1, (
+            f"the revoke path emitted a phantom key_create event: {events}")
+        assert events[0]["key_id"] == created["id"], (
+            f"the single key_create event must name the CREATED key "
+            f"({created['id']}), got {events[0]}")
+        assert all(e["key_id"] != "other-old" for e in events), events

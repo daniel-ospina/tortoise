@@ -184,11 +184,21 @@ class FakeControlPlane:
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
         self.uuid_fidelity = uuid_fidelity
-        # #1709: serializes recover_team_key emulation (the real RPC SELECTs
-        # the token row FOR UPDATE — the fake must be atomic under the
-        # concurrency E2E).
+        # #1709/#1879: per-ORG mint lock — models the SQL `FOR NO KEY UPDATE`
+        # on the `organizations` row that `recover_team_key`,
+        # `session_key_mint` and `provision_api_key` all take. It is acquired
+        # and released WITHIN one `rpc()` call, exactly like a real
+        # transaction's row lock — so a production lane that split its
+        # critical section across TWO rpc() calls would NOT be serialized here
+        # and the concurrency tests would say so.
         import threading
-        self._recover_lock = threading.Lock()
+        self._mint_org_locks: dict[str, threading.Lock] = {}
+        self._mint_org_locks_guard = threading.Lock()
+        # #1879 test hook: invoked INSIDE the emulated mint RPC while the org
+        # lock is held (after the cap read, before the write). A test sets it
+        # to force a DETERMINISTIC interleave instead of a flaky thread race.
+        # None (default) = inert.
+        self.mint_rendezvous = None
         # #1765: auth-side rows for user_identity_inventory/reserve_unlink
         # emulations (mirror auth.users + auth.identities shapes).
         self.auth_users: list[dict] = []
@@ -223,6 +233,38 @@ class FakeControlPlane:
         exactly once in ``rpc_calls``.
         """
         return self.rpc(fn, body)
+
+    def _mint_org_lock(self, org_id: str):
+        """Per-org mint lock (models the SQL `FOR NO KEY UPDATE` row lock)."""
+        with self._mint_org_locks_guard:
+            lock = self._mint_org_locks.get(org_id)
+            if lock is None:
+                import threading
+                lock = threading.Lock()
+                self._mint_org_locks[org_id] = lock
+            return lock
+
+    def _slot_count(self, org_id: str, now, *, exclude_bootstrap: bool = True) -> int:
+        """#1879: the fake's SQL-side cap predicate — `api_key_slot_count`.
+
+        Mirrors `quota._count_resource("api_keys")` / the migration's
+        `public.api_key_slot_count`: non-revoked, non-expired, and (when
+        `exclude_bootstrap`) created_via not bootstrap — NULL-TOLERANT so a
+        legacy row with no created_via still COUNTS.
+        """
+        from datetime import UTC, datetime
+        now_dt = _as_dt(now) or datetime.now(UTC)
+        n = 0
+        for k in self.tables.get("api_keys", []):
+            if k.get("org_id") != org_id or k.get("revoked_at") is not None:
+                continue
+            exp = _as_dt(k.get("expires_at"))
+            if exp is not None and exp <= now_dt:
+                continue
+            if exclude_bootstrap and k.get("created_via") == "bootstrap":
+                continue
+            n += 1
+        return n
 
     def _claim_migrate_created_by(self, org_id: str, user_id: str) -> None:
         """#1765: claim attributes anon-/reg- created_by keys in the team to
@@ -570,6 +612,161 @@ class FakeControlPlane:
                 row["last_used_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
                 return row.get("org_id")
             return None
+        if fn == "session_key_mint":
+            # #1879: the whole session-mint critical section in ONE emulated
+            # transaction, under the org lock (released at the end of THIS
+            # call — exactly like the real RPC's commit).
+            from datetime import datetime, timezone
+            p = body or {}
+            org_id = p.get("p_org_id") or ""
+            user_id = p.get("p_user_id") or ""
+            now = p.get("p_created_at")
+            now_dt = _as_dt(now) or datetime.now(timezone.utc)  # noqa: UP017
+            with self._mint_org_lock(org_id):
+                key_rows = self.tables.setdefault("api_keys", [])
+                if not any(o.get("id") == org_id
+                           for o in self.tables.get("organizations", [])):
+                    raise RuntimeError("session_key_mint: org not found")
+                if self.mint_rendezvous is not None:
+                    # Deterministic interleave point: the caller is INSIDE the
+                    # lock here, so a second mint must block on it.
+                    self.mint_rendezvous()
+                rotated = False
+                rotated_prefix = None
+                if p.get("p_purpose") == "bootstrap":
+                    cap = int(p.get("p_bootstrap_cap") or 3)
+                    boot = [k for k in key_rows
+                            if k.get("org_id") == org_id
+                            and k.get("created_via") == "bootstrap"
+                            and k.get("created_by") == user_id
+                            and k.get("revoked_at") is None
+                            and (_as_dt(k.get("expires_at")) is None
+                                 or _as_dt(k.get("expires_at")) > now_dt)]
+                    if len(boot) >= cap:
+                        raise RuntimeError(
+                            "session_key_mint: bootstrap cap reached")
+                else:
+                    max_keys = p.get("p_max_api_keys")
+                    if max_keys is not None and self._slot_count(org_id, now) >= int(max_keys):
+                        # older-OTHER: live, non-bootstrap, non-expired, owned
+                        # by someone else (#750.10 / #1859 P3-1).
+                        others = [k for k in key_rows
+                                  if k.get("org_id") == org_id
+                                  and k.get("revoked_at") is None
+                                  and k.get("created_by") is not None
+                                  and k.get("created_by") != user_id
+                                  and k.get("created_via") != "bootstrap"
+                                  and (_as_dt(k.get("expires_at")) is None
+                                       or _as_dt(k.get("expires_at")) > now_dt)]
+                        others.sort(key=lambda k: k.get("created_at") or "")
+                        if others:
+                            others[0]["revoked_at"] = now
+                            # NO `_trigger_key_create` here: the real trigger is
+                            # `AFTER INSERT ON public.api_keys` only
+                            # (0015_abuse_events.sql), so a REVOKE must never
+                            # emit a key_create abuse event (the rotation branch
+                            # and the recover_team_key emulation don't either).
+                            # Review P2: emitting one inflated key_create
+                            # telemetry for rows that were never created, and
+                            # `_abuse_evaluate_keys` consumes those events.
+                            # FAIL-CLOSED RE-CHECK (#1879): the revoke frees a
+                            # slot only if the target was still live.
+                            if self._slot_count(org_id, now) >= int(max_keys):
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                        else:
+                            cands = [k for k in key_rows
+                                     if k.get("org_id") == org_id
+                                     and k.get("revoked_at") is None]
+                            legacy = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") is None
+                                 and k.get("created_via") != "bootstrap"],
+                                key=lambda k: k.get("created_at") or "")
+                            own_recovery = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") == user_id
+                                 and k.get("created_via") == "recovery"],
+                                key=lambda k: (k.get("last_used_at") is not None,
+                                               k.get("last_used_at") or "",
+                                               k.get("created_at") or ""))
+                            own_boot = sorted(
+                                [k for k in cands
+                                 if k.get("created_by") == user_id
+                                 and k.get("created_via") == "bootstrap"],
+                                key=lambda k: k.get("created_at") or "")
+                            rotatable = legacy or own_recovery or own_boot
+                            if not rotatable:
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                            rotatable[0]["revoked_at"] = now
+                            rotated_prefix = rotatable[0].get("key_prefix")
+                            if self._slot_count(org_id, now) >= int(max_keys):
+                                raise RuntimeError(
+                                    "session_key_mint: key limit reached")
+                            rotated = True
+                key_rows.append({
+                    "id": p.get("p_key_id"),
+                    "org_id": org_id,
+                    "lookup_hash": p.get("p_lookup_hash"),
+                    "key_prefix": p.get("p_key_prefix"),
+                    "created_via": ("bootstrap" if p.get("p_purpose") == "bootstrap"
+                                    else "recovery"),
+                    "created_by": user_id,
+                    "created_at": now,
+                    "revoked_at": None,
+                    "expires_at": p.get("p_expires_at"),
+                })
+                self._trigger_key_create(
+                    org_id, p.get("p_key_id") or "",
+                    "bootstrap" if p.get("p_purpose") == "bootstrap" else "recovery")
+                return {"rotated": rotated, "rotated_key_prefix": rotated_prefix}
+        if fn == "provision_api_key":
+            # #1879: the atomic provisioned/rotate mint (cap gate + INSERT in
+            # one emulated transaction under the org lock).
+            p = body or {}
+            org_id = p.get("p_org_id") or ""
+            with self._mint_org_lock(org_id):
+                if not any(o.get("id") == org_id
+                           for o in self.tables.get("organizations", [])):
+                    raise RuntimeError("provision_api_key: org not found")
+                if self.mint_rendezvous is not None:
+                    self.mint_rendezvous()
+                max_keys = p.get("p_max_api_keys")
+                credit = int(p.get("p_cap_slot_credit") or 0)
+                if (max_keys is not None
+                        and self._slot_count(org_id, p.get("p_created_at"))
+                        - credit >= int(max_keys)):
+                    raise RuntimeError("provision_api_key: key cap reached")
+                key_rows = self.tables.setdefault("api_keys", [])
+                if any(k.get("lookup_hash") == p.get("p_lookup_hash")
+                       for k in key_rows):
+                    # Mirrors uq_api_keys_lookup_hash: a plain INSERT raises,
+                    # it is NOT an ON CONFLICT no-op (the caller must never
+                    # receive a plaintext for a row it did not insert).
+                    raise RuntimeError(
+                        "provision_api_key: duplicate key value violates unique "
+                        "constraint \"uq_api_keys_lookup_hash\"")
+                key_rows.append({
+                    "id": p.get("p_key_id"),
+                    "org_id": org_id,
+                    "lookup_hash": p.get("p_lookup_hash"),
+                    "key_prefix": p.get("p_key_prefix"),
+                    "created_via": p.get("p_created_via"),
+                    "created_by": p.get("p_created_by"),
+                    "created_at": p.get("p_created_at"),
+                    "revoked_at": None,
+                    "expires_at": p.get("p_expires_at"),
+                    "name": p.get("p_name"),
+                    "graph_id": p.get("p_graph_id"),
+                    "scopes": (p.get("p_scopes") if p.get("p_scopes") is not None
+                               else []),
+                    "created_by_key_id": p.get("p_created_by_key_id"),
+                    "delegation_depth": p.get("p_delegation_depth"),
+                })
+                self._trigger_key_create(org_id, p.get("p_key_id") or "",
+                                         p.get("p_created_via"))
+                return None
         if fn == "recover_team_key":
             # #1709: keyless recovery mint — atomic cap-check + insert under a
             # lock (emulates the RPC's FOR UPDATE row serialization so the
@@ -579,7 +776,7 @@ class FakeControlPlane:
             th = p.get("p_token_hash") or ""
             tid = p.get("p_org_id") or ""
             lookup = p.get("p_lookup_hash") or ""
-            with self._recover_lock:
+            with self._mint_org_lock(tid):
                 tokens = self.tables.setdefault("agent_signup_tokens", [])
                 row = next((t for t in tokens
                             if t.get("token_hash") == th

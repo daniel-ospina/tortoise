@@ -352,6 +352,7 @@ const suites = [
   '20260919000001_metering_period_end_repair.sql',  // #4216
   '20260925000001_oauth_referential_integrity.sql',  // #3036
   '20260925000002_oauth_redemption_state.sql',  // #3027
+  '20260927000001_api_key_mint_serialization.sql',  // #1879
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

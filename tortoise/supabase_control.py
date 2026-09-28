@@ -1094,6 +1094,153 @@ def claim_api_key_revocation(cp, key_id: str, now: str | None = None) -> bool:
     )
     return bool(updated)
 
+# ── #1879: durable multi-worker mint serialization ────────────────────────
+#
+# The mint critical sections below run as ONE Postgres transaction through a
+# SECURITY DEFINER RPC (migration 20260927000001), which serializes on the
+# `organizations` row (`FOR NO KEY UPDATE`). WHY a whole-section RPC: each
+# `cp.query`/`cp.rpc` is its own PostgREST HTTP request, and PostgREST is
+# stateless per request — a lock taken by a WRAPPER RPC releases at that
+# request's commit (before the section runs), and a session-level advisory
+# lock binds to a pooled connection the next request may not reuse. Only a
+# lock taken INSIDE the same transaction as the whole section can serialize
+# it. See the migration header for the lock-resource/mode reasoning.
+
+
+class SessionKeyMintRefusal(RuntimeError):
+    """A SEMANTIC refusal from ``session_key_mint`` (#1879).
+
+    ``code`` is ``"bootstrap_cap"`` (→ 429) or ``"key_limit"`` (→ 402); the
+    HTTP layer maps it. Every OTHER ``RuntimeError`` — transport failure, a
+    missing RPC (PostgREST 404 on a not-yet-applied migration), a truncated
+    response — MUST propagate: the caller fails CLOSED (500, no key) and must
+    never fall back to the pre-#1879 multi-request section, which is exactly
+    the race this RPC closes.
+    """
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+class KeyCapRefusal(RuntimeError):
+    """The ATOMIC cap gate inside ``provision_api_key`` refused (#1879).
+
+    Distinct from the Python pre-check's ``_KeyCapExceeded``: this one fired
+    inside the serialized transaction, i.e. it is the authoritative refusal
+    (#4355's ``cap_slot_credit`` is applied in the same place).
+    """
+
+
+#: RAISE-message substrings → refusal code. The RAISE text is load-bearing
+#: contract (``rpc()`` carries PostgREST's error body `message`), same pattern
+#: as `_RECOVER_ERROR_CODES`.
+_SESSION_MINT_ERROR_CODES = {
+    "session_key_mint: bootstrap cap reached": "bootstrap_cap",
+    "session_key_mint: key limit reached": "key_limit",
+}
+
+
+def mint_session_key(cp, *, org_id: str, user_id: str, purpose: str,
+                     key_id: str, lookup_hash: str, key_prefix: str,
+                     created_at: str, expires_at: str | None,
+                     max_api_keys: int | None,
+                     bootstrap_cap: int = 3) -> dict:
+    """Mint a session key through the atomic ``session_key_mint`` RPC (#1879).
+
+    ONE transaction: lock the org row → (bootstrap 3-active check | recovery
+    cap count → oldest-OTHER revoke → fail-closed re-check → 3-tier rotation →
+    fail-closed re-check) → INSERT. The whole ``_session_key_supabase``
+    critical section lives in SQL so it is serialized across processes; the
+    caller keeps its in-process lock as belt-and-braces only.
+
+    Returns ``{"rotated": bool, "rotated_key_prefix": str | None}``.
+    Raises :class:`SessionKeyMintRefusal` on a semantic refusal, ``RuntimeError``
+    (fail-closed) on anything else.
+    """
+    try:
+        result = cp.rpc_value("session_key_mint", {
+            "p_org_id": org_id,
+            "p_user_id": user_id,
+            "p_purpose": purpose,
+            "p_key_id": key_id,
+            "p_lookup_hash": lookup_hash,
+            "p_key_prefix": key_prefix,
+            "p_created_at": created_at,
+            "p_expires_at": expires_at,
+            "p_max_api_keys": max_api_keys,
+            "p_bootstrap_cap": bootstrap_cap,
+        })
+    except RuntimeError as e:
+        msg = str(e)
+        for marker, code in _SESSION_MINT_ERROR_CODES.items():
+            if marker in msg:
+                raise SessionKeyMintRefusal(msg, code) from e
+        raise
+    if not isinstance(result, dict):
+        # The RPC returns jsonb; an unreadable envelope is a contract
+        # violation, but the mint may ALREADY have committed — reporting a
+        # failure there would strand a live key the client never saw. Confirm
+        # from the row instead. The rotation envelope is advisory UX (the
+        # dashboard's one-time banner), so a missing envelope degrades the
+        # banner, never the key.
+        rows = cp.query(
+            "api_keys",
+            select=["id"],
+            filters=[("org_id", "eq", org_id),
+                     ("lookup_hash", "eq", lookup_hash),
+                     ("revoked_at", "is", None)],
+        )
+        if not rows:
+            raise RuntimeError(
+                "session_key_mint returned an unreadable envelope and no "
+                "committed row (fail-closed)")
+        result = {"rotated": False, "rotated_key_prefix": None}
+    return {
+        "rotated": bool(result.get("rotated")),
+        "rotated_key_prefix": result.get("rotated_key_prefix"),
+    }
+
+
+def mint_provisioned_key(cp, row: dict, *, max_keys: int | None,
+                         cap_slot_credit: int = 0) -> None:
+    """Atomic provisioned/rotate key mint (``provision_api_key``, #1879).
+
+    ``row`` is the ``_mint_key`` insert row (id/org_id/lookup_hash/key_prefix/
+    created_via/created_by/created_at/expires_at/name/graph_id/scopes/
+    created_by_key_id/delegation_depth). The cap gate and the INSERT are one
+    transaction under the SAME org-row lock ``session_key_mint`` takes, so a
+    provisioned mint cannot race a session mint (or another provisioned mint)
+    past the cap. ``cap_slot_credit`` (#4355) is applied inside SQL exactly as
+    the Python pre-check applies it: ``count - credit >= cap``.
+
+    Raises :class:`KeyCapRefusal` when the serialized gate refuses; any other
+    ``RuntimeError`` propagates (fail closed).
+    """
+    try:
+        cp.rpc("provision_api_key", {
+            "p_org_id": row["org_id"],
+            "p_key_id": row["id"],
+            "p_lookup_hash": row["lookup_hash"],
+            "p_key_prefix": row["key_prefix"],
+            "p_created_via": row["created_via"],
+            "p_created_by": row.get("created_by"),
+            "p_created_at": row["created_at"],
+            "p_expires_at": row.get("expires_at"),
+            "p_name": row.get("name"),
+            "p_graph_id": row.get("graph_id"),
+            "p_scopes": row.get("scopes") or [],
+            "p_created_by_key_id": row.get("created_by_key_id"),
+            "p_delegation_depth": row.get("delegation_depth"),
+            "p_max_api_keys": max_keys,
+            "p_cap_slot_credit": cap_slot_credit,
+        })
+    except RuntimeError as e:
+        if "provision_api_key: key cap reached" in str(e):
+            raise KeyCapRefusal(str(e)) from e
+        raise
+
+
 def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
     """#1148: enable/disable an API key (per-key toggle). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
