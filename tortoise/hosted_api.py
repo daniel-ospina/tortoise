@@ -44,6 +44,7 @@ import tortoise
 # #3834: the wait-bound vocabulary's single home — read as a module attribute so
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
+from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -118,10 +119,11 @@ from tortoise.sdk import (
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
+    _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
-    _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
+    _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
@@ -414,18 +416,119 @@ def _capture_session_release(session_key: str | None) -> None:
         _CAPTURE_SESSIONS.pop(session_key, None)
 
 
+def _graph_name_for_namespace(namespace: str | None, *,
+                              graph_name: str | None = None,
+                              uri_graph: str | None = None) -> str:
+    """Namespace → FalkorDB graph name — a mirror of ``TortoiseSDK._get_proj``.
+
+    ``tortoise/sdk.py`` owns this mapping; this is its only restatement, kept
+    here because `_data_graph_name` must name the graph a request opens WITHOUT
+    opening a projection (admission is I/O-free — #3718/#4625), and because an
+    edit to ``sdk.py`` shifts every ``sdk.py:N`` citation in
+    ``docs/product/sdk-rename-table.md`` (MEMORY.md: the sdk_rename_table trap —
+    `tests/test_sdk_rename_table.py` reds on any added/removed sdk.py line).
+    `tests/test_capture_loop_responsiveness.py::`
+    `test_capture_graph_name_mirrors_the_sdk_mapping` drives the REAL
+    ``_get_proj`` against this function through the NAMESPACE-FAMILY branches
+    (``registry`` / explicit ``graph_name`` / ``test_`` / ``test-`` / ``org_``).
+    The URI fallback is NOT covered by that guard and is not reachable from
+    `_data_graph_name` (which never passes ``uri_graph``), so a drift in
+    ``_get_proj``'s URI parsing cannot split the gate from the opened graph for
+    any real credential — see `_data_graph_name`.
+
+    Branch order and truthiness mirror ``_get_proj`` EXACTLY: ``registry``
+    first; ``graph_name is not None`` (not truthiness); the ``test_`` /
+    ``tortoise_test`` family; the hyphenated ``test-`` family; then
+    ``org_{namespace}``; a falsy namespace falls back to the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        return "registry_tortoise"
+    if graph_name is not None:
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            return f"{namespace.replace('-', '_')}_tortoise"
+        return f"org_{namespace}"
+    return uri_graph or "tortoise"
+
+
+def _data_graph_name(org: dict) -> str | None:
+    """The FULL DB graph name this request's data path will open — #3365.
+
+    It is the single value the ADMISSION GATE and the opener share. For a
+    graph-bound key `_data_sdk` passes it straight through as ``graph_name=``;
+    for an org-wide key the name is decided by ``TortoiseSDK._get_proj`` from
+    ``namespace=org_id``, and this function mirrors that derivation — so the two
+    agree by construction on both branches. `_capture_session_key` keys the
+    in-flight registry on the SAME value, so two credentials that route to the
+    same physical graph share one bucket whatever ``graph_id`` shape they carry.
+    `tests/test_capture_loop_responsiveness.py::`
+    `test_data_sdk_opens_the_graph_the_gate_keys_on` pins the CALL FORM the
+    opener uses for each branch (and the name it yields) against this value, and
+    `test_capture_graph_name_mirrors_the_sdk_mapping` pins this value's
+    namespace-family derivation against the real ``_get_proj``.
+
+    A falsy ``org_id`` therefore keys on the literal ``tortoise``, while
+    ``_get_proj`` would open the URI's own graph. That divergence is
+    unreachable in practice (``org_id`` is a DB key and always truthy) and
+    benign if reached (every falsy-id request resolves to the same one graph).
+
+    ``None`` = the binding's namespace did not resolve. `_data_sdk` refuses that
+    request (403 GRAPH_NOT_FOUND) BEFORE any write, so callers must keep it OUT
+    of every real graph's bucket — fail closed, never widen.
+    """
+    if org.get("graph_id"):
+        return org.get("graph_namespace") or None
+    # Org-wide key / session auth: `_data_sdk` opens `namespace=org_id`, whose
+    # resolved name is the SDK derivation. Deliberately NOT the dict's
+    # `graph_namespace`: that is `teams.graph_name`/`t.graph_name`, which
+    # `_data_sdk` ignores on purpose (the selfhost `org_{name}` lane diverges —
+    # #2023), so keying on it would bucket the request by a graph it never opens.
+    return _graph_name_for_namespace(org.get("org_id"))
+
+
 def _capture_session_key(org: dict, session_id: str | None) -> str | None:
-    """Scope an in-flight session key to its tenant (and graph) — #3129.
+    """Scope an in-flight session key to its tenant AND its graph — #3129/#3365.
 
     Session ids are CLIENT-chosen (often a generic harness name), so a bare
     session_id would let one tenant's in-flight capture refuse another tenant's
     unrelated capture of the same name (reviewer-measured 409). The admission
     COUNTER stays global (it bounds a server resource); only this key is scoped.
+
+    #3365: the graph component is the graph the capture will ACTUALLY write to
+    (`_data_graph_name`), not the credential's ``graph_id`` binding. A
+    legacy/pre-guard key bound to the org's DEFAULT graph carries that node's
+    real ``g_<hex>`` id while writing to the same physical graph an org-wide key
+    writes to; keying on the binding id split them into two buckets, so both
+    passed admission and a second same-session capture was served a 0-extract
+    replay — the #3129 silent-loss window, reopened.
+
+    Deliberately NOT normalized by the binding's ``kind`` (the shape
+    `backup_sweep.enumerate_org_graphs` uses for its PERSISTENT object keys —
+    Q4 #2313 / #2376). Those two are different artifacts with different jobs:
+    in the registry/selfhost lane an org-wide key opens ``org_{org_id}`` while a
+    default-kind binding opens ``org_{name}`` — two DIFFERENT graphs — so
+    kind-folding would refuse a legitimate capture with a false 409. This key is
+    ephemeral and process-local (`_CAPTURE_SESSIONS`), so what it must equal is
+    the physical graph, and the value is derived only from server-resolved auth
+    fields (never client input); `_data_sdk` still runs the ownership check
+    before any write.
     """
     if not session_id:
         return None
-    return (f"{org.get('org_id')}:"
-            f"{org.get('graph_id') or 'default'}:{session_id}")
+    graph = _data_graph_name(org)
+    if graph is None:
+        # Fail closed: a bound key whose namespace did not resolve opens NO
+        # graph (403 in `_data_sdk`), so it gets its own bucket — never
+        # another graph's, and never the org default's. The `::` separator is
+        # not produced by any graph-name producer (`org_…`, `test_…_tortoise`,
+        # `registry_tortoise`, `tortoise`), so the sentinel cannot collide with
+        # a real graph's bucket even if one were named `unresolved…`.
+        graph = f"unresolved::{org.get('graph_id')}"
+    return f"{org.get('org_id')}:{graph}:{session_id}"
 
 
 def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
@@ -441,7 +544,9 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     #3129: the same reasoning for a SECOND request carrying a ``session_id``
     that is already being captured — it is refused (409) here, before any
     write, instead of racing the first capture's `capture_ok` write. The
-    caller passes an already tenant-scoped key (`_capture_session_key`).
+    caller passes a key already scoped by TENANT AND RESOLVED GRAPH
+    (`_capture_session_key`, whose graph component is `_data_graph_name` —
+    the graph the request will actually open, #3365).
     """
     global _CAPTURE_IN_FLIGHT
     session_key = session_key or None
@@ -1482,6 +1587,64 @@ async def _lifespan(app):
 
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
+
+# ── #2048: the residual body-buffering class ──────────────────────────────
+# The endpoints that declare `body: XxxRequest` / `body: dict` buffer the WHOLE
+# wire body inside FastAPI's `get_request_handler` BEFORE any dependency or
+# handler runs — upstream of where #2032's per-site capped read could sit.
+# `CappedBodyMiddleware` caps them where the body is still a stream and replays
+# under-cap bytes to the router. Registered FIRST so it lands INNERMOST (inside
+# CORS + the response-header middlewares), giving its 413 the SAME
+# `{"detail": ...}` body and the same response headers as a handler 413.
+#
+# Exemptions: every route that already applies its OWN `_read_capped_body` cap
+# (the #2032 sweep table + the manifest/import/stripe paths), and `/mcp` (the
+# sub-app's own middleware stack). Reading those here would either truncate a
+# legal body or MOVE an already-documented read ahead of its rate-limit / auth
+# / 503 gate (e.g. #2032's register rate-limit-before-parse and oauth
+# 503-before-parse ordering, and the `/v1/internal/` auth-ordering property
+# #4939). The middleware's scope is therefore exactly the class that had NO cap
+# before #2048: the declared `body: XxxRequest` / `body: dict` parameters, plus
+# the `/v1/sessions` capture override. Note `/v1/team/keys` is exempt by EXACT
+# path (the handler-capped POST) — the PATCH on `/v1/team/keys/{key_id}` is a
+# pydantic-body route and stays covered by the default cap.
+_APP_BODY_CAP_EXEMPT_REGEXES = (
+    # #2032 sweep sites (per-site caps live at each call site).
+    re.compile(r"^/v1/register/?$"),
+    re.compile(r"^/v1/session/login/?$"),
+    re.compile(r"^/v1/signup/email/?$"),
+    re.compile(r"^/v1/team/keys/?$"),
+    re.compile(r"^/v1/team/keys/[^/]+/rotate/?$"),
+    re.compile(r"^/v1/claim/?$"),
+    re.compile(r"^/v1/agent/signup/?$"),
+    re.compile(r"^/v1/agent/recover/?$"),
+    re.compile(r"^/v1/agent/token/revoke/?$"),
+    re.compile(r"^/oauth/consent/?$"),
+    re.compile(r"^/oauth/token/?$"),
+    re.compile(r"^/oauth/revoke/?$"),
+    re.compile(r"^/register/?$"),                     # OAuth DCR
+    # Handler-capped larger surfaces.
+    re.compile(r"^/v1/sessions/commit/?$"),           # _COMMIT_SESSION_MAX_BYTES (8 MiB)
+    re.compile(r"^/v1/packs/manifests/?$"),           # MANIFEST_WIRE_CAP_BYTES (~388 KiB)
+    re.compile(r"^/webhooks/stripe/?$"),              # _STRIPE_WEBHOOK_MAX_BYTES (1 MiB)
+    re.compile(r"^/v1/organizations/[^/]+/import/?$"),  # _IMPORT_MAX_BYTES (64 MiB)
+)
+app.add_middleware(
+    _body_limits.CappedBodyMiddleware,
+    default_max_bytes=_body_limits.BODY_MAX_BYTES,
+    default_detail=_body_limits.BODY_413_DETAIL,
+    # /v1/sessions carries session content (schema-unbounded per-turn text):
+    # the #2032 small-surface cap would false-413 a legal capture — see the
+    # CAPTURE_SESSION_MAX_BYTES note in tortoise/body_limits.py.
+    path_caps={
+        "/v1/sessions": (
+            _body_limits.CAPTURE_SESSION_MAX_BYTES,
+            _body_limits.CAPTURE_SESSION_413_DETAIL,
+        ),
+    },
+    exempt_prefixes=("/mcp", "/internal", "/v1/internal"),
+    exempt_regexes=_APP_BODY_CAP_EXEMPT_REGEXES,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -4345,7 +4508,11 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     org_id = org["org_id"]
     gid = org.get("graph_id")
     if gid:
-        ns = org.get("graph_namespace")
+        # The graph-bound branch of `_data_graph_name` — the ONE owner of the
+        # name this request opens. The #3129/#3365 admission gate keys on the
+        # same function, so the graph it reserves and the graph opened here
+        # cannot drift apart.
+        ns = _data_graph_name(org)
         if not ns:
             raise HTTPException(
                 status_code=403,
@@ -4982,6 +5149,19 @@ class CreatePointRequest(BaseModel):
     # seed must not duplicate state on a re-click/retry. Default False keeps
     # the existing endpoint semantics unchanged.
     dedup: bool = False
+    # #4032: the hosted client (agent-infra `scripts/tortoise-memory.mjs`,
+    # `write-points` / `write-claim` --confidence / --authored-by) sent both
+    # of these and pydantic's default `extra='ignore'` DROPPED them here, so
+    # the route never forwarded them and the write reported `ok` while the
+    # value was never stored — a silent-false-green. They are declared (and
+    # the route forwards them) because the underlying primitive already
+    # persists them: `sdk.create_point(..., confidence=, authoredBy=)` writes
+    # both as Point props and `tortoise_client.write_claim` has relied on that
+    # since before this endpoint existed. Wire names are the client's
+    # (`authoredBy`, camelCase) — the same spelling the SDK prop and the MCP
+    # tool use. A value the store cannot hold is a 422, never a silent drop.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("kind")
     @classmethod
@@ -5449,9 +5629,71 @@ def _control_plane_unavailable() -> HTTPException:
     )
 
 
+class _OffloadRefused:
+    """Sentinel for a REFUSED best-effort offload (#4456).
+
+    ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
+    when the pool refused the submission (backlog full — or, on a cancellable
+    lane, cancelled before any worker ran it): the work did NOT happen. A
+    plain bound miss still returns ``None``, because the worker that picked
+    the submission up runs it to completion (the seam abandons only the
+    await). Callers that ignore the return value are unaffected; a
+    delivery-sensitive caller can tell a real drop from a later-than-bound
+    completion instead of reading both as ``None``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "OFFLOAD_REFUSED"
+
+
+#: Public discriminator returned by a REFUSED best-effort offload (#4456).
+OFFLOAD_REFUSED = _OffloadRefused()
+
+#: Rate limit for the ``BILLING_NOTIFY_REFUSED`` ERROR floor (#4456 plan §4).
+#: The shared telemetry pool is reachable by any tenant, so ONE saturation
+#: refuses a notify per billing webhook for EVERY tenant — the repo already
+#: ruled against per-drop alert amplification (``operator_alert._log_shed``),
+#: so the ERROR line is shed-logged too. One line per window is enough to see
+#: the outage; the suppressed count is deliberately not carried.
+_BILLING_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference
+#: point is undefined, so a fresh-boot clock would suppress every line).
+_LAST_BILLING_REFUSED_LOG: float | None = None
+_BILLING_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_billing_notify_refused(org_id: str | None,
+                                event_type: str | None) -> None:
+    """The rate-limited ERROR floor for a REFUSED billing notify (#4456 AC3).
+
+    Emitted BEFORE the incident escalation, so it survives the two reasons the
+    alert channel can be ABSENT (no ``DR_ISSUES_PAT``, or an unbuildable
+    object store — the documented residual): without it, a permanently-lost
+    billing notification reads only as the ``_cp_offload`` best-effort WARNING
+    plus ``alert_operator``'s "no alert channel" WARNING, indistinguishable
+    from routine telemetry noise. Never raises.
+    """
+    global _LAST_BILLING_REFUSED_LOG
+    with suppress(Exception):
+        now = time.monotonic()
+        with _BILLING_REFUSED_LOG_LOCK:
+            if (_LAST_BILLING_REFUSED_LOG is not None
+                    and now - _LAST_BILLING_REFUSED_LOG
+                    < _BILLING_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_BILLING_REFUSED_LOG = now
+        _logger.error(
+            "webhook: billing notify REFUSED by the control-plane offload "
+            "seam (org=%s event_type=%s) — the WebhookEvent marker is already "
+            "committed, so Stripe's retry sees is_first=False and this "
+            "notification is LOST", org_id, event_type)
+
+
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                       pool: str = "auth", timeout: float | None = None,
-                      unavailable=None):
+                      unavailable=None, cancel_on_timeout: bool = True):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -5493,6 +5735,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     await, never the worker thread (CPython #87185), so abandoning a grant that
     is mid-write would claim a retryable state it cannot observe (#2863).
 
+    ``cancel_on_timeout=False`` (#4456) makes the bound DELIVERY-preserving:
+    the bound abandons only the AWAIT, so a submission still QUEUED when the
+    bound expires STILL RUNS (the default ``True`` cancels a queued submission
+    and the worker skips it — a silent DROP, not an abandonment). A
+    ``best_effort=True`` call then returns :data:`OFFLOAD_REFUSED` — instead
+    of ``None`` — when the pool genuinely REFUSED the submission, so the
+    caller can escalate a real drop instead of swallowing it as a success.
+
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
     callers touch, and every routed site is covered by a behavioural test.
@@ -5502,13 +5752,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
         return await run_control_plane_call(
-            fn, op=op, pool=effective_pool, timeout=timeout)
+            fn, op=op, pool=effective_pool, timeout=timeout,
+            cancel_on_timeout=cancel_on_timeout)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
-            return None
+            return OFFLOAD_REFUSED if exc.refused else None
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -5822,9 +6073,43 @@ async def _check_recovery_rate_limit(request: Request,
 # is a ONE-TIME human act, so a 2/24h budget never trips a real user while
 # capping an automated farm. Mirrors the register/sensitive-op limiter
 # posture (#1081's per-IP pattern; RATE_LIMIT_DISABLED=1 opts out in tests).
-_CLAIM_MAX_PER_24H = 2
-_CLAIM_WINDOW = 24 * 3600
-_CLAIM_BUCKETS: dict[str, list[float]] = defaultdict(list)
+#
+# #3125: the bucket key is the REAL client IP — the #1559 rule (see the
+# `#1559:` block in RateLimitMiddleware.dispatch): `request.state.client_ip`,
+# set by ClientIPMiddleware from Fly-Client-IP when
+# TORTOISE_TRUST_FLY_CLIENT_IP=1, falling back to `request.client.host`.
+# Keying on `request.client.host` behind Fly is the PROXY's IP — a constant —
+# so every user shared ONE bucket and the 2/24h budget was a GLOBAL 2/24h cap
+# on the whole claim surface (both `/v1/claim` OAuth and the email/password
+# claim path call this limiter).
+#
+# #3125: the store is BOUNDED, not merely pruned. The pre-fix branch pruned
+# only *stale* buckets, AFTER the charge (the #2866 non-bounding shape — and
+# dead code while every request shared one key): under a fresh-key flood
+# every bucket is in-window, so nothing was reclaimed and the store grew
+# without bound. Resolved with the #2866 D3/D4 policy — reclaim inactive
+# LRU-head buckets before admitting a new key, and while the store is still
+# at cap the new key gets NO bucket of its own: it is charged to one shared
+# overflow bucket, so the distinct-new-IP ceiling is `STORE_CAP + LIMIT`.
+# Fail closed: an un-tractable client is denied, never handed an unbounded
+# budget. Evicting an *active* bucket is explicitly rejected (#2866 approach
+# C) — under churn that is a limiter bypass.
+#
+# All three knobs are read AT CALL TIME via `_int_env` (the #3125 third
+# finding; the signup/recover/DCR convention, D8 of the #2866 policy) so a
+# per-environment budget is tunable without a code change.
+_CLAIM_MAX_PER_24H_DEFAULT = 2
+_CLAIM_WINDOW_DEFAULT = 24 * 3600
+_CLAIM_STORE_CAP_DEFAULT = 10_000
+# Singleton key for the at-cap overflow charge — never a client IP, so it can
+# never be confused with (or collide with) a per-IP bucket.
+_CLAIM_OVERFLOW_KEY = "\x00overflow"
+# Ordered by LAST CHARGE (`move_to_end` on a CHARGED request only) — the
+# ordering invariant `_claim_reclaim` depends on: an active LRU head implies
+# every later key is active too, so reclaim can stop at the first active
+# bucket and can never evict a live budget.
+_CLAIM_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_CLAIM_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
 # #1511: session-exchange per-IP bucket (5/hr) — real per-IP via
 # ClientIPMiddleware (PATH_LIMITS would bucket on the Fly proxy IP = global).
 _SESSION_BUCKETS: dict[str, list[float]] = defaultdict(list)
@@ -5834,31 +6119,125 @@ _SESSION_LOGIN_WINDOW_S = 3600
 _CLAIM_LOCK = asyncio.Lock()
 
 
+def _claim_reclaim(store: OrderedDict, now: float, window_s: int,
+                   cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (#3125 — the #2866 D3/D4 policy, mirroring
+    ``_oauth_dcr_reclaim``).
+
+    By the last-charge ordering invariant an active head implies every later
+    key is active too, so this stops at the first live bucket and can never
+    evict an active key (which under churn would be a limiter bypass).
+    O(1) at the hot cap, replacing the pre-fix O(n) full-store scan.
+    """
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
 async def _check_claim_rate_limit(request: Request) -> None:
-    """IP-based rate limit: 2 claim attempts per rolling 24h per IP."""
+    """IP-based rate limit: 2 claim attempts per rolling window (default 24h)
+    per REAL client IP (#1559/#3125 — `request.state.client_ip`, fallback
+    `request.client.host`; behind Fly the latter is the PROXY's IP).
+
+    Env knobs, read at call time so tests/operators tune without a reload:
+    TORTOISE_CLAIM_MAX_PER_24H (default 2),
+    TORTOISE_CLAIM_WINDOW_S (default 86400 — a non-positive value falls back
+    to the default, never to a disabled limiter),
+    TORTOISE_CLAIM_STORE_CAP (default 10000 — the per-process distinct-IP
+    ceiling; distinct new IPs per window are bounded by
+    `STORE_CAP + MAX_PER_24H`).
+
+    Accepted limitations (stated, not implied): while the store is FULL the
+    overflow bucket is ONE SHARED budget for every untracked IP — so at
+    `STORE_CAP` simultaneous live buckets the limiter degrades to the #3125
+    symptom (untracked clients share `MAX_PER_24H`); it is reachable only at
+    that cardinality and it only ever DENIES, never grants (fail closed), and
+    reclaiming inactive buckets clears it. An IP charged to the overflow
+    bucket can later obtain its own bucket, so one IP is bounded by
+    `2 * MAX_PER_24H` in the worst case — the same property the #2866 DCR
+    policy accepts, and the bound is what keeps the store finite. No IPv6
+    prefix keying: a client holding a whole IPv6 /64 gets one bucket per
+    address — the /64 gap is filed on #5490 (the shared-primitive issue);
+    this limiter does not use that primitive, so a fix there must cover this
+    site too (the claim budget is per-IP, and collapsing a shared /64 would
+    make unrelated users share one 2/24h budget).
+    """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
+    # #1559: the REAL client IP, NEVER the Fly proxy IP behind
+    # request.client.host (a constant behind the proxy ⇒ one global bucket).
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    if not ip:
         return
-    ip = request.client.host
+    # Normalize IPv4-mapped IPv6 so one dual-stack client cannot present two
+    # keys for one address (#1081 review P4). The other per-IP limiters get
+    # this inside `_check_ip_bucket_rate_limit`; this limiter does not use
+    # that helper, so it must apply it here.
+    ip = _normalize_mapped_ipv6(ip)
+    limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
+    window_s = _int_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
+    if window_s <= 0:
+        # An invalid window must never fail OPEN: with window_s <= 0 the
+        # in-window test `now - t < window_s` is never true, the bucket is
+        # emptied on every request and the limiter is silently disabled.
+        # Fall back to the default (the D6 convention for an out-of-range
+        # value) — the intended off-switch is RATE_LIMIT_DISABLED.
+        window_s = _CLAIM_WINDOW_DEFAULT
+    store_cap = _int_env("TORTOISE_CLAIM_STORE_CAP", _CLAIM_STORE_CAP_DEFAULT)
+    # User-facing period, derived so a tuned window cannot make the 429
+    # message lie (identical to "24h" at the default window).
+    period = (f"{window_s // 3600}h"
+              if window_s >= 3600 and window_s % 3600 == 0
+              else f"{window_s}s")
     now = time.time()
     async with _CLAIM_LOCK:
-        bucket = _CLAIM_BUCKETS[ip]
-        bucket[:] = [t for t in bucket if now - t < _CLAIM_WINDOW]
-        if len(bucket) >= _CLAIM_MAX_PER_24H:
+        # Phase 1: evaluate (and, only on a NEW key, evict INACTIVE buckets).
+        # A 429 leaves the stores UNCHARGED and UNGROWN — it may prune
+        # in place, but it never appends and never inserts.
+        bucket = _CLAIM_BUCKETS.get(ip)
+        on_overflow = False
+        if bucket is None:
+            _claim_reclaim(_CLAIM_BUCKETS, now, window_s, store_cap)
+            if len(_CLAIM_BUCKETS) >= store_cap:
+                on_overflow = True  # store full of LIVE buckets — no room
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = [t for t in bucket if now - t < window_s]
+
+        if on_overflow:
+            charged = _CLAIM_OVERFLOW.get(_CLAIM_OVERFLOW_KEY)
+            if charged is None:
+                charged = []
+            else:
+                charged[:] = [t for t in charged if now - t < window_s]
+        else:
+            charged = bucket
+
+        if len(charged) >= limit:
             raise HTTPException(
                 status_code=429,
-                detail=("Too many claim attempts (max 2 per 24h). "
+                detail=(f"Too many claim attempts (max {limit} per {period}). "
                         "Please try again later."),
-                headers={"Retry-After": "86400"},
+                # The advertised wait is the window itself (the pre-fix
+                # constant, here derived) — a tuned window can never
+                # advertise a wait longer than the budget it enforces.
+                headers={"Retry-After": str(window_s)},
             )
-        bucket.append(now)
-        # Bound memory growth: drop dead buckets beyond 10k entries.
-        if len(_CLAIM_BUCKETS) > 10_000:
-            stale = [ip for ip, b in _CLAIM_BUCKETS.items()
-                     if not any(now - t < _CLAIM_WINDOW for t in b)]
-            for ip in stale:
-                del _CLAIM_BUCKETS[ip]
+
+        # Phase 2: every dimension passed — charge (and only now reorder).
+        charged.append(now)
+        if on_overflow:
+            _CLAIM_OVERFLOW[_CLAIM_OVERFLOW_KEY] = charged
+            _CLAIM_OVERFLOW.move_to_end(_CLAIM_OVERFLOW_KEY)
+        else:
+            _CLAIM_BUCKETS[ip] = charged
+            _CLAIM_BUCKETS.move_to_end(ip)
 
 
 # ── Invite-accept limiter (#1134, OWASP per-token/IP/global caps) ────────────
@@ -6067,11 +6446,21 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
         # `_get_proj()` is inside the worker because its FIRST call opens the
         # projection.
         def _write_point() -> dict:
+            # #4032: forward the caller's confidence/authoredBy as props —
+            # only when SUPPLIED (passing None would stamp a null property
+            # onto a point that never asked for one). `sdk.create_point`
+            # persists both verbatim (the SDK's props passthrough).
+            _author_props: dict = {}
+            if body.confidence is not None:
+                _author_props["confidence"] = body.confidence
+            if body.authoredBy is not None:
+                _author_props["authoredBy"] = body.authoredBy
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
                 tags=body.tags,
                 dedup=body.dedup,
+                **_author_props,
             )
             if body.about_object:
                 # #1643: ID-based edge (never the name-resolution path, which
@@ -10256,7 +10645,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    _turn_texts = _capture_turn_texts(windowed)
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
+    # HERE, off the event loop, on the capture pool, and the writer below and
+    # the linker further down REUSE this exact result instead of recomputing it.
+    # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
+    # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
+    # the two passes this lane used to pay for the SAME window — the embedding
+    # batch's and the linker's. It must not run on the loop at all:
+    # `_capture_turn_texts` used to be an O(n) f-string loop, but it now scrubs,
+    # so calling it bare here would put seconds of CPU on the loop — the
+    # #3060/#3086 freeze class this file is built around (and which
+    # `test_capture_loop_responsiveness` cannot see: it counts on-loop QUERIES,
+    # and a scrub issues none). See the scoping doc for the pass COUNT this lane
+    # still pays (the extractor and the session `:Source` each scrub the same
+    # window for their own consumers; idempotence keeps the count correct).
+    _turn_texts, _redaction_counts = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
@@ -10268,10 +10672,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
     # guard and the rebuild journal all live in that one definition, so this
     # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
-    await _run_off_loop(
+    _capture_redactions = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
         windowed, now=now, turn_embs=_turn_embs,
-        session_existed=session_existed)
+        session_existed=session_existed,
+        texts_and_counts=(_turn_texts, _redaction_counts))
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -10565,6 +10970,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 "eid": event_id, "sid": session_id,
                                 "harness": source_harness, "ing": now},
                     )
+                # #4936 (mirror of the sdk capture stamp): the minted-point
+                # join above CANNOT reach an operator whose endpoint RE-KEYED
+                # to a pre-existing graph node (#4716 Part 1) — the payload
+                # point resolved to the existing node, so it is not in
+                # ``minted_ids`` (a folded-only capture mints nothing at all,
+                # leaving the join unreached). Stamp exactly the operator ids
+                # this capture CREATED, surfaced on the extraction meta by
+                # ``sdk._extract_session_v2`` (the apply_payload_operators
+                # return). ``eventId IS NULL`` is the no-clobber guard; the
+                # join's ``draft`` guard is deliberately NOT repeated (these
+                # ids are Points this call created — draft at creation — so a
+                # concurrent promotion flipping one to 'live' must not defeat
+                # the stamp). The join is kept — it is the only surface
+                # covering operators created outside apply_payload_operators
+                # (the M2 projection path).
+                operator_ids = list(meta.get("operator_ids") or [])
+                if operator_ids:
+                    proj.g.query(
+                        "MATCH (o:Point {is_operator:true}) "
+                        "WHERE o.id IN $ids "
+                        "AND o.eventId IS NULL "
+                        "SET o.eventId=$eid, o.source_session=$sid, "
+                        "    o.source_harness=$harness, "
+                        "    o.ingested_at=$ing",
+                        params={"ids": operator_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
                 if retry_failed_capture:
                     # #2335 WI-2b / review (PR #2473): a RETRY heals the
                     # failed first attempt's provenance gap (mirror of the
@@ -10611,7 +11044,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # P1 #1529 (D4): a Source materialization failure is non-fatal and
         # surfaced as an additive warning — never a 500 after writes.
         try:
-            sdk._materialize_session_source(
+            # #4911: off the event loop. The helper now scrubs every turn it is
+            # handed (bounded at 5,000 chars PER TURN, but the turn count is the
+            # caller's), and the pre-existing derivation alone measured ~0.8 s
+            # for a legal-maximum 500x5,000 session — the scrub pushed that to
+            # ~7 s of CPU that would otherwise block every other request on this
+            # loop. Non-fatal either way, same as the surrounding wrap.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR, sdk._materialize_session_source,
                 session_id, event_id, now, body.conversation)
         except Exception:
             import logging
@@ -10706,10 +11146,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # after the capture). Tracked on the Session node.
     try:
         from .session_link import link_session_entities
-        # #4194: the shared `_capture_turn_texts` is the ONE stored-text
-        # definition — the link trigger, the stored turn, and the embedded text
-        # cannot drift (#1532 D1/D2).
-        link_texts = _capture_turn_texts(windowed)
+        # #4194/#4911: the shared `_capture_turn_texts_with_redactions` is the
+        # ONE stored-text definition — the link trigger, the stored turn, and
+        # the embedded text cannot drift (#1532 D1/D2). The texts were already
+        # computed off the loop above, so the linker adds NO scrub pass of its
+        # own.
+        link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
@@ -11152,6 +11594,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # yields []: nothing was added, never a fabricated count. UI rendering
     # of the marker is #1976's — this is the engine data exposure only.
     surfaced = surfaced_marker(extracted, verified_ids=set(facts))
+    # #4911: a capture that redacted a credential says so — byte-parity with
+    # the SDK receipt (`sdk.capture_session`), appended only when non-zero so
+    # an ordinary capture's warning list is unchanged.
+    if _capture_redactions:
+        extraction_warnings.append(
+            _capture_redaction_warning(_capture_redactions))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
@@ -11166,6 +11614,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # #2335 WI-1a: the hosted receipt carries the extractor
             # telemetry (sdk meta stats - real on v2, {} on replayed/M2).
             "stats": meta.get("stats") or {},
+            # #4911: credential-shaped spans redacted from this capture's turn
+            # text before persistence — always present (0 when nothing
+            # matched), byte-parity with the SDK receipt.
+            "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
             # trigger for the in-conversation announcement (SKILL.md §6 copy).
             "first_capture": bool(first_capture)}
@@ -11503,6 +11955,19 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #1370 / #4934: the SAME kind→label routing + gated binder as the local
+    # capture seam (anti-drift — both call `subject_binding`). Subject-kind
+    # names are excluded from the legacy `about_entities` channel below: the
+    # binder is the only confidence-gated aboutSubject producer, and the raw
+    # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
+    from tortoise.subject_binding import bind_point_subjects, is_subject_kind
+    # F6: EXACT names (no `.lower()` fold) so the skip and the case-SENSITIVE
+    # `MATCH (o:Object {name:$n})` resolution agree, derived from the entities
+    # whose KIND is a subject kind.
+    subject_entity_names = {
+        er.entity.name for er in reconcile.entities
+        if is_subject_kind(er.entity.kind)
+    }
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
     document_basename = _document_source_basename(payload)
@@ -11586,6 +12051,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
+            if str(name) in subject_entity_names:
+                # #1370 (F5): DELIBERATE drop, not a hand-off. This loop writes
+                # `aboutObject` ONLY — the binder reads a Point's `slots`, not
+                # an Event's `about_entities`, so nothing replaces this edge.
+                # The attribution is intentionally not emitted because the only
+                # permitted Event→Subject writer would have to be UN-GATED
+                # (bypassing the fail-closed contract the issue exists for).
+                # No edge, no Object stub, no id-less `MERGE`. Residual recorded
+                # in the scoping doc.
+                continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities. MERGE creates the :Object on demand
@@ -11667,6 +12142,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # matching create_point); supersede candidates (changed content) get a NEW
     # content-addressed id + supersede_point (CORRECTS + outdated + edge
     # transfer, PL2). Non-episodic (the quota discriminator). ──
+    # #1370 (G1): payload point id → the id `create_point` actually RESOLVED
+    # the write to (the payload id on a fresh create, the canonical's id on a
+    # content-hash dedup hit). The binder below is keyed on this, never on the
+    # payload id, so it can only bind a Point the write actually addressed.
+    point_resolved_ids: dict[str, str] = {}
     for pr in reconcile.points:
         pid = pr.point.id
         if pr.action == "merge":
@@ -11687,7 +12167,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11708,13 +12188,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            if isinstance(_rid, str) and _rid:
+                point_resolved_ids[pr.point.id] = _rid
             sdk.supersede_point(pr.existing_id, pid)
         else:
             point_props = {}
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11733,23 +12216,37 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            if isinstance(_rid, str) and _rid:
+                point_resolved_ids[pr.point.id] = _rid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
             params={"sid": session_id, "pid": pid},
         )
 
-    # ── 6. Entities — :Object nodes MERGE by name (#452); objectKind + the
-    # S5 gate-result flag (passes_frequency_gate written WITH flag, amendment
-    # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
-    # NOT exist, §4.2). ──
+    # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
+    # become :Subject (with subjectKind) so the Subject layer is reachable and
+    # the vocabulary does not leak into Object.objectKind; everything else stays
+    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
+    # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
+    # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
-        sdk.create_entity(
-            "object", er.entity.name,
-            objectKind=er.entity.kind,
-            passes_frequency_gate=er.entity.passes_frequency_gate,
-            is_episodic=False,
-        )
+        if is_subject_kind(er.entity.kind):
+            sdk.create_entity(
+                "subject", er.entity.name,
+                subjectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
+        else:
+            sdk.create_entity(
+                "object", er.entity.name,
+                objectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
@@ -11803,11 +12300,35 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
         for name in pr.point.about_entities:
+            if str(name) in subject_entity_names:
+                continue  # #1370: the gated binder owns aboutSubject
             proj.g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
                 "MERGE (p)-[:aboutObject]->(o)",
                 params={"pid": pid, "name": name},
             )
+        # #1370: write-time, confidence-gated, fail-closed subject binding —
+        # the SAME shared driver the local capture seam calls. Only for a
+        # point this commit actually WROTE, and only against the id the write
+        # actually RESOLVED to.
+        #
+        # Hosted/local parity rule (G1): the local seam binds the id
+        # `create_point` resolved to, gated on `created_here`; a content-hash
+        # dedup hit resolves to a DIFFERENT node than the payload id, so the
+        # payload id addresses nothing. Binding the payload id made
+        # `link_entity` match no endpoint, return 0, and the binder's F7 path
+        # read that as "already present" — a phantom link. So bind the id
+        # recorded in step 5, and if this point has no resolved id (no write
+        # happened here), do NOT bind (fail-closed).
+        if pr.action in ("new", "supersede") and pr.point.slots:
+            resolved_pid = point_resolved_ids.get(pr.point.id)
+            if resolved_pid:
+                try:
+                    bind_point_subjects(proj, sdk, point_id=resolved_pid,
+                                        slots=pr.point.slots)
+                except Exception:  # noqa: BLE001, RUF100 — never sinks a commit
+                    _logger.warning("subject binding failed for %s",
+                                    resolved_pid, exc_info=True)
 
     # ── 7. Operators — shared commit semantics via apply_payload_operators
     # (#1532 D3; extracted verbatim from this block so the commit and capture
@@ -16745,7 +17266,14 @@ class _ImportVerifyError(Exception):
 # expanded invoice/dispute payloads — the bound primarily protects the
 # HMAC/verify path and defends against oversized replay bodies; note a 413
 # is non-2xx, so Stripe retries with backoff, hence the generous headroom) (1 MiB).
-_BODY_MAX_BYTES = 256 * 1024
+#
+# #2048: the 256 KiB DEFAULT is aliased from the shared module (it is also the
+# cap `CappedBodyMiddleware` applies to the pydantic/dict-body endpoints, which
+# are capped at the middleware layer — see the registration block at the top of
+# this file); the alias keeps ONE literal for the shared default. The detail
+# string is the same object the middleware emits, so a middleware 413 and a
+# handler 413 are byte-identical.
+_BODY_MAX_BYTES = _body_limits.BODY_MAX_BYTES
 _COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
 _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 
@@ -16756,7 +17284,7 @@ _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 # from the enforced test cap); production caps are import-time constants,
 # so the message stays truthful under source-level cap changes. The literal
 # values are pinned by TestDetailConstantsPinned (test_body_cap_sweep.py).
-_BODY_413_DETAIL = f"request body exceeds the size cap ({_BODY_MAX_BYTES // 1024} KiB)"
+_BODY_413_DETAIL = _body_limits.BODY_413_DETAIL
 _COMMIT_SESSION_413_DETAIL = (
     f"commit session request body exceeds the size cap "
     f"({_COMMIT_SESSION_MAX_BYTES // (1024 * 1024)} MiB)"
@@ -16777,15 +17305,16 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
     pack-manifest upload path (#2029), and every request-body read swept in
     #2032 (register/login/signup/claim/keys/agent/oauth/commit/stripe — the
     caps + detail strings live in the constants block directly above).
+
+    The streaming core lives in ``tortoise.body_limits`` (#2048) so the
+    ``/mcp`` sub-app's middleware can enforce the SAME semantics without
+    importing this module (a cycle); this wrapper keeps the #2032 call sites'
+    ``HTTPException(413)`` contract.
     """
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status_code=413, detail=detail)
-        chunks.append(chunk)
-    return b"".join(chunks)
+    try:
+        return await _body_limits.read_capped_body(request, max_bytes, detail)
+    except _body_limits.BodyTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=exc.detail) from None
 
 
 async def _read_internal_json_body(request: Request, *, required: bool = False) -> dict:
@@ -23990,6 +24519,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     repos_count = await _cp_offload(
         lambda: _github_repos_count(token), op="github_repos_count",
         best_effort=True)
+    if repos_count is OFFLOAD_REFUSED:
+        # #4456: a REFUSED best-effort offload never ran; keep the pre-seam
+        # client-visible outcome for this display-only count (``None``)
+        # instead of leaking the seam's sentinel into the JSON body.
+        repos_count = None
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -27730,10 +28264,68 @@ async def webhooks_stripe(request: Request):
             # the webhook AND strand the notification — follow it. (#4352 had
             # already moved the analytics POST behind ``_cp_offload``; what
             # this change adds here is the notify-first order and the guards.)
-            notify_billing_event(
-                notify_kind, {"org_id": org_id, "tier": tier},
-                {"subscription_status": etype},
-            )
+            #
+            # #4456: the notify ITSELF is blocking sync HTTP — Resend via
+            # ``httpx.post(..., timeout=15.0)`` plus Telegram on its own 15 s
+            # timeout (tortoise/notify.py) — and ``hosted_api`` runs a SINGLE
+            # uvicorn worker, so calling it inline held the one event loop for
+            # up to ~30 s and stalled EVERY concurrent request (the #2988 /
+            # #3498 class). It is routed through the #3498 seam rather than
+            # the issue's proposed ``asyncio.to_thread`` DELIBERATELY:
+            # ``to_thread`` submits to the loop's SHARED default executor,
+            # whose workers are NON-daemon and are JOINED at shutdown (#2850),
+            # so a black-holed socket would delay uvicorn's shutdown — and a
+            # notify would park one of the six workers the /health probe and
+            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # on the capture-cost lane). The telemetry pool is a
+            # process-lifetime DAEMON pool with a bounded backlog, so a wedged
+            # notify is abandoned at the seam's wait bound instead of
+            # delaying shutdown, and it can never occupy an auth slot.
+            #
+            # #4456 P1: the wait bound must NOT cancel a QUEUED submission.
+            # ``wait_for`` cancels the awaitable, ``asyncio.wrap_future``
+            # propagates that to the concurrent future, and a queued
+            # ``Future.cancel()`` SUCCEEDS — the worker later SKIPS the
+            # callable (``set_running_or_notify_cancel()`` is False), so the
+            # notification is DROPPED, not abandoned. Because the
+            # ``WebhookEvent`` marker was committed BEFORE the notify
+            # (``is_first=True``), Stripe's retry sees ``is_first=False`` and
+            # the notification is lost PERMANENTLY. ``cancel_on_timeout=False``
+            # keeps the bound on the AWAIT — the loop is freed and the webhook
+            # still returns promptly — while guaranteeing the queued
+            # submission still runs.
+            #
+            # ``best_effort=True`` + the guard keep the never-raise contract
+            # AT THE HAND-OFF: an offload failure is swallowed by the seam —
+            # but a REFUSAL (backlog full: the callable never ran) is a REAL
+            # drop, so the seam returns ``OFFLOAD_REFUSED`` and it is escalated
+            # through the existing operator-alert path instead of being
+            # silently swallowed. Any raise is caught here rather than
+            # reaching the handler's ``except Exception`` → 500, which would
+            # strand a claimed event and cost the payment's ack.
+            try:
+                result = await _cp_offload(
+                    lambda: notify_billing_event(
+                        notify_kind, {"org_id": org_id, "tier": tier},
+                        {"subscription_status": etype}),
+                    op="billing_notify", best_effort=True,
+                    cancel_on_timeout=False)
+                if result is OFFLOAD_REFUSED:
+                    with suppress(Exception):
+                        from tortoise.operator_alert import (
+                            alert_billing_notify_refused,
+                        )
+
+                        # The ERROR line is emitted BEFORE the escalation and
+                        # the subject is platform-scoped ("") — see
+                        # ``_log_billing_notify_refused`` and
+                        # ``alert_billing_notify_refused`` (#4456).
+                        _log_billing_notify_refused(org_id, etype)
+                        alert_billing_notify_refused(org_id, etype)
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: billing notify failed (non-fatal): %s",
+                    _safe_log(exc))
             try:
                 await _async_audit(
                     request, org_id, notify_kind,

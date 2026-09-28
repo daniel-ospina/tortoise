@@ -19,7 +19,7 @@
 // never asserts the categorical absence: a captured-session user has memories
 // in the graph while `harness-connected` is absent, so "Not connected" was
 // false for a reachable population.
-import { NO_CONNECTION_OBSERVED } from './connectionObservation.js'
+import { NO_CONNECTION_OBSERVED, harnessConnectionObserved } from './connectionObservation.js'
 
 export const OVERVIEW_ELEMENTS = Object.freeze([
   'connection-status',
@@ -28,13 +28,36 @@ export const OVERVIEW_ELEMENTS = Object.freeze([
 ])
 
 // Connection status derivation from the merged onboarding projection
-// (jsonb + FLOW). Connected iff the agent reported in (harness-connected
-// step edge) OR the org is complete — every fork's completion gate
-// (self/build/compact, onboarding/state.py) requires harness-connected, so
-// a node-status 'complete' org (or a grandfathered wire-complete org) IS a
-// connected org. Graph-down markers ('unavailable' literal from the server)
-// → 'unavailable', never a fabricated "Connected".
-export function overviewConnection(state) {
+// (jsonb + FLOW). #4646: connected iff the server OBSERVED the
+// `harness-connected` edge — ONE predicate (connectionObservation.js) shared
+// with the wizard's step-3 heading, the other surface stating this same fact.
+//
+// This used to OR in `status === 'complete' || onboarding_complete === true`.
+// That is a completion INFERENCE, and it is FALSE for the grandfathered
+// population: every fork's gate (self/build/compact, onboarding/state.py)
+// requires harness-connected, but `resolve_wire_completion`'s grandfather
+// branch reaches wire completion with ZERO agent step edges (`team-named` and
+// `connection-written` are non-agent). So the card read "Connected ✓" while the
+// wizard read "No connection observed yet" for the same Organization.
+//
+// The observed edge is filed server-side off an AGENT-credentialed write, so a
+// grandfathered org heals when its agent either writes over the REST point API
+// (`hosted_api._maybe_file_harness_connected`, #3670) or re-runs the setup
+// command (the #3671 agent checkpoint route — which has no completion guard).
+// It does NOT heal over every harness: `mcp_server._maybe_onboarding_auto_complete`
+// returns EARLY while `onboarding_complete` is true (`mcp_server.py`:
+// "# already complete"), and that flag is exactly what the grandfathered
+// population carries — so an org whose agent writes only through the hosted MCP
+// server keeps this honest negative until one of those two things happens. That
+// is a real limit of the state, not a reason to widen the predicate back: the
+// remedy is reachable and the claim stays true. (Recorded on #4646.)
+//
+// The defaulted `connectionObserved` IS the shared derivation, injectable so
+// the guard can EXECUTE that this surface reads it (overview.test.js #4646 C) —
+// the same shape `wizardStageLabel(step, { connected })` already uses. Graph-down
+// markers ('unavailable' literal from the server) → 'unavailable', never a
+// fabricated "Connected": this guard deliberately precedes the predicate.
+export function overviewConnection(state, connectionObserved = harnessConnectionObserved) {
   if (!state) return { kind: 'loading' }
   if (state.status === 'unavailable' || state.fork === 'unavailable'
       || state.version === 'unavailable' || state.completed_steps === 'unavailable') {
@@ -44,11 +67,7 @@ export function overviewConnection(state) {
       detail: 'Connection status read failed — retry shortly.',
     }
   }
-  const steps = Array.isArray(state.completed_steps) ? state.completed_steps : []
-  const connected = steps.includes('harness-connected')
-    || state.status === 'complete'
-    || state.onboarding_complete === true
-  if (connected) {
+  if (connectionObserved(state)) {
     return {
       kind: 'connected',
       value: 'Connected ✓',
