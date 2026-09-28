@@ -303,7 +303,8 @@ Recorded so they are not silently dropped. None is required for beta:
 - **The journal capability** — `checkpoint`, `diary_write`, `diary_read`. They arrived in the
   **initial codebase commit** (`a02ab48c7`) with no design record, and their `wing` / `room`
   parameters appear **nowhere in `docs/ONTOLOGY.md`**. They are **live in the MCP server**
-  today. **Filed post-beta** (issue to be created) and **unlisted** until then.
+  today. **Post-beta** and **unlisted** — tracked by **#4667** (keep / rename / retire
+  undecided; a surface decision).
 
 ## Discarded — and why
 
