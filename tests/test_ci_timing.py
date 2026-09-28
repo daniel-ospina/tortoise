@@ -757,6 +757,15 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
     before = manifest_path.read_text()
     _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
+    # The literal 688 was rot-prone, but its FUNCTION was an INDEPENDENT check that
+    # the parse is COMPLETE — and deriving the total from `_locate_durations_block`
+    # removes the rot AND the function: a parse that silently stops early shrinks
+    # both sides of every assertion below equally, so all of them still pass. That
+    # is not hypothetical: truncating that helper to 250 entries leaves this test
+    # GREEN while `stats` and both key sets report 250 (verified on 552e845ec).
+    # PyYAML is a second implementation of the same parse, so the completeness
+    # check survives without a number that can go stale.
+    assert set(entries_before) == set(yaml.safe_load(before)["durations"])
     new_text, stats = ci_timing.render_refreshed_manifest(
         before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
@@ -775,6 +784,7 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # single drop (0.14%). Key-set identity can.
     _, entries_after = ci_timing._locate_durations_block(new_text.split("\n"))
     assert set(entries_after) == set(entries_before)
+    assert set(entries_after) == set(yaml.safe_load(new_text)["durations"])
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
