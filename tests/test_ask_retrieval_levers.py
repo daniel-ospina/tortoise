@@ -214,8 +214,9 @@ def test_gold_turn_in_pool_membership_embedded():
            "binding (120 in → 119 out, was 91), so the binding constraint is "
            "now the TOKEN cap, not the byte cap this marker used to name: at "
            "this helper's 8000-token budget the assembly step keeps 58 items "
-           "(measured — the byte cap is NOT what produces 58: holding tokens at "
-           "64000 and byte_cap at 64000 keeps 78), and the gold turn sits at "
+           "(measured — the byte cap is NOT what produces 58: holding the byte "
+           "ceiling at the lane's own 64000 while raising tokens admits 78), "
+           "and the gold turn sits at "
            "rank 68 after the evidence boost, so it is cut. The gold DOES land "
            "at the product's own 16000-token default (97 kept). This test "
            "raises the window and the item cap but not the token cap, so those "
@@ -262,20 +263,27 @@ def test_ask_cap_attribution_5821():
     """#5821 Task 1: pin WHICH cap binds, so this gate cannot mis-attribute it.
 
     The #4155 marker originally blamed the byte cap for the 58-item keep.
-    Measured on main at b2448869d, BOTH caps bind and they are coupled
-    (`resolve_byte_cap_from_caps` derives byte = 8 x token), but the 58 is the
-    TOKEN cap's doing: holding tokens high at the lane's own 64000-byte ceiling
-    admits 78, which is more than 58. This records that attribution as a
+    Measured on main at b2448869d, BOTH caps bind: with no explicit or
+    env-provided ceiling the derived one is `token x 8` (floored at 32768), so
+    at the lane default the two move together — but the 58 is the TOKEN cap's
+    doing, because holding the byte ceiling at the lane's own 64000 while
+    raising tokens admits more than 58. This records that attribution as a
     PROPERTY rather than a fixed count, so it pins the mechanism without
     becoming a place to widen a budget (#5821 Task 3 keeps that decision out
     of code).
 
     What value makes this test fail: if the token cap stops being the tighter
-    constraint at 8000 (property 2 breaks), if relaxing it no longer raises the
-    keep (property 1 breaks), or if the byte cap stops constraining anything
-    (property 3 breaks) — any of those makes the attribution recorded on the
-    #5821 marker false again, and this test says so instead of letting the
-    comment drift.
+    constraint at the 8000-token lane (property 2 breaks), if relaxing the cap
+    pair no longer raises the keep (property 1 breaks), or if the byte cap
+    stops constraining anything (property 3 breaks) — any of those makes the
+    attribution recorded on the #5821 marker false again, and this test says so
+    instead of letting the comment drift.
+
+    The fixture is what makes those falsifying values reachable: the seeded
+    `1d4e3b97` question yields a 119-item post-boost pool in which the gold turn
+    sits at rank 68, so the pool is deeper than the byte-capped 78 that
+    property 3 needs to be discriminating. The test SKIPS (rather than passing
+    vacuously) when the cached LongMemEval dataset is absent.
     """
     questions = _recorded_questions()
     if not questions:
@@ -317,20 +325,23 @@ def test_ask_cap_attribution_5821():
                 bo, top_k=120, max_context_tokens=token_cap,
                 context_item_cap=120, byte_cap=bc))
 
-        # (1) the token cap is what produces the 58-item keep at this
-        #     helper's 8000-token lane: relaxing it alone raises the keep.
+        # (1) relaxing the token cap — and, by derivation, the byte cap it
+        #     carries with it — raises the keep. This deliberately does NOT
+        #     claim to isolate the token cap: `byte_cap=None` makes the helper
+        #     DERIVE the ceiling, so both move together here. The isolation is
+        #     (2), which holds the byte ceiling fixed.
         assert kept(16000) > kept(8000), (
-            "relaxing the token cap did not raise the keep — the token cap is "
-            "no longer what binds at 8000, so the #5821 attribution is stale")
+            "relaxing the token cap did not raise the keep — the cap pair is "
+            "no longer doing what the #5821 attribution describes")
 
-        # (2) at the 8000-token lane the token cap is the TIGHTER of the two
-        #     coupled caps (byte = 8 x token): holding tokens high and keeping
-        #     the lane's 64000-byte ceiling admits MORE than 58, so the 58 is
-        #     the token cap's doing and not the byte cap's.
-        assert kept(64000, byte_cap=64000) > kept(8000), (
-            "holding tokens high at the lane's 64000-byte ceiling did not "
-            "admit more than the 8000-token lane — the attribution of the 58 "
-            "to the token cap is wrong")
+        # (2) with the byte ceiling held constant at the 8000-token lane's own
+        #     64000, raising only the token budget still raises the keep — so
+        #     the 58 is the TOKEN cap's doing, and the assertion fails if the
+        #     byte cap is the constraining one at that lane.
+        assert kept(16000, byte_cap=64000) > kept(8000), (
+            "holding the byte ceiling at the lane's 64000, raising only the "
+            "token budget did not raise the keep — the 58 is not the token "
+            "cap's doing, so the #5821 attribution is wrong")
 
         # (3) the byte cap is a real, independently binding constraint — it is
         #     NOT inert, and no comment should say it is.
