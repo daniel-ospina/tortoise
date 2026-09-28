@@ -2296,3 +2296,62 @@ def test_table_header_rows_are_read() -> None:
     ]
     missing = [h for h in headers if h not in doc]
     assert not missing, f"a table header row changed or was dropped: {missing}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# COMMENT CITATION ANCHORS (#4748)
+# ─────────────────────────────────────────────────────────────────────
+# Six test/helper COMMENTS cited `sdk.py:<N>` at a line that did not point at the
+# code the comment claimed. Nothing failed, because a comment's target can drift
+# with any docstring insertion — and by the time #4748 was worked, all six had
+# rotted AGAIN (e.g. `sdk.py:744` was a blank line at the issue's commit and
+# unrelated prose at the work commit). The fix is a SYMBOL (`file.py::symbol`),
+# which a line shift cannot invalidate. A rename can still dangle an anchor, so
+# this is its liveness guard: each must resolve to a real def in the file it
+# names. It pins NO line numbers — that is the thing proven to rot.
+# Every anchor is fully QUALIFIED (`Class.method`): a bare method name would let a
+# rename pass this gate whenever any other def of the same name survived anywhere
+# in the file — including a helper nested inside another function (#4748 review).
+# Requiring the real qualified path makes the check exact by construction.
+_CITATION_ANCHORS: tuple[tuple[str, str], ...] = (
+    ("tortoise/sdk.py", "TortoiseSDK.create_point"),             # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK.create_source"),            # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK.ingest"),                   # test_ingest_mode.py
+    ("tortoise/sdk.py", "TortoiseSDK._extract_session_v2"),      # test_no_tests_imports…
+    ("tortoise/sdk.py", "TortoiseSDK.tortoise_fts_query"),       # eval/retrieval/run.py
+    ("tortoise/sdk.py", "TortoiseSDK.file_human_approval"),      # test_ranking.py
+    ("tortoise/sdk.py", "TortoiseSDK.capture_session"),          # test_ingest_v2_parallel.py
+    ("tortoise/projection/entities.py", "_EntityHandlers._event_plain_merge"),
+    ("tortoise/ranking.py", "GraphRanker._fetch_event_signals"),
+)
+
+
+def _defined_symbols(path: Path) -> set[str]:
+    """Function/method symbols defined in `path`, by a fresh AST walk.
+
+    Module-level functions and the direct methods of a top-level class are
+    collected. A function nested INSIDE another function is deliberately not
+    added under its bare name: the anchor exists so a reader can land on the
+    real symbol, and a nested helper that happens to share a name would let a
+    RENAMED method keep this gate green while the comment's referent is gone
+    (#4748 review). Class-qualified anchors are likewise collision-proof.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in tree.body:  # module level only — nested defs do not qualify
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    out.add(f"{node.name}.{sub.name}")
+    return out
+
+
+def test_citation_anchors_resolve_to_real_symbols() -> None:
+    """Every symbol a test/helper comment cites must still exist (#4748)."""
+    for rel, symbol in _CITATION_ANCHORS:
+        assert symbol in _defined_symbols(ROOT / rel), (
+            f"{rel}::{symbol} no longer exists — a test-suite comment anchor "
+            f"dangles. Update the comment(s) citing it (issue #4748)."
+        )

@@ -356,6 +356,92 @@ class TestS2:
         assert "CLAUSE-LEVEL STRIP" not in s1
         assert "OPERATIONAL-VALUE" in s1
 
+    def test_short_session_fact_rule_reaches_every_stage(self):
+        """#1507: the SHORT-SESSION fact-retention clause — the granularity
+        bar is a predicate over CONTENT, never over session LENGTH.
+
+        The v2 pipeline's ONE clear regression in the #1350 measurement was
+        Information Extraction (76.5% vs the 84.7% deterministic baseline,
+        -8.2pp): the bar was calibrated on LONG design sessions, where the
+        narrative-first rule pays off, and read a short fact-dense session as
+        "too small to be worth a point" — so the facts the session existed to
+        record were never emitted (0-2 points against a 3-5 target).
+
+        The clause must reach BOTH registers, for the same reason the value
+        carve-out does (#2453): S1 (the story summarizer) decides what the
+        narrative carries and S2/S4 (the mapper) decides what becomes a
+        point. If only one carries it, the story keeps a fact the mapper then
+        discards and the regression survives.
+        """
+        rule = v2.SHORT_SESSION_FACT_RULE
+        assert "SHORT-SESSION FACT RETENTION" in rule
+        # The predicate framing IS the fix — lock it, not merely presence.
+        assert "NEVER over session length" in rule
+        # QUALIFICATION is load-bearing (review P1): an unqualified "every
+        # stated quantity is durable" re-admits what VALUE_FIDELITY_RULE and
+        # S2_TMPL's VALUE FILTER exclude (test counts, routine readouts), and
+        # S1 carries NO anti-routine gate to catch it. The enumeration must
+        # stay tied to the SAME test the carve-out uses.
+        assert "subject of a decision" in rule
+        assert "never WHETHER it qualifies" in rule
+        # Anti-hoarding edge must survive: padding to a count is the failure
+        # mode a density instruction invites.
+        assert "mint kinds" in rule
+        assert "no-op" in rule
+        # No numeric density target. Pins the removed RANGE in every spelling
+        # (a range gets anchored on as a goal), not merely one punctuation of
+        # it. The only number left in the clause is the descriptive
+        # "one or two facts".
+        for variant in ("3 to 5", "3-5", "3–5", "0 to 2", "0-2", "0–2"):
+            assert variant not in rule
+        assert "quota" not in rule
+
+        # S1 (narrative register) gets it via the granularity slot.
+        s1 = (v2.S1_TMPL
+              .replace("{memory_granularity}", v2._granularity_text())
+              .replace("{date_anchor}", v2._date_anchor(None)))
+        assert "SHORT-SESSION FACT RETENTION" in s1
+        assert "OPERATIONAL-VALUE" in s1   # still shares the slot (#2453)
+
+        # The S2/S4 {anti_routine} slot is its OWN seam and must be pinned
+        # directly (review P1): the pre-review draft also carried the clause via
+        # {master_list}, so a prompt-level assertion alone let this wiring be
+        # deleted while the suite stayed green. The master-render appends were
+        # removed in cycle 1; the slot is now the clause's only S2/S4 seam.
+        assert "SHORT-SESSION FACT RETENTION" in v2._s2s4_rules()
+
+        for prompt in (v2.render_s2_prompt(),
+                       v2.render_s2_prompt(core_only=True),
+                       v2.render_s4_prompt("S", {"results": []}, {})):
+            assert "SHORT-SESSION FACT RETENTION" in prompt
+            assert "VALUE FIDELITY" in prompt   # #2453 rides the same slot
+            # Emitted EXACTLY ONCE (review P2): the master render must NOT
+            # carry it too. The figure is deliberately NOT quoted here — a byte
+            # count in a comment re-stales the moment the clause is edited (it
+            # did, twice); `count == 1` is the claim that cannot go stale.
+            # S4 is in this loop because the duplication defect was per S2/S4,
+            # so a lock covering only S2 would cover half the surface.
+            assert prompt.count("SHORT-SESSION FACT RETENTION") == 1
+
+        # EVERY master render mode must NOT carry it — the single-seam rule
+        # above is only real if this stays true. All three modes are named:
+        # omitting _render_master_compact would leave the absence unguarded
+        # precisely in the mode the others were already verified against.
+        for render in (v2._render_master_core_only(v2.build_master_list()),
+                       v2._render_master_verbose(v2.build_master_list()),
+                       v2._render_master_compact(v2.build_master_list(),
+                                                 "a short story")):
+            assert "SHORT-SESSION FACT RETENTION" not in render
+
+        # The S1 asymmetry lock MUST survive: naming the anti-routine gate in
+        # S1 would import that register into the narrative stage.
+        assert "ANTI-ROUTINE EXCLUSION" not in s1
+        assert "NOOP" not in s1
+        # CLAUSE-LEVEL STRIP is part of the anti-routine block, so it must be
+        # absent from S1 too. Asserted HERE as well as in the sibling test, so
+        # the whole asymmetry lock lives with the clause that could break it.
+        assert "CLAUSE-LEVEL STRIP" not in s1
+
     def test_s4_prompt_anti_routine_exclusion(self):
         """#2424: S4 (the GAP REVIEWER) applies the SAME anti-routine gate
         — it must not ADD true-but-routine content as gaps (its TASK's

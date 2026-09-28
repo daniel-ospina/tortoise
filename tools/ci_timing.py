@@ -14,8 +14,18 @@ measurement artifact (docs/ci-timing.md + docs/ci-timing.json):
     (the retry-protocol prerequisite; documented as a proxy until the
     rerun-based protocol lands)
 
-Measurement only — never gates CI. Stdlib only (Python 3.12). Deterministic
-output (sorted, stable JSON) so the refresh job's no-diff check works.
+Measurement only — this workflow never gates CI directly. But since #5215
+Task 4b it is also the SOLE WRITER of `config/ci-surfaces.yml:durations` — the
+weights `ci_selection.split_fast_gate` packs the push halves by — so a stale or
+wrong weight can red `python-ci-gate` with zero test failures (#3395). The gate
+is still `ci_selection.py --integrity`; this tool only writes the map it reads.
+Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYAML
+(the manifest-side checks load the refreshed text through `yaml.safe_load`) —
+`ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
+does — outside that pin the import is unguarded, so a missing/broken PyYAML
+surfaces as an `ImportError` traceback with exit 1, which is a DEPENDENCY
+failure, not the exit-1 manifest-gate meaning below. Deterministic output
+(sorted, stable JSON) so the refresh job's no-diff check works.
 """
 from __future__ import annotations
 
@@ -198,6 +208,285 @@ def parse_log(path: Path) -> dict:
             "error": error}
 
 
+# --- durations bridge (#5215 Task 4b / T-B): collector → the map the ---------
+# balancer packs by ----------------------------------------------------------
+#
+# `config/ci-surfaces.yml:durations` is the one artifact
+# `ci_selection.split_fast_gate` packs by, and until now nothing moved the
+# collector's measurements into it: the map was a one-off 2026-09-22 sweep.
+# `--refresh-durations` is now the ONLY path that may emit into that key. It is
+# text-preserving (line edits, never a whole-file `yaml.safe_dump` —
+# `ci_selection.register_tests` set exactly that discipline at its two
+# `manifest_path.write_text` sites, and a safe_dump would strip the
+# hand-curated sweep-basis comment header), and it is FAIL-CLOSED:
+#
+#   * a collector key not already classified in the manifest is refused (exit
+#     2) — the bridge never invents a key, so a new test file is registered
+#     first;
+#   * a ZERO-key projection is UNKNOWN (exit 2), never a silent no-op that
+#     writes nothing and reports success;
+#   * un-sampled manifest keys are CARRIED FORWARD (merge, not replace), so
+#     coverage cannot fall — and if the refreshed manifest would still fail
+#     `ci_selection.duration_coverage_issues` (DURATION_COVERAGE_MIN = 0.90) or
+#     `duration_issues`, nothing is written (exit 1).
+#
+# The 0.90 floor is applied to the resulting MANIFEST, never to the collector's
+# `--durations=15` projection: that projection can never enumerate the whole
+# fast pool (#5215 plan, cycle 10), so applying it there would make every
+# legitimate refresh exit non-zero. The manifest-side floor is what
+# `ci_selection.py --integrity` already enforces.
+
+DURATIONS_CAPTURED_AT = "durations_captured_at"
+DURATIONS_VALUE_FLOOR_S = 0.1
+
+# `  <tests-relative key>: <seconds>[  # comment]` — the map's one line shape.
+# Keys may carry a subdirectory (e.g. `bench/test_smoke_embedded.py`).
+_DURATION_LINE_RE = re.compile(
+    r"^(?P<indent>\s{2})(?P<key>[^\s:]+):[ \t]+"
+    r"(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<tail>[ \t]*(?:#.*)?)$"
+)
+
+
+class DurationsBridgeError(Exception):
+    """The bridge refused to render the map (fail-closed)."""
+
+
+def collector_file_weights(logs_dir: Path) -> dict[str, float]:
+    """Per-file seconds from the collector's OWN parser, taking the LARGER
+    value across the sampled jobs (the leg that CARRIES the file spends that
+    time). Basenames, exactly as `parse_log` emits them; the manifest key is
+    resolved by :func:`_resolve_to_manifest_keys`.
+    """
+    weights: dict[str, float] = {}
+    for log_path in sorted(Path(logs_dir).rglob("*.log")):
+        parsed = parse_log(log_path)
+        for fname, entry in parsed["files"].items():
+            seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
+            if seconds > weights.get(fname, 0.0):
+                weights[fname] = seconds
+    return weights
+
+
+def _locate_durations_block(lines: list[str]) -> tuple[int | None, dict[str, int]]:
+    """(index of the top-level `durations:` line, {key: physical line index})."""
+    key_line = next((i for i, ln in enumerate(lines) if ln.startswith("durations:")), None)
+    if key_line is None:
+        return None, {}
+    entries: dict[str, int] = {}
+    for j in range(key_line + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        match = _DURATION_LINE_RE.match(ln)
+        if match:
+            entries[match.group("key")] = j
+            continue
+        if not ln[:1].isspace():
+            break  # the next top-level key ends the block
+        raise DurationsBridgeError(f"malformed line inside the durations block: {ln!r}")
+    return key_line, entries
+
+
+def _resolve_to_manifest_keys(weights: dict[str, float],
+                              manifest_keys: set[str]) -> dict[str, float]:
+    """Map the collector's basenames onto manifest keys, fail-closed.
+
+    The collector keys on the file's basename; the manifest keys on the file's
+    tests/-relative path. An unresolvable key (not classified) or an ambiguous
+    one (two manifest keys sharing a basename) is a refusal, never a guess.
+    """
+    by_basename: dict[str, list[str]] = {}
+    for key in manifest_keys:
+        by_basename.setdefault(Path(key).name, []).append(key)
+    resolved: dict[str, float] = {}
+    for basename, seconds in weights.items():
+        candidates = by_basename.get(basename, [])
+        if not candidates:
+            raise DurationsBridgeError(
+                f"collector key {basename!r} is not classified in the manifest — "
+                f"register the test file before refreshing the durations map"
+            )
+        if len(candidates) > 1:
+            raise DurationsBridgeError(
+                f"collector key {basename!r} matches multiple manifest keys "
+                f"{sorted(candidates)} — refusing to guess"
+            )
+        resolved[candidates[0]] = seconds
+    return resolved
+
+
+def _set_captured_at(lines: list[str], captured_at: str) -> None:
+    """Set the machine-readable capture-age key. Its ABSENCE is UNKNOWN, so it
+    is never inferred from the file's git commit date — any unrelated edit
+    would reset that (cycle 7)."""
+    line = f'{DURATIONS_CAPTURED_AT}: "{captured_at}"'
+    for i, ln in enumerate(lines):
+        if ln.startswith(f"{DURATIONS_CAPTURED_AT}:"):
+            lines[i] = line
+            return
+    for i, ln in enumerate(lines):
+        if ln.startswith("durations:"):
+            lines.insert(i, line)
+            return
+    raise DurationsBridgeError("manifest has no top-level `durations:` key")
+
+
+def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
+                              captured_at: str) -> tuple[str, dict]:
+    """Return (new manifest text, stats). Pure: callers own the write."""
+    lines = manifest_text.split("\n")
+    _, entries = _locate_durations_block(lines)
+    if not entries:
+        raise DurationsBridgeError("manifest has no top-level `durations:` key")
+    if not weights:
+        raise DurationsBridgeError(
+            "collector produced ZERO measured file durations — UNKNOWN, never 0"
+        )
+    resolved = _resolve_to_manifest_keys(weights, set(entries))
+    for key in sorted(resolved):
+        seconds = resolved[key]
+        index = entries[key]
+        match = _DURATION_LINE_RE.match(lines[index])
+        assert match is not None  # located by the same regex
+        tail = match.group("tail")
+        # A stale `# unmeasured` marker stops being true once measured. Any
+        # other trailing comment is preserved verbatim.
+        if re.fullmatch(r"[ \t]*#\s*unmeasured", tail):
+            tail = ""
+        lines[index] = (
+            f"{match.group('indent')}{key}: "
+            f"{max(float(seconds), DURATIONS_VALUE_FLOOR_S):.1f}{tail}"
+        )
+    _set_captured_at(lines, captured_at)
+    stats = {
+        "sampled_keys": len(resolved),
+        "manifest_keys": len(entries),
+        "carried_forward": len(entries) - len(resolved),
+        "captured_at": captured_at,
+    }
+    return "\n".join(lines), stats
+
+
+def _manifest_of(manifest_text: str) -> dict:
+    """Parse refreshed text for the checks. Import is local so the module
+    stays stdlib-only until the bridge actually runs (see the docstring)."""
+    import yaml
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection as cs
+
+    return cs._normalize_surfaces(yaml.safe_load(manifest_text))
+
+
+def validate_refreshed_manifest(manifest_text: str) -> list[str]:
+    """The DURATION subset of `--integrity`'s checks over the NEW text.
+
+    Runs `cs.duration_issues` + `cs.duration_coverage_issues` — this is where
+    the 0.90 coverage floor lives, on the RESULTING manifest rather than on the
+    partial collector projection. PURE and repo-independent, so a synthetic
+    fixture manifest can use it; it is deliberately NOT the whole gate, and a
+    caller that trusts it alone would accept a refresh that tilts the pack
+    (see :func:`integrity_problems`, which `refresh_durations` also runs).
+    """
+    import ci_selection as cs
+
+    manifest = _manifest_of(manifest_text)
+    return cs.duration_issues(manifest) + cs.duration_coverage_issues(manifest)
+
+
+def integrity_problems(manifest_text: str) -> list[str]:
+    """The FULL problem list `ci_selection.py --integrity` composes.
+
+    Composed by CALLING the same `ci_selection` functions, in the same order,
+    as the `--integrity` entry point — never a re-derived subset, so the two
+    cannot disagree about what a valid manifest is. The duration subset alone
+    is not enough: it is blind to `workflow_halves_issues`, so a refresh that
+    skews a weight hard enough to tilt the push halves (the #3395
+    starved-shard shape) would be accepted here and only surface later, with
+    no diagnosis, as a red `python-ci-gate` with zero test failures.
+
+    Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
+    checks read `python-ci.yml`, so this is defined only over this repo's own
+    manifest — the refresh's only production target.
+    """
+    import ci_selection as cs
+
+    manifest = _manifest_of(manifest_text)
+    problems = (cs.integrity(manifest)
+                + cs.slow_file_issues(manifest)
+                + cs.duration_issues(manifest)
+                + cs.leg_coverage_issues(manifest)
+                + cs.duration_coverage_issues(manifest))
+    wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
+    problems += wf_issues
+    if not wf_issues:
+        legs = cs.push_legs(manifest)
+        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        problems += cs.workflow_halves_issues(manifest, halves)
+    else:
+        problems += cs.workflow_halves_issues(
+            manifest, cs.parse_matrix_halves(cs.WORKFLOW.read_text()))
+    return problems
+
+
+def _is_the_repo_manifest(manifest_path: Path) -> bool:
+    """True when `manifest_path` IS this repo's `config/ci-surfaces.yml`.
+
+    The `--integrity` composition is repo-scoped, so it is only defined for
+    this repo's own manifest (a synthetic fixture would read every real test
+    file as unclassified). Guarding on the identity of the path — not on a
+    caller-supplied flag — means the full gate cannot be forgotten by a future
+    refresh caller: the production target always gets it.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ci_selection as cs
+
+    try:
+        return Path(manifest_path).resolve() == Path(cs.MANIFEST).resolve()
+    except OSError:
+        return False
+
+
+def refresh_durations(manifest_path: Path, weights: dict[str, float],
+                      captured_at: str, *, dry_run: bool = False) -> int:
+    """Render + validate + (unless dry-run) write the refreshed map.
+
+    Exit: 0 written/validated · 1 a manifest-side gate would fail · 2 UNKNOWN
+    (no keys, key agreement, unreadable manifest) — never 0 on an unobserved
+    read.
+    """
+    if not manifest_path.exists():
+        print(f"2: manifest not found: {manifest_path}", file=sys.stderr)
+        return 2
+    try:
+        new_text, stats = render_refreshed_manifest(
+            manifest_path.read_text(), weights, captured_at)
+    except DurationsBridgeError as exc:
+        print(f"2: {exc}", file=sys.stderr)
+        return 2
+    issues = validate_refreshed_manifest(new_text)
+    if not issues and _is_the_repo_manifest(manifest_path):
+        # The repo's own manifest is held to the WHOLE `--integrity` gate —
+        # most importantly its halves-duration balance, which the per-key
+        # duration checks cannot see (#3395).
+        issues = integrity_problems(new_text)
+    if issues:
+        print("1: refusing to write — the refreshed manifest would fail the "
+              "integrity gate:", file=sys.stderr)
+        for issue in issues:
+            print(f"   - {issue}", file=sys.stderr)
+        return 1
+    if dry_run:
+        print(f"dry-run: {stats['sampled_keys']} sampled, "
+              f"{stats['carried_forward']} carried forward — no write")
+        return 0
+    manifest_path.write_text(new_text)
+    print(f"refreshed {manifest_path}: {stats['sampled_keys']} sampled, "
+          f"{stats['carried_forward']} carried forward "
+          f"(captured_at {captured_at})")
+    return 0
+
+
 # --- history / flakes -------------------------------------------------------
 
 def load_history(json_path: Path) -> list[dict]:
@@ -332,6 +621,14 @@ def main() -> int:
     ap.add_argument("--logs-dir", default="logs", help="directory of downloaded pytest log artifacts")
     ap.add_argument("--out-dir", default=".", help="where to write ci-timing.md + ci-timing.json")
     ap.add_argument("--max-history", type=int, default=MAX_HISTORY_DEFAULT)
+    ap.add_argument("--refresh-durations", action="store_true",
+                    help="#5215 Task 4b — write the collector's per-file durations into "
+                         "config/ci-surfaces.yml:durations (text-preserving, fail-closed). "
+                         "This is ci-timing.yml's only emit path into that map.")
+    ap.add_argument("--manifest", default="config/ci-surfaces.yml",
+                    help="the selection manifest whose `durations:` map is refreshed")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --refresh-durations, render + validate but do not write")
     args = ap.parse_args()
 
     if args.pick_run:
@@ -339,6 +636,16 @@ def main() -> int:
         if picked:
             print(picked)
         return 0
+
+    if args.refresh_durations:
+        captured_at = (os.environ.get("CI_TIMING_NOW")
+                       or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
+        return refresh_durations(
+            Path(args.manifest),
+            collector_file_weights(Path(args.logs_dir)),
+            captured_at,
+            dry_run=args.dry_run,
+        )
 
     run_id = args.run_id.strip()
     out_dir = Path(args.out_dir)
