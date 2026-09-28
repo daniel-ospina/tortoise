@@ -91,29 +91,27 @@ SCREEN_WORKING = """\
 """
 
 #: A MID-TURN pane whose submission pi ACCEPTED into its pending queue (#5979).
-#: DERIVED, not captured: this reproduces the render of
-#: `updatePendingMessagesDisplay` (pi `dist/modes/interactive/interactive-mode.js`)
-#: as verified against the installed renderer — no live mid-turn capture with a
-#: queued submission was obtainable, so it is labelled rather than passed off as
-#: one. The queued message renders as `Steering: <text>` in
-#: `pendingMessagesContainer`, which sits ABOVE the bordered editor. pi has already
-#: run `editor.setText("")` on submit, so the composer between the last two rules
-#: is EMPTY — the composer read reports UNSENT for a message pi in fact holds.
+#: The shape is a VERBATIM live capture (`cmux read-screen`, 2026-09-28) of a lane
+#: with a queued submission: the `Steering:` entry and pi's own
+#: `↳ Option+Up to edit all queued messages` hint, then the editor whose TOP border
+#: carries the status label (`── ⠼ Working ──`) and whose bottom border is bare,
+#: with the cwd/status footer below. Only the queued TEXT is substituted (with
+#: `PROBE`). Rule lines are shortened for readability; their width is not
+#: load-bearing. A mid-turn editor draws its top border WITH the Working label
+#: (`RULE_RE` matches a labelled border too), so the composer region between the
+#: last two borders is EMPTY — pi runs `editor.setText("")` before queueing, and
+#: the composer read reports UNSENT for a message pi in fact holds.
 #: `SCREEN_COMPOSING_UNSENT` is the opposite state (text in the composer, no
 #: pending display, no turn).
 SCREEN_QUEUED_MID_TURN = """\
-\u2500\u2500 \u280b Working \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+ Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292
+ \u21b3 Option+Up to edit all queued messages
+
+\u2500\u2500 \u280c Working \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 /private/tmp
-\u219119k \u2193577 R25k CH91.1% $0.003 3.8%/700k (auto)                          (deepseek) deepseek-flash \u2022 high
-
-Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292
-\u21b3 Option+Up to edit all queued messages
-
-\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-/private/tmp
-3.8%/700k (auto)                                                              (deepseek) deepseek-flash \u2022 high
+\u2191242 \u2193180 R32k CH99.3% $0.000 86.0%/300k (auto)   (deepseek) deepseek-flash \u2022 high
 """
 
 #: A TRUNCATED pending line, in the EXACT shape the renderer emits. `TruncatedText`
@@ -546,8 +544,51 @@ class TestPendingTurnDisplay(unittest.TestCase):
         comparing only the stripped text made it a permanent false negative."""
         message = "check the build..."
         screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, message)
-        self.assertEqual(cd.pending_turn_identity(screen, message), message)
+        self.assertIsNotNone(cd.pending_turn_identity(screen, message))
         self.assertTrue(cd.pending_turn_matches(screen, message, self.BEFORE))
+
+    def test_a_LONGER_message_cut_to_our_length_is_a_DIFFERENT_message(self):
+        """A real cut head is STRICTLY shorter than the message. Without that, a
+        different, LONGER queued message (`target + " tail"`) truncated to exactly
+        our text was accepted as ours — a false `queued` for an unqueued send."""
+        target = "continue with the migration and then run the full test suite"
+        longer = target + " before reporting back to the lane owner"
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, longer[: len(target)] + "...")
+        self.assertIsNone(cd.pending_turn_identity(screen, target))
+        self.assertFalse(cd.pending_turn_matches(screen, target, self.BEFORE))
+
+    def test_a_SHORT_message_cut_on_a_narrow_pane_still_matches(self):
+        """The floor must not make a genuinely cut SHORT message unmatchable: it
+        drops below the target length for targets shorter than `PENDING_MIN_CHARS`."""
+        target = "please run it"
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, target[:9] + "...")
+        self.assertIsNotNone(cd.pending_turn_identity(screen, target))
+        self.assertTrue(cd.pending_turn_matches(screen, target, self.BEFORE))
+
+    def test_two_identical_queued_copies_count_as_NEW(self):
+        """Novelty is a COUNT, not a string comparison: a repeat dispatch whose
+        copy is queued a second time leaves the identity text unchanged, so a
+        string test reported the accepted submission as a failure."""
+        before = SCREEN_QUEUED_MID_TURN
+        after = SCREEN_QUEUED_MID_TURN.replace(
+            " \u21b3 Option+Up to edit all queued messages",
+            " Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292\n"
+            " \u21b3 Option+Up to edit all queued messages",
+        )
+        self.assertEqual(cd.pending_turn_identity(before, PROBE), cd.pending_turn_identity(after, PROBE))
+        self.assertTrue(cd.pending_turn_matches(after, PROBE, before))
+        # ...and the reverse (a copy REMOVED) is not a new submission
+        self.assertFalse(cd.pending_turn_matches(before, PROBE, after))
+
+    def test_a_live_container_with_bash_output_BELOW_it_is_still_found(self):
+        """pi appends its `bashComponent` to the same container while a lane
+        streams, so live output can sit BELOW the hint and push it far from the
+        end of the capture. A distance-from-the-bottom bound would hide the LIVE
+        container and turn a queued message into a failure (and a duplicate)."""
+        filler = [f"bash output {i}" for i in range(150)]
+        screen = "\n".join([*SCREEN_QUEUED_MID_TURN.splitlines(), *filler])
+        self.assertEqual(cd.pending_turn_identity(screen, PROBE), PROBE)
+        self.assertTrue(cd.pending_turn_matches(screen, PROBE, self.BEFORE))
 
     def test_an_ARBITRARY_arrow_line_does_not_forge_a_container(self):
         """SECURITY. The bound requires pi's OWN hint text, not just the `↳` glyph:
@@ -559,13 +600,12 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertIsNone(cd.pending_turn_identity(forged, PROBE))
         self.assertFalse(cd.pending_turn_matches(forged, PROBE, self.BEFORE))
 
-    def test_a_container_that_has_SCROLLED_UP_is_not_the_live_queue(self):
-        """A container frame left in the transcript (a stale queue that drained)
-        must not be read as the live queue: the bound is the capture's tail."""
-        filler = [f"line {i}" for i in range(120)]
-        stale = "\n".join([*SCREEN_QUEUED_MID_TURN.splitlines(), *filler])
-        self.assertIsNone(cd.pending_turn_identity(stale, PROBE))
-        self.assertFalse(cd.pending_turn_matches(stale, PROBE, self.BEFORE))
+    def test_a_container_that_has_SCROLLED_UP_is_STILL_the_message(self):
+        """A stale frame is rejected by NOVELTY, not by a distance bound: the same
+        container already present in the pre-send capture is not a new submission,
+        even though it is on screen."""
+        stale = SCREEN_QUEUED_MID_TURN
+        self.assertFalse(cd.pending_turn_matches(stale, PROBE, stale))
 
     def test_a_Steering_shaped_line_in_SCROLLBACK_is_not_a_queue(self):
         """SECURITY. A capture contains the whole lane: transcript, model output,
@@ -1141,6 +1181,21 @@ class TestDispatcherRecovery(unittest.TestCase):
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
+
+    def test_a_MULTI_LINE_body_is_flattened_so_it_can_be_confirmed(self):
+        """A newline would submit early in pi's one-line composer, and pi renders a
+        queued submission as only its first line (not message-unique). `send_message`
+        therefore flattens at the boundary, exactly as `_read_message` does, so the
+        sent text, the fingerprint and the confirmation identity are one string."""
+        fake = FakeCmux(queued_turn=True)
+        result = _dispatcher(fake).send_message(
+            "workspace:99", "line one\n\nline   two", label="B4",
+            consume_timeout=0.0, retries=0,
+        )
+        flat = "line one line two"
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "queued")
+        self.assertEqual(fake.queued, flat)
 
     def test_a_text_in_the_composer_is_not_queued(self):
         # `composer_region` -> None means "cannot tell", and an unsent composer
