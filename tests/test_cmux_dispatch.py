@@ -123,8 +123,10 @@ Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292
 #:   node -e "import('<pi-tui>/dist/utils.js').then(m=>console.log(JSON.stringify(
 #:     m.truncateToWidth('Steering: ' + MSG, 40))))"
 #:   -> "Steering: DISPATCH-PROBE-BOOTBLOCK-42\u001b[0m...\u001b[0m"  (cmux strips ANSI)
-#: — a 27-char head, then `...`. A comparison that does not strip the ellipsis can
-#: never match this, i.e. it guards a shape the renderer does not emit.
+#: — a 27-char head at a synthetic 40-col truncation width, then `...`. Both this
+#: and the base fixture are DERIVED, so their declared widths are illustrative and
+#: do not agree with each other; what matters (and is verified) is the SHAPE the
+#: renderer emits: a visible head followed by a literal `...`.
 SCREEN_QUEUED_MID_TURN_TRUNCATED = SCREEN_QUEUED_MID_TURN.replace(
     PROBE, "DISPATCH-PROBE-BOOTBLOCK-42..."
 )
@@ -514,6 +516,72 @@ class TestPendingTurnDisplay(unittest.TestCase):
         self.assertTrue(cd.pending_turn_ambiguous(screen, PROBE))
         self.assertEqual(cd.recovery_action(screen, fp, PROBE), cd.R_RELEASE)
 
+    def test_a_short_pending_line_WITHOUT_an_ellipsis_is_a_DIFFERENT_message(self):
+        """THE ADVERSARIAL FINDING. The first revision stripped `...` and then
+        accepted any prefix, so a DIFFERENT message that merely shares a head was
+        read as a truncation of ours: `Steering: 0123456789abcdef` confirmed a
+        dropped `0123456789abcdef more text`. A shorter line is only ours when the
+        renderer actually cut it, i.e. the raw text ends in `...`."""
+        for queued in (
+            "0123456789abcdef",
+            "please run the full battery",
+        ):
+            message = queued + " and report results"
+            screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, queued)
+            self.assertIsNone(cd.pending_turn_identity(screen, message), queued)
+            self.assertFalse(cd.pending_turn_matches(screen, message, self.BEFORE), queued)
+
+    def test_a_multi_line_message_matches_its_rendered_FIRST_line(self):
+        """pi renders a multi-line submission as one `Steering: <first line>`
+        (`TruncatedText` cuts at the first newline), so the first line IS the
+        identity for a multi-line message — the whole message never appears on one
+        line and would otherwise be a permanent false negative."""
+        message = "Fix the bug\n\nMore detail follows in this brief."
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, "Fix the bug")
+        self.assertEqual(cd.pending_turn_identity(screen, message), "Fix the bug")
+        self.assertTrue(cd.pending_turn_matches(screen, message, self.BEFORE))
+
+    def test_a_Steering_shaped_line_in_SCROLLBACK_is_not_a_queue(self):
+        """SECURITY. A capture contains the whole lane: transcript, model output,
+        bash output (which pi even renders into the same container). Only the
+        pending CONTAINER — the contiguous entries directly above the
+        `\u21b3 \u2026 to edit all queued messages` hint pi renders under the same
+        guard — is evidence. A `Steering:` line anywhere else must never confirm a
+        dispatch."""
+        filler = [f"line {i}" for i in range(60)]
+        # (a) the line in an ordinary transcript, with no hint anywhere
+        no_hint = "\n".join([*filler[:30], f"Steering: {PROBE}", *filler[:30]])
+        self.assertIsNone(cd.pending_turn_identity(no_hint, PROBE))
+        self.assertFalse(cd.pending_turn_matches(no_hint, PROBE, self.BEFORE))
+        # (b) a hint IS present, but the matching line is separated from it by other
+        #     output, so it is not part of the container run
+        separated = "\n".join(
+            [f"Steering: {PROBE}", *filler, "\u21b3 ctrl+e to edit all queued messages"]
+        )
+        self.assertIsNone(cd.pending_turn_identity(separated, PROBE))
+        self.assertFalse(cd.pending_turn_matches(separated, PROBE, self.BEFORE))
+        # (c) a stray `\u21b3` line BELOW the real container (bash output is appended
+        #     to the same container while the lane streams) must not hide the
+        #     container's real hint — the search scans hints newest-first
+        below = SCREEN_QUEUED_MID_TURN.replace(
+            "3.8%/700k (auto)",
+            "\u21b3 stray tool-output arrow\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n3.8%/700k (auto)",
+        )
+        self.assertEqual(cd.pending_turn_identity(below, PROBE), PROBE)
+        self.assertTrue(cd.pending_turn_matches(below, PROBE, self.BEFORE))
+
+    def test_a_SHORT_pending_line_WITHOUT_an_ellipsis_does_not_block_the_resend(self):
+        """THE ADVERSARIAL UNDER-DELIVERY FINDING. `Steering: continue` while we
+        send `continue with the migration` is a DIFFERENT queued message, not a
+        truncation of ours, so it must not suppress the resend — otherwise a lost
+        send is undeliverable whenever the lane holds any head-sharing nudge."""
+        fp = cd.fingerprint(PROBE)
+        message = PROBE + " and then some more"
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:12])
+        self.assertTrue(cd.composer_empty(screen))
+        self.assertFalse(cd.pending_turn_ambiguous(screen, message))
+        self.assertEqual(cd.recovery_action(screen, fp, message), cd.R_RESEND)
+
     def test_an_UNRELATED_pending_line_does_not_block_the_resend(self):
         """THE #5983 UNDER-DELIVERY FINDING. A pending line for a DIFFERENT
         message shares no head with ours, so our message is NOT queued and a
@@ -642,6 +710,8 @@ class FakeCmux:
         no_rules: bool = False,
         queued_turn: bool = False,
         pre_queued: str = "",
+        drop_first_send: bool = False,
+        fail_read_indices: frozenset[int] | set[int] = frozenset(),
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -669,6 +739,13 @@ class FakeCmux:
         #: A pending line ALREADY on the pane before the send (a repeat dispatch of
         #: the same brief, or a stale scrollback line). Must NOT confirm THIS send.
         self.queued = pre_queued
+        #: Drop only the FIRST message send (the resend then lands), so the
+        #: resend-as-recovery path can be exercised end to end.
+        self.drop_first_send = drop_first_send
+        #: 1-based `read_screen` call indices to fail, so a specific read can be
+        #: made unreadable without blinding the pane for the whole dispatch.
+        self.fail_read_indices = set(fail_read_indices)
+        self.read_calls = 0
         self.lag_remaining = 0
         self.visible: str | None = None
 
@@ -716,6 +793,9 @@ class FakeCmux:
     ) -> cd.CmuxResult:
         if self.screen_unreadable:
             return cd.CmuxResult(1, "", "cmux read-screen: command timed out")
+        self.read_calls += 1
+        if self.read_calls in self.fail_read_indices:
+            return cd.CmuxResult(1, "", "cmux read-screen: command timed out")
         self._tick()
         if self.state == "boot_block":
             return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
@@ -760,6 +840,9 @@ class FakeCmux:
             self.eaten.append(eaten)
             self.state = "booting"
             self.pending += remainder
+            return cd.CmuxResult(0, "OK")
+        if self.drop_first_send:
+            self.drop_first_send = False
             return cd.CmuxResult(0, "OK")
         if self.drops_message:
             return cd.CmuxResult(0, "OK")
@@ -847,9 +930,11 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate the message")
 
     def test_release_recovers_when_the_composer_is_unidentifiable(self):
-        # The bare-Enter release must still work for the 2026-09-17 race when
-        # the composer region cannot be read (no rules): a release can never
-        # duplicate, and here it is what submits the message.
+        # Pins the RELEASE OUTCOME for a no-rules pane (the 2026-09-17 race): the
+        # composer region cannot be read, so no resend is safe, and the bare Enter
+        # is what submits the message. NOTE: the R_RELEASE here comes from the
+        # `text_on_screen` branch — the unreadable-composer property itself is
+        # pinned separately by `test_unidentifiable_composer_never_re_sends`.
         fake = FakeCmux(enter_is_noop=1, no_rules=True)
         result = self._send(fake, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
@@ -956,6 +1041,48 @@ class TestDispatcherRecovery(unittest.TestCase):
         # bytes are lost. The pending line predates the send, so it is not
         # evidence about this send — fail closed, never a false success.
         fake = FakeCmux(drops_message=True, pre_queued=PROBE)
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
+
+    def test_a_TRUNCATED_pre_existing_pending_line_does_not_trigger_a_duplicate_resend(self):
+        """THE #5983 DUPLICATE FINDING. A mid-turn pane already holds OUR message
+        as a TRUNCATED queue entry (the normal shape on a narrow pane): the head is
+        below the 40-char fingerprint, so `text_on_screen` misses it, and at/above
+        `PENDING_MIN_CHARS`, so the ambiguity branch misses it too. The pre-fix
+        recovery then chose `resend` and queued a SECOND copy on every attempt.
+        Novelty correctly refuses to CONFIRM it; the recovery must not contradict
+        it. Exactly one `send_text` may happen."""
+        fake = FakeCmux(
+            drops_message=True, pre_queued="DISPATCH-PROBE-BOOTBLOCK-42..."
+        )
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
+        self.assertEqual(result.recoveries, [cd.R_RELEASE])
+        self.assertEqual(fake.sent_log.count(PROBE), 1)
+
+    def test_a_lost_send_is_resent_when_an_UNRELATED_message_is_queued(self):
+        """UNDER-DELIVERY JOURNEY. The pane is mid-turn with another message
+        queued; OUR first send is lost. `Steering: <other>` shares no head with our
+        message, so our message is not queued and the resend is the recovery that
+        delivers it. Suppressing the resend for ANY pending line (the first
+        revision) left the dispatch permanently undeliverable."""
+        fake = FakeCmux(drop_first_send=True, pre_queued="an unrelated brief")
+        result = self._send(fake, consume_timeout=0.0, retries=1)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.status, "consumed")
+        self.assertEqual(result.recoveries, [cd.R_RESEND])
+        self.assertEqual(fake.submitted, [PROBE])
+        self.assertEqual(fake.sent_log.count(PROBE), 2)
+
+    def test_an_unreadable_pre_send_baseline_fails_closed(self):
+        """Novelty cannot be established without a baseline, and a `queued` verdict
+        without novelty is exactly the stale-line false success. The pre-send read
+        failing (twice) must leave the pane's genuinely-queued message reported as
+        `sent-but-not-consumed`, never as `queued`."""
+        # read #1 is the readiness probe; reads #2 and #3 are the baseline + retry.
+        fake = FakeCmux(queued_turn=True, fail_read_indices={2, 3})
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
@@ -1162,6 +1289,17 @@ class TestCliExitCodes(unittest.TestCase):
             "--ready-timeout", "0", "--consume-timeout", "0",
         )
         self.assertEqual(rc, 0, "a queued message is a success, not a failure")
+
+    def test_exit_one_when_a_stale_pending_line_does_not_confirm(self):
+        # #5979: the pending line predates the send (a repeat dispatch of the same
+        # brief, or a stale scrollback line), so it is not evidence about THIS
+        # send. The CLI must NOT report success — the fail-closed direction.
+        fake = FakeCmux(drops_message=True, pre_queued=PROBE)
+        rc = self._main(
+            fake, "send", "--workspace", "workspace:99", "--text", PROBE,
+            "--ready-timeout", "0", "--consume-timeout", "0", "--retries", "0",
+        )
+        self.assertEqual(rc, 1, "a stale pending line must never confirm a lost send")
 
     def test_idle_lane_confirmation_is_unchanged(self):
         # The idle path keeps today's exact success semantics: the message
