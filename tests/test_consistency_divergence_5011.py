@@ -911,7 +911,7 @@ def test_adopted_is_true_for_a_read_only_first_run(proj, tmp_path):
 ])
 def test_terminalizing_events_are_folded_like_the_writer(proj, tmp_path, terminal):
     """`fold` folds `PointRetracted` as a STATUS-ONLY write (no belief decay)
-    and has no arm at all for the other three lifecycle types, while the
+    and has no arm at all for the other four lifecycle types, while the
     writer's full-fidelity replay (`rebuild_all`) folds all four: status/validity
     stamps AND the `decay_clause` belief decay
     (`confidence=0.5`, `posterior_alpha/beta=1.0`). A reference built on `fold`
@@ -1416,7 +1416,7 @@ def test_a_journal_only_vector_of_the_wrong_width_is_a_declared_refusal(
     if not width:
         pytest.skip("store reports no embedding width")
     # The graph holds no vector for either point (a `strip`-era journal).
-    mism, _, _, one_sided, _ = _compare_views(
+    mism, _, _, _, one_sided = _compare_views(
         {"right": {"embedding": [0.5] * width},
          "wrong": {"embedding": [0.5] * (width - 1)}},
         {"right": {}, "wrong": {}},
@@ -1435,11 +1435,17 @@ def test_an_operator_promotion_without_a_snapshot_is_a_status_set(proj, tmp_path
     graph then shows `live` where the fold shows `archived`) — and fails the
     other way if the fold invents a node for a missing id.
     (2) Reachable: a `status`-carrying `PointAdded` followed by a snapshot-less
-    `OperatorPromoted`.
+    `OperatorPromoted`, in BOTH id spellings the writer's replay accepts.
     """
     log_path = str(tmp_path / "promo_nosnap.jsonl")
+    # Both spellings matter: the writer's replay (`apply()` and `rebuild_all`)
+    # reads the id as `id or event_id`, so a promotion carrying only `event_id`
+    # sets `status='live'` on the graph. A fold reading `id` alone no-ops there
+    # and reports the writer's OWN graph as a `content` divergence.
     _seed(proj, log_path, [_pt("x", "a", status="archived"),
-                           {"type": "OperatorPromoted", "id": "x"}])
+                           {"type": "OperatorPromoted", "id": "x"},
+                           _pt("y", "b", status="archived"),
+                           {"type": "OperatorPromoted", "event_id": "y"}])
     r = check_consistency(log_path, proj)
     assert r["ok"] is True, r["divergent_points"]
 
@@ -1541,3 +1547,17 @@ def test_a_torn_sidecar_is_reported_and_never_re_baselined(proj, tmp_path):
     assert r4["state_error"], r4
     assert r4["state_recorded"] is False, r4
     assert os.path.isdir(state_path), "a mistrusted sidecar must not be replaced"
+    os.rmdir(state_path)
+
+    # A BOOLEAN watermark is not an integer one. `isinstance(True, int)` is true,
+    # so `true` would be read as a valid baseline; `True == 1` then MATCHES a
+    # 1-event journal, so it is trusted rather than refused. Same strict-bool
+    # rule `_values_equal` applies, on the path that reads operator-planted
+    # sidecars.
+    with open(state_path, "w", encoding="utf-8") as fh:
+        fh.write('{"format_version": 1, "last_applied_seq": true,'
+                 ' "projection_hash_sha256": "' + "0" * 64 + '"}')
+    r5 = check_consistency(log_path, proj)
+    assert r5["state_error"], r5
+    assert r5["state_recorded"] is False, r5
+    os.unlink(state_path)

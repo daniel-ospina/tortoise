@@ -706,7 +706,13 @@ def read_projection_state(log_path) -> tuple[dict | None, str | None]:
     if data.get("format_version") != _PROJECTION_STATE_FORMAT:
         return None, (f"projection state format {data.get('format_version')!r} "
                       f"is not {_PROJECTION_STATE_FORMAT}")
-    if not isinstance(seq, int) or not isinstance(digest, str) \
+    # `isinstance(seq, bool)` first: `isinstance(True, int)` is true, so a
+    # boolean watermark would otherwise be accepted as a valid baseline (and
+    # `True == 1` would then trust it against a 1-event journal). Same strict
+    # bool rule as `_values_equal`, on the path that reads operator-planted
+    # sidecars.
+    if isinstance(seq, bool) or not isinstance(seq, int) \
+            or not isinstance(digest, str) \
             or not re.fullmatch(r"[0-9a-f]{64}", digest):
         return None, f"projection state malformed (seq={seq!r})"
     return {
@@ -854,7 +860,11 @@ def _fold_journal(events: list[dict]) -> dict:
             elif t == "OperatorPromoted":
                 # `apply()`'s fallback arm: no snapshot means a status-SET on an
                 # existing node (a MATCH-SET that no-ops when it is absent).
-                oid = ev.get("id")
+                # The writer's replay reads the id as `id or event_id` (both
+                # `apply()` and `rebuild_all`), so this fold MUST read it the
+                # same way: reading only `id` makes a faithful graph -- one the
+                # writer's own replay produced -- report as `content` divergent.
+                oid = ev.get("id") or ev.get("event_id")
                 entry = by_id.get(oid) if isinstance(oid, str) else None
                 if isinstance(entry, dict):
                     entry["status"] = "live"
