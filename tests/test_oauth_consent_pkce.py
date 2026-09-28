@@ -383,8 +383,14 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
         routed = _run("load", search="?error=access_denied&error_description=boom",
                       hash=router_frag)
         assert routed["errorVisible"] is True, routed
-        assert all("%2F" not in u and u.endswith(router_frag) for u in routed["replaceStates"]), (
-            f"a router-shaped fragment was mangled or re-encoded: {routed['replaceStates']}"
+        assert routed["replaceStates"], (
+            f"the load was not sanitised, so the fragment pin is vacuous: {routed}"
+        )
+        # Compare the FRAGMENT itself, not a whole-URL substring: the mangling this
+        # guards against re-serialises `#settings?tab=x&foo=bar` to
+        # `settings%3Ftab=x&foo=bar`, which contains no `%2F` at all.
+        assert all(u.split("#", 1)[1] == router_frag[1:] for u in routed["replaceStates"]), (
+            f"a router-shaped fragment was re-encoded: {routed['replaceStates']}"
         )
 
     # A reachable, non-provider cause of the SAME terminal state: the provider
@@ -497,8 +503,10 @@ def test_inv13_the_write_lands_only_after_a_probe_cycle() -> None:
     observable. A store that accepts the credential and then refuses to remove it
     therefore keeps a copy no path can clean — the recorded residual R21, reachable
     only by a store that discriminates by key, which is not a conforming browser
-    store (a re-probe on the real key would detect nothing extra and would leave
-    the credential in two stores instead of one).
+    store (a re-probe on the real key DOES detect such a store, but only after the
+    credential has been written to it, so it cannot un-write it — it copies the
+    residue into the next store, leaving two copies where the throwaway-key probe
+    leaves one).
 
     This pins the divergence the pre-flight guard cannot see: a first store
     whose accepted-size band sits BETWEEN the probe (rejected) and the real value

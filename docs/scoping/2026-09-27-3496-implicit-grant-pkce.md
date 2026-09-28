@@ -638,7 +638,7 @@ better for.
 |---|---|---|---|
 | MCP consent page inline auth client (`tortoise/oauth.py::consent_page_html`) | UI / auth | **this change** (Steps 1–7) | ✅ |
 | `GET /oauth/authorize` (FastAPI, `tortoise/hosted_api.py:28395`) | API endpoint | **this change** (page render only; no route change) | ✅ |
-| CSP `connect-src` for the Supabase token POST | cross-cutting | `tortoise/hosted_api.py:28455-28464` **already** emits `connect-src 'self' <supabase_origin>` — no change | ✅ |
+| CSP `connect-src` for the Supabase token POST | cross-cutting | the CSP built in `oauth_authorize` (anchored to the symbol, not an offset) **already** emits `connect-src 'self' <supabase_origin>` — no change | ✅ |
 | Parent-domain session cookie `sb-tortoise-auth-token` write path | data | `tests/test_cross_subdomain_cookie_sync.py` (extended, Step 10(b)); semantics unchanged for normal sessions | ✅ |
 | Verifier storage (aux chain) | data | the router (Step 3) + harness invariants 3, 4, 12, 13 | ✅ |
 | `blog-admin` adapter (the ported contract's other copy) | data | static predicate assertion (extended) — **no CI-gated suite of its own** → follow-up filed | ⚠️ (filed) |
@@ -784,7 +784,7 @@ was incomplete (it proved remove/read-back-null only for the throwaway probe key
 key it stored, so its own comment overclaimed — the proof was **extended** to the real key), the
 scoping doc's 341-count verification row (whose command omits `tests/test_oauth_mcp.py`'s
 `-k "not Cimd"` requirement), and two comments that described earlier revisions of this PR's own test
-file. The blog-admin follow-up was filed as **#5735**.
+file. (The blog-admin follow-up mentioned above was filed in round 7, as **#5735**.)
 
 ### diff-time code review ROUND 9 (re-review of `f458c3edf`)
 Four fresh reviewers (correctness/logic, security, test-quality, doc-consistency). This round found
@@ -792,14 +792,15 @@ that **round 8's real-key removal proof was net-negative rather than merely inco
 prevent the residual it appears to guard (the credential must be WRITTEN before its removability is
 observable, so a key-discriminating store keeps a copy either way) and it left that credential in TWO
 stores instead of one — **reverted**, with A5/R20/R21, the invariant-13 docstring and the Step-3b
-sketch corrected to state the residual instead of claiming a guarantee the writer cannot give. Two
-real behaviour bugs, each verified by execution before and after: inv 13's `sessionVerifierKeys == []`
-assertions were satisfiable by a store never being in the chain (a **per-store attempt log** now pins
-that the store was TRIED), `strippedHasToken` could not see `provider_refresh_token` (deleting only the
-sibling strip kept it green), `LOAD_TRANSIENT.present` was derived from the generic names
-`type`/`flow_id` so a benign first load was told its sign-in had failed, and `sanitiseUrl()`'s fragment
-param-list test was byte-identity after normalisation so an escaped provider `error_description` kept
-the transient on the URL. A pre-existing defect found on the way — a server value containing a literal
+sketch corrected to state the residual instead of claiming a guarantee the writer cannot give. The
+two real behaviour bugs, each verified by execution before and after, were `LOAD_TRANSIENT.present`
+(derived from the generic names `type`/`flow_id`, so a benign first load was told its sign-in had
+failed) and `sanitiseUrl()`'s fragment param-list test (byte-identity after normalisation, so an escaped
+provider `error_description` kept the transient on the URL). Three assertions that could not fail for
+the reason they claimed were pinned: inv 13's `sessionVerifierKeys == []` assertions were satisfiable
+by a store never being in the chain (a **per-store attempt log** now pins that the store was TRIED),
+and `strippedHasToken` could not see `provider_refresh_token` (deleting only the sibling strip kept it
+green). A pre-existing defect found on the way — a server value containing a literal
 `__SUPABASE_URL__` placeholder expands into the inline script and breaks it (attacker-triggerable page
 corruption, no secret leak) — is **not fixed here** (identical on `origin/main`) and is filed as
 **#6001**.
@@ -852,7 +853,7 @@ recorded here rather than the gates being silently skipped.
 | class | adversarial input | required behaviour | pinned by |
 |---|---|---|---|
 | **A1** verifier exfiltration via store routing | a verifier key + an unknown aux key + a `-user` key | never in `document.cookie`; aux stores only | inv 3, 4, 12, 13 (inv 3 writes the non-verifier keys through the adapter and reads the cookie log by key identity) |
-| **A2** spent-`code` re-forwarding | a stale `?code=` on the return URL | the returned target carries no transient | **inv 11** (+ Step 10(a) textual as secondary) |
+| **A2** spent-`code` re-forwarding | a stale `?code=` on the return URL | the returned target carries no transient | **inv 11** alone |
 | **A3** reflected-content injection | `?error_description=<script>…` / a 10 kB payload with controls inside the bound window | rendered via `textContent`, bounded to 300 chars, stripped | **inv 5** (both mutations killed: unbounded, strip-removed) |
 | **A4** open redirect | a hostile `redirect_uri`/`next`/return target | origin+path are constants; strip only reduces | **inv 11** + **inv 2** (the built return target, with a foreign-host control) |
 | **A5** verifier orphaning | a store that fails mid-flow (including one that accepts a WRITE but refuses REMOVAL, and one whose accepted-size band sits between the pre-flight probe and the real value); an abandoned/failed exchange | no verifier copy in `document.cookie`; the credential is written to a store only after that store's write/read/remove cycle on a same-length dummy completed (a store that ACCEPTS the credential and then refuses its removal retains a copy — residual R21); removed keys cleared from both aux stores | **inv 3, 4, 12, 13** + R19 (library-owned copies); inv 6's `throw-remove` mode (the guard refuses a store the writer would pick but `removeAux` could not clean), inv 4's two halves (each store seeded in turn), inv 13's size-asymmetric relocation |
@@ -922,9 +923,10 @@ real value, and refuses a store whose THROWAWAY-key probe cycle (write → read 
 back null) does not complete); a store that refuses removal is refused for USE, though a store that
 discriminates by KEY still keeps the copy it accepted — that residual is R21, and re-proving removal
 on the real key cannot prevent it (the credential must be written before its removal is observable),
-it only copies the residue into the next store — that is enforced by
-`writeAux` (write → read back → remove → read back null, per store, for the real value), NOT by the
-guard, which only refuses early when the FIRST writable store is uncleanable (inv 6). R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
+it only copies the residue into the next store. What `writeAux` enforces is the
+THROWAWAY-key probe cycle (write → read back → remove → read back null, per store, on a same-length
+**dummy**) with the real value then read back — NOT the guard,
+which only refuses early when the FIRST writable store is uncleanable (inv 6). R4 §8.1 not closed. R5 shelf life (#3524) — the trigger that would flip
 the verdict is an open PR on #3524 deleting the inline client. R6 version drift — test-enforced in
 both directions. R7 item 6 changes the shared cookie's write semantics — gated, so normal sessions
 are byte-identical. R8 the parity suite may trip on the refactor — the Step-3 constraint keeps it
@@ -971,7 +973,7 @@ Landed files and what each carries. Evidence is stated as a command → observed
 
 **Verification (all run at base `5b6cb9367` + this diff).**
 
-- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q -k "not Cimd"` → **326 passed, 2 xfailed**. `-k "not Cimd"` deselects 17 live-network CIMD classes in `test_oauth_mcp.py` (they fetch over the network and hang without it; CI runs them). Counts at the round-9 head.
+- `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_oauth_consent_pkce.py tests/test_oauth_mcp.py tests/test_cross_subdomain_cookie_sync.py tests/test_session_bridge_fragment_retention.py tests/test_no_legacy_token_path.py tests/test_ci_selection.py -q -k "not Cimd"` → **326 passed, 2 xfailed**. `-k "not Cimd"` deselects 17 live-network CIMD tests (across 2 classes) in `test_oauth_mcp.py` (they fetch over the network and hang without it; CI runs them). Counts at the round-9 head.
 - `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_from_uri_userinfo.py tests/test_harness_mcp_config.py tests/test_mcp_route_challenge.py tests/test_oauth_token_fault.py tests/test_3036_oauth_retention.py tests/test_attribution_actor.py tests/test_control_plane_offload_3498.py tests/test_oauth_redemption_state.py tests/test_user_identity_authority.py -q` → **412 passed, 1 failed** (re-measured at the round-9 head). The red is `test_mcp_route_challenge::TestAuthChallenge::test_unknown_credential_carries_challenge[tt_deadbeef]` — the embedded-FalkorDB single-writer contention (`Embedded store busy: … is held by a live process`), **reproduced on a clean `origin/main` worktree**, not this diff; the failure's identity moves between runs, so it is not deterministic under this change. An earlier revision of this row printed the two bare `test_*.py` paths without their `tests/` prefix, recorded `413 passed`, and attributed extra reds to `test_cursor_mcp_exit_evidence.py`, which this command does not list — all three corrected. `TORTOISE_TEST_CARVE_OUT=1` is required; without it the URI gate errors the whole set.
 - `ruff check .` → **All checks passed** (CI pins `ruff==0.16.4`).
 - Mutation evidence: **the union table in the PR body — every row observed red, 0 survived.** The set now includes
