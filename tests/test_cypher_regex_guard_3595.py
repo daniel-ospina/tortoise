@@ -382,3 +382,122 @@ def test_projection_wrapper_refuses_on_every_query_entry_point():
         with pytest.raises(UnsupportedCypherOperatorError):
             getattr(g, verb)(LEGACY_SHAPE_CHECK)
         assert handle.calls == [], f"{verb} reached the raw handle"
+
+
+# ── review round 2: the three P2 probes + the P1 duck-typed handle ──────────
+
+def test_backslash_does_not_escape_a_backtick_identifier():
+    r"""Falsifier (round-2 P2): ``\`` is NOT an escape inside a backtick name.
+
+    openCypher escapes a backtick only by DOUBLING it, so the backtick after a
+    backslash CLOSES the identifier and the ``=~`` that follows is the real
+    operator. Pre-fix, ``\\``` swallowed the close and the operator was never
+    seen — the round-2 probe, which reached the wire unrefused. Value that
+    makes it fail: ``probe``, a real operator after the backtick identifier.
+    """
+    probe = "MATCH (n:`weird\\`) WHERE n.x =~ 'y' RETURN n"
+    assert _unsupported_cypher_operator(probe) == "=~"
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.query(probe)
+    assert handle.calls == [], "the pre-fix miss reached the graph handle"
+
+
+def test_doubled_backtick_inside_identifier_is_a_name():
+    """Anti-overfix guard: a DOUBLED backtick stays inside the identifier.
+
+    ``a``b`` is the openCypher way to write a literal backtick in an
+    identifier, so the ``=~`` between the doubled pair is still NAME content.
+    """
+    assert _unsupported_cypher_operator(
+        "MATCH (n:`a``b=~c`) RETURN n") is None
+
+
+def test_doubled_quote_inside_a_literal_is_data():
+    """Anti-overfix guard: openCypher's doubled-quote escape is honoured.
+
+    ``'a''b=~c'`` is one STRING literal (``a'b=~c``), so the ``=~`` is DATA.
+    """
+    assert _unsupported_cypher_operator("RETURN 'a''b=~c' AS x") is None
+    assert _unsupported_cypher_operator('RETURN "a""b=~c" AS x') is None
+
+
+def test_execute_command_refuses_the_operator_on_a_guarded_handle():
+    """Falsifier (round-2 P2): the raw command channel is guarded too.
+
+    The vendor binds ``Graph.execute_command`` as an INSTANCE attribute, so a
+    plain method override loses to it; the guarded subclass re-binds it. Value
+    that makes it fail: ``LEGACY_SHAPE_CHECK`` as the Cypher argument of a
+    ``GRAPH.QUERY`` command.
+    """
+    g, wire = _guarded_vendor_handle()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.execute_command("GRAPH.QUERY", "g", LEGACY_SHAPE_CHECK)
+    assert wire.commands == [], "execute_command forwarded the operator"
+    # A non-query command (or a supported query) still passes through.
+    g.execute_command("GRAPH.DELETE", "g")
+    assert wire.commands == [("GRAPH.DELETE", "g")]
+
+
+def test_projection_wrapper_execute_command_is_guarded():
+    """Falsifier: ``proj.g.execute_command`` refuses the operator directly."""
+    g, handle = _guarded()
+    with pytest.raises(UnsupportedCypherOperatorError):
+        g.execute_command("GRAPH.QUERY", "test", LEGACY_SHAPE_CHECK)
+    assert handle.calls == []
+
+
+def test_duck_typed_handle_is_proxied_not_reconstructed():
+    """Falsifier (round-2 P1): a stub handle must not raise ``AttributeError``.
+
+    ``tests/test_redirect_seam.py`` installs a client whose ``select_graph``
+    returns a stub exposing only ``query`` (no ``client``/``name``). The
+    pre-fix rebuild ``graph_cls(handle.client, handle.name)`` raised
+    ``AttributeError`` there and redded that ``core``-surface file. The handle
+    must instead be wrapped in a delegating proxy that GUARDS it.
+    """
+    class _StubHandle:
+        def __init__(self):
+            self.calls: list = []
+
+        def query(self, q):
+            self.calls.append(q)
+            return "OK"
+
+    class _ClientReturningStub:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def select_graph(self, graph_id):
+            return self._handle
+
+    handle = _StubHandle()
+    guard = guarded_client(_ClientReturningStub, handle).select_graph("g")
+    # No AttributeError; the supported query reaches the stub unchanged.
+    assert guard.query("MATCH (n) RETURN n") == "OK"
+    assert handle.calls == ["MATCH (n) RETURN n"]
+    # …and the operator is refused BEFORE the stub sees it.
+    with pytest.raises(UnsupportedCypherOperatorError):
+        guard.query(LEGACY_SHAPE_CHECK)
+    assert handle.calls == ["MATCH (n) RETURN n"], "the stub saw the operator"
+
+
+def test_permissive_factory_object_is_not_short_circuited():
+    """Falsifier (round-2 P1): a permissive ``__getattr__`` cannot skip the guard.
+
+    ``getattr(MagicMock(), marker, False)`` is truthy, so the pre-fix marker
+    test returned the mock UNTOUCHED and the guard vanished. The marker is now
+    read from the class MRO, and a non-class factory is wrapped instead. Value
+    that makes it fail: a factory whose every attribute auto-exists must still
+    yield a guarded handle.
+    """
+    from unittest import mock
+
+    factory = mock.MagicMock()
+    factory.return_value.select_graph.return_value = mock.MagicMock()
+    client = guarded_client(factory, host="example.invalid")
+    assert client is not factory, "the factory itself was returned unguarded"
+    guard = client.select_graph("g")
+    with pytest.raises(UnsupportedCypherOperatorError):
+        guard.query(LEGACY_SHAPE_CHECK)
+

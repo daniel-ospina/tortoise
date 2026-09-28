@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
+    _guard_execute_command,
     _guard_unsupported_cypher,
     _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
     _unsupported_cypher_operator,  # noqa: F401  re-export
@@ -1270,10 +1271,10 @@ class _GuardedGraph:
     constructed through ``tortoise.cypher_guard.guarded_client``, whose handles
     guard every query entry point. For defence in depth this wrapper also
     overrides every query entry point itself (``query``, ``ro_query``,
-    ``_query``, ``profile``, ``explain``), so it does not depend on the inner
-    handle's class to refuse. ``__getattr__`` below forwards only the remaining
-    non-query attributes (``name``, ``delete``, ``schema``, ...) to the
-    underlying handle.
+    ``_query``, ``profile``, ``explain``, ``execute_command``), so it does not
+    depend on the inner handle's class to refuse. ``__getattr__`` below forwards
+    only the remaining non-query attributes (``name``, ``delete``, ``schema``,
+    ...) to the underlying handle.
     """
 
     __slots__ = ("_g", "_proj")
@@ -1319,6 +1320,14 @@ class _GuardedGraph:
     def explain(self, cypher: str, params=None):
         _guard_unsupported_cypher(cypher)
         return self._g.explain(cypher, params=params)
+
+    def execute_command(self, *args, **kwargs):
+        # #3595 (review round 2, P2): the raw Redis command channel carries
+        # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
+        # beneath `self._g` already intercept it — but keep the wrapper's own
+        # refusal complete rather than depending on the inner handle's class.
+        _guard_execute_command(args)
+        return self._g.execute_command(*args, **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
