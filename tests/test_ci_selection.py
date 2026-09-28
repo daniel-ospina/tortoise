@@ -908,7 +908,14 @@ def test_tools_longmem_change_selects_eval_not_tier1():
     r = _sel(["tools/longmem_eval/run.py"])
     assert r["full"] is False
     assert r["surfaces"] == ["eval"]
-    assert "eval/retrieval/test_run.py" in r["test_files"]
+    # #6137 moved `eval/retrieval/test_run.py` out of the fast pool into the
+    # slow legs, so the witness that "eval was selected" is another eval file
+    # that stayed — and the moved one is asserted to still run PRE-MERGE, one
+    # leg over (a relocation that dropped it instead would be a coverage loss,
+    # which is the whole thing #6137 must not do).
+    assert "eval/retrieval/test_1348.py" in r["test_files"]
+    assert "eval/retrieval/test_run.py" not in r["test_files"]
+    assert "eval/retrieval/test_run.py" in r["slow_selected"] and r["slow_run"] is True
     assert set(r["test_files"]) != _tier1()
 
 
@@ -1341,14 +1348,17 @@ def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
 def test_tier2_slow_run_scoped_to_matched_surfaces():
     """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
     owns test_dream / test_ep_sources / test_source_inheritance_own — a
-    ranking.py-only PR selects exactly those (never the full committed slow-
-    leg set), and the carve-out job skips (ep owns no carve-out file)."""
+    ranking.py-only PR selects exactly those (never the full leg set), and
+    the carve-out job skips (ep owns no carve-out file). #6137 added
+    test_ep_selector to ep's slow set (it moved out of the fast pool), so
+    the expected list is pinned here as well."""
     r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False and r["surfaces"] == ["ep"]
     assert r["slow_run"] is True
     assert r["carve_out_run"] is False
     assert r["slow_selected"] == [
-        "test_dream.py", "test_ep_sources.py", "test_source_inheritance_own.py"]
+        "test_dream.py", "test_ep_selector.py", "test_ep_sources.py",
+        "test_source_inheritance_own.py"]
 
 
 def test_tier2_carve_out_run_when_surface_owns_carve_files():
