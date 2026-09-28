@@ -137,6 +137,7 @@ from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
@@ -11801,7 +11802,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # empty conversation is never ok=True / a silent extracted:0).
     # 422 over 400: same family as the empty-conversation rejection; a
     # handler-level check because blankness is transcript-derived.
-    transcript, _est = _session_llm_transcript(windowed)
+    transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
     if not transcript.strip():
         raise HTTPException(
             status_code=422,

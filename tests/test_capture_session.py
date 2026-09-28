@@ -3535,7 +3535,14 @@ def test_capture_session_blank_conversation_fails_closed(sdk):
     missing-key / 5000-char whitespace / falsy-0 / 2-char) → ok=False,
     mode='empty', turns=0. Floor boundary: exactly-3-char 'abc' is NON-blank.
     (Note: 'ab cd ef' is ONE 8-char sentence per _SENT — non-blank, so it is
-    NOT in the blank set; the gate uses the real transcript signal.)"""
+    NOT in the blank set; the gate uses the real transcript signal.)
+
+    ⛔ The last three rows are OVER-CAP blanks (#4897 round 11). The window
+    appends a truncation marker to a body it clipped, so a blank turn past the
+    cap has NON-blank TEXT at the gate while holding nothing extractable — the
+    gate must judge the marker-free body. Before the fix, `" " * 5001` was
+    admitted and stored as a marker-only turn, where main had refused it.
+    """
     blank_convos = (
         [{"role": "user", "content": "ok"}],
         [{"role": "user", "content": " "}],
@@ -3544,6 +3551,10 @@ def test_capture_session_blank_conversation_fails_closed(sdk):
         [{"role": "user", "content": " " * 5000}],  # validator's upper bound, whitespace
         [{"role": "user", "content": 0}],         # str() = "0", below floor
         [{"role": "user", "content": "ab"}],      # 2 chars < floor
+        # over-cap blanks: the clipped body is marked, and must STILL be blank
+        [{"role": "user", "content": " " * 5001}],   # cap + 1
+        [{"role": "user", "content": "\n" * 6000}],  # newlines survive the clip
+        [{"role": "user", "content": "\t" * 6000}],  # tabs survive the clip
     )
     for conv in blank_convos:
         res = sdk.capture_session(conv)
@@ -4260,20 +4271,41 @@ def test_capture_extraction_input_and_stored_turn_agree_with_the_marker(
 
 
 def test_the_marker_survives_the_servers_cap_reapplication():
-    """The critical stability property (#4897 review): the server re-applies
-    the cap to the stored body (``_capture_turn_texts``) and the client has
-    already clipped, so a marker appended AFTER the cut would be destroyed. It
-    lives INSIDE the cap, which makes every re-application a no-op."""
-    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _capture_turn_texts, _capture_turn_window
-    content = "z" * 6000
+    """(#4897 review) ``_capture_turn_texts`` is REDACTION-ONLY: it must NOT
+    re-apply the cap to the stored body.
+
+    ⛔ The cap has ONE owner (``_capture_turn_window``), so re-windowing a
+    marked turn is a no-op and a redaction that EXPANDS the body past the cap
+    must survive intact. A re-clip at the stored-text sink would take
+    ``content[:cap]`` of the scrubbed text and destroy the marker the window
+    appended at the cut.
+
+    (The earlier version of this test asserted the same property with a fixture
+    exactly AT the cap, where any re-clip is a no-op — it could not fail. The
+    fixture now expands, so the assertion binds.)
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts,
+        _capture_turn_window,
+    )
+    # 400 x 25 chars = 10,000, clipped to the cap; the 20-char AWS keys inside
+    # the stored window each expand to a 28-char marker, pushing it past the cap.
+    content = ("AKIA" + "ABCDEFGHIJKLMNOP" + " ") * 400
     once = _capture_turn_window([{"role": "user", "content": content}])
+    assert len(once[0]["content"]) == _CAPTURE_TURN_CAP, "the window owns the cap"
     assert _CAPTURE_TRUNCATION_SENTINEL in once[0]["content"]
     twice = _capture_turn_window([dict(t) for t in once])
     assert twice == once, "a re-applied window must not change the marked turn"
     stored = _capture_turn_texts(once)[0]
-    assert stored == "[user] " + once[0]["content"]
+    assert stored != "[user] " + once[0]["content"], (
+        "the fixture must actually EXPAND on scrubbing, or nothing is bound")
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        "the stored-text sink is redaction-only and must not re-clip — a re-clip "
+        "here truncates the scrubbed body and loses the marker")
     assert stored.endswith(
-        f" {_CAPTURE_TRUNCATION_SENTINEL} original length 6000 chars]"), \
+        f" {_CAPTURE_TRUNCATION_SENTINEL} original length {len(content)} chars]"), \
         "the marker must survive the stored-text re-application"
 
 

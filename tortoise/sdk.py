@@ -795,6 +795,37 @@ _TRUNCATION_MARKER_FULL_RE = re.compile(
     re.escape(_CAPTURE_TRUNCATION_SENTINEL) + r" original length \d+ chars\]")
 
 
+def _capture_gate_window(windowed: list[dict]) -> list[dict]:
+    """Return ``windowed`` with synthetic truncation markers stripped (#4897).
+
+    ⛔ WHY THE GATE NEEDS ITS OWN VIEW: :func:`_capture_turn_window` appends a
+    marker to every body it clipped, so a turn that is entirely blank PAST the
+    cap (``" " * 6001``) becomes NON-blank at the empty/blank gate while the
+    conversation still holds nothing extractable. Before #4897 the same input
+    stored ``content[:5000]`` — still blank — and the gate fired; carrying the
+    marker into the gate turned a fail-closed refusal into a stored
+    marker-only turn. The gate must judge the REAL text.
+
+    Only the gate uses this. The extractors keep the marker: it is the evidence
+    of what was cut, and they sit downstream of the gate, so a conversation the
+    gate admits is unaffected.
+
+    A caller who supplies a turn whose whole content is itself a marker
+    lookalike is stripped to an empty body and the gate refuses — correct (such
+    a turn has no extractable content) and fail-closed, which is the safe
+    direction.
+    """
+    out: list[dict] = []
+    for turn in windowed:
+        content = turn.get("content") if isinstance(turn, dict) else None
+        if not isinstance(content, str):
+            out.append(turn)
+            continue
+        body, _marker = _split_truncation_marker(content)
+        out.append({**turn, "content": body} if body != content else turn)
+    return out
+
+
 def _split_truncation_marker(content: str) -> tuple[str, str]:
     """Split a turn's TRAILING truncation marker off its body (#4897).
 
@@ -870,9 +901,12 @@ def _clip_capture_turn_content(
     marker = _capture_truncation_marker(len(content))
     keep = cap - len(marker)
     if keep < 0:
-        # ``cap`` too small to carry the full marker (never the production
-        # 5000). Fall back to the bare sentinel so the cut stays VISIBLE
-        # instead of reverting to a silent ``content[:cap]``.
+        # ``cap`` too small to carry the full marker — never the production
+        # 5000, and unreachable from any caller in the tree. Falls back to the
+        # bare sentinel; note the final ``[:cap]`` can still truncate THAT when
+        # ``cap < len(_CAPTURE_TRUNCATION_SENTINEL)`` (cap=5 → "…[tru"), so the
+        # cut is not guaranteed visible in that corner. Kept as a defensive
+        # branch: reverting to a silent ``content[:cap]`` is no better.
         marker = _CAPTURE_TRUNCATION_SENTINEL
         keep = max(cap - len(marker), 0)
     return (content[:keep] + marker)[:cap]
@@ -1060,7 +1094,7 @@ def _redact_turn_contents(
     back through :func:`_capture_turn_window`. The window bounds the text SCANNED
     here at ``_CAPTURE_TURN_CAP`` per turn, which is also what keeps a
     client-controlled turn of a few MB from costing seconds of scanning
-    (measured: 2 MB → ~6.9 s at ~3 s/MB) and keeps the scan the same window the
+    (measured: ~3 s/MB of scanned text) and keeps the scan the same window the
     persisted text uses; it is a CPU-cost and window-parity bound, not loop
     protection (in the hosted lane every capture-path caller is off the event
     loop, #4911 cycle 1).
@@ -5769,7 +5803,7 @@ class TortoiseSDK:
         # — nothing lands. (#3892 deleted the no-extractor ValueError that
         # used to precede this gate; the turn-cap refusal above still comes
         # first, and this gate still precedes every write.)
-        transcript, _est = _session_llm_transcript(windowed)
+        transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
         if not transcript.strip():
             return {
                 "session_id": session_id,
