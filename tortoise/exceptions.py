@@ -351,8 +351,9 @@ class UnsupportedCypherOperatorError(ValueError):
     ids returned 0 across every graph, where the supported ``STARTS WITH``
     found 5 nodes in 2 graphs.
 
-    Raised by the shared graph-query chokepoint BEFORE the statement is sent,
-    so a caller cannot mistake an unsupported operator for an empty answer.
+    Raised by the guarded-handle seam (``tortoise.cypher_guard``) BEFORE the
+    statement is sent, so a caller cannot mistake an unsupported operator for
+    an empty answer.
     Subclasses ``ValueError``: an unsupported operator is a caller-side
     predicate bug, and the historical ``ValueError`` for invalid input keeps
     working.

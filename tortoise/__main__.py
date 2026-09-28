@@ -6942,10 +6942,12 @@ def _cmd_doctor(args):
             # surfaces as a clean ❌ + rc 1, never a traceback (#720 P2 conf 75).
             probe_port = parsed.port or 16379
             from falkordb import FalkorDB
-            dbc = FalkorDB(host=probe_host, port=probe_port,
-                           username=probe_user, password=probe_pass,
-                           ssl=(parsed.scheme == "rediss"),
-                           socket_connect_timeout=5, socket_timeout=10)
+
+            from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+            dbc = guarded_client(FalkorDB, host=probe_host, port=probe_port,
+                                 username=probe_user, password=probe_pass,
+                                 ssl=(parsed.scheme == "rediss"),
+                                 socket_connect_timeout=5, socket_timeout=10)
             dbc.select_graph(graph_name).query("RETURN 1")
             results.append(("Graph: FalkorDB", "✅", f"connected at {probe_host}:{probe_port} (graph {graph_name})"))
         except ImportError:

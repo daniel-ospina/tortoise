@@ -29,8 +29,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
+from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
+    _guard_unsupported_cypher,
+    _skip_cypher_quoted,  # noqa: F401  re-export: the scanner's public test surface
+    _unsupported_cypher_operator,  # noqa: F401  re-export
+    guarded_client,
+)
 from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
-from tortoise.exceptions import UnsupportedCypherOperatorError  # #3595 `=~` guard
 
 logger = logging.getLogger(__name__)
 
@@ -243,70 +248,10 @@ def _is_bulk_wipe(cypher: str) -> bool:
 
 
 # ── #3595: unsupported-Cypher-operator guard (`=~`) ──────────────────────
-# FalkorDB implements no Cypher regex-match operator. `=~` does not raise: it
-# prints ``FalkorDB does not currently support =~`` IN PLACE OF RESULTS and the
-# surrounding query returns an EMPTY result set — a confident false negative
-# that is indistinguishable from "no matches". Two agents in one session read
-# that as truth: enumerating legacy ``obj-<26hex>`` ids across every graph with
-# ``=~ '^[a-z]{2,3}-[0-9a-f]{26}$'`` returned 0 everywhere, where the supported
-# ``STARTS WITH`` found 5 nodes in 2 graphs.
-#
-# This is a LANDMINE, not a live bug: no shipped Cypher uses `=~` (the `=~` in
-# ``sdk._DIGEST_STRUCTURE_RE`` is a PYTHON character class and never reaches
-# this module). The guard therefore detects the OPERATOR in the QUERY TEXT a
-# caller is about to send — a Python regex can never be `=~` here.
-#
-# A single left-to-right scan keeps state, so `=~` is reported only where it is
-# CODE. Inside a quoted literal (``RETURN 'a =~ b'``) it is DATA; inside a
-# Cypher comment (``// =~``, ``/* =~ */``) it is prose. Neither may trip the
-# guard — a false POSITIVE would block a legitimate query, which is its own
-# class of harm even though it is loud rather than silent.
-
-
-def _unsupported_cypher_operator(cypher: str) -> str | None:
-    """Return the first unsupported Cypher operator in *cypher*, else None.
-
-    Only the Cypher regex-match operator ``=~`` is currently known. The scan
-    skips quoted string literals and Cypher comments, so only an OPERATOR —
-    never data nor prose — is reported. Python-side regexes never pass through
-    this function (#3595).
-    """
-    if not isinstance(cypher, str) or "=~" not in cypher:
-        return None
-    i, n = 0, len(cypher)
-    while i < n:
-        c = cypher[i]
-        if c in ("'", '"'):
-            i = _skip_cypher_quoted(cypher, i, c)
-        elif c == "/" and i + 1 < n and cypher[i + 1] == "/":
-            nl = cypher.find(chr(10), i + 2)
-            i = n if nl == -1 else nl + 1
-        elif c == "/" and i + 1 < n and cypher[i + 1] == "*":
-            end = cypher.find("*/", i + 2)
-            i = n if end == -1 else end + 2
-        elif c == "=" and i + 1 < n and cypher[i + 1] == "~":
-            return "=~"
-        else:
-            i += 1
-    return None
-
-
-def _skip_cypher_quoted(text: str, start: int, quote: str) -> int:
-    """Return the index just past the quoted literal opening at *start*.
-
-    Backslash escapes are honoured (``'a\\'b'`` is one literal). An
-    unterminated literal consumes the remainder — the query is malformed, and
-    the guard must not invent an operator from the swallowed bytes.
-    """
-    i, n = start + 1, len(text)
-    while i < n:
-        if text[i] == "\\":
-            i += 2
-            continue
-        if text[i] == quote:
-            return i + 1
-        i += 1
-    return n
+# The scanner and the guarded graph/client classes live in
+# ``tortoise.cypher_guard`` (the single seam). They are re-exported above so
+# `_GuardedGraph` can share them and so the tests that pin the scanner keep
+# resolving through this module. See that module for the doctrine.
 
 
 # ── #2943: durable pre-wipe snapshot sidecar ────────────────────────────────
@@ -1315,6 +1260,20 @@ class _GuardedGraph:
     Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
+
+    #3595: also refuses the unsupported Cypher ``=~`` operator, so a future
+    ``=~`` written directly against ``proj.g`` fails loudly. This class covers
+    ONE of the repo's handle paths (the projection's write handle); the
+    remaining paths (``proj.db.select_graph(...)`` in hosted_api/backup_sweep/
+    navigation/..., the SDK registry handles) are covered because ``proj.db``
+    and every other FalkorDB client the ``tortoise`` package builds are
+    constructed through ``tortoise.cypher_guard.guarded_client``, whose handles
+    guard every query entry point. For defence in depth this wrapper also
+    overrides every query entry point itself (``query``, ``ro_query``,
+    ``_query``, ``profile``, ``explain``), so it does not depend on the inner
+    handle's class to refuse. ``__getattr__`` below forwards only the remaining
+    non-query attributes (``name``, ``delete``, ``schema``, ...) to the
+    underlying handle.
     """
 
     __slots__ = ("_g", "_proj")
@@ -1325,19 +1284,41 @@ class _GuardedGraph:
 
     def query(self, cypher: str, params=None, timeout=None):
         # #3595: refuse an unsupported operator BEFORE it is sent. FalkorDB
-        # answers `=~` with an EMPTY result set, so this is the only place a
-        # future `=~` can be turned into a loud error instead of a false
-        # negative. Wired here (not at every call site) because every
-        # constructed query reaching a FalkorDB handle passes through this
-        # wrapper: FalkorProjection.query delegates to self.g.query.
-        op = _unsupported_cypher_operator(cypher)
-        if op is not None:
-            raise UnsupportedCypherOperatorError(op, cypher)
+        # answers `=~` with an EMPTY result set, so this is the one decision
+        # point for the `proj.g` path. The decision itself lives in
+        # ``cypher_guard._guard_unsupported_cypher`` — shared with the guarded
+        # handles so the two paths cannot drift.
+        _guard_unsupported_cypher(cypher)
         if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
         return self._g.query(cypher, params=params, timeout=timeout)
+
+    def ro_query(self, cypher: str, params=None, timeout=None):
+        # Same refusal for the read-only verb: the raw handle this wrapper
+        # holds is guarded too, but keep the projection's own wrapper complete
+        # rather than relying on the inner handle's class.
+        _guard_unsupported_cypher(cypher)
+        return self._g.ro_query(cypher, params=params, timeout=timeout)
+
+    def _query(self, cypher: str, params=None, timeout=None, read_only=False):
+        # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
+        # reaching `_query` directly must not slip past the refusal either.
+        _guard_unsupported_cypher(cypher)
+        return self._g._query(
+            cypher, params=params, timeout=timeout, read_only=read_only
+        )
+
+    def profile(self, cypher: str, params=None):
+        # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
+        # `_query`, so they carry their own refusal.
+        _guard_unsupported_cypher(cypher)
+        return self._g.profile(cypher, params=params)
+
+    def explain(self, cypher: str, params=None):
+        _guard_unsupported_cypher(cypher)
+        return self._g.explain(cypher, params=params)
 
     def __getattr__(self, name):
         return getattr(self._g, name)
@@ -2901,7 +2882,14 @@ class FalkorProjection(
             # black hole: the read leg is. (Operators wanting that leg too
             # need a custom connection class — filed separately.)
             read_to = _socket_timeouts()[1]
-            self.db = FalkorDB(
+            # #3595: build through `cypher_guard.guarded_client` — the ONE
+            # client-construction seam — so every handle this client yields
+            # (here and from the direct `proj.db.select_graph(...)` sites
+            # elsewhere) refuses the unsupported `=~` operator. Passing the
+            # vendor class down means the embedded path keeps its own
+            # lifecycle/path guards and only gains the query guard on top.
+            self.db = guarded_client(
+                FalkorDB,
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
@@ -2914,9 +2902,14 @@ class FalkorProjection(
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
             connect_to, read_to = _socket_timeouts()
-            self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=connect_to, socket_timeout=read_to,
-                               ssl=ssl)
+            # #3595: same guarded-construction seam on the server lane — the
+            # ~142 `reg.query(...)` sites behind TortoiseSDK._get_registry and
+            # the direct `proj.db.select_graph(...)` sites all reach the wire
+            # through handles this client produces.
+            self.db = guarded_client(FalkorDB, host=host, port=port,
+                                     username=username, password=password,
+                                     socket_connect_timeout=connect_to,
+                                     socket_timeout=read_to, ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host

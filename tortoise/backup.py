@@ -277,10 +277,12 @@ def _bgsave(uri: str | None = None) -> str:
         return f"failed: {reason}"
     try:
         from falkordb import FalkorDB
-        db = FalkorDB(host=endpoint.host, port=endpoint.port,
-                      username=endpoint.username, password=endpoint.password,
-                      ssl=endpoint.ssl,
-                      socket_connect_timeout=5, socket_timeout=10)
+
+        from tortoise.cypher_guard import guarded_client  # #3595: guard seam
+        db = guarded_client(FalkorDB, host=endpoint.host, port=endpoint.port,
+                            username=endpoint.username, password=endpoint.password,
+                            ssl=endpoint.ssl,
+                            socket_connect_timeout=5, socket_timeout=10)
         db.connection.execute_command("BGSAVE")
     except Exception as e:
         reason = f"BGSAVE against {endpoint.host}:{endpoint.port} failed: {e}"
