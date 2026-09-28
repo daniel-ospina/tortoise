@@ -797,9 +797,9 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     # path so the WINDOW itself is asserted, not just the absence of one value.
     # Row (b)'s absence assertion is vacuous on its own: dropping
     # ``_capture_turn_window`` from ``_materialize_session_source`` still scans
-    # the whole 600,000-char turn and still redacts ``beyond``, so the test
-    # stayed GREEN under that mutation (measured). The scan-length bound is what
-    # binds the control.
+    # the whole raw turn (``len(raw)`` below) and still redacts ``beyond``, so
+    # the test stayed GREEN under that mutation (measured). The scan-length
+    # bound is what binds the control.
     from tortoise import sdk as sdk_mod
     from tortoise.sdk import _CAPTURE_TURN_CAP
 
@@ -816,9 +816,12 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     sid = "sess-4911-source-bound"
     # A turn far larger than the stored window (its credential sits past the
     # 5,000-char cap), plus a structurally odd first turn carrying the secret.
+    # The size is bound to a NAME so the prose and the failure message below can
+    # reference it instead of a hand-copied number that drifts (round 6).
+    raw = "pad " * 200_000 + beyond
     sdk.capture_session(
         [{"role": "user", "content": {"note": f"my key is {secret}"}},
-         {"role": "user", "content": "pad " * 200_000 + beyond}],
+         {"role": "user", "content": raw}],
         session_id=sid)
 
     rows = sdk._get_proj().g.query(
@@ -845,8 +848,8 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     assert scanned, "the capture path never reached redact_secrets"
     assert max(scanned) <= _CAPTURE_TURN_CAP, (
         "the Source sink scanned an UNBOUNDED window — max scanned "
-        f"{max(scanned)} chars vs the {_CAPTURE_TURN_CAP}-char cap; the 600k "
-        "raw turn should have been windowed before the scan")
+        f"{max(scanned)} chars vs the {_CAPTURE_TURN_CAP}-char cap; the "
+        f"{len(raw)}-char raw turn should have been windowed before the scan")
 
 
 # ── AC3: count recorded per session AND surfaced ───────────────────────────
