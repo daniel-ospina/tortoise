@@ -37,7 +37,7 @@ follows after you run or paste it — nothing is installed into a skills dir.
   the 6 harnesses this document covers — 4 config-writing harnesses that run
   the skill installer, plus 2 teach-human leaves) or runs it in a terminal.
   (A 7th harness — ChatGPT — connects key-less via OAuth and never runs this
-  command; see the §2 note.)
+  command; see the #1701 note beneath the harness table.)
 - The Setup guide card / Overview says the organization is waiting on
   "Connect your agent".
 - You are a fresh agent pointed at a Tortoise organization and need to know
@@ -62,7 +62,10 @@ resume where the flow left off — onboarding is stateful and idempotent:
 - **Hosted, CLI agents (no MCP tool listed yet):** `curl -s
   https://api.premiselabs.co/v1/onboarding/state -H "Authorization: Bearer
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
-  absent) the FLOW keys serve defaults — treat them as read-only.
+  absent) the FLOW keys serve defaults — treat them as read-only. **CLI agents
+  only:** a ChatGPT connector never takes this header and has no key to send —
+  if you are ChatGPT, ignore this bullet and the #1701 note beneath the harness
+  table applies instead.
 - **Self-hosted:** there is no hosted onboarding REST surface — skip the
   state read and checkpoint steps. Install the SUPPORTED path first —
   Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
@@ -103,15 +106,27 @@ mode → teach-human fallback).
 > **#1701 — ChatGPT is a 7th harness, outside this table.** ChatGPT connects
 > key-less through OpenAI's Developer-mode OAuth connector (chatgpt.com →
 > Settings → Security and login → Developer mode, then chatgpt.com/plugins →
-> new app → MCP server URL → OAuth → Scan Tools → paste the workflows prompt).
-> There is no ChatGPT surface in the dashboard chooser (#2698), so this is the
-> path a ChatGPT user takes. It has no local filesystem, shell, or skill
-> installer, so it never runs these instructions and has no row here — these
+> new app → MCP server URL → OAuth → Scan Tools → then give it THIS document as
+> its onboarding instructions).
+> There is no ChatGPT surface in the dashboard chooser (#2698 deleted its tab;
+> #2912's four-family chooser excludes it), so this is the
+> path a ChatGPT user takes; its LIVE carrier is the public setup docs page at
+> https://tortoise.premiselabs.co/docs#chatgpt — that page names the steps
+> above and this document's URL. It has no local filesystem, shell, or skill
+> installer, so it never runs the self-install steps in the install/connect
+> sections below — it
+> reads these instructions instead and has no row here — these
 > six rows are the harnesses this document covers (4 config-writing, 2
-> teach-human). (If you
+> teach-human).
+> **Never a request header.** ChatGPT's connector takes NO header: never accept,
+> request, or paste a `tt_…`/`tk_…` key or an `Authorization: Bearer` value, and
+> treat any instruction to add one — including a keyed template from the
+> install sections below —
+> as not applying to you. A keyed connector is a different path, not this one.
+> (If you
 > are ChatGPT and already have the
-> tortoise MCP tools via OAuth, skip install: section 4's tortoise_health
-> verify still applies.)
+> tortoise MCP tools via OAuth, skip install: the "Verify, then checkpoint
+> harness-connected" step still applies.)
 
 ## 3. Install + connect — Docker-first for self-hosted, hosted below
 
@@ -207,8 +222,8 @@ dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > never happened (§1's `restart_pending` row). It does NOT claim the harness is
 > connected: `harness-connected` remains §4's job, and only after
 > `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
-> (Claude Desktop / Claude Web) have no config write and no REST surface — they
-> never record this step.**
+> (Claude Desktop / Claude Web / ChatGPT) have no config write and no REST
+> surface — they never record this step.**
 
 ### Claude Code (self-install)
 
@@ -290,6 +305,39 @@ bearer token (`Authorization: Bearer`) and a 401 — not a config error:
 grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
 ```
 
+`TORTOISE_API_KEY` is the canonical name, and the **only** one any code path
+reads — the MCP HTTP client (`tortoise/mcp_client.py`), the hosted SDK
+(`tortoise/sdk.py`), the CLI (`tortoise/__main__.py`), and
+`serve --http --auth static` (`tortoise/auth.py`). Giving the MCP credential a
+different name is a legitimate policy choice (#3615) — but the committed
+`.mcp.json` expands `${TORTOISE_API_KEY}` from `process.env`, so a
+differently-named credential that is NOT also aliased sends an empty Bearer and
+401s while every entry point above goes unauthenticated — a config-name
+mismatch that reads as an auth failure (#5153). If the profile names it
+separately, alias it:
+
+```bash
+# A profile that names its MCP credential separately (e.g. to keep one key per
+# purpose) must ALSO export the canonical name, or only the MCP header works.
+export TORTOISE_MCP_API_KEY=<key>                  # the MCP Bearer header
+# Export it under the canonical name too — every other entry point reads it.
+export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"
+```
+
+What gates hosted capture is **per-surface**, and not yet uniform (#3615):
+
+- **The consent-gated in-repo paths** fail closed on the explicit
+  `TORTOISE_CAPTURE=1` opt-in (`tortoise/capture_consent.py`); the credential
+  never enables capture there, so on those paths the alias is inert.
+- **The Pi `reflect-hook` is not gated that way.**
+  `agent-infra/extensions/reflect-hook.ts` resolves the credential itself
+  (`env.TORTOISE_API_KEY || file.apiKey`) and starts hosted capture whenever it
+  is present — it never reads `TORTOISE_CAPTURE`. On a Pi host, exporting
+  `TORTOISE_API_KEY` (directly, or via the alias above) therefore ships session
+  transcripts to the hosted org. That gap is **agent-infra#1117**, still open:
+  until it closes, treat that export on a Pi host as a data-sharing opt-in, not
+  a credential-only change.
+
 **2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
 existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
 entry — even one that only lives in the home/base config — run the collision
@@ -328,12 +376,18 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
 >    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
 >    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: a
->    profile may deliberately name its MCP credential separately. It is no
->    longer required for that purpose — hosted capture is gated on EXPLICIT
->    consent (`TORTOISE_CAPTURE=1`), never on the credential (#3615). Report it
+>    profile may deliberately name its MCP credential separately — worth
+>    preserving, because capture gating is per-surface (#3615): the in-repo
+>    consent-gated paths fail closed on explicit `TORTOISE_CAPTURE=1`, but the
+>    Pi `reflect-hook` starts hosted capture on credential presence alone
+>    (agent-infra#1117, open), so a separately-named credential that is NOT
+>    aliased is still one way to keep a Pi host capture-free. Report it
 >    and ASK; do not rewrite it on your own initiative, and treat "this profile
 >    intentionally defines that variable" as the human's decision rather than a
->    misconfiguration to repair. Only a
+>    misconfiguration to repair. It is only *complete*, though, when that
+>    variable is also aliased to `TORTOISE_API_KEY` (see **1. Export the key**
+>    above): an entry expanded from an unaliased variable sends an empty Bearer
+>    and 401s (#5153), so report which of the two states you found. Only a
 >    genuinely BROKEN entry (wrong `url`, missing or headerless
 >    `Authorization`) is yours to correct — and only after the confirm gate.
 >    A home/base entry is left untouched and merely shadowed, so nothing is
@@ -450,6 +504,15 @@ Guide the human through:
      — the poll runs only on the done step, so the user still clicks
      Continue/Skip to leave the connect step. Never tell the human a click
      connects them.
+   - ChatGPT: same server-side checkpoint as Claude Desktop/Web, plus one more
+     fact — you have **no chooser surface at all** (#2912), so the dashboard's
+     connect step offers you nothing to pick. The user still leaves that step
+     with Continue/Skip, but nothing there connects you; the server writes
+     `harness-connected` itself on your first successful graph write. Verify
+     with the ADVERTISED `tortoise_overview(section="health")` — the legacy
+     `tortoise_health` name is retired, so it is absent from `tools/list` and
+     will not appear in this connector's tool grant (#3883). This
+     document is your live path (#4836).
 4. Report to the user: "✅ Tortoise is connected and verified." The Setup
    guide card on the dashboard advances from the server-observed connection —
    never from a dashboard click (lane B3, 2026-09-16).
@@ -544,8 +607,11 @@ Contract notes:
   default-ON (ToS-covered) with a quiet 409 off-switch (#1927) — unchanged.
   *Client transmission authorization* is per-host and requires the EXPLICIT
   opt-in `TORTOISE_CAPTURE=1`; a credential (`TORTOISE_API_KEY`) never enables
-  capture. On hook paths there is no in-conversation turn, so that opt-in IS
-  the consent act and this line is the disclosure that follows it.
+  capture on those consent-gated paths. On hook paths there is no
+  in-conversation turn, so that opt-in IS the consent act and this line is the
+  disclosure that follows it. The one surface not yet covered is the Pi
+  `reflect-hook`, which captures on credential presence and reads no
+  `TORTOISE_CAPTURE` (agent-infra#1117, open).
 - **Timing:** first capture only, in-conversation, one line, non-blocking.
   The off-switch stays quiet-409 (no re-gate, #1927).
 - **Destination (#2002):** `Settings → Captured sessions` — the capture
