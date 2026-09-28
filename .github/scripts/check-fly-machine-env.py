@@ -12,9 +12,11 @@ The incident this exists for (#4568, 2026-09): an out-of-band ``fly.toml
 ``TORTOISE_MANUAL_LINKING_ENABLED`` (declared, live at ``1``) was absent on the
 machine for ~5 h. ``is_truthy(None)`` made ``_linking_available()`` return
 False, so a product flag was off — and the operator had no way to learn that the
-value they applied was not the value the machine ran. ``docs/infra-runbook.md``
-§8.4 records the residual that this script closes: the documented route's
-outcome rested on an operator running ``flyctl ssh console … printenv`` by hand.
+value they applied was not the value the machine ran. Until this script existed,
+the documented route's outcome rested on an operator running ``flyctl ssh
+console … printenv`` by hand; the residual is now recorded as closed in
+``docs/infra-runbook.md`` §8.1, under "The machine side (the second half of
+#4568)".
 
 Division of labour with ``check-fly-secret-drift.py`` — this is not a duplicate:
 
@@ -41,7 +43,13 @@ Exit codes (fail-closed; mirrors check-migration-drift / check-fly-machines-guar
   0  every declared name is present on every active machine with the declared value
   1  at least one declaration is absent or divergent on a running machine
   2  the state could NOT be determined (API error, malformed shape, missing token,
-     unreadable fly.toml / manifest) — never reported as 0
+     unreadable fly.toml / manifest, **no `fly-toml-env` names declared**, or
+     **zero active machines**) — never reported as 0
+
+Both of the last two are the same rule: **"nothing was compared" is not a pass**.
+An empty declaration set, and a fleet with no active machine, each leave this gate
+with no comparison to make; certifying that as green is how a guard rots into a
+warning nobody reads. Exit 2 is not bypassable in the workflow.
 
 Environment seams (the same names the sibling guards use, so CI wiring and tests
 are uniform):
@@ -259,15 +267,22 @@ def main() -> int:
         _err(f"cannot determine declared fly-toml-env names: {e}")
         return 2
     if not declared_names:
-        # Fail-closed ONLY for unreadable input — an empty declaration list is a
-        # readable state. But it makes this gate vacuous, so say so loudly rather
-        # than exit 0 in silence: a silent no-op gate is how a guard rots.
-        print(
-            "::warning::no `fly-toml-env` names are declared in "
-            f"{manifest_path.name} — this gate has nothing to assert.",
-            file=sys.stderr,
+        # An EMPTY declaration set is could-not-determine, not a pass. The
+        # declaration set is this gate's UNIVERSE: with nothing declared,
+        # "every declared name is present" is vacuously true, and the machine
+        # could be missing every `fly.toml [env]` value while the run stays
+        # green — the exact #4568 outcome this gate exists to prevent. Removing
+        # the `fly-toml-env` lines is also invisible to check-fly-secret-drift.py
+        # (it has no reverse [env]-completeness rule), so the hole is real.
+        # This is the same rule applied below to zero active machines: nothing
+        # compared is never a pass. The sibling drift gate refuses the analogous
+        # empty secret list for the same reason.
+        _err(
+            f"cannot determine what to assert: no `fly-toml-env` names are declared "
+            f"in {manifest_path.name} — an empty declaration set cannot certify "
+            "anything ('nothing compared' is not a pass)"
         )
-        return 0
+        return 2
 
     machines_file = os.environ.get("FLY_MACHINES_FILE")
     if machines_file:

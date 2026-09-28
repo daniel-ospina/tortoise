@@ -1570,8 +1570,9 @@ learn that the value they applied was not the value the machine ran.
 `config.env` must carry that name with the value `fly.toml` `[env]` declares. An
 absent or divergent name **exits 1 and names both the variable and the machine**;
 a could-not-determine (API error, malformed shape, missing token, **zero active
-machines**) **exits 2 and is never bypassable** — "nothing was compared" is not a
-pass. A failure here means *the release is live and its env is wrong*, never "the
+machines**, **no `fly-toml-env` names declared**) **exits 2 and is never
+bypassable** — "nothing was compared" is not a pass in either direction. A
+failure here means *the release is live and its env is wrong*, never "the
 deploy failed" (there is no rollback) — the same posture as the DB health step
 (§8.5). The two gates are complementary and neither replaces the other: a perfect
 manifest can coexist with a machine running something else. Tests:

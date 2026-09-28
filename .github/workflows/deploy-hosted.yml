@@ -936,9 +936,11 @@ jobs:
         # malformed shape, missing token) is never bypassable; exit 1 names every
         # absent/divergent name AND the machine carrying it.
         #
-        # `FLY_API_TOKEN` (read-only listing), NOT `FLY_API_TOKEN_DEPLOY` — this
-        # step only reads. Logic lives in the script so it is testable; its
-        # harness is tests/test_fly_machine_env.py (run by ci.yml).
+        # `FLY_API_TOKEN` (not `FLY_API_TOKEN_DEPLOY`) — this step performs a
+        # read-only machines LISTING. Note the token itself is the full-scope one
+        # (the secrets-set step above needs it); it is the OPERATION that is
+        # read-only. Logic lives in the script so it is testable; its harness is
+        # tests/test_fly_machine_env.py (run by ci.yml).
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq

@@ -254,18 +254,22 @@ def test_non_fly_toml_env_sources_are_not_asserted():
     assert "FLY_ONLY_NAME" not in r.stderr, r.stderr
 
 
-def test_no_fly_toml_env_declared_warns_but_passes():
-    # Vacuous, but readable — warn loudly rather than exit 0 in silence.
+def test_no_fly_toml_env_declared_is_could_not_determine():
+    # An EMPTY declaration set cannot certify anything: with nothing declared,
+    # "every declared name is present" is vacuously true, so the machine could be
+    # missing every fly.toml [env] value while this exits 0 — the #4568 outcome.
+    # Same rule as zero active machines: nothing compared is not a pass.
     r = _run([_clean_machine()], manifest=[("SOME_GH_SECRET", "gh-secret:X")])
-    assert r.returncode == 0, r.stderr
-    assert "nothing to assert" in r.stderr, r.stderr
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "empty declaration set" in r.stderr, r.stderr
 
 
-def test_comment_only_manifest_is_not_a_parse_failure():
+def test_comment_only_manifest_is_could_not_determine():
+    # A comment-only manifest declares nothing — exit 2, same as above.
     r = _run([_clean_machine()], manifest=None,
              manifest_raw="# only comments\n\n   \n")
-    assert r.returncode == 0, r.stderr
-    assert "nothing to assert" in r.stderr, r.stderr
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "empty declaration set" in r.stderr, r.stderr
 
 
 # ── fail-closed on unreadable input (exit 2, never the bypassable 1) ───────
