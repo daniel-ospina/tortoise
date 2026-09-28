@@ -530,6 +530,14 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #2500: guards the pre-#2490 terminal-EP backfill script
+  # (`graph-scripts/2500_backfill_terminal_ep_vacuity.py`) AND the canonical
+  # terminal predicate it imports from `tortoise/live.py` — both match no
+  # SOURCE_PATTERNS rule and fall back to `core`, so this is the surface that
+  # runs the guard on a script-only or live.py-only change. Dual-registered
+  # under `ep` (below): the test drives `tortoise/ranking.py`'s confidence sort
+  # key, and an `ep`-only ranking.py change must not skip it (#2938 convention).
+  - test_2500_terminal_ep_backfill.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
@@ -1292,6 +1300,12 @@ surfaces:
   - test_ep_local_395.py
   - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
+  # #2500: the pre-#2490 terminal-EP backfill guard. Dual-registered with
+  # `core` (which owns the graph-script + `tortoise/live.py` fallback): this
+  # arm is what runs when `tortoise/ranking.py` changes — the test asserts the
+  # confidence sort key does NOT gate terminals (the premise the sweep rests
+  # on), so an ep-only ranking.py change must execute it (#2938 convention).
+  - test_2500_terminal_ep_backfill.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
   - test_ep_projections.py
