@@ -156,6 +156,37 @@ def test_semantic_extract_dedup():
     print("PASS test_semantic_extract_dedup")
 
 
+def test_semantic_extract_returns_subject_names():
+    """#4938: ``extract_entities`` reports the Subject names it created.
+
+    The S7 stage itself writes no ``aboutSubject`` edge — the document path
+    wires them from this list via ``add_document(about_entities=...)``. So the
+    returned ``subject_names`` must be exactly the names that produced a
+    ``SubjectAdded`` event (a caller wiring a name that mints no Subject would
+    silently fall through to the Subject-stub fallback in
+    ``_create_about_edges``).
+
+    Fails if: a created Subject is omitted from ``subject_names``; a name is
+    reported that produced no ``SubjectAdded``; or the key is absent.
+    """
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+    api, log = _api()
+    text = (
+        "## Team\n"
+        "The Organisation Design Team owns the Tortoise rollout.\n"
+    )
+    result = ext.extract_entities(text, "doc.md", api)
+
+    assert result["subjects"] >= 1, f"fixture produced no Subjects: {result}"
+    assert "subject_names" in result, (
+        "extract_entities must report the Subject names it created (#4938)")
+    added = {e["name"] for e in log.read_all() if e["type"] == "SubjectAdded"}
+    assert set(result["subject_names"]) == added, (
+        f"subject_names {result['subject_names']} != SubjectAdded names {added}")
+    print(f"PASS test_semantic_extract_returns_subject_names "
+          f"({sorted(added)})")
+
+
 # ── _SemanticStage unit test ─────────────────────────────────────────
 
 def test_semantic_stage_mock():

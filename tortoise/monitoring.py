@@ -488,6 +488,274 @@ LOOP_LAG = Histogram(
 )
 
 
+# ── #4491: EGRESS (response bytes) per org — the network cost dimension ───
+#
+# #4491: inbound bytes were the ONLY byte accounting in the hosted API, and
+# only as a DoS cap (the `content-length` guard on the manifest route) — a
+# safety bound, not a cost metric. NOTHING counted outbound bytes, so the
+# network cost of serving a read-heavy org (retrieval/ask result sets, graph
+# read, export) had no signal at all while reads are free by decision
+# (`product/pricing.json` -> `billing.reads_free: true`).
+#
+# SHAPE — constrained by the #5045 consolidation comment on #4491, which asks
+# for egress to become a DECLARED dimension of one metering substrate "rather
+# than a sixth separate counter": ONE writer (``record_egress``) owns the unit
+# (bytes), the attribution key (org) and the route class, so a dimension
+# registry can enumerate it later without a call-site sweep, and no caller
+# touches a metric object directly (the #501/#3677 house shape). No endpoint,
+# no quota, no cap, no price — this measures; it does not price.
+#
+# BOUNDED CARDINALITY: both labels are capped and everything past the cap folds
+# into ONE shared child — the ``_TELEMETRY_DROP_COUNTS`` doctrine in
+# ``hosted_api``. Without the cap, unknown traffic (or a fleet of orgs) grows
+# the Prometheus child set without bound, which is a scrape-cost bug, not a
+# measurement.
+#
+# ROUTE LABELS SIT ON TWO AXES: the ROUTE axis is CODE LITERAL (a FastAPI route
+# template ``/v1/points/{pid}`` or a declared mount prefix — see
+# ``hosted_api._EGRESS_DECLARED_PREFIXES``), which traffic can never add a child
+# to; the DERIVED axis is REQUEST-derived and therefore UNTRUSTED (a path that
+# matched no route). ``EGRESS_MAX_PATHS`` / ``EGRESS_MAX_DERIVED_PATHS`` bound
+# them separately, and each has one shared overflow child.
+#
+# WHY NOT ONE REGISTRY (measured): the live app already carried 121 templates, so
+# a single 128-slot registry left ~7 slots for unknown traffic — an
+# unauthenticated client could fill them with distinct paths and fold REAL routes
+# (and the size histogram) into ``__other__`` for the whole process.
+#
+# TWO MEASURED HOLES IN THAT SPLIT ALONE, both closed here:
+#   * one label STRING could be emitted from either axis, so a request-derived
+#     label could be written into a template's series — and the histogram
+#     carries no org label, which made that contamination cross-tenant. The
+#     ``origin`` label below makes the same string two distinct children.
+#   * ``/mcp`` and the docs endpoints sat on the derived axis, where 8 cheap
+#     404s on unrelated paths starved them for the process lifetime. Both are
+#     code literals of the app (a ``Mount`` prefix, a plain ``Route`` path), so
+#     they are declared and admitted on the ROUTE axis: unrelated junk cannot
+#     displace them, and no per-sub-route precision is claimed for a sub-app
+#     whose inner routes this layer does not enumerate.
+# What remains on the derived axis is ONLY untrusted traffic, where losing
+# precision is the accepted price of boundedness (the ``_TELEMETRY_DROP_COUNTS``
+# doctrine in ``hosted_api``): no legitimate surface is starved to advantage an
+# attacker.
+#
+# DECLARED LIMIT (scale, not attack): admission is first-come and permanent, so
+# past ``EGRESS_MAX_ORGS`` the LATER orgs fold into ``EGRESS_OVERFLOW`` for the
+# process lifetime — with one shared ``""`` child consuming a slot, a fleet of
+# more than ~511 orgs would see its per-org figure degrade to one bucket. An
+# admitted label is never evicted, because eviction either drops accumulated
+# cost (removing the child) or grows the child set without bound (keeping it).
+# Choosing between those is the metering substrate's decision (#5045), not this
+# counter's.
+EGRESS_MAX_ORGS = 512
+#: The route axis — code literals, ~121 templates today (measured on the live
+#: app) plus the declared mount prefixes, so 512 is headroom for new routes
+#: rather than a tight fit.
+EGRESS_MAX_PATHS = 512
+#: The request-derived axis (paths matching no route). Small on purpose: NOTHING
+#: legitimate lives here — every code-known surface is on the route axis — so
+#: this is the granularity worth paying for traffic that names its own label.
+EGRESS_MAX_DERIVED_PATHS = 8
+EGRESS_OVERFLOW = "__other__"
+#: Where excess REQUEST-DERIVED path labels fold. DELIBERATELY not a path: the
+#: fallback always emits a leading ``/``, so a value a client can request can
+#: never collide with this child — otherwise a client could pre-occupy the
+#: overflow bucket (``GET /__unrouted__``) and make routine folding
+#: indistinguishable from a real path.
+EGRESS_UNROUTED = "__unrouted__"
+# PAIR SPACE: the caps multiply — the worst case is EGRESS_MAX_ORGS x 2 origins x
+# (EGRESS_MAX_PATHS + EGRESS_MAX_DERIVED_PATHS + 2) children. The ORG axis is
+# deliberately generous because org attribution IS the measurement #4491 asks
+# for, and it is not traffic-reachable: every unauthenticated request shares the
+# ``""`` child, and a new org label costs a real org id. The path axis is the
+# bounded one, per the two-axis split above.
+
+#: Response body bytes by (org, route class, origin). The Counter answers "how
+#: many bytes did this org's traffic cost us"; the Histogram below answers "how
+#: big ARE the responses", which is the shape a fair-use boundary needs.
+#: ``origin`` is ``route`` (code literal) or ``derived`` (request-derived) — the
+#: provenance axis that keeps the two apart in the emitted series.
+EGRESS_BYTES = Counter(
+    "tortoise_egress_bytes_total",
+    "Response body bytes written to clients, by org and route class (#4491)",
+    ["org", "path", "origin"],
+)
+#: #4491 indicator 1's "or, at minimum, a distribution of response sizes per
+#: org/path" arm. Labelled by route class ONLY: org x bucket would multiply the
+#: cardinality for a question ("is this route returning 10 MB?") that the org
+#: does not change. It carries ``origin`` for the reason above — a derived label
+#: must never add observations to a template's distribution.
+EGRESS_RESPONSE_BYTES = Histogram(
+    "tortoise_egress_response_bytes",
+    "Response body size distribution by route class (#4491)",
+    ["path", "origin"],
+    buckets=(256, 1024, 4096, 16384, 65536, 262144, 1048576, 8388608),
+)
+
+#: Labels admitted so far, per dimension. Membership IS the cap registry, so a
+#: warm label costs one set lookup with NO lock (the hot path: one response per
+#: admitted org/path pair); the lock is taken only while ADMITTING a new label.
+_EGRESS_ORGS: set[str] = set()
+_EGRESS_PATHS: set[str] = set()
+_EGRESS_DERIVED_PATHS: set[str] = set()
+_EGRESS_LOCK = threading.Lock()
+
+
+#: Characters replaced in a request-derived label: C0, DEL and the C1 range
+#: (U+0085 NEL and U+009B CSI are line-break / escape introducers to
+#: Unicode-aware readers), plus U+2028/U+2029 — the SAME CLASS
+#: ``mcp_auth._sanitize_for_log`` covers. That one escapes for a LOG sink; this
+#: one replaces with ``?``, because a label is a series KEY and the value's
+#: readability matters less than it not splitting a line.
+_EGRESS_LABEL_TRANSLATE = str.maketrans({
+    **{c: "?" for c in (*range(0x20), 0x7F, *range(0x80, 0xA0))},
+    0x2028: "?",
+    0x2029: "?",
+})
+
+
+def _utf8_safe(label: str) -> str:
+    """Make a request-derived label safe to EMIT.
+
+    Control characters are replaced: the path is percent-decoded and
+    unauthenticated, and a reader that splits on line breaks — or one
+    validating control bytes — would drop or garble the series (measured: a NEL
+    in a label adds physical lines to a ``splitlines()`` reader, and the
+    ``*_bucket`` lines carry the same label).
+
+    A label that cannot be UTF-8 encoded is repaired. ``generate_latest()``
+    encodes label values, so ONE lone surrogate would make the whole
+    ``/metrics`` endpoint raise for the process lifetime, blinding every alert
+    rather than this one dimension. Not reachable from the HTTP path today
+    (uvicorn replaces invalid bytes; org ids are charset-validated — measured),
+    and this single writer is the only place that can enforce it.
+    """
+    label = label.translate(_EGRESS_LABEL_TRANSLATE)
+    try:
+        label.encode("utf-8")
+    except UnicodeEncodeError:
+        return label.encode("utf-8", "replace").decode("utf-8")
+    return label
+
+
+def _admit_egress_label(label: str, seen: set[str], cap: int,
+                        overflow: str = EGRESS_OVERFLOW) -> str:
+    """Admit ``label`` as a metric child, folding past ``cap`` into overflow.
+
+    Additive by construction: an already-admitted label never locks (and never
+    changes); a new label past the cap becomes ``overflow`` so the metric stays
+    bounded rather than raising or dropping the whole record.
+    """
+    if label in seen:
+        return label
+    with _EGRESS_LOCK:
+        if label in seen:
+            return label
+        if len(seen) >= cap:
+            seen.add(overflow)
+            return overflow
+        seen.add(label)
+        return label
+
+
+def record_egress(org: str | None, path: str, nbytes: int, *,
+                  derived: bool = False) -> None:
+    """Record response body bytes written for ``org`` on route class ``path``.
+
+    THE single writer for the egress dimension (#4491): the caller
+    (``hosted_api.EgressBytesMiddleware``) supplies what it measured — org,
+    route class, byte count — and never touches a metric object, so the unit
+    and the attribution key stay in one place.
+
+    ``derived`` names WHICH route-label axis ``path`` belongs to: ``False``
+    (default) for a code-literal label (a matched route template, or a declared
+    mount prefix), ``True`` for a label the caller derived from the request path
+    because no route matched. They are separate budgets so request-derived
+    labels can never consume the route budget, and the axis is emitted as the
+    ``origin`` label so the same string can never mix two provenances' series —
+    see the two-axis note above.
+
+    ``org`` may be ``None``/empty: a request that never resolved an org (an
+    unauthenticated 401, a health probe, an MCP call whose org lives in the
+    MCP ContextVar this ASGI layer cannot see) is attributed to the empty
+    label — an honest "unattributed" child rather than an invented org id.
+
+    ``nbytes`` is clamped at 0: a negative count is impossible data, and a
+    negative increment would corrupt a monotonic counter.
+
+    Labels are repaired to be UTF-8 encodable here, at the single writer,
+    because ``generate_latest()`` encodes label values: ONE unencodable value (a
+    lone surrogate) would make the whole ``/metrics`` endpoint raise for the
+    process lifetime, blinding every alert rather than this one dimension. Not
+    reachable from the HTTP path today (uvicorn replaces invalid bytes and org
+    ids are charset-validated — measured), but this is the only place that can
+    enforce it.
+    """
+    amount = max(0, int(nbytes))
+    origin = "derived" if derived else "route"
+    org_label = _utf8_safe(org or "")
+    org_label = _admit_egress_label(org_label, _EGRESS_ORGS, EGRESS_MAX_ORGS)
+    path = _utf8_safe(path or "")
+    if derived:
+        path_label = _admit_egress_label(
+            path, _EGRESS_DERIVED_PATHS, EGRESS_MAX_DERIVED_PATHS,
+            overflow=EGRESS_UNROUTED)
+    else:
+        path_label = _admit_egress_label(path, _EGRESS_PATHS, EGRESS_MAX_PATHS)
+    EGRESS_BYTES.labels(org=org_label, path=path_label, origin=origin).inc(amount)
+    EGRESS_RESPONSE_BYTES.labels(path=path_label, origin=origin).observe(amount)
+
+
+def egress_bytes_by_org() -> dict[str, int]:
+    """In-process snapshot of ``EGRESS_BYTES`` keyed by org (#4491 indicator 3).
+
+    The readable form of the metric, for a person or a test — no dashboard, no
+    UI, no new endpoint. ``/metrics`` carries the same figure as Prometheus
+    text (``sum by (org) (tortoise_egress_bytes_total)``); this is the direct
+    read, mirroring ``analytics_outcome_counts()``. Derived from ``collect()``
+    rather than a second tally, so the snapshot cannot drift from the metric.
+
+    The ``""`` key is the unattributed share and ``EGRESS_OVERFLOW`` the folded
+    tail of the org/path caps; both are INCLUDED, so the snapshot always
+    reconciles to the whole measurement. (``EGRESS_UNROUTED`` needs no mention
+    here: it is a PATH label, so it appears under whichever org incurred the
+    unrouted traffic, never as a key of this org-keyed dict.)
+    """
+    totals: dict[str, int] = {}
+    for family in EGRESS_BYTES.collect():
+        for sample in family.samples:
+            # Read ONLY the byte counter. The created series of the client the
+            # lock resolves is ``<name>_created``, so the second operand is not
+            # reachable there — it is kept so that a client naming it
+            # ``_created_total`` could not have its creation TIMESTAMP summed
+            # as byte counts.
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            org = sample.labels.get("org")
+            if org is None:
+                # A family that lost the org label is skipped, never recorded as
+                # an org literally named ``None``.
+                continue
+            totals[org] = totals.get(org, 0) + int(sample.value)
+    return totals
+
+
+def _reset_egress() -> None:
+    """Test seam: forget every admitted label and this process's series.
+
+    Clears the cap registries as well as the children — leaving them behind
+    would make a following test see labels "already admitted" that no longer
+    exist in the metric, which is exactly the drift the cap must not have.
+    """
+    with _EGRESS_LOCK:
+        _EGRESS_ORGS.clear()
+        _EGRESS_PATHS.clear()
+        _EGRESS_DERIVED_PATHS.clear()
+    EGRESS_BYTES.clear()
+    EGRESS_RESPONSE_BYTES.clear()
+
+
 def register(sdk) -> None:
     """Wire SDK so /health can check FalkorDB connectivity + graph size."""
     global _sdk
@@ -2681,8 +2949,86 @@ def _counter_val(counter) -> int:
     return 0
 
 
+#: #3253: the budget for the ``graph_size`` taxonomy round-trip that
+#: ``metrics()`` runs after a successful probe. Five label ``COUNT`` queries on
+#: the WARM projection ``probe_db`` just built are normally sub-millisecond;
+#: this is a wide margin for a large/loaded graph, and a stall now yields a
+#: per-call ``graph_size_error`` instead of pinning the health call for as long
+#: as the server stalls. Derived from (not restated beside) ``PROBE_TIMEOUT`` so
+#: the health surfaces keep ONE latency knob.
+#:
+#: ⚠️ It is a SEPARATE phase, not a widening of the reachability gate: it
+#: bounds the COUNT, so the caller's total grows by this much (see the shape
+#: totals in ``metrics()``) but the probe's own fast-degrade budget is
+#: untouched. It is captured at IMPORT time, so monkeypatching
+#: ``PROBE_TIMEOUT`` (as the probe-budget tests do) does NOT move it.
+GRAPH_SIZE_TIMEOUT = PROBE_TIMEOUT
+
+#: Name of the DEDICATED process-lifetime daemon worker the ``graph_size``
+#: count runs on. Deliberately NOT ``_probe_worker()``: a stalled label count
+#: on the SINGLE probe slot would hold it and block the NEXT health probe's
+#: ``RETURN 1``, turning a graph_size problem into a false ``degraded`` — the
+#: #3143 symptom class. A separate pool isolates the two failure domains.
+#: Its backlog is BOUNDED but fills slowly: a wedge makes each queued call pay
+#: the full ``GRAPH_SIZE_TIMEOUT`` — still bounded, so a health call is never
+#: pinned by the stall — until the backlog reaches
+#: ``_SingleSlotWorker.MAX_BACKLOG`` (32), after which submissions fail fast
+#: with ``_WorkerBacklogFull``. The recovery seam is
+#: ``_reset_graph_size_worker()``, not the backlog.
+GRAPH_SIZE_WORKER_NAME = "tortoise-graph-size-worker"
+
+#: Prefix of the per-call ``graph_size_error`` marker's structural cases; a
+#: count that RAISES supplies its own message after the colon. Defined once so
+#: callers/tests can match a symbol instead of re-typing the literal.
+_GRAPH_SIZE_UNAVAILABLE = "graph_size not measured"
+
+
+def _bounded_graph_size(target, timeout: float) -> int:
+    """``sum(target.taxonomy().values())`` bounded by ``timeout`` (#3253).
+
+    Runs the count on the DEDICATED ``GRAPH_SIZE_WORKER_NAME`` daemon worker
+    and refuses to wait past ``timeout`` (see ``GRAPH_SIZE_TIMEOUT``). RAISES
+    on failure — the taxonomy error, or a ``TimeoutError`` naming the budget
+    when the count overruns it — so ``metrics()`` can record a per-call
+    ``graph_size_error`` instead of leaving ``graph_size: 0`` to be misread as
+    an empty graph. The worker thread is abandoned, never cancelled (CPython
+    #87185), and is a daemon, so a stalled count cannot block interpreter
+    exit. A worker wedged on a permanently stalled count is dropped with
+    ``_reset_graph_size_worker()`` (mirrors ``_reset_probe_worker()``), so
+    ``graph_size`` is measurable again without a process restart.
+    """
+    future = daemon_worker(GRAPH_SIZE_WORKER_NAME).submit(target.taxonomy)
+    try:
+        counts = future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        # ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError`` on
+        # py3.12, so a ``TimeoutError`` raised INSIDE ``taxonomy()`` (e.g. a
+        # redis socket read timeout) is caught here too. ``future.done()``
+        # separates the two: a callable that already finished raised its OWN
+        # error and must keep it, not be relabelled as a budget overrun.
+        if future.done():
+            raise
+        raise TimeoutError(
+            f"graph_size count exceeded its {timeout}s budget") from exc
+    return sum(counts.values())
+
+
+def _reset_graph_size_worker() -> None:
+    """Drop the graph-size worker so the next count lazily starts a fresh one.
+
+    Mirrors ``_reset_probe_worker()``: the escape hatch for tests and for ops
+    recovery when a count is presumed wedged past any realistic budget. The
+    old (possibly wedged) thread is a daemon — it is abandoned, never joined,
+    so a permanently stalled ``taxonomy()`` cannot pin the one slot for the
+    life of the process and force a restart (#3253 review P2).
+    """
+    with _DAEMON_WORKERS_LOCK:
+        _DAEMON_WORKERS.pop(GRAPH_SIZE_WORKER_NAME, None)
+
+
 def metrics(sdk=None, setup_timeout=None) -> dict:
-    """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
+    """Return {status, db, falkordb, graph_size, graph_size_error, last_ingest,
+    errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
     #1384; ``falkordb`` keeps the legacy message form for backward compat.
@@ -2710,16 +3056,19 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
     PROBE_TIMEOUT`` when an explicit allowance is passed) and never drag an
     extra unbounded taxonomy round-trip onto the health call, and its failure
     must not inflate the very ``errors`` field this response reports. A
-    degraded report carries graph_size 0 with the probe error. The count
-    itself (``taxonomy()``) carries NO budget of its own — it is safe only
-    because it runs after a successful ``RETURN 1`` (a reachable server is
-    expected to answer label counts promptly; that is an assumption, not a
-    measurement), so the MCP tool's total latency is ``setup_timeout +
-    PROBE_TIMEOUT`` PLUS that round-trip. If the probe SUCCEEDS but the count
-    raises, the report is ``status="ok"`` with ``graph_size 0`` and an
-    incremented ``errors`` counter — the failure is recorded, never raised, so
-    ``ok`` + 0 is deliberately indistinguishable from a genuinely empty graph
-    and callers needing certainty must read ``errors``.
+    degraded report carries graph_size 0 with the probe error.
+
+    #3253: the count itself is now BOUNDED by ``GRAPH_SIZE_TIMEOUT`` on a
+    DEDICATED daemon worker (never the shared probe slot), so the MCP tool's
+    total latency is ``setup_timeout + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the explicit-allowance shape and ``PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT``
+    for the platform shape — a BOUNDED tail, never "as long as the server
+    stalls". Whether ``graph_size`` was MEASURED is reported per call through
+    ``graph_size_error``: ``None`` means it was (so a 0 is a genuinely empty
+    graph), a string means it was not (a raised count OR a budget overrun),
+    which makes the two distinguishable WITHOUT diffing the cumulative
+    ``errors`` counter. A failed count still increments ``errors`` and is
+    never raised; ``graph_size`` stays 0 for backward compatibility.
 
     #3143: ``setup_timeout`` (named to match ``probe_db``'s keyword — the
     previous ``probe_setup_timeout`` SHADOWED the module function of the same
@@ -2742,17 +3091,29 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         status = "degraded"
     else:
         status = "unknown"
+    # #3253: ``graph_size_error is None`` ⟺ ``graph_size`` was MEASURED, so a
+    # caller can tell a failed count from a genuinely empty graph on the SAME
+    # call — no second call to diff the cumulative ``errors`` counter.
     graph_size = 0
-    try:
-        if target is not None and db["ok"] is True:
-            graph_size = sum(target.taxonomy().values())
-    except Exception:
-        record_error()
+    graph_size_error: str | None = None
+    if target is None:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: no probe target"
+    elif db["ok"] is not True:
+        graph_size_error = f"{_GRAPH_SIZE_UNAVAILABLE}: db probe failed"
+    else:
+        try:
+            graph_size = _bounded_graph_size(target, GRAPH_SIZE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            graph_size_error = (
+                f"{_GRAPH_SIZE_UNAVAILABLE}: {str(exc)[:160] or type(exc).__name__}"
+            )
+            record_error()
     return {
         "status": status,
         "db": db,
         "falkordb": "connected" if db["ok"] is True else db["error"] or "unreachable",
         "graph_size": graph_size,
+        "graph_size_error": graph_size_error,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),
         "uptime": round(time.monotonic() - _start, 2),

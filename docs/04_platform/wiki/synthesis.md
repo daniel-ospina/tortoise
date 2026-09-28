@@ -30,8 +30,10 @@ El Dato's engineering platform provides the infrastructure for the epistemic gra
 
 - Should directional IMPL be the default at the cost of losing backward information through IMPL chains? (Resolved: yes — the information loss is semantically correct.)
 - Is SVBP a viable refinement for Beta beliefs, or should it be reserved for multi-modal NAND camp detection? (Deferred — revisit when needed.)
+- **Stale facts: is a readable flag enough?** Policy B (#5038, 2026-09-24) requires a stale belief to stay *"still there, still readable, and flagged"*. The agent-memory literature measures that a visible revocation label is *not* acted on — five systems return the revoked fact and outrank its replacement (arXiv 2609.08258); new evidence reaches retrieval in 77.5% of cases but only 3.3% of old entries are judged as needing an update (arXiv 2605.06527). **OPEN — the enforcement half is a reopen of Policy B, not an implementer's call.**
 
 ## Recent Research
 
+- 2026-09-25: #5038 O3 — where the source-version currency check lives. The placement (read-time comparison on the existing extraction link, no stored `status`, existing read surfaces) is **already decided** by Policy B; withholding stale points is a **reopen**, not an adoption. Anchor delivered as #5256. See `docs/research/2026-09-25-5038-source-currency-read-path.md`.
 - 2026-08-07: #338 service-model research — Tortoise already runs as a hosted service (Fly.io, MCP Streamable HTTP at /mcp, 58 tools, tenant tt_ keys); gap is positioning (README/docs library-first) + license consistency (README=BSL vs LICENSE=AGPLv3 vs pyproject=MIT; DEC-002 ranked AGPLv3-dual 0.906 > BSL 0.8875). See `docs/research/2026-08-07-338-service-model.md`.
 - 2026-07-29: EP convergent argument fix evaluation (see log.md INGEST entry)
