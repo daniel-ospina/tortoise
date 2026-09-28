@@ -4359,46 +4359,59 @@ def test_extraction_estimate_is_taken_over_the_stored_window(sdk):
         "the raw estimate counted sentences the stored window never receives")
 
 
-def test_capture_turn_texts_bounds_a_raw_over_cap_conversation():
-    """M4 (#4897 round 2): the stored-text path applies the pre-scan cap itself.
+def test_capture_turn_texts_preserves_the_windowing_bound():
+    """M4 (#4897 round 5): the stored-text sink REQUIRES a windowed conversation.
 
-    ``_capture_turn_texts_with_redactions`` names its parameter ``windowed`` but
-    does not rely on the caller — it passes ``cap=_CAPTURE_TURN_CAP`` to
-    ``_redact_turn_contents`` so a RAW over-cap conversation is still bounded,
-    MARKED and scrubbed. Without that cap a raw >cap turn is stored whole and
-    unmarked (a silent cut and an unbounded Scan).
+    ``_capture_turn_texts_with_redactions`` no longer windows and no longer
+    clips: it is REDACTION-ONLY, and ``_capture_turn_window`` is the sole owner
+    of the cap (#4897 round 5 — clipping here is the two-jobs defect that five
+    review rounds could not patch away).
+
+    The round-2 version of this test asserted that a RAW caller of this sink was
+    bounded. That is a guarantee the code deliberately no longer has, so it is
+    narrowed here to what IS true: the entry-point window bounds a raw over-cap
+    conversation, MARKED, and the sink preserves that bound and its TRUE marker
+    for a caller that follows the contract (production always passes
+    ``windowed``). The raw-caller contract is pinned separately by
+    ``test_the_redactor_is_redaction_only_and_never_clips``.
     """
     from tortoise.sdk import (
         _CAPTURE_TRUNCATION_SENTINEL,
         _CAPTURE_TURN_CAP,
         _capture_turn_texts_with_redactions,
+        _capture_turn_window,
     )
     content = "x" * (_CAPTURE_TURN_CAP + 1000)
-    texts, _counts = _capture_turn_texts_with_redactions(
-        [{"role": "user", "content": content}])
+    windowed = _capture_turn_window([{"role": "user", "content": content}])
+    texts, _counts = _capture_turn_texts_with_redactions(windowed)
     body = texts[0][len("[user] "):]
     assert len(body) <= _CAPTURE_TURN_CAP, (
-        "the stored-text path returned an unbounded body for a raw caller")
+        "the stored-text sink re-clipped, or the window failed to bound the "
+        "raw over-cap turn")
     assert _CAPTURE_TRUNCATION_SENTINEL in body, (
         "a raw over-cap turn was stored with NO marker")
+    assert f"original length {len(content)} chars]" in body, (
+        "the marker must carry the RAW turn's true pre-redaction length")
     assert f"original length {len(content)} chars]" in body
 
 
 def test_a_caller_supplied_marker_cannot_defeat_the_cap():
-    """#4897 round-3 P1: a marker-shaped tail is NOT proof of an earlier clip.
+    """#4897 round-3 P1 / round 5: a marker-shaped tail is NOT proof of a clip.
 
-    The pre-fix guard skipped the clip whenever ANY marker was found, but the
-    marker is CALLER-SUPPLIED text and nothing verified it. A client could
-    append one to an unbounded body and store it whole (reproduced: a
-    2,000,038-char body at ``cap=5,000``); a bare-sentinel tail produced a marker
-    with NO total at all. The clip is now decided on the marker-FREE body, so the
-    raw caller is genuinely bounded and the recorded total is the length of the
-    body actually clipped — not the caller's claim.
+    The round-3 guard tried to fix this by deciding the clip on the marker-FREE
+    body inside the redactor — which is what forced the redactor to do two jobs.
+    Round 5 removes the tension structurally: the WINDOW owns the cap and tests
+    the TOTAL length (markers never exempt a body), and the redactor does not
+    clip at all. So a client appending a marker to an unbounded body still
+    cannot store it whole (reproduced: a 2,000,000-char body), and a bare-
+    sentinel tail produces a marker with the length actually seen — never a
+    marker with NO total and never the caller's claim.
     """
     from tortoise.sdk import (
         _CAPTURE_TRUNCATION_SENTINEL,
         _CAPTURE_TURN_CAP,
         _capture_turn_texts_with_redactions,
+        _capture_turn_window,
     )
     body_text = "A" * 2_000_000
     for tail, label in (
@@ -4407,21 +4420,21 @@ def test_a_caller_supplied_marker_cannot_defeat_the_cap():
         (_CAPTURE_TRUNCATION_SENTINEL, "bare sentinel, no total"),
     ):
         content = body_text + tail
-        texts, _counts = _capture_turn_texts_with_redactions(
-            [{"role": "user", "content": content}])
+        windowed = _capture_turn_window([{"role": "user", "content": content}])
+        texts, _counts = _capture_turn_texts_with_redactions(windowed)
         body = texts[0][len("[user] "):]
         assert len(body) <= _CAPTURE_TURN_CAP, (
             f"{label}: a caller-supplied marker defeated the cap — got "
             f"{len(body)} chars")
         assert _CAPTURE_TRUNCATION_SENTINEL in body, label
-        assert f"original length {len(body_text)} chars]" in body, (
-            f"{label}: the marker must carry the length of the body actually "
-            "clipped, not the caller's claim (or no total at all)")
+        assert f"original length {len(content)} chars]" in body, (
+            f"{label}: the marker must carry the length actually seen, not the "
+            "caller's claim (or no total at all)")
         assert "original length 1 chars]" not in body, (
             f"{label}: the caller's claim survived as the recorded total")
     # Control: the bound is the same one the no-marker raw caller already got.
     control, _c = _capture_turn_texts_with_redactions(
-        [{"role": "user", "content": body_text}])
+        _capture_turn_window([{"role": "user", "content": body_text}]))
     assert len(control[0][len("[user] "):]) <= _CAPTURE_TURN_CAP
 
 

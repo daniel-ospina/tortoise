@@ -830,9 +830,18 @@ def _clip_capture_turn_content(
     """``content`` unchanged when it fits ``cap``; otherwise cut AND marked.
 
     This is the ONE place a capture turn is shortened (#4897). Every writer of
-    stored turn text routes through it, so no cut is silent: the result is
-    always ``<= cap`` characters and, whenever the input was longer, ends with
-    :func:`_capture_truncation_marker` carrying the true original length.
+    stored turn text routes through :func:`_capture_turn_window`, so no cut is
+    silent: the result is always ``<= cap`` characters and, whenever the input
+    was longer, ends with :func:`_capture_truncation_marker` carrying the true
+    original length.
+
+    ⛔ THE CAP IS TESTED ON THE TOTAL ``len(content)``, marker included. A
+    turn carrying a caller's marker-shaped tail (a sentinel plus an unbounded
+    ``original length \\d+`` run — ``_TRUNCATION_MARKER_FULL_RE`` admits any
+    width) is longer than ``cap`` and is CLIPPED like any other over-cap turn,
+    with a fresh marker derived from the length actually seen. Testing a
+    marker-free ``body`` instead would leave a 100,136-char turn (100 chars plus
+    a 100,036-char "marker") unbounded in the store — the round-5 P2.
 
     ⛔ THE MARKER IS RESERVED INSIDE THE CAP — the whole point. The Pi client
     caps before it POSTs, so the server can receive an already-clipped turn; a
@@ -846,12 +855,15 @@ def _clip_capture_turn_content(
     returned verbatim, so the marker means "there is more", never "we reached
     the boundary".
 
-    ⛔ APPLY THIS TO THE PRE-REDACTION TEXT, EXACTLY ONCE. A second application
-    to a body the #4911 scrubber has already changed would recompute ``total``
-    from the SCRUBBED length — the false-marker defect of #4897's P1 — and a
-    redaction replacement longer than the span it replaces can push a complete
-    turn past ``cap``, so re-applying here would mark a complete turn. The
-    window and ``_redact_turn_contents``'s pre-scan clip are the only callers.
+    ⛔ APPLY THIS TO THE PRE-REDACTION TEXT, EXACTLY ONCE, AND NEVER AGAIN. A
+    second application to a body the #4911 scrubber has already changed would
+    recompute ``total`` from the SCRUBBED length — the false-marker defect of
+    #4897's P1 — and a redaction replacement longer than the span it replaces can
+    push a complete turn past ``cap``, so re-applying here would mark a complete
+    turn. :func:`_capture_turn_window` is the only caller, and it is applied when
+    a turn is taken from the RAW conversation (the capture entry points,
+    ``_materialize_session_source``, ``_extract_session_llm``,
+    ``_extract_session_v2``) — never to a redacted body.
     """
     if len(content) <= cap:
         return content
@@ -981,21 +993,32 @@ def _redact_turn_contents(
     control sits at the single point where a message becomes persisted or
     model-visible text, instead of being duplicated per call site.
 
-    ⛔ PER TURN, BEFORE any transcript assembly, and both halves are
-    load-bearing. ``_session_llm_transcript`` sentence-splits and flattens
-    newlines, so scrubbing the ASSEMBLED transcript is too late: the segmenter
-    splits a JWT on its dots and rejoins the fragments with spaces, which no
-    contiguous pattern matches, so the credential landed in ``Source.summary``
-    verbatim while the receipt reported a redaction (reproduced in review).
-    Per-turn also keeps each scan inside one turn's window rather than the
-    concatenated transcript of up to 500 turns (#5296).
+    ⛔ NO PRODUCTION CALLER CLIPS HERE (#4897 round 5). The stored window is
+    decided ONCE, on the RAW text, by :func:`_capture_turn_window` /
+    :func:`_clip_capture_turn_content`, the sole clippers; every capture caller
+    passes NO ``cap``. This function's job on that path is redaction only: split
+    a trailing truncation marker off, scrub the body, re-attach the marker
+    VERBATIM.
 
-    A turn's ``content`` is coerced exactly as the window/stored-text path coerces
-    it (``None`` → ``""``, a non-str → ``str()``) BEFORE scanning, so a
-    structurally-odd payload cannot slip a credential past the scrubber and then
-    be stringified by a downstream consumer (the session ``:Source`` does exactly
-    that with ``str()``). A turn with no match is returned as the SAME object, so
-    nothing else about a stored shape moves.
+    ⛔ ``cap`` IS RETAINED FOR THE EXPLICIT RAW-CALLER API. Main's #5445/#5472
+    tests pin ``_redact_turn_contents(conv, cap=...)`` — a ``cap`` that does not
+    bound the RETURNED turn is a leak, not a knob — so the parameter stays, and
+    when it is passed it is applied to the RAW, marker-free body BEFORE the scan
+    (never to redacted text, so it can never re-derive the marker's ``total``
+    from a scrubbed length: the round-1 P1). No production caller passes it, so
+    the single-clipper invariant holds on every capture lane.
+
+    Five rounds of patches tried to make this one function clip AND redact
+    unconditionally, and each traded in the same tension: a clip decision had to
+    tell a marker THIS module wrote from marker-shaped text a caller supplied,
+    and that discrimination is not decidable in-band. ``len(body) > cap`` is true
+    for an attacker's raw over-cap body AND for a legitimately-clipped body that
+    redaction markup pushed over ``cap``, so every patch chose one and broke the
+    other (round 3 let a marker-shaped tail exempt the body; round 4 re-clipped
+    a caller's marker). Making the clip OPT-IN (``cap is not None``) removes the
+    tension on the production path — no production caller can hit it — while the
+    explicit ``cap=`` path keeps main's tested bound, and re-application is exact
+    for the independent reason in (2) below — the scan input is marker-free.
 
     ⛔ The sibling ``role`` is scrubbed HERE too (#5445). It is caller-controlled
     (the hosted model takes ``conversation: list[dict]`` with no role validation)
@@ -1011,30 +1034,51 @@ def _redact_turn_contents(
     chokepoint (one ``redact_secrets`` owner, per the #4911 control-site rule)
     and its counts join the same total.
 
-    ``cap`` bounds the text scanned per turn. The turn store already caps, so
-    callers there pass nothing (or pass the cap — a no-op on an already-windowed
-    body); the session-``:Source`` consumer receives the RAW
-    conversation and passes the same window the persisted text uses
-    (``_CAPTURE_TURN_CAP``), because a client-controlled turn of a few
-    MB otherwise costs seconds of scanning (measured: 2 MB → ~6.9 s at
-    ~3 s/MB), and because the value beyond that window is never persisted
-    anyway. The capture-lane extraction consumers (``_extract_session_llm``,
-    ``_extract_session_v2``) are handed ``_capture_extraction_window``'s
-    already-clipped view, so a ``cap`` there would be a no-op; the commit
-    consumers (``_commit_session_v1``/``_commit_session_v2``) pass none for the
-    reason given in ``_capture_turn_texts_with_redactions``. The bound is a
-    CPU-cost and window-parity bound, NOT loop protection: in the hosted lane
-    every capture-path caller of this is now off the event loop (#4911 cycle 1).
+    ⛔ CALLER CONTRACT — pass the WINDOWED conversation, never a raw over-cap
+    one. Every sink that can receive a raw conversation windows it FIRST, on
+    that raw text: ``_materialize_session_source`` (the session ``:Source``
+    sink), ``_extract_session_llm`` and ``_extract_session_v2`` (the
+    extractors), and the capture entry points (``capture_session`` / hosted
+    ``_capture_session_impl``). ``_capture_turn_texts_with_redactions`` is
+    redaction-only over a conversation its caller windowed. The generic
+    ``commit_session`` lane (``_commit_session_v1`` / ``_commit_session_v2``)
+    deliberately does NOT window: no stored-turn window exists there and the
+    extractor renders each turn verbatim.
 
-    ⛔ THE RETURNED TEXT MAY EXCEED ``cap`` BY THE REDACTION MARKUP, on purpose
-    (#4897). The cap is applied to the PRE-redaction text (below), which is what
-    its marker records; a #4911 replacement that is LONGER than the span it
-    replaces (``aws_access_key_id`` 20 → 28) then grows the body past ``cap``.
+    ``cap`` bounds the text scanned per turn on the EXPLICIT-caller path (above).
+    The session-``:Source``/extractor consumers pass none because they window
+    first — the capture-lane extractors are handed
+    ``_capture_extraction_window``'s already-clipped view, so a ``cap`` there
+    would be a no-op — and the commit consumers pass none for the reason in
+    ``_capture_turn_texts_with_redactions``. The bound is a CPU-cost and
+    window-parity bound, NOT loop protection: in the hosted lane every
+    capture-path caller of this is off the event loop (#4911 cycle 1).
+
+    ⛔ THE WINDOW IS APPLIED ONCE, TO RAW TEXT, AND NEVER AGAIN. That
+    single-application rule is what keeps the cap from being re-derived from
+    text a #4911 replacement has already changed — a redacted body is never fed
+    back through :func:`_capture_turn_window`. The window bounds the text SCANNED
+    here at ``_CAPTURE_TURN_CAP`` per turn, which is also what keeps a
+    client-controlled turn of a few MB from costing seconds of scanning
+    (measured: 2 MB → ~6.9 s at ~3 s/MB) and keeps the scan the same window the
+    persisted text uses; it is a CPU-cost and window-parity bound, not loop
+    protection (in the hosted lane every capture-path caller is off the event
+    loop, #4911 cycle 1).
+
+    ⛔ THE RETURNED TEXT MAY EXCEED THE CAP BY THE REDACTION MARKUP, on purpose
+    (#4897). The window is applied to the PRE-redaction text, which is what the
+    marker records; a #4911 replacement that is LONGER than the span it replaces
+    (``aws_access_key_id`` 20 → 28) then grows the body past the cap.
     Re-clipping that grown body would either overwrite the true total with the
-    scrubbed size or drop original text to pay for the redaction markup, so this
-    function returns it as-is and the caller must NOT re-apply the cap. The
-    overage is redaction markup, bounded by the credentials present in the
-    window, not un-scanned conversation.
+    scrubbed size or drop original text to pay for the redaction markup, so the
+    body is returned as-is and the caller must NOT re-apply the cap. The overage
+    is redaction markup, bounded by the credentials present in the window, not
+    un-scanned conversation — and it stays under 2x: MEASURED max-density
+    packing of the most-expanding rule (the slack ``xapp-`` form — 12 chars in,
+    22 out, space-separated) is 1.768x, giving 8,840 chars for a body of exactly
+    5,000 and 8,810 for the 6,000-char fixture in
+    ``test_capped_reapplication_preserves_the_true_total`` once windowed with its
+    marker re-attached.
 
     Idempotent in BOTH senses that matter. (1) No rule's ANCHOR GROUP can be
     satisfied inside a ``[REDACTED:<kind>]`` marker, so re-running the scrub
@@ -1049,29 +1093,11 @@ def _redact_turn_contents(
 
     (2) The truncation marker is split OFF before the scan and re-attached
     VERBATIM, so re-applying to a body an expanding redaction has already pushed
-    past ``cap`` does NOT re-clip it and re-derive a false ``total`` from the
-    scrubbed length (the #4897 P1). Re-application is therefore exact even
-    though the returned body may exceed ``cap`` by the redaction markup — a
-    blanket "idempotent" claim that ignored this is exactly what would invite
-    the P1 back (a 6,927-char turn became ``original length 5,008`` on the
-    second pass).
-
-    ⛔ THE CLIP IS DECIDED ON THE MARKER-FREE BODY, NEVER ON THE MARKER'S
-    PRESENCE (round-3 P1). A marker is CALLER-SUPPLIED text; treating one as
-    proof that this module already clipped the turn exempted the whole body from
-    the cap, so any client could smuggle an unbounded turn past it by appending
-    a marker-shaped tail (reproduced: a 2,000,038-char body at ``cap=5000``),
-    and a bare-sentinel tail yielded a marker with NO total — the exact lie
-    #4897 exists to remove. The invariant is now STRUCTURAL: the text scanned is
-    the marker-free ``body``, and ``len(body) > cap`` clips it (re-deriving the
-    marker from the body's OWN length) whether or not a marker was present. A
-    caller's marker is preserved verbatim only while the body it describes
-    already fits ``cap`` — the state THIS module leaves behind, since it reserves
-    the marker INSIDE the cap and a #4911 replacement grows the body only by the
-    redaction markup. A marker that arrives on a body PAST ``cap`` therefore
-    cannot vouch for that body: the body is clipped and the caller's claim is
-    replaced by the length actually seen. The window is a bound, so a claim
-    needing a longer body than the cap can never be honoured.
+    past the cap does NOT re-derive the marker's ``total`` from the scrubbed
+    length (the #4897 P1). Re-application is therefore exact even though the
+    returned body may exceed the cap by the redaction markup — a blanket
+    "idempotent" claim that ignored this is exactly what would invite the P1
+    back (a 6,927-char turn became ``original length 5,008`` on the second pass).
     """
     out: list[dict] = []
     totals: dict[str, int] = {}
@@ -1086,7 +1112,9 @@ def _redact_turn_contents(
         cut = False
         # #4897: split the truncation marker (if any) OFF the text that gets
         # SCANNED — a fail-closed redaction (``private_key``'s ``\Z`` branch)
-        # would otherwise consume the marker and store a cut turn unmarked.
+        # would otherwise consume the marker and store a cut turn unmarked. The
+        # split is UNCONDITIONAL and marker-agnostic: no decision here depends on
+        # the marker, because this function no longer makes one (round 5).
         body, marker = _split_truncation_marker(content)
         # #4897 round-3 P1: the clip is decided on the MARKER-FREE BODY, never
         # on the marker's presence. A marker is caller-supplied, so trusting it
@@ -1101,7 +1129,8 @@ def _redact_turn_contents(
         # marker`` pulls that fresh marker back out so the scan input stays
         # marker-free (the round-2 P2). Clip WITH the marker: a capped scan that
         # returned a silently-shortened string is the same defect one layer
-        # down.
+        # down. This branch fires only when the caller passed an explicit
+        # ``cap`` — production callers pass none (the window already clipped).
         if cap is not None and len(body) > cap:
             body, marker = _split_truncation_marker(
                 _clip_capture_turn_content(body, cap))
@@ -1139,15 +1168,10 @@ def _redact_turn_contents(
                 counts[kind] = counts.get(kind, 0) + n
         for kind, n in counts.items():
             totals[kind] = totals.get(kind, 0) + n
-        # ⛔ TWO and only two reasons to emit a new object, and the second one is
-        # a leak fix: ``cap`` must truncate the RETURNED text, not merely the
-        # text that was scanned. Emitting the original whenever the prefix had
-        # no match forwarded the whole un-scanned tail to the caller — which at
-        # the ``_commit_session_v2`` call site meant a credential past the cap
-        # was rendered into the extractor prompt and sent to the provider.
-        # The clip above ran BEFORE the scrub, so ``counts`` here means "matched
-        # inside the returned window"; the result may exceed ``cap`` by the
-        # redaction markup and MUST NOT be re-clipped (see the docstring).
+        # ⛔ Two reasons to emit a new object: a rule matched, or the opt-in
+        # ``cap=`` path CUT the turn. On the production path (``cap is None``)
+        # there is no clip branch and no ``cut``, so a no-match turn is returned
+        # as the SAME object and nothing else about a stored shape moves.
         # #4897: re-attach the marker AFTER the scrub — no rule could have
         # consumed it, because it was never in the scanned text. ``marker`` is
         # the pre-scan string itself, so a prior cut's true ``total`` survives
@@ -1228,19 +1252,22 @@ def _capture_turn_texts_with_redactions(
     because it scans the same window (and therefore the same spans) the
     ``:Source`` sink and the extractor do.
 
-    The window is applied to the PRE-redaction text BY ``_redact_turn_contents``
-    itself (``cap=`` below), so the marker records the true pre-scrub length and
-    the scrub then runs on the windowed body. The result is NOT re-clipped: a
-    #4897 marker carries a length a #4911 replacement cannot be allowed to
-    rewrite (see ``_redact_turn_contents``). A credential that straddles the cut
-    is therefore only partially there to match, and a shape still meeting its
-    body floor is redacted while a fragment below the floor is not. Known
-    residual, recorded in
+    ⛔ REDACTION-ONLY — this sink does NOT clip, and it REQUIRES a windowed
+    conversation (its parameter is named ``windowed`` for that reason). The
+    window is applied ONCE, on the RAW text, by the caller
+    (``_capture_turn_window``): ``capture_session`` / hosted
+    ``_capture_session_impl`` window at their entry, and
+    ``session_confirm.expected_turns`` windows before calling here. This function
+    then scrubs that window and must NOT re-clip the result: a #4897 marker
+    carries a length a #4911 replacement cannot be allowed to rewrite, and
+    re-clipping redacted text would re-derive the total from the scrubbed length
+    (the round-1 P1; see ``_redact_turn_contents``). A credential that straddles
+    the cut is therefore only partially there to match, and a shape still
+    meeting its body floor is redacted while a fragment below the floor is not.
+    Known residual, recorded in
     ``docs/scoping/2026-09-25-4911-capture-secret-redaction.md``: a credential cut
     mid-body by the window can leave a PREFIX — never the whole value, and never
-    a marker — in the stored turn, and it is not counted. The confirmation path
-    avoids the mismatch this order would otherwise create by windowing first
-    (see ``session_confirm.expected_turns``).
+    a marker — in the stored turn, and it is not counted.
 
     ⛔ The extraction consumers pass NO ``cap``, for two different reasons.
     ``_commit_session_v1`` / ``_commit_session_v2`` receive the RAW conversation
@@ -1249,13 +1276,14 @@ def _capture_turn_texts_with_redactions(
     would both leave the tail un-scanned and silently truncate the extraction
     input — a fidelity loss with nothing to show for it (#4897's lesson); those
     two therefore pay a full linear scan of client-controlled text (measured
-    ~3 s/MB). ``_extract_session_llm`` / ``_extract_session_v2`` are instead
-    handed ``_capture_extraction_window``'s already-clipped view, so their scan
-    is bounded by that window and a ``cap`` would be a no-op. The hosted lane
-    keeps the scan off the event loop, and the SDK-side call is bounded only by
-    what the caller passes.
+    ~3 s/MB). ``_extract_session_llm`` / ``_extract_session_v2`` DO window
+    first — their input is the stored turn window (#721 parity), handed to them
+    as ``_capture_extraction_window``'s already-clipped view — so their scan is
+    bounded by that window and a ``cap`` would be a no-op. The hosted lane keeps
+    the scan off the event loop, and the SDK-side call is bounded only by what
+    the caller passes.
     """
-    redacted, counts = _redact_turn_contents(windowed, cap=_CAPTURE_TURN_CAP)
+    redacted, counts = _redact_turn_contents(windowed)
     texts: list[str] = []
     for turn in redacted:
         role = _normalize_turn_role(turn.get("role"))
@@ -1274,13 +1302,12 @@ def _capture_turn_texts_with_redactions(
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         # #4897: NO re-clip here. The cap was applied to the PRE-redaction text
-        # (by ``_capture_turn_window``, or by ``_redact_turn_contents``'s own
-        # pre-scan clip for a raw caller), and its marker records that text's
-        # true length. Re-applying the cap to the SCRUBBED result would
+        # by the caller's ``_capture_turn_window``, and its marker records that
+        # text's true length. Re-applying the cap to the SCRUBBED result would
         # re-derive the length from text the #4911 replacement changed — writing
         # a FALSE marker whose "original length" is the post-redaction size
         # (6927 → 5008, reproduced in review) — so the stored body may exceed
-        # ``cap`` by the redaction markup, which is a replacement, not
+        # the cap by the redaction markup, which is a replacement, not
         # conversation. A complete turn therefore stays unmarked.
         texts.append(f"[{role}] {content}")
     return texts, counts
@@ -6856,6 +6883,13 @@ class TortoiseSDK:
                      else _model_adapter("deepseek/deepseek-v4-flash",
                                          max_tokens=None, temperature=0.0))
 
+        # #4897 round 5: WINDOW FIRST, on the raw text — the same contract
+        # ``_extract_session_llm`` carries. Production passes the capture loop's
+        # ``windowed`` conversation, so this is a no-op there; a direct raw
+        # caller is bounded to the stored window the extractor and the turn
+        # store share (#721 parity). The cap is decided here, on pre-redaction
+        # text; ``_redact_turn_contents`` never clips.
+        conversation = _capture_turn_window(conversation)
         out = extract_session_v2(model, _redact_turn_contents(conversation)[0],
                                  sdk=self,
                                  session_id=session_id, master=master)
@@ -7509,14 +7543,20 @@ class TortoiseSDK:
         # stored turns do — and PER TURN, before the transcript is assembled:
         # ``_session_llm_transcript`` sentence-splits and flattens, so scrubbing
         # the assembled string cannot see a credential the segmenter split (a
-        # JWT becomes three space-separated fragments). ``cap`` bounds the scan
-        # to the window the persisted text uses — this sink receives the RAW
-        # conversation, so the bound is what keeps its cost proportional to what
-        # is actually persisted. (The hosted caller runs this OFF the event
-        # loop, on ``_CAPTURE_EXECUTOR``; the bound is window parity and CPU
-        # cost, not loop protection — #4911 cycle 1.)
+        # JWT becomes three space-separated fragments).
+        # ⛔ #4897 round 5: WINDOW FIRST, ON THE RAW TEXT, EXACTLY ONCE. This
+        # sink is called with the RAW conversation (``capture_session`` and
+        # hosted ``_capture_session_impl``), so it is one of the raw entry
+        # points the cap now relies on: ``_capture_turn_window`` is the SOLE
+        # clipper, and ``_redact_turn_contents`` is redaction-only. Applying
+        # the window before the scrub is what makes the marker record the true
+        # pre-redaction length, and it bounds the scan to the window the
+        # persisted text uses — the bound is window parity and CPU cost, not
+        # loop protection (the hosted caller runs this OFF the event loop, on
+        # ``_CAPTURE_EXECUTOR``; #4911 cycle 1). A redacted body is never fed
+        # back through the window.
         redacted, _ = _redact_turn_contents(
-            conversation or [], cap=_CAPTURE_TURN_CAP)
+            _capture_turn_window(conversation or []))
         transcript, _ = _session_llm_transcript(redacted)
         summary, topics = _session_source_metadata(transcript)
         content_hash = (
