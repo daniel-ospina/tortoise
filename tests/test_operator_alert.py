@@ -861,7 +861,8 @@ def test_kind_constants_match_the_runbook():
             for ln in runbook.splitlines() if ln.startswith("| ")
             and ln.count("|") >= 3}
     kinds = (oa.UNMETERED_INCREMENT_KIND, cc.UNENFORCEABLE_INCIDENT_KIND,
-             cc.INCIDENT_KIND)
+             cc.INCIDENT_KIND, oa.ABUSE_DECISION_FAULT_KIND,
+             oa.ABUSE_ENFORCEMENT_FAULT_KIND, oa.BILLING_NOTIFY_REFUSED_KIND)
     for kind in kinds:
         assert kind in rows, f"no runbook triage row for {kind}"
         row = rows[kind]
@@ -870,6 +871,16 @@ def test_kind_constants_match_the_runbook():
     assert cc.UNENFORCEABLE_INCIDENT_KIND != cc.INCIDENT_KIND
     assert cc.INCIDENT_KIND not in cc.UNENFORCEABLE_INCIDENT_KIND
     assert cc.UNENFORCEABLE_INCIDENT_KIND not in cc.INCIDENT_KIND
+    # #4872: the abuse kinds must be their own, not aliases of the metering one
+    # — the R2-unreachable adoption path resolves an incident by GitHub search
+    # on the subject suffix, so a superstring relation would cross-adopt.
+    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
+    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.UNMETERED_INCREMENT_KIND
+    assert oa.ABUSE_DECISION_FAULT_KIND not in oa.ABUSE_ENFORCEMENT_FAULT_KIND
+    assert oa.ABUSE_ENFORCEMENT_FAULT_KIND not in oa.ABUSE_DECISION_FAULT_KIND
+    for kind in (oa.ABUSE_DECISION_FAULT_KIND, oa.ABUSE_ENFORCEMENT_FAULT_KIND):
+        assert kind not in cc.INCIDENT_KIND
+        assert kind not in cc.UNENFORCEABLE_INCIDENT_KIND
 
 
 def test_alert_unmetered_increment_helper_dispatches(monkeypatch):
@@ -879,3 +890,39 @@ def test_alert_unmetered_increment_helper_dispatches(monkeypatch):
     assert oa.join_operator_alerts() == 0
     assert store.calls == [(_KIND, "org-h",
                             {"lane": "write_op", "error_type": "ValueError"})]
+
+
+# ── BILLING_NOTIFY_REFUSED: the platform-scoped subject (#4456) ─────────────
+
+
+def test_billing_notify_refused_incident_is_platform_scoped(monkeypatch):
+    """#4456 plan: a refused billing notify files ONE incident per OUTAGE.
+
+    ONE Resend account serves every team, and the shared telemetry pool makes
+    a saturation CROSS-TENANT — a refusal per billing webhook for every tenant
+    — so a per-org key would file N issues for one outage (the same reason
+    ``notify.py`` passes ``""`` for a failed billing send). Dedup is
+    ``(kind, subject)``: every org folds onto ``(kind, "")`` and the affected
+    org travels in the detail.
+    """
+    store = _RecordingStore()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+    oa.reset_operator_alert_state_for_tests()
+    try:
+        oa.alert_billing_notify_refused("org-a", "checkout.session.completed")
+        oa.alert_billing_notify_refused(
+            "org-b", "customer.subscription.updated")
+        assert oa.join_operator_alerts() == 0
+        keys = [k for k in oa._ATTEMPT
+                if k[0] == oa.BILLING_NOTIFY_REFUSED_KIND]
+        assert keys == [(oa.BILLING_NOTIFY_REFUSED_KIND, "")], (
+            f"refusal incidents were keyed per org ({keys}) — one saturation "
+            "would file one issue per tenant instead of one for the outage "
+            "(#4456)"
+        )
+    finally:
+        oa.reset_operator_alert_state_for_tests()
+    assert store.calls == [(oa.BILLING_NOTIFY_REFUSED_KIND, "", {
+        "op": "billing_notify",
+        "event_type": "checkout.session.completed",
+        "org_id": "org-a"})], store.calls

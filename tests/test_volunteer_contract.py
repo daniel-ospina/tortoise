@@ -157,6 +157,31 @@ def test_block_builder_truncates_at_byte_cap_deterministically():
     assert build_block(pointers, surfaced) == block
 
 
+def test_block_builder_renders_pointer_flags_flag_first():
+    """#2385 item 1: ``flags`` (one per pointer) ride the pointer line, and
+    the default (no flags) is byte-identical to the pre-#2385 block — the
+    change is additive to the block grammar only."""
+    pointers = [{"id": "pt_a", "label": "Claim A", "synopsis": "sa"},
+                {"id": "pt_b", "label": "Claim B", "synopsis": "sb"}]
+    surfaced = [{"label": "Claim A", "band": "high"},
+                {"label": "Claim B", "band": "low"}]
+    plain = build_block(pointers, surfaced)
+    assert plain == build_block(pointers, surfaced, ["", ""])
+    block = build_block(
+        pointers, surfaced,
+        [" [contested — read the counterargument]", ""])
+    a = next(line for line in block.splitlines() if "point/pt_a" in line)
+    b = next(line for line in block.splitlines() if "point/pt_b" in line)
+    assert "contested" in a and "point/pt_a [contested" in a
+    assert "contested" not in b
+    # A short flags list never crashes or misaligns (defensive pairing).
+    short = build_block(pointers, surfaced, [" [superseded — see what changed]"])
+    assert "superseded" in next(
+        line for line in short.splitlines() if "point/pt_a" in line)
+    assert "superseded" not in next(
+        line for line in short.splitlines() if "point/pt_b" in line)
+
+
 # ── Pointer grammar (prior-context suppression set) ────────────────────────
 
 def test_pointer_ids_in_text_parses_canonical_grammar():
