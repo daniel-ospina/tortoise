@@ -811,13 +811,30 @@ assert_eq "$(iso_epoch "2026-09-13T03:20:01+00:05")" "$LIVENESS_T" "51: a small 
 assert_eq "$(iso_epoch "epoch:12345")" "12345" "51: epoch:<n> still passes through"
 assert_eq "$(iso_epoch "epoch:1234567890123")" "" "51: an over-long epoch run is refused"
 
-for bad in "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
-           "2026-09-13T03:15:01+99:99" "2026-09-13T03:15:01+05:60" \
-           "2026-09-13T03:15:01+15:00" "2026-09-12T03:15:01-15:00" \
+# (c1) malformed DATETIME fields — pinned to the inner `dt` shape check. BSD `date`
+# prefix-matches a short field (`03:1:01`), so without that guard these return
+# wrong-but-plausible epochs rather than "".
+for bad in "2026-09-13T03:1:01.750Z" "2026-09-13T3:15:01.750Z" \
+           "2026-9-13T03:15:01.750Z" "2026-09-13T03:15:1.750Z" \
+           "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
            "2026-09-13T03:15:01.000+05:00garbage" "2026-09-13T03:15:01.000garbage" \
            "2026-09-13T03:15:01.5.Z" "2026-09-13T03:15:01+banana" "2026-09-13 03:15:01" \
-           "2026-09-13T03:15:01+5:00" "2026-09-13T03:15:01Z0" "epoch:1.5" "epoch:" "not-a-date"; do
+           "2026-09-13T03:15:01+5:00" "2026-09-13T03:15:01Z0"; do
   assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (not a plausible epoch)"
+done
+# (c2) out-of-range offsets — pinned to the hh/mm bounds. Tested separately because
+# they are a DIFFERENT guard: ablating the shape check does not redden these, and
+# ablating the bounds does not redden (c1).
+for bad in "2026-09-13T03:15:01+99:99" "2026-09-13T03:15:01+05:60" \
+           "2026-09-13T03:15:01+15:00" "2026-09-12T03:15:01-15:00"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (offset out of range)"
+done
+# (c3) refused by OTHER mechanisms. Kept as value assertions, but deliberately NOT
+# claimed as shape-pinned: `epoch:` is refused by the epoch branch\'s own digit test
+# (its operand is empty) and `not-a-date` by the outer fallback plus the final
+# digit guard, so neither reddens under a single-guard ablation.
+for bad in "epoch:1.5" "epoch:" "epoch:-1" "not-a-date"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (other mechanisms)"
 done
 
 # …while a plain fractional part with an offset still parses (the real shape).
