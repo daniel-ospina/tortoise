@@ -1145,3 +1145,56 @@ def test_settings_reader_non_utf8_bytes_is_red(tmp_path: Path) -> None:
         b"# caf\xe9\nPATH = '.github/settings.yml'\n"
     )
     assert clause(root, "viii_b") == 1
+
+
+# --- cycle-4 review regressions ---------------------------------------------
+
+
+def test_clause_vii_negated_pr_contains_is_red(tmp_path: Path) -> None:
+    """`!contains(..., 'pull_request')` runs on every event EXCEPT a PR."""
+    for expr in (
+        "!contains(github.event_name, 'pull_request')",
+        "!(github.event_name == 'pull_request')",
+        "contains(github.event_name, 'pull_request') == false",
+        "github.event_name == 'pull_request' && false",
+    ):
+        root, _ = union_tree(
+            tmp_path, "python3 tools/registry_integrity.py", step_if=expr
+        )
+        assert clause(root, "vii") == 1, expr
+
+
+def test_clause_vii_dot_slash_path_is_green(tmp_path: Path) -> None:
+    """`./config/ci-surfaces.yml` names the real file — the earlier lookbehind
+    rejected it because it blocked a preceding `/`."""
+    src = 'REG = "./config/ci-surfaces.yml"\nraise SystemExit(1)\n'
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 0
+
+
+def test_clause_vii_unreferenced_function_failure_is_red(tmp_path: Path) -> None:
+    """A fail statement in a never-called function is not an exit status."""
+    for src in (
+        'import sys\nREG = "config/ci-surfaces.yml"\ndef unused():\n    sys.exit(1)\n',
+        'REG = "config/ci-surfaces.yml"\ndef remainder():\n    return 1\n',
+    ):
+        root, _ = union_tree(
+            tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+        )
+        assert clause(root, "vii") == 1, src
+
+
+def test_live_non_dict_record_does_not_raise(tmp_path: Path) -> None:
+    """A JSON array as the record must return a code, not raise TypeError."""
+    root = make_tree(tmp_path, merge_config())
+    (root / mcg.RECORD_REL).write_text("[]", encoding="utf-8")
+    code, _ = mcg.run_live(
+        root,
+        root / mcg.RECORD_REL,
+        slug="o/r",
+        fetch=lambda _: {"required_status_checks": {"contexts": ["wrong"]}},
+        write=True,
+    )
+    assert code == 1

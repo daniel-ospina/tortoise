@@ -496,6 +496,24 @@ def _unioned_files(root: Path) -> set[str]:
     return unioned
 
 
+_PR_LITERAL = r"['\"]pull_request['\"]"
+
+
+def _pr_predicate_is_negated(text: str) -> bool:
+    """True iff a `pull_request` predicate is NEGATED or compared to false.
+
+    `!contains(github.event_name, 'pull_request')`, `!(... == 'pull_request')`,
+    `contains(...) == false` all run on every event EXCEPT pull_request, yet a
+    positive-substring match would read them as PR-reaching (fail-open).
+    """
+    return bool(
+        re.search(r"!\s*\(*\s*contains\s*\([^)]*" + _PR_LITERAL, text)
+        or re.search(r"!\s*\(*[^()!]*==\s*" + _PR_LITERAL, text)
+        or re.search(r"==\s*" + _PR_LITERAL + r"\s*\)*\s*==\s*false", text)
+        or re.search(r"contains\s*\([^)]*" + _PR_LITERAL + r"\)\s*\)*\s*==\s*false", text)
+    )
+
+
 def _if_excludes_pull_request(expr: Any) -> bool:
     """True unless the `if:` can be shown to admit a `pull_request` run.
 
@@ -514,6 +532,12 @@ def _if_excludes_pull_request(expr: Any) -> bool:
     # No event predicate at all (`true`, `!cancelled()`, `success()`, ...).
     if "github." not in text and "event_name" not in text and "event." not in text:
         return False
+    # A NEGATED PR predicate excludes PR, and a `false` conjunct means the step
+    # can never run; both are checked BEFORE the positive forms.
+    if _pr_predicate_is_negated(text):
+        return True
+    if re.search(r"&&\s*false\b", text) or re.search(r"\bfalse\s*&&", text):
+        return True
     # Explicit PR-excluding tests.
     if re.search(r"!=\s*['\"]pull_request['\"]", text):
         return True
@@ -668,7 +692,7 @@ def _names_path(path: str, literal: str) -> bool:
     A substring test accepted `backup/config/ci-surfaces.yml.bak` as naming the
     unioned `config/ci-surfaces.yml` — a validator that never opens the real file.
     """
-    pattern = r"(?<![A-Za-z0-9_.\-/])" + re.escape(path) + r"(?![A-Za-z0-9_.\-/])"
+    pattern = r"(?<![A-Za-z0-9_\-])" + re.escape(path) + r"(?![A-Za-z0-9_.\-/])"
     return re.search(pattern, literal) is not None
 
 
@@ -717,19 +741,35 @@ def _source_can_fail(source: str) -> bool:
     except SyntaxError:
         return False
     parents: dict[int, ast.AST] = {}
+    referenced: set[str] = set()
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[id(child)] = parent
+        if isinstance(parent, ast.Name):
+            referenced.add(parent.id)
+        elif isinstance(parent, ast.Attribute):
+            referenced.add(parent.attr)
 
-    def enclosing_function(node: ast.AST) -> str | None:
+    def enclosing_function(node: ast.AST) -> ast.AST | None:
         current: ast.AST | None = node
         while current is not None and id(current) in parents:
             current = parents[id(current)]
             if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                return current.name
+                return current
         return None
 
+    def reachable(node: ast.AST) -> bool:
+        """Module-level statements, or statements in a REFERENCED function.
+
+        A fail-capable statement inside a never-referenced function
+        (`def unused(): sys.exit(1)`) is not an exit status: the module exits 0.
+        """
+        fn = enclosing_function(node)
+        return fn is None or fn.name in referenced
+
     for node in ast.walk(tree):
+        if not reachable(node):
+            continue
         if isinstance(node, ast.Assert):
             test = node.test
             if isinstance(test, ast.Constant) and test.value:
@@ -745,9 +785,6 @@ def _source_can_fail(source: str) -> bool:
                 continue  # `raise SystemExit(0)` exits 0
             return True
         if isinstance(node, ast.Return) and node.value is not None:
-            name = enclosing_function(node)
-            if name is None or "main" not in name.lower():
-                continue  # a helper's return value is not an exit status
             value = node.value
             if not (isinstance(value, ast.Constant) and value.value in (0, None)):
                 return True
@@ -1413,7 +1450,7 @@ def _record_live_attempt(
     record: dict = {}
     if path.is_file():
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             if result != "SATISFIED":
                 # A failed read must never launder an unreadable authoritative
@@ -1421,7 +1458,8 @@ def _record_live_attempt(
                 return
             # A SATISFIED live read IS authoritative (an admin re-cut), so it
             # rebuilds the unreadable record from the observed set below.
-            record = {}
+            loaded = None
+        record = loaded if isinstance(loaded, dict) else {}
     record["live_result"] = result
     record["live_checked_at"] = _iso(_now())
     if observed is not None:
