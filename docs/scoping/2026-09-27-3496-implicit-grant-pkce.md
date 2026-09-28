@@ -30,13 +30,13 @@ The repository's **only live browser OAuth client** — the FastAPI-served MCP c
 (`GET /oauth/authorize` (`oauth_authorize` in `tortoise/hosted_api.py`) → `tortoise/oauth.py::consent_page_html`,
 live on `api.premiselabs.co`) — requests its access token with the **Implicit** grant:
 
-- the inline supabase-js client (in `tortoise/oauth.py::consent_page_html`) sets no explicit `flowType`, so it
+- the inline supabase-js client (in `_CONSENT_HTML`, the template `consent_page_html` renders) sets no explicit `flowType`, so it
   inherits the library default `DEFAULT_AUTH_OPTIONS.flowType = 'implicit'` (verified by executing
   `website/apps/dashboard/public/vendor/supabase-2.112.2.min.js`);
 - RFC 10017 §7.2 is two-sided (`MUST NOT` use implicit for browser-based clients; the AS `MUST NOT`
   accept it) with **no grandfathering**, and §6.3.2.1 requires PKCE; §1/§7.1 do not exclude this
   surface (two verifiers could not falsify this ruling);
-- the flow **already initiates and completes on one origin** (in `consent_page_html`, the
+- the flow **already initiates and completes on one origin** (in `_CONSENT_HTML`, the
   `redirectTo = window.location.origin + AUTHORIZE_PATH + window.location.search`), so the #1566
   constraint ("a PKCE verifier is origin-scoped and cannot cross subdomains") is **not violated by a
   migration on that origin**.
@@ -238,7 +238,7 @@ function pkceIncapable() {                       // null | "no-webcrypto" | "no-
       if (store.getItem(sentinel) !== null) throw 0;   // silently-ignored removal
       return null;
     } catch (e) {
-      if (wrote) return "no-store";             // the store the WRITER would pick cannot be cleaned — refuse
+      if (wrote) return "no-store";             // accepted the write, then could not clean it — refuse (fail closed)
       try { store.removeItem(sentinel); } catch (e2) { /* best effort */ }
     }
   }
@@ -317,7 +317,7 @@ re-entrancy trap, and honours the verifier-home decision. There is **no latch an
 last resort**.
 
 **Step 5 — `authorizeReturnTo()` (defence-in-depth).** New helper; `signInWithProvider` (in
-`consent_page_html`)
+`_CONSENT_HTML`)
 uses it instead of the raw `window.location.search`. Strips
 `code`,`error`,`error_code`,`error_description`,`error_uri`,`sb_flow_id`,`flow_id`,`type`; origin
 and path remain constants. **Not** presented as fixing a confirmed sticky loop: GoTrue's
@@ -953,7 +953,11 @@ green without weakening. R9 legacy `${KEY}-user` cookie ignored — unreachable.
 `_recoverAndRefresh` → `_removeSession` emits several removals — aux removals clear the aux stores
 only. R11 #3496's own "already implements step 4" claim is false — correcting comment posted.
 R12 item 5 not in this diff. R13 the `docs/auth-architecture.md` line-number parenthetical is
-deleted by this change. R14 the two Step 3b refusals → the new UX issue. R15 oauth.py's aux
+deleted by this change. R14 the two Step 3b refusals → the new UX issue, which also owns the guard's
+fail-closed OVER-refusal: `pkceIncapable()` probes with a fixed 160-byte payload where `writeAux` probes
+the real value's length, so where a store's per-item cap sits between the two the guard rejects a store
+the writer would have used (reachable only with a cap between ~114 and 160 bytes plus an un-cleanable
+later store; it cannot leak, since the writer re-probes every store it takes). R15 oauth.py's aux
 destination deliberately differs from blog-admin's — recorded in §2.1. R16 the three
 blog-admin/third-copy gaps — the follow-up. R17 the static predicate assertion pins the two copies'
 *spelling*: a semantically-equivalent rewrite reddens it (a change to the boundary must update the

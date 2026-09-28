@@ -2268,12 +2268,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
     const payload = "v".repeat(160);
     const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(89, "0");
-    // The guard must accept the SAME store the writer will use. `writeAux`
-    // takes the FIRST store that accepts a write, so once a store accepts one,
-    // a store that then cannot REMOVE is where the verifier would live — and
-    // where `removeAux` would leave it orphaned. Test that store end to end and
-    // refuse if it fails, rather than falling through to a store the verifier
-    // will never reach. (Verifier orphaning — A5.)
+    // The guard is a FAIL-CLOSED approximation of the writer's choice, not the same
+    // test: it probes with its own key and a fixed 160-byte payload, while the
+    // writer probes with the REAL value's length. Where a store's per-item cap sits
+    // between the two (it would hold the ~114-byte verifier but not this probe), the
+    // guard rejects that store and evaluates the next one — and refuses outright if
+    // the store that accepted the probe then cannot remove the sentinel. That is
+    // deliberately STRICTER than the writer, which would have used the first store
+    // successfully; the divergence is a known fail-closed over-refusal recorded with
+    // the refusal UX work (#5734), and it cannot leak a credential in either
+    // direction because the writer re-probes every store it takes. (A5.)
     for (const store of auxStores()) {
       let wrote = false;
       try {

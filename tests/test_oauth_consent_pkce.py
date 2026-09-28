@@ -463,12 +463,14 @@ def test_inv6_unavailable_store_refuses_locally() -> None:
     access-time throw — a provider click must NOT navigate and must report the
     refusal; no verifier may be written anywhere.
 
-    The `throw-remove` mode pins the A5 contract directly: a store that accepts
-    a WRITE but refuses REMOVAL is the store `writeAux` would pick, and
-    `removeAux` would then orphan the verifier there. The guard must therefore
-    refuse rather than fall through to a store the verifier will never reach —
-    falling through would proceed with the verifier written to the un-cleanable
-    store."""
+    The `throw-remove` mode pins the refusal: with the SESSION store accepting writes
+    but refusing removal, the guard refuses rather than continuing to a localStorage
+    that could take the verifier. Note the guard is a fail-closed approximation, not
+    the writer's own test (it probes a fixed 160-byte payload where the writer probes
+    the real value's length), so it can refuse a configuration the writer would have
+    completed; that over-refusal is recorded with the refusal UX work (#5734). What
+    this mode pins is that the guard refuses AT ALL in that shape, and that no
+    verifier reaches any store."""
     for mode in ({"sessionMode": "throw-method", "localMode": "throw-method"},
                  {"accessThrow": True},
                  # session accepts writes but cannot remove; local is fully OK.
