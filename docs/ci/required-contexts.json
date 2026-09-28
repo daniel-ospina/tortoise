@@ -344,6 +344,12 @@
         "record"
       ]
     ],
+    "recut": [
+      [
+        "mergify-guard-recut.yml",
+        "recut"
+      ]
+    ],
     "redis-guard": [
       [
         "redis-guard.yml",
@@ -457,7 +463,7 @@
       ]
     ]
   },
-  "gate_digest": "72d7ab2c83d4d3deff574a268b206b44dc010474728eacd28e16e994d0160556",
+  "gate_digest": "969f7a26879dc39136cb1229ba007562232bc584c1f20b5e3ad06811608699e2",
   "live_checked_at": "2026-09-28T05:36:59Z",
   "live_observed_contexts": [
     "docs",
@@ -479,5 +485,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-28T06:10:18Z"
+  "verified_at": "2026-09-28T13:43:24Z"
 }

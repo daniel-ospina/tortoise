@@ -535,9 +535,122 @@ def test_clause_viii_a_settings_change_changes_digest(tmp_path: Path) -> None:
     assert clause(root, "viii_a") == 1
 
 
-def test_clause_viii_a_stale_verified_at_is_red(tmp_path: Path) -> None:
+def test_clause_viii_a_stale_verified_at_self_heals(tmp_path: Path) -> None:
+    """Staleness ALONE must not red the required job (#6002 freeze hazard).
+
+    A matching `gate_digest` IS a current attestation of the gate definition, so
+    an aged `verified_at` is a REFRESH TRIGGER, not a divergence. The clause
+    re-derives the digest and reports AUTO-REFRESHED instead of blocking.
+    """
     root = make_tree(tmp_path, merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 1)
+    code, detail = mcg._clause_viii_a(root, mcg._load_record(root))
+    assert code == 0, detail
+    assert "AUTO-REFRESHED" in detail
+    # Attributable: the message names the exact command that persists the refresh.
+    assert "python3 tools/mergify_config_guard.py --recut" in detail
+
+
+def test_stale_record_cannot_red_the_required_job(tmp_path: Path) -> None:
+    """Integration proof of requirement (a): `--static` is GREEN on a stale
+    record, and the warning path fired first.
+
+    This is the mutation proof for the freeze hazard: before this revision a
+    stale record reddened `manifest-integrity` on every PR in the repository.
+    """
+    root = make_tree(tmp_path, merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 400)
+    code, lines = mcg.run_static(root)
+    assert code == 0, lines
+    assert any("AUTO-REFRESHED" in line for line in lines), lines
+
+
+def test_stale_refresh_failure_is_attributed_to_staleness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Requirement (b): a stale record may red ONLY when the refresh was
+    ATTEMPTED and failed for a readable reason — and the red must say STALENESS
+    on the digest and name the exact refresh command, never a bare red a lane
+    has to reverse-engineer.
+    """
+    root = make_tree(tmp_path, merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 1)
+    real = mcg.gate_digest
+    calls = {"n": 0}
+
+    def flaky(path: Path) -> str:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise mcg.GuardUnreadable("simulated refresh read failure")
+        return real(path)
+
+    monkeypatch.setattr(mcg, "gate_digest", flaky)
+    code, detail = mcg._clause_viii_a(root, mcg._load_record(root))
+    assert calls["n"] >= 2, "the refresh must have been attempted"
+    assert code == 1, detail
+    assert "STALENESS" in detail
+    assert "GuardUnreadable" in detail and "simulated refresh read failure" in detail
+    assert "python3 tools/mergify_config_guard.py --recut" in detail
+
+
+def test_stale_refresh_digest_instability_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A digest that changes between two reads of the same tree cannot be
+    silently refreshed — the instability fails closed, attributed to its cause."""
+    root = make_tree(tmp_path, merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 1)
+    real = mcg.gate_digest
+    calls = {"n": 0}
+
+    def unstable(path: Path) -> str:
+        calls["n"] += 1
+        return real(path) if calls["n"] == 1 else "0" * 64
+
+    monkeypatch.setattr(mcg, "gate_digest", unstable)
+    code, detail = mcg._clause_viii_a(root, mcg._load_record(root))
+    assert code == 1, detail
+    assert "not stable across two reads" in detail
+    assert "python3 tools/mergify_config_guard.py --recut" in detail
+
+
+def test_stale_record_with_divergence_still_blocks(tmp_path: Path) -> None:
+    """Staleness must not become a bypass: a DEFINITION change on a stale record
+    is still DIVERGED (the digest check runs first)."""
+    root = make_tree(tmp_path, merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 1)
+    _write(
+        root / ".mergify.yml",
+        _dump(merge_config(rule={"queue_conditions": ["base=main", "check-success=docs"]})),
+    )
     assert clause(root, "viii_a") == 1
+
+
+def test_stale_record_with_bad_live_read_still_reds(tmp_path: Path) -> None:
+    """Self-healing staleness must not launder a recorded I1 divergence."""
+    root = make_tree(
+        tmp_path,
+        merge_config(),
+        verified_days_ago=mcg.RECORD_FRESH_DAYS + 1,
+        record_overrides={"live_result": "DIVERGED"},
+    )
+    assert clause(root, "viii_a") == 1
+
+
+def test_stale_record_with_unparseable_timestamp_is_never_a_pass(tmp_path: Path) -> None:
+    """UNKNOWN is never a pass — including on the stale path."""
+    root = make_tree(tmp_path, merge_config(), record_overrides={"verified_at": "not-a-timestamp"})
+    assert mcg.run_static(root)[0] == 2
+
+
+def test_staleness_query_is_non_gating(tmp_path: Path) -> None:
+    """The refresh workflow's change-gate: 0 fresh / 1 stale / 2 unreadable."""
+    stale = make_tree(tmp_path / "stale", merge_config(), verified_days_ago=mcg.RECORD_FRESH_DAYS + 3)
+    code, lines = mcg.run_staleness(stale)
+    assert code == 1, lines
+    assert "STALE" in lines[0]
+    assert "python3 tools/mergify_config_guard.py --recut" in lines[0]
+
+    fresh = make_tree(tmp_path / "fresh", merge_config())
+    assert mcg.run_staleness(fresh)[0] == 0
+
+    absent = make_tree(tmp_path / "absent", merge_config(), record=False)
+    assert mcg.run_staleness(absent)[0] == 2
 
 
 def test_clause_viii_a_duplicate_yaml_key_exits_2(tmp_path: Path) -> None:

@@ -32,8 +32,26 @@ USAGE
         gate's definition changed (the digest is HEAD-computed, so the fix is a
         re-cut, never a `--admin` merge).
 
+    python3 tools/mergify_config_guard.py --staleness
+        NON-GATING freshness query: 0 = fresh, 1 = stale, 2 = unreadable/absent.
+        The weekly `mergify-guard-recut` workflow uses it to decide whether a
+        refresh is needed; it never gates a pull request.
+
     python3 tools/mergify_config_guard.py --print-digest
         Print the head-computed `gate_digest` (used to author the record).
+
+I10 FRESHNESS IS SELF-HEALING (never a timer that freezes the repo)
+-------------------------------------------------------------------
+I10 BLOCKS on exactly one condition: `record.gate_digest != gate_digest(HEAD)` —
+the record no longer attests the gate definition. Staleness ALONE does not
+block. When the digest still matches HEAD but `verified_at` is older than
+RECORD_FRESH_DAYS, `--static` re-derives the digest and reports AUTO-REFRESHED:
+a matching digest IS a current attestation, so the only field a re-cut moves is
+the timestamp. A required job that reds on a wall clock would freeze every pull
+request in the repository while asserting nothing the digest does not already
+assert. If that re-derivation cannot be applied for a readable reason, the
+failure is attributed to STALENESS on the digest and names the exact `--recut`
+command — never a bare red a lane has to reverse-engineer.
 
 RESULT TOKENS (S12 asserts each is reachable, and that UNAVAILABLE is
 distinguishable from DIVERGED): SATISFIED / DIVERGED / UNAVAILABLE.
@@ -88,8 +106,12 @@ DEFAULT_INJECTION_MODE = "queue"
 KNOWN_INJECTION_MODES = ("queue", "merge")
 HEAVY_CONTEXT = "python-ci-gate"
 
-# I10's own freshness window (the digest is HEAD-computed, but a stale record is
-# still a stale attestation). I1's live read carries its own, looser quarterly
+# I10's freshness threshold. It is a REFRESH TRIGGER, not a block: when the
+# record's digest still matches HEAD, `--static` re-derives the digest and
+# auto-refreshes instead of failing (see `_clause_viii_a`). Staleness alone must
+# never red the REQUIRED `manifest-integrity` job — a timer-driven block would
+# freeze every pull request in the repository while asserting nothing the digest
+# does not already assert. I1's live read carries its own, looser quarterly
 # window and is tracked in a separate key so the two are never conflated.
 RECORD_FRESH_DAYS = 7
 LIVE_FRESH_DAYS = 90
@@ -1436,7 +1458,8 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
         return (
             EXIT_DIVERGED,
             "gate_digest(head) != record.gate_digest — the gate definition changed; "
-            "re-cut with `--recut` (this is the documented fix path, never `--admin`)",
+            "re-cut with `python3 tools/mergify_config_guard.py --recut` "
+            "(the documented fix path, never `--admin`)",
         )
     verified_at = _parse_iso(record.get("verified_at"), f"{RECORD_REL}.verified_at")
     age = _now() - verified_at
@@ -1446,20 +1469,54 @@ def _clause_viii_a(root: Path, record: dict | None) -> tuple[int, str]:
             f"record verified_at {_iso(verified_at)} is in the future — a hand-set "
             "timestamp must not defeat the freshness window",
         )
-    if age > timedelta(days=RECORD_FRESH_DAYS):
-        return (
-            EXIT_DIVERGED,
-            f"record verified_at is {age.days}d old (> {RECORD_FRESH_DAYS}d); re-cut with `--recut`",
-        )
     # A recorded non-clean LIVE read (I1 DIVERGED/UNAVAILABLE) must red `--static`:
     # otherwise the one state I1 exists to surface is only visible to a human
-    # reading the JSON.
+    # reading the JSON. Checked BEFORE the fresh/stale branch so a stale record
+    # carrying a bad I1 read still reds.
     live_result = record.get("live_result")
     if isinstance(live_result, str) and live_result not in ("", "SATISFIED"):
         return (
             EXIT_DIVERGED,
             f"the live I1 read was {live_result} at {record.get('live_checked_at')} — "
             "re-run `--live` when the admin read succeeds",
+        )
+    if age > timedelta(days=RECORD_FRESH_DAYS):
+        # SELF-HEAL, never block. Reaching here means the digest check ABOVE
+        # already matched HEAD, so the record is a current attestation of the
+        # gate definition and a re-cut could only move `verified_at`. A block on
+        # an unattended timer here would freeze every PR in the repository while
+        # asserting nothing the digest does not already assert (#6002).
+        try:
+            healed = gate_digest(root)
+        except Exception as exc:
+            # The refresh was ATTEMPTED and failed for a readable reason. The
+            # block is attributable: it says STALENESS on the digest and names
+            # the exact command. (The first `gate_digest` above succeeded, so an
+            # unparseable tree already raised UNKNOWN before this point.)
+            return (
+                EXIT_DIVERGED,
+                f"STALENESS: {RECORD_REL}.verified_at is {age.days}d old "
+                f"(> {RECORD_FRESH_DAYS}d) and the automatic refresh of the gate "
+                f"digest failed: {type(exc).__name__}: {exc} — refresh with "
+                "`python3 tools/mergify_config_guard.py --recut`",
+            )
+        if healed != head_digest:
+            # Not staleness and not the ordinary divergence check (which already
+            # passed): the digest changed BETWEEN two reads of the same tree, so
+            # the refresh cannot be trusted. Fail closed on the instability.
+            return (
+                EXIT_DIVERGED,
+                f"the gate digest is not stable across two reads "
+                f"({healed[:12]}… != {head_digest[:12]}…) while refreshing a stale "
+                f"{RECORD_REL} — a concurrent gate-definition change; re-run, then "
+                "refresh with `python3 tools/mergify_config_guard.py --recut`",
+            )
+        return (
+            EXIT_OK,
+            f"AUTO-REFRESHED: {RECORD_REL}.verified_at was {age.days}d old "
+            f"(> {RECORD_FRESH_DAYS}d); digest already matched HEAD "
+            f"({recorded[:12]}…), so re-cutting changes only the timestamp — "
+            "persist it with `python3 tools/mergify_config_guard.py --recut`",
         )
     return EXIT_OK, f"gate_digest matches head and was verified {_iso(verified_at)}"
 
@@ -1710,6 +1767,36 @@ def _record_live_attempt(
     _write_record(path, record)
 
 
+def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, list[str]]:
+    """NON-GATING I10 freshness query: 0 = fresh, 1 = stale, 2 = unreadable.
+
+    Used by the weekly `mergify-guard-recut` workflow to make the refresh
+    change-gated (no weekly PR when the record is fresh, so no bot spam). It is
+    never run in the required path and can never red a pull request.
+    """
+    root = Path(root)
+    try:
+        record = _load_record(root, record_path)
+    except GuardUnreadable as exc:
+        return EXIT_UNAVAILABLE, [str(exc)]
+    if record is None:
+        return EXIT_UNAVAILABLE, [f"{RECORD_REL} is absent — no freshness to report"]
+    try:
+        verified_at = _parse_iso(record.get("verified_at"), f"{RECORD_REL}.verified_at")
+    except GuardUnreadable as exc:
+        return EXIT_UNAVAILABLE, [str(exc)]
+    age = _now() - verified_at
+    if age > timedelta(days=RECORD_FRESH_DAYS):
+        return EXIT_DIVERGED, [
+            f"STALE: {RECORD_REL}.verified_at is {age.days}d old "
+            f"(> {RECORD_FRESH_DAYS}d); refresh with "
+            "`python3 tools/mergify_config_guard.py --recut`"
+        ]
+    return EXIT_OK, [
+        f"FRESH: {RECORD_REL}.verified_at is {age.days}d old (<= {RECORD_FRESH_DAYS}d)"
+    ]
+
+
 def run_recut(root: Path, record_path: Path | None = None) -> tuple[int, list[str]]:
     """Recompute I10's digest from HEAD and refresh `verified_at` (fix path)."""
     root = Path(root)
@@ -1740,6 +1827,11 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--static", action="store_true", help="run the static clauses (CI)")
     mode.add_argument("--live", action="store_true", help="I1 — needs an admin credential")
     mode.add_argument("--recut", action="store_true", help="re-cut I10's digest from HEAD")
+    mode.add_argument(
+        "--staleness",
+        action="store_true",
+        help="I10 freshness query (non-gating): 0=fresh, 1=stale, 2=unreadable",
+    )
     mode.add_argument("--print-digest", action="store_true", help="print the head gate_digest")
     mode.add_argument("--clause-inventory", action="store_true", help="print the clause ids")
     parser.add_argument("--root", default=str(REPO), help="repository root to inspect")
@@ -1767,6 +1859,10 @@ def main(argv: list[str] | None = None) -> int:
                 root, record_path, slug=args.repo, write=not args.no_write
             )
             _print_result("LIVE", code, lines)
+            return code
+        if args.staleness:
+            code, lines = run_staleness(root, record_path)
+            _print_result("STALENESS", code, lines)
             return code
         if args.recut:
             code, lines = run_recut(root, record_path)
