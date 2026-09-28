@@ -57,6 +57,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -7720,14 +7721,40 @@ def _empty_cost_bucket() -> dict:
             "calls_without_usage": 0, "usage_present": True}
 
 
+def _bounded_cost_sum(current, delta) -> tuple[float, bool]:
+    """Sum two dollar amounts, never returning a non-finite total.
+
+    #5822 cycle-5 P3: an accumulator that bounds its OWN running total can
+    still be undone one function later, because every AGGREGATION seam
+    (``_rollup_llm``'s cross-stage sum, ``_merge_cost_accumulator``,
+    ``_merge_cost_bucket``) re-summed with a plain ``round(a + b, 6)``. Two
+    finite per-stage totals (``1e308`` each) overflow to ``inf`` there, which
+    takes the emitted row off the analytics sink — httpx encodes with
+    ``allow_nan=False``, so the row is dropped from ``analytics_events`` — and
+    makes ``inf + x == inf`` swallow every later charge in the session.
+
+    Returns ``(total, landed)``. On a non-finite sum ``total`` is the UNCHANGED
+    current value and ``landed`` is ``False``, so the caller can disclose the
+    aggregate that could not be represented instead of writing a non-finite.
+    """
+    rolled = float(current or 0.0) + float(delta or 0.0)
+    if math.isfinite(rolled):
+        return round(rolled, 6), True
+    return float(current or 0.0), False
+
+
 def _merge_cost_bucket(tgt: dict, src: dict) -> None:
     """Merge one cost-envelope bucket into another of the same shape."""
     tgt["calls"] += int(src.get("calls", 0) or 0)
     tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
     tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
-    tgt["cost_usd"] = round(
-        tgt["cost_usd"] + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    tgt["cost_usd"], _cost_landed = _bounded_cost_sum(
+        tgt["cost_usd"], src.get("cost_usd"))
     tgt["calls_without_cost"] += int(src.get("calls_without_cost", 0) or 0)
+    if not _cost_landed:
+        # the merged total is unrepresentable — keep the last FINITE value and
+        # disclose the aggregate that could not be represented
+        tgt["calls_without_cost"] += 1
     tgt["calls_without_usage"] += int(src.get("calls_without_usage", 0) or 0)
     tgt["usage_present"] = bool(
         tgt["usage_present"] and src.get("usage_present", True))
@@ -7751,12 +7778,15 @@ def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
     acc["completion_tokens"] = (
         int(acc.get("completion_tokens", 0))
         + int(src.get("completion_tokens", 0) or 0))
-    acc["cost_usd"] = round(
-        float(acc.get("cost_usd", 0.0))
-        + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    acc["cost_usd"], _cost_landed = _bounded_cost_sum(
+        acc.get("cost_usd", 0.0), src.get("cost_usd"))
     acc["calls_without_cost"] = (
         int(acc.get("calls_without_cost", 0))
         + int(src.get("calls_without_cost", 0) or 0))
+    if not _cost_landed:
+        # a non-finite merged total must never be written; disclose the drop
+        acc["calls_without_cost"] = (
+            int(acc.get("calls_without_cost", 0)) + 1)
     acc["calls_without_usage"] = (
         int(acc.get("calls_without_usage", 0))
         + int(src.get("calls_without_usage", 0) or 0))
@@ -7787,24 +7817,69 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     acc = stats.setdefault("cost", {})
     ptoks = int(prompt_tokens or 0)
     ctoks = int(completion_tokens or 0)
+    # #5822 review P3: normalise EVERY provider-controlled value before the
+    # first mutation into ``acc``. ``cost_usd`` is the last raise point, and it
+    # used to be coerced AFTER the token counters had already been bumped — so a
+    # payload the provider controls (a string ``cost``, or a JSON integer with
+    # 400 digits that overflows ``float()``) left the failing call's TOKENS in
+    # ``acc`` while ``by_route`` was never created. The M2 sink counts AFTER
+    # this returns (correctly — see ``_session_llm_usage_sink``), so the same
+    # call was simultaneously disclosed as ``unattributed`` AND priced into the
+    # row's top-level token count, contradicting its own ``by_stage`` breakdown.
+    # Parsing up front makes the mutation atomic w.r.t. provider input: a payload
+    # that cannot be coerced raises with ``acc`` untouched, and the caller's
+    # residual then discloses the call with no tokens attributed to it.
+    #
+    # A NON-FINITE charge (an ``inf`` from a JSON ``1e400``, or a string
+    # ``"nan"``/``"Infinity"``) does NOT raise on ``float()``, so it would land
+    # on the row and break the emit: ``_track_analytics_event`` encodes with
+    # httpx's ``allow_nan=False``, so one non-finite value raises
+    # ``ValueError``, the row is only written to the local JSONL fallback, and
+    # it never reaches ``analytics_events`` — the table
+    # ``cost_per_session_distribution`` scans. Worse, ``round(nan + x, 6)``
+    # stays ``nan``, so a single ``nan`` silently SWALLOWS every later valid
+    # charge in the session. An unusable charge is therefore treated exactly
+    # like an absent one: disclosed via ``calls_without_cost``, never a
+    # non-finite row, and the tokens are still kept so the row stays repricable
+    # from the pricing map.
+    cost_val = None if cost_usd is None else float(cost_usd)
+    if cost_val is not None and not math.isfinite(cost_val):
+        cost_val = None
     acc["calls"] = int(acc.get("calls", 0)) + 1
     acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
     acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
-    if cost_usd is None:
+    if cost_val is None:
         acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
     else:
-        acc["cost_usd"] = round(
-            float(acc.get("cost_usd", 0.0)) + float(cost_usd), 6)
-    has_usage = bool(ptoks or ctoks or cost_usd is not None)
+        rolled = float(acc.get("cost_usd", 0.0)) + cost_val
+        if math.isfinite(rolled):
+            acc["cost_usd"] = round(rolled, 6)
+        else:
+            # #5822 cycle-4 P3: the charge is FINITE but the ACCUMULATED total
+            # overflows to ``inf`` (two legitimate-looking ``1e308`` charges).
+            # Guarding the OPERAND cannot bound the RESULT, so the consequences
+            # cycle 3 fixed for a non-finite input return here: the row is
+            # dropped from ``analytics_events``, and ``inf + x == inf`` would
+            # swallow every later valid charge. An unusable TOTAL is disclosed
+            # exactly like an unusable charge.
+            cost_val = None
+            acc["calls_without_cost"] = (
+                int(acc.get("calls_without_cost", 0)) + 1)
+    has_usage = bool(ptoks or ctoks or cost_val is not None)
     lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
             .setdefault(model or "unknown", _empty_cost_bucket()))
     lane["calls"] += 1
     lane["prompt_tokens"] += ptoks
     lane["completion_tokens"] += ctoks
-    if cost_usd is None:
+    if cost_val is None:
         lane["calls_without_cost"] += 1
     else:
-        lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
+        rolled_lane = lane["cost_usd"] + cost_val
+        if math.isfinite(rolled_lane):
+            lane["cost_usd"] = round(rolled_lane, 6)
+        else:
+            # a per-route overflow is disclosed, never written as ``inf``
+            lane["calls_without_cost"] += 1
     if not has_usage:
         acc["calls_without_usage"] = (
             int(acc.get("calls_without_usage", 0)) + 1)
@@ -7846,12 +7921,17 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     llm_stats["completion_tokens"] = (
         llm_stats.get("completion_tokens", 0)
         + int(cost.get("completion_tokens", 0) or 0))
-    llm_stats["cost_usd"] = round(
-        llm_stats.get("cost_usd", 0.0)
-        + float(cost.get("cost_usd", 0.0) or 0.0), 6)
+    llm_stats["cost_usd"], _cost_landed = _bounded_cost_sum(
+        llm_stats.get("cost_usd", 0.0), cost.get("cost_usd"))
     llm_stats["calls_without_cost"] = (
         llm_stats.get("calls_without_cost", 0)
         + int(cost.get("calls_without_cost", 0) or 0))
+    if not _cost_landed:
+        # #5822 cycle-5: the CROSS-STAGE sum is the seam where a per-stage
+        # guard is undone — two finite stage totals (1e308 each) overflow here
+        # and would take the emitted row off the analytics sink.
+        llm_stats["calls_without_cost"] = (
+            int(llm_stats.get("calls_without_cost", 0)) + 1)
     # #3359: a call that returned NO usage block at all (no tokens, no
     # charge) is a different disclosure from one that returned tokens but no
     # charge — roll it too, so the emitted row can say so at session level.
