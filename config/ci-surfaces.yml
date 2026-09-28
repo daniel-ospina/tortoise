@@ -536,6 +536,11 @@ surfaces:
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
+  # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
+  # `commit_ops.apply_payload_operators` — the helper is core engine code, and
+  # the re-key regression drives the real embedded capture commit, so this is
+  # the `core` surface (same home as test_4716 above).
+  - test_operator_idempotency_4971.py
   - test_ask_eval_only.py
   - test_backfill_ghost_members_guard.py
   # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
@@ -920,6 +925,15 @@ surfaces:
   # guard tests key presence); a ZERO row packs it at weight 0. Neither is a
   # substitute for the measured value (#4259 review).
   - test_fly_secret_drift.py
+  # #5656: the MACHINE-side half of #4568 — asserts the RUNNING machine's
+  # `config.env` carries every `fly-toml-env` name with the value `fly.toml`
+  # `[env]` declares. Registered in `core` beside its sibling deploy-time guards
+  # (test_fly_machines_guard.py, test_fly_secret_drift.py, test_deploy_workflow.py).
+  # The two secret gates answer DIFFERENT questions — the drift gate reads the
+  # manifest and the Fly secret list (build-time), this one reads the machine
+  # (deployed state) — so a perfect manifest can coexist with a machine running
+  # something else, and dropping either loses that half.
+  - test_fly_machine_env.py
   # #3039: percent-decoding of URI userinfo (the single shared rule in
   # tortoise/config.py, which is a core-surface path) — registered here so a
   # config.py-only change still runs the guard.
@@ -1898,6 +1912,7 @@ durations:
   test_relationships_bounded.py: 17.6
   test_extractor_v2.py: 17.2
   test_fly_machines_guard.py: 13.1
+  test_fly_machine_env.py: 28.2
   test_ask_sdk.py: 3.9
   test_battery_seed_ingest.py: 3.9
   test_delivery_tenancy.py: 9.7
@@ -2067,6 +2082,7 @@ durations:
   test_assembly_fixtures.py: 2.2
   test_epic903_hosted.py: 2.2
   test_operator_dedup_parity.py: 1.4
+  test_operator_idempotency_4971.py: 95.0  # unmeasured — local embedded/carve-out measurement (8 tests, ~79s); refresh from CI junit
   test_search_promoted_fields.py: 1.5
   test_selfhost_rest.py: 1.4
   test_volunteer_reflex_harness_seam.py: 1.5

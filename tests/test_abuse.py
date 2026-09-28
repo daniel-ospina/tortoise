@@ -587,8 +587,8 @@ class TestAbuseOrderParam:
         newest-first. This is what ties the double's semantics to the
         client's wire form; a lane that changes production to a spelling the
         double rejects reds here."""
-        from tortoise.abuse import SupabaseAbuseStore
         from tests.fake_control_plane import FakeControlPlane
+        from tortoise.abuse import SupabaseAbuseStore
         cp = self._CapturingCP()
         store = SupabaseAbuseStore(cp)
         store.latest_flag_at("t1", "point_create")
