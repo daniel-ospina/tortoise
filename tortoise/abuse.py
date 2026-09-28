@@ -77,6 +77,45 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _window_env(name: str, default: int) -> int:
+    """Env-tunable rate-limit WINDOW, floored so a non-positive value can
+    never fail OPEN (#5493).
+
+    A window is the one limiter knob whose non-positive value *disables* the
+    limiter instead of tightening it. The sliding-window test is
+    ``now - t < window_s``; for ``window_s <= 0`` that is never true, so the
+    bucket is pruned to empty on EVERY request, ``len(bucket) >= limit`` is
+    never reached, and every request is allowed, forever. ``0`` is exactly the
+    value an operator reaches for when a limiter misbehaves, so it must not be
+    a second, undocumented off-switch — the intended one is
+    ``RATE_LIMIT_DISABLED=1``.
+
+    A non-positive window therefore falls back to the knob's DEFAULT (the
+    #2866/D6 convention for an out-of-range value) — always at least one
+    second — and a warning names the variable and the value, so the operator
+    who set it is told what happened and why.
+
+    Do NOT "simplify" this back to ``_int_env``. ``_int_env`` is shared with
+    the THRESHOLD/limit knobs, where a non-positive value is a legitimate
+    fail-CLOSED deny-all (``len(bucket) >= 0`` is always true) — the floor
+    belongs to the window knobs alone, so it lives here and not in
+    ``_int_env``.
+
+    ``_int_env`` already treats a NEGATIVE value as unset (its ``isdigit()``
+    gate) and yields ``default``; the ``<= 0`` branch here is therefore what
+    catches the digit-string ``"0"`` that would otherwise slip through.
+    """
+    value = _int_env(name, default)
+    if value > 0:
+        return value
+    fallback = default if default > 0 else 1
+    logger.warning(
+        "%s=%r is not a valid rate-limit window (must be a positive number "
+        "of seconds); using %d so the limiter cannot fail open (#5493)",
+        name, os.environ.get(name), fallback)
+    return fallback
+
+
 def abuse_disabled() -> bool:
     return os.environ.get("TORTOISE_ABUSE_DISABLED") == "1"
 
@@ -604,13 +643,13 @@ class AbuseEngine:
         return _int_env("TORTOISE_ABUSE_POINT_THRESHOLD", 500)
 
     def point_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
+        return _window_env("TORTOISE_ABUSE_POINT_WINDOW_S", 3600)
 
     def key_threshold(self) -> int:
         return _int_env("TORTOISE_ABUSE_KEY_THRESHOLD", 10)
 
     def key_window_s(self) -> int:
-        return _int_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
+        return _window_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
 
     def record_point_create(self, org_id: str, n: int = 1,
                             now: datetime | None = None) -> str | None:
@@ -728,7 +767,7 @@ class ReadVelocityTracker:
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_READ_THRESHOLD", 100)
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_READ_WINDOW_S", 300)
         self._by_key: dict[str, list[float]] = defaultdict(list)
         self._by_org: dict[str, list[float]] = defaultdict(list)
@@ -838,7 +877,7 @@ class SignupVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_SIGNUP_THRESHOLD",
             _int_env("TORTOISE_SIGNUP_IP_LIMIT", 2))  # P3-5: defaults follow allowance
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts
@@ -967,7 +1006,7 @@ class RecoveryVelocityTracker:
         self.threshold = threshold if threshold is not None else _int_env(
             "TORTOISE_ABUSE_RECOVER_THRESHOLD",
             _int_env("TORTOISE_RECOVER_IP_LIMIT", 5))
-        self.window_s = window_s if window_s is not None else _int_env(
+        self.window_s = window_s if window_s is not None else _window_env(
             "TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400)
         self._by_ip: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[str, float] = {}  # bare ip -> last notify ts

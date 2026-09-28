@@ -48,7 +48,10 @@ import tortoise
 from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
-from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
+from tortoise.abuse import (
+    _int_env,  # #1081 signup limiter env knobs (SignupVelocityTracker)
+    _window_env,  # #5493 window knobs must never fail open
+)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -6426,7 +6429,7 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
     (default 86400). The 429 detail carries the support pointer (P2 #8) —
     hard-limit posture with a documented appeal path.
     """
-    window_s = _int_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
+    window_s = _window_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
     await _check_ip_bucket_rate_limit(
         request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
         limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
@@ -6483,7 +6486,7 @@ async def _check_recovery_rate_limit(request: Request,
     await _check_ip_bucket_rate_limit(
         request, buckets=_RECOVER_BUCKETS, lock=_RECOVER_LOCK,
         limit=_int_env("TORTOISE_RECOVER_IP_LIMIT", 5),
-        window_s=_int_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
+        window_s=_window_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
         key=_request_ip_key(request),
         detail={
             "error_code": "over_recovery_ip_rate_limit",
@@ -6495,7 +6498,7 @@ async def _check_recovery_rate_limit(request: Request,
         await _check_ip_bucket_rate_limit(
             request, buckets=_RECOVER_TOKEN_BUCKETS, lock=_RECOVER_TOKEN_LOCK,
             limit=_int_env("TORTOISE_RECOVER_TOKEN_LIMIT", 10),
-            window_s=_int_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
+            window_s=_window_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
             key=("signup-token", token_hash),
             detail={
                 "error_code": "over_recovery_token_rate_limit",
@@ -6748,8 +6751,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_TOKEN_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT",
                        _INVITE_ACCEPT_TOKEN_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
-                          _INVITE_ACCEPT_TOKEN_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
+                             _INVITE_ACCEPT_TOKEN_WINDOW_S),
         key=("invite-accept", "token", token_key),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
@@ -6757,8 +6760,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_IP_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_IP_LIMIT",
                        _INVITE_ACCEPT_IP_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
-                          _INVITE_ACCEPT_IP_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
+                             _INVITE_ACCEPT_IP_WINDOW_S),
         key=("invite-accept", "ip", ip),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
@@ -6766,8 +6769,8 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
         lock=_INVITE_ACCEPT_GLOBAL_LOCK,
         limit=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT",
                        _INVITE_ACCEPT_GLOBAL_LIMIT),
-        window_s=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
-                          _INVITE_ACCEPT_GLOBAL_WINDOW_S),
+        window_s=_window_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
+                             _INVITE_ACCEPT_GLOBAL_WINDOW_S),
         key=("invite-accept", "global"),
         detail=detail, retry_after_s=None)
 
@@ -16528,19 +16531,19 @@ async def _check_invite_otp_rate_limit(request: Request, token: str) -> None:
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_TOKEN_BUCKETS, lock=_INVITE_OTP_TOKEN_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_TOKEN_LIMIT", 5),
-        window_s=_int_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
+        window_s=_window_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
         key=("invite-otp", "token", token_key),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_IP_BUCKETS, lock=_INVITE_OTP_IP_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_IP_LIMIT", 10),
-        window_s=_int_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
+        window_s=_window_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
         key=("invite-otp", "ip", ip),
         detail=detail, retry_after_s=None)
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_OTP_GLOBAL_BUCKETS, lock=_INVITE_OTP_GLOBAL_LOCK,
         limit=_int_env("TORTOISE_INVITE_OTP_GLOBAL_LIMIT", 200),
-        window_s=_int_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
+        window_s=_window_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
         key=("invite-otp", "global"),
         detail=detail, retry_after_s=None)
 
@@ -16556,7 +16559,7 @@ async def _check_invite_resend_rate_limit(request: Request,
     await _check_ip_bucket_rate_limit(
         request, buckets=_INVITE_RESEND_BUCKETS, lock=_INVITE_RESEND_LOCK,
         limit=_int_env("TORTOISE_INVITE_RESEND_LIMIT", 5),
-        window_s=_int_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
+        window_s=_window_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
         key=("invite-resend", "invitation", invitation_id),
         detail={"error_code": "over_invite_resend_rate_limit",
                 "message": "Too many resend requests for this invitation."},

@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -1133,3 +1134,232 @@ class TestDecisionPathObservability:
         for dead in ("abuse window_sum failed", "abuse flag_clear failed",
                      "abuse suspend_team failed", "abuse flag_team failed"):
             assert dead not in src, dead
+
+
+# ── #5493: rate-limit WINDOW knobs must never fail OPEN ────────────────────
+#
+# `_int_env` returns the parsed int for a digit string, so `TORTOISE_*_WINDOW_S=0`
+# reaches a limiter as ``window_s=0``. The sliding-window test is
+# ``now - t < window_s``: with 0 (or a negative) it is NEVER true, so the bucket
+# is pruned to empty on EVERY request, ``len(bucket) >= limit`` is never reached,
+# and every request is allowed, forever. The window knobs therefore read through
+# ``_window_env`` (default-fallback + a warning naming the variable). The
+# THRESHOLD/limit knobs keep ``_int_env`` on purpose — a non-positive threshold
+# is a legitimate fail-CLOSED deny-all (``len(bucket) >= 0`` is always true), so
+# the floor belongs to the windows alone.
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+# EVERY env-tunable rate-limit window knob in the product, with its default.
+# A new window knob must be added here — test_every_window_site_is_covered
+# fails until it is, so a site cannot be added unfloored (or floored-but-untested).
+_WINDOW_KNOBS = [
+    ("TORTOISE_ABUSE_POINT_WINDOW_S", 3600),
+    ("TORTOISE_ABUSE_KEY_WINDOW_S", 86400),
+    ("TORTOISE_ABUSE_READ_WINDOW_S", 300),
+    ("TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400),
+    ("TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400),
+    ("TORTOISE_SIGNUP_IP_WINDOW_S", 86400),
+    ("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
+    ("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", 900),
+    ("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 900),
+    ("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
+    ("TORTOISE_INVITE_RESEND_WINDOW_S", 86400),
+]
+
+_WINDOW_FILES = ("tortoise/abuse.py", "tortoise/hosted_api.py")
+
+
+class _FakeReq:
+    """Minimal Starlette-Request stand-in: the limiters read only
+    ``request.state.client_ip`` and ``request.client.host``."""
+
+    class _Client:
+        def __init__(self, host):
+            self.host = host
+
+    class _State:
+        client_ip = None
+
+    def __init__(self, host="1.2.3.4"):
+        self.client = self._Client(host)
+        self.state = self._State()
+
+
+class _BucketRecorder:
+    """Stands in for ``_check_ip_bucket_rate_limit`` and records the
+    ``window_s`` each limiter family actually passes it."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, request, **kwargs):
+        self.calls.append(kwargs)
+
+
+class TestWindowFloor:
+    """The accessor itself (#5493)."""
+
+    @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
+    def test_zero_window_falls_back_to_default_and_warns(
+            self, name, default, monkeypatch, caplog):
+        monkeypatch.setenv(name, "0")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            got = abuse._window_env(name, default)
+        assert got == default and got > 0
+        assert name in caplog.text  # the operator is told which knob was ignored
+
+    @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
+    def test_negative_window_falls_back_to_default(self, name, default,
+                                                   monkeypatch):
+        # `_int_env`'s isdigit() gate already treats a negative as unset; this
+        # pins that the floor never turns "-1" into a positive-looking clamp.
+        monkeypatch.setenv(name, "-1")
+        assert abuse._window_env(name, default) == default
+
+    @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
+    def test_positive_window_is_honoured(self, name, default, monkeypatch):
+        monkeypatch.setenv(name, "17")
+        assert abuse._window_env(name, default) == 17
+
+    def test_unset_window_uses_default(self, monkeypatch):
+        monkeypatch.delenv("TORTOISE_ABUSE_READ_WINDOW_S", raising=False)
+        assert abuse._window_env("TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+
+    def test_non_positive_default_cannot_reintroduce_zero(self, monkeypatch):
+        # Defence in depth: even a caller who passes a non-positive default
+        # cannot get a zero window back out of the accessor.
+        monkeypatch.setenv("TORTOISE_X_WINDOW_S", "0")
+        assert abuse._window_env("TORTOISE_X_WINDOW_S", 0) == 1
+
+    def test_no_window_is_read_with_int_env(self):
+        """No env-tunable window may be read with the UNFLOORED `_int_env`."""
+        for rel in _WINDOW_FILES:
+            src = (_ROOT / rel).read_text(encoding="utf-8")
+            bad = re.findall(r'_int_env\(\s*"[A-Z_]*WINDOW[A-Z_]*"', src)
+            assert bad == [], f"{rel} reads a window via _int_env: {bad}"
+
+    def test_every_window_site_is_covered(self):
+        """The list above must name EVERY `_window_env` site in the product,
+        so a new window knob fails this test until it is floored AND listed."""
+        found = set()
+        for rel in _WINDOW_FILES:
+            src = (_ROOT / rel).read_text(encoding="utf-8")
+            found |= set(re.findall(
+                r'_window_env\(\s*"([A-Z_]*WINDOW[A-Z_]*)"', src))
+        assert found == {n for n, _ in _WINDOW_KNOBS}, (
+            f"window knobs in source not in _WINDOW_KNOBS: "
+            f"{found.symmetric_difference({n for n, _ in _WINDOW_KNOBS})}")
+
+
+class TestWindowFloorBehaviour:
+    """The floor must be load-bearing at every reader (abuse.py)."""
+
+    def test_abuse_engine_windows_floor_zero(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_POINT_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_ABUSE_KEY_WINDOW_S", "0")
+        eng = AbuseEngine(MemoryAbuseStore())
+        assert eng.point_window_s() == 3600
+        assert eng.key_window_s() == 86400
+
+    def test_read_velocity_window_floors_zero(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "0")
+        assert ReadVelocityTracker().window_s == 300
+
+    def test_signup_velocity_zero_window_still_breaches(self, monkeypatch,
+                                                        notified):
+        # THE FAIL-OPEN, behaviourally: with window_s=0 the count bucket is
+        # emptied on every record, so the 2nd mint never breaches. Floored, the
+        # second mint still breaches (the farming signal is not silently lost).
+        monkeypatch.setenv("TORTOISE_ABUSE_SIGNUP_WINDOW_S", "0")
+        tr = SignupVelocityTracker(threshold=2)
+        assert tr.record_signup("1.2.3.4", org_id="t1", now=1000.0) is None
+        assert tr.record_signup("1.2.3.4", org_id="t2", now=1001.0) == (
+            "ip", "1.2.3.4")
+
+    def test_recovery_velocity_zero_window_still_breaches(self, monkeypatch,
+                                                          notified):
+        monkeypatch.setenv("TORTOISE_ABUSE_RECOVER_WINDOW_S", "0")
+        tr = abuse.RecoveryVelocityTracker(threshold=2)
+        assert tr.window_s == 86400
+        assert tr.record("1.2.3.4", org_id="t1", now=1000.0) is None
+        assert tr.record("1.2.3.4", org_id="t2", now=1001.0) == (
+            "ip", "1.2.3.4")
+
+
+class TestHostedWindowFloor:
+    """Every hosted limiter family must read its window through the floor:
+    a zero env window must never reach `_check_ip_bucket_rate_limit` as 0."""
+
+    def _recorder(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        rec = _BucketRecorder()
+        monkeypatch.setattr(ha, "_check_ip_bucket_rate_limit", rec)
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        return ha, rec
+
+    def test_signup_window_floors_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_SIGNUP_IP_WINDOW_S", "0")
+        asyncio.run(ha._check_signup_ip_rate_limit(_FakeReq()))
+        assert [c["window_s"] for c in rec.calls] == [86400]
+
+    def test_recover_windows_floor_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_RECOVER_IP_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_RECOVER_TOKEN_WINDOW_S", "0")
+        asyncio.run(ha._check_recovery_rate_limit(_FakeReq(), token_hash="abc"))
+        assert [c["window_s"] for c in rec.calls] == [86400, 3600]
+
+    def test_invite_accept_windows_floor_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", "0")
+        asyncio.run(ha._check_invite_accept_rate_limit(_FakeReq(), "tok"))
+        assert [c["window_s"] for c in rec.calls] == [900, 3600, 3600]
+
+    def test_invite_otp_windows_floor_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_OTP_IP_WINDOW_S", "0")
+        monkeypatch.setenv("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", "0")
+        asyncio.run(ha._check_invite_otp_rate_limit(_FakeReq(), "tok"))
+        assert [c["window_s"] for c in rec.calls] == [900, 3600, 3600]
+
+    def test_invite_resend_window_floors_zero(self, monkeypatch):
+        ha, rec = self._recorder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_INVITE_RESEND_WINDOW_S", "0")
+        asyncio.run(ha._check_invite_resend_rate_limit(_FakeReq(), "inv1"))
+        assert [c["window_s"] for c in rec.calls] == [86400]
+
+
+class TestThresholdAsymmetry:
+    """The floor is window-only. A non-positive THRESHOLD is a legitimate
+    fail-CLOSED deny-all and must keep its current semantics (#5493)."""
+
+    def test_int_env_leaves_a_zero_threshold_at_zero(self, monkeypatch):
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "0")
+        assert abuse._int_env("TORTOISE_ABUSE_READ_THRESHOLD", 100) == 0
+
+    def test_zero_threshold_still_denies(self, monkeypatch, notified):
+        # len(bucket) >= threshold is true from the first event -> deny.
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "0")
+        tr = ReadVelocityTracker()
+        assert tr.threshold == 0
+        assert tr.record_read("k1", "t1", now=1000.0) == ("key", "k1")
+
+    def test_negative_threshold_is_treated_as_unset(self, monkeypatch):
+        """Stated decision (#5493): a NEGATIVE threshold is unset (the
+        pre-existing `_int_env` isdigit() gate) and yields the default. Left
+        UNCHANGED: turning it into a deny would alter threshold semantics beyond
+        the window floor, and no caller can express deny-all with a negative
+        today (use 0).
+        """
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_THRESHOLD", "-1")
+        assert abuse._int_env("TORTOISE_ABUSE_READ_THRESHOLD", 100) == 100
+
