@@ -347,11 +347,19 @@ def union_tree(
     validator_src: str | None = VALIDATOR_SRC,
     container_ok: bool = True,
     step_if: str | None = None,
+    step_env: dict | None = None,
+    job_env: dict | None = None,
+    workflow_shell: str | None = None,
 ) -> tuple[Path, dict]:
     step: dict = {"name": "Registry integrity", "run": step_run}
     if step_if is not None:
         step["if"] = step_if
-    jobs = {"manifest-integrity": {"runs-on": "ubuntu-latest", "steps": [step]}}
+    if step_env is not None:
+        step["env"] = step_env
+    manifest: dict = {"runs-on": "ubuntu-latest", "steps": [step]}
+    if job_env is not None:
+        manifest["env"] = job_env
+    jobs = {"manifest-integrity": manifest}
     if container_ok:
         jobs["python-ci-gate"] = {
             "runs-on": "ubuntu-latest",
@@ -360,6 +368,8 @@ def union_tree(
         }
     workflows = default_workflows()
     workflows["python-ci.yml"]["jobs"].update(jobs)
+    if workflow_shell is not None:
+        workflows["python-ci.yml"]["defaults"] = {"run": {"shell": workflow_shell}}
     files = {}
     if validator_src is not None:
         files["tools/registry_integrity.py"] = validator_src
@@ -1042,4 +1052,96 @@ def test_settings_reader_stray_pyc_outside_cache_is_scanned(tmp_path: Path) -> N
     """A compiled module checked into the tree (outside `__pycache__`) is scanned."""
     root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
     (root / "tools" / "legacy.pyc").write_bytes(b"\x00\x01settings.yml\x00")
+    assert clause(root, "viii_b") == 1
+
+
+# --- cycle-3 review regressions ---------------------------------------------
+
+
+def test_clause_vii_step_if_pull_request_target_is_red(tmp_path: Path) -> None:
+    """`pull_request_target` is a DIFFERENT event: the step never runs on a PR."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        step_if="github.event_name == 'pull_request_target'",
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_step_if_bare_event_name_is_green(tmp_path: Path) -> None:
+    """A bare `github.event_name` is truthy on every event — it does reach PR."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        step_if="github.event_name",
+    )
+    assert clause(root, "vii") == 0
+
+
+def test_clause_vii_exit_zero_variants_are_red(tmp_path: Path) -> None:
+    """`sys.exit(0)`, `SystemExit(0)`, and `assert <truthy>` never fail."""
+    for src in (
+        'import sys\nsys.exit(0)\n',
+        'raise SystemExit(0)\n',
+        'assert True\n',
+        'def helper():\n    return "registry"\nprint(helper())\n',
+    ):
+        root, _ = union_tree(
+            tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+        )
+        assert clause(root, "vii") == 1, src
+
+
+def test_clause_vii_system_exit_nonzero_is_green(tmp_path: Path) -> None:
+    src = 'REGISTRIES = ("config/ci-surfaces.yml",)\nraise SystemExit(1)\n'
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 0
+
+
+def test_clause_vii_pythonoptimize_shadow_is_red(tmp_path: Path) -> None:
+    """`PYTHONOPTIMIZE=1` strips `assert`, neutralising the validator."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        step_env={"PYTHONOPTIMIZE": "1"},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_job_level_env_shadow_is_red(tmp_path: Path) -> None:
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        job_env={"PYTHONPATH": "attacker"},
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_workflow_defaults_shell_is_red(tmp_path: Path) -> None:
+    """A workflow-level `defaults.run.shell` silences every run step."""
+    root, _ = union_tree(
+        tmp_path,
+        "python3 tools/registry_integrity.py",
+        workflow_shell="bash -c 'exit 0' {0}",
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_clause_vii_superstring_path_is_red(tmp_path: Path) -> None:
+    """`backup/config/ci-surfaces.yml.bak` is not the unioned file."""
+    src = 'REG = "backup/config/ci-surfaces.yml.bak"\nraise SystemExit(1)\n'
+    root, _ = union_tree(
+        tmp_path, "python3 tools/registry_integrity.py", validator_src=src
+    )
+    assert clause(root, "vii") == 1
+
+
+def test_settings_reader_non_utf8_bytes_is_red(tmp_path: Path) -> None:
+    """A Latin-1 file storing the ASCII name literally must still be detected."""
+    root = make_tree(tmp_path, merge_config(), files={"tools/keep.py": "x = 1\n"})
+    (root / "tools" / "latin.py").write_bytes(
+        b"# caf\xe9\nPATH = '.github/settings.yml'\n"
+    )
     assert clause(root, "viii_b") == 1

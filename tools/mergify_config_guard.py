@@ -121,7 +121,7 @@ _FORBIDDEN_SHELL = (";", "&&", "||", "&", "|", "$(", "`")
 # `env:` keys that can neutralise a Python validator: a PR-authored
 # `PYTHONPATH` + `sitecustomize.py` can shadow `sys.exit`; `PYTHONSTARTUP` runs
 # on interactive start; `PYTHONHOME` re-roots the stdlib.
-_PYTHON_ENV_SHADOWS = ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME")
+_PYTHON_ENV_SHADOWS = ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONOPTIMIZE")
 
 
 class GuardUnreadable(Exception):
@@ -519,15 +519,18 @@ def _if_excludes_pull_request(expr: Any) -> bool:
         return True
     if re.search(r"pull_request\s*==\s*null", text):
         return True
-    # Explicit PR-admitting tests (checked before the push/schedule tests so a
-    # disjunction containing a positive `pull_request` arm is admitted).
+    # Explicit PR-admitting tests, matched on the EXACT event name. A substring
+    # catch-all admitted `pull_request_target`/`pull_request_review` — distinct
+    # events on which a `pull_request`-gated job never runs.
     if re.search(r"==\s*['\"]pull_request['\"]", text):
         return False
-    if re.search(r"contains\s*\([^)]*pull_request", text):
+    if re.search(r"contains\s*\([^,]+,\s*['\"]pull_request['\"]\s*\)", text):
         return False
-    if re.search(r"pull_request\s*!=\s*null", text):
+    if re.search(r"(?<![_a-z])pull_request\s*!=\s*null", text):
         return False
-    if "pull_request" in text:
+    # A bare truthiness test on the event is truthy on every event.
+    bare = re.sub(r"^\$?\{\{?\s*|\s*\}?\}?$", "", text).strip()
+    if bare in ("github.event_name", "github.event", "github.event_name != ''"):
         return False
     # push/schedule-only predicates.
     if re.search(r"==\s*['\"](push|schedule)['\"]", text):
@@ -659,6 +662,16 @@ def _validator_candidates(docs: dict[str, dict], required_workflow: str, closure
     return candidates
 
 
+def _names_path(path: str, literal: str) -> bool:
+    """True iff `literal` names `path` as a whole path, not as a substring.
+
+    A substring test accepted `backup/config/ci-surfaces.yml.bak` as naming the
+    unioned `config/ci-surfaces.yml` — a validator that never opens the real file.
+    """
+    pattern = r"(?<![A-Za-z0-9_.\-/])" + re.escape(path) + r"(?![A-Za-z0-9_.\-/])"
+    return re.search(pattern, literal) is not None
+
+
 def _string_constants(source: str) -> list[str]:
     """Every string literal in `source` (comments and non-literals excluded).
 
@@ -676,12 +689,23 @@ def _string_constants(source: str) -> list[str]:
     ]
 
 
+def _nonzero_exit_arg(args: list[ast.expr]) -> bool:
+    """True iff an exit-like call's first argument can be non-zero."""
+    if not args:
+        return False  # `sys.exit()` / `SystemExit()` defaults to 0
+    first = args[0]
+    return not (isinstance(first, ast.Constant) and first.value in (0, None))
+
+
 def _source_can_fail(source: str) -> bool:
     """True iff the module contains a statement that can exit non-zero.
 
     An AST check, not a substring scan: a `raise`/`assert`/`return <nonzero>` or
     `sys.exit(<nonzero>)` inside a STRING LITERAL or a comment must not count
     (a no-op tool with the word "assert" in a message is not a validator).
+    `sys.exit(0)`, `SystemExit(0)`, `assert <truthy constant>`, and a helper's
+    `return <nonzero>` are NOT failures — only a `return` inside a `main`-like
+    entry function is read as an exit status.
 
     Bound: a syntactically failing statement in unreachable code (`if False:`)
     still counts — the validator's actual behaviour is #5570's
@@ -692,10 +716,38 @@ def _source_can_fail(source: str) -> bool:
         tree = ast.parse(source)
     except SyntaxError:
         return False
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def enclosing_function(node: ast.AST) -> str | None:
+        current: ast.AST | None = node
+        while current is not None and id(current) in parents:
+            current = parents[id(current)]
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return current.name
+        return None
+
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Raise, ast.Assert)):
+        if isinstance(node, ast.Assert):
+            test = node.test
+            if isinstance(test, ast.Constant) and test.value:
+                continue  # `assert <truthy constant>` can never fire
+            return True
+        if isinstance(node, ast.Raise):
+            exc = node.exc
+            if (
+                isinstance(exc, ast.Call)
+                and isinstance(exc.func, ast.Name)
+                and exc.func.id == "SystemExit"
+            ) and not _nonzero_exit_arg(exc.args):
+                continue  # `raise SystemExit(0)` exits 0
             return True
         if isinstance(node, ast.Return) and node.value is not None:
+            name = enclosing_function(node)
+            if name is None or "main" not in name.lower():
+                continue  # a helper's return value is not an exit status
             value = node.value
             if not (isinstance(value, ast.Constant) and value.value in (0, None)):
                 return True
@@ -704,14 +756,22 @@ def _source_can_fail(source: str) -> bool:
             is_exit = (
                 isinstance(func, ast.Attribute) and func.attr in ("exit", "_exit")
             ) or (isinstance(func, ast.Name) and func.id == "exit")
-            if is_exit:
-                if not node.args:
-                    continue  # `sys.exit()` defaults to 0 — not a failure
-                first = node.args[0]
-                if isinstance(first, ast.Constant) and first.value in (0, None):
-                    continue
+            if is_exit and _nonzero_exit_arg(node.args):
                 return True
     return False
+
+
+def _defaults_shell(spec: Any) -> Any:
+    """The `defaults.run.shell` of a workflow or job document, if any."""
+    if not isinstance(spec, dict):
+        return None
+    defaults = spec.get("defaults")
+    if not isinstance(defaults, dict):
+        return None
+    run = defaults.get("run")
+    if not isinstance(run, dict):
+        return None
+    return run.get("shell")
 
 
 def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, str]:
@@ -754,8 +814,18 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         if "-c" in argv:
             problems.append(f"{label}: `python -c` payload is not a direct invocation")
             continue
-        if step.get("shell"):
-            problems.append(f"{label}: validator step overrides `shell:` ({step['shell']!r})")
+        # A `shell:` can be set on the step, the job's `defaults.run`, or the
+        # WORKFLOW's `defaults.run`; a step-level-only check left the last two
+        # as bypasses of the whole shape rule.
+        inherited_shell = (
+            step.get("shell")
+            or _defaults_shell(job)
+            or _defaults_shell(docs.get(cand["workflow"]))
+        )
+        if inherited_shell:
+            problems.append(
+                f"{label}: validator runs under an overridden `shell:` ({inherited_shell!r})"
+            )
             continue
         if step.get("continue-on-error"):
             problems.append(f"{label}: validator step is `continue-on-error`")
@@ -766,12 +836,20 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         if _if_excludes_pull_request(step.get("if")):
             problems.append(f"{label}: validator step's `if:` excludes pull_request")
             continue
-        env = step.get("env") or {}
-        if isinstance(env, dict):
-            shadow = sorted(k for k in env if k in _PYTHON_ENV_SHADOWS)
-            if shadow:
-                problems.append(f"{label}: validator step shadows env {shadow}")
-                continue
+        # `env:` can be set on the step, the job, or the WORKFLOW; all are
+        # effective, and `PYTHONOPTIMIZE=1` alone strips every `assert`.
+        effective_env: dict = {}
+        for source in (
+            docs.get(cand["workflow"], {}).get("env"),
+            job.get("env"),
+            step.get("env"),
+        ):
+            if isinstance(source, dict):
+                effective_env.update(source)
+        shadow = sorted(k for k in effective_env if k in _PYTHON_ENV_SHADOWS)
+        if shadow:
+            problems.append(f"{label}: validator shadows env {shadow}")
+            continue
         # (c) the invocation must name the REAL path/config set, never /dev/null.
         # If `--paths` is given it must COVER the unioned set; otherwise the tool
         # source must reference every unioned path (the #5570 CLI shape).
@@ -795,7 +873,9 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
         except GuardUnreadable as exc:
             problems.append(f"{label}: validator unreadable ({exc})")
             continue
-        named.update(p for p in unioned if any(p in s for s in _string_constants(source)))
+        named.update(
+            p for p in unioned if any(_names_path(p, s) for s in _string_constants(source))
+        )
         missing = sorted(unioned - named)
         if missing:
             problems.append(
@@ -828,25 +908,34 @@ def _validate_union_protection(root: Path, docs: dict[str, dict]) -> tuple[int, 
 def _names_settings_home(data: bytes) -> bool:
     """Bytes that can build a path to `.github/settings.yml`.
 
-    Detects the forms a reader plausibly uses: the literal name (plain or
-    UTF-16), a concatenation (`"settings" + ".yml"`), or a glob
-    (`glob(".github/settings*")`). Bounded heuristic — it matches the NAME, not
-    data flow, so an indirect construction can still evade (declared residual).
+    A RAW ASCII needle first: any codec that stores the name literally (UTF-8,
+    Latin-1, Shift-JIS, a compiled module's marshalled constants) is caught
+    without decoding, so a non-UTF-8 file is never silently skipped. Then
+    decode-based heuristics for the forms a reader plausibly builds: a
+    concatenation (`"settings" + ".yml"`) or a glob (`glob(".github/settings*")`).
+    Bounded — it matches the NAME, not data flow (declared residual).
     """
+    if b"settings.yml" in data or b"settings.yaml" in data:
+        return True
     for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
         try:
             text = data.decode(encoding).lower()
         except (UnicodeDecodeError, ValueError):
             continue
-        if "settings.yml" in text or "settings.yaml" in text:
-            return True
-        for match in re.finditer(r"settings", text):
-            window = text[match.start() : match.start() + 60]
-            if re.search(r"['\"]\s*\+\s*['\"]\.ya?ml", window):
-                return True
-        if re.search(r"(?:rglob|glob)\s*\([^)]*settings", text):
+        if _looks_like_settings_path(text):
             return True
     return False
+
+
+def _looks_like_settings_path(text: str) -> bool:
+    """The concatenation/glob forms of a path to the declaration home."""
+    if "settings.yml" in text or "settings.yaml" in text:
+        return True
+    for match in re.finditer(r"settings", text):
+        window = text[match.start() : match.start() + 60]
+        if re.search(r"['\"]\s*\+\s*['\"]\.ya?ml", window):
+            return True
+    return bool(re.search(r"(?:rglob|glob)\s*\([^)]*settings", text))
 
 
 def _settings_readers(root: Path) -> list[str]:
@@ -878,8 +967,10 @@ def _settings_readers(root: Path) -> list[str]:
                 continue
             try:
                 data = path.read_bytes()
-            except OSError:
-                continue
+            except OSError as exc:
+                # Fail closed: an unreadable file under the scanned scope could
+                # be a reader, so a skip is not a pass.
+                raise GuardUnreadable(f"{rel} is unreadable ({exc})") from exc
             if _names_settings_home(data):
                 readers.append(rel)
     return readers
@@ -1328,6 +1419,8 @@ def _record_live_attempt(
                 # A failed read must never launder an unreadable authoritative
                 # record: skip the write rather than replace it with a stub.
                 return
+            # A SATISFIED live read IS authoritative (an admin re-cut), so it
+            # rebuilds the unreadable record from the observed set below.
             record = {}
     record["live_result"] = result
     record["live_checked_at"] = _iso(_now())
