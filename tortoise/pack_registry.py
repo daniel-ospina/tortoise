@@ -1236,6 +1236,14 @@ class PackRegistry:
         Returns list of kind strings for Cypher IN clause.
         Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:task"]
 
+        INVARIANT (#6146): the argument is ALWAYS in its own expansion —
+        ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
+        its subclasses and equivalents, it never replaces the caller's kind with
+        namespace forms. Read paths (``query``/``paginated_query`` build
+        ``n.pointKind IN [...]`` from this list) must not turn a valid kind into
+        an empty result set, because a wrong-empty is indistinguishable from a
+        true-empty to the caller.
+
         Pre-computed at load_all() time, O(1) dict lookup at query time.
         """
         if not hasattr(self, '_kind_expansions'):
@@ -1298,9 +1306,16 @@ class PackRegistry:
                         expansions[target].append(full_kind)
 
         # Bare-kind resolution: a bare kind name (e.g., "useCase") maps to all
-        # pack-prefixed forms (e.g., "product-strategy:useCase"). The bare form
-        # itself is omitted unless it's a canonical core kind — migrate_kinds
-        # converts bare- → prefixed before queries.
+        # pack-prefixed forms (e.g., "product-strategy:useCase").
+        #
+        # #6146: the bare form ITSELF is kept. Expansion is additive; an
+        # expansion that DROPPED the argument made `query(kind=K)` build
+        # `n.pointKind IN ['dev:issue','pm:issue']`, which matches no point
+        # created with the bare `issue` kind — so a valid kind with live points
+        # returned [] and the caller could not tell that from "no points".
+        # `migrate_kinds` is a manual, opt-in normaliser (tortoise/migrate_kinds.py,
+        # run by hand), never a precondition for a READ, so bare-kinded data is a
+        # state the read path must serve rather than assume away.
         bare_to_full: dict[str, list[str]] = {}
         for full in expansions:
             if ":" in full:
@@ -1312,7 +1327,7 @@ class PackRegistry:
                     if f not in expansions[bare]:
                         expansions[bare].append(f)
             else:
-                expansions[bare] = fulls
+                expansions[bare] = [bare, *fulls]
 
         self._kind_expansions = expansions
 
