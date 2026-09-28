@@ -813,13 +813,30 @@ assert_eq "$(iso_epoch "epoch:1234567890123")" "" "51: an over-long epoch run is
 
 # (c1) malformed DATETIME fields — pinned to the inner `dt` shape check. BSD `date`
 # prefix-matches a short field (`03:1:01`), so without that guard these return
-# wrong-but-plausible epochs rather than "".
+# wrong-but-plausible epochs rather than "". These four are the ONLY inputs of the
+# original thirteen that reach `dt` at all: ablating that arm reddens exactly these
+# four, which is how the split below was measured rather than assumed.
 for bad in "2026-09-13T03:1:01.750Z" "2026-09-13T3:15:01.750Z" \
-           "2026-9-13T03:15:01.750Z" "2026-09-13T03:15:1.750Z" \
-           "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
-           "2026-09-13T03:15:01.000+05:00garbage" "2026-09-13T03:15:01.000garbage" \
+           "2026-9-13T03:15:01.750Z" "2026-09-13T03:15:1.750Z"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (inner dt shape guard)"
+done
+# (c5) a SECOND dot — pinned to the second-dot arm, which refuses BEFORE `dt` is
+# computed (the middle segment would otherwise be discarded by `${iso%%.*}` /
+# `${iso##*.}` and `…:01.000.5Z` would yield a plausible epoch). NOT `dt`: every
+# one of these is well-formed up to the first dot, so `dt` would MATCH them.
+# `…:01.5.Z` is grouped here for locality but is NOT uniquely pinned — with the
+# second-dot arm removed its fraction is empty, and the fraction arm refuses it.
+for bad in "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
            "2026-09-13T03:15:01.5.Z"; do
-  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (not a plausible epoch)"
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (second-dot guard)"
+done
+# (c6) a fraction that is not digits-only — pinned to the fraction arm. These DO
+# reach and PASS `dt` (the field is well-formed to the dot); the refusal is the
+# digits-only test on what follows it, which is also what stops the offset in
+# `…000+05:00garbage` from being silently applied.
+for bad in "2026-09-13T03:15:01.000+05:00garbage" \
+           "2026-09-13T03:15:01.000garbage"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (fraction digits-only guard)"
 done
 # (c4) refused by the OUTER shape fallback (`*)`), NOT by the `dt` guard above.
 # These carry no "." at all, so they never enter the `*.*` branch and never reach
