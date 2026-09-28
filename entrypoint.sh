@@ -39,24 +39,146 @@ set -euo pipefail
 # masks every `scheme://` occurrence inside a longer message; the shell helper is
 # `^`-anchored and does not, by design. tests/test_boot_regressions.py pins the
 # two to identical output over the corpus it enumerates.
+#
+# #2987 — redaction is PER LINE, and fail-closed is PER LINE. The rule above was
+# applied to the whole value and then the fail-closed guard compared the whole
+# value, so (1) sed, being line-oriented, masked only the line carrying the
+# scheme and echoed the rest, and (2) the guard never fired because line 1 had
+# already changed the comparison. A line is the unit the boot log emits, so a
+# line must be safe on its own.
+#
+# #2987 second residual — the guard's only userinfo marker was '@', but '@' is
+# not the only credential shape. A copy-paste that drops the '@host' tail leaves
+# `scheme://:pw` (empty user) or `scheme://user:pw`; a copy-paste that keeps the
+# port leaves `scheme://user:pw:6379`. The fail-closed predicate below mirrors
+# `tortoise/__main__.py::_credential_shaped` exactly (see the parity test), and a
+# line may only stay unmasked when it is a RECOGNISED-SAFE shape: empty, a plain
+# host with no ':', a single-':' host:port with a NUMERIC port, or a bracketed
+# IPv6 host with an optional numeric port. Everything else fails closed.
 _redact_uri() {
-    local uri="${1:-}" masked
+    local uri="${1:-}" masked line out="" first=1 shaped=0 candidate \
+          tail before rest cut=$'[/?#"\047 \t\v\f\r\n]'
     if [ -z "$uri" ]; then
         return 0
     fi
-    masked=$(printf '%s' "$uri" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|') || masked=""
-    # Fail closed on a shape this rule cannot recognise. A malformed value that
-    # still carries userinfo (a copy-paste that dropped the scheme, say) is
-    # matched by nothing above, so without this it would be printed verbatim —
-    # the app would reject it, but the password would already be in the log.
-    if [ "$masked" = "$uri" ] && [ "${uri#*@}" != "$uri" ]; then
-        printf '%s' "<uri-redacted-unrecognised-shape>"
-        return 0
-    fi
-    # A redaction failure must not silently blank the target either: without this
-    # the line reads "→ " and the diagnosability the redaction exists to preserve
-    # is gone with no signal.
-    printf '%s' "${masked:-<unprintable-uri>}"
+    while IFS= read -r line || [ -n "$line" ]; do
+        if ! masked=$(printf '%s' "$line" | sed -E 's|^([[:space:]]*[a-zA-Z][a-zA-Z0-9+.-]*://).*@|\1:***@|'); then
+            # A redaction failure must not silently blank the target either:
+            # without this the line reads "→ " and the diagnosability the
+            # redaction exists to preserve is gone with no signal.
+            masked="<unprintable-uri>"
+        else
+            # Whether sed masked anything decides WHICH text is the candidate to
+            # judge. MASKED (the line carried an '@'): the text after the LAST
+            # '@' is the host for a well-formed URI, but a malformed value can
+            # carry a credential there and this used to echo it verbatim —
+            # `rediss://u:pw@h:1 rediss://:pw` (a later scheme:// this
+            # ^-anchored helper cannot reach at all) and `rediss://u:pw@host:pw`
+            # (a credential-shaped tail; the SAME region fails closed below when
+            # no '@' is present — that asymmetry was the leak). The shared
+            # predicate judges it. This reverses the #720 review's "bad port
+            # stays readable" behaviour: `...@127.0.0.1:notaport` and `...@[abc`
+            # now fail closed, and the port value survives in the exception
+            # text of the same message. UNMASKED: judge the post-scheme /
+            # continuation text, as before.
+            shaped=0
+            candidate=""
+            if [ "$masked" != "$line" ]; then
+                candidate="${line##*@}"
+                case "$candidate" in
+                    *://*) shaped=1 ;;
+                esac
+            else
+                case "$line" in
+                    *@*) shaped=1 ;;
+                esac
+            fi
+            if [ "$shaped" -eq 0 ]; then
+                if [ "$masked" = "$line" ] && [ "$line" != "${line#*://}" ]; then
+                    candidate="${line#*://}"
+                    # A single DB URI has one '://'. A SECOND '://' on a line
+                    # with no '@' cannot be predicated by this ^-anchored
+                    # helper without the embedded-URI handling the canonical
+                    # has, and a later `scheme://:pw` / `scheme://user:pw`
+                    # would otherwise ride through while the canonical masks it.
+                    # Fail closed rather than echo a later occurrence.
+                    if [ "$candidate" != "${candidate#*://}" ]; then
+                        shaped=1
+                    fi
+                else
+                    # No scheme on this line. Only the empty-user tell is safe
+                    # here: an arbitrary 'a:b' line is prose or a path, not a
+                    # credential, and the canonical helper sees such text in
+                    # error messages. A continuation line of a multi-line
+                    # credential is exactly `:password`.
+                    case "$line" in
+                        :*) candidate="$line" ;;
+                    esac
+                fi
+                # Bound the authority at the first path/query/fragment
+                # delimiter, quote or ASCII whitespace: everything after it is
+                # not the authority. The set is spelled out rather than
+                # `[[:space:]]` so it is locale-independent and byte-identical
+                # to `tortoise/__main__.py::_authority_region`. Keep the two in
+                # sync — a different cut set is a divergence, and `[[:space:]]`
+                # additionally matches NBSP under a UTF-8 locale, which the
+                # canonical literal set does not (a parity break).
+                candidate="${candidate%%$cut*}"
+                if [ -n "$candidate" ]; then
+                    case "$candidate" in
+                        \[*)
+                            # A bracketed IPv6 host is recognised-safe with an
+                            # optional numeric port; a malformed bracket is not.
+                            tail="${candidate#*\]}"
+                            case "$tail" in
+                                '') ;;
+                                :*)
+                                    # `[::1]:6379` is recognised-safe; the
+                                    # port must be ALL digits. `:[0-9]*`
+                                    # accepted a digit-led non-numeric suffix
+                                    # (`:[0-9]*` matches `:6379:S3n`), so a
+                                    # bracketed credential failed OPEN here
+                                    # while the canonical masked it.
+                                    case "${tail#:}" in
+                                        ''|*[!0-9]*) shaped=1 ;;
+                                    esac
+                                    ;;
+                                *) shaped=1 ;;
+                            esac
+                            ;;
+                        *:*)
+                            before="${candidate%%:*}"
+                            rest="${candidate#*:}"
+                            if [ -z "$before" ] || [ "$rest" != "${rest#*:}" ]; then
+                                # empty user before the first ':' (a dropped
+                                # '@host'), or more than one ':' — a genuine
+                                # host:port has exactly one.
+                                shaped=1
+                            else
+                                # A NUMERIC field after the ':' is a port, not a
+                                # credential, so a password-less target keeps
+                                # printing unchanged. An empty or non-numeric
+                                # tail is credential material.
+                                case "$rest" in
+                                    ''|*[!0-9]*) shaped=1 ;;
+                                esac
+                            fi
+                            ;;
+                    esac
+                fi
+            fi
+            if [ "$shaped" -eq 1 ]; then
+                masked="<uri-redacted-unrecognised-shape>"
+            fi
+        fi
+        if [ "$first" -eq 1 ]; then
+            first=0
+            out="$masked"
+        else
+            out+=$'\n'"$masked"
+        fi
+    done <<< "$uri"
+    printf '%s' "$out"
 }
 
 # #1349 T11: reject the benchmark-only probe seam in the hosted image.

@@ -130,8 +130,13 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
                                   pool_size=caps["pool_size"],
                                   include_terminal=True)
     annotated = sdk.annotate_ask_hits(hits)
-    from tortoise.retrieval import dedup_pool
-    deduped = dedup_pool(annotated, max_chunks_per_session=3)
+    from tortoise.retrieval import ask_session_key, dedup_pool
+    # The lane's OWN key. Using the default (``session_key_of``) would re-derive
+    # a different bucket order than the lane it claims to reproduce, so the
+    # rendered transcript would not byte-match the message the reader gets
+    # (#4155).
+    deduped = dedup_pool(annotated, max_chunks_per_session=3,
+                         session_key=ask_session_key)
     assembled = assemble_context(
         deduped, top_k=caps["context_item_cap"],
         max_context_tokens=caps["context_token_cap"],
