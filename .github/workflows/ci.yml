@@ -650,8 +650,10 @@ jobs:
     # network, no secrets.
     #
     # ⚠️ This job is NOT a required status check: a red harness does not block a
-    # merge, so a regression here can land and then silently make the REQUIRED
-    # `ai-review-gate` check pass without evaluating evidence. Tracked in #3091
+    # merge, so a regression here can land and then silently let the
+    # `ai-review-gate` check pass without evaluating evidence. `ai-review-gate`
+    # is itself NOT a required check either (verified 2026-09-28, #5426), so
+    # neither job gates a merge. Tracked in #3091
     # (add this job to branch protection, or move the harness into an
     # always-run required job). The `if:` above is a complete per-surface guard:
     # it fires on any change to the gate workflow, this harness, or ci.yml.

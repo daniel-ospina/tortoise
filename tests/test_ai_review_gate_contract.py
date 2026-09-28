@@ -291,6 +291,12 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     assert env["PR_NUMBER"] == "${{ github.event.pull_request.number }}", env
     assert env["REPO_NAME"] == "${{ github.event.repository.full_name }}", env
     assert env["PR_BODY"] == "${{ github.event.pull_request.body }}", env
+    # (#5426) The synthetic-merge-queue-batch guard reads these two. They are
+    # NOT reachable by any runtime case (the harness injects them itself), so a
+    # dropped or mis-sourced env line would silently disable the guard while
+    # every test stayed green — pin the production wiring here.
+    assert env["PR_AUTHOR"] == "${{ github.event.pull_request.user.login }}", env
+    assert env["HEAD_REF"] == "${{ github.head_ref }}", env
     job = _workflow()["jobs"]["ai-review-gate"]
     assert "if" not in _gate_step() and "if" not in job, (
         "a conditional/skipped gate reports Success — never gate this job"

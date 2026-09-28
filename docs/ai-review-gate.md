@@ -12,10 +12,14 @@ ownedBy: epistemic-team
 
 # AI Review Merge Gate
 
-`main` branch protection requires the `ai-review-gate` status check on every
-pull request. It replaces the human-approval requirement: merges proceed when
-the code-review skill's AI review is recorded and all required checks are
-green.
+`ai-review-gate` is **not** a branch-protection required status check on
+`main` (verified 2026-09-28: the live required contexts are `pricing-artifact`,
+`docs`, `test-isolation`, `license-surface`, `legal-e2e`, `python-ci-gate` —
+#5426). GitHub does not block a merge on it — it is the local rail
+(`scripts/admin-merge.sh`, which computes the failing set and refuses on a red)
+and human/agent triage that read it, and the Mergify merge queue does not
+consult it. The `code-review` skill's evidence is therefore enforced on local
+land paths only (#5433).
 
 ## How it works
 

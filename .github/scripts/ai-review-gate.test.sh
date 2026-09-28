@@ -66,6 +66,11 @@
 #       dropped only when the entry carries a hunk, kept verbatim otherwise —
 #       hunk-header rewrite with the absent-count default of 1, mode-width
 #       boundary, and final-newline preservation)
+#   (r) synthetic merge-queue batch (#5426): a `mergify[bot]`-authored PR on
+#       `mergify/merge-queue/<sha>` passes even with no evidence (it is not a
+#       review target and not a merge condition), while a NON-mergify author
+#       with the same branch name, and a `mergify[bot]` PR on an ordinary
+#       branch, both still FAIL — the guard cannot be bypassed by naming alone
 #   plus the static invariants: the required job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
 #   trigger must be EXACTLY `pull_request_target` (asserted over `pull_request*`
@@ -425,6 +430,10 @@ run_gate() { # <env-body-file> [<rest-body-file>]
         export PR_BODY
         PR_BODY="$(cat "$envfile")"
         export HEAD_SHA="$HEAD" PR_NUMBER REPO_NAME
+        # (#5426) Synthetic-queue-batch guard inputs. Defaults describe an
+        # ordinary author PR; the (r) cases override them.
+        export PR_AUTHOR="${PR_AUTHOR_OVERRIDE:-daniel-ospina}"
+        export HEAD_REF="${HEAD_REF_OVERRIDE:-feat/author-branch}"
         export GATE_SECRET="${GATE_SECRET_OVERRIDE:-$KEY}"
         export STUB_BODY_FILE="$restfile" STUB_LOG="$T/gh.log"
         export STUB_UNRECOGNISED="$T/gh-unrecognised"
@@ -921,6 +930,30 @@ diff_marker "$STALE" "$DH_TB1_RAW" > "$T/body-raw-normfail"
 STUB_DIFF_FILE="$TEXT_B1" run_gate "$T/body-raw-normfail"
 assert_rc 1 "(g2) a failing normalizer clears the RAW arm too (no silent fallback)"
 rm -f "$T/bin/python3"
+
+# (r) Synthetic merge-queue batch guard (#5426). Mergify's queue PR is authored
+#     by `mergify[bot]` on `mergify/merge-queue/<sha>` and can never carry an
+#     attestation, so the gate must pass it explicitly instead of reddening
+#     every batch. The guard needs BOTH signals: naming alone must not bypass
+#     the author-PR gate.
+printf 'merge queue: checking #1 + #2 together\n' > "$T/body-r-queue"
+PR_AUTHOR_OVERRIDE="mergify[bot]" HEAD_REF_OVERRIDE="mergify/merge-queue/19ba552894" \
+    STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-queue"
+assert_rc 0 "(r1) a mergify[bot] queue batch passes with no evidence"
+assert_contains "(r1) explains why (not a review target)" "Synthetic merge-queue batch"
+# (r2) Bypass control: a contributor branch named mergify/merge-queue/... is NOT
+#      authored by the bot and must still fail closed.
+printf 'no marker\n' > "$T/body-r-bypass"
+PR_AUTHOR_OVERRIDE="daniel-ospina" HEAD_REF_OVERRIDE="mergify/merge-queue/19ba552894" \
+    STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-bypass"
+assert_rc 1 "(r2) a non-mergify author with a queue-shaped branch still fails closed"
+assert_contains "(r2) reports no evidence" "No AI review evidence found"
+# (r3) The other signal alone must not bypass either: a mergify[bot] PR on an
+#      ordinary branch is an author PR and is evaluated normally.
+printf 'no marker\n' > "$T/body-r-botbranch"
+PR_AUTHOR_OVERRIDE="mergify[bot]" HEAD_REF_OVERRIDE="feat/author-branch" \
+    STUB_DIFF_FILE="$DIFF_FILE" run_gate "$T/body-r-botbranch"
+assert_rc 1 "(r3) mergify[bot] on an ordinary branch is still evaluated (fails with no evidence)"
 
 echo ""
 echo "── Summary ───────────────────────────────────────────────────────"
