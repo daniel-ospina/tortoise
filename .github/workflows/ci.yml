@@ -15,8 +15,8 @@ jobs:
   # `needs: changes` + `if:` on its surface. The 5 branch-protection REQUIRED
   # checks (pricing-artifact, docs, test-isolation, license-surface,
   # legal-e2e) deliberately keep NO needs/if — a SKIPPED required job reports
-  # as Success and would silently pass the required check (the ai-review-gate
-  # trap, #2055). Fail-closed on detection: an empty/erroneous diff emits ALL
+  # as Success and would silently pass a required check (the trap #2055 named).
+  # Fail-closed on detection: an empty/erroneous diff emits ALL
   # surfaces true so every gated job runs — never a silent coverage loss.
   changes:
     runs-on: ubuntu-latest

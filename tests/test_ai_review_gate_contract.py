@@ -282,7 +282,7 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     The runtime tests inject env themselves, so they would still pass if the
     workflow stopped wiring GATE_SECRET to the repo secret or switched the
     head-sha source. Pin the wiring here. Also pin the skip-footgun: a job
-    `if:`/path filter would report SKIPPED — i.e. Success — for the required
+    `if:`/path filter would report SKIPPED — i.e. Success — for the
     check with no evidence evaluated.
     """
     env = _gate_step()["env"]

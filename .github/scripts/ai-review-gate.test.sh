@@ -71,7 +71,7 @@
 #       review target and not a merge condition), while a NON-mergify author
 #       with the same branch name, and a `mergify[bot]` PR on an ordinary
 #       branch, both still FAIL — the guard cannot be bypassed by naming alone
-#   plus the static invariants: the required job must never gain
+#   plus the static invariants: the gate job must never gain
 #   `if:`/`needs:`/`continue-on-error:` (any indentation or quoting), the
 #   trigger must be EXACTLY `pull_request_target` (asserted over `pull_request*`
 #   TOKENS, so `pull_request: {}`, a space before the colon, a quoted key, a
@@ -252,9 +252,9 @@ for _blk in job on perm; do
     fi
 done
 
-# (1) The required job must never become conditional or non-blocking. A
+# (1) The gate job must never become conditional or non-blocking. A
 #     SKIPPED check reports Success; `continue-on-error` swallows a failure.
-#     Either one silently passes the required check without evaluating any
+#     Either one silently passes the check without evaluating any
 #     evidence. The pattern matches the key as a TOKEN after an optional `?`
 #     (YAML explicit key: `? if` / `: false` — valid Actions YAML that GitHub's
 #     own parser accepts) or quote, and accepts a line that ENDS at the key,
@@ -264,14 +264,14 @@ done
 #     Plain, quoted (`    "if":`), space-padded (`    if :`) and explicit-key
 #     (`    ? if`) forms are all matched.
 if grep -qE '(^|[[:space:]{,?])["'\'']?(if|needs|continue-on-error)["'\'']?[[:space:]]*(:|$)' "$T/job-block.yml"; then
-    bad "gate job gained if:/needs:/continue-on-error: — a skipped or swallowed required check reports Success"
+    bad "gate job gained if:/needs:/continue-on-error: — a skipped or swallowed check reports Success"
 else
     ok "gate job carries no if:/needs:/continue-on-error: (must always run)"
 fi
 
 # (2) The trigger must be EXACTLY `pull_request_target`. Under `pull_request`, a
 #     same-repo PR executes ITS OWN copy of this workflow (it can `exit 0` and
-#     self-certify the required check), and fork PRs stop receiving
+#     self-certify the check), and fork PRs stop receiving
 #     AI_REVIEW_GATE_KEY. Assert the SET of `pull_request*` TOKENS in the `on:`
 #     block, not a spelled-out key: a key-spelling matcher misses `pull_request
 #     : {}` (space before colon), `{pull_request: {...}}` (flow mapping), a
@@ -286,14 +286,14 @@ else
     bad "trigger is not exactly pull_request_target (pull_request* tokens found: $(printf '%s' "$on_tokens" | tr '\n' ',') ) — a same-repo PR could run its own gate definition"
 fi
 
-# (3) No path filter may gate the workflow. A required check whose workflow is
-#     skipped by path filtering stays PENDING forever, so the PR can never
-#     merge (a self-inflicted deadlock rather than a silent bypass — an earlier
-#     version of this message claimed it reports Success; corrected in the
-#     cycle-3 review). Matched as a token, so a flow mapping on the trigger
-#     line and an explicit key (`? paths`) are both caught.
+# (3) No path filter may gate the workflow. A path-filtered workflow simply
+#     does not RUN on a non-matching PR, so the gate silently stops reporting
+#     — and a check that reports nothing is read as a pass (the local rail
+#     refuses only on a RED). That is a silent bypass, not a deadlock.
+#     Matched as a token, so a flow mapping on the trigger line and an
+#     explicit key (`? paths`) are both caught.
 if grep -qE '(^|[[:space:]{,?])["'\'']?(paths|paths-ignore)["'\'']?[[:space:]]*(:|$)' "$T/on-block.yml"; then
-    bad "trigger gained a paths:/paths-ignore: filter — a path-filtered required check stays Pending, so the PR can never merge"
+    bad "trigger gained a paths:/paths-ignore: filter — a path-filtered gate never runs, so it silently stops reporting (a skipped check reads as a pass to the rail)"
 else
     ok "trigger carries no paths:/paths-ignore: filter"
 fi
@@ -687,11 +687,11 @@ assert_rc 0 "(l) a whitespace-padded key is normalised"
 echo "── (m) a whitespace-ONLY key fails closed ─────────────────────"
 # A whitespace-only secret passes the raw `-z` guard and then normalizes to the
 # EMPTY string, which is a PUBLIC HMAC key: any PR author could mint a
-# stale-sha marker carrying the live `diff=` and turn the required check green
+# stale-sha marker carrying the live `diff=` and turn the check green
 # on an unreviewed diff. The gate must re-validate AFTER normalization.
 # Sign the marker with the EMPTY key — the key every attacker knows once the
 # secret normalizes to "". If the gate skips validation of the NORMALIZED key,
-# this marker verifies and the required check passes on an unreviewed diff.
+# this marker verifies and the check passes on an unreviewed diff.
 empty_key_marker() {
     local m="review recorded: reviews/${PR_NUMBER}.json verdict=clean @ ${HEAD} diff=${DH} (${REPO_NAME})"
     printf '%s sig=%s\n' "$m" "$(printf '%s' "$m" | openssl dgst -sha256 -hmac "" | awk '{print $NF}')"
@@ -707,7 +707,7 @@ echo "── (n) a malformed trailing line cannot hijack the repo diagnostic ─
 # A well-formed but STALE own-repo marker followed by a line that carries a
 # trailing ` (other/repo) sig=<hex>` but no well-formed 40-hex sha must still
 # report the real cause (stale). Naming `other/repo` suppresses the accurate
-# stale/diff diagnostic on a REQUIRED check.
+# stale/diff diagnostic on a red check.
 {
     diff_marker "$STALE" "$DH2"
     printf 'review recorded: reviews/%s.json verdict=clean @ not-a-sha (some-other/place) sig=%s\n' \
@@ -729,7 +729,7 @@ assert_contains "(o1) names the diff-match path" "passed via diff match"
 assert_contains "(o1) reports the normalized digest matched" "matched the normalized digest"
 # o2 — backward compatibility. The legacy RAW digest is STILL accepted for the
 # same diff. Without this arm every marker already recorded breaks and the
-# required check reddens fleet-wide. This is the case that pins the consumer-
+# check reddens fleet-wide. This is the case that pins the consumer-
 # first land order.
 diff_marker "$STALE" "$DH_RAW" > "$T/body-o2"
 STUB_DIFF_FILE="$DIFF_NORM_FILE" run_gate "$T/body-o2"
@@ -787,7 +787,7 @@ echo "── (q) #1362 binary carve-out: entry-scoped index retention ───�
 # exactly when the hunk content already carries the change. A binary entry has
 # no hunks and `Binary files … differ` carries no content, so an unconditional
 # drop made two DISTINCT binary revisions normalize identically — review v1,
-# sign, swap in v2, and the required gate ACCEPTED the unreviewed binary.
+# sign, swap in v2, and the gate ACCEPTED the unreviewed binary.
 
 # (a) The fail-open is CLOSED. Two different binaries at the same path must
 #     produce DIFFERENT normalized digests. This is the mutation-pinned case:
