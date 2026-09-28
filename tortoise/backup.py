@@ -116,6 +116,29 @@ def restore(backup_dir: str, db_path: str,
     if not events_file.exists():
         return {"events": 0, "status": "error: no events.jsonl in backup"}
 
+    # #3316: classify the SOURCE journal BEFORE any destination mutation. This
+    # is the FOURTH whole-journal replay engine, so a torn trailing removal
+    # record must not be replayed away — but the refusal has to land before the
+    # block below REPLACES the destination store, or a refused restore leaves
+    # the caller's DB emptied and its AOF removed (``remove_stale_aof``
+    # rmtree's it) with nothing restored: the refusal message would claim the
+    # graph was left alone while it had just been destroyed. The RDB path is
+    # deliberately NOT consulted first — consulting it needs the snapshot
+    # copied over the destination, which is the very mutation being guarded.
+    # The cost is bounded: a torn DESTRUCTIVE tail also refuses a restore whose
+    # snapshot could have carried the graph, and the remedy (repair or truncate
+    # the journal in the backup) is the one every other engine names.
+    from tortoise.log import EventLog, refuse_torn_tail_revival
+    _source_log = EventLog(events_file)
+    try:
+        _source_records: list[dict] | None = _source_log.read_all()
+        refuse_torn_tail_revival(_source_log.torn_tail_revival_records())
+    except ValueError:
+        # Mid-file corruption is NOT this refusal (it is a parse error, not a
+        # torn tail) and the RDB path does not read the journal at all: let the
+        # JSONL fallback below raise it, as it did before #3316.
+        _source_records = None
+
     # Copy files to target
     shutil.copy2(events_file, events_path)
     if db_file.exists():
@@ -137,7 +160,7 @@ def restore(backup_dir: str, db_path: str,
             FalkorProjection,
             journal_hard_delete_seqs,
         )
-        from tortoise.log import EventLog, refuse_torn_tail_revival
+        from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
         # incl. SDK-created points that never made it into events.jsonl.
         if db_file.exists():
@@ -155,26 +178,22 @@ def restore(backup_dir: str, db_path: str,
         try:
             # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
             # whose endpoint is created LATER in the journal folds to nothing
-            # inline. This is the FOURTH whole-journal replay engine (besides
-            # ``rebuild`` / ``rebuild_all`` / ``recover_from_log``) — buffer
-            # the records and fold them AFTER the pass, the same trailing
-            # sweep the other three give the type. The records carry their
+            # inline. This engine buffers the records and folds them AFTER the
+            # pass, the same trailing sweep ``rebuild`` / ``rebuild_all`` /
+            # ``recover_from_log`` give the type. The records carry their
             # journal seq so the sweep can suppress a link whose endpoint was
             # HARD-DELETED afterwards (#3722 review P2). A fold failure is
             # logged, never raised: restore must not abort on one unreplayable
             # link.
+            # #3316: the torn-tail verdict was already taken on the SOURCE
+            # journal above, BEFORE this engine replaced the destination store
+            # — the refusal cannot be re-taken here, after the mutation, and
+            # the copy made above is byte-identical to the source. ``None``
+            # means the source parse hit mid-file corruption; re-reading the
+            # copy raises the same actionable error from the same reader.
             log = EventLog(events_path)
-            records = log.read_all()
-            # #3316: the JSONL fallback is the FOURTH whole-journal replay
-            # engine, so it refuses the same journal the other three do. A
-            # torn trailing removal record was dropped by ``read_all`` and the
-            # state it removed would come back live on the replay below, so
-            # refuse BEFORE the fold — the RDB path above already returned
-            # when the snapshot itself carried the graph. The destination
-            # event file and (when present) the snapshot were copied by the
-            # block above: those are restore's OWN targets, not the source,
-            # and no record has been applied to the graph here.
-            refuse_torn_tail_revival(log.torn_tail_revival_records())
+            records = (_source_records if _source_records is not None
+                       else log.read_all())
             hard_delete_seqs = journal_hard_delete_seqs(records)
             deferred_links: list[tuple[int, dict]] = []
             for seq, ev in enumerate(records):

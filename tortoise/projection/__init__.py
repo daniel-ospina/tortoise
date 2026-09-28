@@ -2349,8 +2349,8 @@ def _refuse_revival_torn_tail(revival_records) -> None:
     mutation cannot un-apply it. The classification and the message live in
     :mod:`tortoise.log` so every replay engine (``rebuild`` / ``rebuild_all`` /
     ``InMemoryProjection.rebuild`` / ``recover_from_log`` /
-    ``backup.restore`` / the ``tortoise rebuild`` CLI fallback) refuses through
-    ONE home.
+    ``backup.restore`` / the ``tortoise rebuild`` CLI fallback / the
+    ``tortoise reconcile`` CLI) refuses through ONE home.
     """
     from tortoise.log import refuse_torn_tail_revival
 

@@ -777,6 +777,90 @@ def test_backup_restore_refuses_a_torn_removal_tail():
         proj2.close()
 
 
+def test_backup_restore_refuses_before_touching_the_destination():
+    """The refusal must precede restore's DESTRUCTIVE half (#3316 review).
+
+    ``restore`` copies the backup journal over ``events_path`` and then, when a
+    snapshot is present, rmtree's the destination's AOF and copies the snapshot
+    over the destination DB. A verdict taken after that leaves the caller's
+    store destroyed with nothing restored — while the refusal message claims
+    the graph was left alone. Both halves must be untouched.
+    """
+    from tortoise.backup import restore
+
+    tmp = _mk_tmp()
+    backup_dir = os.path.join(tmp, "backup")
+    work = os.path.join(tmp, "work")
+    os.makedirs(backup_dir, exist_ok=True)
+    os.makedirs(work, exist_ok=True)
+    # The backup: a torn hard delete + a STUB snapshot (0 nodes), so the JSONL
+    # fallback is the path that would run.
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(os.path.join(backup_dir, "events.jsonl"),
+                   _point_added("gone-1"), full[:full.index('"op"')],
+                   torn_last=True)
+    stub = FalkorProjection(os.path.join(backup_dir, "tortoise.db"))
+    stub.close()
+    # The DESTINATION, holding state a refused restore must not destroy.
+    dest_db = os.path.join(work, "dest.db")
+    dest_events = os.path.join(work, "events.jsonl")
+    keep = FalkorProjection(dest_db)
+    try:
+        keep.g.query("CREATE (:Point {id: 'keep-live-1', status: 'live'})")
+    finally:
+        keep.close()
+    with open(dest_events, "w", encoding="utf-8") as fh:
+        fh.write('{"type": "PointAdded", "point": {"id": "dest-marker"}}\n')
+
+    with pytest.raises(RuntimeError, match="resurrect"):
+        restore(backup_dir, dest_db, events_path=dest_events, into_falkor=True)
+
+    with open(dest_events, encoding="utf-8") as fh:
+        assert "dest-marker" in fh.read(), \
+            "the refused restore overwrote the destination journal"
+    proj = FalkorProjection(dest_db)
+    try:
+        kept = proj.g.query(
+            "MATCH (n:Point {id:'keep-live-1'}) RETURN count(n)"
+        ).result_set[0][0]
+        assert kept == 1, "the refused restore destroyed the destination graph"
+    finally:
+        proj.close()
+
+
+def test_reconcile_cli_refuses_a_torn_removal_tail(capsys):
+    """``tortoise reconcile`` is a replay engine too (#3316 review).
+
+    It folds journal records into the graph, so it refuses the same journal the
+    other engines do — as a message and a non-zero exit, not a traceback. The
+    refusal precedes ``FalkorProjection.from_uri``, so no DB is contacted here:
+    nothing can have been applied.
+    """
+    import argparse
+
+    from tortoise.__main__ import _cmd_reconcile
+
+    tmp = _mk_tmp()
+    log_path = os.path.join(tmp, "events.jsonl")
+    full = json.dumps({
+        "type": "EntityMutated", "label": "Point", "id": "gone-1",
+        "op": "delete", "seq": 2,
+    })
+    _write_journal(log_path, _point_added("gone-1"),
+                   full[:full.index('"op"')], torn_last=True)
+
+    rc = _cmd_reconcile(argparse.Namespace(
+        db="docker://:falkordb@localhost:6379/tortoise_test_matrix",
+        log=log_path))
+    captured = capsys.readouterr()
+    assert rc == 1, f"a refused reconcile must exit non-zero, got {rc!r}"
+    assert "Refused:" in captured.err, captured.err
+    assert "resurrect" in captured.err, captured.err
+
+
 def test_rebuild_cli_reports_the_refusal_as_a_message(capsys, monkeypatch):
     """The operator surface: ``tortoise rebuild`` exits non-zero and prints the
     refusal as a message (the same contract as the episodic refusal) instead of

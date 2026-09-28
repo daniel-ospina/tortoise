@@ -319,13 +319,27 @@ def _cmd_reconcile(args):
         return 1
 
     try:
-        from tortoise.log import EventLog
+        from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import FalkorProjection
     except ImportError:
         print("Tortoise not installed. Run: pip install -e negation-game-explorations/tortoise", file=sys.stderr)
         return 1
 
-    events = EventLog(log_path).read_all()
+    # #3316: ``reconcile`` is a replay engine too — it folds journal records
+    # into the graph, so a torn trailing REMOVAL record must not be applied
+    # over (``EventRecorded``'s connector leg deletes a superseded
+    # ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source``).
+    # Refused before the projection is even opened.
+    log = EventLog(log_path)
+    try:
+        events = log.read_all()
+        refuse_torn_tail_revival(log.torn_tail_revival_records())
+    except TornTailResurrectionError as refusal:
+        # Same operator contract as ``tortoise rebuild``: the refusal is the
+        # intended outcome for this journal, so it is a message and a non-zero
+        # exit, never a traceback. Nothing has been applied.
+        print(f"Refused: {refusal}", file=sys.stderr)
+        return 1
 
     proj = None
     try:
