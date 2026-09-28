@@ -868,6 +868,16 @@ done
 for bad in "epoch:1.5" "epoch:" "epoch:-1" "not-a-date"; do
   assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (other mechanisms)"
 done
+# (c7) an out-of-range CLOCK field — pinned to the final digit guard, and the case
+# that proves that guard is not merely defensive. `T25:15:01` passes every SHAPE
+# check (25 is two digits), so it reaches `date`, which refuses it on BOTH GNU and
+# BSD (measured: GNU `date -u -d …` → "invalid date", rc=1; BSD `-j -f` → illegal
+# time format) and leaves `e` EMPTY. The guard is what turns that into the ""
+# contract: without it, `e=$(( e - off ))` reads the empty string as 0 in shell
+# arithmetic and the function returns `0` (an epoch — 1970) instead of "".
+for bad in "2026-09-13T25:15:01Z" "2026-09-13T25:15:01"; do
+  assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (final digit guard)"
+done
 
 # …while a plain fractional part with an offset still parses (the real shape).
 reset_case
