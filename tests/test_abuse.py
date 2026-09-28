@@ -16,8 +16,10 @@ Covers (plan Task 2/4/9 + scoping deltas 8/9/11/13/14):
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -35,7 +37,9 @@ from tortoise.abuse import (AbuseEngine, MemoryAbuseStore, ReadVelocityTracker,
                             SignupVelocityTracker, check_new_country,
                             clear_suspended, is_suspended_signal,
                             mark_suspended, resolve_country, reset_geo_cache)
+from tortoise.alert_store import OpenOutcome
 from tests.fake_control_plane import FakeControlPlane
+import tortoise.operator_alert as oa
 
 
 T0 = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
@@ -679,3 +683,394 @@ class TestTurnstile:
 
         monkeypatch.setattr("httpx.post", boom)
         assert asyncio.run(ha._verify_turnstile("tok", None)) is False
+
+
+# ── #4872: the enforcement decision path's failures are observable ──────────
+
+class _FaultStore:
+    """A ``MemoryAbuseStore`` with a method forced to raise (#4872).
+
+    ``tests/fake_control_plane.FakeControlPlane`` has no ``rpc()`` fault
+    injector (``fail_query`` covers ``query()`` only, and nothing in this file
+    guards against an unfired fault), so a store call must be faulted at the
+    store method to reach the engine's handlers.
+
+    ``times=None`` (the default) faults the method PERMANENTLY. ``times=1``
+    faults it ONCE and then delegates to the real store — which is what lets a
+    test observe what a failed call LEFT BEHIND (both "toward suspension" lanes
+    are about retained state, not about the one return value) and still
+    evaluate the same rule again. A permanent fault would still be firing on
+    that follow-up, so the follow-up would fail for a reason unrelated to the
+    retained state the test pins — a false RED, not a vacuous pass.
+    """
+
+    class _Boom(Exception):
+        pass
+
+    def __init__(self, method: str, message: str = "postgrest: PGRST202",
+                 times: int | None = None):
+        self._inner = MemoryAbuseStore()
+        self._method = method
+        self._exc = self._Boom(message)
+        self._times = times
+        self._fired = 0
+
+    def __getattr__(self, name):
+        if name == self._method:
+            def boom(*_a, **_k):
+                if self._times is not None and self._fired >= self._times:
+                    return getattr(self._inner, name)(*_a, **_k)
+                self._fired += 1
+                raise self._exc
+            return boom
+        return getattr(self._inner, name)
+
+
+class _RecordingOperatorStore:
+    """Records ``(kind, subject, detail)`` from the operator-alert seam."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def open_incident_state(self, kind, org_id="", detail=None):
+        self.calls.append((kind, org_id, dict(detail or {})))
+        return OpenOutcome.FILED
+
+
+@pytest.fixture
+def operator_store(monkeypatch):
+    """Install a recording store on ``operator_alert.alert_store``.
+
+    The autouse ``tests/conftest.py::_operator_alert_isolation`` sets this seam
+    to ``lambda: None``, so a dispatch test that does NOT patch it in-body
+    passes VACUOUSLY. Every test below that asserts on a dispatch uses this.
+    """
+    store = _RecordingOperatorStore()
+    monkeypatch.setattr(oa, "alert_store", lambda: store)
+    return store
+
+
+def _armed_org(store, org_id):
+    """Seed one stage-2-eligible org: an old flag + continuity + a fresh breach.
+
+    Flag 2h ago (> the 1h window), a continuity event inside the band, and a
+    501-weight event in the current window. ``window_sum`` = 501 over the T0
+    window (the T0-1h event sits exactly on the cutoff and is excluded).
+    """
+    store.record_event(org_id, abuse.EVENT_FLAG, rule=abuse.EVENT_POINT_CREATE,
+                       created_at=T0 - timedelta(hours=2))
+    store.record_event(org_id, abuse.EVENT_POINT_CREATE, weight=501,
+                       created_at=T0)
+    store.record_event(org_id, abuse.EVENT_POINT_CREATE, weight=1,
+                       created_at=T0 - timedelta(hours=1))
+
+
+class TestDecisionPathObservability:
+    """#4872: every swallow on ``_evaluate``/``_flag`` reports to the operator.
+
+    The mutation detector is ``_detail``: reverting a ``report_abuse_decision_
+    fault(...)`` call leaves ``store.calls == []`` and REDs the lane's test.
+    """
+
+    def _engine(self, method: str,
+                times: int | None = None) -> tuple[_FaultStore, AbuseEngine]:
+        fs = _FaultStore(method, times=times)
+        return fs, AbuseEngine(fs)
+
+    def _detail(self, store: _RecordingOperatorStore) -> tuple[str, str, dict]:
+        assert oa.join_operator_alerts() == 0
+        assert len(store.calls) == 1, store.calls
+        return store.calls[0]
+
+    def test_window_sum_failure_reports_and_returns_none(self, operator_store):
+        _fs, eng = self._engine("window_sum")
+        assert eng._evaluate("org-1", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        kind, subject, detail = self._detail(operator_store)
+        assert kind == oa.ABUSE_DECISION_FAULT_KIND
+        assert subject == ""
+        assert detail == {"lane": "window_sum", "error_type": "_Boom",
+                          "rule": abuse.EVENT_POINT_CREATE,
+                          "subject_org": "org-1", "fallback": "return_none"}
+
+    def test_clean_window_episode_failure_reports(self, operator_store):
+        _fs, eng = self._engine("latest_flag_at")
+        # total 0 <= 500 → clean branch → the episode-end guard read raises
+        assert eng._evaluate("org-2", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert detail["fallback"] == "return_none"
+
+    def test_clean_window_guard_read_fault_leaves_the_episode_armed(
+            self, operator_store):
+        """The guard-read half of ``clean_window_episode_end``'s TOWARD lane.
+
+        A failure here must NOT end the episode, and the fact asserted is the
+        RETAINED STATE — the stale anchor survives and a later over-threshold
+        evaluation on the SAME rule still suspends — not the lane token alone
+        (which ``DECISION_FAULT_LANES`` restates back at itself). The fault is
+        ONE-SHOT for exactly that reason: the follow-up evaluation must be able
+        to read the anchor the failed call left behind.
+        """
+        fs, eng = self._engine("latest_flag_at", times=1)
+        fs._inner.flag_org("org-12", abuse.EVENT_POINT_CREATE,
+                           now=T0 - timedelta(hours=2))
+        # Clean window (no point_create event) → the episode-end GUARD READ raises
+        assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert fs._inner.latest_flag_at(
+            "org-12", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
+        # Independent fact: the surviving anchor is load-bearing — a LATER
+        # over-threshold evaluation on the same rule still reaches suspend.
+        fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        fs._inner.record_event("org-12", abuse.EVENT_POINT_CREATE, weight=1,
+                               created_at=T0 - timedelta(hours=1))
+        assert eng._evaluate("org-12", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        assert fs._inner.org_suspended("org-12") is True
+
+    def test_clean_window_clear_write_fault_leaves_the_episode_armed(
+            self, operator_store):
+        """The clear-WRITE half of the lane — the sub-case no test exercised.
+
+        The pre-existing ``test_clean_window_episode_failure_reports`` faults
+        the guard READ with NO flag seeded, so the clear write is unreachable.
+        Here a flag IS seeded, so the clean branch reaches the write, the write
+        raises, and the episode must stay ARMED: the return is ``None``, the
+        anchor survives, and a later over-threshold evaluation still suspends.
+        """
+        fs, eng = self._engine("flag_clear")
+        fs._inner.flag_org("org-13", abuse.EVENT_POINT_CREATE,
+                           now=T0 - timedelta(hours=2))
+        assert fs._inner.latest_flag_at(
+            "org-13", abuse.EVENT_POINT_CREATE) is not None
+        # Clean window → guard read succeeds → the CLEAR WRITE raises
+        assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) is None
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "clean_window_episode_end"
+        assert fs._inner.latest_flag_at(
+            "org-13", abuse.EVENT_POINT_CREATE) is not None  # anchor SURVIVED
+        fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        fs._inner.record_event("org-13", abuse.EVENT_POINT_CREATE, weight=1,
+                               created_at=T0 - timedelta(hours=1))
+        assert eng._evaluate("org-13", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        assert fs._inner.org_suspended("org-13") is True
+
+    def test_anchor_read_failure_reflags_and_reports(self, operator_store):
+        fs, eng = self._engine("latest_flag_at")
+        fs._inner.record_event("org-3", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        assert eng._evaluate("org-3", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "flag"
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "latest_flag_at"
+        assert detail["fallback"] == "reflag"
+        assert fs._inner.org_flagged_at("org-3") is not None  # re-flag landed
+
+    def test_continuity_read_failure_still_proceeds_toward_suspend(
+            self, operator_store):
+        """The one lane that fails TOWARD the irreversible action."""
+        fs, eng = self._engine("rule_event_between")
+        _armed_org(fs._inner, "org-4")
+        assert eng._evaluate("org-4", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "suspend"
+        _kind, _subject, detail = self._detail(operator_store)
+        assert detail["lane"] == "rule_event_between"
+        assert detail["fallback"] == "continuity_true"
+        assert fs._inner.org_suspended("org-4") is True
+
+    def test_suspend_rpc_failure_reports_breach_and_does_not_arm(
+            self, operator_store):
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-5")
+        assert eng._evaluate("org-5", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "breach"
+        kind, _subject, detail = self._detail(operator_store)
+        assert kind == oa.ABUSE_ENFORCEMENT_FAULT_KIND
+        assert detail["lane"] == "suspend_org"
+        assert detail["fallback"] == "return_breach"
+        # ⛔ NO ARMING: the suspend did not land and the signal was not marked
+        assert fs._inner.org_suspended("org-5") is False
+        assert is_suspended_signal("org-5") is False
+        assert [r for r in fs._inner.rows
+                if r["event_type"] == abuse.EVENT_SUSPEND] == []
+
+    def test_flag_write_failure_reports(self, operator_store):
+        fs, eng = self._engine("flag_org")
+        fs._inner.record_event("org-6", abuse.EVENT_POINT_CREATE, weight=501,
+                               created_at=T0)
+        assert eng._evaluate("org-6", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "flag"
+        kind, _subject, detail = self._detail(operator_store)
+        assert kind == oa.ABUSE_ENFORCEMENT_FAULT_KIND
+        assert detail["lane"] == "flag_org"
+        assert detail["fallback"] == "return_flag"
+
+    def test_one_incident_for_a_shared_substrate_fault(self, operator_store):
+        """Two orgs, one cause → ONE platform incident, not N per-org."""
+        fs = _FaultStore("window_sum")
+        eng = AbuseEngine(fs)
+        eng._evaluate("org-a", abuse.EVENT_POINT_CREATE, 500, 3600, T0)
+        eng._evaluate("org-b", abuse.EVENT_POINT_CREATE, 500, 3600, T0)
+        assert oa.join_operator_alerts() == 0
+        assert len(operator_store.calls) == 1
+        kind, subject, detail = operator_store.calls[0]
+        assert kind == oa.ABUSE_DECISION_FAULT_KIND
+        assert subject == ""                      # platform sentinel
+        assert detail["subject_org"] == "org-a"   # first org: evidence, not scope
+
+    def test_report_never_raises_when_the_alert_plane_raises(
+            self, monkeypatch):
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-7")
+
+        def raising_operator(*_a, **_k):
+            raise RuntimeError("alert plane down")
+
+        monkeypatch.setattr(oa, "alert_operator", raising_operator)
+        assert eng._evaluate("org-7", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "breach"
+        assert fs._inner.org_suspended("org-7") is False
+
+    def test_report_never_raises_when_store_resolution_fails(
+            self, monkeypatch):
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-8")
+
+        def raising_store():
+            raise RuntimeError("no alert channel")
+
+        monkeypatch.setattr(oa, "alert_store", raising_store)
+        assert eng._evaluate("org-8", abuse.EVENT_POINT_CREATE,
+                             500, 3600, T0) == "breach"
+
+    def test_detail_never_carries_the_exception_message(self, operator_store):
+        leak = "SENTINEL-LEAK-TOKEN"
+        fs = _FaultStore("window_sum", leak)
+        eng = AbuseEngine(fs)
+        eng._evaluate("org-9", abuse.EVENT_POINT_CREATE, 500, 3600, T0)
+        assert oa.join_operator_alerts() == 0
+        assert len(operator_store.calls) == 1
+        detail = operator_store.calls[0][2]
+        assert leak not in json.dumps(detail)
+        assert detail["error_type"] == "_Boom"
+
+    def test_error_record_is_the_residual_without_an_alert_channel(
+            self, caplog, monkeypatch):
+        monkeypatch.setattr(oa, "alert_store", lambda: None)
+        fs, eng = self._engine("suspend_org")
+        _armed_org(fs._inner, "org-10")
+        with caplog.at_level(logging.ERROR, logger="tortoise.abuse"):
+            assert eng._evaluate("org-10", abuse.EVENT_POINT_CREATE,
+                                 500, 3600, T0) == "breach"
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno == logging.ERROR]
+        assert any("suspend_org" in m and "#4872" in m for m in errors)
+        # the record names the RESOLVED kind, not a generic "DECISION FAULT"
+        assert any("kind=ABUSE_ENFORCEMENT_FAULT" in m for m in errors)
+
+    def test_traceback_is_bounded_but_the_record_keeps_firing(
+            self, caplog, monkeypatch):
+        """#4872 amplification guard: the stack is bounded, the residual is not."""
+        monkeypatch.setattr(oa, "alert_store", lambda: None)
+        abuse._fault_traceback_at.clear()
+        try:
+            _fs, eng = self._engine("window_sum")
+            with caplog.at_level(logging.ERROR, logger="tortoise.abuse"):
+                for _ in range(3):
+                    eng._evaluate("org-11", abuse.EVENT_POINT_CREATE,
+                                  500, 3600, T0)
+            errors = [r for r in caplog.records
+                      if r.levelno == logging.ERROR]
+            assert len(errors) == 3          # every occurrence is still recorded
+            assert sum(1 for r in errors if r.exc_info) == 1  # stack once
+            assert all("kind=ABUSE_DECISION_FAULT" in r.getMessage()
+                       for r in errors)
+        finally:
+            abuse._fault_traceback_at.clear()
+
+    def test_traceback_window_boundary(self):
+        """The gate's window and its per-lane keying, at the exact boundary.
+
+        Exercises the ``now`` seam directly, so the 60s constant is pinned by
+        value instead of by "the dict was cleared".
+        """
+        abuse._fault_traceback_at.clear()
+        try:
+            assert abuse._fault_traceback_due("window_sum", now=100.0) is True
+            assert abuse._fault_traceback_due("window_sum",
+                                              now=159.99) is False
+            assert abuse._fault_traceback_due("window_sum", now=160.0) is True
+            # keyed PER LANE: another lane is not suppressed by this one
+            assert abuse._fault_traceback_due("suspend_org", now=100.5) is True
+        finally:
+            abuse._fault_traceback_at.clear()
+
+    def test_lane_inventory_matches_the_declared_kinds(self):
+        kinds = {kind for kind, _fb in abuse.DECISION_FAULT_LANES.values()}
+        assert kinds == {oa.ABUSE_DECISION_FAULT_KIND,
+                         oa.ABUSE_ENFORCEMENT_FAULT_KIND}
+        assert abuse._UNKNOWN_LANE_KIND in kinds
+
+    @staticmethod
+    def _method(tree, name):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(name)
+
+    def test_declared_lanes_match_the_source_call_sites(self):
+        """Completeness fence: no swallow on the decision path is unwired.
+
+        Two independent assertions: (1) EVERY ``except`` handler inside
+        ``AbuseEngine._evaluate``/``_flag`` calls ``report_abuse_decision_fault``
+        — so an ADDED uninstrumented swallow REDs, which is the defect #4872 is
+        about; (2) the emitted lane tokens equal ``DECISION_FAULT_LANES``
+        exactly once each — so a renamed token REDs.
+        """
+        src = Path(abuse.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        emitted: list[str] = []
+        unwired: list[str] = []
+        for fn in ("_evaluate", "_flag"):
+            for node in ast.walk(self._method(tree, fn)):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "report_abuse_decision_fault"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    emitted.append(node.args[0].value)
+                if isinstance(node, ast.ExceptHandler) and not any(
+                        isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Name)
+                        and c.func.id == "report_abuse_decision_fault"
+                        for c in ast.walk(node)):
+                    unwired.append(f"{fn}:{node.lineno}")
+                # `with contextlib.suppress(Exception):` is the evasion FORM
+                # of the same swallow, and `contextlib` is used in this very
+                # module — so a try/except-only fence would leave the
+                # "every swallow is wired" claim false.
+                if isinstance(node, ast.With) and any(
+                        isinstance(item.context_expr, ast.Call)
+                        and ((isinstance(item.context_expr.func, ast.Attribute)
+                              and item.context_expr.func.attr == "suppress")
+                             or (isinstance(item.context_expr.func, ast.Name)
+                                 and item.context_expr.func.id == "suppress"))
+                        for item in node.items):
+                    unwired.append(f"{fn}:{node.lineno} (contextlib.suppress)")
+        assert unwired == [], (
+            "uninstrumented swallow on the abuse decision path: "
+            + ", ".join(unwired))
+        assert sorted(emitted) == sorted(abuse.DECISION_FAULT_LANES)
+        assert len(emitted) == len(set(emitted))  # each lane wired exactly once
+        # the four superseded debug swallows are gone from the source
+        for dead in ("abuse window_sum failed", "abuse flag_clear failed",
+                     "abuse suspend_team failed", "abuse flag_team failed"):
+            assert dead not in src, dead
