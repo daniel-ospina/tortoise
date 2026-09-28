@@ -1,6 +1,6 @@
 """ai-review-gate ↔ record-review.sh signing-contract guard (#3076).
 
-The ``ai-review-gate`` required check (``.github/workflows/ai-review-gate.yml``)
+The ``ai-review-gate`` check (``.github/workflows/ai-review-gate.yml``)
 accepts a PR only when the body carries a signed evidence marker whose HMAC
 verifies against the ``AI_REVIEW_GATE_KEY`` secret::
 
@@ -323,17 +323,17 @@ def test_trigger_and_job_shape_are_pinned_from_parsed_yaml() -> None:
     on = doc.get("on")
     assert isinstance(on, dict) and set(on) == {"pull_request_target"}, (
         "the gate must trigger on pull_request_target ONLY: under `pull_request` a "
-        f"same-repo PR runs its own copy of the workflow and can self-certify the "
-        f"required check. Parsed trigger: {on!r}"
+        f"same-repo PR runs its own copy of the workflow and can self-certify "
+        f"the check. Parsed trigger: {on!r}"
     )
     trigger = on["pull_request_target"] or {}
     assert "paths" not in trigger and "paths-ignore" not in trigger, (
-        f"a path-filtered required check never runs, so it can never pass: {trigger!r}"
+        f"a path-filtered check never runs, so it can never pass: {trigger!r}"
     )
     job = doc["jobs"]["ai-review-gate"]
     for banned in ("if", "needs", "continue-on-error"):
         assert banned not in job, (
-            f"a {banned!r}-gated required job reports Success without evaluating any "
+            f"a {banned!r}-gated job reports Success without evaluating any "
             f"evidence — never make this job conditional or non-blocking: {job.get(banned)!r}"
         )
     assert "permissions" not in job, (

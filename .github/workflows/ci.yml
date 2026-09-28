@@ -643,7 +643,7 @@ jobs:
     # harness extracts that run block and drives it with fabricated signed
     # markers + a stubbed gh, covering sha-match, diff-match, backward compat,
     # fail-closed-on-API-failure, signature-over-diff, PR/repo binding, and the
-    # PR-body source. It ALSO asserts the non-runtime invariants the required
+    # PR-body source. It ALSO asserts the non-runtime invariants the gate
     # job depends on: no if:/needs:/continue-on-error:, trigger stays
     # pull_request_target with no paths: filter, permissions keep
     # pull-requests: read, and GH_TOKEN is declared. Self-contained, no

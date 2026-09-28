@@ -95,7 +95,7 @@ name: ai-review-gate
 #   live_diff_hash_norm — the normalized digest (post-#1362 producers)
 #   live_diff_hash_raw  — the legacy raw digest (every marker already recorded)
 # The legacy arm is MANDATORY: without it every existing marker breaks and
-# the required check reddens fleet-wide. Consumer-first land order: this gate
+# the check reddens fleet-wide. Consumer-first land order: this gate
 # is safe to land before or after the producer and changes nothing until the
 # producer starts emitting the normalized digest.
 #
@@ -236,7 +236,7 @@ jobs:
           # ⛔ Re-assert AFTER normalization (#3057 review): a whitespace-only
           # secret passes the `-z` guard above and then normalizes to the EMPTY
           # string. An empty HMAC key is public — any PR author could mint a
-          # marker (stale sha + the live `diff=`) and turn the required check
+          # marker (stale sha + the live `diff=`) and turn the check
           # green on an unreviewed diff. The guard above validates the RAW
           # value; the normalized value is what the HMAC actually uses, so it
           # must be validated too.
@@ -254,7 +254,7 @@ jobs:
           # before #2982 made the fetch live by adding GH_TOKEN — would assign
           # that error JSON to `body`, discard the PR_BODY fallback, and report
           # "No AI review evidence found" for a PR that carries valid evidence:
-          # an API blip turned into a red REQUIRED check with a diagnostic
+          # an API blip turned into a red check with a diagnostic
           # pointing the wrong way.
           body="${PR_BODY:-}"
           if fetched="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null)"; then
@@ -300,7 +300,7 @@ jobs:
           # differ` carries no content, so the `index` line is its ONLY
           # content-bearing field. An unconditional drop made two distinct
           # binary revisions normalize IDENTICALLY: review binary v1, sign the
-          # marker, swap in binary v2, and the required gate ACCEPTED an
+          # marker, swap in binary v2, and the gate ACCEPTED an
           # unreviewed binary (a fail-open). The ruling's premise is "the
           # index line is redundant with hunk content" — false precisely when
           # there is no hunk content.
@@ -594,7 +594,7 @@ jobs:
             # A trailing ` (text) sig=<hex>` on an otherwise-malformed line
             # (`@ not-a-sha`) must not hijack this branch and misattribute the
             # cause — that would suppress the accurate stale/diff diagnostic on
-            # a REQUIRED check (review finding, #3057).
+            # a check (review finding, #3057).
             latest_repo=""
             if [[ "$latest_raw" =~ ^review\ recorded:\ reviews/[0-9]+\.json\ verdict=clean(-micro|-low)?\ @\ [0-9a-f]{40}(\ diff=[0-9a-f]{64})?\ \(([^()]*)\)(\ sig=[0-9a-f]{64})?$ ]]; then
               latest_repo="${BASH_REMATCH[3]}"
