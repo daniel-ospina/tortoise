@@ -87,17 +87,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     MITIGATES target triples to the re-derived ids, else Layer-1 referential
     integrity fails", #1272).
 
-    ⚠️ Scope, stated honestly (an earlier revision of this docstring claimed
-    the hosted path was immune — it is NOT, and the claim was falsified by the
-    #4716 PR review; **#4970** carries the residual): the hosted commit (``hosted_api._execute_commit_writes`` §5/§7)
-    passes the RAW payload ``Operator`` models and creates its points with
-    ``create_point(..., dedup=True)``, whose internal re-key to an
-    existing-content node is NOT fed back into the operator refs — so a graph
-    holding the point's content under a non-``pt_`` id reproduces the identical
-    silent drop on the hosted lane. Wiring the remap there is a separate
-    change (it needs §5 to surface the resolved ids); #4716 deliberately scopes
-    this helper's CALL SITE to the capture commit, not its correctness claim to
-    the hosted lane.
+    ⚠️ Scope (updated by **#4970**): BOTH write paths now wire this remap —
+    the call site is no longer capture-only. The hosted commit
+    (``hosted_api._execute_commit_writes`` §5/§7) used to pass the RAW payload
+    ``Operator`` models while its ``create_point(..., dedup=True)`` re-keyed
+    to an existing-content node, so the refs named nothing and the edge
+    dropped silently (#4654). #4970 closed that residual: the hosted §5 point
+    loop surfaces the id ``create_point`` actually RESOLVED to (its
+    ``point_resolved_ids`` payload→graph map) and §7 passes the refs through
+    THIS helper — the same graph-id precondition the capture commit satisfies.
 
     Pure and total: only refs present in ``id_map`` are rewritten, everything
     else (graph ids, event ids, empty refs) passes through untouched — so an
@@ -106,6 +104,18 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     ``commit_schema`` Operator models; rewritten entries are copies, entries
     needing no change are returned as the original object, and the INPUTS are
     never mutated in place.
+
+    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids, and ONLY by
+    payload ids (ONE id space): a key the payload never named resolves
+    nothing, and a server-recomputed id (``supersede_id``) mixed into the map
+    could collide with another record's payload id (``point_content_id``
+    hashes content only). On a ``supersede`` reconcile action the payload
+    point id IS the PRIOR node's graph id, and the map keys it to the RESOLVED
+    successor — deliberate, and consistent with ``supersede_point``'s own edge
+    transfer (an operator edge on a superseded point belongs to its
+    successor); pinned by
+    ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
+    test_supersede_operator_ref_follows_the_successor``.
     """
     if not id_map:
         return list(operators or [])
@@ -140,6 +150,38 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     return out
 
 
+def reverse_point_id_map(id_map: dict) -> dict:
+    """Invert a payload-id → resolved-graph-id map for reason lookups.
+
+    ``apply_payload_operators`` resolves a MITIGATES reason from the SAME ref
+    it passes to ``sdk.mitigate_operator`` — but that ref has already been
+    remapped into GRAPH-id space, while the caller's content lookup is keyed
+    by PAYLOAD id. Handing the helper the naive resolver then degrades a
+    re-keyed dampener's reason to its bare graph id (#4716 review P1,
+    reproduced end-to-end). This builds the reverse lookup both write paths
+    pass as ``point_content_by_id``.
+
+    **FIRST payload id wins** when several ids resolved to one graph node
+    (``setdefault`` over the map's insertion order). The rule is stated HERE,
+    once, so the two call sites cannot drift on it. Both write paths key the
+    map by PAYLOAD point id alone, so the winner is always a real
+    ``payload.points`` entry and the reason resolves: two ids resolve to one
+    node only when content+kind match (``_find_point_by_content``), so their
+    normalized content is equal and either winner yields the same reason
+    TEXT. ⛔ Do NOT add a non-payload key (e.g. the server-recomputed
+    ``supersede_id``) to a caller's map: it has no ``payload.points`` entry,
+    so if it won the lookup the reason would degrade to the bare graph id —
+    exactly the #4716 review-P1 degradation this helper exists to prevent —
+    and, being a second id space (``point_content_id`` hashes CONTENT only),
+    it could collide with another record's payload id. See the §5 note in
+    ``hosted_api._execute_commit_writes``.
+    """
+    reverse: dict[str, str] = {}
+    for payload_id, resolved_id in (id_map or {}).items():
+        reverse.setdefault(resolved_id, payload_id)
+    return reverse
+
+
 def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     """#4716 Part 1 (adjacent hole) — same remap for the supersession
     reference that is a payload id BY CONSTRUCTION.
@@ -149,8 +191,12 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
     id). A ``supersedes_by`` whose payload point resolved to an existing graph
     node under a different id is the SAME two-id-space mismatch the operators
-    had — ``apply_supersessions`` would warn ``point supersession ref '<payload
-    id>' not found — skipped (fail-open)`` and the CORRECTS fold would be lost.
+    had: ``sdk.supersede(prior, '<payload id>')`` targets a node that does not
+    exist, RAISES, and ``apply_supersessions`` swallows it as ``point
+    supersede '<prior>' → '<payload id>' failed: …`` — so the CORRECTS fold
+    would be lost. (It is NOT the ``point supersession ref '<payload id>' not
+    found — skipped (fail-open)`` warning: that fires only when the
+    already-graph-id ``superseded`` side is absent.)
 
     ``superseded`` is deliberately NOT remapped (code-review P2): it is the
     record's LANE DISCRIMINATOR downstream — ``apply_supersessions`` dispatches
@@ -183,7 +229,7 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
 
 
 def apply_payload_operators(proj, sdk, operators: list, *,
-                            point_content_by_id=None) -> None:
+                            point_content_by_id=None) -> list[str]:
     """Apply Layer-1 payload operators with commit semantics (#1532 D3).
 
     IMPL/NAND first via ``sdk.create_operator`` (promote_source=False, #780);
@@ -199,6 +245,15 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     missing target. ``point_content_by_id(pid) -> str`` supplies the
     mitigation reason's content fallback when provided.
 
+    ⛔ #4937 (F1 ruling on #2552): a payload record with ``op_type ==
+    "MITIGATES"`` is a BRIDGE-ATTACK record, not a peer operator kind — the
+    ``target`` names the operator bridge it damps and ``strength`` keeps its
+    ``w_eff = w × (1 − strength)`` meaning. It is therefore routed ONLY to
+    ``mitigate_operator``; the first pass below skips it so it can never reach
+    ``create_operator``. The wire spelling stays ``MITIGATES`` inside the
+    ``operators`` array for backward compatibility with older clients and
+    extractors; the *semantics* are mitigation, never a second operator kind.
+
     ⛔ ID-SPACE PRECONDITION (#4716 P1): every ``src``/``dst`` and MITIGATES
     ``target.{src,dst}`` ref MUST be a GRAPH id by the time it reaches here. A
     caller holding a payload-id space MUST pass the refs through
@@ -209,8 +264,30 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     Passing payload ids here is not an error the function can detect: the
     operator write is swallowed as ``operator write skipped (inputs
     missing?)``.
+
+    Returns the ids of the IMPL/NAND operator Points THIS call CREATED, in
+    creation order (#4936). A capture must stamp exactly those nodes with its
+    ``sessionCaptured`` eventId: joining on the MINTED point set instead
+    misses every operator whose endpoint RE-KEYED to a pre-existing graph
+    node (#4716 Part 1) — a folded-only capture has no minted ids at all,
+    so the operator topology was left unstamped and invisible to the
+    eventId-keyed retrievable layer (``operator_counts == {}``). Only
+    CREATED nodes are returned: the MITIGATES Cypher fallback can resolve an
+    operator this call did not write, and a caller stamping provenance must
+    never claim a node a prior session created. The derived-commit call site
+    (``hosted_api._execute_commit_writes`` §7) ignores the value — it has no
+    capture eventId to stamp.
+
+    ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
+    dict is the MITIGATES same-call lookup and is keyed on
+    ``(src, dst, op_type)``, while ``create_operator`` mints unconditionally
+    (#4971) — two payload records that re-key onto the SAME graph triple each
+    create their own node, and a dict keyed on the triple would silently drop
+    the earlier node's id from the provenance set, leaving it unstamped and
+    invisible (the very #4936 defect this return exists to close).
     """
     target_op_ids: dict[tuple, str] = {}
+    created_ids: list[str] = []
     for op in operators:
         op_type = _op_attr(op, "op_type")
         if op_type == "MITIGATES":
@@ -231,6 +308,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
                 "operator write skipped (inputs missing?): %s", e)
             continue
         target_op_ids[(src, dst, op_type)] = result["id"]
+        created_ids.append(result["id"])
     for op in operators:
         if _op_attr(op, "op_type") != "MITIGATES":
             continue
@@ -269,6 +347,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             reason = str(src)
         sdk.mitigate_operator(op_id, reason=reason,
                               strength=_op_attr(op, "strength") or 0.5)
+    return created_ids
 
 
 # ── Supersession application (#2164 Task 3) ────────────────────────────
@@ -427,6 +506,52 @@ def _supersession_fold_order(proj, records):
     return order
 
 
+#: #5654: cap on the per-record WARN emission from ``apply_supersessions``.
+#: Its record loop is fail-open — ``warn(...)`` + ``continue`` per record — so
+#: an over-cap batch turns malformed input into ONE WARN line per record.
+#: #2243 proposes a Layer-1 cap on ``len(payload.supersessions)`` (PR #5648,
+#: still OPEN at #5654's base). Until it lands the ``supersessions`` LIST is
+#: Layer-1-ungated on every path — capture, hosted commit §6b and eval ingest
+#: all hand this helper the uncapped records (the hosted endpoint does run
+#: ``validate_layer1``, but it caps points/entities/operators only; eval splits
+#: a payload into two kind-bucketed calls, so its budget is per call) — so this
+#: emission bound is the only limit on the storm. It bounds the EMISSION,
+#: never the writes: every record is still attempted, and the withheld count
+#: is reported in ONE summary warn. 20 keeps every realistic batch (a handful
+#: of records) fully verbose while capping a pathological one.
+_MAX_SUPERSESSION_WARNS = 20
+
+
+class _PerRecordWarnBudget:
+    """Bound a per-record ``warn()`` emission to a fixed budget (#5654).
+
+    Wraps the caller's warn callable: the first ``limit`` messages are
+    emitted verbatim, later ones are counted but not emitted, so a caller
+    that warns once per record cannot amplify a malformed batch into one
+    WARN line per record. The bound is on the EMISSION only — the caller's
+    control flow is untouched (every record is still attempted) — and
+    ``suppressed`` lets the caller report the withheld count in ONE summary
+    warn.
+    """
+
+    __slots__ = ("_emit", "_limit", "total")
+
+    def __init__(self, emit, limit: int) -> None:
+        self._emit = emit
+        self._limit = limit
+        self.total = 0
+
+    def __call__(self, msg, *args, **kwargs) -> None:
+        self.total += 1
+        if self.total <= self._limit:
+            self._emit(msg, *args, **kwargs)
+
+    @property
+    def suppressed(self) -> int:
+        """Per-record messages counted but not emitted."""
+        return max(0, self.total - self._limit)
+
+
 def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     """Apply canonical supersession records — the ONE consumer-side
     discipline (producer side: extractor_v2._supersession_records).
@@ -435,8 +560,29 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     full provenance) + _fold_object_superseded (count-verified).
     #2164/#2193: shared by capture (_extract_session_v2), eval ingest_v2,
     and the hosted commit endpoint (_execute_commit_writes §6b). warn()
-    receives every skip/failure —
-    never a silent drop — with ONE explicit asymmetry (final-review
+    receives the skip/failure of every record UP TO
+    ``_MAX_SUPERSESSION_WARNS`` per call; the per-record messages beyond that
+    budget are COUNTED, not emitted, and the call then closes with ONE
+    summary warn carrying the batch size, the true warning total and the
+    withheld count (#5654). An over-cap batch therefore stays SIZED — the
+    summary reports the batch size and the true warning total — but its
+    records past the budget are not named individually, and the summary does
+    not distinguish a withheld benign warning from a withheld malformed one.
+    The bound is on the EMISSION only — every record is still
+    attempted by the same gates below. The per-record guarantees recorded
+    earlier (#2242's "exactly one warn" on a lost concurrent fold, #2164's
+    "unresolved refs warn loudly") hold verbatim for any call raising at
+    most ``_MAX_SUPERSESSION_WARNS`` per-record warnings; a call above the
+    budget has
+    its withheld warnings counted, sized and reported in the summary but not
+    named individually — whatever their cause (a legitimate batch can exceed
+    the budget, e.g. many concurrent-race losses, so exceeding it is not by
+    itself evidence of malformed input). Caller-side comments that still
+    promise a per-record "never a silent drop" (``sdk._extract_session_v2``'s
+    docstring and call site, ``hosted_api`` §6b, ``tools/longmem_eval/ingest_v2``)
+    describe the pre-#5654 contract; this bound NARROWS that promise, and the
+    comment updates are tracked in #5723. With ONE explicit
+    asymmetry (final-review
     P3): terminal pt_ olds are treated as idempotent re-ingests and
     skipped SILENTLY regardless of the claimed successor (no
     divergence probe — supersede_point would raise on a terminal old);
@@ -482,6 +628,19 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         warn(f"supersession fold-order pre-pass failed ({exc}) — "
              f"falling back to payload order")
         fold_order = list(range(len(records)))
+    # #5654: bound the EMISSION of the per-record warns in the loop below.
+    # Write semantics are untouched — every record is still attempted by the
+    # same fail-open gates — this only stops a malformed batch from producing
+    # one WARN line per record. `warn` is caller-supplied (capture passes
+    # ``warnings.append``, hosted passes a counting logger delegate, eval
+    # passes ``logger.warning``), so the bound applies at this one seam shared
+    # by every path. Deliberately a BLANKET bound, not a per-class exemption:
+    # exempting the actionable classes would let a broken graph (every fold
+    # failing) storm again. The cost is that a warning past the budget is not
+    # emitted individually — the summary below reports the withheld count so
+    # the malfunction stays visible.
+    _raw_warn = warn
+    warn = _PerRecordWarnBudget(warn, _MAX_SUPERSESSION_WARNS)
     for i in fold_order:
         record = records[i]
         ref = str(_sr_attr(record, "superseded") or "").strip()
@@ -545,23 +704,52 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             params={"sb": supersedes_by},
         ).result_set
         if not sb_rows:
-            warn(f"entity supersession {ref!r} skipped — successor "
-                 f"{supersedes_by!r} is not an Object in the payload "
-                 f"entities or the graph (dangling successor)")
+            # #1370: routing a subject-kind entity to `:Subject` means an
+            # entity supersession record for it can no longer resolve to an
+            # Object. Report that case ACCURATELY (the generic "dangling
+            # successor" message would misdiagnose a correctly-typed node
+            # as a missing one) and skip — entity supersession is Object-only.
+            _subj = proj.g.query(
+                "MATCH (s:Subject {name:$sb}) RETURN count(s)",
+                params={"sb": supersedes_by},
+            ).result_set
+            if _subj and _subj[0][0]:
+                warn(f"entity supersession {ref!r} skipped — successor "
+                     f"{supersedes_by!r} is a :Subject (a declared §5 "
+                     f"subject kind, #1370); entity supersession is "
+                     f"Object-only")
+            else:
+                warn(f"entity supersession {ref!r} skipped — successor "
+                     f"{supersedes_by!r} is not an Object in the payload "
+                     f"entities or the graph (dangling successor)")
             continue
         # NB: >1 successor rows are NOT skipped here — the alias scan below
         # (post ref-side resolution) decides. Duplicate names are only
         # harmful when a candidate is the target itself; otherwise the fold
         # is deterministic (display-string-only successor).
-        # #2164 review (P2, ISSUE C): the fold stores supersededBy truncated
-        # to 200 chars (_fold_object_superseded: str(...)[:200] — mirrors the
-        # write-path name cap, sdk.py name[:200]) — the DEDUP/keep-first
-        # probe below compares against the STORED (truncated) form so a
-        # long same-successor re-ingest dedups instead of warning. The FULL
-        # name is kept for the journaled event (round-2 review, ISSUE 2 —
-        # §11: the event log is the reconstruction source; replay re-truncates
-        # identically at the fold, so journal fidelity costs nothing at
-        # storage). No truncation happens here — only at the compare and fold.
+        # #5370: the fold stores supersededBy VERBATIM (the FULL successor
+        # name) — it no longer truncates to 200 chars. That cap was the
+        # fold's OWN behaviour, never a property of the general write path
+        # (`create_entity`/`_upsert_object` store Object names verbatim), so
+        # it was LOSSY: a >200-char successor was stored as a prefix that
+        # names NO Object, so the ask-path name-keyed probe could not verify
+        # it and the renderer reported "no successor record found" (fixed
+        # here + in projection/entities.py + assembly._state_header_hit).
+        # The DEDUP/keep-first probe below compares against the STORED form;
+        # rows folded BEFORE #5370 still carry the old 200-char prefix, so
+        # the compare accepts EITHER the full name (new rows) or its
+        # 200-char prefix (legacy rows) — a same-successor re-ingest stays a
+        # dedup on both. The FULL name was always kept for the journaled
+        # event (round-2 review, ISSUE 2 — §11: the event log is the
+        # reconstruction source), so for rows folded AFTER #5370 live and
+        # replay agree byte-for-byte. A LEGACY row does not: live holds the
+        # old prefix while the journal holds the full name, so a rebuild
+        # REWRITES the prefix to the full name. That is a benign one-way
+        # healing — the journal is the reconstruction source and its value
+        # is the correct one — but it IS a real live↔replay difference on
+        # pre-fix rows, pinned by
+        # test_rebuild_all_rewrites_a_legacy_prefix_to_the_journaled_full_name.
+        # No truncation happens here — only at the compare (legacy tolerance).
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",
@@ -679,23 +867,43 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # fell through to the fold, clobbering e.g. archived→superseded
         # (and for retracted, reversing the #689 leak-guard direction).
         if (o_status or "") in _RECALL_OBJECT_EXCLUDED_STATUS:
-            # stored supersededBy is truncated to 200 by the fold — compare
-            # against the truncated form (round-2 ISSUE C): a long
-            # same-successor re-ingest dedups instead of spurious conflict.
-            supersedes_by_stored = supersedes_by[:200]
-            if (o_sb or "") == supersedes_by_stored:
-                if len(o_sb or "") >= 200 and len(supersedes_by) > 200:
-                    # round-2 review (ISSUE 1): the stored fold value was
-                    # ITSELF truncated — a DIVERGENT successor sharing the
-                    # same 200-char prefix is indistinguishable from an
-                    # idempotent re-ingest. Keep-first outcome is identical
-                    # (the fold never blind-overwrites), but be loud that
-                    # identity beyond the cap is unverified rather than
-                    # silently absorbing a possible divergence.
+            # #5370: the fold now stores the FULL successor name, but rows
+            # folded BEFORE the fix carry the old 200-char prefix (#2164's
+            # fold cap). Accept EITHER form so a long same-successor
+            # re-ingest stays a silent dedup on new AND legacy rows.
+            stored = o_sb or ""
+            same_successor = stored == supersedes_by or (
+                len(supersedes_by) > 200 and stored == supersedes_by[:200])
+            if same_successor:
+                if stored != supersedes_by:
+                    # Matched via the 200-char-prefix tolerance: the
+                    # stored value is a 200-char name, so a DIVERGENT
+                    # successor sharing those 200 chars is indistinguishable
+                    # from an idempotent re-ingest. Keep-first outcome is
+                    # identical (the fold never blind-overwrites), but be
+                    # loud that identity beyond the prefix is unverified
+                    # rather than silently absorbing a possible divergence.
+                    #
+                    # NB the message below deliberately does NOT call the
+                    # stored value a "legacy fold": the same arithmetic is
+                    # reached by a POST-#5370 row folded onto a successor
+                    # whose name is EXACTLY 200 chars (a genuine full name),
+                    # and the row alone cannot say which it is.
+                    #
+                    # The exact-equality branch (stored == supersedes_by)
+                    # is deliberately SILENT, and cannot be otherwise:
+                    # that equality is exactly what an idempotent
+                    # same-successor re-ingest looks like on new rows AND
+                    # on legacy rows, and a stored 200-char value that was
+                    # really a legacy prefix is indistinguishable from a
+                    # genuinely 200-char successor name. The ambiguity is
+                    # inherent to the width of the old cap, not introduced
+                    # here.
                     warn(f"supersession ref {ref!r} re-folded to a "
                          f"successor sharing a 200-char prefix with the "
-                         f"stored fold — treated as idempotent (keep-first); "
-                         f"identity beyond the name cap is not verified")
+                         f"stored fold — treated as idempotent "
+                         f"(keep-first); identity beyond that prefix "
+                         f"is not verified")
                 # same successor already folded — idempotent dedup no-op
                 continue
             warn(f"supersession ref {ref!r} already terminal "
@@ -793,4 +1001,13 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
         except Exception as exc:
             warn(f"ObjectSuperseded emit/fold failed for {obj_name!r}: {exc}")
+    if warn.suppressed:
+        _raw_warn(
+            f"supersession batch of {len(records)} record(s): "
+            f"{warn.total} per-record warning(s) raised — the first "
+            f"{_MAX_SUPERSESSION_WARNS} were reported individually, "
+            f"{warn.suppressed} withheld (not individually logged). "
+            f"Every record was still applied or skipped by the same "
+            f"fail-open gates."
+        )
     return applied

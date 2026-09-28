@@ -14,7 +14,7 @@ exactly one condition, and no two of them may be collapsed into each other:
 are the adopted contract, not a local invention:
 
 * **roadmap §7 item 9, ADOPTED 2026-09-17** —
-  ``premise-labs/product/2026-09-13-tortoise-beta-roadmap.md:274`` adopts "a
+  ``premise-labs/product/archive/2026-09-13-tortoise-beta-roadmap.md:286`` adopts "a
   distinct exit code at the client boundary plus one status vocabulary
   (``available | empty | degraded | unconfigured``)". The beta plan's objective 3
   cites that contract and does not restate it.

@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
+  errorCode,
   errorMessage,
   errorStatus,
   headerUpgradeEligible,
@@ -135,6 +136,14 @@ test('#4639: a genuine limit refusal still offers the upgrade', () => {
   // qualifies on the STRUCTURED status.
   assert.equal(shouldNudgeUpgrade(Object.assign(
     new Error('Extraction budget exhausted for this period'), { status: 402 })), true)
+  // #4614: a 402 whose `code` names a SPEND cap an upgrade cannot lift must
+  // NEVER produce an upsell — while the canonical plan-limit code still does.
+  assert.equal(shouldNudgeUpgrade(Object.assign(
+    new Error('Cohort LLM spend cap reached'),
+    { status: 402, code: 'cohort_cost_cap' })), false)
+  assert.equal(shouldNudgeUpgrade(Object.assign(
+    new Error('Team points limit reached (25000). Upgrade your plan.'),
+    { status: 402, code: 'quota_exceeded' })), true)
   // Legacy string path (client-side 402 copy, no status threaded).
   assert.equal(shouldNudgeUpgrade('Graph limit reached for this tier — upgrade to add more graphs.'), true)
   assert.equal(shouldNudgeUpgrade('Graph limit reached — delete a graph or upgrade.'), true)
@@ -144,16 +153,23 @@ test('#4639: a genuine limit refusal still offers the upgrade', () => {
     new Error('Graph limit reached — delete a graph or upgrade.'), { status: 409 })), true)
 })
 
-test('#4639: error normalization reads Error objects, {message,status}, and strings', () => {
+test('#4639: error normalization reads Error objects, {message,status,code}, and strings', () => {
   assert.deepEqual(normalizeError(Object.assign(new Error('boom'), { status: 404 })),
-    { message: 'boom', status: 404 })
+    { message: 'boom', status: 404, code: null })
   assert.deepEqual(normalizeError({ message: 'limit reached', status: 402 }),
-    { message: 'limit reached', status: 402 })
-  assert.deepEqual(normalizeError('plain'), { message: 'plain', status: null })
-  assert.deepEqual(normalizeError(null), { message: '', status: null })
+    { message: 'limit reached', status: 402, code: null })
+  assert.deepEqual(normalizeError('plain'), { message: 'plain', status: null, code: null })
+  assert.deepEqual(normalizeError(null), { message: '', status: null, code: null })
+  // #4614: the machine-readable refusal category survives normalization.
+  assert.deepEqual(normalizeError(Object.assign(
+    new Error('x'), { status: 402, code: 'quota_exceeded' })),
+  { message: 'x', status: 402, code: 'quota_exceeded' })
   assert.equal(errorMessage(undefined), '')
   assert.equal(errorStatus('plain'), null)
   assert.equal(errorStatus({ status: '402' }), null) // a string status is not a status
+  assert.equal(errorCode({ code: 'quota_exceeded' }), 'quota_exceeded')
+  assert.equal(errorCode({ code: 402 }), null) // a numeric code is not a code
+  assert.equal(errorCode('plain'), null)
 })
 
 // ── 3. Render-region pins (main.jsx has no runtime harness) ───────────────

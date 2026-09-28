@@ -350,9 +350,224 @@ class TestDetectQuestionType:
             "how many times did you prefer option A?") == "multi-session"
 
     def test_month_only_date_falls_through(self) -> None:
-        # The KU rule requires a 4-digit year — an optional month word
-        # WITHOUT the year does not match (deliberate month-only boundary).
+        # The KU rule requires a 4-digit year — a month name WITHOUT the
+        # year does not match (deliberate month-only boundary).
         assert detect_question_type("what was the gym schedule before March?") is None
+
+    # ── #2009: the case fold ───────────────────────────────────────────────
+
+    @pytest.mark.parametrize("q,expected", [
+        # Each fixture's fold-dependent cue is its FIRST word, so the
+        # sentence-cased form exercises the fold rather than sidestepping it.
+        # The SSP row's ONLY cue is its leading "Which option …": a bare
+        # ``prefer`` later in the same sentence would still match after a
+        # missing fold and the row would not test it.
+        ("How many weeks ago did I meet my aunt?", "temporal-reasoning"),
+        ("How many days did I spend camping?", "temporal-reasoning"),
+        ("How often do I attend yoga?", "knowledge-update"),
+        ("How many different doctors did I see?", "multi-session"),
+        ("Currently, what is the schedule?", "knowledge-update"),
+        ("Which option is better?", "single-session-preference"),
+    ])
+    def test_the_case_of_the_question_never_changes_the_type(
+            self, q: str, expected: str) -> None:
+        """#2009: detection is CASE-INSENSITIVE.
+
+        Value that makes this test FAIL: removing the ``.lower()`` fold in
+        ``detect_question_type``. The patterns are lowercase, so a rule
+        anchored on a capitalised first word stops matching.
+
+        Every fixture reaches that value: each one's cue is its FIRST word.
+        Five rows then fail by returning ``None``; the ``spend`` row fails by
+        returning ``multi-session`` instead (the lowercase ``spend`` later in
+        the string still matches the MS cue), which is why each row asserts
+        the exact expected type rather than merely non-None. The first assert
+        is what catches a fold moved to a call site — it passes the
+        sentence-cased input — while the lower/upper asserts additionally pin
+        that the fold is unconditional on the input's case.
+        """
+        assert detect_question_type(q) == expected
+        assert detect_question_type(q.lower()) == expected
+        assert detect_question_type(q.upper()) == expected
+
+    # ── #2009: cues added by the calibration, per class ────────────────────
+
+    @pytest.mark.parametrize("q", [
+        "I finished the book two weeks ago",
+        "I attended a class a month ago",
+        "How many days had passed between the two events?",
+        "Which event happened first, the wedding or the party?",
+        "What did I do last Saturday?",
+        "Which mode of transport did I use most recently?",
+    ])
+    def test_temporal_cues_added_by_2009(self, q: str) -> None:
+        """Cues #2009 added to TR.
+
+        Value that makes it FAIL: each fixture's own cue, in the position it
+        uses — a word number ("two") rather than a literal digit, an elapsed
+        span between events, an ordering verb, or a relative day reference.
+        Every fixture reaches it: each carries at least one such cue, and no
+        fixture's cue is case-dependent. The first two rows rely SOLELY on
+        the word-number rule, so removing it reds exactly those two. The
+        remaining rows are not all multiply-covered: "How many days had
+        passed between the two events?" is reached by three rules and
+        "which event happened first, the wedding or the party?" by five, but
+        "What did I do last Saturday?" and "most recently" rows are reached
+        by one each — their rule is unpinned by a second, which is why they
+        are asserted by type rather than left to deletion testing.
+        """
+        assert detect_question_type(q) == "temporal-reasoning"
+
+    @pytest.mark.parametrize("q,expected", [
+        ("How often do I attend yoga classes?", "knowledge-update"),
+        ("What is my previous occupation?", "knowledge-update"),
+        ("How many different doctors did I visit?", "multi-session"),
+        ("What is the total number of items?", "multi-session"),
+        ("How much did I spend in total?", "multi-session"),
+    ])
+    def test_cues_added_by_2009(self, q: str, expected: str) -> None:
+        """Cues #2009 added to KU and MS.
+
+        Value that makes it FAIL: the class the fixture's cue must reach.
+        Three fixtures are MS and two KU, so a change that routed either
+        group to the other class reds at least one row on the TYPE (not just
+        on non-None). Every fixture reaches its cue: "how often", "my
+        previous", then "how many", "total" and "how much". (The narrower
+        `how many different` / `the total` / `in total` forms were dropped as
+        syntactically subsumed by those broader cues — see `_MS_PATTERNS`.)
+        """
+        assert detect_question_type(q) == expected
+
+    @pytest.mark.parametrize("q", [
+        "I've been feeling nostalgic lately. Do you think it would be a good "
+        "idea to attend my high school reunion?",
+        "Can you suggest some accessories for my camera?",
+        "Do you have any tips for keeping the kitchen clean?",
+        "What should I serve for dinner this weekend?",
+    ])
+    def test_advice_shaped_questions_stay_generic(self, q: str) -> None:
+        """Advice-shaped questions keep the generic baseline.
+
+        Value that makes it FAIL: adding an advice-seeking cue to
+        ``_SSP_PATTERNS``. The first three fixtures each carry one of the
+        named cues ("do you think", "can you suggest", "any tips") and are
+        reached by it — adding those three cues reds exactly those three.
+        The fourth carries none of them: its cue is the ``what should I
+        <verb>`` imperative form, refused for the same reason but expressed
+        as a different pattern, so the three-cue mutation leaves it green and
+        it is the type assertion (not the mutation) that pins it.
+
+        The first fixture is the exact question ``d6233ab6`` whose
+        characterization ``docs/runbook/4107-preference-abstention.md`` §3
+        pins (``detect_question_type`` -> None, generic prompt emitted).
+        """
+        assert detect_question_type(q) is None
+
+    @pytest.mark.parametrize("q", [
+        # Two new baselines no cue added by #2009 may claim.
+        "what is the office address?",
+        "who leads the project?",
+    ])
+    def test_added_cues_leave_the_baseline_alone(self, q: str) -> None:
+        """Generic questions stay generic under the #2009 cues.
+
+        Value that makes it FAIL: any added cue broad enough to match these
+        strings — a bare ``\bwho\b`` / ``\bwhat\b``, or a loose "the"/"is"
+        form — which is the over-broad pattern this test exists to catch.
+        Reachable: the value is exactly such a too-general cue matching the
+        fixture; the two strings carry no cue word, so only an over-reach can
+        claim them.
+        """
+        assert detect_question_type(q) is None
+
+    def test_ordering_rules_need_first_not_before(self) -> None:
+        """An ordinal is not a date: `before <year>` stays KU.
+
+        Value that makes it FAIL: an unanchored ordinal-before-date branch
+        (``\b(first|second|third)\b.{0,N}\bbefore\b``). Only the
+        ``first version before 2025`` fixture reaches it — it is the one row
+        carrying both an ordinal and ``before <year>``. The gym row carries
+        no ordinal and pins instead that the KU year rule still claims a
+        plain date question, with TR preceding KU.
+        """
+        assert detect_question_type(
+            "what was the gym schedule before 2025?") == "knowledge-update"
+        assert detect_question_type(
+            "what was the first version before 2025?") == "knowledge-update"
+        assert detect_question_type(
+            "which event happened first?") == "temporal-reasoning"
+
+    @pytest.mark.parametrize("q", [
+        "what is my first name?",
+        "who was my first manager?",
+    ])
+    def test_first_needs_an_ordering_verb(self, q: str) -> None:
+        """An ATTRIBUTIVE "first" is a fact question, not an ordering one.
+
+        Value that makes it FAIL: a bare wh-``first`` rule such as
+        ``\\b(which|who|what)\\b.{0,50}\\bfirst\\b``. Both fixtures reach it —
+        each contains a first-word wh-question with attributive "first".
+        """
+        assert detect_question_type(q) is None
+
+    @pytest.mark.parametrize("q", [
+        "which city did I visit first?",
+        "which device did I purchase first?",
+        "which book did I read first?",
+        "who arrived first?",
+    ])
+    def test_ordering_first_without_an_alternative_is_still_ordering(
+            self, q: str) -> None:
+        """A sentence-final ordinal is ordering even with no verb listed.
+
+        Value that makes it FAIL: a rule that requires an alternative
+        (``or``) or a verb from a fixed list. Every fixture reaches it: each
+        names no alternative and uses an unlisted verb, so only the
+        sentence-final-ordinal form can claim them.
+        """
+        assert detect_question_type(q) == "temporal-reasoning"
+
+    def test_ordinal_choice_is_first_only(self) -> None:
+        """The `which … ordinal … or` rule is pinned to FIRST.
+
+        Value that makes it FAIL: widening that rule to ``second|third``.
+        The preference fixture is reachable — ``prefer`` is a LATER cue and
+        TR wins the precedence race, so the widening flips it to
+        temporal-reasoning.
+        """
+        assert detect_question_type(
+            "which do you prefer, the second option or the third?") \
+            == "single-session-preference"
+        assert detect_question_type(
+            "which book did I finish first, A or B?") == "temporal-reasoning"
+
+    def test_participated_is_not_a_temporal_cue(self) -> None:
+        """A bare verb must not outrank MS in the highest-precedence class.
+
+        Value that makes it FAIL: a bare ``\\bparticipated?\\b`` in TR. The
+        counting fixture is reachable — it contains that word, so TR claims
+        it before MS sees the explicit ``how many times`` marker. The second
+        assertion pins that the genuine ordering form is still covered (by
+        the pre-existing ``which event`` rule, not by the bare verb).
+        """
+        assert detect_question_type(
+            "how many times have I participated in the marathon?") \
+            == "multi-session"
+        assert detect_question_type("which event did I participate in?") \
+            == "temporal-reasoning"
+
+    def test_past_elapsed_state_does_not_steal_the_current_form(self) -> None:
+        """"how long HAD I" (TR) and "how long HAVE I" (KU) are distinct.
+
+        Value that makes it FAIL: a ``(had|have)`` alternation in the new TR
+        elapsed-state rule. Reachable: the KU fixture contains ``have``, so
+        TR claims it first and the row reds.
+        """
+        assert detect_question_type(
+            "how long had I been a member when I attended the meetup?") \
+            == "temporal-reasoning"
+        assert detect_question_type(
+            "how long have I been using my Fitbit?") == "knowledge-update"
 
     # #2027 test-review pins: regex branches previously unpinned — a
     # widening here silently changes which prompt ships on the product

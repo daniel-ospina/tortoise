@@ -169,6 +169,49 @@ def test_hyphenated_namespace_registry_graph_stays_guard_passing(tmp_path):
         sdk.close()
 
 
+# ── #3634 / epic CI-3 half 2: the registry name is the reaper's input ─────
+
+def _registry_name_for(tmp_path, ns, graph_name):
+    """Drive the REAL derivation: _get_registry reads proj.graph_name."""
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(str(tmp_path / "x.db"), namespace=ns)
+    try:
+        if graph_name is not None:
+            sdk._get_proj().graph_name = graph_name   # the redirect does this in a test session
+        return sdk._get_registry()._name
+    finally:
+        sdk.close()
+
+
+def test_test_derived_registry_name_carries_an_approved_prefix(tmp_path):
+    name = _registry_name_for(tmp_path, "registry", "test_docs_api_abc123def456")
+    assert name.startswith(("test_", "tortoise_test_")), name
+
+
+def test_already_compliant_registry_name_is_not_double_prefixed(tmp_path):
+    name = _registry_name_for(tmp_path, "test-hosted", "test_hosted_tortoise")
+    assert name.startswith("test_hosted_")
+    assert not name.startswith("test_test_hosted_")
+
+
+def test_shared_registry_name_is_never_prefixed(tmp_path):
+    """AC2's fail-closed direction. `namespace="registry"` makes `_get_proj`'s
+    `namespace == "registry"` branch force graph_name="registry_tortoise"
+    BEFORE our override, so this is the real shared-name path.
+
+    No separate `graph_name=None` leg: in a test session the projection
+    redirect rewrites graph_name to `test_x_<hash>` inside `_get_proj()`
+    (sdk.py), so a `None` leg asserts redirect behaviour, not the shared-name
+    invariant — and without a test session it is byte-identical to the
+    `"registry_tortoise"` leg below, which already carries that path. The
+    `does not start with` assertion below keeps the invariant fail-closed and
+    lane-independent: it reds if someone prefixes the `elif ns`/`else`
+    branches that produce the shared name."""
+    name = _registry_name_for(tmp_path, "registry", "registry_tortoise")
+    assert name == "registry_control_plane"
+    assert not name.startswith(("test_", "tortoise_test_")), name
+
+
 def test_explicit_test_prefixed_name_honored_verbatim(uri_env):
     """Cycle-2 P0-1b: an explicit test_* name is the shared opt-in — honored
     verbatim by the redirect (never derived)."""

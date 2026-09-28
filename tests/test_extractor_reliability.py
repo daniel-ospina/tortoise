@@ -1310,3 +1310,169 @@ def test_rotating_two_strikes_down_lane_half_open_probe_restores():
     if out.startswith("farm-a:"):
         assert "farm-a" not in model._downed  # probe success restored it
         assert model._stall_strikes["farm-a"] == 0
+
+
+def test_rotating_half_open_probe_lane_is_reachable_despite_bounded_budget():
+    """#4992 regression: with one cold lane (``farm-b``) and one twice-stalled
+    UNCCOOLED lane (``farm-a`` — the #2384 half-open probe), ``complete()`` must
+    reach ``farm-a``. The pre-fix bounded loop drew every attempt from the random
+    ``_pick()``, so all n*3 = 6 draws could land on the cooled lane and the call
+    raised ``RuntimeError: all 2 providers in cooldown`` — about a lane that was
+    not cooled at all.
+
+    This is the issue's seed sweep: 6 of the first 500 seeds fail on the pre-fix
+    code (seeds 5, 193, 231, 248, 461, 479); after the deterministic reachability
+    pass every seed succeeds and ``farm-a`` is the ONLY admissible lane."""
+    import random
+
+    from tortoise.model_adapters import RotatingModel
+
+    class _P:
+        def __init__(self, name):
+            self.provider = name
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return f"{self.provider}:{system}"
+
+    rng_state = random.getstate()
+    try:
+        for seed in range(500):
+            random.seed(seed)
+            a, b = _P("farm-a"), _P("farm-b")
+            model = RotatingModel([a, b], cooldown_s=300)
+            model._in_flight = a
+            model.note_stall(provider="farm-a")
+            model.note_stall(provider="farm-a")     # farm-a is now downed
+            model._cooldowns["farm-b"] = 10.0 ** 10  # only healthy lane is cooled
+            model._cooldowns["farm-a"] = 0.0         # downed lane is probe-eligible
+            out = model.complete(system="s", user="u")
+            assert out == "farm-a:s", (seed, out)
+            assert a.calls == 1, (seed, a.calls)
+            assert "farm-a" not in model._downed, seed  # probe restored it
+            assert model._stall_strikes["farm-a"] == 0, seed
+    finally:
+        random.setstate(rng_state)
+
+
+def test_rotating_exhaustion_message_names_the_reason_when_not_all_cooled():
+    """#4992 message honesty: the exhaustion message is DERIVED from the
+    eligibility test, so it can only claim a cause the code established. A lane
+    excluded for a reason other than cooldown must be named as such — the pre-fix
+    code asserted "all N providers in cooldown" in the half-open-probe case,
+    about a lane that was not cooled at all.
+
+    Under the current policy the only reachable no-eligible state is
+    all-lanes-cooled (any uncooled lane is admissible via the half-open probe),
+    so this pins the general form of the message as a direct-call defense rather
+    than through ``complete()``."""
+    from tortoise.model_adapters import _DOWNED_SKIP_REASON, RotatingModel
+
+    class _P:
+        def __init__(self, name):
+            self.provider = name
+
+    class _DownedExclusion(RotatingModel):
+        """Eligibility that excludes every lane for a NON-cooldown reason,
+        exercising the message's general form."""
+
+        def _lane_ineligible_reason(self, p, now):
+            return _DOWNED_SKIP_REASON
+
+    model = _DownedExclusion([_P("farm-a"), _P("farm-b")], cooldown_s=300)
+    msg = model._no_eligible_message(time.time())
+    assert "in cooldown" not in msg, msg
+    # the reason the eligibility test returned must appear — not just any text
+    assert _DOWNED_SKIP_REASON in msg, msg
+    assert "farm-a" in msg and "farm-b" in msg, msg
+    assert msg.startswith("no eligible provider"), msg
+
+
+def test_rotating_exhaustion_message_is_all_cooldown_when_every_lane_is_cooled():
+    """#4992: the reachable no-eligible state — every lane genuinely cooled —
+    keeps the established "all N providers in cooldown" text, and no lane is
+    called. Pins the branch that production actually takes."""
+    from tortoise.model_adapters import RotatingModel
+
+    class _P:
+        def __init__(self, name):
+            self.provider = name
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return "ok"
+
+    a, b = _P("farm-a"), _P("farm-b")
+    model = RotatingModel([a, b], cooldown_s=300)
+    model._cooldowns["farm-a"] = 10.0 ** 10
+    model._cooldowns["farm-b"] = 10.0 ** 10
+    with pytest.raises(RuntimeError) as excinfo:
+        model.complete(system="s", user="u")
+    assert str(excinfo.value) == "all 2 providers in cooldown"
+    assert a.calls == 0 and b.calls == 0
+
+
+def test_rotating_none_completion_is_a_result_not_a_failure():
+    """#4992 review regression: a lane may LEGALLY return None (the OpenRouter
+    adapter forwards a null message content, which a reasoning-budget collapse
+    produces), so the attempt helper must not use None as its failure sentinel.
+    That collision turned one null completion into a cooldown plus a
+    "no eligible provider" raise — and, upstream, into billed retries of a
+    request that had actually been answered."""
+    from tortoise.model_adapters import RotatingModel
+
+    class _NoneP:
+        def __init__(self, name):
+            self.provider = name
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return None
+
+    a, b = _NoneP("farm-a"), _NoneP("farm-b")
+    model = RotatingModel([a, b], cooldown_s=300)
+    assert model.complete(system="s", user="u") is None
+    assert a.calls + b.calls == 1, (a.calls, b.calls)
+    assert not model._cooldowns, "a delivered None is not a provider failure"
+
+
+@pytest.mark.timeout(10)  # an unbounded re-scan regression must fail fast, not hang CI
+def test_rotating_reachability_rescans_after_eligibility_changes(monkeypatch):
+    """#4992 review regression: eligibility is state-dependent — a lane skipped
+    as "session-downed while a healthy lane exists" becomes admissible the
+    moment that healthy lane is cooldowned by a failed attempt in the SAME
+    pass. A single forward pass still missed it and re-raised the failing lane's
+    error; the reachability pass must re-scan until no unattempted lane is
+    admissible."""
+    import random
+
+    from tortoise.model_adapters import RotatingModel
+
+    class _P:
+        def __init__(self, name, fail=False):
+            self.provider = name
+            self.fail = fail
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if self.fail:
+                raise _HTTPError(402)  # provider budget spent → rotate (#1951)
+            return f"{self.provider}:{system}"
+
+    a, b = _P("farm-a"), _P("farm-b", fail=True)
+    model = RotatingModel([a, b], cooldown_s=300)
+    model._in_flight = a
+    model.note_stall(provider="farm-a")
+    model.note_stall(provider="farm-a")   # farm-a downed
+    model._cooldowns["farm-a"] = 0.0      # probe-eligible once farm-b is cooled
+    # Force every Phase-1 draw onto farm-a (skipped while farm-b is healthy), so
+    # only the reachability pass can serve the call.
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+    out = model.complete(system="s", user="u")
+    assert out == "farm-a:s"
+    assert a.calls == 1
+    assert b.calls == 1, "healthy lane tried once, then the re-scan reaches farm-a"

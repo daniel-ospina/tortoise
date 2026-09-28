@@ -488,13 +488,19 @@ class TestClosedVocab:
     def test_core_kinds_accepted_bare_and_namespaced(self):
         from tortoise.value_extractor import validate_summary, _object_kind_vocab  # noqa: F401, I001
         vocab = _object_kind_vocab()
-        for kind in ("Project", "WorkItem", "Problem", "document", "tag",
+        # `document` is deliberately absent: D10 (#5013, ONTOLOGY v3.15, #5022)
+        # retired `objectKind: document` — a document is a `:Source` — and §5
+        # dropped it, so it is not part of the closed objectKind vocabulary.
+        for kind in ("Project", "WorkItem", "Problem", "tag",
                      "user", "skill", "tool", "agent", "workflow",
                      "agreement", "standard", "other", "strategy", "plan",
                      "goal", "target"):
             assert kind in vocab, f"{kind} missing from closed vocab"
             assert f"core:{kind}" in vocab, f"core:{kind} missing"
             assert kind.lower() in vocab, f"{kind.lower()} missing"
+        # The retired kind must stay OUT: the positive loop above cannot notice a
+        # RE-ADD (D10 — #5013, ONTOLOGY v3.15, #5022).
+        assert "document" not in vocab and "core:document" not in vocab
         # pack kinds present too
         assert "product-strategy:product" in vocab
 

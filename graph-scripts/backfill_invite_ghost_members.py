@@ -22,9 +22,10 @@ Usage:
     python3 graph-scripts/backfill_invite_ghost_members.py [--dry-run] [--yes] [--uri URI]
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:6379/tortoise).
-Test safety: always verify the graph before running. For test graphs
-(tortoise_test_* / test_*) no confirmation is needed; production graphs
-require --yes.
+Test safety: the guard runs on the graph the sweep ACTUALLY writes (the
+SDK-resolved registry graph), never on the URI path — so a test-prefixed
+`--uri` never auto-approves a write to the shared registry graph, and `--yes`
+is required for a real run (#5188).
 """
 from __future__ import annotations
 
@@ -39,28 +40,18 @@ sys.path.insert(0, os.path.dirname(_HERE))
 DEFAULT_URI = "docker://:falkordb@localhost:6379/tortoise"
 
 
-def _base_graph_name(uri: str) -> str:
-    """Extract the base graph name from a connection URI path."""
-    from urllib.parse import urlparse
-    parsed = urlparse(uri)
-    if parsed.scheme not in ("docker", "redis", "rediss", "bolt"):
-        print(f"Unsupported URI scheme: {uri}")
-        sys.exit(1)
-    return parsed.path.lstrip("/") or "tortoise"
-
-
-def _registry_graph_name(base: str) -> str:
-    """Resolve the graph actually swept: with namespace='registry' the SDK
-    selects registry_control_plane (or registry_{base}_control_plane for
-    test-prefixed graphs) on the URI's server — independent of the URI
-    path (sdk._get_registry naming)."""
-    if base.startswith("tortoise_test_") or base.startswith("test_"):
-        return f"registry_{base}_control_plane"
-    return "registry_control_plane"
-
-
 def test_guard(graph_name: str, yes: bool = False) -> None:
-    """Safety gate: confirm before running on non-test graphs."""
+    """Safety gate: must be given the graph the sweep ACTUALLY writes.
+
+    The key difference here — and the reason this guard takes the RESOLVED
+    name, NOT the URI path — is that `TortoiseSDK(namespace="registry")`
+    resolves to `<ns>_control_plane` (`registry_control_plane`) whatever the
+    URI path says. Gating on the URI path auto-approves a run whose path
+    merely LOOKS test-prefixed while the write lands on the shared registry
+    graph (#5188). Because that resolved name is never test-prefixed on the
+    no-`path=` CLI path this script uses, a real write must always pass
+    `--yes`.
+    """
     if graph_name.startswith("tortoise_test_") or graph_name.startswith("test_"):
         print(f"✅ Test graph detected ({graph_name}) — proceeding")
         return
@@ -84,17 +75,23 @@ def main() -> int:
     ap.add_argument("--uri", default=os.environ.get("TORTOISE_DB_URI", DEFAULT_URI))
     args = ap.parse_args()
 
-    graph_name = _base_graph_name(args.uri)
-    test_guard(graph_name, args.yes)
-    print(f"Registry graph on this server: {_registry_graph_name(graph_name)}")
-
     # Connect through the SDK (registry namespace) so the sweep shares the
-    # exact registry graph + namespace logic as the invite endpoints.
+    # exact registry graph + namespace logic as the invite endpoints — and so
+    # the printed registry name comes from that SAME derivation. #3634: do
+    # not re-derive it here; a second copy drifts from sdk._get_registry.
     os.environ["TORTOISE_DB_URI"] = args.uri
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(namespace="registry")
     try:
+        reg = sdk._get_registry()
+        target = reg.name
+        # The URI path never names this graph — `TortoiseSDK(namespace="registry")`
+        # derives the registry name from the NAMESPACE, not from the URI path.
+        # #5188: gate on the RESOLVED name, never the URI path — a test-prefixed
+        # `--uri` used to auto-approve a sweep of the shared registry graph.
+        test_guard(target, args.yes)
+        print(f"Registry graph (SDK-resolved): {target}")
         result = sdk.sweep_invite_ghost_memberships(dry_run=args.dry_run)
     finally:
         sdk.close()
