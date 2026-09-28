@@ -640,13 +640,13 @@ def test_inv7_item6_write_path_parity() -> None:
     )
 
     # Non-vacuity for the `if (obj.user)` narrowing (#3496 item 6): the payload
-    # above carries a `user` object, so a dropped or misspelled branch is
-    # OBSERVABLE here. Without it the provider-token deletes alone clear
-    # SIZE_GUARD, and every assertion below stayed green on a page whose whole
-    # identities/user_metadata narrowing block had been deleted — the case the
-    # size guard exists for (#1225, the citation the page's own comment carries
-    # and the shared bridge's header does too; a bare #1835 here resolved to an
-    # unrelated merged PR).
+    # above carries a `user` object, so a dropped or misspelled narrowing branch
+    # is OBSERVABLE in the assertions below. WITHOUT a `user` object the
+    # provider-token deletes alone bring the value under SIZE_GUARD (#1225), so
+    # the item6 fixture needs one for the narrowing to do any work — the driver
+    # scenario states the same beside the fixture. (With this fixture's large
+    # `user`, the token deletes alone leave the value ABOVE SIZE_CAP, so the
+    # narrowing — not the token strip — is what makes this write land at all.)
     sessions = []
     for header in r["strippedHeaders"]:
         value = _cookie_value(header)
