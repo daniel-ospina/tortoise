@@ -813,9 +813,11 @@ assert_eq "$(iso_epoch "epoch:1234567890123")" "" "51: an over-long epoch run is
 
 # (c1) malformed DATETIME fields — pinned to the inner `dt` shape check. BSD `date`
 # prefix-matches a short field (`03:1:01`), so without that guard these return
-# wrong-but-plausible epochs rather than "". These four are the ONLY inputs of the
-# original thirteen that reach `dt` at all: ablating that arm reddens exactly these
-# four, which is how the split below was measured rather than assumed.
+# wrong-but-plausible epochs rather than "". These four are the only inputs of the
+# original thirteen that `dt` REFUSES, and ablating that arm reddens exactly these
+# four — which is how the split below was measured rather than assumed. (Six of the
+# thirteen REACH `dt`: these four fail it, and (c6)'s two PASS it. "Reddens under
+# ablation" means "is refused BY the guard", which is not the same as "reaches" it.)
 for bad in "2026-09-13T03:1:01.750Z" "2026-09-13T3:15:01.750Z" \
            "2026-9-13T03:15:01.750Z" "2026-09-13T03:15:1.750Z"; do
   assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (inner dt shape guard)"
@@ -832,8 +834,9 @@ for bad in "2026-09-13T03:15:01.000.5Z" "2026-09-13T03:15:01.0.0+05:00" \
 done
 # (c6) a fraction that is not digits-only — pinned to the fraction arm. These DO
 # reach and PASS `dt` (the field is well-formed to the dot); the refusal is the
-# digits-only test on what follows it, which is also what stops the offset in
-# `…000+05:00garbage` from being silently applied.
+# digits-only test on what follows it. Note the failure mode for the first one: its
+# offset branch does NOT match (the string ends in `garbage`), so without this test
+# `iso="$dt"` would silently DROP the `+05:00` and return a plausible epoch.
 for bad in "2026-09-13T03:15:01.000+05:00garbage" \
            "2026-09-13T03:15:01.000garbage"; do
   assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (fraction digits-only guard)"
@@ -851,13 +854,15 @@ for bad in "2026-09-13T03:15:01+banana" "2026-09-13 03:15:01" \
 done
 # (c2) out-of-range offsets — pinned to the hh/mm bounds. Tested separately because
 # they are a DIFFERENT guard: ablating the shape check does not redden these, and
-# ablating the bounds does not redden (c1).
+# ablating the bounds does not redden (c1). (`+15:00` alone pins the hh bound and
+# `+05:60` alone the mm bound; `+99:99` reddens only with BOTH removed, so it is not
+# uniquely pinned — disclosed in the same spirit as (c5)'s `…:01.5.Z`.)
 for bad in "2026-09-13T03:15:01+99:99" "2026-09-13T03:15:01+05:60" \
            "2026-09-13T03:15:01+15:00" "2026-09-12T03:15:01-15:00"; do
   assert_eq "$(iso_epoch "$bad")" "" "51: '$bad' → the PARSER returns "" (offset out of range)"
 done
 # (c3) refused by OTHER mechanisms. Kept as value assertions, but deliberately NOT
-# claimed as shape-pinned: `epoch:` is refused by the epoch branch\'s own digit test
+# claimed as shape-pinned: `epoch:` is refused by the epoch branch's own digit test
 # (its operand is empty) and `not-a-date` by the outer fallback plus the final
 # digit guard, so neither reddens under a single-guard ablation.
 for bad in "epoch:1.5" "epoch:" "epoch:-1" "not-a-date"; do

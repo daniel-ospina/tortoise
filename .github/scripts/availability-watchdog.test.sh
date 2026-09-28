@@ -551,10 +551,11 @@ redact_unit() { # <text>
 # GitHub Actions bot with the heartbeat title and the heartbeat body marker.
 # search_json() cannot be reused (it carries the INCIDENT marker, so the
 # heartbeat adoption check would correctly reject it).
-heartbeat_search_json() { # <number> [title] [login]
+heartbeat_search_json() { # <number> [title] [login] [body]
   local n="${1:-7000}" t="${2:-$HEARTBEAT_TITLE_FIXTURE}" l="${3:-github-actions[bot]}"
+  local b="${4:-$HEARTBEAT_MARKER_FIXTURE}"
   printf '{"items":[{"number":%s,"title":"%s","body":"%s","user":{"login":"%s","type":"Bot"}}]}' \
-    "$n" "$t" "$HEARTBEAT_MARKER_FIXTURE" "$l"
+    "$n" "$t" "$b" "$l"
 }
 
 # seed an existing open incident in the stub's issue store.
@@ -3092,6 +3093,28 @@ run_watchdog
 assert_eq "$RC" "0" "hb6b: a heartbeat UPDATE failure does NOT fail a healthy run"
 assert_contains "$OUT" "heartbeat: could not update" "hb6b: …but it is logged loudly"
 assert_not_contains "$OUT" "heartbeat: recorded on" "hb6b: …and NEVER claims the record was written"
+
+# (hb6c) …and the search's two jq `select`s are load-bearing too — the watchdog's
+# copies of the checker's exact-title and body-marker guards (liveness cases 39/40
+# pin the checker's halves; nothing pinned the watchdog's). GitHub's
+# `in:title "…"` is a PHRASE match, so a bot issue titled `<title> EXTRA` is
+# returned by the query and would be adopted and PATCHed — while the checker, which
+# requires the EXACT title, sees no open record and alarms "pager dead" every run.
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_SEARCH_JSON="$(heartbeat_search_json 7000 "$HEARTBEAT_TITLE_FIXTURE EXTRA")"
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT PATCH')" "0" "hb6c: a bot title that is not EXACT is NOT adopted (never PATCHed)"
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb6c: …a fresh machine record is filed instead"
+
+# (hb6d) …and the marker select is load-bearing for the same reason: an exact-title
+# machine issue with NO marker is not our record.
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_HEARTBEAT_SEARCH_JSON="$(heartbeat_search_json 7000 "$HEARTBEAT_TITLE_FIXTURE" "github-actions[bot]" "no marker here")"
+run_watchdog
+assert_eq "$(count_calls 'GH-HEARTBEAT PATCH')" "0" "hb6d: an exact-title issue WITHOUT the body marker is NOT adopted"
+assert_eq "$(count_calls 'GH-HEARTBEAT POST')" "1" "hb6d: …a fresh machine record is filed instead"
 
 # (hb7) the operator kill switch records nothing (and the checker will then
 # alarm BY DESIGN — a silence is never an all-clear).
