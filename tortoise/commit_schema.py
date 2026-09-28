@@ -451,7 +451,11 @@ class Point(BaseModel):
 
 
 class OperatorTarget(BaseModel):
-    """MITIGATES edge-identity triple — the operator MERGE key (PL1)."""
+    """MITIGATES edge-identity triple — the operator MERGE key (PL1).
+
+    #4937: this identifies the operator BRIDGE a mitigation attacks; it is
+    not a peer of the ``Operator`` it belongs to.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -461,8 +465,24 @@ class OperatorTarget(BaseModel):
 
 
 class Operator(BaseModel):
-    """Epistemic operator — IMPL / NAND (direction REQUIRED) / MITIGATES
-    (target + strength [0.10, 0.50] REQUIRED). No op_<sha> ids (PL1)."""
+    """Epistemic operator record — IMPL / NAND, or the MITIGATES bridge-attack.
+
+    ``op_type`` is the WIRE vocabulary of the commit payload's ``operators``
+    array. Its three values are NOT three operator kinds:
+
+    * ``IMPL`` / ``NAND`` — the two operator kinds (a reified operator Point,
+      ``is_operator: true``, carrying direction + an optional label).
+    * ``MITIGATES`` — the wire spelling of a **bridge-attack**: ``target``
+      names the operator bridge it damps and ``strength`` names the dampening
+      (``w_eff = w × (1 − strength)``, weights.py). The commit path routes this
+      record to ``mitigate_operator``, which writes a mitigation Point +
+      ``(op)-[:mitigated_by]->(m)`` — NEVER a generic operator (#4937, the F1
+      ruling on #2552). The spelling is retained for backward compatibility
+      with older clients/extractors; ``target``/``strength`` are REQUIRED on
+      it precisely because it is not a peer operator.
+
+    No op_<sha> ids (PL1).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -588,13 +608,33 @@ class SupersessionRecord(BaseModel):
     for POINT-level refs (E5 #1537 — ``superseded``/``supersedes_by`` are
     content-addressed ``pt_<sha>`` ids, dispatched by prefix at the write
     sites), as a CORRECTS edge via the canonical ``supersede()``. Additive-
-    optional so old clients' payloads still validate (no migration)."""
+    optional so old clients' payloads still validate (no migration) — with
+    ONE deliberate exception (#2243): ``evidence`` is capped at 200 chars, so
+    a client that previously sent longer evidence now gets a 422. The two ref
+    fields stay uncapped on purpose (see the note below)."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # ⛔ ``superseded``/``supersedes_by`` are DELIBERATELY UNCAPPED (#2243):
+    # they carry entity NAMES, and an Object name is IDENTITY — the write
+    # path MERGEs on it and stores it VERBATIM. #5370/#5390 removed the
+    # fold's own 200-char cap on the successor name precisely because it was
+    # LOSSY (a >200-char successor folded to a prefix that names NO Object,
+    # so a live successor rendered "no successor record found"). A
+    # ``max_length`` here would 422 that reproduced, supported case instead.
+    # ``evidence`` is free text (no identity role) and IS capped, mirroring
+    # ``Point.quote`` (≤200, :382) so a malformed batch cannot embed MBs
+    # inside the 8 MiB body cap.
+    #
+    # RESIDUAL (known, deliberate): the uncapped ref fields are interpolated
+    # into the per-record WARN lines (commit_ops.py:525/551/596/633), so a
+    # single WARN can still be body-cap-scale. What the caps DO bound is the
+    # WARN COUNT (≤ MAX_OPERATORS records), which is the amplification the
+    # issue describes; per-WARN size stays bounded only by the 8 MiB request
+    # cap.
     superseded: str = Field(min_length=1)   # existing entity id OR name
     supersedes_by: str = Field(min_length=1)  # the new entity's name
-    evidence: str = Field(default="")
+    evidence: str = Field(default="", max_length=200)
 
 
 class CommitPayload(BaseModel):
@@ -834,6 +874,15 @@ def validate_layer1(
     if len(payload.operators) > MAX_OPERATORS:
         add("operators", f"operator count {len(payload.operators)} exceeds "
             f"MAX_OPERATORS ({MAX_OPERATORS})")
+    # Supersessions (#2243): bound the batch too. The write path's
+    # ``apply_supersessions`` emits ONE WARN PER RECORD (fail-open), so an
+    # unbounded batch amplifies into a warning storm; this count cap is the
+    # load-bearing half of the fix. It mirrors the operators cap (also
+    # MAX_OPERATORS=500) and is the same order as entities (MAX_ENTITIES=500).
+    if len(payload.supersessions) > MAX_OPERATORS:
+        add("supersessions", f"supersession count "
+            f"{len(payload.supersessions)} exceeds MAX_OPERATORS "
+            f"({MAX_OPERATORS})")
 
     # Atomicity shape (per point).
     for i, pt in enumerate(payload.points):

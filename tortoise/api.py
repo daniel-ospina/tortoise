@@ -391,9 +391,9 @@ class EventAPI:
                      owned_by: str = "",
                      managed_by: str = "",
                      governing_agreement: str = "",
-                     doc_status: str = "draft",
                      format: str = "markdown",
                      version: str = "",
+                     content_hash: str | None = None,
                      createdAt: str | None = None,
                      updatedAt: str | None = None,
                      corrects: str | None = None,
@@ -414,13 +414,26 @@ class EventAPI:
         #125: topics/summary/session_id/event_id capture metadata.
         #167: source_path → d.sourcePath for file resolution.
         #133: needs_extraction → d.needs_extraction for --upgrade-all discovery.
+        D10 (ONTOLOGY v3.15 §4.4): ``doc_status`` is RETIRED — liveness is a
+        read of the extracted entities, not a stored field. It is no longer a
+        parameter and is never emitted.
         Epic #900 T3: ``source_url`` overrides the #205 auto-wire target (the
         indexer passes the real ``corpus://`` Source url so no phantom Source
         is merged — the override rides the JOURNALED event, so replay honors
         it); ``domain`` is persisted as ``d.domain`` via ``_persist_extra_props``
-        (intentionally NOT in ``_DOCUMENT_HANDLED`` — the persistence IS the
+        (intentionally NOT in ``_DOC_RETIRED`` — the persistence IS the
         intent); ``suppress_embedding`` skips the unconditional embedding call
         (new-path docs; the legacy branch computes as today — SC4).
+        #5422: ``content_hash`` is the document's **version anchor** on the
+        extraction path — the SHA-256 of the ingested text (callers pass
+        ``tortoise.ids.content_hash(text)``). It rides the JOURNALED event so
+        the projection fold writes it replayably, and it is what gives a
+        document-derived Point a version to anchor on (ONTOLOGY §4.6: the
+        hash identifies a version; identity is ``url``). The JSONL field is
+        snake_case (``content_hash``) like every sibling on this event — the
+        projection normalizes it to ``contentHash`` on the node. Absent/None
+        is the back-compat shape — the fold PRESERVES the stored hash rather
+        than clearing it, so a metadata-only re-emit cannot wipe an anchor.
         """
         self._emit("DocumentCreated",
                    corrects=corrects,
@@ -433,9 +446,9 @@ class EventAPI:
                    owned_by=owned_by,
                    managed_by=managed_by,
                    governing_agreement=governing_agreement,
-                   doc_status=doc_status,
                    format=format,
                    version=version,
+                   content_hash=content_hash,
                    createdAt=createdAt or now_iso(),
                    updatedAt=updatedAt or now_iso(),
                    topics=topics or [],

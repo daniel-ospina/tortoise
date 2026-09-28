@@ -1082,8 +1082,10 @@ class GapsRanker:
 # whether the cap was hit.
 
 # Node labels that participate in the knowledge subgraph.
+# D10 (ONTOLOGY v3.15 §4.4): :Document is retired — a document is a :Source,
+# so the Source label already covers it.
 SUBNODE_LABELS = (
-    "Point", "Object", "Subject", "Event", "Source", "Document",
+    "Point", "Object", "Subject", "Event", "Source",
 )
 _SUBNODE_LABEL_WHERE = " OR ".join(f"m:{lab}" for lab in SUBNODE_LABELS)
 

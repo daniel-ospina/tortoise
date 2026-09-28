@@ -338,7 +338,8 @@ over-engineering.
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 
 Before spawning a workstream, opening a worktree, or dispatching a sub-agent for issue **N**,
-run the collision pre-flight — **all surfaces, untruncated**:
+run the collision pre-flight — **all surfaces queried, and untruncated where truncation could
+matter**:
 
 ```bash
 # from the target repo's worktree (`--repo .` pins the target to THIS repo):
@@ -366,15 +367,22 @@ as "restored in #2745" is not work, and matching it fabricated a false COLLISION
 a window), and `gh issue view N` (assignee + claim comments), matching the issue number
 boundary-exactly (`3061` never matches `30610`) plus the issue's distinctive title keywords.
 
-- `exit 0` **CLEAN** — every surface queried, no in-flight work → proceed.
-- `exit 1` **COLLISION** — a hit; do **not** dispatch, coordinate on the named surface first.
-- `exit 2` **INCOMPLETE** — a surface could not be queried (gh auth/network) **or a PR list was
-truncated at its completeness cap**. This is **not** clean. Fix the surface and re-run; never
-treat it as a pass.
+- `exit 0` **CLEAN** — every **blocking** surface queried, no in-flight work → proceed. (The
+  closed-PR surface is advisory: exit 0 may mean it was sampled or even unqueried, and the CLEAN
+  line now counts only surfaces actually read and names any advisory shortfall.)
+- `exit 1` **COLLISION** — a hit on a blocking surface; do **not** dispatch, coordinate on the named
+  surface first. An advisory-surface match is reported but never blocks.
+- `exit 2` **INCOMPLETE** — a **blocking** surface could not be queried (gh auth/network) **or an
+  open-PR list was truncated at its completeness cap**. This is **not** clean. Fix the surface and
+  re-run; never treat it as a pass.
 
-PR lists are enumerated to completeness (`--pr-limit`, default 1000; `--closed-pr-limit`, default
-5000). A list longer than its cap is reported **TRUNCATED** and the run is `exit 2` — a partial
-list is never CLEAN.
+**OPEN** PR lists are enumerated to completeness (`--pr-limit`, default 1000); a list longer than its
+cap is reported **TRUNCATED** and the run is `exit 2` — a partial list is never CLEAN. The
+**closed-PR** surface is a single bounded **advisory** request (`--closed-pr-limit`, default 100, which
+is now the per-page SAMPLE size rather than a completeness cap): its own `Link` header supplies the
+total, so a partial sample is reported `⚠ PARTIAL` but is **not** `exit 2` — that surface can never
+block a dispatch, so its partiality cannot authorize what a full enumeration would have refused
+(#5251). Every other surface keeps the fail-closed posture.
 
 **Enforcement lives in the agent skills, outside this repo.** The dispatch-path gate is wired
 into `~/.pi/agent/skills/`: `epic-executor` (Step 3 pre-dispatch, fail-closed), `issue-workflow`

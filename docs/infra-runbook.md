@@ -1556,6 +1556,28 @@ The source tokens are:
 A bare `unmanaged` entry — present on Fly with no declared source — **FAILS the
 gate**. It names the #4126 defect precisely, not debt to be recorded.
 
+**The machine side (the second half of #4568).** The gate above checks the
+*manifest* against the Fly **secret list** and `fly.toml` `[env]` — build-time
+surfaces. That is not the same question as *"does the machine that is actually
+running carry the declared value?"*, and for a while nothing asked it: a declared
+`fly-toml-env` value the machine did not have passed every gate there was. It cost
+~5 h of `TORTOISE_MANUAL_LINKING_ENABLED` being absent — `is_truthy(None)` →
+`_linking_available()` False, a product flag off — with no way for the operator to
+learn that the value they applied was not the value the machine ran.
+
+`.github/scripts/check-fly-machine-env.py` now asserts it, **post-release**, in
+`post-deploy-verify`: for every `fly-toml-env` name, each **active** machine's
+`config.env` must carry that name with the value `fly.toml` `[env]` declares. An
+absent or divergent name **exits 1 and names both the variable and the machine**;
+a could-not-determine (API error, malformed shape, missing token, **zero active
+machines**, **no `fly-toml-env` names declared**) **exits 2 and is never
+bypassable** — "nothing was compared" is not a pass in either direction. A
+failure here means *the release is live and its env is wrong*, never "the
+deploy failed" (there is no rollback) — the same posture as the DB health step
+(§8.5). The two gates are complementary and neither replaces the other: a perfect
+manifest can coexist with a machine running something else. Tests:
+`tests/test_fly_machine_env.py`.
+
 **Fail-closed, and the two exit classes.** Exit 1 = undeclared or stale
 declarations (the actionable incident-time class). Exit 2 = the gate *could not
 determine state* (missing/empty secret list, unparsable manifest, PyYAML

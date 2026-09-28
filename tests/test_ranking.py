@@ -393,8 +393,10 @@ def test_event_signal_includes_produces_confidence(sdk):
     against a cartesian o×p merge (which would inflate about_objects to 6).
 
     NB: ranking.py queries `-[:PRODUCES]->` (uppercase). Production emits
-    lowercase `produces` (sdk.py:1582, entities.py) — a PRE-EXISTING case
-    mismatch (#25) that leaves this branch dead in production (confidence
+    lowercase `produces` (``entities.py::_EntityHandlers._event_plain_merge`` for the
+    Event→Object/Source edge; ``sdk.py::TortoiseSDK.file_human_approval`` for the
+    Event→Point edge) — a PRE-EXISTING case mismatch (#25) that leaves this
+    branch dead in production (confidence
     always coalesces to 0.5). This test pins the branch as ranking.py
     consumes it; when the #25 fix lands (lowercase query), flip the edge
     creation to lowercase and update expectations.
@@ -422,7 +424,8 @@ def test_event_signal_includes_produces_confidence(sdk):
 
 
 def test_event_signal_lowercase_produces_edge_not_matched(sdk):
-    """Production-reality pin: the SDK emits lowercase `produces` (sdk.py:1582),
+    """Production-reality pin: the SDK emits lowercase `produces`
+    (``entities.py::_EntityHandlers._event_plain_merge``, ``sdk.py::TortoiseSDK.file_human_approval``),
     which the uppercase `-[:PRODUCES]->` query never matches — so coalesce 0.5
     stays live even when produced Points exist (pre-existing #25 case
     mismatch). The #25 fix (lowercasing the query) flips FOUR tests: this one
@@ -486,7 +489,8 @@ def test_event_signal_batch_fetch_preserves_per_event_grouping(sdk):
     """One WHERE eventId IN $ids call over multiple MATCHED events must keep
     per-event aggregation for BOTH about_objects count AND avg confidence —
     counts and confidence must not merge across events. Production rerank
-    batches all search results in a single fetch (sdk.py:3252)."""
+    batches all search results in a single fetch
+    (``ranking.py::GraphRanker._fetch_event_signals``)."""
     ev_a = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s8")
     ev_b = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s9")
     proj = sdk._get_proj()

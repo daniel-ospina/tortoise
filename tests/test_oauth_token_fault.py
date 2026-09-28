@@ -656,17 +656,37 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
 
 # ── Task 5: `refresh_grant` — wrap the pre-mint reads, map the abort, unmask ──
 
-@pytest.mark.parametrize("table,select", [
-    ("oauth_clients", None),        # FIRST read on the path — the :726 leak
-    ("oauth_refresh_tokens", None),  # the refresh-token SELECT
-    ("organizations", None),                # _assert_team_usable
-    ("org_memberships", None),     # membership_for_user_org — S4 call site #4
-    ("oauth_access_tokens", ["id"]),  # prev_access
+# #4482: each arm is scoped to the call shape the refresh path ALONE issues.
+# `FakeControlPlane._take_fault` consumes the FIRST matching fault, and the boot
+# readers — `_sweep_events`->`_iter_registered_orgs`, `_purge_deleted_orgs`,
+# `_probe_control_plane` and `_sweep_oauth_retention`, all on daemon workers off
+# the TestClient lifespan — query the same tables. A fault whose shape is not
+# unique to the refresh path is stolen by one of them, the injected failure never
+# reaches the read under test, and the endpoint answers 200 instead of 503
+# (`assert (200 == 503)`), nondeterministically. Same class as the #4464 sites in
+# this file; same remedy.
+@pytest.mark.parametrize("table,select,match", [
+    ("oauth_clients", None, None),        # FIRST read on the path — the :726 leak
+    # refresh_grant's pre-mint SELECT is the only GET of this table filtering on
+    # `token_hash` (the retention sweep filters on `expires_at`), so a shape
+    # predicate scopes it without duplicating the production column list.
+    ("oauth_refresh_tokens", None,
+     lambda t, m, sel, f: m == "GET"
+     and any(c == "token_hash" for c, _, _ in (f or []))),
+    # _assert_org_usable; the boot sweep's org readers use other select shapes.
+    ("organizations", ["suspended_at", "tier"], None),
+    ("org_memberships", None, None),     # membership_for_user_org — S4 call site #4
+    # `prev_access` and the retention sweep BOTH GET oauth_access_tokens with
+    # select=["id"]; only the filter separates them, so this arm needs a shape
+    # predicate, not a select literal.
+    ("oauth_access_tokens", None,
+     lambda t, m, sel, f: m == "GET" and list(sel or []) == ["id"]
+     and any(c == "refresh_token_id" for c, _, _ in (f or []))),
 ])
-def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
+def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select, match):
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-pre")
-    cp.fail_query(table=table, method="GET", select=select, times=1)
+    cp.fail_query(table=table, method="GET", select=select, match=match, times=1)
     r = _post_refresh(tc, cp, rt)
     assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
     assert cp.tables["oauth_refresh_tokens"][0]["revoked_at"] is None    # grant untouched
