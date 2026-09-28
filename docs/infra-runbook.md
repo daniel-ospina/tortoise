@@ -1514,8 +1514,10 @@ surface.
 pack-catalog smoke (#1929), and post-release DB health (#1719 — since #4538 it
 runs in its own `post-deploy-verify` job and does not colour the deploy job; its
 phase contract — the weaker predicate informs, the strongest decides — is §8.5).
-Some can be bypassed for an incident-fix deploy — and **a bypass is an
-incident-window state, not a setting.** **Not every gate is bypassable:** the
+Some can be bypassed for an incident-fix deploy, and `SKIP_FLY_SECRET_PROVENANCE`
+also carries a `fly-toml-env` route-(b) transition (§8.4 step 4) — and **a
+*persistent* bypass is an incident-window state, not a setting.** **Not every
+gate is bypassable:** the
 migration-drift gate has no `if:` guard and no `SKIP_` lane by design (the #1001
 P0 recurred while a migration was missing from prod, so a missing token or an
 error must fail the deploy).
@@ -1550,7 +1552,7 @@ The source tokens are:
 |---|---|
 | `gh-secret:<GH_NAME>` | propagated by the workflow from the GitHub Actions secret `<GH_NAME>` (not always the same name — e.g. `GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`) |
 | `workflow` | set by the workflow from non-secret context (`${GITHUB_SHA}`, a composed feature flag) |
-| `fly-toml-env` | applied from `fly.toml` `[env]` — versioned, and the deploy applies it |
+| `fly-toml-env` | applied from `fly.toml` `[env]` — versioned, and the deploy applies it. The gate **fails while a Fly secret of the same name still exists** (a Fly secret SHADOWS `[env]`, so the versioned value is not what the app reads): that is the route-(b) transition, not drift — §8.4 step 4 is the order that completes it |
 | `fly-only:<issue-ref>` | a **deliberately** out-of-band secret; the named issue carries the recorded decision (§8.3) |
 
 A bare `unmanaged` entry — present on Fly with no declared source — **FAILS the
@@ -1642,6 +1644,14 @@ Rules that hold for every one of them:
   step/job-level `if:` — `SKIP_PACK_SMOKE` skips the whole packaging-smoke job,
   and `SKIP_DB_HEALTH_GATE` skips the whole health step — so nothing in it
   runs, and the bypass is not exit-class-limited.
+- **One bypass has a second, NON-incident use.** `SKIP_FLY_SECRET_PROVENANCE`
+  also carries the single transition deploy of a `fly-toml-env` route (b)
+  (§8.4 step 4, #4568): the declaration is "stale" only until the shadowing Fly
+  secret is unset, and the `[env]`-before-`unset` order needs that deploy. Use
+  the **per-run dispatch input** there, so nothing is left set and no `_SET_AT`
+  window exists. The exit-1 lane releases *every* exit-1 violation in the run, so
+  read the violation list and confirm the only entry is the name being moved —
+  the run summary names the gate, not the violations.
 
 **A bypass is never the committed default.** Every `skip-*` dispatch input
 defaults to the non-bypass value, so clearing the repo variable re-arms the gate
@@ -1709,13 +1719,64 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    fly secrets list -a tortoise-y4mjjq
    ```
 4. Resolve it by **declaring the real source**: add the propagation line to the
-   workflow plus the matching probe line (§8.1), or record the value in
-   `fly.toml [env]` and unset the Fly secret — **deploy the `[env]` entry first**,
-   because a Fly secret SHADOWS `[env]`.
-5. Only if that is impossible **during an incident** (e.g. an operator must
-   hand-set a secret mid-incident) may you set
-   `SKIP_FLY_SECRET_PROVENANCE=true` for the window — clear it afterwards, and
-   declare the secret anyway.
+   workflow plus the matching probe line (§8.1), or — for a **non-secret config
+   value** — record it in `fly.toml [env]`. That second route is a transition, and
+   **the `[env]` value must be on the machine before the secret is unset**
+   (#4568; #4471's caution for whoever executes it):
+
+   - **read the current value, then land it** — while the secret shadows `[env]`,
+     `flyctl ssh console -a tortoise-y4mjjq -C "printenv <NAME>"` shows the value
+     production actually runs. Put **that** in the `[env]` entry — never
+     `.env.example`'s default, which becomes effective at the unset below — and
+     merge the entry with the `fly-toml-env` declaration;
+   - **deploy it, from the merged commit** — apply `[env]` with a `deploy-hosted`
+     dispatch carrying `skip-fly-secret-provenance: true` **for that run only**
+     (the shadowed declaration is exit-1 class, so that input releases it, and the
+     bypass is stated in the run summary; use the dispatch input, never the repo
+     variable — nothing is left set). **Confirm this name's shadow is the ONLY
+     violation in that run**: the input releases every exit-1 violation, and the
+     summary names the gate, not the violations (they are in the step log). The
+     secret still shadows `[env]`, so the value the app reads does not change. (A
+     config-only operator deploy of the current image — how #4523 did it — also
+     applies `[env]`, but runs none of the deploy gates and leaves no run summary
+     or audit line; the dispatch is the route.)
+   - **wait for the deploy job, not the run, then unset** — a `deploy-hosted`
+     **run** can end RED with `[env]` already applied: since #4538 the separate,
+     fail-closed `post-deploy-verify` job can leave the run red *after*
+     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and
+     `concurrency: cancel-in-progress` can cancel a run after that step too.
+     Require the `deploy-api` job's Deploy step to succeed — unsetting against a
+     deploy that did **not** apply `[env]` drops the value. Only then run
+     `flyctl secrets unset <NAME> --app tortoise-y4mjjq`;
+   - **verify BOTH halves** — `flyctl secrets list -a tortoise-y4mjjq` must no
+     longer list `<NAME>` (the shadow is gone; that list is the gate's own input),
+     **and** `printenv <NAME>` on the machine must still return the value you read
+     at the top (the move is behaviour-preserving). Neither alone is enough:
+     `secrets list` says nothing about the value, and `printenv` alone cannot say
+     *which* source supplied it.
+
+   ⛔ **The `[env]` deploy must be from the MERGED commit.** From a
+   **pre-merge** commit it is the out-of-band application #4568 records: the
+   next `deploy-hosted` run re-applied `main`'s `fly.toml` (which lacked the
+   entries), removed them, and the value was absent until a later deploy put
+   `[env]` back — ~5 h for `TORTOISE_MANUAL_LINKING_ENABLED`. Unset-first
+   reaches that same state directly: `fly.toml` is the value's **only durable
+   home** (the deploy re-materialises the machine's env from it), so with no
+   `[env]` on the machine the unset leaves the variable absent until a later
+   deploy. The route relies on Fly applying `[env]` at deploy and preserving
+   the machine config across a `secrets unset`; nothing asserts the running env
+   (that is #4568's other half), so the two checks above are the only checks on
+   the outcome. Until the unset, **every push-triggered `deploy-hosted` run
+   fails this gate** (the transitional state is red by design), so finish this
+   step as soon as the transition deploy's `Deploy` step succeeds — and do
+   **not** clear that freeze with `vars.SKIP_FLY_SECRET_PROVENANCE`, which
+   leaves the incident-class lane armed.
+5. The provenance bypass's sanctioned uses are route (b)'s transition deploy
+   (step 4 — per-run input, nothing left set) and an incident-fix deploy that must
+   hand-set a secret, where on a push-triggered run the repo variable is the only
+   lane — set it for the window, clear it afterwards, and declare the secret
+   anyway. The workflow's own `skip-fly-secret-provenance` input description
+   names both uses.
 
 **Rotation:** for a `gh-secret:` name, rotating the GitHub secret is the only
 step — the next deploy propagates it.
