@@ -23,14 +23,21 @@ from .live import is_terminal_status  # #2498 shared terminal vocabulary
 _logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════
-# #3301 — THE canonical OBJECT terminal vocabulary. ONE declaration; nothing
-# re-literals it (``TortoiseSDK.recall_state`` and the four search legs both
-# consume THIS object). The OBJECT family is NOT the Point family: an Object
+# #3301 — THE canonical OBJECT terminal vocabulary for the SEARCH/RECALL
+# read surfaces. ONE declaration; nothing on those surfaces re-literals it
+# (``TortoiseSDK.recall_state`` and the four search legs both consume THIS
+# object). The OBJECT family is NOT the Point family: an Object
 # has no ``outdated`` concept (no writer sets ``outdated`` on an Object) and no
 # ``draft`` state, so this set is the recall/read-surface tuple and it is
 # deliberately narrower than ``live.TERMINAL_EXCLUDED_STATUSES`` (which adds
 # ``outdated``). A retracted/superseded/deprecated/archived Object is a dead
 # Object — no current state to report.
+#
+# DELIBERATELY NOT the whole story: the render-time successor-existence probe
+# in assembly.py keeps its OWN wider set (``assembly._RECALL_OBJECT_EXCLUDED_STATUSES``
+# — adds ``outdated``, i.e. it treats an ``outdated``-status Object as
+# recall-excluded for the render probe, which this fold does not). Do not
+# unify the two blindly: they answer different questions.
 #
 # This is NOT ``TortoiseSDK.STATE_EXCLUDED_STATUS`` (a class attr missing
 # 'archived' and used for the POINT pool).

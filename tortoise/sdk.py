@@ -14927,9 +14927,10 @@ class TortoiseSDK:
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
         include_terminal (#1391, #3301): default False — terminal-status
         nodes are excluded from the BASE retrieval. For Points that is
-        (retracted, superseded, outdated, archived); for Objects it is the
-        canonical OBJECT vocabulary (superseded, deprecated, archived,
-        retracted — no ``outdated`` flag, which no Object writer sets). Pass
+        ``live.TERMINAL_EXCLUDED_STATUSES`` (retracted, superseded, outdated,
+        archived, deprecated); for Objects it is the canonical OBJECT
+        vocabulary (superseded, deprecated, archived, retracted — no
+        ``outdated`` flag, which no Object writer sets). Pass
         True to surface them (audit/history queries); a prior/resolution leg
         that must still SEE a terminal node (link-before-create, anchor
         resolution) opts in here too.

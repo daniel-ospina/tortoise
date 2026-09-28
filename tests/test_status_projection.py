@@ -815,10 +815,12 @@ class TestReadSide:
             sdk.close()
 
     def test_recall_state_filter_covers_the_whole_object_vocabulary(self):
-        """#3301: the recall_state Object filter must exclude the ENTIRE
-        canonical OBJECT vocabulary (commit_ops.OBJECT_TERMINAL_STATUSES), not
-        just 'superseded' — the four search legs now exclude that exact set, so
-        a literal copy in the read surface is how the two drift."""
+        """#3301: recall_state round-trips the ENTIRE canonical OBJECT
+        vocabulary, not just 'superseded'. The default half is enforced
+        end-to-end (the four search legs exclude the canonical set at the query
+        layer and the read-surface filter consumes the same constant); the
+        include_superseded half pins the terminal-inclusive wiring that the
+        widening alone regressed."""
         from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES
         sdk = _fresh_sdk()
         try:

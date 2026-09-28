@@ -548,7 +548,7 @@ class TestS3BatchEnrichment:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False):
                 # the REAL callee row shape (#4511): ``point_kind``, not ``kind``
                 return [{"id": "pt-1", "content": "flash is the path",
                          "point_kind": "statement"}]

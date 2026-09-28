@@ -581,8 +581,9 @@ def docker_resolver_port(sdk) -> ResolverPort:
     (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` — today ``retracted``), so
     resolution here cannot return a removed Object. (Scoped to this port:
     the sibling Object-anchor resolvers — ``aggregate.py``,
-    ``coverage_loop.py`` — take the shared search lane's wider Object
-    vocabulary, which #3301 defines.) The exact + alias legs carry it as a
+    ``coverage_loop.py`` — are status-BLIND: #3301 widened the shared search
+    lane's Object exclusion, and those resolution-only legs opt back out of
+    it via ``excluded_statuses=()``, so they still resolve terminal Objects.) The exact + alias legs carry it as a
     Cypher conjunct (the graph filters; the batched exact probe stays one
     query). The FTS leg applies it in Python instead, through the SAME
     constant so the two can never drift — and, since #3301 widened the

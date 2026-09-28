@@ -206,6 +206,32 @@ def test_audit_opt_out_still_sees_the_hidden_objects(graph, leg):
     assert _ids(rows) == set(ALL_IDS), leg
 
 
+# ── The extractor PRIOR leg opts back into terminal Objects ───────────────
+
+def test_extractor_prior_leg_opts_into_terminal_objects():
+    """#3301: the S3 object/subject prior leg must pass include_terminal=True
+    (commit_ops.apply_supersessions' documented entity-terminal idempotency
+    branch is reachable through it), while the Point leg keeps the default —
+    terminal Points stay out of capture priors."""
+    from tortoise.extractor_v2 import _fts_rows
+
+    class _RecordingSDK:
+        def __init__(self):
+            self.calls = []
+
+        def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                               include_terminal=False):
+            self.calls.append((entity_type, include_terminal))
+            return []
+
+    sdk = _RecordingSDK()
+    _fts_rows(sdk, "object", "q", limit=3)
+    _fts_rows(sdk, "subject", "q", limit=3)
+    _fts_rows(sdk, "point", "q", limit=3)
+    assert sdk.calls == [("object", True), ("subject", True),
+                         ("point", False)]
+
+
 # ── The vocabulary has ONE declaration ───────────────────────────────────
 
 def test_object_vocabulary_is_declared_once_and_is_the_canonical_set():
