@@ -35,11 +35,11 @@ USAGE
     python3 tools/mergify_config_guard.py --staleness
         NON-GATING, DIGEST-AWARE freshness query. It distinguishes a stale
         record that still attests HEAD (safe: only the timestamp moves) from a
-        stale record whose digest DISAGREES with HEAD (NOT safe: an automatic
-        re-cut would launder a real gate-definition change).
+        record whose digest DISAGREES with HEAD (NOT safe: an automatic re-cut
+        would launder a real gate-definition change).
         exit 0 = fresh; 1 = stale, digest matches HEAD; 2 = unreadable/absent
-        (UNKNOWN, never a pass); 3 = stale and gate_digest != gate_digest(HEAD)
-        (a human must decide — the automatic re-cut is refused).
+        (UNKNOWN, never a pass); 3 = gate_digest != gate_digest(HEAD),
+        independent of age (a human must decide — the automatic re-cut is refused).
         The weekly `mergify-guard-recut` workflow uses it to decide whether a
         refresh is needed; it never gates a pull request.
 
@@ -52,8 +52,9 @@ I10 BLOCKS on exactly one condition: `record.gate_digest != gate_digest(HEAD)` �
 the record no longer attests the gate definition. Staleness ALONE does not
 block. `--staleness` consults that SAME comparison before it reports anything
 refreshable: a stale record whose digest matches HEAD is a safe refresh (exit
-1), while a stale record whose digest DISAGREES with HEAD is a real gate change
-in progress and is reported as its own state (exit 3, `STALE-DIVERGED`) that
+1), while a record whose digest DISAGREES with HEAD — stale or not — is a real
+gate change in progress and is reported as its own state (exit 3,
+`DIGEST-DIVERGED`, age-independent) that
 forbids the automatic re-cut — otherwise the weekly self-healer would overwrite
 the divergent digest with HEAD's and launder the very bypass the guard exists
 to catch. When the digest still matches HEAD but `verified_at` is older than
@@ -68,8 +69,8 @@ command — never a bare red a lane has to reverse-engineer.
 RESULT TOKENS (S12 asserts each is reachable, and that UNAVAILABLE is
 distinguishable from DIVERGED): SATISFIED / DIVERGED / UNAVAILABLE. The
 `--staleness` mode carries its own token map (FRESH / STALE / UNKNOWN /
-STALE-DIVERGED) because its states are not the three-way clause outcome: a
-stale-but-matching record and a stale-and-diverged record are both "not fresh"
+DIGEST-DIVERGED) because its states are not the three-way clause outcome: a
+matching-digest record and a diverged-digest record are both "not fresh"
 yet demand opposite callers' actions, so the shared DIVERGED token cannot name
 them.
 
@@ -153,17 +154,19 @@ RESULT_TOKEN = {0: "SATISFIED", 1: "DIVERGED", 2: "UNAVAILABLE"}
 
 # `--staleness` needs a FOURTH state the three-way clause outcome cannot express:
 # a stale record whose digest STILL MATCHES HEAD (safe — a re-cut moves only the
-# timestamp) must be distinguishable, by exit code alone, from a stale record
-# whose digest DISAGREES with HEAD (NOT safe — a re-cut would launder a real gate
-# change). Both are non-zero and both are "not fresh", so `EXIT_DIVERGED` is the
-# wrong code for the safe one and, used for both, makes the workflow's shell
+# timestamp) must be distinguishable, by exit code alone, from a record whose
+# digest DISAGREES with HEAD (NOT safe — a re-cut would launder a real gate
+# change). The divergence state is age-INDEPENDENT: it is reported whether or not
+# the freshness window has elapsed, so its token names the DIGEST, never
+# staleness. Both are non-zero and both are "not fresh", so `EXIT_DIVERGED` is
+# the wrong code for the safe one and, used for both, makes the workflow's shell
 # check undecidable without parsing prose.
-EXIT_STALE_DIVERGED = 3
+EXIT_DIGEST_DIVERGED = 3
 STALENESS_TOKEN = {
     EXIT_OK: "FRESH",
     EXIT_DIVERGED: "STALE",
     EXIT_UNAVAILABLE: "UNKNOWN",
-    EXIT_STALE_DIVERGED: "STALE-DIVERGED",
+    EXIT_DIGEST_DIVERGED: "DIGEST-DIVERGED",
 }
 
 # Shell operators that make a step a COMPOUND command. Clause (vii) requires the
@@ -1808,8 +1811,9 @@ def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, lis
     0 = fresh (digest matches HEAD, within the window)
     1 = stale, digest matches HEAD (SAFE: a re-cut moves only the timestamp)
     2 = unreadable/absent (UNKNOWN — never a pass, never auto-refreshed)
-    3 = stale, digest DISAGREES with HEAD (NOT safe: the gate definition changed;
-        an automatic re-cut would launder it, so the caller must refuse)
+    3 = digest DISAGREES with HEAD, age-independent (NOT safe: the gate
+        definition changed; an automatic re-cut would launder it, so the caller
+        must refuse). Reported whether or not the freshness window has elapsed.
 
     Used by the weekly `mergify-guard-recut` workflow to make the refresh
     change-gated (no weekly PR when the record is fresh, so no bot spam). It is
@@ -1843,8 +1847,8 @@ def run_staleness(root: Path, record_path: Path | None = None) -> tuple[int, lis
             f"{exc} — refusing to re-cut"
         ]
     if recorded != head_digest:
-        return EXIT_STALE_DIVERGED, [
-            f"STALE-DIVERGED: {RECORD_REL}.gate_digest {recorded[:12]}… != "
+        return EXIT_DIGEST_DIVERGED, [
+            f"DIGEST-DIVERGED: {RECORD_REL}.gate_digest {recorded[:12]}… != "
             f"gate_digest(HEAD) {head_digest[:12]}… — the gate DEFINITION changed, "
             "so an automatic re-cut would launder a real gate change as a "
             "timestamp-only refresh. Refusing to re-cut; a human must review the "
@@ -1904,7 +1908,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "I10 freshness query (non-gating, digest-aware): 0=fresh, "
-            "1=stale/digest-matches, 2=unreadable, 3=stale/digest-diverged"
+            "1=stale/digest-matches, 2=unreadable, "
+            "3=digest-diverged (age-independent)"
         ),
     )
     mode.add_argument("--print-digest", action="store_true", help="print the head gate_digest")

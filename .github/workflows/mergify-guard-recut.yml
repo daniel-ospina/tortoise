@@ -13,7 +13,8 @@ name: Mergify Guard Recut
 #
 # CHANGE-GATED AND DIGEST-AWARE: `--staleness` is a non-gating query (0 fresh /
 # 1 stale with gate_digest == gate_digest(HEAD) / 2 unreadable or absent, i.e.
-# UNKNOWN / 3 stale with gate_digest != gate_digest(HEAD)). A fresh record
+# UNKNOWN / 3 digest-diverged with gate_digest != gate_digest(HEAD),
+# age-independent). A fresh record
 # produces NO PR — zero weekly bot spam — and a DIVERGED record produces no
 # re-cut either: state 3 means the gate DEFINITION changed, and overwriting the
 # record's digest with HEAD's would launder a real, unreviewed gate change as a
@@ -62,7 +63,8 @@ jobs:
           set -euo pipefail
           # `--staleness` is NON-GATING and DIGEST-AWARE: 0 fresh / 1 stale with
           # gate_digest == gate_digest(HEAD) / 2 unreadable or absent (UNKNOWN) /
-          # 3 stale with gate_digest != gate_digest(HEAD). It is never run in the
+          # 3 digest-diverged (gate_digest != gate_digest(HEAD), age-independent).
+          # It is never run in the
           # required path, so it cannot red a pull request. Only status 1 may
           # reach the re-cut; every other non-zero status fails closed.
           status=0

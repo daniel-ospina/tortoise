@@ -659,12 +659,12 @@ def test_staleness_tokens_are_explicit() -> None:
         0: "FRESH",
         1: "STALE",
         2: "UNKNOWN",
-        3: "STALE-DIVERGED",
+        3: "DIGEST-DIVERGED",
     }
 
 
 def test_staleness_is_digest_aware_and_never_launders(tmp_path: Path) -> None:
-    """A stale record whose digest DISAGREES with HEAD is its own state (3).
+    """A record whose digest DISAGREES with HEAD is its own state (3).
 
     THE LAUNDERING CASE (mutation proof for the new state): `--recut` overwrites
     `gate_digest` with HEAD's UNCONDITIONALLY, so a digest-blind staleness query
@@ -687,8 +687,8 @@ def test_staleness_is_digest_aware_and_never_launders(tmp_path: Path) -> None:
     )
     code, lines = mcg.run_staleness(diverged)
     assert code == 3, lines
-    assert mcg.STALENESS_TOKEN[code] == "STALE-DIVERGED"
-    assert "STALE-DIVERGED" in lines[0]
+    assert mcg.STALENESS_TOKEN[code] == "DIGEST-DIVERGED"
+    assert "DIGEST-DIVERGED" in lines[0]
     assert "gate DEFINITION changed" in lines[0]
     assert "human" in lines[0]
     # Divergence is a real gate change, so it must NOT be the refreshable state.
@@ -711,7 +711,9 @@ def test_staleness_divergence_is_age_independent(tmp_path: Path) -> None:
     )
     code, lines = mcg.run_staleness(diverged)
     assert code == 3, lines
-    assert "STALE-DIVERGED" in lines[0]
+    assert "DIGEST-DIVERGED" in lines[0]
+    # The token names the DIGEST, not staleness: this record is age-fresh.
+    assert "STALE" not in mcg.STALENESS_TOKEN[3]
 
 
 def test_staleness_unreadable_digest_is_unknown_never_a_pass(tmp_path: Path) -> None:
@@ -748,7 +750,7 @@ def test_staleness_cli_reports_divergence_with_its_own_token(
     )
     assert mcg.main(["--staleness", "--root", str(diverged)]) == 3
     out = capsys.readouterr().out
-    assert "STALENESS RESULT: STALE-DIVERGED" in out
+    assert "STALENESS RESULT: DIGEST-DIVERGED" in out
 
 
 def test_recut_would_launder_a_diverged_digest(tmp_path: Path) -> None:
