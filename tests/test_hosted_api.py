@@ -2674,6 +2674,13 @@ class TestSessionCapture:
         the marker-FREE body. This list stopped at ``" " * 5000`` — exactly the cap, the
         one boundary NOT clipped — so reverting only the HOSTED gate to the marked window
         left the whole suite green while an over-cap blank POST stopped 422-ing.
+
+        ⛔ AND the FINAL THREE rows, for the same reason one round later (#4897 review
+        round 14). Round 14 added "a turn with no content of its own yields no claims" to
+        ``_session_llm_transcript``, which refuses the blank and lookalike rows on its OWN —
+        so reverting this gate to the marked window went green again. These three clip to a
+        body with no >=3-char SENTENCE, which that skip does not cover, so the marker is the
+        only sentence in the transcript unless the gate strips it.
         """
         from tortoise.sdk import _capture_truncation_marker
         for conv in ([{"role": "user", "content": "ok"}],
@@ -2689,7 +2696,11 @@ class TestSessionCapture:
                      # The blank rows above are ALSO covered by "a blank retention is not marked",
                      # so reverting the hosted gate to the marked window left this suite green while
                      # an over-cap blank POST stopped 422-ing (verified: the mutation survived).
-                     [{"role": "user", "content": _capture_truncation_marker(5001)}]):
+                     [{"role": "user", "content": _capture_truncation_marker(5001)}],
+                     # the round-14 rows: no >=3-char sentence in the clipped body
+                     [{"role": "user", "content": "X" + " " * 6000}],
+                     [{"role": "user", "content": "  .  " * 2000}],
+                     [{"role": "user", "content": _capture_truncation_marker(5001) + " "}]):
             r = client.post("/v1/sessions", json={"conversation": conv})
             assert r.status_code == 422, (conv, r.text)
 

@@ -122,6 +122,15 @@ export function clipTurnContent(
 ): string {
   const points = Array.from(content);
   if (points.length <= cap) return content;
+  // ⛔ A WHITESPACE-ONLY RETENTION IS NOT MARKED — mirrors the Python clipper
+  // (#4897 review round 14, P3). The marker means "there is more"; for a body
+  // that holds nothing that statement is misleading, and a marker-ONLY turn is
+  // what made the server's v1 extractor mint a Point whose entire content was
+  // the marker itself. The server now skips such a turn at extraction, but the
+  // two clippers are pinned byte-identical for NON-BLANK input only, so without
+  // this branch a client-clipped blank turn would be stored marker-only while
+  // the server-side clipper stores it blank — a divergence no test covers.
+  if (!content.trim()) return points.slice(0, cap).join("");
   let marker = truncationMarker(points.length);
   let keep = cap - Array.from(marker).length;
   if (keep < 0) {

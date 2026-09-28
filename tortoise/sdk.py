@@ -712,6 +712,17 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
         # view blanks on, so the m2 lane and the default v2 lane cannot
         # disagree about which turns contribute a unit.
         #
+        # ⛔ A TURN WITH NO CONTENT OF ITS OWN YIELDS NO CLAIMS (#4897 review round 14, P1).
+        # The marker reserves 41 characters of the cap, so a turn whose real text sits in that
+        # band is stored as ``" " * keep + marker`` — its whole readable body IS the marker.
+        # ``_SENT`` parses ``…[truncated: original length 5971 chars]`` as a sentence, so the v1
+        # extractor minted a Point whose entire content was this module's own marker
+        # (reproduced in review). That is not "the marker reaches the model" — which the CALLER
+        # CONTRACT below requires for a turn that HAS content — it is a turn with nothing to say
+        # creating a claim. Skipping it leaves the marker riding through untouched for every
+        # turn that does have content.
+        if not _split_truncation_marker(content)[0].strip():
+            continue
         # #4897: the extraction input is the SAME marked window the node
         # stores — the caller passes `_capture_turn_window`'s output (the
         # windowed, cap-applied conversation), so the marker and its TRUE
@@ -798,13 +809,18 @@ _TRUNCATION_MARKER_FULL_RE = re.compile(
 def _capture_gate_window(windowed: list[dict]) -> list[dict]:
     """Return ``windowed`` with synthetic truncation markers stripped (#4897).
 
-    ⛔ WHY THE GATE NEEDS ITS OWN VIEW: :func:`_capture_turn_window` appends a
-    marker to every body it clipped, so a turn that is entirely blank PAST the
-    cap (``" " * 6001``) becomes NON-blank at the empty/blank gate while the
-    conversation still holds nothing extractable. Before #4897 the same input
-    stored ``content[:5000]`` — still blank — and the gate fired; carrying the
-    marker into the gate turned a fail-closed refusal into a stored
-    marker-only turn. The gate must judge the REAL text.
+    ⛔ WHY THE GATE NEEDS ITS OWN VIEW (#4897; rationale corrected in review
+    round 14): the strip is NOT redundant with the clipper's blank-retention
+    branch, but for a narrower reason than the original text gave. The original
+    example — ``" " * 6001`` — is now handled by the clipper itself, which returns
+    a blank window with NO marker, so it never reaches the gate as non-blank.
+    What the strip actually decides is a clipped turn whose body holds no
+    >=3-char SENTENCE (``"X" + " " * 6000`` clips to a lone ``X``; ``"  .  " *
+    2000`` to single dots) or a caller-supplied lookalike with trailing
+    whitespace. In those the marker's own text is the only sentence the
+    transcript would hold, so without the strip a turn with nothing extractable
+    reads as content and gets admitted — measured: exactly four probe inputs
+    change verdict when the strip is removed. The gate must judge the REAL text.
 
     Only the gate uses this. The extractors keep the marker: it is the evidence
     of what was cut, and they sit downstream of the gate, so a conversation the
@@ -841,9 +857,17 @@ def _split_truncation_marker(content: str) -> tuple[str, str]:
     """Split a turn's TRAILING truncation marker off its body (#4897).
 
     Returns ``(body, marker)`` with ``body + marker == content``. ``marker`` is
-    the exact string :func:`_clip_capture_turn_content` appended — the full
-    `` …[truncated: original length N chars]``, or the bare-sentinel fallback —
+    the string :func:`_clip_capture_turn_content` appended — the full
+    ``…[truncated: original length N chars]``, or the bare-sentinel fallback —
     or ``""`` when the turn was not cut.
+
+    ⛔ ``marker`` IS 40 CHARS, NOT 41 (#4897 review round 14, P3): the appended
+    text is `` …[truncated: …]`` with a LEADING SPACE, and ``rfind`` starts at the
+    sentinel, so that space stays in ``body``. ``body + marker == content`` still
+    holds (it is the whole reason the space is not lost), but the leading space is
+    handed to :func:`security.redact_secrets` along with the body — the marker
+    text proper is not. Callers that need the marker-free text must ``.strip()``
+    the body; both blank gates do.
 
     ⛔ WHY SPLIT AT ALL: the marker must NEVER be part of the text handed to
     :func:`security.redact_secrets`. The ``private_key`` rule's fail-closed
@@ -931,12 +955,20 @@ def _clip_capture_turn_content(
     # slice actually returned — makes the cut marked whenever ANY retained
     # character is non-whitespace, so the band is never dropped silently.
     #
-    # The residual: a turn whose only non-whitespace lives IN the band is now
-    # marked and spends the band on the marker — the reserved width and the
-    # content compete for the same 41 characters. Losing the band WITH a marker
-    # that says "there is more" is the honest failure; losing it without one was
-    # not.
-    if not content[:cap].strip():
+    # ⛔ AND THE SLICE IS NOT ENOUGH (#4897 review round 14, P1): testing
+    # ``content[:cap]`` still missed real text PAST the cap when everything
+    # retained was whitespace — ``" " * 5000 + "REALCONTENT"`` returned
+    # ``" " * 5000`` unmarked and silently dropped the word. The test is
+    # therefore on the WHOLE content: if the turn holds no non-whitespace
+    # ANYWHERE there is nothing to mark and nothing was lost; if it holds any,
+    # it is marked and ``keep`` is reserved for the marker.
+    #
+    # The residual: a turn whose only non-whitespace lives IN the band is marked
+    # and spends the band on the marker — the reserved width and the content
+    # compete for the same 41 characters. That turn is stored marker-only, which
+    # is why `_session_llm_transcript` skips a turn whose marker-stripped body is
+    # blank rather than minting the marker into a Point.
+    if not content.strip():
         return content[:cap]
     marker = _capture_truncation_marker(len(content))
     keep = cap - len(marker)

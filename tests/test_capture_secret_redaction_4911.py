@@ -620,8 +620,10 @@ def test_capped_reapplication_preserves_the_true_total():
     pass 1 windows to 5,000 (marker reports the true total 6,000), then the
     scrub grows the STORED turn to **8,810** chars — 1.762x on the 5,000-char
     window. (The 1.768x max-density figure recorded on ``_redact_turn_contents``
-    is the MARKER-FREE ratio, 8,769 / 4,959 — a different quantity; do not
-    conflate the two.)
+    is the MARKER-FREE ratio, 8,770 / 4,960 — a different quantity; do not
+    conflate the two. Both integers were off by one until review round 14: the
+    marker's LEADING SPACE stays in the body, so the marker-free body is 4,960,
+    not 4,959, and its scrubbed length is 8,770.)
 
     This test binds the NEW invariant — the redactor is REDACTION-ONLY, so
     re-applying it to its own output is byte-identical and can never recount a

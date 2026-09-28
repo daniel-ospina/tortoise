@@ -93,6 +93,7 @@ from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
+    _capture_gate_window,
     _capture_turn_embeddings,
     _capture_turn_texts_with_redactions,
     _capture_turn_window,
@@ -371,7 +372,13 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     # Same marker-stripped view as capture's own gates (#4897 review round 12): this mirror
     # previously admitted an over-cap blank turn and seeded a marker-only session, while capture
     # refused it — contradicting this function's own docstring ("exactly as in capture").
-    transcript, _est = _session_llm_transcript(sdk._capture_gate_window(windowed))
+    #
+    # ⛔ ``_capture_gate_window`` is a MODULE-LEVEL function in ``tortoise.sdk``, not a
+    # ``TortoiseSDK`` method, and ``sdk`` here is an SDK INSTANCE. Round 12 wrote
+    # ``sdk._capture_gate_window(windowed)``, which raised ``AttributeError`` for EVERY caller —
+    # caught by ``tests/test_ask_seed_shape.py`` in review round 14. Import it and call it
+    # directly; the SDK class has no ``__getattr__``.
+    transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
     if not transcript.strip():
         return []
     proj = sdk._get_proj()
