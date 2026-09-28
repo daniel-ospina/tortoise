@@ -104,19 +104,35 @@ def _terminal_excluded(clause: str) -> str:
 # successor recomputes independently). Defined HERE (live.py is a leaf — sdk.py
 # imports live.py and projection/entities.py can import it without a cycle via
 # sdk.py:31's `from .projection import`).
+
+#: The belief half of a terminalizing write, as DATA — the ONE declaration.
+#: ``decay_clause`` renders it into Cypher and the in-memory fold
+#: (``projection._apply_one``) writes it into its ``{id: point}`` index, so the
+#: two representations of the SAME write cannot drift apart. They did: the
+#: pure fold's ``PointRetracted`` arm tombstoned without decaying, so ``fold()``
+#: kept the pre-retract belief while ``rebuild_all`` held the vacuous one — a
+#: divergence on EVERY retract (#4542). A hand-maintained second copy of these
+#: three literals is the drift trap; do not re-declare them at a call site.
+VACUITY_BELIEF: dict[str, float] = {
+    "confidence": 0.5,
+    "posterior_alpha": 1.0,
+    "posterior_beta": 1.0,
+}
+
+
 def decay_clause(alias: str) -> str:
     """Cypher SET fragment decaying a terminalizing claim to vacuity.
 
-    Appends ``{alias}.confidence=0.5, {alias}.posterior_alpha=1.0,
-    {alias}.posterior_beta=1.0`` to a SET clause — crash-atomic with the
+    Renders ``VACUITY_BELIEF`` (the one declaration) as
+    ``{alias}.confidence=0.5, {alias}.posterior_alpha=1.0,
+    {alias}.posterior_beta=1.0`` for a SET clause — crash-atomic with the
     status/flag write it rides (single statement). ``alias`` is the node
     variable (``"n"`` for retract/supersede/invalidate/folds, ``"p"`` for
     assess_source's older-assessment SET). Reading a decayed claim back:
     coalesce(posterior_alpha, ep_alpha, 1.0) = 1.0 and confidence = 0.5 —
     the vacuous Beta(1,1) posterior mean.
     """
-    return (f"{alias}.confidence=0.5, {alias}.posterior_alpha=1.0, "
-            f"{alias}.posterior_beta=1.0")
+    return ", ".join(f"{alias}.{k}={v}" for k, v in VACUITY_BELIEF.items())
 
 
 def _terminal_expression(clause: str) -> str:

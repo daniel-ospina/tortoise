@@ -1267,7 +1267,11 @@ class _GuardedGraph:
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.fork_slot import is_fork_refusal  # noqa: E402
-from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
+from tortoise.live import (  # noqa: E402
+    VACUITY_BELIEF,
+    _live_only,
+    _terminal_excluded,
+)
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
 # `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
@@ -2168,7 +2172,18 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         rid = ev.get("id")
         p = points.get(rid) if isinstance(rid, str) else None
         if p:
+            # #4542: a retract is a BELIEF write, not just a tombstone —
+            # ``_retract`` (the graph arm) writes ``decay_clause('n')``
+            # beside the status, and live ``retract_point`` CASes the same
+            # two halves. Writing only ``status`` left ``fold()`` holding
+            # the PRE-retract belief while ``rebuild_all`` held the vacuous
+            # one — a divergence on EVERY retract, and the #330 parity
+            # contract this function owns. ``VACUITY_BELIEF`` is the single
+            # declaration both arms render, so they cannot re-drift.
+            # (``updatedAt`` is the one prop this fold still does not
+            # stamp; that divergence is #4666's subject, not this one.)
             p["status"] = "retracted"
+            p.update(VACUITY_BELIEF)
     elif t == "PointsMerged":
         # #331 (review r2): `or []` also covers an explicit "merge_ids": null
         # in the log — dict.get(key, []) only covers the missing key.
