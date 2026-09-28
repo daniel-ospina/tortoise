@@ -338,3 +338,36 @@ class EmbedderUnavailableError(RuntimeError):
             f"(uv sync --extra embeddings) or unset the variable to allow the "
             f"documented keyword-only degrade (#4861)."
         )
+
+
+class UnsupportedCypherOperatorError(ValueError):
+    """#3595 — a Cypher query used an operator FalkorDB does not implement.
+
+    FalkorDB has no ``=~`` regex-match operator, and it does not error: it
+    prints ``FalkorDB does not currently support =~`` *in place of results*,
+    so the surrounding query returns an **empty result set** — a confident
+    false negative that is indistinguishable from "no matches". Two agents in
+    one session read exactly that: an enumeration for legacy ``obj-<26hex>``
+    ids returned 0 across every graph, where the supported ``STARTS WITH``
+    found 5 nodes in 2 graphs.
+
+    Raised by the shared graph-query chokepoint BEFORE the statement is sent,
+    so a caller cannot mistake an unsupported operator for an empty answer.
+    Subclasses ``ValueError``: an unsupported operator is a caller-side
+    predicate bug, and the historical ``ValueError`` for invalid input keeps
+    working.
+
+    ``operator`` is the offending token (currently always ``"=~"``); the
+    message names the supported alternatives.
+    """
+
+    def __init__(self, operator: str, cypher: str = ""):
+        self.operator = operator
+        self.cypher = cypher
+        super().__init__(
+            f"FalkorDB does not support the Cypher {operator!r} regex-match "
+            f"operator, and it fails SILENTLY — the query returns an EMPTY "
+            f"result set indistinguishable from 'no matches' (#3595). "
+            f"Use a supported operator instead: STARTS WITH / ENDS WITH / "
+            f"CONTAINS. Offending query: {cypher!r}"
+        )

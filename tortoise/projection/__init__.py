@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+from tortoise.exceptions import UnsupportedCypherOperatorError  # #3595 `=~` guard
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,73 @@ def _is_bulk_wipe(cypher: str) -> bool:
     if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
+
+
+# ── #3595: unsupported-Cypher-operator guard (`=~`) ──────────────────────
+# FalkorDB implements no Cypher regex-match operator. `=~` does not raise: it
+# prints ``FalkorDB does not currently support =~`` IN PLACE OF RESULTS and the
+# surrounding query returns an EMPTY result set — a confident false negative
+# that is indistinguishable from "no matches". Two agents in one session read
+# that as truth: enumerating legacy ``obj-<26hex>`` ids across every graph with
+# ``=~ '^[a-z]{2,3}-[0-9a-f]{26}$'`` returned 0 everywhere, where the supported
+# ``STARTS WITH`` found 5 nodes in 2 graphs.
+#
+# This is a LANDMINE, not a live bug: no shipped Cypher uses `=~` (the `=~` in
+# ``sdk._DIGEST_STRUCTURE_RE`` is a PYTHON character class and never reaches
+# this module). The guard therefore detects the OPERATOR in the QUERY TEXT a
+# caller is about to send — a Python regex can never be `=~` here.
+#
+# A single left-to-right scan keeps state, so `=~` is reported only where it is
+# CODE. Inside a quoted literal (``RETURN 'a =~ b'``) it is DATA; inside a
+# Cypher comment (``// =~``, ``/* =~ */``) it is prose. Neither may trip the
+# guard — a false POSITIVE would block a legitimate query, which is its own
+# class of harm even though it is loud rather than silent.
+
+
+def _unsupported_cypher_operator(cypher: str) -> str | None:
+    """Return the first unsupported Cypher operator in *cypher*, else None.
+
+    Only the Cypher regex-match operator ``=~`` is currently known. The scan
+    skips quoted string literals and Cypher comments, so only an OPERATOR —
+    never data nor prose — is reported. Python-side regexes never pass through
+    this function (#3595).
+    """
+    if not isinstance(cypher, str) or "=~" not in cypher:
+        return None
+    i, n = 0, len(cypher)
+    while i < n:
+        c = cypher[i]
+        if c in ("'", '"'):
+            i = _skip_cypher_quoted(cypher, i, c)
+        elif c == "/" and i + 1 < n and cypher[i + 1] == "/":
+            nl = cypher.find(chr(10), i + 2)
+            i = n if nl == -1 else nl + 1
+        elif c == "/" and i + 1 < n and cypher[i + 1] == "*":
+            end = cypher.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        elif c == "=" and i + 1 < n and cypher[i + 1] == "~":
+            return "=~"
+        else:
+            i += 1
+    return None
+
+
+def _skip_cypher_quoted(text: str, start: int, quote: str) -> int:
+    """Return the index just past the quoted literal opening at *start*.
+
+    Backslash escapes are honoured (``'a\\'b'`` is one literal). An
+    unterminated literal consumes the remainder — the query is malformed, and
+    the guard must not invent an operator from the swallowed bytes.
+    """
+    i, n = start + 1, len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i + 1
+        i += 1
+    return n
 
 
 # ── #2943: durable pre-wipe snapshot sidecar ────────────────────────────────
@@ -1256,6 +1324,15 @@ class _GuardedGraph:
         self._proj = projection
 
     def query(self, cypher: str, params=None, timeout=None):
+        # #3595: refuse an unsupported operator BEFORE it is sent. FalkorDB
+        # answers `=~` with an EMPTY result set, so this is the only place a
+        # future `=~` can be turned into a loud error instead of a false
+        # negative. Wired here (not at every call site) because every
+        # constructed query reaching a FalkorDB handle passes through this
+        # wrapper: FalkorProjection.query delegates to self.g.query.
+        op = _unsupported_cypher_operator(cypher)
+        if op is not None:
+            raise UnsupportedCypherOperatorError(op, cypher)
         if _is_bulk_wipe(cypher) and not getattr(self._proj, "_skip_guard", False):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"

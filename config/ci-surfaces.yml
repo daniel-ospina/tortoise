@@ -566,6 +566,10 @@ surfaces:
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
   - test_env_isolation.py
+  # #3595: the unsupported Cypher `=~` operator must FAIL LOUDLY instead of
+  # returning an empty result set. Pure-unit guard pins the shared graph-query
+  # chokepoint (tortoise/projection/_GuardedGraph.query -> exceptions).
+  - test_cypher_regex_guard_3595.py
   - test_graph_name_ownership.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
