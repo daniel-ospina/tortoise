@@ -61,7 +61,7 @@ aboutObjects: tortoise
 | #2535 invited-user onboarding — what "joining an org" means; the membership model as it is, the member connect gap after the (shipped) skip, multi-org, and the recorded decisions (POLICY A · #2789 · #2534) | `docs/scoping/2026-09-25-2535-invited-user-onboarding-design.md` |
 | #3027 OAuth authorization-code redemption state — durable `redemption_state`/`redemption_id` + `code_id` provenance, the claim-identity CAS fence, why the reconciler never re-arms, and the directional `used_at`-agreement CHECK | `docs/scoping/2026-09-25-3027-oauth-redemption-state.md` |
 | #4911 capture-path credential redaction — the anchored scrubber at the ONE stored-text definition, the three persistence consumers it reaches, the local-spool exclusion ruling, and the measured residuals | `docs/scoping/2026-09-25-4911-capture-secret-redaction.md` |
-| #3496 MCP consent page off the implicit grant onto Authorization Code + PKCE — the A1–A5 invariants, the key-identity storage router, the contradiction test against #3501/#3701, and the recorded residuals | `docs/scoping/2026-09-27-3496-implicit-grant-pkce.md` |
+| #3496 MCP consent page off the implicit grant onto Authorization Code + PKCE — the A1–A7 adversarial threat surface, the key-identity storage router, the contradiction test against #3501/#3524, and the recorded residuals | `docs/scoping/2026-09-27-3496-implicit-grant-pkce.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |

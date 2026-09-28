@@ -831,9 +831,9 @@ Wiring Check / Deferral ledger, and no claim is made that this change closes the
   default verifier storage).
 - **#3529** — #3501's 4 untested BFF/session threat classes (different surface from A1–A7).
 - **#4678** — BFF "absolute claim" comments; its lesson bounds this passage's wording.
-- **New issue A** — provider-denial / refusal UX (the two Step 3b refusals + R14 + the
-  session-too-large message): context, options, recommendation.
-- **New issue B** — blog-admin's adapter has no CI-gated suite and is outside the parity completeness
+- **#5734** — provider-denial / refusal UX (the two Step 3b refusals + R14 + the
+  session-too-large message): context, options, recommendation. (P0 sibling, building on this branch.)
+- **#5735** — blog-admin's adapter has no CI-gated suite and is outside the parity completeness
   scan (the shared-declaration follow-up's evidence).
 
 ## Risks & residuals

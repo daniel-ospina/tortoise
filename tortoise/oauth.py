@@ -2379,9 +2379,9 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // params it parses (`xr(window.location.href)` in the bundle) and
   // `detectSessionInUrl: true` deliberately keeps the library as the fragment
   // consumer, so a provider that returns its refusal in the hash reaches the
-  // library but never `.search`. Reading one channel only left a hash-carried
-  // refusal on the bare sign-in view with no explanation — the dead end this
-  // terminal state exists to remove.
+  // library but never `.search`. Reading one channel only would leave a
+  // hash-carried refusal on the bare sign-in view with no explanation — the
+  // dead end this terminal state exists to remove.
   const loadParams = () => {
     const out = new URLSearchParams(window.location.search);
     if (window.location.hash.length > 1) {

@@ -411,7 +411,11 @@ class TestAuthorizePage:
         # bump has exactly one derived place to satisfy.
         assert re.search(
             r"@supabase/supabase-js@\d+\.\d+\.\d+/dist/umd/supabase\.min\.js", r.text)
-        assert not re.search(r"@supabase/supabase-js@(?:\d+|\d+\.\d+)[/\"]", r.text)
+        # The negative must name every mutable shape, not only the numeric ones:
+        # `@2.x` and `@latest` carry no bare digit run before the `/`, so an
+        # alternation of `\d+`/`\d+.\d+` misses exactly the forms named above.
+        assert not re.search(
+            r"@supabase/supabase-js@(?:\d+(?:\.\d+){0,2}|latest|x|\d+\.x)[/\"]", r.text)
         # #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
         # browser-based client, so the flow type is explicit. The behaviour
         # (code_challenge_method=s256, verifier routed off the cookie) is pinned

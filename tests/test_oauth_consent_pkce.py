@@ -364,7 +364,13 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     # returns `?code=`, and the code exchange inside createClient() is rejected.
     # This is the case the state exists to catch — it carries no
     # `error_description`, so the generic message is the entire report.
-    failed = _run("load", search="?code=THECODE&state=st-1", exchangeFails=True)
+    failed = _run("load", search="?code=THECODE&state=st-1",
+                  seedVerifier="verifier-abc", exchangeFails=True)
+    assert failed["exchangeCount"] == 1, (
+        f"the code exchange was never attempted (no stored verifier makes the "
+        f"library treat the callback as non-PKCE), so the assertions below say "
+        f"nothing about a REJECTED exchange: {failed}"
+    )
     assert failed["viewSignin"] == "block", failed
     assert failed["errorVisible"] is True, (
         f"a rejected code exchange produced no message: {failed}"
@@ -389,9 +395,8 @@ def test_inv5_terminal_state_exact_with_a_clean_load_control() -> None:
     # Mixed case: a transient in the QUERY and a NON-param fragment. The
     # fragment is not a param list, so stripping must leave it byte-identical
     # (`#section-2` re-serialises to `section-2=`, which is not the same URL
-    # fragment). Without this control the fragment branch rewrote it to
-    # `#section-2=` — a regression the query-only and fragment-only cases both
-    # miss.
+    # fragment). Without this control the query-only and fragment-only cases
+    # both miss the fragment branch mangling it to `#section-2=`.
     mixed = _run("load", search="?error=access_denied&error_description=boom",
                  hash="#section-2")
     assert mixed["errorVisible"] is True, mixed
@@ -411,9 +416,9 @@ def test_inv6_unavailable_store_refuses_locally() -> None:
     The `throw-remove` mode pins the A5 contract directly: a store that accepts
     a WRITE but refuses REMOVAL is the store `writeAux` would pick, and
     `removeAux` would then orphan the verifier there. The guard must therefore
-    refuse rather than fall through to a store the verifier will never reach.
-    (Before the fix the guard fell through and the flow proceeded with the
-    verifier written to the un-cleanable store.)"""
+    refuse rather than fall through to a store the verifier will never reach —
+    falling through would proceed with the verifier written to the un-cleanable
+    store."""
     for mode in ({"sessionMode": "throw-method", "localMode": "throw-method"},
                  {"accessThrow": True},
                  # session accepts writes but cannot remove; local is fully OK.
@@ -500,6 +505,23 @@ def test_inv13_the_write_is_proven_cleanable_where_it_lands() -> None:
         f"the A5 probe retained the credential under a non-credential key: {leaked}"
     )
 
+    # A store that ACCEPTS the probe but stores a DIFFERENT value for the real key
+    # fails at the real-key read-back — AFTER the credential was written to it.
+    # That is the only shape reaching `writeAux`'s catch with the real key
+    # populated, so it is what pins the catch's `removeItem(key)`: without that
+    # line the store keeps a copy while the writer relocates to the next store.
+    norm = _run("click", search="", sessionMode="normalise")
+    assert norm["navs"], (
+        f"the flow did not proceed although localStorage is usable: {norm}"
+    )
+    assert norm["sessionVerifierKeys"] == [], (
+        f"the store that failed its own read-back retained the credential: "
+        f"{norm['sessionVerifierKeys']}"
+    )
+    assert norm["localVerifierKeys"], (
+        f"the verifier reached no store at all — the write was refused, not relocated: {norm}"
+    )
+
     # …and a silent-remove store is not a way in when no store can be cleaned: the
     # guard's read-back-null refuses it too (fail closed).
     both_silent = _run("click", search="", sessionMode="silent-remove",
@@ -560,14 +582,27 @@ def test_inv11_return_target_is_canonicalised_with_a_control() -> None:
 
     The control restores the raw-search form and asserts the transient IS echoed,
     so the assertion discriminates."""
-    hostile = ("?client_id=x&code=STALE&error=access_denied"
-               "&error_description=leak&sb_flow_id=flow123&state=st-1")
+    hostile = ("?client_id=x&redirect_uri=https%3A%2F%2Fclient.example%2Fcb"
+               "&response_type=code&code_challenge=chal&code_challenge_method=S256"
+               "&scope=mcp&state=st-1&code=STALE&error=access_denied"
+               "&error_description=leak&sb_flow_id=flow123")
     r = _run("return_target", search=hostile)
     assert r["innerOrigin"] == PAGE_ORIGIN, r
     assert r["innerPath"] == AUTHORIZE_PATH, r
     assert r["innerTransients"] == [], (
         f"a transient was echoed into the return target: {r['innerTransients']}"
     )
+    # The OTHER half of the contract: the params the flow NEEDS must SURVIVE the
+    # strip. The server re-renders PARAMS from this callback URL, so silently
+    # dropping `state` or `code_challenge` here breaks /oauth/consent and the MCP
+    # handshake while every "the transient was removed" assertion above stays
+    # green — an over-strip is a permanent false green without this.
+    for required in ("client_id", "redirect_uri", "response_type",
+                     "code_challenge", "code_challenge_method", "state", "scope"):
+        assert required in r["innerParams"], (
+            f"required authorize param {required!r} was stripped from the return "
+            f"target: {r['innerParams']}"
+        )
 
     guard_off = _render_page().replace(
         "options: { redirectTo: authorizeReturnTo() },",
@@ -636,6 +671,12 @@ function makeStore(mode, quota) {
     setItem: function (k, v) {
       if (mode === 'throw-method') throw new Error('storage disabled');
       v = String(v);
+      // 'normalise': accepts every write but stores a DIFFERENT string for any
+      // value that is not the A5 probe payload (`x…x`). The probe therefore
+      // passes and the store is SELECTED; the failure appears only at the
+      // real-key read-back — the one shape that reaches writeAux's catch with
+      // the credential already written to this store.
+      if (mode === 'normalise' && !/^x*$/.test(v)) v = v.toUpperCase();
       const cap = quota || opts.storeQuota;
       if (cap && v.length > cap) {
         const e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e;
@@ -866,6 +907,7 @@ function innerTarget(assignUrl) {
         const transients = ['code', 'error', 'error_code', 'error_description',
                             'error_uri', 'sb_flow_id', 'flow_id', 'type'];
         out.innerTransients = transients.filter(function (k) { return inner.searchParams.has(k); });
+        out.innerParams = Array.from(inner.searchParams.keys());
       }
     }
   } else if (scenario === 'load') {
@@ -880,6 +922,13 @@ function innerTarget(assignUrl) {
     out.controlCharsInError = Array.from(String(out.errorText)).filter(function (c) {
       const n = c.codePointAt(0);
       return n < 32 || (n >= 127 && n <= 159) || n === 0x2028 || n === 0x2029;
+    }).length;
+    // Did this load actually ATTEMPT a code exchange? Without it, a terminal
+    // state on a `?code=` load cannot be told from a load that never called the
+    // token endpoint at all (with no stored verifier the library treats the
+    // callback as non-PKCE and skips the exchange entirely).
+    out.exchangeCount = fetchCalls.filter(function (c) {
+      return c.url.indexOf('/auth/v1/token') >= 0;
     }).length;
     out.replaceStates = replaceStates.slice();
     out.navs = navs.slice();
