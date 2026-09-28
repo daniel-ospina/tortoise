@@ -943,8 +943,7 @@ def _apply_replay(sdk, events_dir) -> None:
     """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the
     canonical apply()-based engine. ``consistency.recover_from_log`` and
     ``backup.restore`` are independent replay loops wired to the SAME shared
-    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``);
-    they are exercised by their own suites, not here."""
+    plan (``plan_point_restamp_folds`` + ``apply_journal_point_restamp``)."""
     sdk._get_proj().rebuild(EventLog(str(events_dir / "events.jsonl")))
 
 
@@ -1178,6 +1177,47 @@ def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
         assert recover_from_log(str(synth_dir), proj)["recovered"]
         assert _point_state(sdk, b) == via_all, (
             f"{promote_type}: recover_from_log != rebuild_all")
+
+
+def test_apply_replay_matches_rebuild_all_on_a_nested_terminalizer_payload(
+        sup):
+    """#3305/#325: ``_norm`` tolerates a NESTED terminalizer payload
+    (``{"type": ..., "point": {"id": ..., "new_id": ...}}``). The
+    whole-journal apply() arm must normalize like the plan and ``rebuild_all``
+    do, or it silently drops a fold both engines otherwise land — and emits a
+    FALSE fold-miss warning naming the target it could not see."""
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    base = EventLog(str(events / "events.jsonl")).read_all()
+    synth_dir = events.parent / "synth-nested"
+    synth_dir.mkdir()
+    _synthesize_journal(synth_dir / "events.jsonl", [
+        *base,
+        {"event_id": sdk.ulid(), "ts": "2026-01-01T00:00:00+00:00",
+         "type": "PointSuperseded", "initiated_by": "raw-producer",
+         "projection_version": 2, "point": {"id": a, "new_id": b}},
+    ])
+
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(synth_dir))
+    via_all = _point_state(sdk, a)
+    assert via_all["status"] == "superseded"
+    assert via_all["outdated"] is True
+    assert _corr(proj, a, b) == 1
+
+    _apply_replay(sdk, synth_dir)
+    # expiredAt is the ``_now_iso()`` fallback (the record carries none) — a
+    # replay-time clock, so compare the fold's SEMANTIC fields, not wall clock.
+    via_apply = _point_state(sdk, a)
+    assert via_apply["status"] == via_all["status"] == "superseded", (
+        "the apply() arm dropped a NESTED terminalizer payload that "
+        "rebuild_all folded")
+    assert via_apply["outdated"] is True
+    assert via_apply["validTo"] == via_all["validTo"]
+    assert _corr(sdk._get_proj(), a, b) == 1, (
+        "the nested payload's CORRECTS edge was dropped")
 
 
 def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):

@@ -1470,7 +1470,15 @@ class _EntityHandlers:
         before this one the whole-journal apply() arm was quieter than both —
         a ``rebuild(EventLog)`` replay of a terminalizer whose target was never
         created said nothing, while ``rebuild_all`` warned.
+
+        The record is NORMALIZED here (``self._norm``) because the fold body
+        reads the flat ``id``/``new_id``, and ``_norm`` tolerates a nested
+        payload (``{"type": ..., "point": {...}}``) — the plan normalizes when
+        it decides and ``rebuild_all`` normalizes before folding, so an
+        unnormalized call here would make the engines disagree on a
+        supported-by-``_norm`` record (#325/#3722's raw-vs-normalized class).
         """
+        ev = self._norm(ev)
         apply_decay, apply_stamp = plan.get(seq, (False, False))
         if not apply_decay and not apply_stamp:
             # Ineligible (a non-non-empty-writable id): the plan already warned.
