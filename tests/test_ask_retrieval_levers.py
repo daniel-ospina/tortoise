@@ -207,25 +207,43 @@ def test_gold_turn_in_pool_membership_embedded():
             sdk.close()
 
 
+def _embedder_installed() -> bool:
+    """Cheap, import-time-safe capability probe for MARKER conditions.
+
+    Deliberately NOT `_embedder_present()`: that one calls
+    `EmbeddingModel.get()`, which LOADS a model (cold ~57 s, bounded by
+    `_LOAD_TIMEOUT_S` = 90 s). A `pytest.mark.xfail(condition=...)` is evaluated
+    at module import, so using the decisive probe there would block collection
+    for every run of this file — including `--collect-only` and deselected
+    runs — and, worse, a transient load failure returns None and populates the
+    negative cache, misclassifying a vector-capable checkout as the keyword
+    lane and silently XFAILing the very assertion that is worst-case red. The
+    decisive probe stays inside the test body, where a failure fails the
+    assertion instead of converting it to an XFAIL.
+    """
+    import importlib.util
+    return importlib.util.find_spec("sentence_transformers") is not None
+
+
 @pytest.mark.xfail(
     strict=True,
-    condition=not _embedder_present(),
+    condition=not _embedder_installed(),
     reason="Accepted regression from the #4155 grouping fix — root-caused as "
-           "#5821 — BUT ONLY ON THE KEYWORD LANE, which is what this marker's "
-           "condition now encodes. Measured 2026-09-28 at origin/main 20e4819be: "
-           "with the dense leg ABSENT the gold turn sits at rank 77 and is cut "
-           "(kept 58); with it PRESENT the gold is at rank 9 and LANDS in "
-           "context at item_cap=40, so this test XPASSes and strict=True reds "
-           "the suite on any vector-capable checkout. The regression is the "
-           "missing dense leg, not the ranking: there is no measured "
-           "retrieval-quality regression on the vector lane. The corrected "
-           "bucket key does make the per-session cap stop binding (120 in → "
-           "119 out, was 91), and at this helper's 8000-token budget the "
-           "assembly step keeps 58 items — the TOKEN cap, not the byte cap "
-           "this marker used to name. The measured attribution is pinned by "
-           "test_ask_cap_attribution_5821 below. strict=True on the keyword "
-           "lane so that a real fix there makes this an XPASS failure and "
-           "forces the marker's removal.",
+           "#5821 — on the KEYWORD LANE, which is what this marker's condition "
+           "now encodes. Measured 2026-09-28 at origin/main 20e4819be: on the "
+           "keyword lane the #4155 key deepens the pool (dedup 91 → 119) while "
+           "the assembly step keeps 58, so the gold moves from rank 55 (kept "
+           "70 — it landed) to rank 68 post-boost (> 58 — cut). Isolating the "
+           "#4155 key alone reproduces exactly that: with the pre-#4155 key the "
+           "gold lands on this lane. On the VECTOR lane the dense leg holds the "
+           "gold at rank 9 and it lands at item_cap=40, so this test XPASSes "
+           "an unconditional strict marker and reds the suite on any "
+           "vector-capable checkout — the canonical dev env. The 58-item keep is "
+           "the TOKEN cap's doing, not the byte cap this marker used to name; "
+           "the measured attribution is pinned by "
+           "test_ask_cap_attribution_5821 below. strict=True on the keyword lane "
+           "so that a real fix there makes this an XPASS failure and forces the "
+           "marker's removal.",
 )
 def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     """A6 measurement-gated cap review, embedded lane: 1d4e3b97 (in-pool,
@@ -234,13 +252,16 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     Step 0. Default-off knobs are exercised explicitly.
 
     ⚠️ Known-failing by owner decision, tracked as #5821 — see the marker
-    reason. **The failure is lane-dependent and the marker now says so:** with
-    the dense leg absent the gold sits at rank 77 and the assembly step keeps
-    only 58, so it is cut; with the dense leg present the gold is at rank 9 and
-    lands at `item_cap=40`, so the test passes and `strict=True` would red the
-    suite. That is why the marker carries
-    `condition=not _embedder_present()` — it encodes the lane the regression
-    actually belongs to instead of asserting it universally.
+    reason. **The failure is lane-dependent and the marker now says so.** On
+    the keyword lane the #4155 key deepens the pool (dedup 91 → 119) while the
+    assembly step keeps 58, so the gold moves from rank 55 in a pool of 70 (it
+    landed) to rank 68 post-boost in a pool of 119 (> 58 — cut). On the vector
+    lane the dense leg holds the gold at rank 9 and it lands at `item_cap=40`,
+    so the test passes and an unconditional `strict=True` would red the suite.
+    That is why the marker carries `condition=not _embedder_installed()` — it
+    encodes the lane the regression belongs to instead of asserting it
+    universally, and it probes cheaply because marker conditions are evaluated
+    at import.
 
     This test raises the window and the item cap but not the token cap, so on
     the keyword lane those two raises cannot lift the keep above 58 (a
