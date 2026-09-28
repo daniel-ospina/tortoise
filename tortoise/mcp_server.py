@@ -3925,8 +3925,10 @@ def tortoise_session_capture(conversation: list[dict],
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
+        _stored_session_harness,
         _submit_off_loop,
     )
     limits = _current_org_limits.get() or {}
@@ -4015,8 +4017,25 @@ def tortoise_session_capture(conversation: list[dict],
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+            # #4898: attribute the failure to the SESSION's stored harness, NOT
+            # the caller's raw ``harness`` argument — the SAME resolution the
+            # REST capture applies to both per-harness keys
+            # (``_observed_capture_harness``: stored or claimed,
+            # first-writer-wins; #3681 / #3700). Without it, a failed
+            # re-capture of an existing ``session_id`` whose stored harness
+            # differs writes the error under the CALLER's declaration and the
+            # dashboard paints the failure on another harness's row — the
+            # relabel class #3681 closed for the receipt key, one key down.
+            # ``_stored_session_harness`` fails open to None, which restores
+            # the fresh-session rule (the claim only ever introduces a harness
+            # the server has not stamped).
             with contextlib.suppress(Exception):
-                _record_capture_last_error(org_id, harness, str(detail))
+                _record_capture_last_error(
+                    org_id,
+                    _observed_capture_harness(
+                        org, harness,
+                        asyncio.run(_stored_session_harness(org, session_id))),
+                    str(detail))
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
