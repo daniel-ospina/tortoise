@@ -648,6 +648,65 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
             f"Graph-scoped keys cannot access {surface}.")
 
 
+#: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to
+#: the ``_SENSITIVE_OP_LIMITS`` entry the op is governed by. Enforced at the
+#: dispatch point below, NEVER inside a handler: a handler that charges its own
+#: limit is the second implementation of one budget that this seam exists to
+#: prevent, and it is the entry point the REST twin cannot see.
+_MCP_BUDGETED_OPS: dict[str, str] = {
+    # tortoise_pack_install reaches pack_manifest_store.upsert_tenant_manifest
+    # directly (no HTTP), so #2038's per-IP budget on the REST twin
+    # POST /v1/packs/manifests never applied to it.
+    "tortoise_pack_install": "pack_manifest",
+}
+
+
+async def _check_mcp_op_budget(name: str, org_id: str) -> None:
+    """#2050: charge the sensitive-op budget for an MCP tool, or refuse.
+
+    `tortoise_pack_install` is the cheapest path to the same expensive
+    operation the REST surface bounds: it calls `upsert_tenant_manifest`
+    in-process, consuming no `pack_manifest` budget at all and bounded only by
+    the generic 100/min per-key middleware — a ~1200x looser bound than the
+    REST twin's 5/hr. The dispatch point is the ONE funnel every client tool
+    call passes through on every transport, so the budget is applied HERE.
+
+    Team scope, not IP: the caller is an authenticated agent server, and a
+    per-IP frame would be both wrong (shared egress addresses) and unavailable
+    (no Request at this seam). The team-scoped bucket is charged through
+    `hosted_api._check_sensitive_op_budget` — the SAME shared
+    `_SENSITIVE_BUCKETS` store, the SAME `_SENSITIVE_OP_LIMITS` table and the
+    SAME refusal contract the REST arm uses.
+
+    Ordering mirrors the REST twin (`upload_pack_manifest` charges before its
+    scope check), so a scope-denied call still consumes budget there and here.
+    Refusal is RAISED, not returned as a `{"installed": False}` dict: a dict
+    would read to the caller as a completed call, not a refusal. Auth (401) is
+    excluded by construction — transport middleware rejects it before this
+    seam, exactly as the REST dependency does.
+
+    No scope (stdio / operator) or the selfhost placeholder org → skip: there
+    is no tenant registry to bill, mirroring `_enforce_quota`.
+    """
+    op = _MCP_BUDGETED_OPS.get(name)
+    if op is None:
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if not org_id or org_id == SELFHOST_ORG_ID:
+        return
+    from fastapi import HTTPException
+
+    from tortoise.hosted_api import _check_sensitive_op_budget
+    try:
+        await _check_sensitive_op_budget(op, org_id)
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        raise ToolError(
+            f"{exc.detail} (Retry-After: {exc.headers.get('Retry-After', '3600')}s)",
+        ) from None
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -664,6 +723,9 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     org_id = _current_org_id.get() or ""
+    # #2050: budget BEFORE the scope gate — the REST twin charges before its
+    # scope check too, so the two surfaces agree on what consumes budget.
+    await _check_mcp_op_budget(name, org_id)
     _enforce_mcp_tool_scope(name)
     maybe_record_mcp_read(
         name, org_id, _current_org_limits.get(),
