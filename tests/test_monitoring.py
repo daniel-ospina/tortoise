@@ -98,6 +98,19 @@ def _fresh_probe_worker():
     monitoring._reset_probe_worker()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_graph_size_worker():
+    """#3253 review P2: the DEDICATED graph-size worker is process-lifetime
+    too. A test that wedges it (the stalled-taxonomy tests below) would leave
+    the ONE slot held, so every later ``graph_size`` count in the file pays
+    the full budget and ``graph_size`` stops being measurable — leaking a
+    wedged worker into the next test. Drop it per test, the same recovery
+    seam ops uses to fix a wedged count without a process restart."""
+    monitoring._reset_graph_size_worker()
+    yield
+    monitoring._reset_graph_size_worker()
+
+
 class TestProbeDb:
     """probe_db() deep-check (#1384) — never raises, hard-bounded."""
 
@@ -701,6 +714,204 @@ class TestMetricsExplicitSdkArg:
         assert result["status"] == "degraded"
         assert calls["taxonomy"] == 0
         assert result["graph_size"] == 0
+        # #3253: a skipped count is NOT a measured 0 — say so per call.
+        assert result["graph_size_error"] is not None
+
+
+class TestGraphSizeMeasurementIsBoundedAndReported:
+    """#3253: the ``graph_size`` taxonomy round-trip in ``metrics()``.
+
+    Two defects, one shape. (1) The count ran on the CALLER thread with no
+    budget of its own, so a server that answered ``RETURN 1`` promptly but
+    stalled on the five label ``COUNT``s pinned the health call for as long as
+    the server stalled — the MCP ``tortoise_health`` tool and ``serve_health``
+    both. (2) A count that RAISED was swallowed (``record_error()``) and the
+    report stayed ``status="ok"`` / ``graph_size: 0``, identical to a genuinely
+    empty graph on the same call; only the process-lifetime ``errors`` counter
+    moved, so telling them apart took a second call.
+
+    The fix bounds the count (``GRAPH_SIZE_TIMEOUT``, on a DEDICATED daemon
+    worker so it can never occupy the probe slot) and reports per-call
+    whether the value was MEASURED via ``graph_size_error`` (``None`` ==
+    measured, so a 0 is a real empty graph; a string == not measured).
+    """
+
+    class EmptySDK(FakeSDK):
+        """A reachable graph with no nodes — a REAL measured zero."""
+
+        def taxonomy(self):
+            return {"Point": 0, "Event": 0}
+
+    class BoomSDK(FakeSDK):
+        def taxonomy(self):
+            raise RuntimeError("count failed")
+
+    def test_success_reports_a_measured_value(self):
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=42))
+        assert result["graph_size"] == 42
+        # None is the "measured" signal, so 42 needs no caveat.
+        assert result["graph_size_error"] is None
+
+    def test_empty_graph_is_a_measured_zero(self):
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=self.EmptySDK(db_ok=True))
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is None, (
+            "a genuinely empty graph must read as measured, not unavailable")
+
+    def test_count_failure_is_distinguishable_from_empty_without_diffing_errors(
+            self):
+        """THE #3253 DISCRIMINATOR. Assert the DISTINCTION, not just a
+        number: on the SAME per-call report, an empty graph and a failed count
+        share ``status`` + ``graph_size`` (so the old reader could not tell
+        them apart) but differ on ``graph_size_error`` — no second call, no
+        cumulative-counter diff."""
+        monitoring._sdk = None
+        empty = monitoring.metrics(sdk=self.EmptySDK(db_ok=True))
+        failed = monitoring.metrics(sdk=self.BoomSDK(db_ok=True))
+
+        # The pre-#3253 observable really is identical — this is the defect.
+        assert (empty["status"], empty["graph_size"]) == (
+            failed["status"], failed["graph_size"])
+
+        # The per-call marker is what separates them.
+        assert empty["graph_size_error"] is None
+        assert failed["graph_size_error"] is not None
+        assert "count failed" in failed["graph_size_error"]
+        # The failure is still recorded (never raised) for the Prometheus
+        # counter consumer — the marker is additive, not a replacement.
+        assert failed["errors"] > empty["errors"]
+
+    def test_stalled_count_is_bounded_and_reported(self, monkeypatch):
+        """A reachable server that stalls on the label counts must not pin
+        the health call: ``metrics()`` returns inside the count budget with an
+        explicit unavailability marker instead of hanging."""
+        import threading
+
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.05)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the DEDICATED graph-size worker, not the caller.
+                release.wait(5.0)
+                return {"Point": 1}
+
+        try:
+            started = time.monotonic()
+            result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        assert result["status"] == "ok"
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None, result
+        assert "budget" in result["graph_size_error"]
+        assert elapsed < 1.0, f"metrics() did not honour the count budget: {elapsed:.2f}s"
+
+    def test_stalled_count_never_occupies_the_probe_slot(self, monkeypatch):
+        """Isolation: the count runs on its OWN worker, so a stalled count
+        cannot hold the single probe slot and turn a graph_size problem into a
+        false ``degraded`` on the next probe (#3143's symptom class)."""
+        import threading
+
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", 0.05)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                release.wait(5.0)
+                return {"Point": 1}
+
+        try:
+            stalled = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert stalled["graph_size_error"] is not None
+            # The count thread is STILL parked on the graph-size worker here;
+            # the probe lane must be unaffected.
+            started = time.monotonic()
+            probe = monitoring.probe_db(FakeSDK(db_ok=True))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+        assert probe["ok"] is True, probe
+        assert elapsed < 1.0, f"the probe lane queued behind the count: {elapsed:.2f}s"
+
+    def test_wedged_count_is_bounded_and_reset_restores_measurement(
+            self, monkeypatch):
+        """#3253 review P2 — the post-stall behaviour no test covered.
+
+        ONE permanently stalled ``taxonomy()`` count wedges the single
+        graph-size slot for the life of the process, because the worker is a
+        singleton and the stalled ``taxonomy()`` is abandoned, not cancelled.
+        Two properties
+        must hold and neither was pinned: (a) every LATER ``metrics()`` call
+        is still bounded — it queues behind the wedged slot and pays the
+        budget (failing fast only once the backlog of 32 is FULL), never
+        unbounded; and (b) ``_reset_graph_size_worker()`` drops the wedged
+        worker so ``graph_size`` is measurable again with no restart. Pre-fix
+        there was no reset seam at all, so (b) could not pass.
+        """
+        import threading
+
+        budget = 0.05
+        monkeypatch.setattr(monitoring, "GRAPH_SIZE_TIMEOUT", budget)
+        release = threading.Event()
+
+        class StallSDK(FakeSDK):
+            def taxonomy(self):
+                # Parked on the graph-size worker until the test ends — never
+                # returns during the loop, so the slot stays wedged.
+                release.wait(30.0)
+                return {"Point": 1}
+
+        try:
+            # The first call is abandoned at the budget; the worker is left
+            # wedged on the stalled count.
+            first = monitoring.metrics(sdk=StallSDK(db_ok=True))
+            assert first["graph_size_error"] is not None, first
+
+            # (a) Later calls queue behind the wedged slot and each pay the
+            # budget — but none may be UNBOUNDED. A generous absolute bound
+            # (matching this file's 1.0s tolerance for a 0.05s budget):
+            # pre-fix an unbounded call would ride the stalled count instead.
+            for i in range(3):
+                started = time.monotonic()
+                result = monitoring.metrics(sdk=StallSDK(db_ok=True))
+                elapsed = time.monotonic() - started
+                assert result["graph_size_error"] is not None, (i, result)
+                assert result["graph_size"] == 0, (i, result)
+                assert elapsed < 1.0, (
+                    f"post-stall metrics() call {i} was not bounded: "
+                    f"{elapsed:.4f}s (budget {budget}s)")
+
+            # (b) The recovery seam: drop the wedged worker and the very next
+            # count is measurable again. Without it, graph_size stayed
+            # unmeasured for the process lifetime.
+            monitoring._reset_graph_size_worker()
+            recovered = monitoring.metrics(
+                sdk=FakeSDK(db_ok=True, graph_size=7))
+            assert recovered["graph_size"] == 7, recovered
+            assert recovered["graph_size_error"] is None, recovered
+        finally:
+            release.set()
+            monitoring._reset_graph_size_worker()
+
+    def test_probe_failure_marks_graph_size_unavailable(self):
+        """A degraded report must not leave ``graph_size_error`` as None —
+        that would present its ``graph_size: 0`` as a measured empty graph."""
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["graph_size_error"] is not None
+
+    def test_missing_probe_target_marks_graph_size_unavailable(self):
+        monitoring._sdk = None
+        result = monitoring.metrics()
+        assert result["status"] == "unknown"
+        assert result["graph_size"] == 0
+        assert result["graph_size_error"] is not None
 
 
 class TestProbeSetupBudget:
@@ -881,8 +1092,11 @@ class TestProbeSetupBudget:
         """#3143 review: post-fix, ``graph_size`` is newly reachable on large
         graphs. A reachable DB whose label COUNT raises must not surface as a
         crash — the report stays ok/0 and the failure is recorded in
-        ``errors`` (never raised), which is the only signal distinguishing it
-        from a genuinely empty graph."""
+        ``errors``, never raised.
+
+        #3253: the per-call ``graph_size_error`` marker is the signal that now
+        distinguishes this from a genuinely empty graph (the ``errors``
+        counter is process-lifetime and needs a second call to diff)."""
         class TaxonomyBoomSDK(FakeSDK):
             def __init__(self):
                 super().__init__(db_ok=True)
@@ -897,6 +1111,8 @@ class TestProbeSetupBudget:
         assert result["db"]["ok"] is True
         assert result["graph_size"] == 0
         assert result["errors"] == baseline["errors"] + 1
+        assert baseline["graph_size_error"] is None
+        assert result["graph_size_error"] is not None
 
     def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
             self, monkeypatch):

@@ -182,6 +182,61 @@ STATE_VALUE_CARVE_OUT = (
     "ephemeral counters not central to a decision."
 )
 
+# #1507: the SHORT-SESSION fact-retention clause. The granularity bar was
+# calibrated on LONG design sessions, where the narrative-first rule pays off
+# (Multi-Session +2.6pp, Abstention +11.9pp). On a SHORT, fact-dense session it
+# misfires: the mapper reads the bar as "this turn is too small to be worth a
+# point" and under-extracts the very facts the session exists to record.
+# Measured (#1350, official judge, 500-Q): Information Extraction 76.5% vs the
+# deterministic baseline's 84.7% (-8.2pp) — the ONE clear regression of the v2
+# pipeline — with 0-2 points per short session against a 3-5 target.
+#
+# SCOPE — what this clause does and does NOT assert. The operative instruction
+# ("emit each qualifying claim separately rather than folding it") is
+# length-INDEPENDENT, and that is deliberate: the failure it repairs is a FOLD,
+# and a fold loses a short session's facts far more often than a long one's
+# (there is nothing else in the session to fall back on). No figure above
+# measures THIS clause's long-session effect: the +2.6pp/+11.9pp arms were
+# measured on the PRE-CHANGE pipeline and are not re-measured here. They MUST
+# NOT regress (the issue's indicator (b)), which is a no-regression
+# requirement, not a claim this change improved them.
+#
+# QUALIFICATION is load-bearing, not decoration. "Every stated quantity is
+# durable" would re-admit exactly what S2_TMPL's VALUE FILTER and
+# VALUE_FIDELITY_RULE exclude (test counts, routine readouts), and S1 carries
+# NO anti-routine gate to catch it — so the enumeration is qualified by the
+# SAME test the carve-out uses ("the subject of a decision, observation, or
+# plan"). This clause changes WHERE a qualifying value is emitted, never
+# WHETHER it qualifies.
+#
+# NO NUMERIC RANGE. An earlier draft said "typically 3 to 5 points where the
+# turns previously yielded 0 to 2". Dropped: it contradicts "a point per fact"
+# (if a short session holds one or two facts, 3-5 is reachable only by
+# splitting or hoarding) and models anchor on ranges — it would have
+# functioned as the quota the same sentence disclaimed.
+#
+# SEAMS: S1 (_granularity_text) and the S2/S4 {anti_routine} slot
+# (_s2s4_rules) — deliberately NOT the master render, which would emit it a
+# second time inside the same prompt. The slot is the shared rule-write site
+# (#2453), which is why the clause rides it rather than the master render.
+SHORT_SESSION_FACT_RULE = (
+    "SHORT-SESSION FACT RETENTION (the granularity bar is a predicate over "
+    "content, NEVER over session length): do NOT read a short or sparse "
+    "conversation as 'too small to be worth a point' — brevity is not "
+    "insignificance, and the whole content of a short session is often the "
+    "one or two facts in it. The bar asks whether a claim is DURABLE, not "
+    "how long the session was.\n"
+    "Emit each qualifying claim SEPARATELY rather than folding the session's "
+    "facts into one summary point: a stated date, deadline, name, role, "
+    "quantity, version, threshold, commitment, decision, or stated "
+    "preference is its OWN point WHEN it is the subject of a decision, "
+    "observation, or plan — the OPERATIONAL-VALUE CARVE-OUT decides "
+    "WHICH; this clause decides only WHERE a qualifying value is emitted, "
+    "never WHETHER it qualifies. A routine readout that is not a thing being "
+    "fixed or a chosen target is still a no-op, so do not pad with routine "
+    "asides or mint kinds to reach a count."
+)
+
 
 # #2424 (compounds with #2453 — one PR): the ANTI-ROUTINE exclusion gate —
 # the mapper-level NOOP (Mem0 semantics: a per-candidate relevance decision,
@@ -316,7 +371,8 @@ def _s2s4_rules() -> str:
     (the #2424 residual clause-level strip and the operator rules live in
     the shared blocks, so every mapping stage carries them)."""
     return (ANTI_ROUTINE_EXCLUSION + "\n\n" + VALUE_FIDELITY_RULE
-            + "\n\n" + OPERATOR_SEMANTICS_RULE)
+            + "\n\n" + OPERATOR_SEMANTICS_RULE
+            + "\n\n" + SHORT_SESSION_FACT_RULE)
 
 
 CORE_OBJECT_KEYS = (
@@ -807,7 +863,8 @@ def _granularity_text(master: dict | None = None) -> str:
     master = master or build_master_list()
     g = master.get("memory_granularity", {})
     out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
-    return f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
+    head = f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
+    return head + "\n" + SHORT_SESSION_FACT_RULE
 
 
 # ── Session-date anchoring (E1, #1533) ────────────────────────────────────
@@ -2532,6 +2589,51 @@ def _norm_kind(k: str) -> str:
     must resolve to the same key or link-before-create misses and a
     duplicate :Object is created server-side."""
     return str(k or "").strip().rsplit(":", 1)[-1].lower()
+
+
+#: The write path's identity content cap — the three sites ``execute_embed``
+#: keys content identities on (event content, point content, minted endpoint
+#: refs) all truncate with ``str(x).strip()[:1000]``. Other fields carry their
+#: own, unrelated caps (a point's 200-char ``quote``, a summary's 2000).
+#: ``vet_gate._MAX_CONTENT`` mirrors this value (that module must not import
+#: this one — see its header), and a parity test pins the two together.
+_MAX_CONTENT = 1000
+
+
+def _endpoint_keys(ref: object) -> frozenset[str]:
+    """Every ENTITY-NAME identity the mint's entity guard keys a ref under.
+
+    The mint keys a ref's content with ``M(x) = _norm(x.strip()[:_MAX_CONTENT])``.
+    A ref names an entity in one of two spellings a model writes — the entity's
+    name, or its whitespace-collapsed re-typing — so the guard's key set is ``M``
+    applied to both: ``{M(x), M(_norm(x))}``. This is the guard's set only; the
+    mint separately registers the untruncated ``_norm(ref)`` as a RESOLUTION alias
+    (``_full``), which is why ``vet_gate._norm_variants`` is a superset.
+
+    ⚠️ Scope: the two SPELLINGS, not every truncation of them — and the
+    boundary is bidirectional. A sub-cap prefix of a name whose ``_norm`` window
+    is NOT that name's own ``_MAX_CONTENT`` window keys apart and would still be
+    minted; closing that needs prefix matching, which would refuse legitimate
+    edges whose text merely STARTS with an entity name. Conversely a ref that
+    merely COINCIDES with the name's own truncated window while naming something
+    else is refused — e.g. entity ``"pytest" + " "*1200 + "suffix"`` with ref
+    ``"pytest"`` (the window ``_norm(name[:_MAX_CONTENT])`` is ``"pytest"``):
+    a legitimate edge ``main`` kept, now dropped. That is the accepted trade-off
+    of a finite key set pending prefix matching, NOT a correctness claim — the
+    residual is recorded on #5069. Keying the
+    entity-name sets on the FULL name while ``_mint_endpoint`` keyed the
+    truncated ref let a >1000-char participant name be minted as a claim Point
+    (the OPERATOR REFERENCING hard rule's own failure mode); keying them on the
+    truncated form ALONE dropped the collapsed arm. The mint's entity sets are
+    built from THIS key set; ``vet_gate._norm_variants`` is the mirror for the
+    prune and is a superset of it (it also carries the untruncated
+    resolution alias), and a test pins that containment.
+    """
+    raw = str(ref or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset({_norm(raw[:_MAX_CONTENT]),
+                      _norm(_norm(raw)[:_MAX_CONTENT])})
 
 
 # E5 (#1537) — a single shared content token is never a revision; the
@@ -5712,7 +5814,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # #2552 mint-before-wire guard: an operator endpoint that names an
     # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
     # must never be materialized as a claim Point (see `_mint_endpoint`).
-    emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
+    # #5069: keyed through `_endpoint_keys` — the SAME transform the mint's
+    # guard applies to a ref — because a key built from the full normalised
+    # name alone did not match the mint's truncated ref, so the guard missed
+    # for a >1000-char entity name (and for its collapsed spelling when that
+    # spelling is itself past the cap, where the old full-name key was a
+    # different string).
+    emitted_entity_names = {k for name, _ in emitted_entity_keys
+                            for k in _endpoint_keys(name)}
     # #4716 Part 2 (Defect A / #4656 gap 1) — the mint's entity guard also
     # consults the S3 index's entity rows, not just this session's payload
     # entities: an Object that already exists in the graph but was NOT
@@ -5731,8 +5840,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # outside it is still mintable; closing that needs an authoritative
     # query-independent entity lookup, which is deliberately out of #4716's
     # scope (see the issue's "the candidate set cannot carry correctness").
-    graph_entity_names = {_norm(str(e.get("name") or ""))
-                          for e in idx["entities"] if e.get("name")}
+    graph_entity_names = {k for e in idx["entities"] if e.get("name")
+                          for k in _endpoint_keys(e.get("name"))}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -5742,7 +5851,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(ev, dict):
             warnings.append(f"non-dict event entry {ev!r} skipped")
             continue
-        content = str(ev.get("content", "")).strip()[:1000]
+        content = str(ev.get("content", "")).strip()[:_MAX_CONTENT]
         if not content:
             continue
         ekind = str(ev.get("eventKind", "")).strip() or "core:occurrence"
@@ -5817,7 +5926,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
             continue
-        content = str(p.get("content", "")).strip()[:1000]
+        content = str(p.get("content", "")).strip()[:_MAX_CONTENT]
         if not content:
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
@@ -6019,13 +6128,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
-        content = str(ref or "").strip()[:1000]
+        content = str(ref or "").strip()[:_MAX_CONTENT]
         if not content:
             return ""
+        # `n` is the RESOLUTION key (`point_ids`/`event_ids` are keyed on the
+        # minted content). The ENTITY guard is the same key-set transform the
+        # sets above were built with (#5069): a ref naming a participant in
+        # either of the two SPELLINGS `_endpoint_keys` keys is refused — other
+        # truncations of the name are out of scope (the residual on #5069).
         n = _norm(content)
         if n in point_ids:
             return point_ids[n]
-        if n in emitted_entity_names or n in graph_entity_names:
+        if _endpoint_keys(ref) & (emitted_entity_names | graph_entity_names):
             # The hard rule is explicit — "NEVER use an entity name as an
             # operator endpoint — entities are wired through
             # about_entities". Minting one would fabricate a degenerate claim
@@ -7308,6 +7422,65 @@ def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
     return {}
 
 
+#: The fixed 9-class ``_classify_error`` vocabulary (#1524). Declared as code
+#: (the #1787 ``llm_error_census`` emission contract that also names it has no
+#: code presence — #5526) so a future add/rename is detectable; #4959 reroutes
+#: a 403 WITHIN this set rather than adding a 10th class. This is the
+#: CLASSIFIER's vocabulary ONLY — the census also carries stage-producer
+#: classes outside this set, so never treat it as the census's full vocabulary.
+_LLM_ERROR_CENSUS_CLASSES = frozenset({
+    "fatal_401_auth",
+    "fatal_402_billing",
+    "fatal_403_forbidden",
+    "fatal_4xx",
+    "transient_429_rate_limit",
+    "transient_5xx",
+    "transient_timeout",
+    "transient_network",
+    "transient_unknown",
+})
+
+
+def _is_key_limit_error(e: BaseException) -> bool:
+    """True → this HTTP rejection is the provider's OWN key-limit condition
+    (a spent budget, or another provider-side limit), not a credential /
+    authorization failure.
+
+    Delegates to ``tortoise.model_adapters.is_billing_exhausted`` (#4860 /
+    #4951) — the SINGLE seam that owns the key-limit body signatures — so the
+    census class and the rotation seam make the same key-limit/billing
+    discrimination on every requests-shaped error this lane produces (#4959).
+    (The two consumers still disagree in OTHER ways — see
+    ``_classify_error``'s KNOWN DIVERGENCES; #5525.) The seam's signature set is deliberately
+    BROAD (#4952: the trailing ``"limit exceeded"`` also matches "rate limit
+    exceeded" / "organization limit exceeded" / "token limit exceeded"), and
+    the census INHERITS that breadth — a 403 whose body matches any of those
+    phrasings records ``fatal_402_billing`` and degrades the run. Deliberately
+    NOT narrowed here: the direction is fail-closed (a false degrade, never a
+    false certificate), a 429 is intercepted by the earlier branch, the seam's
+    signature table is #4951's to own, and a second boundary in this module
+    would re-create exactly the divergence #4959 removes. Pinned by
+    ``test_classify_error_generic_limit_403_is_billing_broad_by_design``.
+
+    Lazily imported (the extractor stays free of a hard ``model_adapters`` /
+    ``requests`` import), mirroring ``_is_fatal_error``. On ``ImportError``
+    the answer is False, so a 403 degrades to the PRE-#4959 credential class
+    ``fatal_403_forbidden``: still ``fatal_*`` (the abort decision is
+    unchanged and the integrity gate still grades it ``hard``), but NOT a
+    killer class — on the PARTIAL shape (an embed list present, so
+    ``empty_embed_list`` is not bumped) the extraction-killer gate does not
+    fire on that branch. A FULLY aborted session still fires it, via
+    ``empty_embed_list``. That branch is a defensive fallback for an
+    unimportable seam, not a supported mode (``model_adapters`` is a
+    first-class dependency of this module's taxonomy — ``_is_fatal_error``
+    imports it too)."""
+    try:
+        from tortoise.model_adapters import is_billing_exhausted
+    except ImportError:  # pragma: no cover — P2 landed; defensive fallback
+        return False
+    return is_billing_exhausted(e)
+
+
 def _classify_error(e: BaseException) -> str:
     """Granular census class for one LLM-call exception (D3 vocabulary).
 
@@ -7318,8 +7491,45 @@ def _classify_error(e: BaseException) -> str:
     are produced by the stage callers, not here.
 
     Duck-typed (``e.response.status_code``) so the extractor stays free of a
-    hard ``requests`` import — semantically identical to P2's taxonomy table
-    (#1530: 401/402/403 fatal, 429/5xx transient, other 4xx fatal)."""
+    hard ``requests`` import. This is the CENSUS-class mapper, NOT the retry
+    taxonomy (that is ``_is_fatal_error`` / P2's ``is_fatal``); the two are
+    aligned on the common provider statuses but are deliberately NOT claimed
+    identical — see KNOWN DIVERGENCES below.
+
+    #4959 — the ONE body-sensitive carve-out: a 403 whose response BODY
+    carries the provider's key-limit signature is the SAME condition as a
+    402 (this key's budget is spent), so it records ``fatal_402_billing`` —
+    the class ``EXTRACTION_KILLER_CENSUS_CLASSES`` gates on — instead of
+    ``fatal_403_forbidden``. Without it the billing signal was INVISIBLE on
+    the shape that matters: a key-limited question that still extracted SOME
+    points (an embed list present, so ``empty_embed_list`` is never bumped)
+    carried only ``fatal_403_forbidden`` — a class the killer gate does not
+    read — so the gate did not fire on the billing event and the run could
+    certify. (A FULLY aborted session additionally bumps ``empty_embed_list``,
+    which DOES fire the gate — so the carve-out's value is the partial shape,
+    not the abort. #4860: 7/7 captures aborted on a key-limit 403.) The
+    retry/abort decision is unchanged — both classes are FATAL — and a
+    signature-less 403 (a genuine permission failure) keeps
+    ``fatal_403_forbidden``, so the credential-vs-budget distinction survives.
+    The key-limit test itself is ``_is_key_limit_error`` above (its breadth
+    caveat included).
+
+    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
+
+    KNOWN DIVERGENCES from P2's retry taxonomy (both pre-existing, not
+    introduced here, and both tracked on #5525, whose root was restated to
+    cover the mapping as well as the status source). The list is what is
+    KNOWN — NOT an exhaustive claim:
+
+    * the status is read from ``e.response.status_code`` ONLY, so a
+      ``urllib.error.HTTPError`` (status on ``.code``, no ``.response`` — the
+      ``OpenAICompatModel`` shape) is never matched and classifies
+      ``transient_unknown``;
+    * 408 / 425 are TRANSIENT in ``model_adapters.TRANSIENT_STATUS_CODES`` but
+      fall through ``400 <= st < 500`` here to ``fatal_4xx``.
+
+    Neither is changed here (a classifier change is its own concern, #5525),
+    and neither is denied here."""
     st = getattr(getattr(e, "response", None), "status_code", None)
     if st is not None:
         if st == 429:
@@ -7331,7 +7541,8 @@ def _classify_error(e: BaseException) -> str:
         if st == 402:
             return "fatal_402_billing"
         if st == 403:
-            return "fatal_403_forbidden"
+            return ("fatal_402_billing" if _is_key_limit_error(e)
+                    else "fatal_403_forbidden")
         if 400 <= st < 500:
             return "fatal_4xx"
         return "transient_unknown"
@@ -7348,9 +7559,11 @@ def _is_fatal_error(e: BaseException) -> bool:
 
     Consumes P2's taxonomy export (``tortoise.model_adapters.is_fatal`` —
     401/402/403 FATAL + 400/404/other-4xx FATAL_CONFIG are permanent; never
-    retried, MECE fix #1524). The local ``_classify_error`` fallback mirrors
-    the same semantics (the ``fatal_*`` census prefix) so the retry decision
-    can never diverge from the census classes (GATE-1: one taxonomy)."""
+    retried, MECE fix #1524); the local ``_classify_error`` fallback mirrors
+    the same ``fatal_*`` prefix (GATE-1). This is the ABORT decision ONLY.
+    The CENSUS class comes from ``_classify_error``, and the two are NOT
+    guaranteed to agree — it reads the status from a different attribute and
+    maps 408/425 differently; see its KNOWN DIVERGENCES paragraph."""
     try:
         from tortoise.model_adapters import is_fatal
         return is_fatal(e)

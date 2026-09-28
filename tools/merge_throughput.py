@@ -1023,6 +1023,143 @@ def collect_fast_files_unclassified():
         return {}
 
 
+# --- Task 4b (#5215 M8): the shard metric + the durations-map observation ----
+#
+# `shard-balance` measures OBSERVED WALL TIME — the two heavy legs of the latest
+# completed push-to-main run — never the durations map: a perfectly balanced map
+# with a 10-minute observed split is the whole point (M8/S8). The map's capture
+# age comes from the machine-readable `durations_captured_at` key the collector's
+# `--refresh-durations` bridge writes, never from the file's git commit date
+# (any unrelated edit would reset that).
+
+HEAVY_LEG_JOBS = {"a": "test (a)", "b": "test (b)"}
+DURATIONS_DIVERGENCE_TOLERANCE = 0.5
+
+
+def _job_wall_seconds(job: dict):
+    start = _parse_ts(job.get("started_at"))
+    end = _parse_ts(job.get("completed_at"))
+    if start is None or end is None:
+        return None
+    return (end - start).total_seconds()
+
+
+def collect_shard_balance():
+    """Observed wall time of the two heavy legs on the latest completed
+    push-to-main python-ci run. Never derived from the durations map."""
+    try:
+        sys.path.insert(0, str(REPO / "tools"))
+        import ci_timing
+
+        run_id = ci_timing.pick_run(OWNER_REPO)
+        if not run_id:
+            return {}
+        jobs = ci_timing.fetch_jobs(OWNER_REPO, run_id)
+    except Exception:
+        return {}
+    legs: dict[str, dict] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        key = next(
+            (k for k, name in HEAVY_LEG_JOBS.items() if job.get("name") == name),
+            None,
+        )
+        if key is None:
+            continue
+        wall = _job_wall_seconds(job)
+        if wall is None:
+            continue
+        legs[key] = {"conclusion": job.get("conclusion"), "wall_seconds": wall}
+    if set(legs) != {"a", "b"}:
+        return {}
+    imbalance = abs(legs["a"]["wall_seconds"] - legs["b"]["wall_seconds"]) / 60.0
+    return {"legs": legs, "shard_imbalance_minutes": imbalance,
+            "run_id": run_id, "read_ok": True}
+
+
+def _collector_observed_weights():
+    """The collector's OWN committed output (`docs/ci-timing.json`), per file.
+
+    The bridge's map is compared against THIS — the collector is the single
+    source; the instrument never re-parses a pytest log.
+    """
+    path = REPO / "docs" / "ci-timing.json"
+    try:
+        data = jsonlib.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    files = data.get("files")
+    if not isinstance(files, dict) or not files:
+        return None
+    observed = {}
+    for name, entry in files.items():
+        if isinstance(entry, dict) and _is_num(entry.get("total_ms")):
+            observed[Path(str(name)).name] = float(entry["total_ms"]) / 1000.0
+    return observed or None
+
+
+def _diverged_duration_keys(durations: dict, observed: dict) -> list[str]:
+    """Keys whose map value differs from the collector's observation beyond the
+    relative tolerance. An un-observed map key is NOT a divergence — the
+    collector is a top-15 projection, so a key it never saw is not evidence of a
+    wrong weight (it is carried forward by the bridge)."""
+    by_basename: dict[str, list[str]] = {}
+    for key in durations:
+        by_basename.setdefault(Path(key).name, []).append(key)
+    diverged = []
+    for basename, seen in observed.items():
+        for key in by_basename.get(basename, []):
+            value = durations.get(key)
+            if not _is_num(value):
+                continue
+            denom = max(abs(float(value)), abs(float(seen)), 1e-9)
+            if abs(float(value) - float(seen)) / denom > DURATIONS_DIVERGENCE_TOLERANCE:
+                diverged.append(key)
+    return sorted(set(diverged))
+
+
+def collect_durations_map():
+    """Capture age + sampled-key count of the map the balancer reads, and the
+    keys whose value diverges from the collector's own observation.
+
+    A map with no `durations_captured_at` is UNKNOWN (exit 2), never a fresh 0.
+    """
+    try:
+        sys.path.insert(0, str(REPO / "tools"))
+        import ci_selection as cs
+
+        manifest = cs.load_manifest()
+        durations = cs._durations_map(manifest)
+        if not durations:
+            return {}
+        age = _age_days(manifest.get("durations_captured_at"))
+        observed = _collector_observed_weights()
+        payload = {
+            "durations_map": {
+                "age_days": age if age is not None else UNKNOWN,
+                "sampled_keys": len(durations),
+                "tolerance": DURATIONS_DIVERGENCE_TOLERANCE,
+            },
+            "read_ok": True,
+        }
+        if observed is not None:
+            # Only present when a comparison actually happened: a non-empty
+            # observation whose basenames do NOT overlap the map compared ZERO
+            # keys, and `diverged: []` would then read as "no divergence" — a
+            # false green on an unobserved read. Omit the key so the check
+            # exits 2 (#3395).
+            compared = sum(
+                1 for name in {Path(k).name for k in durations} if name in observed
+            )
+            payload["durations_map"]["compared_keys"] = compared
+            if compared:
+                payload["diverged"] = _diverged_duration_keys(durations, observed)
+        return payload
+    except Exception:
+        return {}
+
+
 def collect_payload(name: str, opts: dict):
     """Live read for a check when no fixture is injected."""
     try:
@@ -1030,6 +1167,10 @@ def collect_payload(name: str, opts: dict):
             return collect_conflicts(opts.get("sweep_concurrency"))
         if name == "fast-files-unclassified":
             return collect_fast_files_unclassified()
+        if name == "shard-balance":
+            return collect_shard_balance()
+        if name == "durations-map":
+            return collect_durations_map()
         if name == "main-gate":
             sha = live_main_sha()
             if sha is UNKNOWN:
@@ -2077,6 +2218,8 @@ def build_report(fixture=None):
         gap = _fixture_payload(fixture, "gap").get("gap", {"value": UNKNOWN, "terms": {}})
         capacity = _fixture_payload(fixture, "capacity")
         dm = _fixture_payload(fixture, "durations-map").get("durations_map", {})
+        diverged = _fixture_payload(fixture, "durations-map").get("diverged")
+        shard = _fixture_payload(fixture, "shard-balance")
         ff = _fixture_payload(fixture, "fast-files-unclassified")
         batch = _fixture_payload(fixture, "batch-size")
     else:
@@ -2087,7 +2230,10 @@ def build_report(fixture=None):
         conflicts = collect_conflicts()
         gap = {"value": UNKNOWN, "terms": {}}
         capacity = {}
-        dm = {}
+        live_dm = collect_durations_map()
+        dm = live_dm.get("durations_map", {}) if isinstance(live_dm, dict) else {}
+        diverged = live_dm.get("diverged") if isinstance(live_dm, dict) else None
+        shard = collect_shard_balance()
         ff = collect_fast_files_unclassified()
         batch = {}
     runs = main_runs or []
@@ -2097,7 +2243,9 @@ def build_report(fixture=None):
         "main_gate": main_gate(runs) if runs else UNKNOWN,
         "mergify_mergeable": mergify_mergeable(runs) if runs else UNKNOWN,
         "max_batch_size": batch.get("max_batch_size", UNKNOWN),
-        "shard_imbalance_minutes": UNKNOWN,
+        "shard_imbalance_minutes": (shard.get("shard_imbalance_minutes", UNKNOWN)
+                                    if isinstance(shard, dict) else UNKNOWN),
+        "legs": shard.get("legs", UNKNOWN) if isinstance(shard, dict) else UNKNOWN,
         "queue_depth": UNKNOWN,
         "fast_files_unclassified": ff.get("fast_files_unclassified", UNKNOWN),
         "conflicts": {
@@ -2118,6 +2266,7 @@ def build_report(fixture=None):
             "sampled_keys": dm.get("sampled_keys", UNKNOWN),
             "tolerance": dm.get("tolerance", UNKNOWN),
         },
+        "diverged": diverged,
     }
 
 
