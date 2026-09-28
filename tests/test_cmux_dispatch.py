@@ -82,6 +82,29 @@ SCREEN_WORKING = """\
 \u219119k \u2193577 R25k CH91.1% $0.003 3.8%/700k (auto)                          (deepseek) deepseek-flash \u2022 high
 """
 
+#: A MID-TURN pane whose submission pi ACCEPTED into its pending queue (#5979).
+#: This is the verbatim shape of `updatePendingMessagesDisplay`
+#: (pi `dist/modes/interactive/interactive-mode.js`): the queued message renders
+#: as `Steering: <text>` in `pendingMessagesContainer`, which sits ABOVE the
+#: bordered editor. pi has already run `editor.setText("")` on submit, so the
+#: composer between the last two rules is EMPTY — the composer read reports
+#: UNSENT for a message pi in fact holds. `SCREEN_COMPOSING_UNSENT` is the
+#: opposite state (text in the composer, no pending display, no turn).
+SCREEN_QUEUED_MID_TURN = """\
+\u2500\u2500 \u280b Working \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+/private/tmp
+\u219119k \u2193577 R25k CH91.1% $0.003 3.8%/700k (auto)                          (deepseek) deepseek-flash \u2022 high
+
+Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292
+\u21b3 ctrl+e to edit all queued messages
+
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+/private/tmp
+3.8%/700k (auto)                                                              (deepseek) deepseek-flash \u2022 high
+"""
+
 #: The CORRUPTION case: the prompt ate the pointer's prefix and the remainder
 #: was submitted as a real turn. Observed live: latest_submitted_message == "292".
 SCREEN_TRUNCATED_TURN = """\
@@ -373,32 +396,67 @@ class TestRecoveryDecision(unittest.TestCase):
         self.assertFalse(cd.composer_empty(SCREEN_COMPOSING_UNSENT))
 
 
-class TestQueuedInComposer(unittest.TestCase):
-    """`queued_in_composer` — the positive-evidence-only queue signal (#5979)."""
+class TestPendingTurnDisplay(unittest.TestCase):
+    """`pending_turn_matches` — the positive-acceptance queue signal (#5979)."""
 
-    def test_text_in_the_composer_region_is_queued(self):
+    def test_steering_line_carrying_our_fingerprint_is_a_pending_turn(self):
         fp = cd.fingerprint(PROBE)
-        self.assertTrue(cd.queued_in_composer(SCREEN_COMPOSING_UNSENT, fp))
+        self.assertIn("Steering: ", SCREEN_QUEUED_MID_TURN)
+        # The composer is EMPTY: pi cleared it before queueing. This is exactly
+        # why the composer read cannot be the queue signal.
+        self.assertEqual(cd.composer_region(SCREEN_QUEUED_MID_TURN).strip(), "")
+        self.assertTrue(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, fp))
 
-    def test_unidentifiable_composer_is_never_queued(self):
+    def test_follow_up_line_carrying_our_fingerprint_is_a_pending_turn(self):
         fp = cd.fingerprint(PROBE)
-        no_rules = f"{PROBE}\n/private/tmp\n0.0%/700k (auto)\n"
-        self.assertIsNone(cd.composer_region(no_rules))
-        self.assertFalse(cd.queued_in_composer(no_rules, fp))
-        self.assertFalse(cd.queued_in_composer(None, fp))
+        screen = SCREEN_QUEUED_MID_TURN.replace("Steering:", "Follow-up:")
+        self.assertTrue(cd.pending_turn_matches(screen, fp))
 
-    def test_text_outside_the_composer_is_not_queued(self):
-        # A message visible only in the TRANSCRIPT is not evidence of a queue.
+    def test_TEXT_IN_THE_COMPOSER_IS_NOT_A_PENDING_TURN(self):
+        """THE REFUTATION, pinned. On submit-while-streaming pi clears the editor
+        BEFORE queueing, so text still in the composer is the UNSENT state
+        (`SCREEN_COMPOSING_UNSENT`, "UNSENT, no turn"). The refuted design read
+        that as `queued` — a false success that also skipped the release
+        recovery which would have submitted it."""
         fp = cd.fingerprint(PROBE)
-        rule = "\u2500" * 40
-        transcript = f"{rule}\n{PROBE}\n{rule}\n\n{rule}\n/private/tmp\n0.0%/700k (auto)\n"
-        self.assertEqual(cd.composer_region(transcript), "")
-        self.assertFalse(cd.queued_in_composer(transcript, fp))
+        self.assertEqual(cd.composer_region(SCREEN_COMPOSING_UNSENT).strip(), PROBE)
+        self.assertFalse(cd.pending_turn_matches(SCREEN_COMPOSING_UNSENT, fp))
 
-    def test_a_different_message_in_the_composer_is_not_our_queue(self):
+    def test_a_different_pending_message_is_not_our_pending_turn(self):
         fp = cd.fingerprint(PROBE)
-        other = SCREEN_COMPOSING_UNSENT.replace(PROBE, "an unrelated brief")
-        self.assertFalse(cd.queued_in_composer(other, fp))
+        other = SCREEN_QUEUED_MID_TURN.replace(PROBE, "an unrelated brief")
+        self.assertTrue(cd.pending_turn_present(other))
+        self.assertFalse(cd.pending_turn_matches(other, fp))
+
+    def test_a_truncated_pending_line_still_matches_our_head(self):
+        # `TruncatedText(text, 1, 0)` cuts the display to the pane width, so a
+        # narrow pane shows only a head of the message. The match is head-anchored
+        # in BOTH directions so the truncation direction still identifies ours.
+        fp = cd.fingerprint(PROBE)
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:30])
+        self.assertTrue(cd.pending_turn_matches(screen, fp))
+
+    def test_an_unreadably_short_pending_remnant_is_not_a_match(self):
+        # Fail closed: a remnant too short to identify the message is not ours.
+        fp = cd.fingerprint(PROBE)
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:12])
+        self.assertFalse(cd.pending_turn_matches(screen, fp))
+
+    def test_no_pending_display_is_never_a_pending_turn(self):
+        fp = cd.fingerprint(PROBE)
+        self.assertFalse(cd.pending_turn_matches(SCREEN_IDLE_READY, fp))
+        self.assertFalse(cd.pending_turn_matches(SCREEN_WORKING, fp))
+        self.assertFalse(cd.pending_turn_matches(None, fp))
+        self.assertFalse(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, ""))
+
+    def test_a_pending_display_suppresses_a_duplicating_resend(self):
+        # A pending line for a DIFFERENT message (ours not identifiable from it),
+        # on a pane whose composer is empty: without the hint the empty composer
+        # would select `resend` and enqueue a SECOND copy of our message.
+        fp = cd.fingerprint(PROBE)
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, "an unrelated brief")
+        self.assertTrue(cd.composer_empty(screen))
+        self.assertEqual(cd.recovery_action(screen, fp), cd.R_RELEASE)
 
 
 #: A REAL, unedited `cmux list-workspaces --json --id-format both` capture
@@ -514,6 +572,7 @@ class FakeCmux:
         screen_unreadable: bool = False,
         drops_message: bool = False,
         no_rules: bool = False,
+        queued_turn: bool = False,
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -533,6 +592,12 @@ class FakeCmux:
         #: `composer_region` returns None ("cannot tell"). A pane in that state
         #: must never be read as a queued success.
         self.no_rules = no_rules
+        #: THE #5979 STATE. A MID-TURN pane that ACCEPTED the message into pi's
+        #: pending queue: the `Steering: <text>` display is up, the composer is
+        #: EMPTY, and the turn boundary has not arrived — so `latest_submitted_*`
+        #: never moves and the composer holds nothing.
+        self.queued_turn = queued_turn
+        self.queued = ""
         self.lag_remaining = 0
         self.visible: str | None = None
 
@@ -586,6 +651,14 @@ class FakeCmux:
         if self.state == "booting":
             return cd.CmuxResult(0, "[loop-enforcer] loaded\n[verification-gate] loaded\n")
         screen = SCREEN_IDLE_READY
+        if self.queued:
+            return cd.CmuxResult(
+                0,
+                SCREEN_QUEUED_MID_TURN.replace(
+                    "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292",
+                    self.queued,
+                ),
+            )
         if self.pending:
             if self.no_rules:
                 screen = (
@@ -619,6 +692,12 @@ class FakeCmux:
             return cd.CmuxResult(0, "OK")
         if self.drops_message:
             return cd.CmuxResult(0, "OK")
+        if self.queued_turn:
+            # pi ACCEPTS the submission into its pending queue. The editor is
+            # cleared, so the text is NOT in the composer — it is in the pending
+            # display, and it becomes a turn only when the current turn ends.
+            self.queued = text
+            return cd.CmuxResult(0, "OK")
         self.pending += text
         return cd.CmuxResult(0, "OK")
 
@@ -630,6 +709,10 @@ class FakeCmux:
             return cd.CmuxResult(0, "OK")  # rc=0, but nothing is submitted
         if self.state == "boot_block":
             self.state = "booting"
+            return cd.CmuxResult(0, "OK")
+        if self.queued_turn:
+            # The turn boundary has not arrived: pi holds the submission in its
+            # queue and a bare Enter cannot release it.
             return cd.CmuxResult(0, "OK")
         if self.pending and not self.never_consumes:
             self.submitted.append(self.pending)
@@ -682,19 +765,15 @@ class TestDispatcherRecovery(unittest.TestCase):
 
     def test_race_the_composer_holds_the_text_and_release_recovers_it(self):
         # The 2026-09-17 incident: the Enter does not submit; the text sits in
-        # the composer. If the composer is IDENTIFIABLE, the queue-aware verdict
-        # reports `queued` (#5979) — the pane is mid-turn, pi holds the message
-        # and will turn it when the current turn ends. That is a DELIVERED
-        # message, and it must never be re-sent (a re-send would duplicate it).
+        # the composer. Correct recovery is a bare Enter, NOT a re-send. An
+        # UNSENT composer is NEVER a success — pi clears the editor before it
+        # queues anything, so text still here has not been accepted (#5979).
         fake = FakeCmux(enter_is_noop=1)
         result = self._send(fake, consume_timeout=0.0)
         self.assertTrue(result.ok, result.detail)
-        self.assertEqual(result.status, "queued")
-        self.assertIn("queued in the composer", result.detail)
-        self.assertEqual(fake.submitted, [], "a queued message has not turned yet")
-        self.assertEqual(
-            fake.sent_log.count(PROBE), 1, "a queued message must never be re-sent"
-        )
+        self.assertEqual(result.status, "consumed")
+        self.assertEqual(result.recoveries, [cd.R_RELEASE])
+        self.assertEqual(fake.submitted, [PROBE], "must not duplicate the message")
 
     def test_release_recovers_when_the_composer_is_unidentifiable(self):
         # The bare-Enter release must still work for the 2026-09-17 race when
@@ -763,42 +842,47 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate on lag")
 
     def test_never_consumed_fails_closed(self):
-        # The send is lost: it surfaces NEITHER as a submitted turn NOR in the
-        # composer. A one-sided change that reported every miss as success would
-        # pass the queued tests and fail this one — this is the regression guard.
-        fake = FakeCmux(drops_message=True)
+        # The message never becomes a turn AND never enters pi's pending queue:
+        # it sits in the composer, unsent. The strict verdict must hold — the
+        # refuted design reported this very screen as success, turning the
+        # module's own UNSENT failure signature into a false positive.
+        fake = FakeCmux(never_consumes=True)
         result = self._send(fake, consume_timeout=0.0, retries=2)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
         self.assertIn("sent-but-not-consumed", result.detail)
         self.assertEqual(result.attempts, 3)  # initial + 2 retries
 
-    def test_busy_lane_message_in_the_composer_is_a_queued_success(self):
+    def test_busy_lane_pending_turn_is_a_queued_success(self):
         # THE #5979 DEFECT. `latest_submitted_message` only advances at a turn
         # boundary, so on a mid-turn lane the strict check can never be
-        # satisfied: the message sits in the composer, accepted for the next
-        # turn. That is a DELIVERED message, and it must exit 0 — the old
-        # verdict spent the whole timeout and reported `sent-but-not-consumed`.
-        fake = FakeCmux(never_consumes=True)
+        # satisfied: pi has ACCEPTED the message into its pending queue (the
+        # `Steering:` display is up) and it becomes a turn when the current turn
+        # ends. That is a DELIVERED message and it must exit 0 — the old verdict
+        # spent the whole timeout and reported `sent-but-not-consumed`.
+        fake = FakeCmux(queued_turn=True)
         result = self._send(fake, consume_timeout=0.0, retries=2)
         self.assertTrue(result.ok, result.detail)
         self.assertEqual(result.status, "queued")
-        self.assertIn("queued in the composer", result.detail)
+        self.assertIn("pending queue", result.detail)
         self.assertEqual(result.attempts, 1, "no need to wait out the retries")
         self.assertEqual(fake.submitted, [], "queued is not yet consumed")
+        self.assertEqual(fake.sent_log.count(PROBE), 1, "must never be re-sent")
+        self.assertEqual(result.recoveries, [], "a queue is not a recovery")
 
     def test_eaten_message_is_not_queued_and_still_fails(self):
         # The boot-block prompt ate the pointer and nothing retained the text:
-        # absent from BOTH the submitted message and the composer. Fail closed.
+        # absent from BOTH the submitted message and the pending display, and
+        # absent from the composer. Fail closed.
         fake = FakeCmux(drops_message=True)
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
         self.assertNotIn("queued", result.status)
 
-    def test_unidentifiable_composer_is_not_a_queued_success(self):
-        # `composer_region` -> None means "cannot tell", and "cannot tell" is
-        # NOT a queue. A None region must fail closed, never confirm a delivery.
+    def test_a_text_in_the_composer_is_not_queued(self):
+        # `composer_region` -> None means "cannot tell", and an unsent composer
+        # means "not accepted". Neither may confirm a delivery.
         fake = FakeCmux(never_consumes=True, no_rules=True)
         result = self._send(fake, consume_timeout=0.0, retries=1)
         self.assertFalse(result.ok)
@@ -914,7 +998,7 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.attempts, 1)
 
     def test_failure_detail_carries_the_reason_not_a_placeholder(self):
-        fake = FakeCmux(drops_message=True)
+        fake = FakeCmux(never_consumes=True)
         result = self._send(fake, consume_timeout=0.0, retries=0)
         self.assertFalse(result.ok)
         self.assertNotIn("no confirmation)", result.detail)
@@ -982,7 +1066,7 @@ class TestCliExitCodes(unittest.TestCase):
         self.assertEqual(fake.submitted, [PROBE])
 
     def test_exit_one_when_sent_but_never_consumed(self):
-        fake = FakeCmux(drops_message=True)
+        fake = FakeCmux(never_consumes=True)
         rc = self._main(
             fake, "send", "--workspace", "workspace:99", "--text", PROBE,
             "--ready-timeout", "0", "--consume-timeout", "0", "--retries", "0",
@@ -990,8 +1074,9 @@ class TestCliExitCodes(unittest.TestCase):
         self.assertEqual(rc, 1, "an unconsumed send must NEVER exit 0")
 
     def test_exit_zero_when_the_message_is_queued_for_the_next_turn(self):
-        # #5979: a queued message is delivered. The CLI contract is exit 0.
-        fake = FakeCmux(never_consumes=True)
+        # #5979: pi accepted the message into its pending queue. The CLI
+        # contract is exit 0 — a queued message is delivered.
+        fake = FakeCmux(queued_turn=True)
         rc = self._main(
             fake, "send", "--workspace", "workspace:99", "--text", PROBE,
             "--ready-timeout", "0", "--consume-timeout", "0",

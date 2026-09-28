@@ -25,7 +25,8 @@ of that syscall and are therefore invisible to any exit code:
 
 The rule this tool enforces: **verify the ARTIFACT, not the send.** Confirmation
 is a read of whether the message became a conversation message
-(`cmux list-workspaces --json` -> `latest_submitted_message`), with the pane
+(`cmux list-workspaces --json` -> `latest_submitted_message`) OR entered pi's
+PENDING-TURN queue (the pane's `Steering:` / `Follow-up:` display), with the pane
 screen as the discriminator between "sitting unsent in the composer" (release
 with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
 confirmed exits non-zero with `sent-but-not-consumed`; it never reports success
@@ -34,19 +35,43 @@ on an unconsumed send.
 QUEUED IS NOT UNCONSUMED (#5979)
 --------------------------------
 `latest_submitted_message` only advances at a TURN BOUNDARY. On a lane that is
-mid-turn — i.e. every lane that is actually working — pi accepts a submission
-into its queue and the composer holds it until the current turn ends, so the
-strict "is it the latest submitted message?" test can never be satisfied inside
-any bounded wait. The old verdict called that `sent-but-not-consumed` and the
-message was in fact delivered; three callers (`ask-owner.py`, `turn-classify.py`,
-`turn-end.py`) each discovered this independently and worked around it.
+mid-turn — i.e. every lane that is actually working — pi ACCEPTS a submission
+into its queue and consumes it when the current turn ends, so the strict "is it
+the latest submitted message?" test can never be satisfied inside any bounded
+wait. The old verdict called that `sent-but-not-consumed` and the message was in
+fact delivered; three callers (`ask-owner.py`, `turn-classify.py`, `turn-end.py`)
+each discovered this independently and worked around it.
 
-The verdict is therefore queue-aware: a message whose text sits in the pane's
-composer region after a failed submission check is reported `queued` (exit 0) —
-it was accepted and will become a turn. The fail-closed direction is unchanged:
-a text absent from the composer (eaten by a boot-block prompt, or never landed)
-still has to become the latest submitted message, and an UNIDENTIFIABLE composer
-(`composer_region` -> None) never counts as evidence of a queue.
+The verdict is therefore queue-aware, and it keys on POSITIVE evidence that pi
+accepted the submission: pi's pending-turn display
+(`dist/modes/interactive/interactive-mode.js::updatePendingMessagesDisplay`)
+renders the queued text as `Steering: <text>` / `Follow-up: <text>` in
+`pendingMessagesContainer`. A line whose text starts with this message's
+fingerprint is direct evidence that the message entered pi's queue -> `queued`,
+exit 0.
+
+TWO THINGS THIS DELIBERATELY DOES NOT DO:
+
+  * The pane's COMPOSER is not evidence of a queue. On submit-while-streaming pi
+    runs `editor.setText("")` BEFORE queueing, so a real queue leaves the
+    composer EMPTY, and text still sitting in the composer is the UNSENT state
+    (`SCREEN_COMPOSING_UNSENT`, "UNSENT, no turn"). Composer occupancy is used
+    only as a RECOVERY hint: it selects the non-duplicating `release-only` (bare
+    Enter) recovery, and can never produce exit 0 on its own.
+  * TRANSCRIPT GROWTH is not evidence either, and is deliberately not wired in.
+    The callers that trust it combine it with a SENTINEL CONTENT match, because
+    on a mid-turn lane the transcript is growing for the lane's OWN turn —
+    unattributable growth would fabricate success for a message that never
+    landed. The attributable variant is unavailable at queue time: pi's
+    `_queueSteer` pushes the text into an in-memory array and the session file is
+    appended only on `message_end`, i.e. when the message is CONSUMED at the turn
+    boundary — by which point `latest_submitted_message` also moves. So the
+    pending-turn display is the queue signal.
+
+The fail-closed direction is unchanged: a text that appears in NEITHER a
+submitted message NOR the pending display still fails `sent-but-not-consumed`,
+and an unreadable pane (`composer_region` -> None, or a `read-screen` failure)
+is never a queue.
 
 PREVENTION, then DETECTION
 --------------------------
@@ -68,7 +93,8 @@ USAGE
 EXIT CODES
 ----------
     0  consumed — the message became a conversation message, or
-       queued — the message is sitting in the composer, accepted for the next turn
+       queued — pi accepted it into its pending queue (the pane's
+       `Steering:`/`Follow-up:` display carries this message) for the next turn
     1  sent-but-not-consumed, or never-became-ready — NOT success
     2  usage error (missing/invalid input, unknown workspace)
     3  cmux transport error (binary missing, socket refused, non-zero rc)
@@ -143,6 +169,22 @@ R_DISMISS_RESEND = "dismiss-and-resend"
 #: pi's input box is delimited by long horizontal rules; the composer is the
 #: region between the LAST TWO of them.
 RULE_RE = re.compile(r"^\s*[\u2500-]{8,}\s*$")
+
+#: pi's PENDING-TURN display, one line per queued submission (#5979).
+#: `dist/modes/interactive/interactive-mode.js::updatePendingMessagesDisplay`:
+#: `theme.fg("dim", `Steering: ${message}`)` for a submission queued while
+#: streaming, `Follow-up: ${message}` for one queued during compaction. The
+#: container sits ABOVE the bordered editor (and above the status bar), so the
+#: queued text is NOT in the composer.
+PENDING_TURN_RE = re.compile(r"^\s*(?:Steering|Follow-up):\s*(?P<text>.*)$")
+
+#: Minimum visible characters for a TRUNCATED pending line to count as ours. The
+#: display is a single line (`TruncatedText(text, 1, 0)` in the same function)
+#: cut to the pane width, so a narrow pane shows only a head of the message. A
+#: truncated match must still be long enough to identify the message: 24 chars of
+#: a head-anchored match is message-specific in practice while still surviving a
+#: pane narrower than the 40-char fingerprint.
+PENDING_MIN_CHARS = 24
 
 
 # --------------------------------------------------------------------------- #
@@ -331,26 +373,62 @@ def composer_empty(screen: str | None) -> bool:
     return region is not None and not region.strip()
 
 
-def queued_in_composer(screen: str | None, fp: str) -> bool:
-    """True when the sent message is sitting in the pane's composer (#5979).
+def pending_turn_matches(screen: str | None, fp: str) -> bool:
+    """True when pi's PENDING-TURN display carries THIS message (#5979).
 
-    A message that IS visible in the input box but never became the latest
-    submitted message has been QUEUED: `latest_submitted_*` advances only at a
-    turn boundary, so a pane that is mid-turn accepts the submission without
-    surfacing it as the latest turn until the current turn ends. That is a
+    A submission that never became the latest submitted message but IS shown in
+    pi's pending queue has been ACCEPTED: pi's `latest_submitted_*` advances only
+    at a turn boundary, so a pane that is mid-turn takes the submission into its
+    queue without surfacing it as a turn until the current turn ends. That is a
     DELIVERED message, not a failed one, and reporting `sent-but-not-consumed`
     for it is what silently dropped every nudge to a busy lane.
 
-    FAIL CLOSED. `composer_region` returning None means "cannot tell", and a
-    None region is NOT evidence of a queue: an unreadable composer, a message
-    eaten by the boot-block prompt, or a send that never landed must all keep
-    the existing failure. Only POSITIVE evidence — the fingerprint inside an
-    identifiable composer region — may report `queued`.
+    The evidence is the `Steering: <text>` / `Follow-up: <text>` line pi renders
+    from `pendingMessagesContainer` — a region ABOVE the bordered editor, and one
+    the composer read cannot see (pi clears the editor before queueing).
+
+    FAIL CLOSED. Only positive evidence — a pending line whose text is
+    head-anchored on this message's fingerprint — may report `queued`. A text in
+    the composer, a text nowhere on screen, an unreadable pane and an
+    unidentifiable composer all stay unconfirmed.
     """
-    region = composer_region(screen)
-    if region is None:
+    if not screen or not fp:
         return False
-    return text_on_screen(region, fp)
+    # A `fp` shorter than the floor must be matched in full.
+    floor = min(len(fp), PENDING_MIN_CHARS)
+    for row in screen.splitlines():
+        match = PENDING_TURN_RE.match(row)
+        if not match:
+            continue
+        visible = normalize(match.group("text"))
+        if not visible:
+            continue
+        # Full fingerprint visible in the pending line (the common case).
+        if visible.startswith(fp):
+            return True
+        # The display is one line truncated to the pane width, so the message may
+        # be cut short of the fingerprint. `fp.startswith(visible)` is the
+        # head-anchored form of that truncation; the floor keeps a short,
+        # unidentifiable remnant from matching.
+        if len(visible) >= floor and fp.startswith(visible):
+            return True
+    return False
+
+
+def pending_turn_present(screen: str | None) -> bool:
+    """True when the pane is showing pi's pending-turn display AT ALL.
+
+    A recovery HINT, never a success verdict. The display exists only while pi
+    holds a queued submission — and pi clears the editor before queueing, so the
+    composer is empty. Without this hint `recovery_action` would read the empty
+    composer, pick `resend`, and enqueue a SECOND copy of our message. A bare
+    Enter cannot duplicate, so ANY pending display degrades the recovery to
+    `release-only` (which then fails closed if the message was in fact lost).
+    """
+    for row in (screen or "").splitlines():
+        if PENDING_TURN_RE.match(row):
+            return True
+    return False
 
 
 def recovery_action(screen: str | None, fp: str) -> str:
@@ -369,6 +447,13 @@ def recovery_action(screen: str | None, fp: str) -> str:
     if boot_blocked(screen):
         return R_DISMISS_RESEND
     if text_on_screen(screen, fp):
+        return R_RELEASE
+    if pending_turn_present(screen):
+        # A mid-turn pane with its pending-turn display up has an EMPTY composer
+        # (pi clears the editor before queueing), so the `composer_empty` branch
+        # below would pick RESEND and enqueue a SECOND copy of our message. A
+        # bare Enter cannot duplicate; if our message was genuinely lost this
+        # fails closed at `sent-but-not-consumed` instead of double-queueing.
         return R_RELEASE
     if composer_empty(screen):
         return R_RESEND
@@ -760,20 +845,24 @@ class Dispatcher:
                 )
                 return result
 
-            # A message that never became the latest submission but IS in the
-            # input box has been QUEUED for the next turn (#5979): a mid-turn
-            # pane accepts the submission and only surfaces it as a turn when
-            # the current turn ends — later than any bounded wait. `queued` is a
-            # DELIVERED message (exit 0), not a failure.
+            # A message that never became the latest submission but IS carried by
+            # pi's pending-turn display has been QUEUED for the next turn
+            # (#5979): a mid-turn pane accepts the submission and only surfaces it
+            # as a turn when the current turn ends — later than any bounded wait.
+            # `queued` is a DELIVERED message (exit 0), not a failure. The screen
+            # read is reused by `recovery_action`, so no extra cmux call is added.
             screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
-            if queued_in_composer(screen, fp):
+            if pending_turn_matches(screen, fp):
                 result.ok = True
                 result.status = "queued"
                 result.detail = (
-                    f"{tag}{workspace} confirmed: message is queued in the "
-                    f"composer for the next turn (attempt {attempt}, {reason})"
+                    f"{tag}{workspace} confirmed: pi accepted the message into its "
+                    f"pending queue for the next turn (attempt {attempt}, {reason})"
                 )
-                self.log(f"{tag}queued ({reason}) — the lane is mid-turn")
+                self.log(
+                    f"{tag}queued ({reason}) — the lane is mid-turn; the message is "
+                    f"in pi's pending queue"
+                )
                 return result
 
             if attempt > retries:
