@@ -713,8 +713,9 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
         # disagree about which turns contribute a unit.
         #
         # #4897: the extraction input is the SAME marked window the node
-        # stores — the caller passes `_capture_turn_window`'s output (or the
-        # cap-redacted conversation), so the marker and its TRUE pre-redaction
+        # stores — the caller passes `_capture_turn_window`'s output (the
+        # windowed, cap-applied conversation), so the marker and its TRUE
+        # pre-redaction
         # length ride through here untouched. Re-clipping here would recompute
         # that length from already-scrubbed text (see the CALLER CONTRACT
         # above) and break #721 parity exactly when the marker matters.

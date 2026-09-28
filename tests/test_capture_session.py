@@ -4392,7 +4392,6 @@ def test_capture_turn_texts_preserves_the_windowing_bound():
         "a raw over-cap turn was stored with NO marker")
     assert f"original length {len(content)} chars]" in body, (
         "the marker must carry the RAW turn's true pre-redaction length")
-    assert f"original length {len(content)} chars]" in body
 
 
 def test_a_caller_supplied_marker_cannot_defeat_the_cap():

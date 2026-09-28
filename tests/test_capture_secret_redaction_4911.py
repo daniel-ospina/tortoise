@@ -621,13 +621,22 @@ def test_capped_reapplication_preserves_the_true_total():
     scrub grows the body to **8,810** chars — 1.768x, the measured
     max-density packing recorded on ``_redact_turn_contents``.
 
-    Under the previous design (``cd662b370``) this was RED: pass 2 split the
-    marker, saw an 8,770-char marker-free body past the cap and RE-CLIPPED it,
-    rewriting the marker's total to the SCRUBBED length (8,770 — reproduced
-    against the old code). The old test did not catch that — its pass-1 body was
-    4,968 chars, so it never entered the re-clip branch, and it asserted
-    ``len(body) > 5000`` on the whole content rather than on the marker-free
-    quantity the code actually tested.
+    This test binds the NEW invariant — the redactor is REDACTION-ONLY, so
+    re-applying it to its own output is byte-identical and can never recount a
+    span. It would go RED if a production-default ``cap`` were reintroduced into
+    ``redact_turn_contents`` (it would re-clip and rewrite the total).
+
+    ⚠️ It is NOT, however, a regression test for the historical round-4 P1. That
+    P1 lived in ``cd662b370``'s ``cap=...`` call path, and this test calls the
+    redactor with a SINGLE positional argument — under the old signature ``cap``
+    defaulted to ``None``, so the re-clip branch never fired and the test would
+    have PASSED at ``cd662b370`` (verified by running this fixture against the
+    old function body: pass 2 byte-identical). The historical P1 is covered by
+    the ABSENCE of the parameter plus
+    ``test_the_redactor_is_redaction_only_and_never_clips``. The old test this
+    replaced was separately vacuous: its pass-1 body was 4,968 chars, so it
+    never entered the re-clip branch, and it asserted ``len(body) > 5000`` on
+    the whole content rather than the marker-free quantity the code tested.
     """
     from tortoise.sdk import (
         _CAPTURE_TRUNCATION_SENTINEL,
@@ -784,6 +793,24 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     utterance, so it IS the summary — which makes the marker check load-bearing.
     """
     _keyless(monkeypatch)
+    # #4897 round 6: capture every string the scrubber is handed on the Source
+    # path so the WINDOW itself is asserted, not just the absence of one value.
+    # Row (b)'s absence assertion is vacuous on its own: dropping
+    # ``_capture_turn_window`` from ``_materialize_session_source`` still scans
+    # the whole 600,000-char turn and still redacts ``beyond``, so the test
+    # stayed GREEN under that mutation (measured). The scan-length bound is what
+    # binds the control.
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+
+    scanned: list[int] = []
+    _real_redact = sdk_mod.redact_secrets
+
+    def _spy(text: str):
+        scanned.append(len(text))
+        return _real_redact(text)
+
+    monkeypatch.setattr(sdk_mod, "redact_secrets", _spy)
     secret = "sk_live_" + _fill(24)
     beyond = "sk-proj-" + _fill(64)
     sid = "sess-4911-source-bound"
@@ -812,6 +839,14 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     #     credential cannot reach this sink (the documented residual is a
     #     PREFIX of a value cut mid-body in the stored TURN, not this sink).
     assert beyond not in blob, blob
+    # (c) the WINDOW is load-bearing: every string the Source path scans is
+    #     bounded by the cap. Without this assertion the mutation named above is
+    #     invisible — and the sink is cheap *here* only because the cap holds.
+    assert scanned, "the capture path never reached redact_secrets"
+    assert max(scanned) <= _CAPTURE_TURN_CAP, (
+        "the Source sink scanned an UNBOUNDED window — max scanned "
+        f"{max(scanned)} chars vs the {_CAPTURE_TURN_CAP}-char cap; the 600k "
+        "raw turn should have been windowed before the scan")
 
 
 # ── AC3: count recorded per session AND surfaced ───────────────────────────
