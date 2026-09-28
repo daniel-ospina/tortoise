@@ -1409,15 +1409,60 @@ surface.
   explaining the refusal), and the corrupt-ledger message now says explicitly
   that **no escalation page was sent and why**, so the gap is named rather than
   silent. Independent liveness for the pager itself is tortoise **#4573**.
-- **A sustained incident observed through a FLAP gets no escalation page.**
-  When a probe answers UP but the recovery-confirmation probe fails while an
-  incident is already open, the run leaves the incident open and exits GREEN
-  *before* the escalation leg, so no state advances and nothing is paged. That
-  early exit is deliberate (the open incident is the standing alert, and
-  changing when a flap counts as still-failing is a behavioural change with its
-  own design), so the run **names the gap** instead: it logs a warning saying
-  the escalation leg is not reached and **no escalation page is sent this
-  run**, so “no page” is never read as “nothing to page about”.
+- **A sustained incident observed through a FLAP gets no escalation page and
+  advances no state — a recorded DECISION, not an open gap (#5021).** When a
+  probe's verdict is UP but the recovery-confirmation probe fails while an
+  incident is already open, the run leaves the incident open, advances **no**
+  state, does **not** reach the escalation leg, and (since #5021) exits **RED**.
+  Two separate reasons, stated separately because they are not the same:
+  * **Why the state is not advanced — the restart gate.**
+    `decide_escalation`'s RUN leg reads `STATE_DOWN_RUNS`, the same counter
+    `decide_restart`'s run leg reads, and `normalize_escalation_knobs` enforces
+    `ESCALATE_MIN_RUNS >= SUSTAINED_MIN_RUNS`. So any flap that **advanced**
+    that counter to satisfy the pager's run leg would simultaneously satisfy the
+    restart leg's run window, and the flap is a run whose first probe verdict
+    was UP (`probe()` returns on the FIRST UP attempt, so at least one attempt
+    answered — not necessarily all `PROBE_ATTEMPTS`). A self-heal restart of a
+    service that was answering UP moments ago is what the restart gate exists to
+    bound, so the flap advances nothing. The wall-clock leg is not moved here
+    either: it is anchored on the incident's server-side `created_at`.
+  * **Why `last_down_ts` is not advanced either — the same hazard, wall-clock
+    axis.** `last_down_ts` is the staleness input that decides whether
+    `STATE_FIRST_FAILURE_TS` (the restart window's START) is reset to `now`: the
+    reset fires only once the gap since the last recorded failing run exceeds
+    `STALE_RESET_MINUTES`. Stamping `last_down_ts` from a flap would hold the
+    restart window open across a run in which the service answered UP — arming
+    (or keeping armed) a restart in the wall-clock dimension, exactly what the
+    shared-counter argument forbids in the run-count dimension. So a flap
+    advances neither.
+  * **Why a page is not sent — scope, not impossibility.** Because
+    `decide_escalation` is a pure function of **persisted** state, a page IS
+    reachable from here without moving anything: when an incident has already
+    accumulated `ESCALATE_MIN_RUNS` observed failing runs and is past its
+    anchor, the leg can be run against the state the incident already holds and
+    a page sent while persisting **only** `escalate_state`/`escalate_ts`/
+    `page_ok_ts` — `decide_restart` reads none of those, so nothing is armed.
+    That is a change to the **escalation state machine**, and the owner recorded
+    on #5021 that it is consolidated under the one-incident-substrate refactor
+    (tortoise **#5047**) and is *not an independent patch*; the mechanism and
+    its proof are written up there. Residual that #5047 owns: a service that
+    flaps from creation and never records a genuine DOWN run keeps `down_runs`
+    below `ESCALATE_MIN_RUNS`, so its run leg is never satisfied and it does not
+    page at all.
+  * **What #5021 changed:** the run is no longer **GREEN**. The confirmation
+    probe FAILED (a `DOWN` verdict exhausts all `PROBE_ATTEMPTS` attempts, while
+    an `UNEXPECTED` verdict returns on its first attempt), and a run that
+    observed a failure must not read as an all-clear — the same “green while
+    down” rule the no-open-incident sibling already enforces. The message names
+    the refusal and its reason, so “no page” is never read as “nothing to page
+    about”.
+  The convergent practice this refusal is argued against (`keep_firing_for`-style
+  hysteresis: keep a flapping alert *firing* and throttle notifications rather
+  than let it read as resolved) supports the state-preserving page — it says
+  nothing about advancing a restart window — and is cited on #5047. A
+  **cross-kind flap** is unchanged: `any_open` treats either kind as the standing
+  alert, so this path files no new incident either, and the incident's kind can
+  understate the observed failure until the next genuine DOWN/DEGRADED run.
 - **This leg covers the PAGER, not the MONITOR.** If the workflow is disabled,
   the schedule is dropped, or the job never reaches the failing path, no
   escalation can fire and there is no run log to read — “the pager is dead” then
@@ -1466,12 +1511,18 @@ surface.
   issue is a new outage.
 - **Flapping** (UP→DOWN→UP within minutes) keeps an open incident open
   (recovery needs a confirmation probe) but does churn comments. That
-  unconfirmed-recovery run exits **GREEN** — the open incident, not the run
-  colour, is the standing alert, so do not read a green run as all-clear while
-  an incident is open. The sustained
-  clock is **preserved** while the incident stays open (it is only reset when
-  the gap since the last failing run exceeds `STALE_RESET_MINUTES`), so a flap
-  does not delay self-healing; a flap that recovers long enough to close the
+  unconfirmed-recovery run exits **RED**, not green (#5021): the confirmation
+  probe failed a full `PROBE_ATTEMPTS` cycle, and a run that observed a full
+  failure must not read as an all-clear. The open incident is still the standing
+  alert, and **no escalation page** is sent for it on this path — see the flap
+  entry in §7.8 for why that refusal is deliberate (it is the restart gate).
+  A flap advances **no** failing-run state, so it moves neither clock. The
+  restart window itself runs from `STATE_FIRST_FAILURE_TS`; `last_down_ts` is
+  only the staleness input that decides when that start is reset to `now`. Because
+  a flap does not stamp `last_down_ts`, the gap since the last recorded failing
+  run keeps growing through a flap, so once it exceeds `STALE_RESET_MINUTES` the
+  stale-clock reset fires and restarts the window (fail closed, toward *not*
+  restarting) rather than being held open. A flap that recovers long enough to close the
   incident starts a fresh sustained clock, but the restart budget is **shared
   across incidents** and does not reset (next bullet). If a flap is seen with
   NO incident open, the watchdog files one for the observed failure rather than
