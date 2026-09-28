@@ -30,8 +30,16 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import cmux_dispatch as cd  # noqa: E402
 
+#: The dispatch probe used throughout. Defined before the fixtures because the
+#: derived queued-turn fixture substitutes it.
+PROBE = "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292"
+
 # --------------------------------------------------------------------------- #
-# Verbatim screen fixtures (captured 2026-09-20, pi 0.85.1)
+# Screen fixtures. Most are VERBATIM live captures (2026-09-20, pi 0.85.1).
+# `SCREEN_QUEUED_MID_TURN` is the exception: no live mid-turn capture with a
+# queued submission was obtainable, so it is DERIVED from the installed renderer
+# (`updatePendingMessagesDisplay` + `TruncatedText`/`truncateToWidth`, verified by
+# RUNNING the renderer, not by reading it) and labelled as such at its definition.
 # --------------------------------------------------------------------------- #
 
 #: A freshly-booted pi frozen on the deprecation prompt. Boot never completes.
@@ -83,13 +91,16 @@ SCREEN_WORKING = """\
 """
 
 #: A MID-TURN pane whose submission pi ACCEPTED into its pending queue (#5979).
-#: This is the verbatim shape of `updatePendingMessagesDisplay`
-#: (pi `dist/modes/interactive/interactive-mode.js`): the queued message renders
-#: as `Steering: <text>` in `pendingMessagesContainer`, which sits ABOVE the
-#: bordered editor. pi has already run `editor.setText("")` on submit, so the
-#: composer between the last two rules is EMPTY — the composer read reports
-#: UNSENT for a message pi in fact holds. `SCREEN_COMPOSING_UNSENT` is the
-#: opposite state (text in the composer, no pending display, no turn).
+#: DERIVED, not captured: this reproduces the render of
+#: `updatePendingMessagesDisplay` (pi `dist/modes/interactive/interactive-mode.js`)
+#: as verified against the installed renderer — no live mid-turn capture with a
+#: queued submission was obtainable, so it is labelled rather than passed off as
+#: one. The queued message renders as `Steering: <text>` in
+#: `pendingMessagesContainer`, which sits ABOVE the bordered editor. pi has already
+#: run `editor.setText("")` on submit, so the composer between the last two rules
+#: is EMPTY — the composer read reports UNSENT for a message pi in fact holds.
+#: `SCREEN_COMPOSING_UNSENT` is the opposite state (text in the composer, no
+#: pending display, no turn).
 SCREEN_QUEUED_MID_TURN = """\
 \u2500\u2500 \u280b Working \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 /private/tmp
@@ -105,6 +116,19 @@ Steering: DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292
 3.8%/700k (auto)                                                              (deepseek) deepseek-flash \u2022 high
 """
 
+#: A TRUNCATED pending line, in the EXACT shape the renderer emits. `TruncatedText`
+#: renders through `truncateToWidth(text, width)`, whose default ellipsis is the
+#: literal `...`, so a pending line wider than the pane is captured as `<head>...`.
+#: Verified by running the INSTALLED renderer (not eyeballed):
+#:   node -e "import('<pi-tui>/dist/utils.js').then(m=>console.log(JSON.stringify(
+#:     m.truncateToWidth('Steering: ' + MSG, 40))))"
+#:   -> "Steering: DISPATCH-PROBE-BOOTBLOCK-42\u001b[0m...\u001b[0m"  (cmux strips ANSI)
+#: — a 27-char head, then `...`. A comparison that does not strip the ellipsis can
+#: never match this, i.e. it guards a shape the renderer does not emit.
+SCREEN_QUEUED_MID_TURN_TRUNCATED = SCREEN_QUEUED_MID_TURN.replace(
+    PROBE, "DISPATCH-PROBE-BOOTBLOCK-42..."
+)
+
 #: The CORRUPTION case: the prompt ate the pointer's prefix and the remainder
 #: was submitted as a real turn. Observed live: latest_submitted_message == "292".
 SCREEN_TRUNCATED_TURN = """\
@@ -113,8 +137,6 @@ SCREEN_TRUNCATED_TURN = """\
 /private/tmp
 \u21912.1k \u2193489 R25k CH91.1% $0.003 4.1%/700k (auto)                          (deepseek) deepseek-flash \u2022 high
 """
-
-PROBE = "DISPATCH-PROBE-BOOTBLOCK-4292 :: reply with the single word ACK4292"
 
 #: THE ARM-B REGRESSION (live, 2026-09-20). pi renders its TUI inline, so after
 #: the boot-block prompt is satisfied the prompt line STAYS VISIBLE above the
@@ -397,20 +419,25 @@ class TestRecoveryDecision(unittest.TestCase):
 
 
 class TestPendingTurnDisplay(unittest.TestCase):
-    """`pending_turn_matches` — the positive-acceptance queue signal (#5979)."""
+    """`pending_turn_identity`/`pending_turn_matches` — the queue signal (#5979).
 
-    def test_steering_line_carrying_our_fingerprint_is_a_pending_turn(self):
-        fp = cd.fingerprint(PROBE)
+    `BEFORE` is a pre-send pane with no pending turn, so novelty holds in every
+    test that is not about novelty itself.
+    """
+
+    BEFORE = SCREEN_IDLE_READY
+
+    def test_steering_line_carrying_the_whole_message_is_a_pending_turn(self):
         self.assertIn("Steering: ", SCREEN_QUEUED_MID_TURN)
-        # The composer is EMPTY: pi cleared it before queueing. This is exactly
+        # The composer is EMPTY: pi cleared it before queueing. That is exactly
         # why the composer read cannot be the queue signal.
         self.assertEqual(cd.composer_region(SCREEN_QUEUED_MID_TURN).strip(), "")
-        self.assertTrue(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, fp))
+        self.assertEqual(cd.pending_turn_identity(SCREEN_QUEUED_MID_TURN, PROBE), PROBE)
+        self.assertTrue(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, PROBE, self.BEFORE))
 
-    def test_follow_up_line_carrying_our_fingerprint_is_a_pending_turn(self):
-        fp = cd.fingerprint(PROBE)
+    def test_follow_up_line_carrying_the_whole_message_is_a_pending_turn(self):
         screen = SCREEN_QUEUED_MID_TURN.replace("Steering:", "Follow-up:")
-        self.assertTrue(cd.pending_turn_matches(screen, fp))
+        self.assertTrue(cd.pending_turn_matches(screen, PROBE, self.BEFORE))
 
     def test_TEXT_IN_THE_COMPOSER_IS_NOT_A_PENDING_TURN(self):
         """THE REFUTATION, pinned. On submit-while-streaming pi clears the editor
@@ -418,45 +445,86 @@ class TestPendingTurnDisplay(unittest.TestCase):
         (`SCREEN_COMPOSING_UNSENT`, "UNSENT, no turn"). The refuted design read
         that as `queued` — a false success that also skipped the release
         recovery which would have submitted it."""
-        fp = cd.fingerprint(PROBE)
         self.assertEqual(cd.composer_region(SCREEN_COMPOSING_UNSENT).strip(), PROBE)
-        self.assertFalse(cd.pending_turn_matches(SCREEN_COMPOSING_UNSENT, fp))
+        self.assertFalse(
+            cd.pending_turn_matches(SCREEN_COMPOSING_UNSENT, PROBE, self.BEFORE)
+        )
 
     def test_a_different_pending_message_is_not_our_pending_turn(self):
-        fp = cd.fingerprint(PROBE)
         other = SCREEN_QUEUED_MID_TURN.replace(PROBE, "an unrelated brief")
-        self.assertTrue(cd.pending_turn_present(other))
-        self.assertFalse(cd.pending_turn_matches(other, fp))
+        self.assertFalse(cd.pending_turn_matches(other, PROBE, self.BEFORE))
 
-    def test_a_truncated_pending_line_still_matches_our_head(self):
-        # `TruncatedText(text, 1, 0)` cuts the display to the pane width, so a
-        # narrow pane shows only a head of the message. The match is head-anchored
-        # in BOTH directions so the truncation direction still identifies ours.
-        fp = cd.fingerprint(PROBE)
-        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:30])
-        self.assertTrue(cd.pending_turn_matches(screen, fp))
+    def test_a_pending_line_LONGER_than_the_message_is_a_DIFFERENT_message(self):
+        """THE #5983 ADVERSARIAL FINDING. Matching on the 40-char FINGERPRINT
+        accepted a dropped short dispatch whenever an unrelated longer queued
+        message shared its head — `visible.startswith(fp)` with `fp == "continue"`
+        confirmed a lost `"continue"` against a queued `"continue with the
+        migration"`. Identity is the WHOLE message, so a longer pending line never
+        matches (and the fleet's own nudges, which share a head, stop colliding)."""
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, "continue with the migration")
+        self.assertIsNone(cd.pending_turn_identity(screen, "continue"))
+        self.assertFalse(cd.pending_turn_matches(screen, "continue", self.BEFORE))
+
+    def test_a_truncated_pending_line_with_the_renderers_ellipsis_matches(self):
+        """`truncateToWidth` appends a literal `...`, so the truncated head on
+        screen ends in `...`. The comparison strips it; comparing the raw text (as
+        the first revision did) can NEVER match a truncated line."""
+        self.assertIn("BOOTBLOCK-42...", SCREEN_QUEUED_MID_TURN_TRUNCATED)
+        self.assertEqual(
+            cd.pending_turn_identity(SCREEN_QUEUED_MID_TURN_TRUNCATED, PROBE),
+            "DISPATCH-PROBE-BOOTBLOCK-42",
+        )
+        self.assertTrue(
+            cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN_TRUNCATED, PROBE, self.BEFORE)
+        )
 
     def test_an_unreadably_short_pending_remnant_is_not_a_match(self):
-        # Fail closed: a remnant too short to identify the message is not ours.
-        fp = cd.fingerprint(PROBE)
-        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:12])
-        self.assertFalse(cd.pending_turn_matches(screen, fp))
+        # Fail closed: a remnant below the identity floor is not enough.
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:12] + "...")
+        self.assertIsNone(cd.pending_turn_identity(screen, PROBE))
+        self.assertFalse(cd.pending_turn_matches(screen, PROBE, self.BEFORE))
 
     def test_no_pending_display_is_never_a_pending_turn(self):
-        fp = cd.fingerprint(PROBE)
-        self.assertFalse(cd.pending_turn_matches(SCREEN_IDLE_READY, fp))
-        self.assertFalse(cd.pending_turn_matches(SCREEN_WORKING, fp))
-        self.assertFalse(cd.pending_turn_matches(None, fp))
-        self.assertFalse(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, ""))
+        for screen in (SCREEN_IDLE_READY, SCREEN_WORKING, None):
+            self.assertFalse(cd.pending_turn_matches(screen, PROBE, self.BEFORE))
+        self.assertFalse(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, "", self.BEFORE))
 
-    def test_a_pending_display_suppresses_a_duplicating_resend(self):
-        # A pending line for a DIFFERENT message (ours not identifiable from it),
-        # on a pane whose composer is empty: without the hint the empty composer
-        # would select `resend` and enqueue a SECOND copy of our message.
+    def test_a_PRE_EXISTING_identical_pending_line_is_not_novel(self):
+        """A pending line already on the pane BEFORE the send is not evidence
+        about THIS send: a repeat dispatch of the same brief (or a stale line left
+        in scrollback) would otherwise confirm a send whose bytes never landed.
+        Same novelty discipline as `is_consumed`'s."""
+        self.assertEqual(cd.pending_turn_identity(SCREEN_QUEUED_MID_TURN, PROBE), PROBE)
+        self.assertFalse(
+            cd.pending_turn_matches(
+                SCREEN_QUEUED_MID_TURN, PROBE, SCREEN_QUEUED_MID_TURN
+            )
+        )
+
+    def test_without_a_pre_send_baseline_the_verdict_fails_closed(self):
+        self.assertFalse(cd.pending_turn_matches(SCREEN_QUEUED_MID_TURN, PROBE, None))
+
+    def test_an_ambiguous_short_remnant_OF_OURS_suppresses_the_resend(self):
+        """A pending head of OUR message below the identity floor may be our own
+        truncated queue entry, so a resend could duplicate it. The composer is
+        empty, so without this hint `composer_empty` would pick `resend`."""
+        fp = cd.fingerprint(PROBE)
+        screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, PROBE[:12] + "...")
+        self.assertTrue(cd.composer_empty(screen))
+        self.assertTrue(cd.pending_turn_ambiguous(screen, PROBE))
+        self.assertEqual(cd.recovery_action(screen, fp, PROBE), cd.R_RELEASE)
+
+    def test_an_UNRELATED_pending_line_does_not_block_the_resend(self):
+        """THE #5983 UNDER-DELIVERY FINDING. A pending line for a DIFFERENT
+        message shares no head with ours, so our message is NOT queued and a
+        resend is the recovery that delivers it. The first revision suppressed
+        the resend for ANY pending line, leaving a send lost during another
+        lane's queued work permanently undeliverable."""
         fp = cd.fingerprint(PROBE)
         screen = SCREEN_QUEUED_MID_TURN.replace(PROBE, "an unrelated brief")
         self.assertTrue(cd.composer_empty(screen))
-        self.assertEqual(cd.recovery_action(screen, fp), cd.R_RELEASE)
+        self.assertFalse(cd.pending_turn_ambiguous(screen, PROBE))
+        self.assertEqual(cd.recovery_action(screen, fp, PROBE), cd.R_RESEND)
 
 
 #: A REAL, unedited `cmux list-workspaces --json --id-format both` capture
@@ -573,6 +641,7 @@ class FakeCmux:
         drops_message: bool = False,
         no_rules: bool = False,
         queued_turn: bool = False,
+        pre_queued: str = "",
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -597,7 +666,9 @@ class FakeCmux:
         #: EMPTY, and the turn boundary has not arrived — so `latest_submitted_*`
         #: never moves and the composer holds nothing.
         self.queued_turn = queued_turn
-        self.queued = ""
+        #: A pending line ALREADY on the pane before the send (a repeat dispatch of
+        #: the same brief, or a stale scrollback line). Must NOT confirm THIS send.
+        self.queued = pre_queued
         self.lag_remaining = 0
         self.visible: str | None = None
 
@@ -879,6 +950,15 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "sent-but-not-consumed")
         self.assertNotIn("queued", result.status)
+
+    def test_a_PRE_EXISTING_identical_pending_line_does_not_confirm_a_lost_send(self):
+        # The same brief was dispatched before and is STILL queued; THIS send's
+        # bytes are lost. The pending line predates the send, so it is not
+        # evidence about this send — fail closed, never a false success.
+        fake = FakeCmux(drops_message=True, pre_queued=PROBE)
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "sent-but-not-consumed")
 
     def test_a_text_in_the_composer_is_not_queued(self):
         # `composer_region` -> None means "cannot tell", and an unsent composer
