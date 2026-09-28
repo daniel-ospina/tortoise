@@ -138,9 +138,9 @@ def test_parse_log_ignores_a_quoted_watchdog_banner(tmp_path: Path) -> None:
     # #6145 regression. The workflow echoes the WATCHDOG banner to the STEP's
     # stdout AFTER pytest's output is redirected into the log, so the uploaded
     # artifact never contains it — parse_log reads artifacts only (--logs-dir).
-    # The deleted clause could therefore never be RIGHT about this input, while
-    # any pytest output that QUOTES the string could set killed=True on a run
-    # that was never killed.
+    # The deleted clause has no GENUINE true positive here: the real banner is
+    # never in the artifact, while a QUOTED copy in pytest's own output would set
+    # killed=True on a run that was never killed.
     log = FIXTURE_LOG.splitlines()
     log[-1] = (
         "============================ WATCHDOG: pytest killed after 45m "

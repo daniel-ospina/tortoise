@@ -177,12 +177,12 @@ def parse_log(path: Path) -> dict:
         # python-ci.yml ships pytest's output files (or the junitxml/nodeids/
         # step_wall beside them), never a job log.
         #
-        # #6145: matching the banner string anyway could never be right about
-        # this input, so it is deleted rather than narrowed. Stated precisely:
-        # this is REACHABLE BY CONSTRUCTION, not an observed misfire — no test
-        # currently emits the banner on stdout. The misfire is available to any
-        # assertion that prints or diffs the workflow text containing it, which
-        # is why a clause with no possible true hit is still worth removing.
+        # #6145: matching the banner string has no GENUINE true positive — the
+        # real banner is never in this artifact — so it is deleted rather than
+        # narrowed. What it can match is a QUOTED copy: any assertion that prints
+        # or diffs the workflow text containing it, which would report a kill
+        # that did not happen. That is reachable by construction, not an observed
+        # misfire (no test currently emits the banner on stdout).
         #
         # What survives covers the SIGINT path only. `timeout -s INT -k 10
         # <budget>` sends INT first, and pytest's interrupt summary carries
