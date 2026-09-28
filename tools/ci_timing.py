@@ -173,21 +173,35 @@ def parse_log(path: Path) -> dict:
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
         # stdout AFTER pytest's output is redirected, so the ARTIFACT this
-        # function reads can never contain it. pytest's own interrupt summary
-        # (KeyboardInterrupt) is the reliable in-artifact signal for a
-        # watchdog-killed run.
+        # function reads can never contain it — every pytest-log-* upload in
+        # python-ci.yml ships pytest's output files (or the junitxml/nodeids/
+        # step_wall beside them), never a job log.
         #
-        # #6145: matching the banner string anyway was not a fallback — it was a
-        # live FALSE-POSITIVE channel. A predicate that can never be true of a
-        # real artifact can still be true of pytest's own OUTPUT, which quotes
-        # the string whenever a workflow-guard test prints or diffs the workflow
-        # text containing it. That set killed=True on runs that were never
-        # killed, and this flag feeds the flake/kill counters every triage
-        # decision rests on. Deleted rather than narrowed: the signal does not
-        # exist in this input, so the clause could only misfire.
-        # The wall evidence a kill DOES leave in the artifact (/tmp/step_wall.txt,
-        # uploaded beside this log) is consumed by testdb_canary_classify.py's
-        # step-wall gate; it is deliberately not re-derived here.
+        # #6145: matching the banner string anyway could never be right about
+        # this input, so it is deleted rather than narrowed. Stated precisely:
+        # this is REACHABLE BY CONSTRUCTION, not an observed misfire — no test
+        # currently emits the banner on stdout. The misfire is available to any
+        # assertion that prints or diffs the workflow text containing it, which
+        # is why a clause with no possible true hit is still worth removing.
+        #
+        # What survives covers the SIGINT path only. `timeout -s INT -k 10
+        # <budget>` sends INT first, and pytest's interrupt summary carries
+        # "KeyboardInterrupt", which IS in the artifact. KNOWN BLIND SPOT: the
+        # `-k 10` SIGKILL half (rc=137, documented reachable in the workflow)
+        # writes no interrupt summary — pytest emits it during unconfigure,
+        # after session teardown — so on that path this flag stays False. The
+        # deleted clause could not see that path either, so it is a pre-existing
+        # gap, recorded here rather than papered over.
+        #
+        # Residual, stated rather than smoothed: this is still a substring test,
+        # so it is quotable the same way the deleted clause was (an assertion
+        # source line containing the token). It is kept because the signal
+        # genuinely occurs in this input, which the banner does not.
+        #
+        # The wall evidence a kill leaves (/tmp/step_wall.txt) is consumed by
+        # testdb_canary_classify.py's step-wall gate — but only the `test`
+        # matrix uploads that file, so the side lanes leave no wall evidence and
+        # no classifier consumes one for them.
         if "KeyboardInterrupt" in line:
             killed = True
         if "slowest" in line and "durations" in line:

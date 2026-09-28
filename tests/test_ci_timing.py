@@ -153,6 +153,8 @@ def test_parse_log_ignores_a_quoted_watchdog_banner(tmp_path: Path) -> None:
     # the counts on that line are still parsed (pytest's own summary shape) —
     # the kill FLAG is what must not be inferred from it
     assert parsed["counts"]["passed"] == 10
+    assert parsed["counts"]["failed"] == 1
+    assert parsed["counts"]["error"] == 2
 
 
 def test_parse_log_missing_file(tmp_path: Path) -> None:
