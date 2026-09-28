@@ -389,7 +389,7 @@ def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
 
 
 @pytest.mark.parametrize("secret,kind,direction", [
-    # SHRINKS: 72 chars -> 26 (`[REDACTED:openai_api_key]`) — the old test's
+    # SHRINKS: 72 chars -> 25 (`[REDACTED:openai_api_key]`) — the old test's
     # only shape, which made the post-scrub re-clip a no-op and hid the defect.
     ("sk-proj-" + _fill(64), "openai_api_key", "shrinking"),
     # EXPANDS: 20 chars -> 28 (`[REDACTED:aws_access_key_id]`) — the P1 shape.
@@ -444,7 +444,7 @@ def test_a_dangling_pem_header_past_the_cut_still_carries_the_marker(
     ``-----END`` falls past the cut, the scrubber replaced everything after the
     header — the truncation marker included — and a cut turn was stored UNMARKED.
     Reproduced end-to-end: an 11,263-char turn stored as 4,823 chars with no
-    sentinel, and a 3,000-case fuzz found 585 such cuts, every one a PEM. A cut
+    sentinel. Every such cut the fuzz below produced carried a PEM. A cut
     turn with no marker is exactly the silent truncation #4897 exists to end.
     """
     _keyless(monkeypatch)
@@ -555,8 +555,8 @@ def test_every_cut_turn_is_stored_with_a_marker_fuzz():
 
     The shape that found the bug: a turn over the cap that contains a PEM
     header whose ``-----END`` is absent or falls past the cut (i.e. pasting a
-    real key). Before the fix 986 of 3,000 such cuts stored NO marker. Every
-    cut must now carry the marker, with the true pre-redaction length.
+    real key). Before the fix, cuts on a turn shaped like this stored NO marker.
+    Every cut must now carry the marker, with the true pre-redaction length.
     """
     import random
 

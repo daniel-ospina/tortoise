@@ -4106,7 +4106,7 @@ def test_capture_stores_a_truncation_marker_with_the_true_length(sdk):
     (no marker exists), which is exactly the silence the issue is about.
     """
     from tortoise.sdk import _CAPTURE_TURN_CAP
-    content = "design discussion " * 500              # 8500 chars > 5000
+    content = "design discussion " * 500   # several times the cap, see the assert
     assert len(content) > _CAPTURE_TURN_CAP
     sdk.capture_session([{"role": "user", "content": content}])
     stored = sdk._get_proj().g.query(
@@ -4245,7 +4245,7 @@ def test_capture_extraction_input_and_stored_turn_agree_with_the_marker(
         return orig(self, conversation, session_id, now)
 
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_extract_session_v2", spy)
-    content = "reasoning about the storage redesign. " * 400   # ~14,800 chars
+    content = "reasoning about the storage redesign. " * 400   # far past the cap
     assert len(content) > _CAPTURE_TURN_CAP
     sdk.capture_session([{"role": "user", "content": content}])
     stored = sdk._get_proj().g.query(
