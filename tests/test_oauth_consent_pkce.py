@@ -663,24 +663,37 @@ def test_inv7_item6_write_path_parity() -> None:
         f"(#3496 item 6): {sorted(sess['user'])}"
     )
     md = sess["user"].get("user_metadata") or {}
-    # EXACT allowlist, not a deny-list spot-check. A `keep = {...md}; delete
-    # keep.gigantic` implementation — the allowlist→denylist divergence from
-    # website/assets/supabase-session.js:116-124 — KEEPS every un-kept key, so
-    # asserting only the absence of known bloat passes it while the bloat ships.
-    assert set(md) == {"display_name", "avatar_url", "full_name", "name"}, (
-        f"user_metadata is not narrowed to the essential claims: {sorted(md)}"
+    # EXACT allowlist → exact VALUES. Key-set plus truthiness still passes a
+    # right-key/wrong-value assignment (`keep.name = md.display_name`) — the
+    # fixture gives `name` and `display_name` distinct values precisely so a swap
+    # is observable — and a `keep = {...md}; delete keep.gigantic` DENYLIST keeps
+    # every un-kept key (the allowlist→denylist divergence from
+    # website/assets/supabase-session.js:116-128).
+    assert md == {
+        "display_name": "Ada Lovelace",
+        "avatar_url": "https://a.example/a.png",
+        "full_name": "Ada Lovelace",
+        "name": "ada",
+    }, f"user_metadata is not the narrowed allowlist: {md}"
+
+    # …and nothing un-narrowed survives anywhere ELSE on the written session,
+    # pinned by SHAPE rather than by scanning for the bloat's key names. A name
+    # scan is the same denylist spot-check this test just condemned: a re-attach
+    # that avoids the literals — `obj.user.extra = Object.values(md)` — ships the
+    # bloat VALUES with none of the keys that name them.
+    assert set(sess) == {"access_token", "expires_at", "refresh_token", "user"}, (
+        "an unexpected top-level property survived on the written session: "
+        f"{sorted(sess)}"
     )
-    for kept in ("display_name", "avatar_url", "full_name", "name"):
-        assert md[kept], (
-            f"the narrowing kept a falsy essential `{kept}` claim: {md}"
-        )
-    # …and no un-narrowed data survives ANYWHERE on the written session: a
-    # re-attach (`obj.user.legacy_blob = md`) leaves user_metadata narrowed
-    # while shipping the un-narrowed object on a sibling property.
+    assert set(sess["user"]) == {"id", "user_metadata"}, (
+        f"an unexpected property survived on the written user: {sorted(sess['user'])}"
+    )
+    # …plus the bloat VALUES themselves, wherever a re-attach might park them.
     blob = json.dumps(sess)
-    for marker in ("identities", "gigantic", "legacy_blob"):
+    for marker in ("y" * 64, "z" * 64):
         assert marker not in blob, (
-            f"un-narrowed data survived on the written session (`{marker}`): {blob}"
+            "the un-narrowed metadata values survived on the written session "
+            f"(`{marker[:8]}…`): {blob[:300]}"
         )
 
     assert r["overCapWrote"] is False, f"an over-cap write reached the cookie: {r}"
@@ -1169,10 +1182,13 @@ function innerTarget(assignUrl) {
         user_metadata: {
           display_name: 'Ada Lovelace', avatar_url: 'https://a.example/a.png',
           full_name: 'Ada Lovelace', name: 'ada',
-          // TWO distinct non-allowlisted keys: one large, one small. A single
-          // one is satisfied by a deny-list `delete keep.gigantic`.
-          gigantic: 'y'.repeat(1500),      // must NOT survive the narrowing
-          legacy_blob: 'z'.repeat(400),    // must NOT survive the narrowing
+          // THREE non-allowlisted keys. A deny-list naming one, or the two
+          // OBVIOUS bloat keys, still keeps the third — only the allowlist
+          // drops all three, which is the property this test is for.
+          gigantic: 'y'.repeat(1500),             // must NOT survive the narrowing
+          legacy_blob: 'z'.repeat(400),           // must NOT survive the narrowing
+          provider_claims_blob: 'w'.repeat(120),  // ditto — deliberately not an
+                                                  // obvious deny-list candidate
         },
       },
     });
