@@ -89,7 +89,10 @@ from pathlib import Path
 #     connector ingest reaches, or ``SessionRecorded`` above): it needs a second
 #     ``PointAdded`` for an EXISTING id with an explicit TERMINAL status, and
 #     excluding the two types would refuse the most common torn record of all.
-#     Filed as #5921 with the reproduction. The SAME root cause also reaches the
+#     Born-terminal creates are a supported, behaviorally pinned write
+#     (tests/test_2952_write_path_determinism.py::test_born_terminal_point_is_not_a_dirty_root),
+#     which is why this is a disclosure and not a mistake. Filed as #5921 with
+#     the reproduction. The SAME root cause also reaches the
 #     ``PointPromoted`` / ``OperatorPromoted`` ``get_point`` snapshots, which
 #     share ``_upsert_point_props``; no writer path can put a terminal status in
 #     one (promotion is terminal-guarded), so the reachable composition is the
@@ -129,10 +132,11 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #   ConfidenceChanged — can carry ``outdated=true``, an EP-terminal flag.
 #   DirectEdgeRepoint — its ``delete_only=true`` leg removes an edge.
 #   EventRecorded — additive ONLY in the common case; see below.
-#   SessionRecorded — ``_fold_session_recorded`` writes ``capture_ok`` /
-#                     ``capture_extractor`` / ``capture_redactions`` STRAIGHT
-#                     from the payload (projection/entities.py:1261-1266, an
-#                     unconditional overwrite), and the SDK emits it as one of
+#   SessionRecorded — ``_fold_session_recorded`` OVERWRITES ``capture_ok`` /
+#                     ``capture_extractor`` / ``capture_redactions`` from the
+#                     payload (projection/entities.py:1261-1266; the only gate
+#                     is payload PRESENCE — ``val is not None and
+#                     _annotator_value_ok(val)``), and the SDK emits it as one of
 #                     the capture's TRAILING records (sdk.py:4844) with
 #                     ``capture_ok=False`` on a failed or keyless capture. A
 #                     dropped tear restores ``capture_ok=NULL``, which
@@ -162,12 +166,19 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 
 # ``"type"`` is matched anywhere in the partial record (the JSONL envelope is
 # ``event_id`` / ``ts`` / ``type`` / …), so a tear after the type field is
-# legible; one before it is not, and an unlegible type is NOT assumed harmless.
+# legible; one before it is not, and an unlegible or AMBIGUOUS type is NOT
+# assumed harmless (see :func:`has_truncated_type_value`).
 _RECORD_TYPE_RE = re.compile(r'"type"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"')
-# A ``"type"`` KEY, complete or not — see :func:`has_truncated_type_value`.
-# Deliberately stops at the COLON (not the opening quote): a tear can land
-# between ``:`` and the quote, and that is still "the value did not survive".
+# A ``"type"`` KEY — see :func:`has_truncated_type_value`. Deliberately stops
+# at the COLON (not the opening quote): a tear between ``:`` and the quote is
+# still "the value did not survive".
 _TYPE_KEY_RE = re.compile(r'"type"\s*:')
+# A ``"type"`` key torn MID-TOKEN at the end of the line (``"t`` / ``"ty``
+# / ``"typ`` / ``"type``). Anchored at the end because elsewhere a prefix of
+# the word collides with other keys (``"title``, ``"tag``) — and required to
+# be preceded by ``,`` / ``{`` (a KEY position), so a torn STRING VALUE that
+# merely begins ``"t`` (``"id": "t``) is not mistaken for a torn key.
+_TORN_TYPE_KEY_RE = re.compile(r'[{,]\s*"t(?:y(?:p(?:e)?)?)?$')
 
 
 def record_types_from_partial(raw: str) -> list[str]:
@@ -182,39 +193,57 @@ def record_types_from_partial(raw: str) -> list[str]:
 
 
 def has_truncated_type_value(raw: str) -> bool:
-    """True when a ``"type"`` KEY survived the tear but its VALUE did not.
+    """True when a torn record's ``type`` cannot be established unambiguously.
 
-    ``_RECORD_TYPE_RE`` only matches a COMPLETE identifier, so a tear inside an
-    envelope ``type`` value leaves the key legible with no match — and a later
-    or nested complete ``"type"`` (e.g. a payload-first record's inner dict)
-    would then mask it, classifying a record with an unreadable type as
-    harmless. Counting the keys (up to the COLON, so a tear between ``:`` and
-    the opening quote counts too) against the matches closes that: an extra key
-    means a value did not survive, and an unreadable type is refused, never
-    assumed harmless.
+    Three shapes, all refused:
+
+    * **No** legible type at all — the tear landed before or inside the
+      envelope's ``type``.
+    * **More than one** legible type, or a ``"type"`` key with no legible
+      value. The envelope writes ``type`` first, but ``EventLog.append`` is
+      public and a journal is operator-editable, so a payload-first record can
+      carry a nested ``"type"`` BEFORE the envelope's — and once the envelope's
+      is torn away, the remaining prefix is byte-identical to a prefix of a
+      harmless record. Refusing is the only safe read: a nested type must never
+      stand in for an envelope that did not survive.
+    * A ``"type"`` KEY torn mid-token at the end of the line (``"t`` / ``"ty`` /
+      ``"typ`` / ``"type`` with no colon), in KEY position (after ``,`` or
+      ``{``) — a torn string VALUE that happens to start ``"t`` is not one.
+
+    Named limit, so it is not overstated: a hand-written PAYLOAD-FIRST record
+    whose nested ``"type"`` survives while the envelope's key has not yet been
+    written (and left no fragment) is byte-identical to a producer prefix and
+    cannot be distinguished from one. No writer path emits that shape —
+    ``api._emit`` / ``sdk._emit_event`` / ``mining._emit_event`` all place
+    ``type`` in the envelope dict before any payload — so the limit is reachable
+    only for a hand-edited or foreign journal.
 
     (An ESCAPED ``\"type\": \"X\"`` inside a string value matches neither
     pattern — the backslash breaks the ``"`` - ``:`` - ``"`` shape — so a value
     that merely mentions the key is not miscounted.)
     """
-    return len(_TYPE_KEY_RE.findall(raw)) > len(_RECORD_TYPE_RE.findall(raw))
+    if len(_RECORD_TYPE_RE.findall(raw)) != 1:
+        return True
+    if len(_TYPE_KEY_RE.findall(raw)) != 1:
+        return True
+    return _TORN_TYPE_KEY_RE.search(raw) is not None
 
 
 def torn_record_may_revive_state(raw: str) -> bool:
     """True when dropping *raw* (a torn trailing record) could REVIVE state.
 
-    False only when EVERY legible type is inside
-    :data:`TORN_TAIL_HARMLESS_EVENT_TYPES` — the data-LOSS direction the
-    torn-tail tolerance was designed for. An unreadable type and a type outside
-    the set are both True: neither can be proven harmless. The classification
-    is over the type ALONE, never over the payload bytes: a torn record is a
-    prefix, so a key that is absent from it may still have been present in the
-    record being written (this is why ``EventRecorded`` is not in the set).
+    False only when the record's ``type`` is legible and UNambiguous and is a
+    member of :data:`TORN_TAIL_HARMLESS_EVENT_TYPES` — the data-LOSS direction
+    the torn-tail tolerance was designed for. An unreadable or ambiguous type,
+    and a type outside the set, are both True: neither can be proven harmless.
+    The classification is over the TYPE ALONE, never over the payload bytes: a
+    torn record is a prefix, so a key that is absent from it may still have been
+    present in the record being written (this is why ``EventRecorded`` is not in
+    the set).
     """
-    types = record_types_from_partial(raw)
-    if not types or has_truncated_type_value(raw):
+    if has_truncated_type_value(raw):
         return True
-    return any(t not in TORN_TAIL_HARMLESS_EVENT_TYPES for t in types)
+    return record_types_from_partial(raw)[0] not in TORN_TAIL_HARMLESS_EVENT_TYPES
 
 
 def torn_tail_revival_records(raws) -> list[str]:
@@ -225,13 +254,11 @@ def torn_tail_revival_records(raws) -> list[str]:
 def describe_torn_tail_revival(revival_records) -> str:
     """The legible record types of *revival_records*, for an operator message.
 
-    EVERY legible type per record, not just the first: classification refuses
-    when ANY legible type is outside the allowlist, so a message naming only
-    the first could contradict the decision it reports (an allowlisted envelope
-    type beside a non-allowlisted nested one). A type KEY whose VALUE did not
-    survive the tear — and a record with no type at all — is also named
-    ``<unreadable>``: the state it dropped cannot even be identified, so it is
-    reported as such rather than omitted.
+    EVERY legible type per record, not just the first, plus ``<unreadable>``
+    when the type is not unambiguous: classification refuses a record whose type
+    could not be established, so a message naming only a surviving nested type
+    would contradict the decision it reports. The state such a record dropped
+    cannot be identified, so it is reported as such rather than omitted.
     """
     kinds: set[str] = set()
     for raw in (revival_records or []):

@@ -412,11 +412,24 @@ def test_torn_record_with_a_truncated_envelope_type_is_refused():
         '{"point": {"type": "PointAdded", "id": "x"}, "type": "')
     assert torn_record_may_revive_state(
         '{"point": {"type": "PointAdded", "id": "x"}, "type":')
+    # a KEY torn mid-token, in key position (fragment at EOF)
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded", "id": "x"}, "ty')
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded", "id": "x"}, "type')
+    assert torn_record_may_revive_state(
+        '{"point": {"type": "PointAdded", "id": "x"}, "t')
     # An ESCAPED occurrence inside a string value is not a key and must not
     # make a benign record unreadable.
     assert not torn_record_may_revive_state(
         '{"type": "PointAdded", "point": {"id": "x", '
         '"content": "said \\"type\\": \\"EntityMu')
+    # A torn STRING VALUE that merely starts with `t` is not a torn type KEY
+    # (it is not in key position) — the no-over-correction direction.
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "torn-1", "content": "t')
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "torn-1", "content": "typ')
     print("PASS test_torn_record_with_a_truncated_envelope_type_is_refused")
 
 
@@ -563,6 +576,19 @@ def test_read_all_resets_torn_state_across_calls():
     EventLog(clean).append({"type": "PointAdded", "point": {"id": "b"}})
     log.path = Path(clean)
     assert log.read_all() == [{"type": "PointAdded", "point": {"id": "b"}}]
+    assert log.torn_trailing_count == 0
+    assert log.torn_trailing_raw == []
+    assert log.torn_tail_revival_records() == []
+
+    # The reset must also hold on the MISSING-FILE early return: a stale tear
+    # list there would make a replay engine refuse a journal it never read.
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write('{"type": "EntityMutated", "op": "del')  # torn again
+    log.path = Path(p)
+    log.read_all()
+    assert log.torn_trailing_count == 1
+    log.path = Path(_tmp("does-not-exist.jsonl"))
+    assert log.read_all() == []
     assert log.torn_trailing_count == 0
     assert log.torn_trailing_raw == []
     assert log.torn_tail_revival_records() == []

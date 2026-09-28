@@ -490,9 +490,13 @@ def test_recover_from_log_refuses_a_torn_session_recorded():
     """
     tmp = _mk_tmp()
     db_path = os.path.join(tmp, "torn_session.db")
+    # A COMPLETE SessionRecorded first, so the `:Session` assertion below is real
+    # evidence: without the refusal the fold would MERGE it, and only the refusal
+    # (which precedes the whole replay) keeps the node out.
+    complete = json.dumps({"type": "SessionRecorded", "id": "sess-0"})
     torn = '{"type": "SessionRecorded", "id": "sess-1", "capture_ok": false'
     _write_journal(os.path.join(tmp, "events.jsonl"),
-                   _point_added("kept-1"), torn, torn_last=True)
+                   _point_added("kept-1"), complete, torn, torn_last=True)
 
     proj = FalkorProjection(db_path)
     try:
@@ -506,24 +510,6 @@ def test_recover_from_log_refuses_a_torn_session_recorded():
             "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
     finally:
         proj.close()
-
-
-def test_born_terminal_creation_is_a_supported_write():
-    """PREMISE of the disclosed #5921 tolerance — pinned so it cannot rot.
-
-    The disclosure says a torn born-terminal ``PointAdded`` is tolerated. That
-    is only *a disclosure* while ``create_point`` really accepts a terminal
-    status and the terminal vocabulary really contains it; if a future change
-    refuses born-terminal creates, the disclosure must be revisited rather than
-    left standing. Asserted against hard-coded literals.
-    """
-    from tortoise.live import TERMINAL_EXCLUDED_STATUSES
-    from tortoise.sdk import POINT_STATUS_VALUES
-
-    assert "superseded" in POINT_STATUS_VALUES
-    assert "retracted" in POINT_STATUS_VALUES
-    assert "superseded" in TERMINAL_EXCLUDED_STATUSES
-    assert "retracted" in TERMINAL_EXCLUDED_STATUSES
 
 
 def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
