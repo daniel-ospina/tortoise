@@ -254,9 +254,10 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     ⚠️ Known-failing by owner decision, tracked as #5821 — see the marker
     reason. **The failure is lane-dependent and the marker now says so.** On
     the keyword lane the #4155 key deepens the pool (dedup 91 → 119) while the
-    assembly step keeps 58, so the gold moves from rank 55 in a pool of 70 (it
-    landed) to rank 68 post-boost in a pool of 119 (> 58 — cut). On the vector
-    lane the dense leg holds the gold at rank 9 and it lands at `item_cap=40`,
+    assembly step keeps 58, so the gold moves from rank 55 post-boost in a pool
+    of 91 with a keep of 70 (it landed) to rank 68 post-boost in a pool of 119
+    with a keep of 58 (> 58 — cut). On the vector lane the dense leg holds the
+    gold at rank 9 and it lands at `item_cap=40`,
     so the test passes and an unconditional `strict=True` would red the suite.
     That is why the marker carries `condition=not _embedder_installed()` — it
     encodes the lane the regression belongs to instead of asserting it
