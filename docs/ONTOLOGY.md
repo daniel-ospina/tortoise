@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.16"
+title: "Tortoise — Canonical Ontology v3.18"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-24
+updated: 2026-09-27
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.16
+# Tortoise — Canonical Ontology v3.18
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,99 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
+> - §3.9: **`related` is defined.** It means *connected, and nothing more* — no
+>   direction (symmetric), no chaining (non-transitive), and never a substitute for a
+>   hierarchy relation (`hasPart` / `memberOf` / `reportsTo`). The shape follows the
+>   SKOS Reference's associative link.
+> - **It carries no epistemic weight, by decision.** Nothing that computes confidence
+>   may traverse it — neither the support path (`IMPL`/`NAND`) nor the
+>   source-credibility prior path (`_apply_source_inheritance`, which reads
+>   `extractedFrom`). **Relevance is not expressed by this link; it is expressed on
+>   the operator** (`IMPL`/`NAND`). The AIF scheme node (`RA-node`) is cited only as an
+>   **illustrative** analogy for relevance-on-the-operator, and operator-less direct
+>   `IMPL`/`NAND` edges also exist (§8).
+> - Enforcement status is stated rather than implied: the three meanings are
+>   **declarations** (`_VALID_EDGE_PREDICATES` is a flat membership set). What *is*
+>   enforced is the **durability** half — `related` sits in **neither**
+>   `DERIVABLE_STRUCTURAL_RELS` nor `SUPERSEDE_STRUCTURAL_RELS`, pinned by
+>   `test_related_is_neutral_by_construction` (#5547). Wiring a producer requires
+>   revisiting both sets first (#2489).
+> - Precedent recorded: SKOS `skos:related` (W3C); ConceptNet `/r/RelatedTo` ("the
+>   most general relation … can't determine what that relationship is"); and AIF's
+>   scheme node, cited as an **illustrative** analogy for relevance-on-the-operator
+>   only.
+> - Known defect on the designated operator route, **and it breaches the rule above
+>   today**: **#5566** — a non-logical edge onto an operator pulls the node into the
+>   affected set, where its prior is discarded (`Beta(1,1)`). The EP traversal is
+>   unfiltered on relation, so `related` is not yet weight-free in fact. Owner-reserved
+>   (belief model, DECISION-LEDGER §22).
+>
+> **Changelog v3.18 (2026-09-25, issue #4021 — the inverted predecessor window is refused):**
+> - §4.7/§4.1 (`validTo`): the supersession end is now checked against the
+>   **predecessor's own `validFrom`** before it is stamped. The resolution order is
+>   unchanged (`valid_from` kwarg → successor `validFrom` → successor `createdAt`
+>   → `now`), but a resolved end that sorts **strictly before** the predecessor's
+>   start — same measure (`_created_sort_key`) and same `is not None` presence
+>   predicate `restore_point_at`'s `_covers` uses — is refused with `ValueError`
+>   **before any mutation**: no event journaled, no half-write. Equality is
+>   well-formed (a zero-length predecessor window) and still supersedes. The
+>   comparison is made only where **both** instants are orderable; a bound that is
+>   present but **unorderable** names no instant and is not compared.
+> - Why: **nothing on the write path read the predecessor's start**, so a
+>   **backdated successor** persisted `validTo < validFrom`. An inverted window
+>   satisfies `_covers` for **no** query instant, so `restore_point_at` reported
+>   honest absence for the old fact at every instant — a silent, permanent
+>   unreachability, with no error anywhere. This covers the **inverted**
+>   direction only; the orderability residual is tracked separately on #5360 and
+>   is **not** absorbed here. It has two sides, and the supersession guard touches
+>   both: a truthy-but-unparseable successor `validFrom` with no kwarg (the
+>   resolved end), and an unparseable predecessor `validFrom` (the comparison's
+>   other operand). Neither is compared — refusing on an ordering-fallback
+>   artefact would make a point carrying a non-ISO start impossible to supersede.
+> - The MCP dry-run preview (`tortoise_supersede(dry_run=True)`) calls the same
+>   helper, so it refuses a write the writer would refuse — a dry run that reports
+>   a clean blast radius for a write that then raises is the fail-open direction
+>   of the same defect.
+> - **OVERRIDES:** the "be liberal / normalise the interval" default at the
+>   supersession write — a silently inverted window (`validTo < validFrom`) is
+>   unsatisfiable by every query instant while reporting honest absence, so the
+>   write fails closed rather than persisting a corrupt interval. This is also a
+>   deliberate narrowing of `supersede_point`'s **additive-only** promise ("no
+>   behavior change for callers that don't pass the kwarg"): the input class whose
+>   behaviour changes is the one that used to corrupt silently.
+>
+> **Changelog v3.17 (2026-09-24 — issue #4937, the F1 ruling recorded on #2552 — MITIGATES retires from the operator menu):**
+> - §2: the operator KINDS are `IMPL`/`NAND` (+ declared labels). `MITIGATES`
+>   leaves the generic operator menu: a **mitigation** is not a peer operator
+>   but a Point that attaches to the IMPL/NAND operator bridge it damps
+>   (`(op {is_operator:true})-[:mitigated_by]->(m)`, strength ∈ [0.10, 0.50],
+>   `w_eff = w × (1 − strength)`, §3.9). An operator kind cannot express that —
+>   it carries no strength and no bridge.
+> - Code alignment: `sdk.create_operator` refuses `op_type="MITIGATES"` with an
+>   explicit error naming `mitigate_operator` (the correct path), and the
+>   generic label menu is `IMPL`/`NAND` (+ pack-declared relations). The
+>   extractor/commit payload spelling `MITIGATES` (target + strength) is the
+>   WIRE name of a bridge-attack record and is routed to the mitigation path
+>   (`commit_ops.apply_payload_operators` → `mitigate_operator`), never to
+>   `create_operator`.
+> - Existing data: the retired entry was the built-in operator **label**
+>   exemption (`label not in ("IMPL", "NAND", "MITIGATES")`); the `op_type`
+>   allowlist already excluded `MITIGATES`, so `create_operator` with
+>   `op_type="MITIGATES"` never created a node. Point-in-time measurement
+>   (2026-09-24, the 9 reachable fleet FalkorDB stores / 5,131 graphs):
+>   `MATCH (o:Point {is_operator:true}) WHERE o.op_type='MITIGATES'` → **0
+>   hits** (the live mechanism is the `mitigated_by` edges the same sweep
+>   found). The label-exemption removal is **warning-only** (warn-not-block):
+>   an operator carrying `label='MITIGATES'` stays legal and readable, and the
+>   change only stops a NEW one from being silently exempted. So **no migration
+>   runs and no data is dropped** — the refusal is loud at the write boundary,
+>   and the legacy PAYLOAD spelling keeps working.
+> - **OVERRIDES:** the "be liberal in what you accept" default at the write
+>   boundary — a second spelling of mitigation would make "why is this weaker?"
+>   answerable two ways with the strength present in only one; the menu keeps a
+>   single spelling and the mitigation attaches to the bridge it damps.
 >
 > **Changelog v3.16 (2026-09-24 — issues #2726 + #2727, meeting source kinds +
 > object-kind alignment; original branch change dated 2026-09-09, renumbered from
@@ -59,9 +152,11 @@ doc_status: live
 >   `subclassOf` against any of them (#2727).
 >   **Count correction on merge:** §5/§6/§1/§4.3 name **16** object kinds —
 >   v3.15 (#5013) retired `document` from the Object vocabulary (a document is a
->   `:Source`, §4.4) and the resolutions below follow it. The runtime constant
->   (`CANONICAL_OBJECT_KINDS` — 17 members) and `extractor_v2.CORE_OBJECT_KEYS`
->   still carry `document`, a code lag owned by #5026.
+>   `:Source`, §4.4) and the resolutions below follow it. The code lag this note
+>   used to record is now closed: the runtime constant (`CANONICAL_OBJECT_KINDS`
+>   — 16 members) and `extractor_v2.CORE_OBJECT_KEYS` no longer carry
+>   `document` (removed in `e5de6373c`, PR #5236 — the D10 code half tracked by
+>   #5026).
 >   The `subclassOf` PascalCase shape check is scoped to allow canonical
 >   lowercase object kinds — superseding the R6 §1.1 "parent must be a core
 >   PascalCase kind" contract (the `packs/agent-ops` `nearMisses: [standard]`
@@ -108,9 +203,11 @@ doc_status: live
 >   `docs/architecture/STORAGE-ARCHITECTURE.md` +
 >   `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (PR #5016) > the
 >   implementing issue.
-> - **Implementation status:** the code half is not landed — `#5026` (the label
->   migration), `#5024` (the unjournalled version transition), `#5038` (the
->   version model).
+> - **Implementation status:** `#5026` (the label migration) **landed** — PR
+>   #5127 merged 2026-09-25 (`294d5847e`): the `:Document` label is retired, and
+>   the legacy spelling survives only as a deprecated alias whose writes route to
+>   `:Source` keyed `url`. Still **open**: `#5024` (the unjournalled version
+>   transition) and `#5038` (the version model).
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
@@ -351,7 +448,7 @@ Each layer answers a different question. All four are live mechanisms.
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
 | **Semantic** | Who/what exists? | Subject, Object, Source (**incl. documents**) | Nouns. Standing structural relations (ownedBy, memberOf, hasPart) via plain edges. |
-| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
+| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **`MITIGATES` is not an operator kind** (#4937): a mitigation is a Point attached to the operator bridge it damps (`(op {is_operator:true})-[:mitigated_by]->(m)`, §3.9) — it weakens a relationship's relevance, it is not a peer operator. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the reconstruction source for `Object.status` (§11), status is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved). |
 
@@ -361,8 +458,14 @@ Each layer answers a different question. All four are live mechanisms.
 > status is a fold cache over the events — never the truth itself) and their **confidence** (derived from the
 > attached Points). **Points** — the logic: statements (pointKind `statement` —
 > the only extraction point kind; hypothesis folded into confidence) connected
-> to the state they argue about (aboutObject); IMPL/NAND/MITIGATES among them
-> move the object's confidence. **Events** — what happened, for
+> to the state they argue about (aboutObject); the IMPL/NAND **operators**
+> among them move the object's confidence. A **mitigation** is NOT a third
+> operator kind (#4937, the F1 ruling on #2552): it is a Point that attaches
+> to the operator bridge it damps — `(op {is_operator:true})-[:mitigated_by]->
+> (m)` — weakening the relationship's relevance by
+> `w_eff = w × (1 − strength)` (§3.9). It is therefore not a peer in the
+> operator menu, and it contributes no confidence of its own. **Events** — what
+> happened, for
 > context: occurrences AND the **decision-as-event** (eventKind `decision`,
 > aboutObject → the object(s) it resolved). The graph says *"this state is
 > based on these reasons"* — never *"this decision was made because of these
@@ -519,15 +622,96 @@ performs, produces, uses, authoredBy, ownedBy, managedBy,
 hasMember, holdsRole, memberOf, reportsTo,
 participatesIn, hasPart, related, dependsOn, references,
 wasDerivedFrom
+```
 
 > **#214 (2026-08-06):** `instantiates` removed — Event→Action legacy from v2.5;
 > Action was dissolved in Ontology v3.0.
 >
 > **Vocabulary-only edges** (valid predicates with zero producers):
-> `reportsTo` (org hierarchy, Subject→Subject), `related` (generic catch-all),
-> `dependsOn` (pack-declared — dev:api dependsOn dev:database; used by `list_relations()`
-> for kind expansion). All three remain valid for `create_edge()`.
-```
+> `reportsTo` (org hierarchy, Subject→Subject), `dependsOn` (pack-declared —
+> dev:api dependsOn dev:database; used by `list_relations()` for kind expansion),
+> and `related` — **defined below**. All three remain valid for `create_edge()`.
+>
+> **`related` — the neutral association link.**
+>
+> Use it when two things are connected and you mean nothing more than that. It says
+> "these belong in the same neighbourhood" and deliberately does not say how. It is
+> not support, not contradiction, not provenance, and not a way of saying "part of"
+> or "reports to"; where one of those is meant, one of those links must be used.
+>
+> Three meanings follow, and they are what make it safe to use freely:
+>
+>   * **It has no direction.** "A is related to B" and "B is related to A" are the
+>     same statement — so it can never be used to say "A adds information to B",
+>     which does have a direction.
+>   * **It does not chain.** A related to B, and B related to C, tells you nothing
+>     directly about A and C.
+>   * **It is not a hierarchy.** It never substitutes for "part of", "member of" or
+>     "reports to".
+>
+> **It carries no epistemic weight, by decision (#5025, owner ruling 2026-09-27).**
+> Nothing that computes confidence may read this link: it must not be traversed when
+> support is propagated (the `IMPL`/`NAND` path), and it must not be traversed when
+> the system weighs how much to trust a source (`_apply_source_inheritance`, which
+> reads `extractedFrom`). A structural link a confidence path walks is no longer
+> neutral — it is an argument wearing a neutral name.
+>
+> **`related` is exempt from §8's "confidence edge attribute" row.** §8 gives a plain
+> structural edge a `confidence` attribute; for `related` that attribute is **not** a
+> weight, and no confidence path reads it. The two sections are consistent once read
+> together: a `confidence` property may exist on the edge without the edge being an
+> argument.
+>
+> **Where relevance is expressed: not here.** Relevance belongs on the **operator** —
+> by attaching an `IMPL`/`NAND` to the operator's node. That matches the shape
+> argumentation interchange uses: in AIF the *rationale for a relation* is carried by
+> a **scheme node** (`RA-node`), not by the relation itself. **The analogy is
+> illustrative, not authoritative** — AIF's `RA-node` is about inference-rule
+> application; the point here is only that "why are these two connected" is a property
+> of the node rather than of the pair. **Plain support or contradiction between two
+> claims may also be an operator-less direct `IMPL`/`NAND` edge** (§8 below,
+> `create_direct_edge`), so claims do **not** connect only through a scheme in this
+> ontology, and the neutral link is not what makes relevance possible.
+>
+> **`related` — enforcement status (normative detail).** The three meanings above
+> follow the SKOS Reference (W3C Recommendation): symmetric (`owl:SymmetricProperty`,
+> S23); **not** transitive (§8.6.4 — "Note that `skos:related` is not a transitive
+> property"); disjoint from the hierarchical relations (§8.6.10 — "fundamentally
+> distinct in nature"). The same shape is the norm elsewhere: ConceptNet's
+> `/r/RelatedTo` is documented as "the most general relation. There is some positive
+> relationship between A and B, but ConceptNet can't determine what that relationship
+> is based on the data", and is symmetric.
+>
+> **Declared, not machine-enforced.** Symmetry, non-transitivity and
+> hierarchy-disjointness are declarations. `_VALID_EDGE_PREDICATES` is a flat
+> frozenset, and **for `related`** `create_edge()` applies no symmetry, transitivity
+> or disjointness logic — no test asserts those properties of `related`. (Transitivity
+> logic *does* exist in the codebase for a **different** predicate: `create_edge`'s
+> transitive cycle guard for `ownedBy` (`projection/edges.py:565-582`), tested by
+> `test_transitive_cycle_rejected` and `test_direct_cycle_rejected`. This claim is
+> scoped to `related`.)
+>
+> **The durability half IS enforced — the confidence half is NOT.** What is enforced
+> is *transfer and replay*: `related` is in **neither** `DERIVABLE_STRUCTURAL_RELS`
+> (no replay descriptor) **nor** `SUPERSEDE_STRUCTURAL_RELS` (a supersede does not
+> transfer it — it stays at the old point), pinned by
+> `tests/test_dry_run_preview.py` ("in NO transfer leg") and
+> `test_related_is_neutral_by_construction` (#5547). **These two sets govern
+> durability, not weight** — do not read their enforcement as the rule above being
+> true in the code.
+>
+> ⛔ **"Carries no epistemic weight" is a DECISION WITH A KNOWN BREACH — it is the
+> target, not today's behaviour.** The EP affected-set traversal is **unfiltered on
+> relation** (`ep.py:807`, `:922`, `:937`), so a `related` edge that lands on an
+> operator *does* reach `_update_claim_posterior` (`ep.py:625+`), which recomputes
+> that node as `Beta(1,1)` and **discards its prior** — **#5566**. Until that is
+> fixed, `related` **can** change a belief number. Tracked as its own defect and
+> owner-reserved (belief model, DECISION-LEDGER §22).
+>
+> **Wiring a producer requires revisiting both sets first.** Per #2489 a predicate's
+> label and its replay key are one unit: `STRUCTURAL_REL_LABELS` holds the target
+> label and the replay-key selection sits beside it in `stub_key`, so the two must
+> move together, and the replay branch keys on `etype in DERIVABLE_STRUCTURAL_RELS`.
 
 Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 
@@ -579,7 +763,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`) falls back to the **wall clock** when the session carries no date, so a clock-stamped start is possible though not the intent; **absent ⇒ open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
-| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` stamps `now` (no successor ⇒ no contiguity). A `valid_from` **kwarg** is refused when it disagrees with a successor that **carries** a stored `validFrom` (same instant required, else `ValueError` before any write — §4.7). §4.7 |
+| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358). A `valid_from` **kwarg** is refused when it disagrees with a successor that **carries** a stored `validFrom` (same instant required, else `ValueError` before any write — §4.7). A successor whose resolved start is **parseable** and sorts **strictly before the predecessor's own parseable `validFrom`** is refused outright (`ValueError`, same measure, before any write — an inverted window is satisfiable by no query instant) (#4021). A bound that is present but **unorderable** on EITHER side is not compared: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (`_assert_window_start_not_inverted` makes the same choice for `invalidate_point`), and the open orderability residual is #5360's. §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
@@ -683,7 +867,7 @@ A document is a **`:Source`** (§4.6). Its bytes live **outside the graph**, rea
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | **The CURRENT version's valid-time window** — when the content held in the world (declared §4.7, #3642). A prior version's window is a journal record — see *Versioning* |
 | `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of this version stopped being current (declared §4.7, #3642) |
 | `documentKind` | string | — | `bibo:Document` subclasses | ⚠️ | **Genre**, when `sourceKind: document` — the core vocabulary is in **§5**. Distinct from `sourceKind` (§4.4) |
-| `format` | string | — | `dc:format` | ⚠️ | Storage format (markdown, jsonl, yaml, cypher). Not yet in `_SOURCE_HANDLED` |
+| `format` | string | — | `dc:format` | ✅ | Storage format (markdown, jsonl, yaml, cypher). In `_SOURCE_HANDLED` since D10 (v3.15) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
@@ -730,7 +914,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
 | start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`, mining.py) falls back to the **wall clock** (`_now()`) when the session carries no `date`/`startedAt`, so a clock-stamped start is a real, reachable write — though not the intent. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
-| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg stays the **sole** source for an undated successor. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
+| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg stays the **sole** source for an undated successor. **The resolved end is additionally checked against the PREDECESSOR's own `validFrom`**: when BOTH order to an instant and the end is strictly earlier ⇒ `ValueError` before any mutation (#4021), because an inverted window (`validTo < validFrom`) is satisfied by **no** query instant, so the predecessor would be silently unreachable from every read surface — equality (a zero-length predecessor window) remains legal. An **unorderable** bound on either side is NOT compared even so: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison (and a point whose window is already unorderable is not newly hidden by the write) — the open orderability residual is #5360's. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
@@ -808,7 +992,7 @@ authoritative for the temporal slots. Event's transaction-time start is
 | responsibility | authoredBy | — | edge (§3.5) | — | — |
 | ownership | — | — | edge (§3.5) | — | — |
 | management | — | — | edge (§3.5) | — | — |
-| format | — | — | — | format | **⚠️ `format` belongs here** — `_SOURCE_HANDLED` does not yet carry it |
+| format | — | — | — | format | **✅ `format` belongs here** — moved into `_SOURCE_HANDLED` by D10 (v3.15) |
 | aboutEdges | ✅ | — | ✅ | ✅ | — |
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |
@@ -1037,6 +1221,17 @@ edge attribute.
 | Point↔Point support / contradict (IMPL/NAND) | **Yes** | EP over the IMPL/NAND edge |
 | Any edge needing mitigation (+/− relevance) | **Yes** — mitigations attach to the operator | EP over IMPL/NAND |
 | Structural edge without mitigation (about\*, performs/produces/uses, memberOf/ownedBy, provenance) | **No** — plain edge | confidence edge attribute |
+| `related` — the neutral association edge (§3.9) | **No** — plain edge | **none** — evidence-free by construction; no belief path may read it |
+
+- **Neutral vs structural (#5025):** the `Structural edge without mitigation` row above
+  permits a `confidence` attribute on a plain structural edge; for `related` that
+  attribute is **not a weight** — the property may exist, and no confidence path reads
+  it — because its neutrality is the point. "Structural" and "belief-free" are not
+  synonyms:
+  `extractedFrom` is structural and **does** carry weight, via the Beta prior set in
+  `_apply_source_inheritance`. A predicate is neutral only when no read path traverses it
+  — see §3.9 for the breach that currently leaves `related`'s neutrality a target rather
+  than a fact (#5566).
 
 - **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
   (no operator); EP propagates over it the same way.
@@ -1232,5 +1427,5 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
 | **Schema.org** | Event with startTime/endTime. Action pattern: `performs`=schema:agent inverse (the "direct performer or driver of the action"), `produces`=schema:result, `uses`=schema:instrument (mechanisms) / schema:input. |
 | **BIBO** | `documentKind` genre vocabulary (v3.15/D10: an axis over `sourceKind: document`, not an Object subclass). |
 | **OWL-Time** | Event is the temporal entity (`startedAt`/`endedAt` = the valid-time alias, §4.7). Non-event validity windows (`validFrom`/`validTo`) are intervals on the same axis. Transaction time is the record clock, not an OWL-Time interval. |
-| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `status='superseded'` on Point — the `outdated` flag + `CORRECTS` edge are shared with invalidation and do not distinguish the two). Window contiguity on **supersession** is the Graphiti (Zep) **intent, conditional**: `validTo` = the successor's `validFrom` **when it carries one**, else its `createdAt`, else `now` (exact contiguity only for a dated successor); `invalidate_point` instead stamps `validTo=now` (no successor ⇒ no contiguity) (§4.7). |
+| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `status='superseded'` on Point — the `outdated` flag + `CORRECTS` edge are shared with invalidation and do not distinguish the two). Window contiguity on **supersession** is the Graphiti (Zep) **intent, conditional**: `validTo` = the successor's `validFrom` **when it carries one**, else its `createdAt`, else `now` (exact contiguity only for a dated successor); `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) (§4.7). |
 | **RDF-star** | Operators are reified edges with metadata (label + confidence) — RDF-star-like reification for epistemic edges. |

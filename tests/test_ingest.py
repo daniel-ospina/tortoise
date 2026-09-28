@@ -53,6 +53,45 @@ def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
 
 
+# #3717: the ingest CLI defaults BOTH output paths relative to the process CWD
+# (tortoise/ingest.py: `--log` events.jsonl, `--out` graph.html). A test that
+# omits one drops an untracked artifact in the CWD (the repo root), dirtying the
+# working tree, racing every other test through one shared path, and risking a
+# swept-up `git add`. Every call site below passes both explicitly into _tmp().
+# This guard fails the offending test if either default name is created or
+# rewritten in the CWD during it, so the leak cannot silently return.
+# (Pass the --out value as a str: argparse scans options before applying
+# type=Path, so a Path value raises TypeError in _parse_optional.)
+_CWD_RELATIVE_DEFAULT_ARTIFACTS = ("graph.html", "events.jsonl")
+
+
+def _artifact_sig(path):
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+@pytest.fixture(autouse=True)
+def _no_cwd_output_default_leak():
+    """#3717 regression guard: no test here may write an ingest CLI default
+    artifact into the CWD instead of an explicit _tmp() path."""
+    cwd = Path.cwd()
+    before = {n: _artifact_sig(cwd / n) for n in _CWD_RELATIVE_DEFAULT_ARTIFACTS}
+    yield
+    after = {n: _artifact_sig(cwd / n) for n in _CWD_RELATIVE_DEFAULT_ARTIFACTS}
+    leaked = sorted(
+        n for n in _CWD_RELATIVE_DEFAULT_ARTIFACTS
+        if after[n] is not None and after[n] != before[n]
+    )
+    assert not leaked, (
+        f"#3717: test leaked ingest CLI default artifact(s) into {cwd}: {leaked}. "
+        "Pass an explicit --out/--log under a temp dir (_tmp(...)) instead of "
+        "relying on the CWD-relative default."
+    )
+
+
 
 def _live_uri(test_graph: str) -> str:
     """The live backend URI with a per-test test-prefixed graph path.
@@ -512,6 +551,411 @@ def test_main_transcript_no_document():
 
 
 # ---------------------------------------------------------------------------
+# #4938 — the document path produces Subjects by default
+# ---------------------------------------------------------------------------
+
+_DOC_SUBJECT_FIXTURE = """---
+title: Vendor Evaluation
+type: research
+---
+
+## Background
+
+Alice Rivera met the Acme Organisation to review the proposal.
+The Design Team owns the rollout plan.
+
+## Decision
+
+We adopt the approach because it is cheaper.
+"""
+
+
+class _PersonOrgModel(MockModel):
+    """Deterministic stand-in whose entity stage names a person and an org.
+
+    ``MockModel`` only promotes multi-word capitalized names containing
+    "team"/"org"/"group"/"dept" to Subjects, so it cannot express the
+    issue's "a markdown file naming a person and an organisation" fixture.
+    This subclass pins ONLY the S7 entity output (one natural person + one
+    organisation + one object) and delegates every other stage (points,
+    relations) to ``MockModel`` so the rest of the pipeline stays the
+    ordinary offline stand-in.
+    """
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "extract_entities" in system:
+            import json
+            return json.dumps({
+                "subjects": [
+                    {"name": "Alice Rivera", "subjectKind": "naturalPerson"},
+                    {"name": "Acme Organisation", "subjectKind": "organization"},
+                ],
+                "objects": [{"name": "FalkorDB", "objectKind": "database"}],
+                "aboutEntities": ["Alice Rivera", "Acme Organisation",
+                                  "FalkorDB"],
+            })
+        return super().complete(system=system, user=user)
+
+
+def _person_org_build_model(spec, *, reasoning=False):
+    """``build_model`` replacement returning the pinned person+org stand-in."""
+    return _PersonOrgModel(spec)
+
+
+class _FailingEntityModel(MockModel):
+    """Stand-in whose S7 entity stage always fails (points still succeed)."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "extract_entities" in system:
+            raise RuntimeError("simulated entity-stage failure")
+        return super().complete(system=system, user=user)
+
+
+def _failing_entity_build_model(spec, *, reasoning=False):
+    return _FailingEntityModel(spec)
+
+
+class _SecondSectionFailingEntityModel(MockModel):
+    """S7 succeeds on the first section, then fails on the second.
+
+    Models the partial-failure shape: section 1's Subjects are already minted
+    when section 2 raises, so the document must still be wired to them (no
+    orphan Subjects) and the failure must be reported.
+    """
+
+    def __init__(self, id: str = "mock"):
+        super().__init__(id)
+        self._calls = 0
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "extract_entities" in system:
+            self._calls += 1
+            if self._calls >= 2:
+                raise RuntimeError("simulated entity-stage failure on section 2")
+        return super().complete(system=system, user=user)
+
+
+def _second_section_failing_build_model(spec, *, reasoning=False):
+    return _SecondSectionFailingEntityModel(spec)
+
+
+def _ingest_doc_fixture(tmp_path, extra_args=()):
+    """Run the CLI once on ``_DOC_SUBJECT_FIXTURE``; return (db, journal)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out, *extra_args]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _person_org_build_model):
+        _run_main(None)
+    return db, log
+
+
+def _document_counts(db):
+    """The counts #4938's two indicators speak about, read from the graph."""
+    proj = FalkorProjection(db)
+    try:
+        def one(q):
+            return proj.g.query(q).result_set[0][0]
+        return {
+            "subjects": one("MATCH (s:Subject) RETURN count(s)"),
+            "about_subject": one(
+                "MATCH ()-[:aboutSubject]->() RETURN count(*)"),
+            "sources": one("MATCH (s:Source) RETURN count(s)"),
+            "documents": one(
+                "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+                "RETURN count(s)"),
+            "points": one("MATCH (p:Point) RETURN count(p)"),
+        }
+    finally:
+        proj.close()
+
+
+def test_4938_default_document_ingest_files_subjects(tmp_path):
+    """Indicator 1 (#4938): a DEFAULT document ingest (no flag) of a markdown
+    file naming a person and an organisation yields >=1 ``:Subject`` node and
+    >=1 ``aboutSubject`` edge — the owner's document -> Source + Subjects model
+    is on by default.
+
+    Fails if: S7 stays opt-in (0 Subjects); the Subjects are minted but the
+    document->Subject edges are never wired (0 aboutSubject); the wired names
+    do not match the document's own content entities.
+    """
+    db, _log = _ingest_doc_fixture(tmp_path)
+    counts = _document_counts(db)
+    assert counts["subjects"] >= 1, f"no :Subject minted by default: {counts}"
+    assert counts["about_subject"] >= 1, (
+        f"no aboutSubject edge written by default: {counts}")
+    proj = FalkorProjection(db)
+    try:
+        names = {r[0] for r in proj.g.query(
+            "MATCH (s:Source)-[:aboutSubject]->(sub:Subject) "
+            "RETURN sub.name").result_set}
+    finally:
+        proj.close()
+    assert {"Alice Rivera", "Acme Organisation"} <= names, names
+    print(f"PASS test_4938_default_document_ingest_files_subjects ({counts})")
+
+
+def test_4938_document_source_and_point_counts_unchanged(tmp_path):
+    """Indicator 2 (#4938) — the regression guard: the ``:Source`` / document /
+    ``:Point`` counts of the SAME ingest are IDENTICAL with S7 on (default) and
+    S7 off (``--no-semantic-extract``). Subjects and aboutSubject edges are the
+    only difference, so default-on S7 cannot inflate the metered layers.
+
+    The DIFFERENTIAL form is the point: an absolute-count assertion would still
+    pass if both runs changed together; this one fails the moment the default
+    run gains or loses a Source, document or Point relative to the opt-out run.
+
+    Fails if: the default is not actually on (0 Subjects); the opt-out does not
+    disable it (Subjects without the flag); or the metered counts diverge.
+    """
+    on_db, _ = _ingest_doc_fixture(tmp_path / "on")
+    off_db, _ = _ingest_doc_fixture(tmp_path / "off",
+                                    ["--no-semantic-extract"])
+    on = _document_counts(on_db)
+    off = _document_counts(off_db)
+    assert off["subjects"] == 0 and off["about_subject"] == 0, (
+        f"--no-semantic-extract did not disable the Subject path: {off}")
+    assert on["subjects"] >= 1 and on["about_subject"] >= 1, (
+        f"the default document ingest filed no Subjects: {on}")
+    for key in ("sources", "documents", "points"):
+        assert on[key] == off[key], (
+            f"{key} changed with S7 on: default={on[key]} opt-out={off[key]}"
+            f" (indicator 2 regression guard)")
+    assert on["points"] > 0, "vacuous fixture: the ingest extracted no Points"
+    print(f"PASS test_4938_document_source_and_point_counts_unchanged "
+          f"(on={on}, off={off})")
+
+
+def test_4938_document_subjects_survive_journal_rebuild(tmp_path):
+    """Verification-checklist row 2 (#4938): the default document ingest's
+    ``SubjectAdded`` events and the document->Subject edges survive a
+    journal-only rebuild — live counts == rebuilt counts.
+
+    Fails if: the reorder puts ``SubjectAdded`` AFTER ``DocumentCreated`` in the
+    journal (replay would then resolve no Subject and drop the edge); or the
+    edge is written by a raw non-journaled query (live != rebuild).
+    """
+    db, log = _ingest_doc_fixture(tmp_path)
+    live = _document_counts(db)
+    rebuild_db = str(tmp_path / "rebuilt.db")
+    proj = FalkorProjection(rebuild_db)
+    try:
+        proj.rebuild_all(str(log.parent))
+        rebuilt_subjects = proj.g.query(
+            "MATCH (s:Subject) RETURN count(s)").result_set[0][0]
+        rebuilt_about = proj.g.query(
+            "MATCH ()-[:aboutSubject]->() RETURN count(*)").result_set[0][0]
+    finally:
+        proj.close()
+    assert live["subjects"] >= 1 and live["about_subject"] >= 1, live
+    assert rebuilt_subjects == live["subjects"], (
+        f"Subjects live={live['subjects']} rebuilt={rebuilt_subjects}")
+    assert rebuilt_about == live["about_subject"], (
+        f"aboutSubject live={live['about_subject']} rebuilt={rebuilt_about}")
+    print(f"PASS test_4938_document_subjects_survive_journal_rebuild "
+          f"(subjects={rebuilt_subjects}, aboutSubject={rebuilt_about})")
+
+
+def test_4938_document_edge_does_not_clear_the_point_marker(tmp_path):
+    """#4938 verification-checklist row 4 is WRONG as written: the #4889 read
+    marker must NOT clear on a document ingest.
+
+    ``subject_binding_available`` probes the ``(Point|Event)-[:aboutSubject]->
+    (:Subject)`` shapes that ``fetch_point_epistemic_state`` actually reads, so
+    the document's ``(Source)-[:aboutSubject]->(:Subject)`` edge — indicator 1 —
+    cannot make the Point ``subject`` field resolvable. Clearing the marker on
+    a Source-sourced edge would make it lie about exactly the field it
+    advertises.
+
+    Fails if: the document ingest starts writing Point/Event-sourced edges
+    (the ungated path #1370 owns), or the probe is widened to any source label.
+    """
+    from tortoise.search_engine import subject_binding_available
+    db, _log = _ingest_doc_fixture(tmp_path)
+    counts = _document_counts(db)
+    assert counts["about_subject"] >= 1, counts
+    proj = FalkorProjection(db)
+    try:
+        point_sourced = proj.g.query(
+            "MATCH (n:Point)-[:aboutSubject]->(:Subject) RETURN count(n) AS c "
+            "UNION ALL "
+            "MATCH (m:Event)-[:aboutSubject]->(:Subject) RETURN count(m) AS c"
+        ).result_set
+        assert sum(r[0] for r in point_sourced) == 0, point_sourced
+        assert subject_binding_available(proj.g) is False, (
+            "a document-Source aboutSubject edge must NOT clear the "
+            "Point/Event-scoped read marker (#4889)")
+    finally:
+        proj.close()
+    print("PASS test_4938_document_edge_does_not_clear_the_point_marker")
+
+
+def test_4938_entity_stage_failure_does_not_sink_the_document(tmp_path):
+    """#4938 durability guard: S7 is an enrichment, and ``begin_ingest`` has
+    already claimed the content hash when it runs — so a failed entity stage
+    must NOT abort before the document is written. If it did, the Source would
+    never be created AND a plain re-run would SKIP ("already processed"),
+    silently losing the document.
+
+    This is the TOTAL-failure shape (every section fails): the Source + Points
+    are still written and the failure is reported.
+
+    Fails if: the ingest raises; the Source/Points are not written; or the
+    failure is silent (no warning printed).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _failing_entity_build_model):
+        stdout = _run_main(None, capture=True)
+    counts = _document_counts(db)
+    assert counts["sources"] == 1 and counts["documents"] == 1, counts
+    assert counts["points"] > 0, counts
+    assert counts["subjects"] == 0, counts
+    assert "warning: S7 entity extraction failed" in stdout, stdout
+    print("PASS test_4938_entity_stage_failure_does_not_sink_the_document")
+
+
+def test_4938_partial_entity_failure_leaves_no_orphan_subjects(tmp_path):
+    """#4938 review P2: when S7 mints section 1's Subjects and then section 2
+    fails, those Subjects must still be wired to the document — otherwise the
+    graph holds Subjects no document is about, and the operator is told they
+    were not extracted.
+
+    Fails if: the partial failure aborts the ingest; the minted Subjects are
+    not returned/wired (``about_subject < subjects``); or the skipped section
+    is not reported.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model",
+                  _second_section_failing_build_model):
+        stdout = _run_main(None, capture=True)
+    counts = _document_counts(db)
+    assert counts["sources"] == 1 and counts["points"] > 0, counts
+    assert counts["subjects"] >= 1, (
+        f"section 1's Subjects were lost on the section-2 failure: {counts}")
+    assert counts["about_subject"] == counts["subjects"], (
+        f"orphan Subjects: {counts['subjects']} minted but only "
+        f"{counts['about_subject']} wired: {counts}")
+    assert "warning: S7 entity extraction failed" in stdout, stdout
+    print(f"PASS test_4938_partial_entity_failure_leaves_no_orphan_subjects "
+          f"({counts})")
+
+
+def test_4938_graph_write_failure_does_not_orphan_minted_subjects(tmp_path):
+    """#4938 review P2 (residual): a NON-section failure — a graph/journal
+    write inside the mint loop — must not leave the Subjects created earlier in
+    the run unpointed-at.
+
+    ``seen_subjects`` is written only after ``add_subject`` returns, so a raise
+    from the SECOND call leaves the FIRST Subject already created. The names
+    whose call returned are attached as ``partial_subject_names`` and the
+    fail-open caller still wires them, so the document is about the Subjects
+    this run actually created.
+
+    Fails if: the created Subject is left unwired (a Subject exists while no
+    document points at it), the document is not written, or the failure is
+    silent. Scope: this covers a raise from the call itself; a raise after the
+    MERGE committed is out of scope (see ``_attach_partial_subjects``).
+    """
+    from tortoise.api import EventAPI
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = tmp_path / "events.jsonl"
+    out = str(tmp_path / "graph.html")
+    real_add_subject = EventAPI.add_subject
+    calls = {"n": 0}
+
+    def flaky_add_subject(self, name, subject_kind="other"):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            # Fail BEFORE journaling, so exactly one Subject is durable.
+            raise RuntimeError("simulated graph-write failure on 2nd Subject")
+        return real_add_subject(self, name, subject_kind)
+
+    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason",
+            "--db", db, "--log", str(log), "--out", out]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _person_org_build_model), \
+            patch("tortoise.api.EventAPI.add_subject", flaky_add_subject):
+        stdout = _run_main(None, capture=True)
+    counts = _document_counts(db)
+    assert counts["sources"] == 1 and counts["documents"] == 1, counts
+    assert counts["points"] > 0, counts
+    assert counts["subjects"] >= 1, (
+        f"the minted Subject was lost on the write failure: {counts}")
+    assert counts["about_subject"] == counts["subjects"], (
+        f"orphan Subjects after a non-section failure: {counts['subjects']} "
+        f"minted, {counts['about_subject']} wired: {counts}")
+    assert "warning: S7 entity extraction failed" in stdout, stdout
+    print("PASS test_4938_graph_write_failure_does_not_orphan_minted_subjects "
+          f"({counts})")
+
+
+def test_4938_upgrade_path_files_subjects(tmp_path):
+    """#4938 review P2: the capture→upgrade path (``--upgrade``) is the
+    supported full-extraction route for captured documents, so S7 must run
+    there too — otherwise 'on by default' holds for only one entry point and an
+    upgraded document still yields 0 ``:Subject`` / 0 ``aboutSubject``.
+
+    Fails if: the upgrade path does not run S7 (0 Subjects), or it runs S7
+    without wiring the document's aboutSubject edges.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    t = tmp_path / "vendor-eval.md"
+    t.write_text(_DOC_SUBJECT_FIXTURE, encoding="utf-8")
+    db = str(tmp_path / "g.db")
+    log = str(tmp_path / "events.jsonl")
+    out = str(tmp_path / "graph.html")
+    seed = FalkorProjection(db)
+    try:
+        seed.g.query(
+            "CREATE (s:Source {url:$id, id:$id, title:'Vendor Evaluation', "
+            "documentKind:'research', needs_extraction:true, sourcePath:$sp})",
+            params={"id": t.name, "sp": str(t)})
+    finally:
+        seed.close()
+    argv = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--upgrade", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
+    with patch("sys.argv", argv), \
+            patch("tortoise.ingest.build_model", _person_org_build_model):
+        _run_main(None)
+    counts = _document_counts(db)
+    assert counts["subjects"] >= 1, f"upgrade path minted no Subjects: {counts}"
+    assert counts["about_subject"] >= 1, (
+        f"upgrade path wired no aboutSubject edge: {counts}")
+    print(f"PASS test_4938_upgrade_path_files_subjects ({counts})")
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -561,26 +1005,29 @@ def test_capture_metadata_creates_document_no_points():
         "---\ntitle: Test\ntopics: licensing, AGPL\nsummary: Compared\n"
         "sessionId: s1\ndoc_status: captured\n---\n\n## User\nDiscuss licensing\n",
         encoding="utf-8")
-    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
-            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--capture-metadata", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     # Verify via live projection
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)
     try:
-        # Document exists with fields (discover by sessionId — doc_id may differ)
+        # Document Source exists with fields (discover by sessionId — doc_id may differ).
+        # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source keyed url = doc_id.
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.sessionId = 's1' "
-            "RETURN d.topics, d.summary, d.eventId"
+            "MATCH (s:Source) WHERE s.sessionId = 's1' "
+            "RETURN s.topics, s.summary, s.eventId"
         ).result_set
         assert rows, "Document not created"
         assert rows[0][0] == ["licensing", "AGPL"], rows[0][0]
         assert rows[0][1] == "Compared"
-        # sessionCaptured Event + produces→Document + uses→Skill
+        # sessionCaptured Event + produces→document Source + uses→Skill
         ev = proj.g.query(
-            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:produces]->(d:Document) "
-            "WHERE d.sessionId = 's1' RETURN count(e)"
+            "MATCH (e:Event {eventKind:'sessionCaptured'})-[:produces]->(s:Source) "
+            "WHERE s.sessionId = 's1' RETURN count(e)"
         ).result_set
         assert ev[0][0] >= 1, ev
         uses = proj.g.query(
@@ -617,14 +1064,17 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
         "---\ntitle: Test2\ntopics: licensing\nsummary: Compared\nsessionId: s2\n---\n\n"
         "## User\nWe should raise B slowly\n## Assistant\nFast raises wreck early buyers\n",
         encoding="utf-8")
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
     # 1. capture-metadata first (should NOT block full later)
     with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log1,
-                            "--capture-metadata", "--point-model", "mock:cheap",
+                            "--out", out, "--capture-metadata",
+                            "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason"]):
         _run_main(None)
     # 2. full ingest on same file → MUST extract (not skipped)
     with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log2,
-                            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]):
+                            "--out", out, "--point-model", "mock:cheap",
+                            "--relation-model", "mock:reason"]):
         _run_main(None)
     # Full ingest should have produced points/events (begin_ingest not blocked)
     lines = [ln for ln in Path(log2).read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -636,9 +1086,9 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
 
 
 @_live_db
-def test_capture_defaults_doc_status_captured():
-    """#133 P0: --capture-metadata with NO doc_status in frontmatter
-    must default the Document to doc_status='captured' (not 'draft')."""
+def test_capture_defaults_needs_extraction():
+    """#133 P0 / D10: --capture-metadata with NO extraction flag in frontmatter
+    must mark the document Source needs_extraction=true (extraction pending)."""
     import json  # noqa: F401
     uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
@@ -653,19 +1103,21 @@ def test_capture_defaults_doc_status_captured():
     Path(t).write_text(
         "---\ntitle: CapDefault\ntopics: x\nsummary: y\n---\n\n## User\nhello\n",
         encoding="utf-8")
-    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
-            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--capture-metadata", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.title = 'CapDefault' "
-            "RETURN d.doc_status"
+            "MATCH (s:Source) WHERE s.title = 'CapDefault' "
+            "RETURN s.needs_extraction"
         ).result_set
         assert rows, "Document not created"
-        assert rows[0][0] == "captured", f"expected captured, got {rows[0][0]!r}"
+        assert rows[0][0] is True, f"expected needs_extraction=True, got {rows[0][0]!r}"
     finally:
         proj.close()
 
@@ -686,19 +1138,21 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     _f.close()
     t = _tmp("ne.md")
     Path(t).write_text(
-        "---\ntitle: NeedsExtract\ntopics: a\ndoc_status: captured\n"
+        "---\ntitle: NeedsExtract\ntopics: a\n"
         "needs_extraction: true\n---\n\n## User\nImportant decision\n",
         encoding="utf-8")
-    args = ["ingest", str(t), "--db", db, "--log", log, "--capture-metadata",
-            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+            "--capture-metadata", "--point-model", "mock:cheap",
+            "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.title = 'NeedsExtract' "
-            "RETURN d.needs_extraction"
+            "MATCH (s:Source) WHERE s.title = 'NeedsExtract' "
+            "RETURN s.needs_extraction"
         ).result_set
         assert rows and rows[0][0] is True, f"needs_extraction not stored: {rows}"
     finally:
@@ -707,8 +1161,8 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
 
 @_live_db
 def test_upgrade_on_already_extracted_is_noop():
-    """#133: --upgrade on a Document already doc_status='extracted' → no-op
-    'doc already extracted, skipped' (idempotency)."""
+    """#133 + D10 (#5026): --upgrade on a document Source already extracted
+    (needs_extraction=false) → no-op 'doc already extracted, skipped'."""
     import json  # noqa: F401
     uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
@@ -719,22 +1173,25 @@ def test_upgrade_on_already_extracted_is_noop():
     _f = _FP.from_uri(uri)
     _f.g.query("MATCH (n) DETACH DELETE n")
     _f.close()
-    # The Document id MUST equal the file path so _do_upgrade finds it and
-    # exercises the "already extracted → skip" path (review P1).
+    # The document Source id MUST equal the file path so _do_upgrade finds it
+    # and exercises the "already extracted → skip" path (review P1).
     t = _tmp("already.md")
     Path(t).write_text("---\ntitle: X\n---\n\n## User\nhi\n", encoding="utf-8")
-    # Real convention: Document id = filename (args.transcript.name), sourcePath = full path
+    # Real convention: document id = filename (args.transcript.name), sourcePath = full path
     doc_id = Path(t).name
     from tortoise.projection import FalkorProjection
     proj = FalkorProjection.from_uri(uri)
     try:
+        # D10: a document is a :Source; needs_extraction=false means extracted.
         proj.g.query(
-            "CREATE (d:Document {id:$id, title:'X', doc_status:'extracted', sourcePath:$sp})",
+            "CREATE (s:Source {url:$id, id:$id, title:'X', "
+            "documentKind:'document', needs_extraction:false, sourcePath:$sp})",
             params={"id": doc_id, "sp": str(t)},
         )
     finally:
         proj.close()
-    args = ["ingest", str(t), "--db", db, "--log", log, "--upgrade",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out, "--upgrade",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -743,10 +1200,10 @@ def test_upgrade_on_already_extracted_is_noop():
     proj = FalkorProjection.from_uri(uri)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document {id:$id}) RETURN d.doc_status",
+            "MATCH (s:Source {url:$id}) RETURN s.needs_extraction",
             params={"id": doc_id},
         ).result_set
-        assert rows[0][0] == "extracted", rows[0][0]
+        assert rows[0][0] is False, rows[0][0]
     finally:
         proj.close()
 
@@ -775,19 +1232,21 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     # Real file under the base — doc sourcePath = file path (ingest convention)
     real_file = corpus / "doc-a.md"
     real_file.write_text(
-        "---\ntitle: A\ndoc_status: captured\n---\n\n## User\nhi\n",
+        "---\ntitle: A\n---\n\n## User\nhi\n",
         encoding="utf-8")
     proj = FalkorProjection(db)
     try:
+        # D10: a document is a :Source; its extraction signal is needs_extraction.
         proj.g.query(
-            "CREATE (d:Document {id:$id, title:'A', doc_status:'captured', "
-            "sourcePath:$sp})",
+            "CREATE (s:Source {url:$id, id:$id, title:'A', documentKind:'document', "
+            "needs_extraction:true, sourcePath:$sp})",
             params={"id": str(real_file), "sp": str(real_file)},
         )
     finally:
         proj.close()
     # No positional transcript — the crash path (P0 regression)
-    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -795,10 +1254,10 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document) WHERE d.sourcePath = $sp RETURN d.doc_status",
+            "MATCH (s:Source) WHERE s.sourcePath = $sp RETURN s.needs_extraction",
             params={"sp": str(real_file)},
         ).result_set
-        assert rows and rows[0][0] == "extracted", f"expected extracted, got {rows}"
+        assert rows and rows[0][0] is False, f"expected extracted (needs_extraction=False), got {rows}"
     finally:
         proj.close()
 
@@ -816,27 +1275,28 @@ def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
     corpus.mkdir()
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
     from tortoise.projection import FalkorProjection
-    # Tenant-crafted Document pointing at a path outside the base
+    # Tenant-crafted document Source pointing at a path outside the base
     proj = FalkorProjection(db)
     try:
         proj.g.query(
-            "CREATE (d:Document {id:'doc-evil', title:'Evil', "
-            "doc_status:'captured', sourcePath:$sp})",
+            "CREATE (s:Source {url:'doc-evil', id:'doc-evil', title:'Evil', "
+            "documentKind:'document', needs_extraction:true, sourcePath:$sp})",
             params={"sp": "/etc/passwd"},
         )
     finally:
         proj.close()
-    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
-    # Doc NOT extracted — the file was never read
+    # Doc NOT extracted — the file was never read (needs_extraction stays true)
     proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document {id:'doc-evil'}) RETURN d.doc_status",
+            "MATCH (s:Source {url:'doc-evil'}) RETURN s.needs_extraction",
         ).result_set
-        assert rows[0][0] == "captured", f"expected captured (fail-closed), got {rows[0][0]}"
+        assert rows[0][0] is True, f"expected pending (fail-closed), got {rows[0][0]}"
     finally:
         proj.close()
 
@@ -853,27 +1313,28 @@ def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
     # without containment)
     real = _tmp("doc-real.md")
     Path(real).write_text(
-        "---\ntitle: Real\ndoc_status: captured\n---\n\n## User\nreal content\n",
+        "---\ntitle: Real\n---\n\n## User\nreal content\n",
         encoding="utf-8")
     proj = FalkorProjection(db)
     try:
         proj.g.query(
-            "CREATE (d:Document {id:'doc-x', title:'X', doc_status:'captured', "
-            "sourcePath:$sp})",
+            "CREATE (s:Source {url:'doc-x', id:'doc-x', title:'X', "
+            "documentKind:'document', needs_extraction:true, sourcePath:$sp})",
             params={"sp": real},
         )
     finally:
         proj.close()
-    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+    out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
+    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
     proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
-            "MATCH (d:Document {id:'doc-x'}) RETURN d.doc_status",
+            "MATCH (s:Source {url:'doc-x'}) RETURN s.needs_extraction",
         ).result_set
-        assert rows[0][0] == "captured"
+        assert rows[0][0] is True
     finally:
         proj.close()
 
