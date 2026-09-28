@@ -1,0 +1,3 @@
+queue_rules:
+  - name: main
+    batch_size: 2

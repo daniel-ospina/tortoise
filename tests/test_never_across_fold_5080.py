@@ -3,11 +3,17 @@ difference.
 
 The owner ruling of 2026-09-24 authorises merging near-duplicate claims and
 forbids a merge across a difference in a number/quantity, a named entity, a
-language, a negation, a condition, a date/scope, or a load-bearing connective
-whose role changes across the pair (``#5139``).  The authoritative predicate is
+language, a negation, a condition, a date/scope, a load-bearing connective
+whose role changes across the pair (``#5139``), or a role inversion read from
+the pair (``#5131``).  The authoritative predicate is
 ``extractor_v2._boundary`` — the connective class is enumerated by
-``_CONNECTIVE_SLOTS``/``_CONNECTIVE_MEMBERS``, and the labels it can report by
-``distinguishing_difference``; the prose below is a reading aid.  Both
+``_CONNECTIVE_SLOTS``/``_CONNECTIVE_MEMBERS``, the role-inversion class by
+``_frame_and_content``/``_block_exchange``/``_coordination_between`` (whose
+exemption is enumerated by ``_COORDINATION_MEMBERS``, the SMALLER set — a
+strict subset of the clause-relation slot, which is NOT the enumeration to
+follow), and the
+labels it can report by ``distinguishing_difference``; the prose below is a
+reading aid.  Both
 write-path fold sites enforce that boundary from ONE implementation
 (``extractor_v2.fold_allowed`` / ``supersede_allowed``):
 
@@ -17,9 +23,9 @@ write-path fold sites enforce that boundary from ONE implementation
 
 A refused fold produces ADD / no hit, so both claims survive.  A differing
 NUMBER or DATE is a new value for one attribute and keeps superseding (UPDATE);
-a differing NEGATION, CONDITION, marker SCOPE, LANGUAGE, substituted content or
-CONNECTIVE OPERATOR means the two are rival claims, which may be neither folded
-nor superseded.
+a differing NEGATION, CONDITION, marker SCOPE, LANGUAGE, substituted content,
+CONNECTIVE OPERATOR or ROLE INVERSION means the two are rival claims, which may
+be neither folded nor superseded.
 
 Every never-across pair in the tables below carries token overlap at or above
 ``NOOP_MIN_OVERLAP``, so the assertion is that the boundary refuses a fold the
@@ -127,8 +133,15 @@ NEVER_ACROSS = [
      "we shipped 2 crates to 3 stores", "number"),
     ("we have 2 cats and 3 dogs", "we have 3 cats and 2 dogs", "number"),
     ("we have 2 cats and 3 dogs", "we have 2 dogs and 3 cats", "number"),
+    # ... and the same two nouns swapped with the numbers HELD in place is
+    # also a role inversion — `crates` and `stores` change slots around `to`,
+    # and `to` is not a coordination, so it does not commute (#5131).  The
+    # boundary reports the substitution, because its documented order puts an
+    # identity difference ahead of a value one (`_boundary`); the refusal is
+    # the same either way.  The rows above pin the number BINDING on its own,
+    # and the `and` row above pins a noun swap a coordination folds.
     ("we shipped 3 crates to 2 stores",
-     "we shipped 3 stores to 2 crates", "number"),
+     "we shipped 3 stores to 2 crates", "substituted_content"),
     # A clitic the hand-written list cannot enumerate: the rule is "X + n't",
     # not the ~17 verbs someone thought to write down.
     ("we mustn't ship the build", "we ship the build", "negation"),
@@ -227,6 +240,14 @@ NEVER_ACROSS = [
     ("we re-sign the contract", "we resign the contract",
      "substituted_content"),
     ("we run a co-op", "we run a coop", "substituted_content"),
+    # An argument SWAP (#5131): the content multiset is one claim, but the two
+    # noun phrases fill each other's slots, so the two claims are rivals.  The
+    # FRAME is unchanged — that is what separates this from the legitimate
+    # reorder #4652 pins — and no coordination sits between the two blocks.
+    ("the cat chased the dog", "the dog chased the cat",
+     "substituted_content"),
+    ("alice reports to bob", "bob reports to alice",
+     "substituted_content"),
 ]
 
 # Pairs differing in a VALUE dimension AND an identity dimension at once.  The
@@ -278,6 +299,21 @@ IDENTITY_DIMENSIONS = {
     "negation", "condition", "scope", "language", "substituted_content",
     "unreadable",
 }
+
+
+# `_frame_and_content` reads a token containing a DIGIT as frame (the value
+# branch), so a pin built from `f"w{i}"` has an EMPTY content list: the
+# exchange scan is never reached and the pin asserts nothing.  These are
+# digit-free and prefixed so they collide with no stopword, clock unit or date
+# word, which makes them CONTENT.
+def _alpha_token(i: int) -> str:
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = letters[r] + out
+    return "zz" + out
 
 
 class TestDistinguishingDifference:
@@ -1638,31 +1674,358 @@ class TestDistinguishingDifference:
         predicate lacks.  The one-sided form beside a SHARED member IS refused
         (the `gate` row of `test_a_one_sided_state_word_is_a_rival_claim`), so
         this pin records a boundary and not a predicate that never fires.
+
+        The role-inversion rule (#5131) does not reach it either, and that is
+        the recorded exclusion: the two members' exchange STRADDLES the
+        coordination `and`, and a coordination's members commute, so
+        `_coordination_between` reads the exchange as the coordination
+        reordering itself rather than as a re-assignment of slots.
         """
         assert v2.fold_allowed("the flag is on and the gate is off",
                                "the flag is off and the gate is on")
         assert not v2.fold_allowed("the flag is off and the gate is on",
                                    "the flag is off and the gate is off")
 
-    def test_a_role_inversion_is_a_known_limit(self):
-        """Documented residual, pinned so it cannot go silent.
+    def test_a_role_inversion_is_a_rival_claim(self):
+        """The role inversion is refused — the limit is CLOSED (#5131).
 
-        A marker-free pair that inverts a role carries one multiset and two
-        meanings, and a token-level predicate cannot see the inversion.  The
-        obvious fix — refuse every pair whose content order differs — is
-        WRONG: a legitimate paraphrase reorders freely and #4652 pins that
-        "backpressure control is missing from the ingest queue" folds into
-        "the ingest queue is missing backpressure control", which is the same
-        multiset in a different order.  Separating a reordering from a role
-        inversion needs syntax, so it is left to a model (filed as #5131).
+        This replaces `test_a_role_inversion_is_a_known_limit`, which pinned
+        the fold.  A marker-free pair whose two noun phrases are inverted
+        carries ONE content multiset and TWO meanings, and the set comparison
+        saw only the multiset, so the pair folded and the in-capture seam then
+        `DETACH DELETE`d the second claim.  The boundary now reads the PAIR: an
+        unchanged FRAME multiset plus a two-block EXCHANGE around a shared
+        middle (a content predicate, a frame relator, or both) is a
+        re-assignment of slots, not a rewording.
+
+        The last assertion is the anti-regression the obvious fix breaks:
+        refusing every pair whose content ORDER differs refuses #4652's
+        legitimate reorder, whose frame CHANGES as its arguments move.
         """
-        assert v2.fold_allowed("the cat chased the dog",
-                               "the dog chased the cat")
-        # ... and the reason the shape above cannot be tightened: this pair is
-        # the same multiset in a different order and MUST fold (#4652).
+        for prior, rival in (
+                ("the cat chased the dog", "the dog chased the cat"),
+                ("alice reports to bob", "bob reports to alice"),
+                # The middle can be a frame RELATOR and no content token at
+                # all: `in`/`of` are frame, so the raw gap between the blocks
+                # is what marks the exchange.
+                ("the key is in the lock", "the lock is in the key"),
+                ("the owner of the house", "the house of the owner"),
+                # Both blocks begin with the same token, so a MAXIMAL common
+                # prefix would eat one block's leading `server` and hide the
+                # exchange; the head/tail search keeps it visible.
+                ("the server pings the server pool",
+                 "the server pool pings the server"),
+                # A fixed tail (`a gift`) must not absorb either argument.
+                ("alice gave bob a gift", "bob gave alice a gift"),
+                # An adjective inside a noun phrase decides nothing by itself:
+                # this is still a genuine inversion (who met whom), and it is
+                # refused — while `the red car hit the truck` / `the car hit the
+                # red truck`, the same "adjective inside an NP" shape, folds
+                # because its decomposition closes the gap on one side.
+                ("the tall woman met the man", "the man met the tall woman")):
+            assert v2.distinguishing_difference(prior, rival) \
+                == "substituted_content", (prior, rival)
+            assert not v2.fold_allowed(prior, rival), (prior, rival)
+            # A rival may be neither folded NOR superseded: an UPDATE would
+            # overwrite one of the two meanings with the other.
+            assert not v2.supersede_allowed(prior, rival), (prior, rival)
+        # ... and the reorder the obvious fix WOULD have refused must fold:
+        # the same multiset in a different order, with a frame that changed as
+        # the arguments moved (#4652).
         assert v2.fold_allowed(
             "backpressure control is missing from the ingest queue",
             "the ingest queue is missing backpressure control")
+
+    def test_a_copula_identity_pair_is_refused_not_folded(self):
+        """The FAIL-CLOSED cost of reading the relator structurally.
+
+        A copula is a relator, so `the owner is the manager` against `the
+        manager is the owner` is read as an exchange and refused — even though
+        identity is symmetric and the two really do assert the same thing.
+        The direction is fail-closed: both claims are kept, at the cost of one
+        dedup.  Telling an identity copula from a DIRECTIONAL preposition
+        (`the key is in the lock` against `the lock is in the key`, a genuine
+        inversion) would need a semantic list of relators, which the guard
+        deliberately does not keep; refusing both is the safe side.
+        """
+        assert v2.distinguishing_difference(
+            "the owner is the manager",
+            "the manager is the owner") == "substituted_content"
+        assert not v2.fold_allowed("the owner is the manager",
+                                   "the manager is the owner")
+        assert not v2.supersede_allowed("the owner is the manager",
+                                        "the manager is the owner")
+
+    def test_a_role_verdict_is_independent_of_capture_order(self):
+        """The verdict must not depend on which claim was captured first.
+
+        The in-capture seam calls ``fold_allowed(prior, candidate)`` with the
+        EARLIER capture as the prior, so an order-dependent verdict would
+        `DETACH DELETE` a rival in one capture order and keep it in the other.
+        The boundary is read from the PAIR and must be symmetric; every pair
+        here is checked in BOTH directions.  Two order-dependences are pinned:
+        the relator check reading each claim's own span (a one-sided read
+        folded ``the build failed silently`` but refused ``silently the build
+        failed``), and the coordination read on the FIRST accepted
+        decomposition of a pair that admits several.
+        """
+        for a, b in (
+                ("the cat chased the dog", "the dog chased the cat"),
+                ("the key is in the lock", "the lock is in the key"),
+                ("the server pings the server pool",
+                 "the server pool pings the server"),
+                ("alice reports to bob", "bob reports to alice"),
+                ("the build failed silently", "silently the build failed"),
+                ("alice quickly shipped the order",
+                 "alice shipped the order quickly"),
+                ("we ship the server, the client",
+                 "we ship the client, the server"),
+                ("the cat the dog chased", "the dog the cat chased"),
+                ("the cat and the dog chased the book",
+                 "and the book the dog chased the cat"),
+                ("cat and dog cat to dog", "dog to cat dog and cat"),
+                ("backpressure control is missing from the ingest queue",
+                 "the ingest queue is missing backpressure control"),
+                ("the cat and the dog", "the dog and the cat"),
+                # The reordered-phrase class, in both its shapes: fronted and
+                # in situ.  Pinned for order-independence here as well as in
+                # `test_the_fail_closed_residuals_keep_both_claims`, because the
+                # seam reads the pair in capture order and a one-sided read of
+                # either span is what this call-out exists to catch.
+                ("in staging the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record in staging"),
+                ("from the depot the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record from the depot"),
+                ("we shipped the crate from the depot to the store",
+                 "we shipped the crate to the store from the depot")):
+            assert (v2.distinguishing_difference(a, b)
+                    == v2.distinguishing_difference(b, a)), (a, b)
+            assert v2.fold_allowed(a, b) == v2.fold_allowed(b, a), (a, b)
+
+    def test_the_fail_closed_residuals_keep_both_claims(self):
+        """The reorderings the guard refuses: what they have in common.
+
+        A shape the token stream cannot tell from a genuine inversion is
+        REFUSED, so both claims are kept.  That is the SAFE direction — a
+        duplicate costs less than a deleted rival — and each pair is pinned so
+        the over-refusal is a recorded boundary, not an accident.  They do NOT
+        all have the same status: the comma-list reorder and the reordered
+        phrase/adjunct do not differ (an over-refusal, i.e. a lost dedup),
+        while the reduced relative DOES differ and must not fold.  A comma-list
+        reorder is separated only by the second block's determiner, which is
+        the same raw shape a reduced relative has once the comma is gone:
+        ``the cat the dog chased`` against ``the dog the cat chased``.
+        """
+        for a, b in (
+                ("we ship the server, the client",
+                 "we ship the client, the server"),
+                ("the cat the dog chased", "the dog the cat chased"),
+                # A reorder that leaves a token strictly between the two
+                # content blocks in EACH claim is refused — FAIL-CLOSED, both
+                # claims kept, pinned so the class is a recorded boundary
+                # rather than a surprise.  The condition is the PAIR's own gap,
+                # not the moved phrase: the same shape folds when the gap
+                # closes on either side (pinned in
+                # `test_a_role_reading_that_is_not_an_exchange_stays_foldable`).
+                ("in staging the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record in staging"),
+                ("the deploy succeeded as the build completed",
+                 "as the build completed the deploy succeeded"),
+                # The decisive contrast for the adjacency condition: this pair
+                # carries the SAME moved phrase and the SAME frame head as
+                # `from the depot we shipped the crate` (pinned as FOLDING in
+                # `test_a_role_reading_that_is_not_an_exchange_stays_foldable`)
+                # and is refused only because the following block's determiner
+                # supplies the gap here and not there.
+                ("from the depot the alpha engine processed the delta record",
+                 "the alpha engine processed the delta record from the depot"),
+                ("we shipped the crate from the depot to the store",
+                 "we shipped the crate to the store from the depot")):
+            assert v2.distinguishing_difference(a, b) == "substituted_content", \
+                (a, b)
+            assert not v2.fold_allowed(a, b), (a, b)
+            assert not v2.supersede_allowed(a, b), (a, b)
+
+    def test_a_role_reading_that_is_not_an_exchange_stays_foldable(self):
+        """The reorderings the exchange rule deliberately does NOT reach.
+
+        Closing the inversion must not refuse the legitimate reorderings that
+        wear the same content multiset.  Each is pinned so the exclusion is a
+        recorded boundary and not a predicate that refuses every reorder:
+
+        * a COORDINATION's two members trading places (`the cat and the dog` /
+          `the dog and the cat`) IS read as an exchange, and
+          `_coordination_between` folds it — a coordination's members commute,
+          so the trade asserts nothing.  The exemption is deliberately BROAD:
+          a coordination ANYWHERE inside the straddled span folds, including
+          one inside the shared middle (`the cat and the dog chased the
+          book` / `the book and the dog chased the cat`) and one joining two
+          CLAUSES (`we tested the build and then shipped the release` / `we
+          shipped the release and then tested the build`).  Those two are
+          FAIL-OPEN residuals in the DELETE direction (both pairs do differ);
+          closing them needs the coordination's member spans, which a token
+          walk does not recover, and they are pinned here rather than left
+          silent;
+        * an exchange whose two blocks are ADJACENT in the RAW stream has no
+          relator between them and is not an exchange at all — a RE-FLOW (an
+          adverb, an object, or a whole clause moving) keeps folding;
+        * an exchange whose FRAME changed — active/passive adds the auxiliary
+          and `by`, and #4652 drops `from`.
+        """
+        for prior, candidate in (
+                ("the cat and the dog", "the dog and the cat"),
+                ("the cat and the dog chased the book",
+                 "the book and the dog chased the cat"),
+                ("we tested the build and then shipped the release",
+                 "we shipped the release and then tested the build"),
+                ("the flag is on and the gate is off",
+                 "the flag is off and the gate is on"),
+                ("the manager approved the plan",
+                 "the plan was approved by the manager"),
+                ("the dog chased the cat",
+                 "the cat was chased by the dog"),
+                ("the build silently failed", "the build failed silently"),
+                ("the build failed silently", "silently the build failed"),
+                ("alice quickly shipped the order",
+                 "alice shipped the order quickly"),
+                # A reorder whose moved phrase leaves the two content blocks
+                # ADJACENT is a RE-FLOW and keeps folding.  This is the other
+                # side of the pair pinned in
+                # `test_the_fail_closed_residuals_keep_both_claims`: the same
+                # moved phrase is refused there and folds here, because the
+                # following block supplies a gap in one pair and not the other
+                # — the verdict is read from the pair's spans, not from the
+                # phrase.
+                ("from the depot we shipped the crate",
+                 "we shipped the crate from the depot"),
+                ("she drove the car to the office on tuesday",
+                 "she drove the car on tuesday to the office"),
+                ("the server is up and the db is down",
+                 "the db is down and the server is up"),
+                ("alice and bob and carol shipped",
+                 "carol and bob and alice shipped"),
+                # A multi-token block whose token-level decomposition leaves the
+                # blocks adjacent on ONE side folds by the SAME adjacency rule as
+                # the pairs above — this one DOES differ (which car hit which),
+                # so the fold is a pinned FAIL-OPEN in the delete direction.  It
+                # is NOT folded "because the comparison is over tokens": an
+                # adjective inside a noun phrase decides nothing on its own
+                # (`the tall woman met the man` / `the man met the tall woman`
+                # is refused, pinned as the inversion it is).
+                ("the red car hit the truck",
+                 "the car hit the red truck"),
+                # A conjunction joining two CLAUSES rather than two commuting
+                # members is exempt too, and the exemption is deliberately
+                # broad — this pair DOES differ (which clause failed), so it is
+                # a pinned FAIL-OPEN in the delete direction.
+                ("the build failed but the test passed",
+                 "the test passed but the build failed")):
+            assert v2.distinguishing_difference(prior, candidate) is None, \
+                (prior, candidate)
+            assert v2.fold_allowed(prior, candidate), (prior, candidate)
+
+    def test_a_symmetric_relation_pair_is_refused_not_folded(self):
+        """The FAIL-CLOSED cost beyond the copula, declared and pinned.
+
+        The copula is the shape the exchange rule sees most often, not the
+        only one: ANY relator with no structural direction makes an exchanged
+        pair look like a re-assignment of slots.  A symmetric relation is the
+        clearest case — `alice is married to bob` and `bob is married to alice`
+        really do assert one thing, and the boundary refuses them anyway.
+
+        This is the same safe direction as the copula residual (both claims
+        kept, at the cost of a dedup), and it is pinned so that the class is a
+        recorded boundary rather than an undeclared side effect of the rule.
+        Telling a symmetric relator from a directional one needs semantics the
+        token walk does not have, so the refusal is the whole honest answer.
+        """
+        for prior, candidate in (
+                ("the addon pairs with the plugin",
+                 "the plugin pairs with the addon"),
+                ("alice is married to bob", "bob is married to alice"),
+                ("the file matches the pattern",
+                 "the pattern matches the file")):
+            assert v2.distinguishing_difference(prior, candidate) \
+                == "substituted_content", (prior, candidate)
+            assert not v2.fold_allowed(prior, candidate), (prior, candidate)
+            assert not v2.supersede_allowed(prior, candidate), (prior, candidate)
+
+    def test_the_exchange_scan_is_bounded_and_refuses_when_it_gives_up(
+            self):
+        """The scan cannot run away, and giving up REFUSES rather than folds.
+
+        `_block_exchange` is a nested search whose work grows with the fourth
+        power of the content-token count, and it runs on the negative path too.
+        The claim text is model output, so without a bound a long pair sharing
+        an opening and a close made ONE comparison run for minutes — on the
+        capture path, once per retrieved candidate.  The bound is what makes
+        that impossible; this pins that BOTH bounds exist, that each is
+        reachable on its own, and that reaching either is read as REFUSE (both
+        claims kept) rather than as "no exchange" (which would let the seam
+        delete the rival).
+
+        The literal value of the ceiling is pinned, because it is a SAFETY
+        bound and not a similarity threshold: a change to it silently moves
+        which long claims fold, so it must be a deliberate act.
+
+        The last three assertions are the pair that must never be caught by the
+        bound: two LONG, byte-equal claims.  Above the ceiling the scan is not
+        attempted at all, so without the exact-equality short circuit in
+        `_role_inversion` a re-captured claim would read as a rival and be
+        duplicated — i.e. the bound would break idempotency.  They are built
+        from digit-free tokens so the content list is non-empty and the short
+        circuit (not the value branch, and not the `not content_a` early
+        return) is what the assertion actually exercises.
+        """
+        assert v2._BLOCK_EXCHANGE_MAX_TOKENS == 200
+        assert v2._BLOCK_EXCHANGE_BUDGET == 5000
+        # A pair above the LENGTH CEILING: the scan is not attempted at all.
+        n = v2._BLOCK_EXCHANGE_MAX_TOKENS + 40
+        seq = tuple((i, f"t{i}") for i in range(n))
+        flipped = tuple((i, t) for i, (_, t) in enumerate(reversed(seq)))
+        assert v2._block_exchange(seq, flipped) \
+            == v2._EXCHANGE_BUDGET_EXCEEDED
+        # ...and the BUDGET trips on its own, not only the ceiling: the same
+        # sequence against itself is AT the ceiling and has the maximal
+        # head/tail search, so only the attempt counter can stop it.
+        inside = tuple((i, f"t{i}")
+                       for i in range(v2._BLOCK_EXCHANGE_MAX_TOKENS))
+        assert v2._block_exchange(inside, inside) \
+            == v2._EXCHANGE_BUDGET_EXCEEDED
+        assert v2._role_inversion_is_unscannable(
+            v2._EXCHANGE_BUDGET_EXCEEDED)
+        assert not v2._role_inversion_is_unscannable((0, 2, 0, 2))
+        # The end-to-end path on real claim text: content-bearing (digit-free),
+        # longer than the ceiling, same frame multiset, same content multiset.
+        words = [_alpha_token(i) for i in range(n)]
+        long_a = " ".join(words)
+        long_b = " ".join(reversed(words))
+        _, content_a = v2._frame_and_content(long_a)
+        assert len(content_a) > v2._BLOCK_EXCHANGE_MAX_TOKENS, len(content_a)
+        assert v2._role_inversion(long_a, long_a) is False
+        # Every such long pair is refused, whatever the two claims say...
+        assert not v2.fold_allowed(long_a, long_b)
+        assert not v2.supersede_allowed(long_a, long_b)
+        # ...EXCEPT the pair where nothing changed at all, which must still
+        # read as the same claim rather than as a rival.
+        assert v2.distinguishing_difference(long_a, long_a) is None
+        assert v2.fold_allowed(long_a, long_a)
+        assert v2.supersede_allowed(long_a, long_a)
+
+    def test_the_coordination_vocabulary_is_pinned_literally(self):
+        """The exemption's members are an enumeration, so pin them.
+
+        The exemption set is deliberately NARROWER than the clause-relation
+        slot: `so` is a slot member and is NOT coordinating here.  A reader
+        following only `_CONNECTIVE_SLOTS` would conclude the opposite, so the
+        literal set is pinned, together with the subset relation the
+        import-time check enforces.
+        """
+        assert frozenset(
+            {"and", "or", "nor", "but", "yet"}) == v2._COORDINATION_MEMBERS
+        assert "so" in v2._CONNECTIVE_SLOTS[0]
+        assert "so" not in v2._COORDINATION_MEMBERS
+        assert v2._CONNECTIVE_SLOTS[0] >= v2._COORDINATION_MEMBERS
 
     def test_a_month_used_as_a_name_is_a_known_limit(self):
         """Documented residual, pinned so it cannot go silent.
