@@ -23,6 +23,18 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                         installed_namespaces: Collection[str] | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
 
+    **This compile is the only seam through which a pack's domain reaches the
+    extractor.** The kinds, their semantics, and each pack's memory granularity
+    all arrive here; the pipeline stages read them from the compiled
+    brief/master — S1 reads ``memory_granularity`` (``extractor_v2.
+    _granularity_text``), S2/S4 read the pack kinds (derived BY NAMESPACE in
+    ``extractor_v2._build_master_from_brief``, with no engine allowlist —
+    #5165), and S3 reads nothing pack-authored. The engine holds the pipeline
+    mechanics and the core ontology, never a pack's domain. The two engine-side
+    enumerations that are still exceptions to that rule, and the render modes
+    that change what the prompt carries, are stated in
+    ``docs/EXPANSION_PACKS.md`` §"The extractor contract".
+
     The brief the PROMPTS are compiled from. It is graph-gated only when a
     caller passes ``installed_namespaces`` — the ENFORCER is not: the
     deterministic enforcer (``validate_summary`` → ``_object_kind_vocab``),
@@ -88,7 +100,7 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                 "nearMisses": spec.get("nearMisses", []),
             }
     # T12 (#1272): the core objectKind set is aligned to ONTOLOGY §5 Object
-    # Kind Vocabulary (17 kinds — Problem added by the #2238 problem-family
+    # Kind Vocabulary (16 kinds — Problem added by the #2238 problem-family
     # salvage landing, 2026-09-05) — the prior brief
     # (concept/standard/document/tool/workflow/WorkItem/other)
     # missed project/tag/user/skill/agent/agreement + strategy/plan/goal/
