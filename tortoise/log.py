@@ -67,18 +67,25 @@ from pathlib import Path
 # member's folds MERGE/SET authoritative state and never delete a node or edge
 # NOR CLEAR an authoritative property — a ``SET n.x = $x`` whose payload value
 # is a legitimate ``null`` IS a removal (the live write cleared it), even
-# though nothing is deleted (see ``PointRevised`` below). Clearing a DERIVED
-# embedding so it is recomputed is a cache clear, not such a removal. A member
-# with no fold at all is a proof-carrying no-op. A torn tail whose type is
-# legible and wholly inside this set keeps the pre-existing tolerance. EVERYTHING ELSE is refused: an unlisted type and an
+# though nothing is deleted (see ``PointRevised`` below). The owned-null
+# ``embedding`` clear is such a removal too, NOT a recompute: writing it away
+# RESURRECTED the vector an earlier record set (``_upsert_point_props``'
+# ``embedding_clear`` arm, projection/entities.py:719-730 → :772, whose own
+# ``#5004 round-6`` comment records that bug). The OTHER embedding writes are a
+# genuine recompute cache clear: a ``REMOVE n.embedding`` gated on a NEW vector
+# being written, in the Point fold (entities.py:853), the Subject/Object upserts
+# (:1650, :1713-1719), the Document fold (:1951) and the Event fold (:2127).
+# A member with no fold at all is a proof-carrying no-op. A torn tail whose
+# type is legible and wholly inside this set keeps the pre-existing tolerance.
+# EVERYTHING ELSE is refused: an unlisted type and an
 # unreadable type cannot be proven harmless, and a silent resurrection is worse
 # than a loud refusal — the refusal touches no graph and leaves the journal for
 # the operator.
 #
-# ONE DISCLOSED EXCEPTION to "never terminalize a lifecycle" — read before
-# trusting the criterion above. Root cause in one line: a fold that writes a
-# lifecycle property STRAIGHT from the record's payload is payload-dependent,
-# and a torn prefix cannot prove that payload absent.
+# ONE DISCLOSED EXCEPTION, AND ITS BOUNDARY — read before trusting the criterion
+# above. Root cause in one line: a fold that writes an authoritative value
+# STRAIGHT from the record's payload is payload-dependent, and a torn prefix
+# cannot prove that payload absent.
 #   * ``PointAdded`` / ``OperatorAdded`` are members, but their fold reaches
 #     ``n.status = coalesce($st, n.status, 'live')`` with ``$st`` taken from the
 #     payload (projection/entities.py:770, :795) and ``create_point`` accepts
@@ -87,20 +94,40 @@ from pathlib import Path
 #     journals ``status`` in its ``PointAdded`` point snapshot (sdk.py:3828). A
 #     torn born-terminal ``PointAdded`` for an id an EARLIER record left live is
 #     therefore a resurrection this classifier tolerates. ``n.content=$content``
-#     and the operator ``n.direction=$dir`` (entities.py:767, :822) are the same
-#     family on the same re-create composition. It is NOT a
+#     and the operator ``n.direction=$dir`` (entities.py:766, :825) are the same
+#     family on the same re-create composition, and so is an owned-null
+#     ``embedding`` (re-capture of a deterministic turn id — ``turn_id =
+#     f"{session_id}_t{i}"``, sdk.py:1106 — with changed content and nothing
+#     encoded, whose snapshot journals the read-back ``None``, sdk.py:1130):
+#     the replay then keeps a stale vector the live write cleared. It is NOT a
 #     first-order path (unlike ``EventRecorded``'s connector leg, which every
-#     connector ingest reaches, or ``SessionRecorded`` above): it needs a second
-#     ``PointAdded`` for an EXISTING id with an explicit TERMINAL status, and
-#     excluding the two types would refuse the most common torn record of all.
+#     connector ingest reaches, or ``SessionRecorded`` above): every arm needs a
+#     SECOND ``PointAdded``/``OperatorAdded`` for an EXISTING id, and excluding
+#     the two types would refuse the most common torn record of all.
 #     Born-terminal creates are a supported, behaviorally pinned write
 #     (tests/test_2952_write_path_determinism.py::test_born_terminal_point_is_not_a_dirty_root),
 #     which is why this is a disclosure and not a mistake. Filed as #5921 with
-#     the reproduction. The SAME root cause also reaches the
+#     the reproductions. The SAME root cause also reaches the
 #     ``PointPromoted`` / ``OperatorPromoted`` ``get_point`` snapshots, which
 #     share ``_upsert_point_props``; no writer path can put a terminal status in
 #     one (promotion is terminal-guarded), so the reachable composition is the
 #     create path above.
+#
+# ⛔ WHY THE FOUR REMAIN WHILE ``PointRevised`` / ``OperatorAnnotated`` ARE
+# REFUSED — the boundary, since it is not "which fold can clear". Those two
+# write whatever props the caller passed on a record that ONLY updates, so a
+# ``null`` clear is part of the record's ORDINARY payload shape with no second
+# event required. Here the clear needs a same-id RE-CREATE, so the ordinary
+# payload of the type is still a creation. Removing these four would instead
+# refuse the dominant torn shape of an ingest journal (a crash mid-append), i.e.
+# turn the crash-resume tolerance of epic #900 S15/T12 — a recorded decision
+# (tests/test_index_restore.py::test_s15_torn_tail_journal_rebuilds_to_crash_free_state,
+# tests/test_index_directory.py::test_e2e18_hard_crash_sigkill_resume) — into a
+# blocked recovery that then loses the fragment anyway. That is a DECISION, not
+# a bug fix: the durable fix is writer-side (give the owned-null clear its own
+# refused record type, or stop journaling an owned-null ``embedding`` on a
+# re-create), which is what #5921 asks for. Reopen #5921 before widening this
+# refusal.
 #
 # ⛔ THE POLARITY IS DELIBERATE: a NEW event type defaults to REFUSED, not
 # tolerated. Adding one here is the claim that its loss cannot revive state —

@@ -488,6 +488,26 @@ def test_torn_born_terminal_point_added_is_a_disclosed_tolerance():
     print("PASS test_torn_born_terminal_point_added_is_a_disclosed_tolerance")
 
 
+def test_torn_point_added_owned_null_embedding_is_a_disclosed_tolerance():
+    """The SECOND disclosed instance of the same #5921 root cause.
+
+    An owned-null ``embedding`` (a re-capture of a deterministic turn id that
+    encoded nothing) CLEARS the stored vector on the live write and is NOT
+    recomputed, so a replayed tear keeps a stale vector. The type is kept
+    because refusing it would refuse the dominant torn shape of an ingest
+    journal — the boundary and the reason are in the log.py comment, and the
+    writer-side fix is #5921. Pinned so the tolerance is visible and any
+    tightening is deliberate.
+    """
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "sess_t0", '
+        '"content": "edited", "embedding": nu')
+    assert not torn_record_may_revive_state(
+        '{"type": "PointAdded", "point": {"id": "sess_t0", '
+        '"content": "edited", "embedding": null')
+    print("PASS test_torn_point_added_owned_null_embedding_is_a_disclosed_tolerance")
+
+
 def test_a_torn_point_revised_carrying_a_clear_is_refused():
     """``PointRevised`` / ``OperatorAnnotated`` are NOT allowlisted.
 
