@@ -1126,3 +1126,358 @@ def get_current_usage(org_id: str) -> dict:
         overage_cost = overage_units * overage_price_per_10k()
 
     return _view(ops_used, ops_limit, eligible, overage_cost)
+
+
+# ── Graph storage lane: per-org GRAPH.MEMORY USAGE gauge (#5331) ─────────────
+#
+# WHY. The owner ruling (2026-09-26) is that storage is counted in MB/GB, not
+# nodes. The graph MB figure comes from ``GRAPH.MEMORY USAGE``
+# (``tortoise/graph_storage.py``), which is a SAMPLING ESTIMATE that excludes
+# per-graph/Redis-key overhead. This lane puts the reading on the SAME durable
+# per-(org, period) ledger the ask/capture lanes use, so the figure needs no
+# new store and no new read path.
+#
+# A GAUGE, NOT AN INCREMENT. The other lanes are cumulative workload; graph
+# storage is a current-state measurement. This lane OVERWRITES its columns (the
+# latest reading in the window wins) instead of summing them — adding two
+# readings of the same graph would double-count the same bytes. The point
+# estimate, the observed range and the SAMPLES/repeats used are stored together
+# so the reading's own precision travels with it.
+#
+# NOT A BILLING CHANGE (#5331 is measurement only): nothing here prices, caps,
+# throttles or refuses, and ``get_cohort_spend_usd`` reads only ``ask_cost_usd``
+# + ``capture_cost_usd``, so the spend ceiling cannot see these columns by
+# construction.
+
+
+def _finite_or(value, default: float) -> float:
+    """Coerce to a finite float, else *default* — one NaN guard per float.
+
+    Catches ``OverflowError`` as well as ``(TypeError, ValueError)``: a helper
+    whose whole job is to answer "is this finite" must not raise before it can
+    answer, and ``float(10**400)`` raises ``OverflowError: int too large to
+    convert to float`` rather than returning a non-finite value.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _is_finite(value) -> bool:
+    """True only for a value that coerces to a finite float.
+
+    ``OverflowError`` is caught for the same reason as in ``_finite_or``: an
+    un-coercible magnitude is not finite, and must answer ``False`` rather than
+    propagate a raise out of the fail-soft ledger write.
+    """
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def record_graph_storage_reading(org_id: str | None, *, total_mb: float,
+                                 indices_mb: float | None = None,
+                                 samples: int | None = None,
+                                 repeats: int = 1,
+                                 min_mb: float | None = None,
+                                 max_mb: float | None = None,
+                                 spread_mb: float = 0.0,
+                                 measured_at: str | None = None,
+                                 _selfhost_transport: bool = False
+                                 ) -> dict | None:
+    """SET the org's graph-storage GAUGE for the current window (#5331).
+
+    A gauge, not an increment: the latest reading in the window wins (see the
+    lane note above). Window resolution RAISES on an unresolvable anchor
+    (#3825); that raise is a SIGNAL, not a refusal (#3981) — the caller
+    (``graph_storage.record_graph_storage``) absorbs it and the request is
+    served. A failure of the write RPC itself stays non-fatal (WARNING,
+    dropped) — the shared #3824 residual.
+
+    NON-FINITE ``total_mb`` DROPS the write (returns None) rather than
+    coercing it: this is a GAUGE, and overwriting a real reading with a
+    fabricated ``0.0`` is the false-zero the meter's contract forbids. A
+    non-integer ``samples``/``repeats`` is dropped the same way (the stored
+    figure would misstate its own precision). Non-finite min/max/indices are
+    coerced to a safe value — they are context for a finite total, never the
+    headline figure.
+
+    Exemptions mirror ``record_ask_usage``: no org, or the selfhost transport.
+
+    ⚠️ ``samples``/``repeats`` default here to the meter's own defaults, but a
+    real caller always passes the reading's values — a stored 0 would claim a
+    precision the reading did not have. The defaults exist only so the writer
+    is callable in isolation.
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not _is_finite(total_mb):
+        # A non-finite total is NOT a zero-byte graph — it is an unusable
+        # measurement. DROP the write rather than coerce it to 0.0: a gauge
+        # OVERWRITE of 0.0 would clobber a real prior reading with a fabricated
+        # zero (the honesty contract ``graph_storage.record_graph_storage``
+        # states — a failed measurement must not appear on the ledger).
+        _logger.warning(
+            "graph storage metering dropped a non-finite total_mb "
+            "(team=%s total_mb=%r) — keeping the last good reading rather "
+            "than writing a fabricated 0.0", org_id, total_mb)
+        return None
+    total = float(total_mb)
+    # ⛔ DELEGATE to the meter's own validators, so the two paths CANNOT drift.
+    # A round-6 review found this boundary still flooring a finite non-integer
+    # (``int(5.9) == 5``) and applying NO bounds (a stored ``samples=0``, a huge
+    # unclamped count) — the identical defect the same PR had just fixed in
+    # ``graph_storage._resolve_samples/_resolve_repeats``, and exactly the
+    # source/ledger asymmetry its own commit set out to close. Re-implementing
+    # the rule here is what let them diverge, so this calls the ONE
+    # implementation: it rejects a non-finite or fractional count, rejects a
+    # non-integer, and clamps to [1, MAX] with a warning.
+    from tortoise.graph_storage import (
+        REPEATS_MAX,
+        SAMPLES_DEFAULT,
+        SAMPLES_MAX,
+        _resolve_repeats,
+        _resolve_samples,
+    )
+    if samples is None:
+        samples = SAMPLES_DEFAULT
+    try:
+        # Distinct messages per parameter, because the two have different
+        # documented ranges (SAMPLES is the engine's knob with an engine max;
+        # repeats is this module's own bound).
+        samples = _resolve_samples(samples)
+    except ValueError as e:
+        _logger.warning(
+            "graph storage metering dropped an unusable samples (team=%s "
+            "samples=%r) — not writing a figure that misstates its own "
+            "precision: %s", org_id, samples, e)
+        return None
+    try:
+        repeats = _resolve_repeats(repeats)
+    except ValueError as e:
+        _logger.warning(
+            "graph storage metering dropped an unusable repeats (team=%s "
+            "repeats=%r) — not writing a figure that misstates its own "
+            "precision: %s", org_id, repeats, e)
+        return None
+    assert 1 <= samples <= SAMPLES_MAX and 1 <= repeats <= REPEATS_MAX
+    # Repair the RELATIONAL invariants at the boundary, mirroring the source:
+    # the migration defines ``graph_storage_spread_mb`` as "max_mb - min_mb — the
+    # OBSERVED spread" and the reader relies on ``min <= total <= max``, so a
+    # caller passing a contradictory trio must not have it persisted verbatim.
+    # Measured before this: ``min=9, total=5, max=1`` was written as-is.
+    safe_min = _finite_or(min_mb, total) if min_mb is not None else total
+    safe_max = _finite_or(max_mb, total) if max_mb is not None else total
+    safe_min, safe_max = min(safe_min, total), max(safe_max, total)
+    # ``spread`` is COMPUTED, not trusted: a caller-supplied spread that does not
+    # equal ``max - min`` would contradict the row it is stored beside. The
+    # parameter is still READ, as a cross-check, so a disagreeing caller is told
+    # rather than silently overridden.
+    safe_spread = safe_max - safe_min
+    if not math.isfinite(safe_spread):
+        # ⛔ The DERIVED spread needs its own guard — the per-input finiteness
+        # checks do NOT provide it, because subtracting two individually finite
+        # extremes can overflow to inf (min=-1e308, max=1e308). Measured before
+        # this: the Supabase lane STORED ``spread_mb = inf`` and a strict encoder
+        # then rejected the row, while the embedded lane dropped the write — the
+        # two substrates disagreed on the same input. This is the identical
+        # defect the meter guards at the source (``measure_graph_storage`` fails
+        # the reading rather than publish an infinite spread), so the boundary
+        # DROPS the write, exactly as it already does for a non-finite total:
+        # keeping the last good reading beats persisting an unusable one.
+        _logger.warning(
+            "graph storage metering dropped a non-finite DERIVED spread "
+            "(team=%s min=%r max=%r total=%r) — not writing an inf spread",
+            org_id, safe_min, safe_max, total)
+        return None
+    if spread_mb is not None and _is_finite(spread_mb):
+        supplied = float(spread_mb)
+        if abs(supplied - safe_spread) > 1e-9:
+            _logger.warning(
+                "graph storage metering: supplied spread %r disagrees with "
+                "max-min (%r) for team=%s — storing the DERIVED value, so the "
+                "row cannot contradict itself", supplied, safe_spread, org_id)
+    # A non-finite index share is ABSENT, not zero (review finding):
+    # ``graph_storage_indices_mb`` is nullable precisely so "the engine did not
+    # report an index share" stays distinguishable from "reported as 0" — the
+    # distinction this meter exists to keep. Defaulting a NaN to 0.0 would write
+    # a fabricated clean figure, which is the one thing a measurement must not do.
+    # A share LARGER than the total is dropped for the same reason: it is not a
+    # usable part-of-whole, and the source drops it too.
+    safe_indices = None
+    if indices_mb is not None and _is_finite(indices_mb):
+        candidate = float(indices_mb)
+        if candidate <= total:
+            safe_indices = candidate
+    period = _require_period(org_id, "graph storage metering")
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        return _record_graph_storage_reading_locked(
+            org_id, period, now_iso,
+            total=total,
+            indices=safe_indices,
+            samples=samples,
+            repeats=repeats,
+            min_mb=safe_min,
+            max_mb=safe_max,
+            spread=safe_spread,
+            measured_at=measured_at,
+        )
+
+
+def _record_graph_storage_reading_locked(org_id: str, period: MeteringPeriod,
+                                         now_iso: str, *, total: float,
+                                         indices: float | None, samples: int,
+                                         repeats: int, min_mb: float,
+                                         max_mb: float, spread: float,
+                                         measured_at: str | None
+                                         ) -> dict | None:
+    """The serialized graph-storage gauge write."""
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_set_graph_storage,
+            )
+            metering_set_graph_storage(
+                get_control_plane(), org_id, period.start_iso, period.end_iso,
+                total_mb=total, indices_mb=indices, samples=samples,
+                repeats=repeats, min_mb=min_mb, max_mb=max_mb,
+                spread_mb=spread, measured_at=measured_at)
+            return _graph_storage_row(period, total, indices, samples, repeats,
+                                      min_mb, max_mb, spread, measured_at)
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "SET m.period = $label, m.period_end = $pend, "
+            "    m.graph_storage_mb = $total, "
+            "    m.graph_storage_indices_mb = $indices, "
+            "    m.graph_storage_samples = $samples, "
+            "    m.graph_storage_repeats = $repeats, "
+            "    m.graph_storage_min_mb = $min_mb, "
+            "    m.graph_storage_max_mb = $max_mb, "
+            "    m.graph_storage_spread_mb = $spread, "
+            "    m.graph_storage_measured_at = $measured, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "pstart": period.start_iso,
+                    "pend": period.end_iso, "label": period.label,
+                    "total": total, "indices": indices, "samples": samples,
+                    "repeats": repeats, "min_mb": min_mb, "max_mb": max_mb,
+                    "spread": spread, "measured": measured_at,
+                    "now": now_iso},
+        )
+        return _graph_storage_row(period, total, indices, samples, repeats,
+                                  min_mb, max_mb, spread, measured_at)
+    except Exception as e:
+        _logger.warning(
+            "graph storage metering write failed (non-fatal): team=%s "
+            "period=%s error=%s", org_id, period.label, e,
+        )
+        return None
+
+
+def _graph_storage_row(period: MeteringPeriod, total: float,
+                       indices: float | None, samples: int, repeats: int,
+                       min_mb: float, max_mb: float, spread: float,
+                       measured_at: str | None) -> dict:
+    """The writer's return shape — the same keys the reader returns."""
+    return {
+        "period": period.label,
+        "period_start": period.start_iso,
+        "period_end": period.end_iso,
+        "graph_storage_mb": total,
+        "graph_storage_indices_mb": indices,
+        "graph_storage_samples": samples,
+        "graph_storage_repeats": repeats,
+        "graph_storage_min_mb": min_mb,
+        "graph_storage_max_mb": max_mb,
+        "graph_storage_spread_mb": spread,
+        "graph_storage_measured_at": measured_at,
+    }
+
+
+def get_graph_storage_reading(org_id: str) -> dict:
+    """The org's last graph-storage reading in the current window (#5331).
+
+    Returns the ``graph_storage_*`` fields plus the window. ZEROS (and a
+    ``None`` timestamp) for an org with no reading yet: a successful read
+    returning NO row is not an error (the MERGE only creates the row on the
+    first write). Read failures degrade to the zero view (never 500, #923),
+    including an unresolvable window.
+    """
+    zeros: dict = {
+        "graph_storage_mb": 0.0,
+        "graph_storage_indices_mb": None,
+        "graph_storage_samples": 0,
+        "graph_storage_repeats": 0,
+        "graph_storage_min_mb": 0.0,
+        "graph_storage_max_mb": 0.0,
+        "graph_storage_spread_mb": 0.0,
+        "graph_storage_measured_at": None,
+    }
+
+    def _zero_view(label: str,
+                   period: MeteringPeriod | None = None) -> dict:
+        return {**zeros, "period": label,
+                "period_start": period.start_iso if period else None,
+                "period_end": period.end_iso if period else None}
+
+    if not org_id:
+        return _zero_view(_display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        _logger.warning(
+            "graph storage usage query failed (degrading to zero view): "
+            "team=%s error=%s", org_id, e,
+        )
+        return _zero_view(_display_period_label())
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_graph_storage,
+            )
+            row = metering_get_graph_storage(get_control_plane(), org_id,
+                                             period.start_iso)
+            out = {**zeros}
+            out.update({k: row.get(k) for k in zeros if k in row})
+            out.update({"period": period.label,
+                        "period_start": period.start_iso,
+                        "period_end": period.end_iso})
+            return out
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.graph_storage_mb, m.graph_storage_indices_mb, "
+            "m.graph_storage_samples, m.graph_storage_repeats, "
+            "m.graph_storage_min_mb, m.graph_storage_max_mb, "
+            "m.graph_storage_spread_mb, m.graph_storage_measured_at",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        if not rows:
+            return _zero_view(period.label, period)
+        r = rows[0]
+        return {
+            "graph_storage_mb": float(r[0] or 0.0),
+            "graph_storage_indices_mb": (float(r[1])
+                                         if r[1] is not None else None),
+            "graph_storage_samples": int(r[2] or 0),
+            "graph_storage_repeats": int(r[3] or 0),
+            "graph_storage_min_mb": float(r[4] or 0.0),
+            "graph_storage_max_mb": float(r[5] or 0.0),
+            "graph_storage_spread_mb": float(r[6] or 0.0),
+            "graph_storage_measured_at": r[7],
+            "period": period.label,
+            "period_start": period.start_iso,
+            "period_end": period.end_iso,
+        }
+    except Exception as e:
+        _logger.warning(
+            "graph storage usage query failed (degrading to zero view): "
+            "team=%s period=%s error=%s", org_id, period.label, e,
+        )
+        return _zero_view(period.label, period)
