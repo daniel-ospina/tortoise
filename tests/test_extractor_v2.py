@@ -404,9 +404,10 @@ class TestS2:
         assert "OPERATIONAL-VALUE" in s1   # still shares the slot (#2453)
 
         # The S2/S4 {anti_routine} slot is its OWN seam and must be pinned
-        # directly (review P1): rendering S2 also carries the clause via
-        # {master_list}, so asserting on the PROMPT alone let this wiring be
-        # deleted while the suite stayed green.
+        # directly (review P1): the pre-review draft also carried the clause via
+        # {master_list}, so a prompt-level assertion alone let this wiring be
+        # deleted while the suite stayed green. The master-render appends were
+        # removed in cycle 1; the slot is now the clause's only S2/S4 seam.
         assert "SHORT-SESSION FACT RETENTION" in v2._s2s4_rules()
 
         for prompt in (v2.render_s2_prompt(),
@@ -429,9 +430,7 @@ class TestS2:
             assert "SHORT-SESSION FACT RETENTION" not in render
 
         # The S1 asymmetry lock MUST survive: naming the anti-routine gate in
-        # S1 would import that register into the narrative stage. This is not
-        # hypothetical — the first draft of this clause did exactly that, and
-        # only this class's sibling test caught it.
+        # S1 would import that register into the narrative stage.
         assert "ANTI-ROUTINE EXCLUSION" not in s1
         assert "NOOP" not in s1
 
