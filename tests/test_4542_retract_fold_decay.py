@@ -20,9 +20,10 @@ Pinned contracts here:
   (b2) the copies that CANNOT be consolidated here stay pinned to the
       declaration instead of silently drifting from it: ``consistency._DECAY``
       (the journal side of the divergence detector) is asserted equal to it in
-      case (e). Consolidating that module belongs to the held #5011 lane, and
-      the ``assess_source`` payload in ``tortoise/sdk.py`` is a fourth copy
-      named in the PR body; neither is edited here.
+      case (e). Two hand-declared copies of the triple remain besides
+      ``VACUITY_BELIEF`` — that one, and the ``assess_source`` payload in
+      ``tortoise/sdk.py``; consolidating the first belongs to the held #5011
+      lane and the second is unguarded, so neither is edited here.
   (c) ``fold()`` and ``rebuild_all()`` agree on a retract produced by the REAL
       emitters (``create_point`` + ``retract_point``), which is also what makes
       the synthetic shapes above reachable rather than invented;
@@ -200,13 +201,15 @@ def test_4542_fold_retract_before_a_recreate_leaves_the_fresh_incarnation_alone(
 
 
 def test_4542_detector_journal_side_is_pinned_to_the_declaration():
-    """(e) `tortoise/consistency.py::_DECAY` is a THIRD hand-declared copy of
-    the same triple, and it is the JOURNAL side of the divergence detector that
-    measures this invariant — so a drift there would silently corrupt the
-    verdict (`check_consistency` would report the writer's own graph as
-    diverged, or a real divergence as clean). That module belongs to the held
-    #5011 lane, so it is not edited here; it is PINNED instead. If the
-    declaration moves, this reds and names the copy that must follow it.
+    """(e) `tortoise/consistency.py::_DECAY` is one of the two hand-declared
+    copies of the same triple that remain besides `VACUITY_BELIEF` (the other
+    is the `assess_source` payload in `tortoise/sdk.py`), and it is the JOURNAL
+    side of the divergence detector that measures this invariant — so a drift
+    there would silently corrupt the verdict (`check_consistency` would report
+    the writer's own graph as diverged, or a real divergence as clean). That
+    module belongs to the held #5011 lane, so it is not edited here; it is
+    PINNED instead. If the declaration moves, this reds and names the copy that
+    must follow it.
 
     (1) Fails if `_DECAY` drifts from the contract values below.
     (2) Reachable: the object is imported from the shipped module.

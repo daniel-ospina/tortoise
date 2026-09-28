@@ -114,14 +114,14 @@ def _terminal_excluded(clause: str) -> str:
 #: (#4542).
 #:
 #: ⚠️ This is NOT yet the only declaration, and nothing here should be read as
-#: claiming it is. Two consumers still hand-declare the same triple:
-#: ``tortoise/consistency.py``'s ``_DECAY`` (the JOURNAL side of the divergence
-#: detector that measures this very invariant) and the ``assess_source``
-#: sweep's ``ConfidenceChanged`` payload in ``tortoise/sdk.py``. ``_DECAY`` is
-#: pinned to this declaration by ``tests/test_4542_retract_fold_decay.py``
-#: until #5011's lane can consolidate it (that file is held); the sdk payload
-#: is named in #4542's PR as a follow-up. Do not add a fourth — read the values
-#: from here.
+#: claiming it is. TWO hand-declared copies of the same triple remain besides
+#: this one: ``tortoise/consistency.py``'s ``_DECAY`` (the JOURNAL side of the
+#: divergence detector that measures this very invariant) and the
+#: ``assess_source`` sweep's ``ConfidenceChanged`` payload in ``tortoise/sdk.py``
+#: (unguarded — read it there). ``_DECAY`` is pinned to this declaration by
+#: ``tests/test_4542_retract_fold_decay.py`` so it cannot drift silently while
+#: #5011's lane (which owns that file) consolidates it. Read the values from
+#: here; do not add a third.
 VACUITY_BELIEF: dict[str, float] = {
     "confidence": 0.5,
     "posterior_alpha": 1.0,
