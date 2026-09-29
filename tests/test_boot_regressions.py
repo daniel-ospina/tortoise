@@ -1195,6 +1195,35 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         f"re-entry/shutdown"
     )
 
+    # P3: MEMBERSHIP alone still passed when the ARM was deleted or renamed.
+    # `_analytics_canary_task` was in the tuple and read by both functions, so
+    # deleting the `app.state._analytics_canary_task = loop.create_task(...)`
+    # line left every suite green while the tuple disarmed a task nothing ever
+    # armed — the round-3 orphan shape, one level down. Pin the ASSIGNMENT:
+    # every member must actually be armed on `app.state` somewhere in the
+    # module. The check is module-wide rather than scoped to `_start_liveness`
+    # because only two of the six are armed there (the boot sweep, the event
+    # retention task, the first-contact pre-warm and the health probe are all
+    # armed by their own functions) — scoping it to `_start_liveness` would
+    # assert something false.
+    armed = {
+        node.targets[0].attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and isinstance(node.targets[0].value, ast.Attribute)
+        and node.targets[0].value.attr == "state"
+        and isinstance(node.targets[0].value.value, ast.Name)
+        and node.targets[0].value.value.id == "app"
+    }
+    unarmed = expected_attrs - armed
+    assert not unarmed, (
+        f"{sorted(unarmed)} are in _LIVENESS_TASK_ATTRS but never assigned on "
+        f"app.state anywhere in hosted_api.py — the tuple disarms a task that "
+        f"was never armed, so a deleted or renamed arm is silently orphaned"
+    )
+
     for name, fn in fns.items():
         assert any(
             isinstance(node, ast.Name) and node.id == "_LIVENESS_TASK_ATTRS"
