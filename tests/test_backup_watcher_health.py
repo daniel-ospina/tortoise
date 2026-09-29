@@ -58,9 +58,11 @@ def _restore_watcher_state():
     """Never leak the module globals this suite mutates into another test."""
     prev_watcher = hosted_api._WATCHER
     prev_error = hosted_api._WATCHER_START_ERROR
+    prev_expected = hosted_api._WATCHER_EXPECTED
     yield
     hosted_api._WATCHER = prev_watcher
     hosted_api._WATCHER_START_ERROR = prev_error
+    hosted_api._WATCHER_EXPECTED = prev_expected
 
 
 def _stub_db_ok(monkeypatch) -> dict:
@@ -168,11 +170,17 @@ def test_watcher_start_failure_sets_the_health_marker():
 def test_health_ok_when_watcher_running(monkeypatch):
     hosted_api._WATCHER = _FakeWatcher(alive=True)
     hosted_api._WATCHER_START_ERROR = None
+    hosted_api._WATCHER_EXPECTED = False
 
     body = _health_with_db_ok(monkeypatch)
 
     assert body["status"] == "ok"
-    assert body["backup_watcher"] == {"state": "running", "ok": True, "error": None}
+    assert body["backup_watcher"] == {
+        "state": "running",
+        "ok": True,
+        "error": None,
+        "expected": False,
+    }
 
 
 def test_health_degraded_when_watcher_never_started(monkeypatch):
@@ -214,11 +222,17 @@ def test_health_stays_ok_when_watcher_is_legitimately_disabled(monkeypatch):
     """
     hosted_api._WATCHER = None
     hosted_api._WATCHER_START_ERROR = None
+    hosted_api._WATCHER_EXPECTED = False
 
     body = _health_with_db_ok(monkeypatch)
 
     assert body["status"] == "ok"
-    assert body["backup_watcher"] == {"state": "disabled", "ok": True, "error": None}
+    assert body["backup_watcher"] == {
+        "state": "disabled",
+        "ok": True,
+        "error": None,
+        "expected": False,
+    }
 
 
 def test_health_never_raises_on_watcher_failure(monkeypatch):
@@ -238,3 +252,48 @@ def test_health_never_raises_on_watcher_failure(monkeypatch):
     assert body["status"] == "degraded"
     assert body["backup_watcher"]["state"] == "unknown"
     assert body["backup_watcher"]["ok"] is False
+
+
+# ── (c) #4498 `expected` — visible without degrading ────────────────────────
+
+
+def test_health_expected_and_absent_is_visible_but_stays_ok(monkeypatch):
+    """Hosted boot that dropped/lost its ``BACKUP_*`` config: /health must SHOW
+    that a watcher was expected, yet still answer ``ok``.
+
+    This is the whole point of #4498 option 2 (additive visibility, no owner
+    decision): ``expected`` True on a ``disabled`` block with ``ok`` True, and
+    the end-to-end body still ``status: "ok"``. Without the marker an operator
+    cannot tell "expected and absent" from "intentionally off" without reading
+    the boot log — the blindness #2851/#2870/#2922 produced for ~31 days.
+    """
+    hosted_api._WATCHER = None
+    hosted_api._WATCHER_START_ERROR = None
+    hosted_api._WATCHER_EXPECTED = True
+
+    body = _health_with_db_ok(monkeypatch)
+
+    assert body["status"] == "ok"  # visibility, NOT degradation (#4498 option 2)
+    assert body["backup_watcher"]["state"] == "disabled"
+    assert body["backup_watcher"]["ok"] is True
+    assert body["backup_watcher"]["expected"] is True
+
+
+def test_health_non_hosted_default_reports_expected_false(monkeypatch):
+    """The non-hosted/TestClient default: same ``disabled`` block, but
+    ``expected`` False — so the two cases are distinguishable (#4498).
+
+    Also pins the non-hosted boot end-to-end: ``status: "ok"`` through the
+    /health response with ``expected`` False. The marker defaults False and a
+    non-hosted lifespan must never publish True.
+    """
+    hosted_api._WATCHER = None
+    hosted_api._WATCHER_START_ERROR = None
+    hosted_api._WATCHER_EXPECTED = False
+
+    body = _health_with_db_ok(monkeypatch)
+
+    assert body["status"] == "ok"
+    assert body["backup_watcher"]["state"] == "disabled"
+    assert body["backup_watcher"]["ok"] is True
+    assert body["backup_watcher"]["expected"] is False
