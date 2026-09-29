@@ -364,6 +364,24 @@ jobs:
         # tests/test_mergify_config_guard.py::test_mutation_removing_the_guard_step_would_remove_the_enforcement.
         run: python3 tools/mergify_config_guard.py --static
 
+      - name: "Required-set sync (#6144)"
+        # The required-status-check set is declared in three places — live
+        # branch protection, `.mergify.yml`'s `queue_conditions` /
+        # `merge_conditions`, and `.github/settings.yml` — and nothing read two
+        # of them. `.mergify.yml` stated the invariant in a COMMENT with a
+        # hand-maintained "Last reconciled …" line; a comment cannot fail.
+        #
+        # Hosted in THIS job because it is the same class of check as the
+        # manifest drift gate beside it: a cheap, unconditional, fail-closed
+        # assertion about repo config, whose red must block a merge. It adds
+        # no new required context and no new workflow — it rides the aggregate
+        # that is already required.
+        #
+        # Offline by default (no `--live`: reading branch protection needs
+        # admin scope, and `GITHUB_TOKEN` cannot). `--live` is the owner/rail
+        # check. Exit 2 = could not measure, which is NOT a pass.
+        run: python3 .github/scripts/check-required-set.py
+
   test:
     # #880: split into two parallel halves (matrix). The fast suite's pytest
     # session is ~28 min but the atexit teardown of ~200 leaked embedded
