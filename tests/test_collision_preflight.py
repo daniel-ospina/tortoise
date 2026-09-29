@@ -1471,6 +1471,23 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("refs/remotes/origin/fix/3061cafe", out)
 
+    def test_a_lane_branch_under_mergify_not_merge_queue_still_collides(self):
+        # ⛔ THE WIDTH OF THE FILTER IS A FAIL-CLOSED DECISION (review cycle 1,
+        # PR #6267). The first version excluded the whole `mergify/` namespace,
+        # justified by "no lane can claim one" — a claim measured only for
+        # `mergify/merge-queue/*`. A lane CAN create `mergify/<issue>-name`
+        # locally, and that branch then became invisible on a BLOCKING surface:
+        # a false CLEAN, which for this tool is strictly worse than a false
+        # COLLISION. Pinning the narrower namespace is what stops the filter
+        # being widened again without a decision.
+        for ref in (f"mergify/{ISSUE}-lane", f"mergify/{ISSUE}-lane-local"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(f"refs/remotes/origin/{ref}", out)
+
     def test_local_branch_hit(self):
         _git(self.repo, "branch", "fix/3061-collision-preflight")
         rc, out = self.run_tool()
