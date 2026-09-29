@@ -235,7 +235,8 @@ claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
 
 `$TORTOISE_API_KEY` must be exported in the shell you run this in — and in
 your profile for later sessions
-(`export TORTOISE_API_KEY=<key>` in `~/.zshrc` / `~/.bashrc`). The shell
+(`export TORTOISE_API_KEY=tt_YOUR_KEY` in `~/.zshrc` / `~/.bashrc` — if that
+profile is version-controlled, use a non-committed include instead). The shell
 expands it, so the key lands in **`~/.claude.json`** — local scope, under this
 project's entry: private to you, this project only, **never committed**.
 Validate the config was written (`claude mcp list` shows `tortoise`).
@@ -266,13 +267,14 @@ Create/merge `.cursor/mcp.json` in the project — the file is **committable**
 { "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
 ```
 
-Set `TORTOISE_API_KEY` in your environment (Cursor settings or shell
-profile). Restart Cursor so it picks up the config.
+Set `TORTOISE_API_KEY` in Cursor's own MCP settings environment — a Cursor
+launched from Finder does not read `~/.zshrc`. Restart Cursor so it picks up the
+config.
 
 ### Codex CLI (self-install)
 
 ```bash
-export TORTOISE_API_KEY=<key>
+export TORTOISE_API_KEY=tt_YOUR_KEY
 codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY
 ```
 
@@ -316,7 +318,7 @@ bearer token (`Authorization: Bearer`) and a 401 — not a config error:
 # Idempotent: a bare `>>` stacks a second export on every re-run.
 # Shell profiles are often version-controlled — if yours is, keep the key
 # out of it and use a non-committed include instead.
-grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
+grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=tt_YOUR_KEY' >> ~/.zshrc   # or ~/.bashrc
 ```
 
 `TORTOISE_API_KEY` is the canonical name, and the **only** one any code path
@@ -333,7 +335,7 @@ separately, alias it:
 ```bash
 # A profile that names its MCP credential separately (e.g. to keep one key per
 # purpose) must ALSO export the canonical name, or only the MCP header works.
-export TORTOISE_MCP_API_KEY=<key>                  # the MCP Bearer header
+export TORTOISE_MCP_API_KEY=tt_YOUR_KEY           # the MCP Bearer header
 # Export it under the canonical name too — every other entry point reads it.
 export TORTOISE_API_KEY="$TORTOISE_MCP_API_KEY"
 ```

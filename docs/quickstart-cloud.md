@@ -41,7 +41,7 @@ The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **s
 Export the key first, then add this to your client's `.mcp.json` (Claude Code and Pi read this file; Cursor reads `.cursor/mcp.json` and expands only the `${env:…}` form) — the file is **committable**, so it carries the env reference, never the key:
 
 ```bash
-export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell, and in ~/.zshrc / ~/.bashrc
+export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell; use a non-committed include in your profile if it is version-controlled
 ```
 
 ```json
@@ -192,11 +192,11 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 
    Encrypted by default (AES-256-GCM). Set `TORTOISE_BACKUP_KEY` (base64 32-byte) to use a key you control, or keep the `key_b64` the CLI prints once on its stdout JSON line — you need it to import.
 2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup), or from the CLI: `tortoise signup` (mints a free hosted team + key, no email).
-3. **Connect a working directory**: run `tortoise init --api-key tt_<your-key>` from the directory you'll use.
+3. **Connect a working directory**: run `tortoise init --api-key 'tt_<your-key>'` from the directory you'll use.
 4. **Import the artifact** into the team graph (owner session auth):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
+   curl -X POST "https://api.premiselabs.co/v1/organizations/<org_id>/import" \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \

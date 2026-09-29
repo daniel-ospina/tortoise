@@ -91,8 +91,9 @@ One transport per setup — daemon MCP over **HTTP** for hosted + the Docker
 path; **stdio** for the no-Docker single-agent eval path (quickstart §5):
 
 ```bash
-# Hosted — export it in this shell (and in your profile for later sessions)
-export TORTOISE_API_KEY=<key>
+# Hosted — export it in this shell (and in your profile for later sessions;
+# if your profile is version-controlled, use a non-committed include instead)
+export TORTOISE_API_KEY=tt_YOUR_KEY
 claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
   --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 # Self-hosted — Docker path (compose daemon from §1): daemon MCP over HTTP
@@ -117,7 +118,7 @@ claude mcp add --transport http tortoise http://localhost:8000/mcp
 
 ```bash
 # Codex
-codex mcp add tortoise http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
+codex mcp add tortoise --url http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
 ```
 
 Or add to `.mcp.json`:
