@@ -623,10 +623,8 @@ def _all_vector_arms_measured_empty_scope(entries: list[dict]) -> bool:
     whose every arm failed therefore returns ``False`` and still fails
     closed.
 
-    ``#2952``'s empty-scope rule is shared by C1 and C2 so the two gates
-    cannot disagree on the same trace — the defect that let C1 return
-    ``None`` while C2 raised ``leg_absent``. What counts as an empty scope,
-    and the failure carve-out above, are stated once in
+    ``#2952``'s empty-scope rule is shared by C1 and C2. What counts as an
+    empty scope, and the failure carve-out above, are stated once in
     :func:`run_vector_query`.
     """
     vecs = [e for e in entries if e.get("leg") == "vector"]
@@ -696,8 +694,7 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     selected NO nodes (:data:`VECTOR_SCOPE_EMPTY`) is NEUTRAL — it neither
     proves the read hybrid nor declares it degraded. An arm that measured a
     different, empty scope therefore cannot launder another arm's genuine
-    degradation, and a trace in which EVERY vector arm measured an empty
-    scope returns ``None`` (the #2952 empty-scope rule).
+    degradation.
     """
     if leg_trace is None:
         return None
@@ -1755,8 +1752,7 @@ def degradation_chain(
     scope_kinds (#4199): optional KIND values the read's own post-retrieval
         kind filter selects — forwarded verbatim to
         :func:`run_vector_query`, which then judges the dense leg's material
-        against that scope instead of the whole entity label (and records
-        ``no_embeddings`` for a scope that has nodes but no embedded ones).
+        against that scope instead of the whole entity label.
         Default None = pre-#4199 behavior.
     """
     import concurrent.futures

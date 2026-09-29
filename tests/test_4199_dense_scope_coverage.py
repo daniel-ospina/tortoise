@@ -25,9 +25,8 @@ THE FIX (``#4199`` in ``tortoise/search_engine.py::run_vector_query``)
 When a leg trace is being recorded, the caller now names the KIND values its
 own post-retrieval kind filter selects (``scope_kinds``). The leg measures its
 material over THAT scope once: a scope that HAS nodes but NONE embedded means
-this read's dense leg can contribute nothing, so every healthy outcome record
-is written as ``no_embeddings``/``degraded`` — the #2952 vocabulary, no new
-term. Retrieval itself is untouched; only the DECLARATION changes.
+this read's dense leg can contribute nothing. Retrieval itself is untouched;
+only the DECLARATION changes.
 
 WHY NOT ``require_hybrid_retrieval`` (#2985)
 
@@ -359,9 +358,8 @@ def test_empty_kind_scope_read_is_not_refused(
     empty-scope rule), but before the review fix C2 fell through to
     ``_degraded_read_marker("leg_absent", ...)`` and refused — ``hybrid`` came
     back False with ``refusal_reason="leg_absent"`` on a read whose dense leg
-    RAN. The two gates must agree: ``declared_degraded_read is None`` implies
-    ``hybrid`` is True and there is no refusal reason. (Regression on head
-    ``104f746e5``; ``67980bea`` returned ``hybrid=True`` here.)
+    RAN. (Regression on head ``104f746e5``; ``67980bea`` returned
+    ``hybrid=True`` here.)
     """
     _offline_llm(monkeypatch)
     sdk = sdk_factory()
