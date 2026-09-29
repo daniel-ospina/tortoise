@@ -1266,8 +1266,16 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
     ).result_set
     # str-only: a non-string id would make the suffix slice raise, and no
     # writer ever stores one (the same str-only posture the replay folds take).
+    # ``isdecimal()`` — NOT ``isdigit()`` — is the predicate that AGREES with
+    # the ``int()`` the stale sweep applies below: ``'²'.isdigit()`` is True
+    # while ``int('²')`` raises, so an ``isdigit()`` guard admitted an id the
+    # sweep then could not index (#3551 review). ``isdecimal()`` is True
+    # exactly for the suffixes ``int()`` parses, so every id returned here is
+    # safe to parse. A suffix that is not a decimal integer is not an id this
+    # writer mints (``_capture_turn_id`` formats an ``int``), so it is left
+    # untouched rather than swept — never delete an id we cannot place.
     return [r[0] for r in (rows or [])
-            if isinstance(r[0], str) and r[0][len(prefix):].isdigit()]
+            if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
 def _write_capture_turns(
@@ -1410,6 +1418,9 @@ def _write_capture_turns(
         # the capture lanes' offset 0 this is the #1920 rule exactly.
         _prefix = f"{session_id}_t"
         _first_live = turn_offset + len(turn_rows)
+        # Every id ``_capture_turn_ids`` returns is ``int()``-parseable by
+        # construction (its guard is the same decimal predicate), so this parse
+        # is total: the sweep can never raise on an id its own guard admitted.
         stale = [tid for tid in _capture_turn_ids(proj, session_id)
                  if tid not in keep
                  and int(tid[len(_prefix):]) >= _first_live]

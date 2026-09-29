@@ -5,7 +5,8 @@ writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK.capture_sessi
 each delegate the ``:Session`` MERGE / turn store to ONE primitive, and that the
 extraction did not change a byte of what either lane writes.
 
-The load-bearing test is ``test_writers_are_behaviour_equivalent_*``: a refactor's
+The load-bearing tests are ``test_sdk_writer_is_behaviour_equivalent`` and
+``test_hosted_writer_is_behaviour_equivalent_and_parity``: a refactor's
 failure mode is a silent behaviour change that every "an id exists" test passes
 through, so those tests pin the EXACT pre-refactor Cypher/parameters recorded by
 running both lanes on a non-trivial turn list (odd roles, ``None`` content, and a
@@ -265,6 +266,46 @@ def test_turn_offset_shifts_the_written_ids(tmp_path):
         turn_offset=2, session_existed=True)
     assert sorted(sdk_mod._capture_turn_ids(proj, "off")) == [
         "off_t0", "off_t1", "off_t2"]
+
+
+def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
+    """A turn-shaped id whose suffix passes the SHAPE filter but is not
+    ``int()``-parseable must not break the stale sweep (#3551 review).
+
+    ``str.isdigit()`` is strictly wider than ``int()`` — ``'²'.isdigit()`` is
+    True yet ``int('²')`` raises — so an id shaped ``<sid>_t²`` used to be
+    admitted by ``_capture_turn_ids`` and then blow up the sweep's parse AFTER
+    the caller's :Session MERGE had committed, turning a benign cleanup into a
+    failed capture. The guard now uses ``isdecimal()``, which is True exactly
+    for the suffixes ``int()`` parses, so the id is left untouched instead.
+    """
+    sdk = TortoiseSDK(db_path=str(tmp_path / "wide.db"))
+    proj = sdk._get_proj()
+
+    # Seed a real capture so the :Session node exists for the sweep to read.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, "wide", _CONV[:2], now="2026-01-01T00:00:00+00:00")
+
+    # Inject an episodic turn-shaped Point whose suffix passes the OLD guard
+    # but is not int()-parseable.
+    weird = "wide_t²"
+    assert weird[len("wide_t"):].isdigit()          # admitted by `isdigit()`
+    assert not weird[len("wide_t"):].isdecimal()    # ... not by `isdecimal()`
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) "
+        "CREATE (t:Point {id:$tid, is_episodic:true, pointKind:'event'}) "
+        "CREATE (s)-[:CONTAINS]->(t)",
+        params={"sid": "wide", "tid": weird})
+
+    # Re-capture: this drives the stale sweep. Pre-fix, `int('²')` raised.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, "wide", _CONV[:2], now="2026-01-01T00:01:00+00:00")
+
+    # The malformed id was neither swept nor allowed to break the capture.
+    rows = proj.g.query(
+        "MATCH (t:Point {id:$tid}) RETURN t.id",
+        params={"tid": weird}).result_set
+    assert rows, "the non-parseable id was wrongly swept"
 
 
 # ── neither caller holds independent MERGE text ────────────────────────────
