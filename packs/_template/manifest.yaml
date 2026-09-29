@@ -57,8 +57,11 @@ ontology:
   #   - description:  one line of what the kind IS (this is prompt material)
   #   - synonyms:     normalized aliases — deterministic near-miss catch
   #   - examples:     concrete instance examples for the classifier
-  #   - nearMisses:   confusable kinds (own pack, `ns:kind`, or core) — prompt
-  #                   guidance + retry trigger
+  #   - nearMisses:   confusable kinds (own pack, `ns:kind`, or core) — the
+  #                   post-extraction kind classifier's rerank input. The
+  #                   ENGINE does not render them into the S2/S4 extraction
+  #                   prompt (`tools/probe_extractor.py` does render them into
+  #                   the offline calibration probe's EXTRACTION_SYSTEM)
   #   - extractable:  bool, default true — false = registered but never minted
   #                   by extraction
   #   - storeAs:      claim|decision|entity|tag|event — default inferred from
@@ -174,6 +177,91 @@ extraction:
     kinds: {}
     relations: {}
     chains: {}
+
+# ── Manifest v3.1 (epic #909 §1.4/§1.5, #1026): extraction behaviour slots ──
+# Additive and backward compatible: a v3 manifest with none of these keys
+# normalizes to the documented shape unchanged (all four default to empty).
+#
+# ⛔ These slots DECLARE; they never DROP. The design that motivated this
+# section originally included `entityPatterns`/`excludePatterns` — name-pattern
+# rules that discarded artefacts at mint. #1026 rules against them:
+#
+#     "keep the slot, as declared entity types only — the pack declares which
+#      kinds its artefacts are; no name patterns; nothing is dropped at mint."
+#
+# Declaring either key is a validation ERROR carrying that reason, so an author
+# arriving from a pattern-filtering design is told why at the point of adoption
+# rather than being left to infer it from "unknown key".
+#
+#   entityCues:        {kind: [surface cue, ...]} — the surface forms YOUR
+#                      domain writes this kind in (dev: "the .py module";
+#                      product-strategy: "our pricing page"). The key must be a
+#                      kind reference that RESOLVES: this pack's own kind, a
+#                      core kind, a kind declared by exactly ONE other pack
+#                      (bare), or `namespace:kind` of a loaded pack. That is
+#                      what makes the slot declarative rather than a filter.
+#                      A core kind is written BARE (`Project`) — that is the
+#                      manifest convention. `core:Project`, the internal
+#                      spelling the compiled brief emits, is accepted too, but
+#                      prefer the bare form.
+#                      ⚠️ NOTE — per-kind surface forms ALREADY have a home the
+#                      classifier reads: `ontology.kindDefs.<kind>.synonyms`
+#                      and `.examples`, which compile_kind_index_spec renders
+#                      into the classification surface. Nothing reads
+#                      `entityCues` yet. Until a consumer migrates, declaring
+#                      this block ALONE does not reach the classifier — put the
+#                      forms in kindDefs.synonyms/examples.
+#   relationTemplates: pack-typical edge shapes, so the extractor recognizes
+#                      the domain's IMPL/NAND phrasings.
+#                        predicate:        the domain verb
+#                        mechanism:        IMPL | NAND — the same pair
+#                                          `ontology.relations` accepts.
+#                                          ⛔ NOT MITIGATES: it was RETIRED from
+#                                          the operator menu by the F1 ruling
+#                                          (#4937 / #2552) and
+#                                          `sdk.create_operator` refuses it.
+#                        fromKind/toKind:  kind references, resolved as above
+#                        description:      one line of what the shape captures
+#   valueGate:         {keep: [...], drop: [...]} — what a VALUABLE utterance
+#                      looks like in this domain. It judges utterances and never
+#                      removes an artefact.
+#                      ⚠️ This is the STRUCTURED form of a decision the pack may
+#                      already declare as `ontology.memory_granularity`, and
+#                      **memory_granularity is the one that is actually read**:
+#                      extractor_v2 renders it into the S1 prompt. Note
+#                      value_gate.py itself reads NO pack manifest — it is a
+#                      stdlib-only leaf whose identifier rules keep their policy
+#                      provenance declared elsewhere: issue/PR numbers and commit
+#                      hashes by the dev pack's memory_granularity, paths and ids
+#                      by extractor_v2's landed #2453 clause. Nothing reads
+#                      `valueGate` yet, so declaring this block ALONE changes
+#                      nothing — set memory_granularity as well.
+#   promptFragments:   ["..."] — pack-authored instruction snippets DECLARED
+#                      for the value brief. NOTE: no consumer reads the v3.1
+#                      slots yet — they validate and normalize, nothing more.
+#                      Capped on BOTH words and characters: ~120 words / 480
+#                      chars each, ~600 words / 2400 chars in total. The word
+#                      count is a proxy, not a tokenizer, which is why the
+#                      character bound exists alongside it.
+#
+# Example (the kinds are CORE, so this snippet validates as written — a pack's
+# own kinds must be declared in its *Kinds lists, and an `ns:kind` ref must
+# resolve to a loaded pack):
+#   extraction:
+#     entityCues:
+#       Project: ["the <domain> initiative", "our <domain> rollout"]
+#       Document: ["the .py module", "the migration file"]
+#     relationTemplates:
+#       - predicate: addresses
+#         mechanism: IMPL
+#         fromKind: Project
+#         toKind: Document
+#         description: "an initiative served by an artefact"
+#     valueGate:
+#       keep: ["design rationale", "a trade-off stated with its reason"]
+#       drop: ["logistics", "tool mechanics"]
+#     promptFragments:
+#       - "Prefer domain nouns over file paths when naming an entity."
 
 # ── Layer 2: Connectors ──────────────────────────────────────────────────
 connectors: []
