@@ -328,12 +328,21 @@ def _on_loop_nested_names(node: ast.AST) -> set[str]:
 _CP_METHOD_NAMES = frozenset({"query", "rpc", "rpc_value"})
 
 #: The receiver convention this detector recognises, and NOTHING else. ``cp`` is
-#: the module's own binding for ``get_control_plane()`` at every control-plane
-#: call site; a call through ``get_control_plane()`` directly is matched too. A
-#: receiver that could be the DATA-plane SDK (``sdk.g.query`` / ``reg.query`` /
-#: ``db.query`` — #3086's lane) is deliberately not matched, so the
-#: false-positive rate is zero by construction: an unrecognised receiver is
-#: SKIPPED (it can only ever UNDER-report, never wrongly fail the guard).
+#: the module's own binding for ``get_control_plane()`` at nearly every
+#: control-plane call site; a call through ``get_control_plane()`` directly is
+#: matched too. A receiver that could be the DATA-plane SDK (``sdk.g.query`` /
+#: ``reg.query`` / ``db.query`` — #3086's lane) is deliberately not matched, so
+#: an unrecognised receiver is SKIPPED.
+#:
+#: That makes this a HEURISTIC, not a proof, and it errs in BOTH directions:
+#:   * UNDER-reports — a control-plane client bound to any other local name
+#:     (``control = get_control_plane(); control.query(...)``) is invisible.
+#:   * OVER-reports — the name ``cp`` is NOT always the control plane.
+#:     ``backups_list`` binds ``cp = _control_plane_source()``, which returns a
+#:     FalkorDB registry handle in registry mode, so a ``cp.query(...)`` there
+#:     would be a DATA-plane call wrongly failing this guard. Latent today (no
+#:     such call is on the loop); named here so the next reader does not trust
+#:     the convention as universal.
 _CP_RECEIVER_NAME = "cp"
 
 
@@ -519,11 +528,18 @@ def test_no_on_loop_control_plane_helper_calls():
         f"the blocking-helper derivation saw only {len(blocking)} functions — "
         "it is not seeing supabase_control's HTTP surface"
     )
-    # The derivation reads supabase_control.py ALONE; union in the helpers it
-    # structurally cannot see, THEN assert the seam sets are covered. This traps
-    # the general case: a seam name defined in NEITHER place (a typo, or a
-    # helper the derivation does not reach) falls out of the universe and fails
-    # HERE instead of silently losing its guard.
+    # The derivation reads supabase_control.py ALONE, so union in the
+    # hosted_api-defined helpers it structurally cannot see.
+    #
+    # NOTE THE SCOPE HONESTLY — this is NOT a general net. It restores coverage
+    # for the helpers NAMED in the two seam sets below, and for nothing else. A
+    # blocking helper defined in hosted_api.py and absent from those sets is
+    # still outside the universe, and a fresh on-loop call to it is still
+    # unflagged. Demonstrated by mutation in review: an on-loop
+    # `_ensure_graph_exists(...)`, and a brand-new hosted helper doing
+    # `cp.query`, both pass this guard. Widening the derivation to the
+    # hosted_api call graph (the sync-helper-reached class) is a separate change
+    # with its own review, not something to imply here.
     blocking |= _hosted_api_defined_seam_names()
     # (``>=`` is the ruff-SIM300 form of ``_A1_CONFIRMED_SEAMS |
     # _ROUTED_SESSION_SEAMS <= blocking`` — the same subset relation.)
