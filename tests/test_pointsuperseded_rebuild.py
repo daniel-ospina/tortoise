@@ -1574,3 +1574,74 @@ def test_deferred_corrects_sweep_does_not_resurrect_a_deleted_successor(sup):
             f"{name}: engines disagree on a hard-deleted successor edge — "
             f"rebuild_all={via_all} rebuild={via_apply} "
             f"recover={via_recover} (expected {expected})")
+
+
+def test_terminalizer_successor_field_is_type_scoped_on_every_engine(sup):
+    """#3305 (review P1): the CORRECTS successor field is read per NORMALIZED
+    type, exactly as the fold dispatch and ``rebuild_all``'s sweep read it.
+
+    ``_fold_point_superseded`` reads ``new_id`` ONLY; ``_fold_point_invalidated``
+    reads ``corrected_by`` ONLY. A deferred sweep that took ``new_id or
+    corrected_by`` would let a record mint an edge its own fold arm never
+    creates — a phantom CORRECTS on the apply() engines that ``rebuild_all``
+    does not produce. Raw-producer journals can carry either name on either
+    type, so this is reachable, not hypothetical."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live"}}
+
+    # Each shape against the successors it must NOT mint an edge for.
+    shapes = [
+        # supersede carrying only corrected_by (its fold reads new_id only)
+        {"type": "PointSuperseded", "id": "a", "corrected_by": "c",
+         "valid_to": ts, "expired_at": ts}, ["c"],
+        # invalidate carrying only new_id (its fold reads corrected_by only)
+        {"type": "PointInvalidated", "id": "a", "new_id": "x",
+         "valid_to": ts, "expired_at": ts}, ["x"],
+        # invalidate carrying BOTH: only corrected_by may mint the edge
+        {"type": "PointInvalidated", "id": "a", "new_id": "x",
+         "corrected_by": "c", "valid_to": ts, "expired_at": ts}, ["c", "x"],
+    ]
+    for i, (term, candidates) in enumerate(
+            (shapes[0:2], shapes[2:4], shapes[4:6])):
+        entries = [_added("a")] + [_added(c) for c in candidates]
+        entries.append({"event_id": sdk.ulid(), "ts": ts,
+                        "initiated_by": "raw-producer",
+                        "projection_version": 2, **term})
+        synth_dir = events.parent / f"synth-type-scoped-{i}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", entries)
+
+        def _edges():
+            return sorted(tuple(r) for r in proj.g.query(
+                "MATCH (s:Point)-[:CORRECTS]->(b:Point {id:'a'}) "
+                "RETURN s.id").result_set)
+
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _edges()
+        _apply_replay(sdk, synth_dir)
+        via_apply = _edges()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _edges()
+
+        allowed = ({"c"} if term["type"] == "PointInvalidated"
+                   and term.get("corrected_by") else set())
+        for name, got in (("rebuild_all", via_all), ("rebuild", via_apply),
+                          ("recover_from_log", via_recover)):
+            assert got == via_all, (
+                f"shape {i}: {name} != rebuild_all on the type-scoped "
+                f"successor field — {got} != {via_all}")
+            assert {e[0] for e in got} <= allowed, (
+                f"shape {i}: {name} minted a phantom CORRECTS from a field its "
+                f"own fold arm ignores: {got} (allowed {allowed})")
