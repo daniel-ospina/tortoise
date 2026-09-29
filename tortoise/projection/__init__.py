@@ -3719,7 +3719,7 @@ class FalkorProjection(
         # MERGE no-ops where ``rebuild_all``'s after-creations sweep succeeds.
         # Buffer the endpoints and re-apply them after the pass — the same
         # forward-reference treatment ``EntityLinked`` gets below.
-        deferred_corrects: list[tuple[str, str]] = []
+        deferred_corrects: list[tuple[int, str, str]] = []
         for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                 entity_link_events.append((seq, ev))
@@ -3741,7 +3741,8 @@ class FalkorProjection(
             # must never abort a post-wipe replay (the graph was already
             # DETACH DELETE'd above), so a failure is logged, not raised.
             try:
-                self.fold_deferred_corrects_edges(deferred_corrects)
+                self.fold_deferred_corrects_edges(
+                    deferred_corrects, hard_delete_seqs)
             except Exception:
                 logger.exception(
                     "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
@@ -4611,6 +4612,10 @@ class FalkorProjection(
         # different terminalizers from one journal. See that function for the
         # rules.
         restamp_plan, _ = plan_point_restamp_folds(events)
+        # The hard-delete map is needed TWICE below (the supersede/invalidate
+        # sweep's edge staleness rule and the EntityLinked tail) — compute it
+        # once, here.
+        hard_delete_seqs = journal_hard_delete_seqs(events)
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
@@ -5177,12 +5182,17 @@ class FalkorProjection(
                 # UNCONDITIONALLY (exact live parity, supersede's precedent).
                 later_inline = max_inline_seq.get(ev["id"])
                 skip_ua = later_inline is not None and later_inline > fsq
+                successor = ev.get("corrected_by")
+                edge_ok = not _hard_delete_suppresses(
+                    hard_delete_seqs, ev["id"], "Point", fsq) and not (
+                    successor and _hard_delete_suppresses(
+                        hard_delete_seqs, successor, "Point", fsq))
                 # #3305: the shared home for both lifecycle families — the
                 # SAME dispatch ``apply()`` calls, so the two engines cannot
                 # drift. ``decay=False``: pass-1b already applied the belief
                 # half inline at the surviving event's seq.
                 matched = self._fold_point_restamp(
-                    ev, skip_updated_at=skip_ua, decay=False)
+                    ev, skip_updated_at=skip_ua, decay=False, edge=edge_ok)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointInvalidated fold matched no Point "
@@ -5196,21 +5206,27 @@ class FalkorProjection(
                 # #3305: same shared dispatch as the invalidate arm above (and
                 # as ``apply()``). ``decay=False`` — pass-1b already applied
                 # the decay inline at the surviving supersede's seq. The
-                # updatedAt seq-gate is the INVALIDATE arm's, mirrored: a
-                # superseded point is status-terminal but NOT stamp-frozen —
-                # live accepts a revision after a supersede, and the
-                # chronological apply() arm keeps that revision's stamp, so
-                # without the gate the sweep clobbers it with the older
-                # journaled supersede ts and the two engines disagree (review
-                # P2, #3305). KNOWN DIVERGENCE (#6239): a ``PointPromoted``
+                # updatedAt seq-gate is the INVALIDATE arm's, mirrored: without
+                # it the sweep writes the older journaled supersede ts while
+                # the chronological apply() arm leaves the later PointRevised's
+                # replay-now stamp, and the two engines disagree. (Live
+                # ``update_point`` on a plain Point does not itself advance
+                # updatedAt — the replay-now value is the separate,
+                # pre-existing replay-vs-live class, not claimed here.)
+                # KNOWN DIVERGENCE (#6239): a ``PointPromoted``
                 # AFTER a supersede still re-livens ``status`` on the apply()
                 # arm while this sweep keeps it terminal — live refuses to
                 # promote a superseded point, so the shape is raw-producer /
                 # cross-file only. Tracked, not reconciled here.
                 later_inline = max_inline_seq.get(ev["id"])
                 skip_ua = later_inline is not None and later_inline > fsq
+                successor = ev.get("new_id")
+                edge_ok = not _hard_delete_suppresses(
+                    hard_delete_seqs, ev["id"], "Point", fsq) and not (
+                    successor and _hard_delete_suppresses(
+                        hard_delete_seqs, successor, "Point", fsq))
                 matched = self._fold_point_restamp(
-                    ev, skip_updated_at=skip_ua, decay=False)
+                    ev, skip_updated_at=skip_ua, decay=False, edge=edge_ok)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointSuperseded fold matched no Point "
@@ -5583,7 +5599,7 @@ class FalkorProjection(
         # skip, counted as dropped and never applied (see
         # `fold_deferred_entity_links`).
         self.fold_deferred_entity_links(
-            entity_link_events, journal_hard_delete_seqs(events))
+            entity_link_events, hard_delete_seqs)
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator

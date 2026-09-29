@@ -1133,7 +1133,7 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # in the journal cannot be merged chronologically (see
     # ``fold_deferred_corrects_edges``), and ``rebuild_all``'s after-creations
     # sweep resolves it, so the engines would disagree.
-    deferred_corrects: list[tuple[str, str]] = []
+    deferred_corrects: list[tuple[int, str, str]] = []
     for seq, ev in enumerate(events):
         if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
             entity_link_events.append((seq, ev))
@@ -1156,7 +1156,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
             torn += 1
     if deferred_corrects:
         try:
-            projection.fold_deferred_corrects_edges(deferred_corrects)
+            projection.fold_deferred_corrects_edges(
+                deferred_corrects, hard_delete_seqs)
         except Exception:
             logger.exception(
                 "recover_from_log: deferred CORRECTS fold failed; %d "

@@ -1363,7 +1363,8 @@ class _EntityHandlers:
     def _fold_point_restamp(self, ev: dict, *,
                             skip_updated_at: bool = False,
                             decay: bool = True,
-                            stamp: bool = True) -> int:
+                            stamp: bool = True,
+                            edge: bool = True) -> int:
         """#3305: ONE home for the Point-lifecycle terminalizer fold body.
 
         Two replay engines must reach the same graph fold for a journaled
@@ -1435,10 +1436,10 @@ class _EntityHandlers:
         if stamp:
             if t == "PointSuperseded":
                 matched = self._fold_point_superseded(
-                    ev, skip_updated_at=skip_updated_at)
+                    ev, skip_updated_at=skip_updated_at, edge=edge)
             elif t == "PointInvalidated":
                 matched = self._fold_point_invalidated(
-                    ev, skip_updated_at=skip_updated_at)
+                    ev, skip_updated_at=skip_updated_at, edge=edge)
             else:
                 # Unreachable while ``_POINT_RESTAMP_EVENT_TYPES`` and these
                 # arms agree (pinned by tests). Warn rather than no-op: a
@@ -1486,16 +1487,17 @@ class _EntityHandlers:
         unnormalized call here would make the engines disagree on a
         supported-by-``_norm`` record (#325/#3722's raw-vs-normalized class).
 
-        Returns the ``(old_id, successor_id)`` CORRECTS endpoints when a STAMP
-        was applied and the record names a successor (``PointSuperseded``'s
+        Returns the ``(seq, old_id, successor_id)`` CORRECTS endpoints when a
+        STAMP was applied and the record names a successor (``PointSuperseded``'s
         ``new_id`` / ``PointInvalidated``'s ``corrected_by``), else ``None``.
-        The caller BUFFERS the pair and re-applies it after every creation —
+        The caller BUFFERS the triple and re-applies it after every creation —
         this pass is chronological, so the inline MERGE no-ops when the
         successor is created LATER in the journal, and only the trailing
         ``fold_deferred_corrects_edges`` sweep can resolve it (the same
         forward-reference treatment ``EntityLinked`` gets; ``rebuild_all``'s
         sweep already runs after its pass-1a hoist, which is why the two
-        engines disagreed).
+        engines disagreed). The ``seq`` rides along because the sweep needs it
+        for the hard-delete staleness rule.
         """
         ev = self._norm(ev)
         apply_decay, apply_stamp = plan.get(seq, (False, False))
@@ -1519,7 +1521,7 @@ class _EntityHandlers:
             # No named successor (a bare invalidate, or a supersede the fold's
             # own applicability guard dropped): nothing to defer.
             return None
-        return (rid, successor)
+        return (seq, rid, successor)
 
     def _merge_corrects_edge(self, old_id: str, new_id: str) -> int:
         """#3305: the ONE home for a terminalizer fold's CORRECTS edge MERGE.
@@ -1566,7 +1568,7 @@ class _EntityHandlers:
         )
         return 1 if result.result_set else 0
 
-    def fold_deferred_corrects_edges(self, edges) -> int:
+    def fold_deferred_corrects_edges(self, edges, hard_delete_seqs=None) -> int:
         """#3305: re-apply a replayed terminalizer's CORRECTS edge AFTER every
         creation has applied.
 
@@ -1585,18 +1587,41 @@ class _EntityHandlers:
         them here. Deferring the flags instead would drag the invalidate
         family's ``updatedAt`` seq-gate along and risk a NEW divergence.
 
-        ``edges`` is a sequence of ``(old_id, new_id)`` pairs. Returns the
-        number of edges actually merged.
+        ``edges`` is a sequence of ``(journal_seq, old_id, new_id)`` triples.
+
+        ``hard_delete_seqs`` (``projection.journal_hard_delete_seqs``) is the
+        SAME staleness rule ``fold_deferred_entity_links`` applies, and it is
+        REQUIRED for parity rather than a nicety: a sweep that ran purely on
+        node existence would re-merge an edge onto a successor that was
+        hard-deleted (``EntityMutated op=delete`` / ``PointsMerged``) AFTER the
+        terminalizer and later re-created under the same id — an edge live does
+        not have, and one ``rebuild_all`` does not produce. Ids are reused
+        routinely, so without the rule the deferred sweep RESURRECTS a deleted
+        edge and puts the engines back into disagreement. An edge is skipped
+        when EITHER endpoint was hard-deleted after this record's seq.
+
+        Returns the number of edges actually merged.
         """
+        from tortoise.projection import _hard_delete_suppresses
+
+        hard_delete_seqs = hard_delete_seqs or {}
         applied = 0
-        for old_id, new_id in edges:
+        for seq, old_id, new_id in edges:
             if not old_id or not new_id:
+                continue
+            if (_hard_delete_suppresses(
+                    hard_delete_seqs, old_id, "Point", seq)
+                    or _hard_delete_suppresses(
+                        hard_delete_seqs, new_id, "Point", seq)):
+                # Stale: the endpoint was hard-deleted after this terminalizer
+                # and its re-creation does not bring the edge back (live parity).
                 continue
             applied += self._merge_corrects_edge(old_id, new_id)
         return applied
 
     def _fold_point_superseded(self, ev: dict,
-                               skip_updated_at: bool = False) -> int:
+                               skip_updated_at: bool = False,
+                               edge: bool = True) -> int:
         """#2423: fold a PointSuperseded event into Point.status/validity +
         CORRECTS edge.
 
@@ -1645,13 +1670,16 @@ class _EntityHandlers:
         expired_at = ev.get("expired_at") or _now_iso()
         updated_at = ev.get("ts") or _now_iso()
         # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
-        # applies: a LATER same-id PointRevised/PointPromoted (inline, pass-1b)
-        # is a legitimate newer writer, and the trailing sweep is otherwise the
-        # id's LAST writer and would clobber its stamp with the older journaled
-        # supersede ts. A superseded point is status-TERMINAL but its updatedAt
-        # is NOT frozen — live accepts a revision after a supersede (review P2,
-        # #3305). status/outdated/validTo/expiredAt/CORRECTS always fold; the
-        # gate suppresses ONLY the updatedAt column.
+        # applies. Without it the trailing sweep is the id's LAST writer and
+        # writes the journaled supersede ts, while the chronological apply()
+        # arm leaves the LATER PointRevised's replay-now stamp (measured) — the
+        # engines would disagree. status/outdated/validTo/expiredAt/CORRECTS
+        # always fold; the gate suppresses ONLY the updatedAt column. (Live
+        # ``update_point`` on a plain Point does not itself advance updatedAt;
+        # the replay-now value is the separate, pre-existing replay-vs-live
+        # class, not claimed here.) ``edge=False`` suppresses the CORRECTS arm
+        # for a successor the journal hard-deleted after this record (see
+        # ``fold_deferred_corrects_edges`` / the pass-1b sweep).
         if skip_updated_at:
             set_clause = ("SET n.status='superseded', n.outdated=true, "
                           "n.validTo=$vt, n.expiredAt=$ea ")
@@ -1665,7 +1693,7 @@ class _EntityHandlers:
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
             params=params,
         )
-        if result.result_set:
+        if result.result_set and edge:
             self._merge_corrects_edge(oid, new_id)
         return len(result.result_set)
 
@@ -1698,7 +1726,8 @@ class _EntityHandlers:
         )
         return len(result.result_set)
 
-    def _fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False) -> int:
+    def _fold_point_invalidated(self, ev: dict, skip_updated_at: bool = False,
+                                edge: bool = True) -> int:
         """#2488: fold a PointInvalidated event into the outdated flag +
         validity stamps + CORRECTS edge (NO status write).
 
@@ -1771,7 +1800,7 @@ class _EntityHandlers:
             "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
             params=params,
         )
-        if result.result_set and corrected_by:
+        if result.result_set and corrected_by and edge:
             # Best-effort edge arm: a missing/deleted corrected_by point
             # (never re-created, hard-deleted) silently no-ops the MERGE.
             # A RAW producer omitting corrected_by entirely still gets the

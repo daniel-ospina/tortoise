@@ -177,7 +177,7 @@ def restore(backup_dir: str, db_path: str,
             # later, so defer the edges and re-apply them after the pass (the
             # inline MERGE no-ops for a forward reference, while
             # ``rebuild_all``'s after-creations sweep resolves it).
-            deferred_corrects: list[tuple[str, str]] = []
+            deferred_corrects: list[tuple[int, str, str]] = []
             for seq, ev in enumerate(records):
                 if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
                     deferred_links.append((seq, ev))
@@ -196,7 +196,8 @@ def restore(backup_dir: str, db_path: str,
                 proj.apply(ev)
             if deferred_corrects:
                 try:
-                    proj.fold_deferred_corrects_edges(deferred_corrects)
+                    proj.fold_deferred_corrects_edges(
+                        deferred_corrects, hard_delete_seqs)
                 except Exception:
                     logger.exception(
                         "restore: deferred CORRECTS fold failed; %d "

@@ -1457,14 +1457,17 @@ def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
             f"{name}: the CORRECTS edge was dropped on every engine: {via_all}")
 
 
-def test_supersede_then_revision_keeps_the_revision_stamp_on_every_engine(sup):
-    """#3305 (review P2): a supersede is status-TERMINAL but NOT stamp-frozen.
+def test_supersede_then_revision_does_not_end_at_the_supersede_ts(sup):
+    """#3305 (review P2): the supersede sweep needs the invalidate arm's
+    ``updatedAt`` seq-gate — without it the sweep writes the older journaled
+    supersede ts while the chronological apply() arm leaves the later
+    ``PointRevised``'s replay-now stamp, and the engines disagree (measured).
 
-    Live accepts a ``PointRevised`` after a supersede, so the trailing sweep
-    must not clobber that revision's ``updatedAt`` with the older journaled
-    supersede ts — the invalidate family already carried this seq-gate
-    (``skip_updated_at``); the supersede sibling did not. Pins the gate on ALL
-    three engines by asserting none of them ends at the supersede ts."""
+    Pins the gate on ALL three engines by asserting none of them ends at the
+    supersede ts. The exact value is replay-now, which differs per run, so
+    cross-engine VALUE equality is not assertable — only this property is.
+    (Live ``update_point`` on a plain Point does not itself advance
+    ``updatedAt``; that replay-vs-live gap is separate and pre-existing.)"""
     from tortoise.consistency import recover_from_log
 
     _, events, sdk = sup
@@ -1501,3 +1504,73 @@ def test_supersede_then_revision_keeps_the_revision_stamp_on_every_engine(sup):
         assert row[2] != sup_ts, (
             f"{name}: the sweep clobbered the later revision's updatedAt with "
             f"the older journaled supersede ts ({sup_ts!r})")
+
+
+def test_deferred_corrects_sweep_does_not_resurrect_a_deleted_successor(sup):
+    """#3305 (review P1): the trailing CORRECTS sweep must apply the SAME
+    hard-delete staleness rule ``fold_deferred_entity_links`` applies.
+
+    A successor hard-deleted (``EntityMutated op=delete`` / ``PointsMerged``)
+    AFTER the terminalizer and re-created under the same id must NOT get the
+    edge back on the apply()-based engines — live removes the edge at the
+    delete and re-creation does not restore it. Without the rule the sweep ran
+    purely on node existence and resurrected the edge on ``rebuild`` /
+    ``recover_from_log`` / the backup restore, while ``rebuild_all`` dropped it:
+    a NEW engine divergence introduced by the deferral itself. Asserted on all
+    three engines, for BOTH delete shapes, with a no-delete control that keeps
+    the edge."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    ts = "2026-01-01T00:00:00+00:00"
+    proj = sdk._get_proj()
+
+    def _added(pid):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointAdded",
+                "point": {"id": pid, "label": "statement", "content": pid,
+                          "status": "live"}}
+
+    def _supersede():
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": "PointSuperseded", "id": "a", "new_id": "s2",
+                "valid_to": ts, "expired_at": ts}
+
+    deleters = {
+        "EntityMutated": {"event_id": sdk.ulid(), "ts": ts,
+                          "initiated_by": "raw-producer",
+                          "projection_version": 2, "type": "EntityMutated",
+                          "op": "delete", "id": "s2", "label": "Point"},
+        "PointsMerged": {"event_id": sdk.ulid(), "ts": ts,
+                         "initiated_by": "raw-producer",
+                         "projection_version": 2, "type": "PointsMerged",
+                         "merge_ids": ["s2"]},
+    }
+    shapes = {**deleters, "control": None}
+    for name, deleter in shapes.items():
+        entries = [_added("a"), _added("s2"), _supersede()]
+        if deleter is not None:
+            entries.append(dict(deleter))
+        entries.append(_added("s2"))
+        synth_dir = events.parent / f"synth-deleted-successor-{name}"
+        synth_dir.mkdir()
+        _synthesize_journal(synth_dir / "events.jsonl", entries)
+
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(synth_dir))
+        via_all = _corr(proj, "a", "s2")
+
+        _apply_replay(sdk, synth_dir)
+        via_apply = _corr(proj, "a", "s2")
+
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert recover_from_log(str(synth_dir), proj)["recovered"]
+        via_recover = _corr(proj, "a", "s2")
+
+        expected = 1 if deleter is None else 0
+        assert (via_all, via_apply, via_recover) == (expected,) * 3, (
+            f"{name}: engines disagree on a hard-deleted successor edge — "
+            f"rebuild_all={via_all} rebuild={via_apply} "
+            f"recover={via_recover} (expected {expected})")
