@@ -34,15 +34,21 @@ tortoise signup
 
 2 free anonymous teams per IP per 24h (3rd → 429 with a retry window); on a shared network or need more? Contact support@premiselabs.co.
 
-## 2. Connect your agent (MCP, streamable-http)
+## 2. Connect your agent (MCP over HTTP)
 
-The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key. In client JSON the transport value is `"http"` — Claude Code accepts `"streamable-http"` as an alias, but Cursor's CLI can drop the whole config file and Pi ignores `type`, so `"http"` is the only universally safe value.
+The hosted endpoint is `https://api.premiselabs.co/mcp/`. The transport is **Streamable HTTP**, and in
+client JSON config its value is `"http"`.
 
-Export the key first. For one machine, prefer the one-liner — it writes **local** scope to `~/.claude.json` (private, never committed): `claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"`. To share the config through the repo, add this to your client's `.mcp.json` (Claude Code and Pi read this file; Cursor reads `.cursor/mcp.json` and expands only the `${env:…}` form) — the file is **committable**, so it carries the env reference, never the key:
+> ⚠️ Never set an entry's `type` to `"streamable-http"`. That is a Claude Code alias for this
+> transport, not a second one: Cursor's CLI can silently drop a whole config file that uses it,
+> leaving you with no error and no connection. If your client requires a `type`, use `"http"`;
+> Cursor and Pi omit `type` entirely and infer the transport from `url`.
 
-```bash
-export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell; use a non-committed include in your profile if it is version-controlled
-```
+Auth is a Bearer header that reads your key from the environment — never paste the literal key into a
+config file, because config files get committed.
+
+**Claude Code** — add to `.mcp.json` in your project. Claude Code requires `"type": "http"` (a `url`
+entry with no `type` is read as stdio and the server is skipped):
 
 ```json
 {
@@ -61,6 +67,29 @@ export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell; use a non-committed inclu
 A project-scope `.mcp.json` stays **⏸ Pending approval** in Claude Code until you
 approve it once — start `claude` in the project and allow the prompt, or run
 `/mcp` (`claude mcp reset-project-choices` resets the choice).
+
+**Cursor** — add to `.cursor/mcp.json`. Cursor expands `${env:…}` and infers the transport from `url`,
+so the entry carries **no** `type`:
+
+```json
+{
+  "mcpServers": {
+    "tortoise": {
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${env:TORTOISE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Export the key you were shown in step 1 so the header resolves — the config file holds the *reference*,
+not the secret:
+
+```bash
+export TORTOISE_API_KEY="tt_..."   # the key from step 1; add to your shell profile to persist
+```
 
 **Codex** instead:
 
@@ -192,11 +221,11 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 
    Encrypted by default (AES-256-GCM). Set `TORTOISE_BACKUP_KEY` (base64 32-byte) to use a key you control, or keep the `key_b64` the CLI prints once on its stdout JSON line — you need it to import.
 2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup), or from the CLI: `tortoise signup` (mints a free hosted team + key, no email).
-3. **Connect a working directory**: run `tortoise init --api-key 'tt_<your-key>'` from the directory you'll use.
+3. **Connect a working directory**: run `tortoise init --api-key tt_<your-key>` from the directory you'll use.
 4. **Import the artifact** into the team graph (owner session auth):
 
    ```bash
-   curl -X POST "https://api.premiselabs.co/v1/organizations/<org_id>/import" \
+   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \
