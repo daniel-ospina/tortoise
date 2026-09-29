@@ -1472,14 +1472,12 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("refs/remotes/origin/fix/3061cafe", out)
 
     def test_a_lane_branch_under_mergify_not_merge_queue_still_collides(self):
-        # ⛔ THE WIDTH OF THE FILTER IS A FAIL-CLOSED DECISION (review cycle 1,
-        # PR #6267). The first version excluded the whole `mergify/` namespace,
-        # justified by "no lane can claim one" — a claim measured only for
-        # `mergify/merge-queue/*`. A lane CAN create `mergify/<issue>-name`
-        # locally, and that branch then became invisible on a BLOCKING surface:
-        # a false CLEAN, which for this tool is strictly worse than a false
-        # COLLISION. Pinning the narrower namespace is what stops the filter
-        # being widened again without a decision.
+        # ⛔ THE WIDTH OF THE FILTER IS A FAIL-CLOSED DECISION. A lane CAN create
+        # `mergify/<issue>-name` locally, and any namespace wider than
+        # `mergify/merge-queue/` renders that branch invisible on a BLOCKING
+        # surface: a false CLEAN, which for this tool is strictly worse than a
+        # false COLLISION. This pins the narrower namespace so the filter cannot
+        # be widened again without a decision.
         for ref in (f"mergify/{ISSUE}-lane", f"mergify/{ISSUE}-lane-local"):
             with self.subTest(ref=ref):
                 _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
@@ -1489,7 +1487,7 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn(f"refs/remotes/origin/{ref}", out)
 
     def test_second_mergify_namespace_and_ci_bot_branch_are_not_claims(self):
-        # Two more generated namespaces exist in this repo's real refs.
+        # Two further generated namespaces exist in this repo's real refs.
         # `mq/merge-queue/` is a second Mergify merge-queue namespace;
         # `chore/ci-timing-refresh-` is minted by this repo's own workflow from
         # `git rev-parse --short HEAD`, so a short SHA can LEAD with an issue
