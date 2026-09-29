@@ -18,6 +18,46 @@ aboutObjects: EXTRACTOR-V4-ARCHITECTURE.md, extractor pipeline, S2.2 VET, entity
 
 ---
 
+## ⛔ USAGE IS DENOMINATED IN TOKENS, AND OVERAGE IS PURCHASED — decision, owner, 2026-09-26 (`#4495`)
+
+**Read this before the rest of the document.** This document is about the *pipeline*; it is silent on **what
+extraction costs the customer**, and that silence is now filled by a ruling:
+
+- **Extraction usage is counted in TOKENS**, and a tier carries a **starter number of tokens**. *"similar for usage,
+  we give them a number of 'tokens' but if they use too much, they have to purchase extraction overage."*
+- **Extraction overage is PURCHASED**, with **prepaid credits** (the owner's reason is cashflow, in preference to
+  approving a postpaid maximum spend).
+- The subscription is priced on **features**; storage is billed separately in **MB/GB** — see the decision block in
+  `STORAGE-ARCHITECTURE.md`.
+- **Prices are NOT set here.** The owner *"calibrat[es] after the beta launch"*, from measured consumption.
+
+**What this means for this document's own design work.** The tokens are the **extraction** lane's workload — the LLM
+work this architecture specifies — so any change that alters extraction **volume** (batch size, the S1→S2 step count,
+the VET pass, per-item vs per-batch judgment) now moves a **customer-visible meter**, not merely a cost. That is a
+reason to prefer measurable steps over inferred ones: §16.2's rule (a claim must be checkable) is now also a billing
+surface.
+
+**⛔ Where the measurement is — PLANNED, not present.** The capture lane does **not** record token counters on `main`
+today: of its capture-lane columns, the per-org ledger carries only `capture_calls` and `capture_cost_usd` (the
+ask-lane counters `ask_calls`/`ask_tokens_in`/`ask_tokens_out` are separate and already present). **`#5045` (PR #5697, unmerged) will
+add `capture_tokens_in`/`capture_tokens_out`**; the **ask** lane already records `ask_tokens_in/out`. When the
+capture columns land, **the spend ceiling stays blind to them by construction** — `metering_cohort_spend` and
+`get_cohort_spend_usd` read **only** `ask_cost_usd` + `capture_cost_usd`, so adding token counters cannot change the
+cap's behaviour. That separation is deliberate: this ruling is about the **unit**, and the cap is a separate decision.
+
+**⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
+seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
+**post-hoc** meter with overage. Those are pricing/enforcement questions — owner territory, post-beta calibration.
+
+> **OVERRIDES:** the **postpaid metered/auto-billing** default the field uses, and **`write_ops`** (the current
+> metered-usage unit) as the unit for extraction consumption — replaced by **prepaid credits** and per-token
+> extraction with purchased overage, because per-write-op accounting cannot express LLM work at all (extraction
+> consumes provider tokens, not graph writes), and because the owner's cashflow reason favours **buying credits in
+> advance** over approving a maximum spend. (Billing LLM work per token is itself the field default, so the marker
+> names the unit we leave *and* the payment shape we depart from.)
+
+---
+
 ## 1. Why v4 exists
 
 ### The measured problem
@@ -590,7 +630,7 @@ S6  COMMIT
 
 **And ⚠️ `llm_tail` is NOT a ready-made Jev seam — that was over-read.** It is a **BOOLEAN** (`kind_classifier.py:93`); the line cited as a seam is `:522`, the **offline-eval CLI disabling it**. The tail is a **hardcoded prompt + a JSON parser**, so **swapping Jev in requires an adapter, a prompt, and a parser** — it is a *small* piece of work, but it is work, not a config flag.
 
-**⚠️ And the "structural enforcement" argument is weaker than it reads.** `closed_vocab_rejects` **already exists** (the closed vocabulary is enforced today), so Jev's `Choice` does not add a new guarantee the pipeline lacks — it removes a class of **malformed / off-vocabulary** emission. And a repo-wide search for `entityCues` returns **no matches** — do not cite it.
+**⚠️ And the "structural enforcement" argument is weaker than it reads.** `closed_vocab_rejects` **already exists** (the closed vocabulary is enforced today), so Jev's `Choice` does not add a new guarantee the pipeline lacks — it removes a class of **malformed / off-vocabulary** emission. And a repo-wide search for `entityCues` returns **no READER** — #1026 Stage 2 made the slot declarable, but nothing consumes it yet, so do not cite it as an implemented classifier surface.
 
 **⚠️ And a hard constraint this ordering must respect:** ⚠️ **`#4899`'s Phase-1 mechanical DISCARD has known false positives** — *"a bare `#\d{3,}` in a working note is discardable; **a PR number a decision turned on is not**"* — and **only the lookup or a semantic judgment can tell them apart.** Phase 1 runs before the lookup deliberately, which is why `#4899` **gates it behind a flag, records every discard with its rule id, and requires the counterfactual to be recoverable.** **Any reordering that moves the gate earlier must preserve those three.**
 
