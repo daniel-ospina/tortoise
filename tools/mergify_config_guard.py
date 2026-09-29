@@ -98,6 +98,17 @@ NOT re-implemented here — it is already asserted by
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/mergify_config_guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/mergify_config_guard.py`"
+    )
+
 import argparse
 import ast
 import hashlib
@@ -105,7 +116,6 @@ import json
 import re
 import shlex
 import subprocess
-import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path

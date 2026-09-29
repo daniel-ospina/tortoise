@@ -42,10 +42,20 @@ machine-readable report (parsed by ``tests/test_graph_diagnostics.py``).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/graph-diagnostics.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/graph-diagnostics.py`"
+    )
+
 import argparse
 import json
 import os  # noqa: F401
-import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 
