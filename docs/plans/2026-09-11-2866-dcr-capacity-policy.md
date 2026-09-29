@@ -68,7 +68,7 @@ file for ~120 lines. Recorded, not silently dropped.
 | S3 | `ClientIPMiddleware` trust flag + `fly.toml [env]` | config seam | all per-IP limiters | HTTP integration + `tomllib` config test | flag missing ⇒ exemption dead; flag on a non-proxy ingress ⇒ spoofable |
 | S4 | `_oauth_control_plane()` registry-mode 503 | mode gate | selfhost/registry deployments | HTTP integration | 503 consumes a charge / creates a bucket |
 | S5 | `SCOPES_ACCEPTED` / `authorization_server_metadata` | protocol metadata | MCP clients (scope discovery), DCR gate | unit + HTTP integration | `offline_access` 400s registration; AS metadata disagrees with the gate; `SUPPORTED ⊄ ACCEPTED` |
-| S6 | authorize/consent scope forward (`hosted_api.py:21752/21779/21865`) + store (`oauth.py:499`) | protocol path (unchanged) | consent page | existing tests + filed sibling issue | unvalidated scope minted into a token (filed, not fixed here) |
+| S6 | authorize/consent scope forward (`hosted_api.py:21752/21779/21865`) + store (`oauth.py:499`) | protocol path (was unchanged; now gated) | consent page | existing tests + `tests/test_oauth_mcp.py::TestScopeAllowList` | unvalidated scope minted into a token (filed, **since fixed by #3128** — scope gated by `validate_scope` on the authorize/consent/mint path) |
 | S7 | Generic `RateLimitMiddleware` (100/min, no `max_entries`) also wrapping `/register` | middleware | all routes | non-interference assertion in the DCR fixture | test-isolation break if its `_disabled` is captured with the flag removed; residual unbounded store |
 | S8 | `docs/oauth-mcp.md` env-knob table | docs | operators | review | stale knob docs |
 

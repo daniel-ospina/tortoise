@@ -1,0 +1,43 @@
+name: Main health (nightly)
+# #5215 D13 / Task 8 — the post-merge main signal for the five required
+# contexts that had none.
+#
+# Five of the six branch-protection required contexts — pricing-artifact,
+# docs, test-isolation, license-surface, legal-e2e — are emitted by ci.yml,
+# which was `on: pull_request:` only. A required context that never runs on
+# `main` can sit red there with nothing reporting it. (The #5583 class is NOT
+# this gap: that was a retrieval defect in `tortoise/search_engine.py`, and
+# `python-ci.yml` already grades its suite on `push: main`.)
+#
+# This workflow is the signal: on a schedule (and on demand) it CALLS ci.yml
+# via `on.workflow_call` with `main_health: true`, so the SAME jobs emit
+# check-runs on main. It REPORTS; it does not gate — a scheduled run is not a
+# branch-protection context, so a red here cannot block a merge.
+#
+# `schedule` / `workflow_dispatch` ONLY (D13): a per-push trigger would pay the
+# CI time this plan exists to cut. The call passes `secrets: inherit` — a
+# reusable workflow does NOT inherit secrets by default, and the five jobs need
+# the same secrets a PR run does.
+on:
+  schedule:
+    # 05:17 UTC daily — off the hour so it does not contend with the hourly
+    # registry crons.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-health-nightly
+  cancel-in-progress: false
+
+jobs:
+  main-health:
+    # The caller job. It is deliberately NOT a branch-protection required
+    # context — this signal reports, it never gates the merge path.
+    name: main-health
+    uses: ./.github/workflows/ci.yml
+    with:
+      main_health: true
+    secrets: inherit
