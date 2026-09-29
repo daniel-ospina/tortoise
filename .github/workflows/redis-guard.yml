@@ -1,5 +1,17 @@
 # redis-guard CI gate (issue #176, Task 13)
-# Runs the unified hook; must BLOCK merge (branch protection requires it).
+# Runs the unified hook on every PR and push to main.
+#
+# ⚠️ THIS IS NOT A REQUIRED STATUS CHECK. This comment used to claim "must BLOCK
+# merge (branch protection requires it)" — that was false, and had been for a
+# long time: the live `main` protection has SEVEN contexts and `redis-guard` is
+# none of them, and it is in neither of `.mergify.yml`'s `queue_conditions` /
+# `merge_conditions` lists. So a red run here reports, and does NOT block a
+# merge — a guard that believed it gated the merge and did not (#6144).
+#
+# What still enforces it: the `.pre-commit-config.yaml` hook of the same name
+# runs `tools/redis-guard.py` locally, and `python-ci.yml`'s Python matrix owns
+# the leak-pattern tests. Deciding whether to make this check REQUIRED is a
+# branch-protection change (owner action), not a file edit.
 name: redis-guard
 on:
   pull_request:

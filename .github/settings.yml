@@ -1,12 +1,42 @@
-# Branch protection via probot-settings (issue #176, Task 13)
-# If probot-settings app is NOT installed, configure manually:
-#   Settings -> Branches -> main -> Require status checks -> redis-guard
+# Branch protection — DECLARATIVE MIRROR of the live `main` protection.
+#
+# ⚠️ This file is INERT. probot-settings reads a top-level `branches:` key; this
+# file nests under `repository: -> branch-protection:`, a schema nothing reads.
+# So it neither drives nor reflects branch protection by itself — it is a third
+# declaration of the same list (the other two are live branch protection and
+# `.mergify.yml`'s `queue_conditions`/`merge_conditions`), and the reason
+# `.github/scripts/check-required-set.py` asserts all three agree.
+#
+# It was last correct for a REDIS-era protection: it declared `redis-guard` and
+# `strict: true`. Both were false. `strict: true` here is the origin of the
+# stale premise recorded in #4764 (the live protection is `strict: false`, so a
+# behind branch merges as-is), and `redis-guard` has not been a required check
+# for a long time while `.github/workflows/redis-guard.yml` still claimed it
+# was — a guard that believed it blocked the merge and did not.
+#
+# Manual equivalent (if you are ever here to set this by hand):
+#   Settings -> Branches -> main -> Require status checks -> the SEVEN below.
+# Keep this list equal to live `.required_status_checks.contexts` and to
+# `check-required-set.py`'s enumeration; `check-required-set.py --live` is the
+# assertion. Live protection has SEVEN contexts: the six the queue names
+# explicitly, plus `ai-review-gate`, which Mergify enforces at the merge by
+# branch-protection injection and which is deliberately NOT in
+# `queue_conditions` (naming it there would make it an ENTRY gate too).
 repository:
   branch-protection:
     - branch: main
       enforce_admins: false
       required_status_checks:
-        strict: true
+        # `false` matches the LIVE protection. Do not flip this to `true` here:
+        # it is a branch-protection change (strict up-to-date protection), not a
+        # file edit, and a requirement this file cannot actually enforce.
+        strict: false
         contexts:
-          - redis-guard
+          - pricing-artifact
+          - docs
+          - test-isolation
+          - license-surface
+          - legal-e2e
+          - python-ci-gate
+          - ai-review-gate
       required_pull_request_reviews: null
