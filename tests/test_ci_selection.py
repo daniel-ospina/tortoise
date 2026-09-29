@@ -3998,7 +3998,7 @@ def test_every_changed_set_diff_disables_rename_detection():
       "Compute per-surface path gates (#2149)" step, and one on the dead step
       below. So a comment cannot satisfy it (and a comment mentioning the flag
       cannot inflate it). The floor now has ZERO headroom: the two LIVE commands
-      already meet it, so deleting the dead step alone leaves `checked == 2` and
+      fall one short of it, so deleting the dead step alone leaves `checked == 2` and
       FAILS the floor — the floor must come down to 2 BEFORE that step is removed.
     * The dead third command — from the "Get changed markdown files" step in
       `ci.yml` (cited by step name, not line number, because line numbers drift)
@@ -4006,8 +4006,9 @@ def test_every_changed_set_diff_disables_rename_detection():
       checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
       the diff fails, `|| true` leaves `FILES` empty and the consuming
       markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
-      check (#2802)" step comment records this. Do not let the floor drift above
-      the number of live commands.
+      check (#2802)" step comment records this. Do not let the floor drift above the
+      PARSED count — today 3, of which only 2 are live, so this inert step is the
+      only thing holding the floor at 3 rather than 2.
     * The same step's `--no-renames` is still deliberate and the rule applies to
       it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
       the DELETED source path of a `.md`->`.md` rename is tolerated —
