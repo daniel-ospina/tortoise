@@ -6996,6 +6996,14 @@ class FalkorProjection(
                 # deleted raw on every rebuild. That is the silent loss this
                 # issue exists to prevent, on the one path whose comment already
                 # says a live-writer fix cannot retire the bytes.
+                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here, although
+                # `entities._SOURCE_IDENTITY_PROPS`' docstring says it is. Making
+                # the code match that comment would change what an
+                # `EntityMutated` replay does with `url`/`canonicalUrl`/
+                # `urlAliases`, and `test_5026_b1_aboutdocument_replay_key_is_url_
+                # never_title` (a main-side pin) is exactly about the url replay
+                # key — so the change is deferred until it can be run against the
+                # docker lane rather than guessed at.
                 _sm = sorted(k for k in state if k in _SOURCE_SERVER_MANAGED_PROPS)
                 if _sm:
                     for k in _sm:

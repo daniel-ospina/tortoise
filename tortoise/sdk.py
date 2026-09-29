@@ -22671,15 +22671,20 @@ class TortoiseSDK:
                 # OPTIONAL + coalesce semantics (a source with no reference
                 # yields the SOURCE as its own terminal provenance) but are
                 # ALWAYS emitted, so the key set is stable and a caller
-                # iterating a non-empty chain cannot ``KeyError``. When the
-                # coalesce FELL BACK the entity IS the source node, so the same
-                # declared-surface filter applies — otherwise the fallback
-                # re-hands the very payload the `source` filter above strips. A
-                # genuinely referenced entity is left intact: it is not a
-                # `:Source` row, so this declaration is not its to prune.
+                # iterating a non-empty chain cannot ``KeyError``. The filter is
+                # keyed on the RESOLVED node's LABEL, not on whether the coalesce
+                # fell back: `Source -[:references]-> Source` is a real in-tree
+                # edge (`link_source_to_entity(ref, did, "Source")` — the
+                # corpus→document layering — and `hosted_api` links a document
+                # under the same label), so the referenced node is frequently a
+                # `:Source` as well. Gating on the fallback flag alone left exactly
+                # that case unfiltered while the `source` half of the SAME row was
+                # stripped, which is the leak this method exists to close. A
+                # referenced Event/Subject/Object is still returned whole: it is not
+                # a `:Source`, so this declaration is not its to prune.
                 "entity": (
                     filter_source_props(row[1] or {})[0]
-                    if row[3]
+                    if row[1] is not None and (row[3] or "Source" in (row[2] or []))
                     else (dict(row[1]) if row[1] is not None else None)
                 ),
                 "labels": list(row[2]) if row[2] is not None else [],
@@ -22773,7 +22778,13 @@ class TortoiseSDK:
             "RETURN properties(s)",
             params={"url": url, "updates": updates, "now": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()},
         )
-        return dict(r.result_set[0][0]) if r.result_set else {}
+        # #3998 (D30): `properties(s)` is a :Source bag, so it goes through the
+        # same declared-surface filter as every other :Source read. A graph
+        # written before the passthrough closed can still hold a payload here,
+        # and this method EDITS the node — returning it unfiltered would hand
+        # those bytes back on the one path a caller takes right after completing
+        # it, which is the leak the read filter exists to close.
+        return filter_source_props(dict(r.result_set[0][0]))[0] if r.result_set else {}
 
     # ── Backfill Migration ────────────────────────────────────────
 

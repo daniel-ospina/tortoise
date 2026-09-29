@@ -484,6 +484,20 @@ class _EntityHandlers:
         # silently loses a property that is on the node.
         "domain", "status", "embedding", "about_entities",
         "documentKind", "document_kind",
+        # #3998: the DOCUMENT writer's own payload (`api.DocumentCreated` →
+        # `_upsert_document`, whose passthrough passes no `allow_keys`, so every
+        # one of these lands on the document `:Source`). They are the same
+        # undeclared-drop class as the line above and were found by reading what
+        # that writer actually emits rather than what this declaration assumed:
+        # `needs_extraction` is read back by `ingest` (`coalesce(s.needs_extraction,
+        # false)`) as the extraction signal, and `authored_by`/`owned_by`/
+        # `managed_by`/`governing_agreement`/`document_knowledge_domain`/`createdAt`
+        # are the document's own provenance metadata. Both spellings are listed
+        # for the session/source pair because the document writer emits the
+        # snake_case forms while the session-capture writer mints the camelCase.
+        "needs_extraction", "story_arc", "document_knowledge_domain",
+        "authored_by", "owned_by", "managed_by", "governing_agreement",
+        "createdAt", "session_id", "event_id", "source_path",
     })
     _SOURCE_EXTRA_PROPS: frozenset = frozenset({
         "credibilityTier",   # create_source(tier=)
@@ -2820,7 +2834,6 @@ class _EntityHandlers:
         # declared :Source surface since #3998 (see _SOURCE_EXTRA_PROPS). An
         # undeclared key is DENIED rather than written, so no spelling of a raw
         # payload can reach the node and no journal replay can restore one.
-        # legitimately carries them is not silently dropped.
         # The DENIAL is logged (#2795's drift warning, applied to this layer):
         # silently dropping a prop a caller sent is how a declaration rots into
         # a mystery, and the return value exists precisely to feed this.
