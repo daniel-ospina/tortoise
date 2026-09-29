@@ -54,9 +54,9 @@
 #      Read the mode before reasoning about the list; the same list behaves
 #      differently under the two modes.
 #
-# Last reconciled with the live required set: 2026-09-26
+# Last reconciled with the live required set: 2026-09-29
 #   queue_conditions (entry) : pricing-artifact, docs, test-isolation,
-#                              license-surface, legal-e2e
+#                              license-surface, legal-e2e, ai-review-gate
 #   merge_conditions (merge) : python-ci-gate
 
 # ── Parallel speculative checks — test several batches at once ────────────────
@@ -101,15 +101,38 @@ queue_rules:
   - name: main
     # Entry gate — evaluated against the PR head, before it is queued.
     #
-    # The five below are cheap and repo-wide: they run their own workflow bodies
-    # in `ci.yml`, and `tools/ci_selection.py` selects legs for the Python suite,
-    # not for these. The heavy check is deliberately not listed here — per
+    # The list below is cheap and repo-wide: the `ci.yml` checks run their own
+    # workflow bodies there, and `tools/ci_selection.py` selects legs for the Python
+    # suite, not for these (`ai-review-gate` is its own workflow, `ai-review-gate.yml`).
+    # The heavy check is deliberately not listed here — per
     # contract point 4 it would be an entry condition anyway under the default
     # injection mode, which is the treadmill this change removes. It is named in
     # `merge_conditions` below, where it is re-run against the queue branch.
     #
-    # Verified: these five report `success` (never `skipped`) across every sampled
-    # PR, so `check-success` cannot deadlock entry.
+    # ⛔ THE REVIEW RECORD IS AN ENTRY CONDITION (#5433), and this is the ONLY place the
+    # queue can enforce it. The record is an author-PR property — bound to the author PR's
+    # number and head — which is exactly why the synthetic queue batch deliberately PASSES
+    # `ai-review-gate` instead of evaluating it (that gate's #5426 guard), so a merge-time
+    # condition could never check it. Until this line existed, no step on the SERVER-SIDE
+    # MERGE PATH enforced the record: the check ran on every PR and read the body, but it
+    # was neither a required context nor named in any condition, so nothing acted on its
+    # conclusion. The local `review-enforcer` gate guards `gh pr merge` run on a developer
+    # machine; Mergify merged through the queue having consulted the record nowhere, so an
+    # unreviewed or review-invalidated PR reached `main` by the routine route. Entry is
+    # evaluated against the author PR head, where the run that verifies the record actually
+    # reports.
+    #
+    # Cost: nothing extra — `ai-review-gate` already runs on every PR (it is a ~seconds job
+    # reading the body and an HMAC), so naming it adds no workflow and no wall-clock. It
+    # must ALSO be a live required context, and therefore present in the guard's record
+    # `docs/ci/required-contexts.json`: clause (iv)'s agreement sub-check reds when the
+    # config's check set and the record's `required_contexts` disagree (active under `merge`
+    # injection; I1 itself is the LIVE comparison, read only by `--live`).
+    #
+    # Verified: every check listed below always REPORTS a conclusion (never `skipped`), so
+    # `check-success` cannot deadlock entry. They are not all green on an unreviewed PR —
+    # `ai-review-gate` is red by design until a review is recorded, which IS the enforcement;
+    # the rest are green on any PR that builds.
     queue_conditions:
       - base=main
       - -draft
@@ -118,12 +141,13 @@ queue_rules:
       - check-success=test-isolation
       - check-success=license-surface
       - check-success=legal-e2e
+      - check-success=ai-review-gate
     # Re-asserted against the *queue branch*, immediately before the merge.
     # This is the whole point of the queue: the check that gates the merge ran
     # on the tree being merged, not on a stale head.
     #
     # Only the critical-path check is named here, deliberately. A condition here
-    # must be a check that actually *reports on the queue branch*; the five cheap
+    # must be a check that actually *reports on the queue branch*; the cheap
     # checks are strictly enforced at ENTRY by `queue_conditions` above, and at
     # merge only weakly — by the injected branch-protection conditions, which
     # accept neutral/skipped (contract point 3). Adding a check that the queue
@@ -202,12 +226,20 @@ queue_rules:
 #     · #3016 — the base race this queue exists to remove
 #     · #5215 — merge throughput, and what the click actually cost
 #     · #5426 — `ai-review-gate` is red whenever no valid recorded review marker
-#       exists for the PR, and it is not a required context
-#     · #5433 — the review record is enforced only by LOCAL tooling
-#       (`review-enforcer` and `scripts/atomic-land.sh`); Mergify merges
-#       server-side, so no step on that path reads it
-#   ⛔ Never write "the review attestation is an enforced gate" here or anywhere
-#   else. It is enforced on local land paths only, never on a queue merge.
+#       exists for the PR
+#     · #5433 — the record was, until that change, enforced only by LOCAL tooling
+#       (`review-enforcer`, `scripts/atomic-land.sh`, the rail); Mergify merges
+#       server-side, so no step on that path ENFORCED it — the check itself ran
+#       and read the body, but nothing acted on its conclusion. The entry
+#       condition above is the enforcement that closes it.
+#   ⛔ The `check-success=ai-review-gate` line in `queue_conditions` IS the
+#   server-side enforcement of the review record — removing it silently restores
+#   #5433, and the config guard's clause-(iv) agreement (config checks == the record's
+#   `required_contexts`) is what keeps it from being removed quietly. Re-read the
+#   live branch-protection API before restating whether the check is required.
+#   ⚠️ #3091 qualifier: the check is required, its HARNESS
+#   (`ai-review-gate-tests`) is not — a PR that weakens the gate is evaluated by
+#   the base revision, so it can merge with that harness red-but-unrequired.
 merge_protections_settings:
   auto_merge_conditions: true
 

@@ -78,6 +78,10 @@
     ],
     "check": [
       [
+        "availability-liveness.yml",
+        "check"
+      ],
+      [
         "skip-bypass-expiry.yml",
         "check"
       ]
@@ -226,6 +230,12 @@
       [
         "post-merge-validation.yml",
         "lint"
+      ]
+    ],
+    "main-health": [
+      [
+        "main-health-nightly.yml",
+        "main-health"
       ]
     ],
     "manifest-integrity": [
@@ -463,9 +473,10 @@
       ]
     ]
   },
-  "gate_digest": "969f7a26879dc39136cb1229ba007562232bc584c1f20b5e3ad06811608699e2",
-  "live_checked_at": "2026-09-28T05:36:59Z",
+  "gate_digest": "c87ec08f1f991eb23a9d4203e1da1a6fdc8e5a7389b1917fac6ae0f00d14fd99",
+  "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
+    "ai-review-gate",
     "docs",
     "legal-e2e",
     "license-surface",
@@ -474,9 +485,10 @@
     "test-isolation"
   ],
   "live_result": "SATISFIED",
-  "live_verified_at": "2026-09-28T05:36:59Z",
-  "read_sha": "0469ed1bad8734249081c431b649b6fe455953e2",
+  "live_verified_at": "2026-09-29T02:35:26Z",
+  "read_sha": "9c4788400b838a0ed115cab7225bee93b2e4440b",
   "required_contexts": [
+    "ai-review-gate",
     "docs",
     "legal-e2e",
     "license-surface",
@@ -485,5 +497,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-28T13:43:24Z"
+  "verified_at": "2026-09-29T02:35:39Z"
 }
