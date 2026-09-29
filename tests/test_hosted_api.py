@@ -9769,6 +9769,12 @@ class TestCapturePathSkipsDiscardedProjection:
 
         monkeypatch.setattr(_ha_mod, "_get_onboarding_projection", _spy_projection)
         monkeypatch.setattr(_ha_mod, "_get_onboarding_state", lambda org_id: {})
+        # #3553: the write leg now goes through `_write_jsonb_fields_cas`, which
+        # reads via `_read_onboarding_state_and_version` — stub it too, or the
+        # test opens a real registry graph and only reaches `_spy_write` through
+        # the version-None fallback. Same fix as tests/test_telemetry_registration.py.
+        monkeypatch.setattr(_ha_mod, "_read_onboarding_state_and_version",
+                            lambda org_id: ({}, None))
         monkeypatch.setattr(_ha_mod, "_write_onboarding_state", _spy_write)
         return proj_calls, writes
 
