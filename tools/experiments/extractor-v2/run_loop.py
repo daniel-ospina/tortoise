@@ -2,8 +2,21 @@
 """Optimization loop: cleaner prompt (from file) -> solar clean -> flash S1.
 Reports cost + the cleaner's compression ratio + flash output."""
 from __future__ import annotations  # noqa: I001
-import json, sys, time  # noqa: E401
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/experiments/extractor-v2/run_loop.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/experiments/extractor-v2/run_loop.py`"
+    )
+
+import json
+import time
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.model_adapters import MODELS
 
