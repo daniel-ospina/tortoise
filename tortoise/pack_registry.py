@@ -1103,8 +1103,7 @@ class PackRegistry:
                     )
 
         # relationTemplates: pack-typical IMPL/NAND shapes. The mechanism
-        # vocabulary is the pair `relations[].mechanism` already enforces — see
-        # the note at the check below for why it is NOT `CORE_PREDICATES`.
+        # vocabulary is the pair `relations[].mechanism` already enforces.
         templates = extraction.get("relationTemplates")
         if templates is not None and not isinstance(templates, list):
             errors.append("extraction.relationTemplates must be a list")
@@ -1123,13 +1122,13 @@ class PackRegistry:
                             f"toKind, description)"
                         )
                 mechanism = tpl.get("mechanism")
-                # IMPL|NAND — the SAME pair `relations[].mechanism` enforces.
-                # MITIGATES is RETIRED (ONTOLOGY v3.17, #4937, the F1 ruling on
-                # #2552) and `sdk.create_operator` refuses it, so accepting it
-                # here would advertise, on the author-facing template, an edge
-                # the engine cannot build. `CORE_PREDICATES` no longer carries
-                # it either (#2766 / #5322), so the two slots finally agree:
-                # both read the SAME literal pair, IMPL and NAND.
+                # IMPL|NAND — the pair this check hardcodes and
+                # `relations[].mechanism` hardcodes. `MITIGATES` is RETIRED
+                # (ONTOLOGY v3.17, #4937, the F1 ruling on #2552) and
+                # `sdk.create_operator` refuses it, so accepting it here would
+                # advertise, on the author-facing template, an edge the engine
+                # cannot build. `CORE_PREDICATES` holds that same pair
+                # (#2766 / #5322).
                 # `predicate` is the one REFERENCE among these slots. The
                 # sibling `ontology.relations` requires a non-empty camelCase
                 # predicate and both kind sides, and a template naming none of
