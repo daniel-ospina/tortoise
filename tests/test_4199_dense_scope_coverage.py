@@ -618,10 +618,11 @@ def test_empty_scope_cannot_launder_a_leg_failure():
     a keyword-only read whose dense leg ERRORED was reported with no
     declaration at all: the same laundering the empty-scope rule exists to
     stop, keyed on scope instead of arm. ``index_missing`` is the other
-    failure reachable post-probe; both are covered.
+    failure reachable post-probe; all three are covered.
     """
     for message, reason in (("kaboom", "query_failed"),
-                            ("no such index for vector", "index_missing")):
+                            ("no such index for vector", "index_missing"),
+                            ("embedding is null", "no_embeddings")):
         graph = _RoutingGraph([
             ("count(n.embedding)", [(0, 0)], None),
             ("euclideanDistance", [], RuntimeError(message)),

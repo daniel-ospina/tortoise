@@ -569,8 +569,11 @@ _KIND_FIELD_BY_ENTITY = {
 
 #: #4199 — trace-entry key recording that the arm measured an EMPTY scope
 #: (the ``scope_kinds`` predicate selected NO nodes). Present only on a
-#: vector entry whose scope probe ran; absent means the entry measured a
-#: non-empty scope or was never scoped. The value is
+#: vector entry whose scope probe ran and whose read did not FAIL. Absent
+#: means one of: the entry measured a non-empty scope, was never scoped, or
+#: is a FAILURE record — a failure keeps its own ``reason`` and the key
+#: absent so that an empty scope cannot launder it (#4199 review P2; see
+#: :func:`run_vector_query`'s ``failure`` argument). The value is
 #: :data:`VECTOR_SCOPE_EMPTY`.
 VECTOR_SCOPE_KEY = "scope"
 #: The arm's ``scope_kinds`` selected no nodes. An empty scope is a category
@@ -614,6 +617,13 @@ def _vector_leg_healthy(entries: list[dict]) -> bool:
 
 def _all_vector_arms_measured_empty_scope(entries: list[dict]) -> bool:
     """True when EVERY vector entry measured an EMPTY scope (#4199 review P1).
+
+    A FAILURE record is deliberately NOT counted as an empty-scope
+    measurement: it carries no :data:`VECTOR_SCOPE_KEY` and keeps its own
+    ``reason``, so an empty scope cannot neutralise a failed leg (the
+    ``failure`` argument of :func:`run_vector_query`'s ``_record``). A trace
+    whose every arm failed therefore returns ``False`` and still fails
+    closed.
 
     ``#2952``'s empty-scope rule: a scope that selected NO nodes at all makes
     ``no_embeddings`` a category error, so such a read is neither declared
@@ -1035,7 +1045,12 @@ def run_vector_query(
     NEUTRAL on the trace entry (:data:`VECTOR_SCOPE_KEY` →
     :data:`VECTOR_SCOPE_EMPTY`): its ``ok``/degraded record stands, but
     :func:`declared_degraded_read` skips it so it can neither prove the read
-    hybrid nor declare it degraded (the empty-scope rule).
+    hybrid nor declare it degraded (the empty-scope rule). ONE EXCEPTION:
+    a FAILURE (:func:`_record` called with ``failure=True`` -
+    ``index_missing``, a raised ``no_embeddings``, ``query_failed``) is
+    never tagged neutral and keeps its own reason, because an empty scope
+    must not launder a failed leg into "no declaration at all" (#4199
+    review P2).
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
