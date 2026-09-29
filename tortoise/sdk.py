@@ -1239,10 +1239,11 @@ def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
     (``f"{session_id}_t{i}"``).
 
     The CLIENT's constructor (``session_confirm.turn_point_id``) is deliberately
-    its own copy: it is pinned against this format by
-    ``tests/test_session_confirm.py``, so a format change reds a test rather than
-    silently making every confirmation defer (a version-bound parity — a client
-    on an older table cannot be made to import this module).
+    its own copy: ``tests/test_session_confirm.py`` asserts the literal
+    ``f"{session_id}_t{i}"`` is still present in this module AND that
+    ``turn_point_id("abc", 0) == "abc_t0"``, so the format is pinned by a test
+    rather than by an import (a version-bound parity — a client on an older
+    table cannot be made to import this module).
     """
     return f"{session_id}_t{index + turn_offset}"
 
@@ -1266,14 +1267,16 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
     ).result_set
     # str-only: a non-string id would make the suffix slice raise, and no
     # writer ever stores one (the same str-only posture the replay folds take).
-    # ``isdecimal()`` — NOT ``isdigit()`` — is the predicate that AGREES with
-    # the ``int()`` the stale sweep applies below: ``'²'.isdigit()`` is True
-    # while ``int('²')`` raises, so an ``isdigit()`` guard admitted an id the
-    # sweep then could not index (#3551 review). ``isdecimal()`` is True
-    # exactly for the suffixes ``int()`` parses, so every id returned here is
-    # safe to parse. A suffix that is not a decimal integer is not an id this
-    # writer mints (``_capture_turn_id`` formats an ``int``), so it is left
-    # untouched rather than swept — never delete an id we cannot place.
+    # ``isdecimal()`` — NOT ``isdigit()`` — is the predicate whose True set is
+    # a SUBSET of what the ``int()`` the stale sweep applies below parses:
+    # ``'²'.isdigit()`` is True while ``int('²')`` raises, so an ``isdigit()``
+    # guard admitted an id the sweep then could not index (#3551 review). The
+    # implication that matters runs ONE way — no input is ``isdecimal()`` True
+    # and ``int()``-unparseable — so every id returned here is guaranteed
+    # parseable. (``int()`` also parses suffixes ``isdecimal()`` rejects, e.g.
+    # ``'-1'``/``' 3'``/``'3_0'``; those are not ids this writer mints —
+    # ``_capture_turn_id`` formats an ``int`` — so they are left untouched
+    # rather than swept, never deleted where we cannot place them.)
     return [r[0] for r in (rows or [])
             if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 

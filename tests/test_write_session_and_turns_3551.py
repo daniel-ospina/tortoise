@@ -276,8 +276,10 @@ def test_non_int_parseable_suffix_does_not_break_capture(tmp_path):
     True yet ``int('²')`` raises — so an id shaped ``<sid>_t²`` used to be
     admitted by ``_capture_turn_ids`` and then blow up the sweep's parse AFTER
     the caller's :Session MERGE had committed, turning a benign cleanup into a
-    failed capture. The guard now uses ``isdecimal()``, which is True exactly
-    for the suffixes ``int()`` parses, so the id is left untouched instead.
+    failed capture. The guard now uses ``isdecimal()``, whose True set is a
+    SUBSET of what ``int()`` parses (``int()`` also parses ``'-1'``/``' 3'``,
+    which ``isdecimal()`` rejects), so any suffix the guard admits is
+    guaranteed parseable and the wide id is left untouched instead.
     """
     sdk = TortoiseSDK(db_path=str(tmp_path / "wide.db"))
     proj = sdk._get_proj()

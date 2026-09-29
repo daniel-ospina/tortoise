@@ -322,11 +322,14 @@ surfaces:
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
   # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
-  # turn store). DUAL-REGISTERED (`api` + `core`): it guards both
-  # `tortoise/hosted_api.py::_capture_session_impl` (api) and
-  # `tortoise/sdk.py::TortoiseSDK.capture_session` (sdk, a SHARED_MODULE) — and
-  # a named-surface match REPLACES the `core` fallback, so both entries are
-  # needed for a hosted_api.py-only or sdk.py-only PR to run it.
+  # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
+  # that carries a PR-shape requirement — the primitive is called from
+  # `tortoise/hosted_api.py::_capture_session_impl`, which SELECTS `api`, and a
+  # named-surface match REPLACES the `core` fallback, so a core-only
+  # registration would never run this guard on a hosted_api.py-only PR. The
+  # `core` entry covers the engine path: the primitive also serves
+  # `tortoise/sdk.py::TortoiseSDK.capture_session`, and `tortoise/sdk.py` is a
+  # SHARED_MODULE (so an sdk.py change selects the full matrix regardless).
   - test_write_session_and_turns_3551.py
   # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
   # admission gate, the ledger write, the reader and the RPC wrappers all live
