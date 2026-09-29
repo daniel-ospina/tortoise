@@ -117,8 +117,11 @@ def test_handler_makes_no_direct_query_call():
 # LIMIT, stated: the scan walks ASYNC bodies, so a blocking call inside a SYNC
 # helper reached from an async body is not visible here (that was the removed
 # ``_session_pinned_org`` lazy-read shape; it is pinned directly by
-# ``test_session_pinned_org_is_a_pure_predicate``). On-loop calls that remain in
-# an async body are named SITE-PRECISELY in ``_ORG_MINT_LOCK_RESIDUAL``.
+# ``test_session_pinned_org_is_a_pure_predicate``). The on-loop calls that
+# remain in an async body are exempted MECHANICALLY by
+# ``_ORG_MINT_LOCK_RESIDUAL``: each is proven to sit inside a
+# ``with _org_mint_lock(...):`` section, so the exemption is a property of the
+# code rather than a declaration.
 
 #: The §A1-confirmed seam helpers whose sites must stay OFF the loop. Every name
 #: still has to resolve (``test_routed_seam_helper_names_still_exist``) and none
@@ -140,15 +143,22 @@ _ROUTED_SESSION_SEAMS = frozenset({
     "invitation_info_by_token",
 })
 
-#: The ONLY on-loop control-plane calls left, as (enclosing_async_function, callee).
-#: Site-precise on purpose: ``revoke_api_key`` / ``active_api_keys`` /
-#: ``insert_api_key`` are routed EVERYWHERE ELSE, so a name-based allowlist would
-#: silently re-open those sites. All six call sites sit inside
-#: ``with _org_mint_lock(tid):`` — a ``threading.Lock``; the module comment above
-#: ``_org_mint_lock`` says an ``await`` inside that section requires converting
-#: the lock to a per-org ``asyncio.Lock`` (or porting the mint to the single SQL
-#: RPC), a design change of a security-critical mint path deliberately left to
-#: its own change.
+#: The ONLY on-loop control-plane helper calls left, as
+#: (enclosing_async_function, callee). ``revoke_api_key`` / ``active_api_keys``
+#: / ``insert_api_key`` are routed EVERYWHERE ELSE, so a name-based allowlist
+#: would silently re-open those sites.
+#:
+#: The exemption is MECHANICAL, not declared. The guard resolves every
+#: offender's call LINE and asserts it falls inside a
+#: ``with _org_mint_lock(...):`` body: the mint section runs under a
+#: synchronous ``threading.Lock``, and the module comment above
+#: ``_org_mint_lock`` says an ``await`` inside it requires converting the lock to
+#: a per-org ``asyncio.Lock`` (or porting the mint to the single SQL RPC) — a
+#: design change of a security-critical mint path deliberately left to its own
+#: change. So a call inside the lock cannot be offloaded, and a call OUTSIDE it
+#: fails however it is spelled: a 4th ``active_api_keys`` added outside the lock
+#: dedupes into the same ``(function, callee)`` pair, so set membership alone
+#: would let it through; the line-range check is what stops it.
 _ORG_MINT_LOCK_RESIDUAL = frozenset({
     ("_session_key_supabase", "active_api_keys"),
     ("_session_key_supabase", "revoke_api_key"),
@@ -188,6 +198,35 @@ def _module_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
+def _body_import_aliases(node: ast.AST) -> dict[str, str]:
+    """``from ... import X as Y`` aliases at ANY depth of ``node``'s body.
+
+    The #4350 review found the detector resolved block-local aliases NOWHERE:
+    ``from tortoise.supabase_control import org_by_id as _org_by_id`` inside an
+    ``if`` left the call recorded as the opaque alias ``_org_by_id``, so an
+    alias imported anywhere but the body's top level defeated the name guard.
+
+    A nested ``def``/``async def``/``class`` body is EXCLUDED — its imports
+    belong to that function, not to the enclosing loop body (and the enclosing
+    scan resolves their calls against the enclosing scope).
+    """
+    aliases: dict[str, str] = {}
+
+    def walk(current: ast.AST) -> None:
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                continue
+            if isinstance(child, ast.ImportFrom):
+                for alias in child.names:
+                    if alias.asname:
+                        aliases[alias.asname] = alias.name
+            walk(child)
+
+    walk(node)
+    return aliases
+
+
 def _unoffloaded_calls(node: ast.AST,
                        module_aliases: dict[str, str] | None = None,
                        boundaries: frozenset[str] | None = None,
@@ -197,9 +236,10 @@ def _unoffloaded_calls(node: ast.AST,
     boundary and is not nested inside one, as ``(resolved_callee, call)``.
 
     The callee name is RESOLVED through ``from ... import X as Y`` aliases
-    (module-level and local to the body), so ``_sb_memberships(...)`` (an alias
-    of ``user_memberships``) is seen for what it is — an alias is exactly how
-    the session lane smuggles one of these calls past a naive name match.
+    (module-level, and at ANY depth of the body — a block-local import included,
+    excluding nested def bodies), so ``_sb_memberships(...)`` (an alias of
+    ``user_memberships``) is seen for what it is — an alias is exactly how the
+    session lane smuggles one of these calls past a naive name match.
 
     Nested ``def``/``async def``/``class`` bodies are skipped: a blocking call
     in a nested function belongs to that function's own declared residual entry
@@ -210,11 +250,7 @@ def _unoffloaded_calls(node: ast.AST,
     the entry a residual declares (#4625 review F1).
     """
     aliases = dict(module_aliases or {})
-    for stmt in getattr(node, "body", []):
-        if isinstance(stmt, ast.ImportFrom):
-            for alias in stmt.names:
-                if alias.asname:
-                    aliases[alias.asname] = alias.name
+    aliases.update(_body_import_aliases(node))
 
     def resolved(func: ast.expr) -> str | None:
         name = _callee_name(func)
@@ -282,6 +318,65 @@ def _on_loop_nested_names(node: ast.AST) -> set[str]:
     }
     return _nested_defs_invoked_on_loop(
         node, nested_names, _ONBOARDING_OFFLOAD_BOUNDARIES)
+
+
+#: The DIRECT method-form control-plane I/O surface. ``cp.query(...)`` resolves
+#: to the callee name ``query`` — never a member of the derived
+#: ``_supabase_control_blocking_names()`` universe, which holds module-level
+#: FUNCTION names — so no guard, old or new, ever saw these sites (#4350
+#: review). ``rpc`` / ``rpc_value`` are the same class.
+_CP_METHOD_NAMES = frozenset({"query", "rpc", "rpc_value"})
+
+#: The receiver convention this detector recognises, and NOTHING else. ``cp`` is
+#: the module's own binding for ``get_control_plane()`` at every control-plane
+#: call site; a call through ``get_control_plane()`` directly is matched too. A
+#: receiver that could be the DATA-plane SDK (``sdk.g.query`` / ``reg.query`` /
+#: ``db.query`` — #3086's lane) is deliberately not matched, so the
+#: false-positive rate is zero by construction: an unrecognised receiver is
+#: SKIPPED (it can only ever UNDER-report, never wrongly fail the guard).
+_CP_RECEIVER_NAME = "cp"
+
+
+def _is_control_plane_receiver(expr: ast.expr, aliases: dict[str, str]) -> bool:
+    """True when ``expr`` is the control-plane client: the name ``cp``, or a
+    call to ``get_control_plane()`` (through an alias, and the
+    ``sc.get_control_plane()`` attribute form)."""
+    if isinstance(expr, ast.Name):
+        return expr.id == _CP_RECEIVER_NAME
+    if isinstance(expr, ast.Call):
+        func = expr.func
+        if isinstance(func, ast.Name):
+            return aliases.get(func.id, func.id) == "get_control_plane"
+        if isinstance(func, ast.Attribute):
+            return func.attr == "get_control_plane"
+    return False
+
+
+def _control_plane_method_calls(node: ast.AST,
+                                module_aliases: dict[str, str] | None = None,
+                                boundaries: frozenset[str] | None = None,
+                                descend_nested: frozenset[str] | set[str] = frozenset(),
+                                ) -> list[tuple[str, ast.Call]]:
+    """On-loop DIRECT method-form control-plane I/O in ``node``'s own body.
+
+    A ``cp.query(...)`` is recorded by ``_unoffloaded_calls`` as the callee name
+    ``query``, which is never in the derived FUNCTION-name universe — so the
+    method form needs its own receiver-sensitive detector (FIX E). The scan
+    honours the same offload boundaries as the name scan, so an offloaded call
+    (``await _cp_offload(lambda: cp.query(...))``) is not reported.
+    """
+    aliases = dict(module_aliases or {})
+    aliases.update(_body_import_aliases(node))
+    hits: list[tuple[str, ast.Call]] = []
+    for name, call in _unoffloaded_calls(
+            node, aliases, boundaries, descend_nested):
+        if name not in _CP_METHOD_NAMES:
+            continue
+        if not isinstance(call.func, ast.Attribute):
+            continue
+        if _is_control_plane_receiver(call.func.value, aliases):
+            hits.append((name, call))
+    return hits
 
 
 def _async_bodies(tree: ast.AST):
@@ -358,29 +453,98 @@ def _supabase_control_blocking_names() -> set[str]:
     return blocking
 
 
+def _hosted_api_defined_seam_names() -> set[str]:
+    """Seam helpers DEFINED IN ``hosted_api.py``.
+
+    ``_supabase_control_blocking_names()`` walks ``supabase_control.py`` alone,
+    so a blocking helper defined HERE can never enter the derived universe —
+    ``_github_repos_count`` / ``_track_analytics_event`` (a direct blocking
+    ``httpx.Client``) and ``_org_node_sync_limits`` / ``_resolve_signup_token``
+    (which reach ``org_by_id`` / ``resolve_signup_token``). Without this, the
+    guard classifies a fresh on-loop call to one of them as non-blocking — the
+    4-name regression the inventory's deletion introduced (#4350 review).
+    Derived from the seam sets + the definition site, not a second hand list.
+    """
+    defined = {
+        n.name
+        for n in ast.walk(ast.parse(HOSTED_API.read_text()))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    return set(_A1_CONFIRMED_SEAMS | _ROUTED_SESSION_SEAMS) & defined
+
+
+def _org_mint_lock_ranges(tree: ast.AST) -> list[tuple[int, int]]:
+    """The line ranges covered by every ``with _org_mint_lock(...):`` body.
+
+    There are several such sites in the file (the session lane and the registry
+    lane); a residual call site must fall inside ONE of them. This is the
+    mechanism that turns the residual from a declaration into a property of the
+    code.
+    """
+    ranges: list[tuple[int, int]] = []
+    for sub in ast.walk(tree):
+        if not isinstance(sub, ast.With):
+            continue
+        if not any(
+            isinstance(item.context_expr, ast.Call)
+            and _callee_name(item.context_expr.func) == "_org_mint_lock"
+            for item in sub.items
+        ):
+            continue
+        ranges.append((
+            min(stmt.lineno for stmt in sub.body),
+            max(stmt.end_lineno or stmt.lineno for stmt in sub.body),
+        ))
+    return ranges
+
+
 def test_no_on_loop_control_plane_helper_calls():
     """The design's "fail on the NEXT call site" guard.
 
     The helper set is DERIVED (``_supabase_control_blocking_names`` walks
-    ``supabase_control``'s call graph), so a new helper needs no list update. An
-    un-offloaded direct call from an async body to any of them is a regression
-    unless its ``(function, callee)`` site is declared in
-    ``_ORG_MINT_LOCK_RESIDUAL``. The residual is asserted in BOTH directions, so
-    it can neither hide a new site nor outlive the site it names.
+    ``supabase_control``'s call graph), unioned with the seam helpers DEFINED IN
+    ``hosted_api.py`` that the derivation structurally cannot see, so a new
+    helper needs no list update. An un-offloaded direct call from an async body
+    to any of them is a regression unless its site is MECHANICALLY inside a
+    ``with _org_mint_lock(...):`` section. The residual is asserted in BOTH
+    directions, so it can neither hide a new pair nor outlive the pair it names.
+
+    Two call classes are scanned: the derived helper NAMES, and DIRECT
+    method-form control-plane I/O (``cp.query`` / ``cp.rpc`` / ``cp.rpc_value``)
+    — the latter resolves to the callee name ``query``, which is never in a
+    FUNCTION-name universe, so no guard ever saw those sites (FIX E).
     """
     blocking = _supabase_control_blocking_names()
     assert len(blocking) > 50, (
         f"the blocking-helper derivation saw only {len(blocking)} functions — "
         "it is not seeing supabase_control's HTTP surface"
     )
+    # The derivation reads supabase_control.py ALONE; union in the helpers it
+    # structurally cannot see, THEN assert the seam sets are covered. This traps
+    # the general case: a seam name defined in NEITHER place (a typo, or a
+    # helper the derivation does not reach) falls out of the universe and fails
+    # HERE instead of silently losing its guard.
+    blocking |= _hosted_api_defined_seam_names()
+    # (``>=`` is the ruff-SIM300 form of ``_A1_CONFIRMED_SEAMS |
+    # _ROUTED_SESSION_SEAMS <= blocking`` — the same subset relation.)
+    assert blocking >= _A1_CONFIRMED_SEAMS | _ROUTED_SESSION_SEAMS, (
+        "the seam sets name helpers the derivation does not see — they are "
+        "defined in hosted_api.py, not supabase_control.py, so they are outside "
+        "the derived universe and a fresh on-loop call to one would go unflagged")
     tree = ast.parse(HOSTED_API.read_text())
     aliases = _module_aliases(tree)
-    offenders = {
-        (node.name, name)
-        for node in _async_bodies(tree)
-        for name, call in _unoffloaded_calls(node, aliases)
-        if name in blocking
-    }
+    helper_sites: list[tuple[str, str, int]] = []
+    cp_io_sites: list[tuple[str, str, int]] = []
+    for node in _async_bodies(tree):
+        descend = _on_loop_nested_names(node)
+        for name, call in _unoffloaded_calls(
+                node, aliases, descend_nested=descend):
+            if name in blocking:
+                helper_sites.append((node.name, name, call.lineno))
+        for name, call in _control_plane_method_calls(
+                node, aliases, descend_nested=descend):
+            cp_io_sites.append((node.name, name, call.lineno))
+    offenders = {(fn, name) for fn, name, _line in helper_sites}
     new = offenders - _ORG_MINT_LOCK_RESIDUAL
     assert not new, (
         "on-loop control-plane call(s) in async body (function, callee): "
@@ -388,27 +552,43 @@ def test_no_on_loop_control_plane_helper_calls():
         "declare the site in _ORG_MINT_LOCK_RESIDUAL with a reason (#4350)")
     assert offenders >= _ORG_MINT_LOCK_RESIDUAL, (
         "a declared in-lock residual site no longer exists — delete its entry")
+    # The exemption, PROVEN PER CALL SITE: every offender line must fall inside
+    # a ``with _org_mint_lock(...):`` body. A direct ``cp.query`` inside the lock
+    # needs no list entry — the same no-await invariant justifies it, and this
+    # check proves the site is in it; outside, it fails regardless of spelling.
+    lock_ranges = _org_mint_lock_ranges(tree)
+    outside = sorted(
+        (fn, name, line)
+        for fn, name, line in helper_sites + cp_io_sites
+        if not any(start <= line <= end for start, end in lock_ranges)
+    )
+    assert not outside, (
+        "on-loop control-plane call(s) OUTSIDE `with _org_mint_lock(...)` "
+        f"(function, callee, line): {outside} — the mint-lock exemption is "
+        "mechanical, so a call outside the lock fails whatever its spelling "
+        "(#4350)")
 
 
 def test_routed_seam_helpers_stay_off_loop():
     """The routed seam helpers must not come back onto the loop.
 
-    The two seam sets are name assertions only — the blocking universe is the
-    derived one — so this is the list-free form of "these helpers are routed".
-    The floor keeps the pin from shrinking to nothing.
+    ``on_loop`` is computed from EVERY direct call in an async body — with NO
+    ``name in blocking`` pre-filter. Filtering first made the intersection
+    structurally vacuous for a seam helper the derivation cannot see (exactly
+    the four ``hosted_api``-defined ones), so the test could never fail for the
+    names it exists to protect (#4350 review). The floor keeps the pin from
+    shrinking to nothing.
     """
     assert _A1_CONFIRMED_SEAMS and _ROUTED_SESSION_SEAMS, (
         "a routed-seam set was emptied — its helpers lost their regression guard")
-    blocking = _supabase_control_blocking_names()
     tree = ast.parse(HOSTED_API.read_text())
     aliases = _module_aliases(tree)
-    offenders = {
-        (node.name, name)
+    on_loop = {
+        name
         for node in _async_bodies(tree)
-        for name, call in _unoffloaded_calls(node, aliases)
-        if name in blocking
+        for name, _call in _unoffloaded_calls(
+            node, aliases, descend_nested=_on_loop_nested_names(node))
     }
-    on_loop = {name for _fn, name in offenders}
     leaked = (_A1_CONFIRMED_SEAMS | _ROUTED_SESSION_SEAMS) & on_loop
     assert not leaked, (f"a routed seam helper is back on the loop: {sorted(leaked)}")
 
@@ -495,6 +675,74 @@ def test_detector_ignores_a_keyword_callable_argument():
         if name in _DETECTOR_FIXTURE_NAMES
     ]
     assert hits == []
+
+
+def test_detector_resolves_an_alias_imported_inside_a_block():
+    """FIX C1: a ``from ... import X as Y`` nested inside an ``if``/``try`` is
+    still an alias of X — not an opaque ``Y`` the name guard cannot classify."""
+    src = (
+        "async def handler():\n"
+        "    if True:\n"
+        "        from tortoise.supabase_control import user_memberships as _sb\n"
+        "    rows = _sb(cp, uid)\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        (call.lineno, name)
+        for name, call in _unoffloaded_calls(node)
+        if name in _DETECTOR_FIXTURE_NAMES
+    ]
+    assert hits == [(4, "user_memberships")], (
+        f"a block-local import alias must resolve to its original name, got {hits}"
+    )
+
+
+def test_detector_descends_into_an_on_loop_nested_def():
+    """FIX C2: a nested sync def INVOKED on the loop runs there, so its body is
+    scanned as part of the enclosing async body (the shared #4455 / #4625 rule)."""
+    src = (
+        "async def handler():\n"
+        "    def _inner():\n"
+        "        return user_memberships(cp, uid)\n"
+        "    return _inner()\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        name
+        for name, _call in _unoffloaded_calls(
+            node, descend_nested=_on_loop_nested_names(node))
+        if name in _DETECTOR_FIXTURE_NAMES
+    ]
+    assert hits == ["user_memberships"], (
+        f"a nested def invoked on the loop must be descended into, got {hits}"
+    )
+
+
+def test_detector_flags_direct_control_plane_method_io():
+    """FIX E self-test: the receiver-sensitive method-form detector.
+
+    One FLAGGED (``cp.query``), one OFFLOADED (the same call inside the offload
+    seam's lambda), one on a NON-control-plane receiver (``db.query`` — the
+    data-plane SDK, #3086's lane), plus the ``get_control_plane()`` receiver and
+    the ``rpc_value`` member.
+    """
+    src = (
+        "async def handler():\n"
+        "    rows = cp.query('api_keys')\n"
+        "    ok = await _cp_offload(lambda: get_control_plane().query('api_keys'))\n"
+        "    other = db.query('RETURN 1')\n"
+        "    res = get_control_plane().rpc_value('f', {'p': 1})\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        (call.lineno, name)
+        for name, call in _control_plane_method_calls(node)
+    ]
+    assert hits == [(2, "query"), (5, "rpc_value")], (
+        "the method-form detector must flag an un-offloaded ``cp.query`` and "
+        "``get_control_plane().rpc_value``, and must NOT flag the offloaded "
+        f"call or a non-control-plane receiver (``db.query``); got {hits}"
+    )
 
 
 def test_session_pinned_org_is_a_pure_predicate():
