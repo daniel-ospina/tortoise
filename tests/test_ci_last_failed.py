@@ -172,12 +172,18 @@ def test_full_run_is_outside_the_guard_and_unconditional():
     # `[ -n "$X" ] && exit 1` or an `if …; then exit; fi` short-circuit.
     assert not between, between
     # the ONLY exit inside [guard, full) is the pinned red branch — an `exit 0`
-    # added INSIDE the pre-phase block would let a PASSING pre-phase skip the
-    # full half green, and `between` cannot see it (it is before the last fi).
-    exits = [ln.strip() for ln in lines[guard:full]
-             if ln.strip().startswith("exit ")]
+    # added INSIDE the pre-phase block (bare, `|| exit 0`, or a `trap … EXIT`)
+    # would let a PASSING pre-phase skip the full half GREEN, and `between`
+    # cannot see it (it is before the last fi). Token-based, not first-token.
+    region = lines[guard:full]
+    exits = [ln.strip() for ln in region
+             if re.search(r"(^|[;&|]\s*|\bthen\s+)exit(\s|$)", ln.strip())]
     assert exits == ["exit $LF_RC"], exits
-    # ...and the gating line itself carries no shell condition prefix.
+    assert "trap" not in "\n".join(region), region
+    # ...nor may the pre-phase invocation itself short-circuit.
+    pre_line = next(ln for ln in region if PRE_JUNIT in ln)
+    assert not re.search(r"\|\||&&|;", pre_line), pre_line
+    # ...and the gating line carries no shell condition prefix.
     assert lines[full].strip().startswith("timeout -s INT -k 10 55m"), lines[full]
 
 
@@ -308,6 +314,9 @@ def test_prephase_failopen_codes_are_pinned():
         script.count('] && [ "$LF_RC" -ne'))
     # the red path must EXIT with that code, not fall through to the full run.
     assert "exit $LF_RC" in script
+    # ...and the capture itself: without it LF_RC stays 0 and neither the red
+    # branch nor the watchdog banner can ever fire (pre-phase AND full always run).
+    assert "LF_RC=$?" in script
 
 
 def test_prephase_has_its_own_bounded_watchdog():
