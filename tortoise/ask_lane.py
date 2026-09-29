@@ -318,7 +318,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
     the D8 supersession markers reach the reader; cost-bounded by the
     resolved caps — ``resolve_ask_retrieval_caps()``, default
-    200/200/16000/derived) → ask-path annotation (session-date join + speaker)
+    200/400/200/16000/128000) → ask-path annotation (session-date join + speaker)
     → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
     → A5 evidence-mark boost (default ON — reorders the deduped pool by
     stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
@@ -361,8 +361,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
         ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` /
         ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` /
-        ``TORTOISE_ASK_POOL_SIZE`` (defaults 200/200/16000/derived(128000 bytes)/200
-        since #4105; the retrieval-window limit is threaded IN TANDEM with the
+        ``TORTOISE_ASK_POOL_SIZE`` (resolved defaults 200/400/200/16000/128000
+        — limit/pool/item-cap/token-cap/byte-cap — since #4105, with the pool
+        raised to the SDK's ``limit*2`` candidate floor by #4235; the
+        retrieval-window limit is threaded IN TANDEM with the
         assembly caps and the pool floor, and the byte ceiling is resolved
         rather than hard-coded — raising only the assemble cap changes
         nothing, and a byte ceiling that cannot be raised is now impossible:
@@ -412,6 +414,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         _distinct_session_ids,
         apply_evidence_boost,
         ask_env_bool,
+        ask_session_key,
         assemble_context,
         dedup_pool,
         estimate_tokens_ask,
@@ -559,14 +562,14 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
         #    rerank → assembly (resolved / pool / byte caps from ``caps``).
         try:
-            def _ask_session_key(h: dict) -> str:
-                return (h.get("session_id")
-                        or h.get("session_date")
-                        or f"idx:{h.get('lme_session_index', -1)}")
-
+            # #4155: ``retrieval.ask_session_key`` is the single source for
+            # this key (snake ``session_id`` → the camel ``sessionId`` the
+            # point fetch populates → ``session_date`` → ``idx:``). Reading
+            # only the snake key collapsed every date-less captured chunk
+            # into ONE global ``idx:-1`` bucket, so the cap applied globally.
             deduped = dedup_pool(
                 annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
-                session_key=_ask_session_key)
+                session_key=ask_session_key)
             # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
             # the stored-``has_answer`` fallback — source-session class,
             # conservative). Zero marks → byte-identical order (all factors

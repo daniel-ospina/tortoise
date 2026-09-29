@@ -1,6 +1,6 @@
 """ai-review-gate ↔ record-review.sh signing-contract guard (#3076).
 
-The ``ai-review-gate`` required check (``.github/workflows/ai-review-gate.yml``)
+The ``ai-review-gate`` check (``.github/workflows/ai-review-gate.yml``)
 accepts a PR only when the body carries a signed evidence marker whose HMAC
 verifies against the ``AI_REVIEW_GATE_KEY`` secret::
 
@@ -282,7 +282,7 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     The runtime tests inject env themselves, so they would still pass if the
     workflow stopped wiring GATE_SECRET to the repo secret or switched the
     head-sha source. Pin the wiring here. Also pin the skip-footgun: a job
-    `if:`/path filter would report SKIPPED — i.e. Success — for the required
+    `if:`/path filter would report SKIPPED — i.e. Success — for the
     check with no evidence evaluated.
     """
     env = _gate_step()["env"]
@@ -291,6 +291,12 @@ def test_gate_step_env_and_shape_are_wired() -> None:
     assert env["PR_NUMBER"] == "${{ github.event.pull_request.number }}", env
     assert env["REPO_NAME"] == "${{ github.event.repository.full_name }}", env
     assert env["PR_BODY"] == "${{ github.event.pull_request.body }}", env
+    # (#5426) The synthetic-merge-queue-batch guard reads these two. They are
+    # NOT reachable by any runtime case (the harness injects them itself), so a
+    # dropped or mis-sourced env line would silently disable the guard while
+    # every test stayed green — pin the production wiring here.
+    assert env["PR_AUTHOR"] == "${{ github.event.pull_request.user.login }}", env
+    assert env["HEAD_REF"] == "${{ github.head_ref }}", env
     job = _workflow()["jobs"]["ai-review-gate"]
     assert "if" not in _gate_step() and "if" not in job, (
         "a conditional/skipped gate reports Success — never gate this job"
@@ -317,17 +323,17 @@ def test_trigger_and_job_shape_are_pinned_from_parsed_yaml() -> None:
     on = doc.get("on")
     assert isinstance(on, dict) and set(on) == {"pull_request_target"}, (
         "the gate must trigger on pull_request_target ONLY: under `pull_request` a "
-        f"same-repo PR runs its own copy of the workflow and can self-certify the "
-        f"required check. Parsed trigger: {on!r}"
+        f"same-repo PR runs its own copy of the workflow and can self-certify "
+        f"the check. Parsed trigger: {on!r}"
     )
     trigger = on["pull_request_target"] or {}
     assert "paths" not in trigger and "paths-ignore" not in trigger, (
-        f"a path-filtered required check never runs, so it can never pass: {trigger!r}"
+        f"a path-filtered check never runs, so it can never pass: {trigger!r}"
     )
     job = doc["jobs"]["ai-review-gate"]
     for banned in ("if", "needs", "continue-on-error"):
         assert banned not in job, (
-            f"a {banned!r}-gated required job reports Success without evaluating any "
+            f"a {banned!r}-gated job reports Success without evaluating any "
             f"evidence — never make this job conditional or non-blocking: {job.get(banned)!r}"
         )
     assert "permissions" not in job, (

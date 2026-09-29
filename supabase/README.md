@@ -134,7 +134,11 @@ check that repo migrations are not ahead of the linked project's applied set
 with `SUPABASE_ACCESS_TOKEN`). A deploy with pending table/column/function/
 unique-index migrations is BLOCKED until they are applied; index-only and
 remote-ahead drift warn. Operator sequence: dispatch `supabase-deploy` → apply
-GREEN → then deploy the app.
+GREEN → then deploy the app. If the gate reports `OUT OF ORDER` (a blocking
+version older than prod's newest applied version), resolve those FIRST — a
+forward migration, or `migration repair --linked --status applied <version>`
+when the migration is provably already in prod — because the apply pushes the
+whole pending set in filename order.
 
 Manual fallback (equivalent):
 

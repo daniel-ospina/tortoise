@@ -27,6 +27,10 @@ with the R2 create-once object as the dedup LINEARIZATION POINT:
   ``resolve_incident_state`` is the same operation reporting WHICH fact it
   established (:class:`ResolveOutcome`: RESOLVED / ABSENT / SKIPPED_FRESH) —
   the bool form stays for the callers that only branch on it (#3820 cycle-7).
+  A close that FAILS is neither announced nor deleted-to-resolve: the failure
+  is recorded on the sentinel, the incident stays OPEN, and the failure is
+  propagated (``CloseCooldown`` once the bounded retry window is active) so a
+  caller cannot read it as a clean resolution (#5143, ADR-011).
 - ``incident_open`` is a read-only presence check on the same dedup object —
   no close, no delete — so a caller holding an armed alert window can ask
   whether the incident behind it still exists (#3820 cycle-9 P1). It consults
@@ -138,7 +142,11 @@ def _write_json(storage, key: str, data: dict[str, Any]) -> None:
 
 def _parse_iso(value: Any) -> datetime | None:
     """Best-effort ISO parse — a corrupt/missing timestamp never raises (it simply
-    means "no cooldown recorded")."""
+    means "no cooldown recorded").
+
+    A naive stamp (written by an older revision) is read as UTC so the close
+    cooldown's age arithmetic cannot raise ``TypeError``.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -149,11 +157,12 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 class CloseCooldown(RuntimeError):
-    """Raised when a close is skipped because a recent attempt for the same
-    incident failed (bounded-retry backoff, final-cycle review P1).
+    """Raised when a close is SKIPPED because a recent attempt failed (#5143).
 
-    Not an error condition: the incident is simply still open and the caller must
-    keep treating the subject as unresolved. It exists as a distinct type so the
+    Not an error condition: the incident is simply still open and the caller
+    must keep treating the subject as unresolved, retrying after the bounded
+    backoff. Raised as a distinct type so a caller keeps the subject PENDING
+    rather than reading a falsy return as "nothing was open", and so the
     containment layers can log it at INFO without a traceback.
     """
 
@@ -245,11 +254,12 @@ class AlertStore:
         self._repo = repo
         self._assignee = assignee
         self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
-        # Backoff after a failed close (final-cycle review P1: a permanently
-        # failing close would otherwise be retried every poll — 2 GitHub writes
+        # #5143: bounded retry — a failed issue-close is left alone for this long
+        # before it is attempted again (ADR-011: the next healthy run closes it).
+        # One attempt per window also bounds the write burst: a permanently
+        # failing close would otherwise be retried every poll (2 GitHub writes
         # each, plus a duplicate audit comment because the comment POST precedes
-        # the state PATCH — with no cap. One attempt per window bounds both the
-        # comment spam and the write burst).
+        # the state PATCH) with no cap.
         self._close_cooldown_min = close_cooldown_min
 
     def _clock(self) -> datetime:
@@ -710,6 +720,16 @@ class AlertStore:
         issue it described — each letting a non-owner clear a kind it has no
         evidence about. Authority is decided by KIND_OWNERS alone; the `writer`
         field is diagnostic only.
+
+        #5143 / ADR-011: a close that did NOT happen is not a resolution. If
+        ``close_issue`` fails, the failure is recorded on the sentinel
+        (``close_failed_at`` / ``close_failures``), nothing is announced, the
+        object is NOT deleted, and the exception propagates so the caller keeps
+        the subject pending. A retry inside ``close_cooldown_min`` is SKIPPED and
+        raises :class:`CloseCooldown` (still open, backing off). ADR-011: "A blip
+        must not re-file; a permanent failure must not be silent" and "the
+        incident stays open with no writer able to close it. That is correct
+        rather than a defect … The driver's next healthy run closes it."
         """
         states = self._alias_states(kind, org_id)
         if not states:
@@ -735,11 +755,13 @@ class AlertStore:
                     kind, owner, writer,
                 )
                 return ResolveOutcome.SKIPPED_FRESH
-        # Bounded retry (final-cycle review P1): skip the attempt while a recent
-        # close failure is cooling down. Raise the dedicated type so callers keep
-        # the subject PENDING (a plain False would read as "nothing open" and
-        # retire it). The marker is written to the sentinel that carried the
-        # failed issue, so the newest across the alias set bounds the attempt.
+        # Bounded retry (#5143, final-cycle review P1): skip the attempt while a
+        # recent close failure is cooling down, so a GitHub outage cannot make
+        # every poll hammer the close endpoint. Raise the dedicated type so
+        # callers keep the subject PENDING (a plain False would read as "nothing
+        # open" and retire it). The marker is written to the sentinel that
+        # carried the failed issue, so the newest across the alias set bounds the
+        # attempt.
         failed_at = max(
             (t for t in (_parse_iso(s.get("close_failed_at")) for _, s in states)
              if t is not None),
@@ -772,9 +794,14 @@ class AlertStore:
             try:
                 self._close(number, "Resolved — condition cleared.")
             except Exception as e:
-                # Record the failure so the next attempts back off, then re-raise:
-                # nothing is announced and the objects are kept, so the incident
-                # stays OPEN and is retried (after the cooldown).
+                # The close did NOT happen. Record the failure (so the retry backs
+                # off) and RE-RAISE — the whole fix (#5143): nothing is announced
+                # and nothing is deleted, so the incident stays OPEN until its
+                # close is OBSERVED. This is ADR-011's "a blip must not re-file; a
+                # permanent failure must not be silent" (and the runbook's
+                # close-then-delete order: delete-to-resolve must never precede a
+                # successful close). Pre-fix, this warned and fell through to the
+                # push + delete, reporting RESOLVED for a still-open issue.
                 for fkey, fstate in states:
                     if str(fstate.get("issue_number")) == str(number):
                         fstate["close_failed_at"] = self._clock().isoformat()
@@ -789,7 +816,7 @@ class AlertStore:
                             )
                 logger.warning(
                     "issue close failed for %s #%s: %s — leaving the incident OPEN "
-                    "(no resolution announced, objects kept); retrying after "
+                    "(no resolution announced, sentinel kept); retrying after "
                     "%.0f min",
                     kind, number, e, self._close_cooldown_min,
                 )
