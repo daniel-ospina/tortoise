@@ -1812,20 +1812,9 @@ class CollisionPreflightTest(unittest.TestCase):
         _git(self.repo, "checkout", "-q", "-b", "release/hub-work")
         # ⛔ USE THE SHARED FIXTURE HELPER — do not hand-roll this repo. This
         # block was an inline copy of `_sibling_repo` that had dropped its two
-        # identity lines (`config user.email` / `config user.name`), so the seed
-        # commit died with `exit status 128` on the CI runner, which supplies no
-        # identity for git to auto-detect. The assertions below were therefore
-        # never EXECUTED in CI: the test ERRORED here, before reaching them.
-        #
-        # The failure reproduces locally only when git is made to demand an
-        # explicit identity — `GIT_CONFIG_GLOBAL` carrying
-        # `[user] useConfigOnly = true`, with no system config. That is the
-        # REPRODUCTION CONDITION, not a setting this repo's CI declares:
-        # nothing here CONFIGURES a git identity (or `useConfigOnly`). The only
-        # identities in the tree are per-command (`-c user.name=…` on the two
-        # refresh-job commits) and per-test-fixture — and those two refresh
-        # jobs pass `-c` for the very reason this fixture must: the runner
-        # carries no configured identity to inherit.
+        # identity lines (`git config user.email` / `git config user.name`),
+        # which the seed commit below needs. Going through the helper keeps that
+        # in one place, so a hand-rolled copy cannot drop it again.
         other = self._sibling_repo("other-repo", "other-owner/other-repo")
 
         self.gh_fixtures(open_prs=[{
