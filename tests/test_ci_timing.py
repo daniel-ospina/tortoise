@@ -125,18 +125,32 @@ def test_parse_log_durations_and_counts(tmp_path: Path) -> None:
     assert not parsed["killed"]
 
 
-def test_parse_log_watchdog_and_variants(tmp_path: Path) -> None:
-    # watchdog kill: the summary banner is replaced by the WATCHDOG banner,
-    # which still carries the counts (parsed from it — 10 passed, 1 failed,
-    # 2 errored). No pytest summary line survives.
+def test_parse_log_detects_a_kill_from_pytest_interrupt_summary(tmp_path: Path) -> None:
+    # A watchdog kill (SIGINT) leaves pytest's OWN interrupt summary in the
+    # artifact; that is the in-artifact signal parse_log reads (#1477 P2).
+    log = FIXTURE_LOG.splitlines()
+    log[-1] = "!!! KeyboardInterrupt !!!"
+    parsed = ci_timing.parse_log(write_log(tmp_path, "killed.log", "\n".join(log)))
+    assert parsed["killed"] is True
+
+
+def test_parse_log_ignores_a_quoted_watchdog_banner(tmp_path: Path) -> None:
+    # #6145 regression. The workflow echoes the WATCHDOG banner to the STEP's
+    # stdout AFTER pytest's output is redirected into the log, so the uploaded
+    # artifact never contains it — parse_log reads artifacts only (--logs-dir).
+    # The deleted clause has no GENUINE true positive here: the real banner is
+    # never in the artifact, while a QUOTED copy in pytest's own output would set
+    # killed=True on a run that was never killed.
     log = FIXTURE_LOG.splitlines()
     log[-1] = (
         "============================ WATCHDOG: pytest killed after 45m "
         "(10 passed, 1 failed, 2 errored so far) — last test lines above "
         "================================"
     )
-    parsed = ci_timing.parse_log(write_log(tmp_path, "killed.log", "\n".join(log)))
-    assert parsed["killed"] is True
+    parsed = ci_timing.parse_log(write_log(tmp_path, "quoted.log", "\n".join(log)))
+    assert parsed["killed"] is False
+    # the counts on that line are still parsed (pytest's own summary shape) —
+    # the kill FLAG is what must not be inferred from it
     assert parsed["counts"]["passed"] == 10
     assert parsed["counts"]["failed"] == 1
     assert parsed["counts"]["error"] == 2
@@ -757,6 +771,15 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     manifest_path = REPO_ROOT / "config" / "ci-surfaces.yml"
     before = manifest_path.read_text()
     _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
+    # The literal 688 was rot-prone, but its FUNCTION was an INDEPENDENT check that
+    # the parse is COMPLETE — and deriving the total from `_locate_durations_block`
+    # removes the rot AND the function: a parse that silently stops early shrinks
+    # both sides of every assertion below equally, so all of them still pass. That
+    # is not hypothetical: truncating that helper to 250 entries leaves this test
+    # GREEN while `stats` and both key sets report 250 (verified on 552e845ec).
+    # PyYAML is a second implementation of the same parse, so the completeness
+    # check survives without a number that can go stale.
+    assert set(entries_before) == set(yaml.safe_load(before)["durations"])
     new_text, stats = ci_timing.render_refreshed_manifest(
         before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
@@ -775,6 +798,7 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # single drop (0.14%). Key-set identity can.
     _, entries_after = ci_timing._locate_durations_block(new_text.split("\n"))
     assert set(entries_after) == set(entries_before)
+    assert set(entries_after) == set(yaml.safe_load(new_text)["durations"])
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []

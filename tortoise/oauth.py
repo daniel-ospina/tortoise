@@ -59,11 +59,10 @@ logger = logging.getLogger("tortoise.oauth")
 # advertises (#2866). `offline_access` is accepted (Claude's connector
 # requests it, and the AS does mint refresh tokens unconditionally) without
 # becoming a default fallback or a PRM-advertised scope. The superset
-# relation is structural. NOTE: scope enforcement is DCR-only today —
-# `validate_authorize_params` takes no `scope` parameter, so the
-# authorize/consent path forwards an unvalidated scope into the minted token
-# (pre-existing, filed as #3128). Do not read this constant as an authorize
-# gate.
+# relation is structural. `validate_scope` reads this list on the
+# authorize/consent/mint paths and `register_client` shares its membership
+# test (#3128), so SCOPES_ACCEPTED is the whole scope policy — never mint a
+# scope that is not in it.
 SCOPES_SUPPORTED = ["mcp"]
 SCOPES_ACCEPTED = [*SCOPES_SUPPORTED, "offline_access"]
 ACCESS_TOKEN_TTL_S = int(os.environ.get("TORTOISE_OAUTH_ACCESS_TTL", "3600"))
@@ -286,7 +285,9 @@ def _log_and_capture(exc: BaseException, *, where: str) -> None:
                                                captured; the handler only logs)
       lane 2 rollback/observation (capture=False) → log only (lane 2 captured the trigger)
       lane 3 prev-access revoke        → log only (non-decision-bearing hygiene)
-      the two correction-#8 revokes    → each the single capture for its terminal path
+      the three correction-#8 revokes  → each the single capture for its terminal path
+                                        (family revoke / membership revoke /
+                                        poisoned-scope revoke)
       `exchange_auth_code` / `refresh_grant` pre-consume/pre-mint `except Exception`
                                        → this call IS the single capture for that path
       `oauth_token` boundary           → this call IS the single capture for that path
@@ -313,6 +314,51 @@ def _now_iso() -> str:
 def _sha256(value: str) -> str:
     """Hex digest — the stored form for codes/tokens/secrets (never plaintext)."""
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+# ── Scope policy (the single allow-list gate, #3128) ────────────────────────
+
+def _unsupported_scope(scope: str) -> list[str]:
+    """Scope tokens this AS does not accept (empty ⇒ every token is accepted).
+
+    The one membership test shared by the DCR gate (``register_client``) and
+    the authorize/consent/mint gate (``validate_scope``), so those two can
+    never drift from the advertised ``SCOPES_ACCEPTED`` set (#3128). The CIMD
+    document validator (``tortoise/cimd.py``) applies the same test through
+    its own ``supported_scopes`` argument, which is wired to this same
+    constant.
+    """
+    return [s for s in scope.split() if s not in SCOPES_ACCEPTED]
+
+
+def validate_scope(scope) -> str:
+    """The authorize/consent/mint scope gate (#3128).
+
+    Returns the canonical (space-delimited, single-spaced) scope string, or
+    raises ``invalid_scope`` when any requested token is outside
+    ``SCOPES_ACCEPTED``. Per RFC 6749 §3.3 + §4.1.2.1 an unsupported scope is
+    a client error (``invalid_scope``: "The requested scope is invalid,
+    unknown, or malformed") — it is REJECTED, never silently minted onto an
+    authorization code or a token claim. §3.3's alternative ("MAY fully or
+    partially ignore the scope requested") is deliberately not used to
+    intersect with the client's registered scope: #2866 admits
+    ``offline_access`` at the AS level for a client that requests it, and a
+    default ``mcp`` registration would otherwise be silently narrowed — a
+    user-visible revocation of a scope the AS advertises.
+
+    A blank/absent scope falls back to ``SCOPES_SUPPORTED`` (RFC 6749 §3.3
+    pre-defined default). A non-string scope is malformed ⇒ ``invalid_scope``.
+    """
+    blank = scope is None or (isinstance(scope, str) and not scope.split())
+    resolved = " ".join(SCOPES_SUPPORTED) if blank else scope
+    if not isinstance(resolved, str):
+        raise OAuthError(400, "invalid_scope", "scope must be a string.")
+    if _unsupported_scope(resolved):
+        # Deliberately does NOT echo the requested tokens: the value is
+        # attacker-controlled and lands in a redirect query string.
+        raise OAuthError(400, "invalid_scope",
+                         f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
+    return " ".join(resolved.split())
 
 
 def _new_token(prefix: str) -> str:
@@ -787,8 +833,7 @@ def register_client(cp, body: dict) -> dict:
         scope = " ".join(SCOPES_SUPPORTED)
     if not isinstance(scope, str):
         raise OAuthError(400, "invalid_client_metadata", "scope must be a string.")
-    requested = scope.split()
-    if any(s not in SCOPES_ACCEPTED for s in requested):
+    if _unsupported_scope(scope):
         raise OAuthError(400, "invalid_client_metadata",
                          f"Unsupported scope. Supported: {SCOPES_ACCEPTED}")
 
@@ -854,8 +899,16 @@ def _verify_client_auth(cp, client_id: str, body: dict) -> dict:
 def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               response_type: str | None,
                               code_challenge: str | None,
-                              code_challenge_method: str | None) -> dict:
-    """Validate the /oauth/authorize request. Returns the client row."""
+                              code_challenge_method: str | None,
+                              scope: str | None = None) -> dict:
+    """Validate the /oauth/authorize request. Returns the client row.
+
+    #3128: ``scope`` is the requested scope and is validated HERE — on the one
+    path shared by GET /oauth/authorize (page render) and POST /oauth/consent
+    (code mint) — so an out-of-allow-list scope is refused before a code is
+    stored. ``scope or client.get("scope")`` mirrors the mint fallback
+    exactly.
+    """
     client = resolve_client(cp, client_id)
     try:
         if client is None:
@@ -878,6 +931,10 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                    for u in registered_uris):
             raise OAuthError(400, "invalid_request",
                              "redirect_uri is not registered for this client.")
+        # #3128: the requested scope is checked against SCOPES_ACCEPTED (the
+        # same set DCR enforces) BEFORE the consent page renders or a code is
+        # minted. A scope the AS does not advertise is a client error.
+        validate_scope(scope or client.get("scope"))
         if not code_challenge or not _valid_pkce(code_challenge):
             raise OAuthError(400, "invalid_request",
                              "code_challenge (PKCE, 43-128 chars) is required.")
@@ -1407,6 +1464,11 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
     orphan pair is rolled back so exactly one rotation wins (PR #1264 review
     P2 — no double rotation under concurrent workers).
     """
+    # #3128: the mint is the LAST line for a scope claim. Validating here (in
+    # addition to the authorize/consent gate) means no token row can ever carry
+    # a scope outside SCOPES_ACCEPTED — including a legacy code/refresh row
+    # written before the gate existed, or any future caller of this writer.
+    scope = validate_scope(scope)
     access = _new_token(ACCESS_TOKEN_PREFIX)
     refresh = _new_token(REFRESH_TOKEN_PREFIX)
     refresh_id = secrets.token_urlsafe(16)
@@ -1611,7 +1673,9 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
 
     Rotating per (user, org): each use revokes the presented token and mints
     a fresh pair. Org suspension revokes the whole (user, org) family;
-    a lapsed membership revokes the presented token.
+    a lapsed membership revokes the presented token. A stored scope no longer
+    in SCOPES_ACCEPTED (#3128) revokes the presented token and terminates the
+    grant with `invalid_grant` — no mint.
     """
     # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
     # `oauth_clients`; a wrap starting at the refresh-token SELECT leaves it
@@ -1673,6 +1737,24 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
         _log_and_capture(exc, where="refresh_grant pre-mint")
         raise OAuthTemporarilyUnavailable(
             "Temporary control-plane failure before token rotation — retry.") from None
+    # #3128: a refresh row minted before the scope gate (or made stale by a
+    # future narrowing of SCOPES_ACCEPTED) carries a scope the AS no longer
+    # accepts. The mint refuses it — but left as-is the presented token would
+    # be refused forever with no recovery signal. Revoke the poisoned
+    # credential and report terminal invalid_grant so the client re-authorizes
+    # (mirrors the lapsed-membership branch above).
+    try:
+        validate_scope(row.get("scope") or " ".join(SCOPES_SUPPORTED))
+    except OAuthError:
+        try:
+            cp.query("oauth_refresh_tokens", method="PATCH",
+                     filters=[("id", "eq", row["id"])],
+                     json_body={"revoked_at": _now_iso()})
+        except Exception as exc:  # correction #8: the single capture for this path
+            _log_and_capture(exc, where="poisoned-scope revoke")
+        raise OAuthError(400, "invalid_grant",
+                         "The refresh token's scope is no longer supported — "
+                         "re-run authorization.") from None
     try:
         out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
                             org_id=row["org_id"], scope=row.get("scope")
@@ -1880,7 +1962,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   <div class="error" id="error"></div>
   <div class="spinner" id="spinner" style="display:none">Verifying session…</div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.2/dist/umd/supabase.min.js"
         nonce="__NONCE__"
         onerror="showError('Auth script blocked — please retry.')"></script>
 <script nonce="__NONCE__">
@@ -1896,24 +1978,37 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // custom storage when persistSession is false, review P0) and
   // setItem/removeItem are REAL writes — getSession() always re-reads
   // storage, so an ingested OAuth/email session must persist to the cookie
-  // or the sign-in fallback loops. detectSessionInUrl stays true so the
-  // provider redirect back with #access_token is ingested.
+  // or the sign-in fallback loops. detectSessionInUrl stays TRUE, but not to
+  // ingest a token fragment: #3496 moved this flow to PKCE, so the provider
+  // returns `?code=` in the QUERY, and the library gates the code exchange on
+  // this flag (an implicit-style fragment return is refused by the bundle).
   // #3503: this page is the ONE place it stays true — it does NOT load
   // website/assets/supabase-session.js (that file's factory sets it false,
-  // because its load-time IIFE is the fragment consumer there), so this
-  // inline client is the sole consumer of the hash and must ingest it.
+  // because its load-time IIFE is the fragment consumer there). loadParams()
+  // below still merges the hash, because a provider REFUSAL arrives there.
   const COOKIE_NAME = "sb-tortoise-auth-token";
-  // #1704: parent-domain cookie storage — a faithful port of the
-  // dashboard's supabaseStorage (website/assets/supabase-session.js):
-  // getItem reads an existing dashboard session (no second login),
-  // setItem/removeItem persist sign-ins here (the OAuth/email fallback
-  // needs a REAL write — getSession() always re-reads storage).
+  // #1704: parent-domain cookie storage — the COOKIE mechanics (name, domain
+  // and secure attributes, size guard; getItem reads an existing dashboard
+  // session so there is no second login; setItem/removeItem are REAL writes,
+  // because getSession() always re-reads storage) are ported from the
+  // dashboard's supabaseStorage (website/assets/supabase-session.js). #3496
+  // SPLITS the provenance: the KEY-IDENTITY ROUTING below is ported from the
+  // blog-admin console's authStorage (website/apps/blog-admin/src/lib/
+  // supabase.ts) — the DASHBOARD bridge (website/assets/supabase-session.js)
+  // has no key routing at all: it writes whatever key it is handed to the
+  // cookie, which is the hole this adapter now closes.
   // Method shorthand so `this` binds to the object (arrow functions
   // would bind window). Size guard + localhost-aware domain/secure
   // attributes mirror the canonical adapter.
   const COOKIE_PATH = "/";
   const COOKIE_DOMAIN = ".premiselabs.co";
   const SIZE_GUARD = 3800;
+  // #3496 item 6: the write-path cap, DERIVED from the rule (never hardcoded —
+  // a literal previously disagreed with the rule by 4 bytes, leaving an untested
+  // band where the code wrote and the browser dropped). Mirrors
+  // website/assets/supabase-session.js:46-47.
+  const COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
+  const SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
   const isLocal = () => {
     const h = window.location.hostname;
     if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
@@ -1926,8 +2021,77 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   };
   const domainAttr = () => (isPremiselabsHost() && !isLocal() ? "; Domain=" + COOKIE_DOMAIN : "");
   const secureAttr = () => (isLocal() ? "" : "; Secure");
+  // #3496: the PKCE code_verifier must NEVER reach the JS-readable
+  // parent-domain jar. Key-identity routing, ported from the blog-admin
+  // console's authStorage contract (website/apps/blog-admin/src/lib/supabase.ts):
+  // ONLY the session key may reach document.cookie; every other key is an
+  // origin-scoped aux credential. The aux chain has NO cookie leg, so the
+  // allowlist is fail-closed by construction.
+  const auxStores = () => {
+    const out = [];
+    try { if (window.sessionStorage) out.push(window.sessionStorage); } catch (e) { /* unavailable */ }
+    try { if (window.localStorage) out.push(window.localStorage); } catch (e) { /* unavailable */ }
+    return out;
+  };
+  const readAux = (key) => {
+    for (const s of auxStores()) {
+      try { const v = s.getItem(key); if (v !== null) return v; } catch (e) { /* next store */ }
+    }
+    return null;
+  };
+  // #3496 A5: the write is proven CLEANABLE in the same store, for the real value
+  // SIZE, before the credential is accepted. The pre-flight probe cannot guarantee
+  // that on its own — it writes a 160-byte payload under its own key, so a store
+  // whose accepted-size band sits between the probe and the real value (or which
+  // refuses removal only once it holds something) would pass the probe and then
+  // orphan the credential. This re-verifies per store, at write time, with a
+  // payload of the REAL length under a THROWAWAY key — and that payload is a
+  // DUMMY of the same length, never the credential itself: a store that accepts
+  // the write but SILENTLY IGNORES removal would otherwise retain the verifier
+  // under `probeKey`, a key no path can ever clean. What that probe cannot prove is
+  // REMOVABILITY OF THE REAL KEY: the credential has to be WRITTEN before its
+  // removal can be observed, so a store that accepts the credential and then
+  // refuses to remove it keeps a copy no path can clean (recorded residual R21 —
+  // a store that discriminates by key is not a conforming browser store). A
+  // re-probe on the REAL key DOES detect that store, but only AFTER the credential
+  // is already written to it, so it cannot un-write it: it skips the store and
+  // copies the same credential into the next one, leaving two copies where the
+  // throwaway-key probe leaves one. The writer therefore keeps the probe, and the
+  // real write is proven by its read-back alone.
+  const writeAux = (key, value) => {
+    const v = String(value);
+    const probe = "x".repeat(v.length);
+    const probeKey = "__tt_wprobe-" + Math.random().toString(16).slice(2).padEnd(32, "0");
+    for (const s of auxStores()) {
+      try {
+        s.setItem(probeKey, probe);
+        if (s.getItem(probeKey) !== probe) throw 0;
+        s.removeItem(probeKey);
+        if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
+        s.setItem(key, v);
+        if (s.getItem(key) !== v) throw 0;
+        return true;
+      } catch (e) {
+        // Best-effort cleanup — BOTH keys. `key` must be cleaned too: the failure
+        // can be the read-back AFTER a successful `setItem(key, v)` (a store that
+        // truncates or normalises what it accepted), and this loop then writes the
+        // same credential into the NEXT store, so without this the first store
+        // would retain a copy in a store that failed verification. Cleanup is not
+        // proof — the read-back above is — so a store reaching here is still skipped.
+        try { s.removeItem(probeKey); } catch (e2) { /* ignore */ }
+        try { s.removeItem(key); } catch (e3) { /* ignore */ }
+      }
+    }
+    return false;   // refuse — never fall through to the cookie jar
+  };
+  const removeAux = (key) => {
+    for (const s of auxStores()) {
+      try { s.removeItem(key); } catch (e) { /* next store */ }
+    }
+  };
   const cookieStorage = {
     getItem(key) {
+      if (key !== COOKIE_NAME) return readAux(key);
       try {
         const parts = document.cookie.split("; ");
         for (const p of parts) {
@@ -1938,6 +2102,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       } catch (e) { return null; }
     },
     setItem(key, value) {
+      if (key !== COOKIE_NAME) { writeAux(key, value); return; }
       if (!value) { this.removeItem(key); return; }
       let encoded = encodeURIComponent(value);
       // Size guard (#1225): a GitHub OAuth session (user_metadata +
@@ -1948,10 +2113,34 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           const obj = JSON.parse(value);
           delete obj.provider_token;
           delete obj.provider_refresh_token;
+          // #3496 item 6: port the shared bridge's non-essential-claim
+          // narrowing (website/assets/supabase-session.js:111-135).
+          if (obj.user) {
+            delete obj.user.identities;
+            if (obj.user.user_metadata) {
+              const md = obj.user.user_metadata;
+              const keep = {};
+              if (md.display_name) keep.display_name = md.display_name;
+              if (md.avatar_url) keep.avatar_url = md.avatar_url;
+              if (md.full_name) keep.full_name = md.full_name;
+              if (md.name) keep.name = md.name;
+              obj.user.user_metadata = keep;
+            }
+          }
           encoded = encodeURIComponent(JSON.stringify(obj));
         } catch (e) { /* not JSON — leave as-is */ }
         if (encoded.length > SIZE_GUARD + 100) {
           console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
+        }
+        if (encoded.length > SIZE_CAP) {
+          // A write past the browser's limit is a silent no-op there, so the
+          // caller would believe the session landed. Refuse and REPORT: this
+          // page has no read-back caller, so a console-only refusal is
+          // invisible by construction (#3503/#3496 item 6).
+          console.warn('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write');
+          showSignin();
+          showError("Your sign-in session is too large to store securely here — try again.");
+          return;
         }
       }
       const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
@@ -1959,6 +2148,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
         "; SameSite=Lax" + secureAttr() + "; Expires=" + expires;
     },
     removeItem(key) {
+      if (key !== COOKIE_NAME) { removeAux(key); return; }
       document.cookie = key + "=;" + domainAttr() + "; Path=" + COOKIE_PATH +
         "; SameSite=Lax" + secureAttr() + "; Max-Age=0";
     },
@@ -1972,7 +2162,11 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
           storageKey: COOKIE_NAME,
           persistSession: true,   // required for the custom storage to be used
           autoRefreshToken: false,
-          detectSessionInUrl: true,  // OAuth fallback ingests the hash
+          detectSessionInUrl: true,  // gates the PKCE ?code exchange (_initialize)
+          // #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
+          // browser-based client. Explicit PKCE; the code_verifier is routed to
+          // the origin-scoped aux chain by the adapter above, never the cookie.
+          flowType: "pkce",
         },
       });
     } else {
@@ -2128,10 +2322,72 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     document.getElementById("view-signin").style.display = "block";
   }
 
+  // #3496: the transient params a provider round-trip may leave on the URL.
+  // Stripped with URLSearchParams.delete (not a string replace, so an encoded
+  // `%63ode=` is removed too).
+  const STRIP_PARAMS = ["code", "error", "error_code", "error_description",
+                        "error_uri", "sb_flow_id", "flow_id", "type"];
+  // #3496: defence-in-depth — the return target is rebuilt from the sanitised
+  // query so a transient is never echoed back to the provider. (GoTrue's
+  // `url.Values.Set` makes the "permanent stale-code loop" premise false; this
+  // is canonicalisation, not a loop fix.)
+  function authorizeReturnTo() {
+    const u = new URL(window.location.href);
+    STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+    return window.location.origin + AUTHORIZE_PATH + (u.search || "");
+  }
+  // #3496: PKCE cannot be done correctly without WebCrypto (the bundle silently
+  // downgrades to `plain` when crypto.subtle is absent — reachable because this
+  // page deliberately supports LAN-http origins) and cannot be completed without
+  // a writable origin-scoped aux store. Fail CLOSED before the provider
+  // redirect: the library would otherwise navigate and lose the verifier,
+  // costing a full round trip. The probe key is randomised (localStorage is
+  // cross-tab) and LONGER than the longest real verifier key so an item-size cap
+  // cannot slip through. It deliberately does NOT carry the `-code-verifier`
+  // suffix: a store that refuses removal cannot be cleaned, and the one entry it
+  // leaks must not be mistakable for a credential.
+  function pkceIncapable() {
+    if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
+    const payload = "v".repeat(160);
+    const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(89, "0");
+    // The guard is a FAIL-CLOSED approximation of the writer's choice, not the same
+    // test: it probes with its own key and a fixed 160-byte payload, while the
+    // writer probes with the REAL value's length. Where a store's per-item cap sits
+    // between the two (it would hold the ~114-byte verifier but not this probe), the
+    // guard rejects that store and evaluates the next one — and refuses outright if
+    // the store that accepted the probe then cannot remove the sentinel. That is
+    // deliberately STRICTER than the writer, which would have used the first store
+    // successfully; the divergence is a known fail-closed over-refusal recorded with
+    // the refusal UX work (#5734), and it cannot leak a credential in either
+    // direction because the writer re-probes every store it takes. (A5.)
+    for (const store of auxStores()) {
+      let wrote = false;
+      try {
+        store.setItem(sentinel, payload);
+        if (store.getItem(sentinel) !== payload) throw 0;
+        wrote = true;
+        store.removeItem(sentinel);
+        if (store.getItem(sentinel) !== null) throw 0;
+        return null;
+      } catch (e) {
+        if (wrote) return "no-store";
+        try { store.removeItem(sentinel); } catch (e2) { /* best effort */ }
+      }
+    }
+    return "no-store";
+  }
   async function signInWithProvider(provider) {
+    const incap = pkceIncapable();
+    if (incap) {
+      showSignin();
+      showError(incap === "no-webcrypto"
+        ? "This browser cannot complete a secure sign-in here (no WebCrypto). Open this page over HTTPS."
+        : "This browser is blocking site storage, so sign-in cannot be completed securely. Enable storage (or leave private browsing) and retry.");
+      return;
+    }
     const { error } = await supabaseClient.auth.signInWithOAuth({
       provider: provider,
-      options: { redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search },
+      options: { redirectTo: authorizeReturnTo() },
     });
     if (error) showError(error.message);
   }
@@ -2206,11 +2462,96 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
   // #1701 R1: auto-advance when a session lands after an initial null
-  // (provider redirect hash ingestion / cookie session). runConsentFlow is
+  // (provider redirect `?code` exchange / cookie session). runConsentFlow is
   // in-flight guarded, so a double fire never runs two overlapping previews.
+  // #3496: one terminal state for a failed/declined/refused sign-in. Capture
+  // the load-time transient ONCE, read-only — the library has already consumed
+  // `?code` synchronously inside createClient(), so never rewrite the URL before
+  // it has attempted the code.
+  //
+  // BOTH return channels are read. supabase-js folds the fragment into the
+  // params it parses (`xr(window.location.href)` in the bundle) and
+  // `detectSessionInUrl: true` deliberately keeps the library as the fragment
+  // consumer, so a provider that returns its refusal in the hash reaches the
+  // library but never `.search`. Reading one channel only would leave a
+  // hash-carried refusal on the bare sign-in view with no explanation — the
+  // dead end this terminal state exists to remove.
+  const loadParams = () => {
+    const out = new URLSearchParams(window.location.search);
+    if (window.location.hash.length > 1) {
+      // No try/catch: `new URLSearchParams(<string>)` cannot throw (the string
+      // branch is a straight form-urlencoded parse), so a guard here would be
+      // dead code describing a state that does not exist.
+      new URLSearchParams(window.location.hash.slice(1)).forEach((v, k) => {
+        if (!out.has(k)) out.set(k, v);
+      });
+    }
+    return out;
+  };
+  const LOAD_QUERY = loadParams();
+  // #3496: a provider round trip is evidenced only by PROVIDER-owned markers.
+  // `type` and `flow_id` are generic names a benign authorize GET can carry (the
+  // server ignores unknown params and `authorizeReturnTo` preserves the rest), so
+  // treating them as evidence told a first-time visitor who had done nothing that
+  // their sign-in failed. They stay in STRIP_PARAMS — stripping is cosmetic — and
+  // no longer make `present` true.
+  const TRANSIENT_MARKERS = ["code", "error", "error_code", "error_description",
+                             "error_uri", "sb_flow_id"];
+  const LOAD_TRANSIENT = {
+    present: TRANSIENT_MARKERS.some((k) => LOAD_QUERY.has(k)),
+    error_description: LOAD_QUERY.get("error_description"),
+  };
+  function boundedText(s) {
+    if (!s) return "";
+    const t = String(s).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ");
+    return t.length > 299 ? t.slice(0, 299) + "\u2026" : t;
+  }
+  function showTerminalFallback() {
+    showSignin();
+    showError(boundedText(LOAD_TRANSIENT.error_description) || "Sign-in failed — please start again.");
+  }
+  function sanitiseUrl() {
+    try {
+      const u = new URL(window.location.href);
+      STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
+      if (u.hash.length > 1) {
+        const raw = u.hash.slice(1);
+        // A param list: every `&`-separated part is `name=value` with a NON-EMPTY
+        // name that is not path/route shaped. Testing this by comparing
+        // `new URLSearchParams(raw).toString()` to `raw` is NOT the same test —
+        // that is byte-identity after NORMALISATION, which any value carrying an
+        // escaped character fails, so a provider `error_description` with a space
+        // (`boom%20boom`) took the left-alone branch and kept the transient on the
+        // URL, which is the one case this branch exists for. The NAME test also
+        // keeps `#/route/x?a=1` and `#settings?tab=x` out: both contain `=`, so a
+        // bare "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
+        // A fragment that is not a param list is left alone, transient included:
+        // that is cosmetic URL-bar residue, not page state (the page derives its
+        // own transient from `LOAD_QUERY`, captured before this runs).
+        const isParamList = raw.split("&").every((p) => {
+          const i = p.indexOf("=");
+          return i > 0 && /^[^/?:=]+$/.test(p.slice(0, i));
+        });
+        if (isParamList) {
+          const h = new URLSearchParams(raw);
+          STRIP_PARAMS.forEach((k) => h.delete(k));
+          const rest = h.toString();
+          u.hash = rest ? "#" + rest : "";
+        }
+      }
+      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    } catch (e) { /* leave the URL alone */ }
+  }
+
   if (supabaseClient) {
-    supabaseClient.auth.onAuthStateChange((event) => {
-      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") runConsentFlow();
+    supabaseClient.auth.onAuthStateChange(async (event) => {
+      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") {
+        if (LOAD_TRANSIENT.present) {
+          const { data } = await supabaseClient.auth.getSession();
+          if (!data || !data.session) { showTerminalFallback(); sanitiseUrl(); return; }
+        }
+        runConsentFlow();
+      }
     });
     runConsentFlow();
   } else spinner(false);
