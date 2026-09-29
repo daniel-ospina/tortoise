@@ -48,27 +48,26 @@ The client wheel stages this file as a SHARED module (``client/build_client.sh``
 copies it, like ``tortoise/mcp_client.py``), so ``import tortoise.status_vocabulary``
 works in a client-only install too.
 
-**One RAISED divergence, not a silent alignment.** The read-path half of the
-contract exists as an UNMERGED branch (``tortoise/read_status.py`` on
-``feat/3892-read-path-status`` / PR #4040), so nothing in this module imports it
-and nothing here assumes it has landed. That read-path half declares the same
-four terms but maps two of them differently:
+**The read path CONSUMES this module — the divergence is resolved.** The
+read-path half (``tortoise/read_status.py``, PR #4040) imports the four terms
+and the published set from here and DELEGATES its configuration /
+reachability / content mapping to ``classify`` above, so the same condition
+names the same term on both surfaces and the #3832 / D5 split — *never
+configured* vs *configured but down* — holds on the read path too:
 
-* **this vocabulary** — ``degraded`` = the store is configured but could not be
-  reached (off by outage); ``unconfigured`` = no store / endpoint / key was ever
-  declared (off by policy).
-* **the pending read path** — ``unconfigured`` = the read could not reach a
-  store at all, *"no store / endpoint configured, or unreachable"*;
-  ``degraded`` = the store was reached but a leg did not run.
+* ``available`` — the store answered and returned content;
+* ``empty`` — the store answered and returned nothing;
+* ``degraded`` — the store is configured but could not be reached;
+* ``unconfigured`` — no store / endpoint / key was ever declared.
 
-So the same word would name two different conditions across the two surfaces,
-and the one condition the owner decision #3832 / D5 exists to separate —
-*never configured* vs *configured but down* — is collapsed again on the read
-path. **That is raised, not papered over**: it is a decision for the lanes and
-the owner decision it touches, so this module keeps the boundary's mapping and
-this note is the flag. When the read path lands it should consume this module's
-terms and resolve its own condition mapping explicitly, rather than redeclaring
-the words.
+**One read-path dimension this vocabulary does not name.** A retrieval leg
+that did not run (no embedder installed, a tripped breaker, a timeout) leaves
+the store ANSWERED but the memory layer IMPAIRED. The four terms have no name
+for "the store answered, but not every leg did", so the read path carries it
+as ``degraded`` — the recorded term for an impaired memory — and keeps the
+leg-by-leg detail in its ``leg_trace``. That is a read-path-local extension,
+recorded here because this module is the vocabulary's ONE home: it adds no
+fifth term, renames none, and does not change the boundary's mapping.
 """
 
 from __future__ import annotations
