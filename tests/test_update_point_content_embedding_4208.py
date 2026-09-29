@@ -271,9 +271,12 @@ def test_a_derived_edit_clears_a_stale_verbatim_marker(sup):
     exact-float compare, while a rebuild drops it (`_revise_point` re-encodes
     and never reads it): live != rebuild.
 
-    (1) Fails at the #5238 head: the marker survives (`True` beside the
-    re-encoded vector) and both assertions below fail. (2) Reachable: caller
-    vector then derived content edit — the exact sequence in the finding.
+    (1) Pre-fix, the LIVE assertion fails: the marker survives (`True` beside
+    the re-encoded vector), so ``live.get("embedding_verbatim") is None``
+    fails. The post-rebuild assertion ALREADY passes without the fix —
+    `rebuild_all` drops the marker regardless — so it pins the replay half
+    (live and rebuild agree), not the fix. (2) Reachable: caller vector then
+    derived content edit — the exact sequence in the finding.
     """
     events, sdk = sup
     pid = sdk.create_point("statement", "original").get("id")

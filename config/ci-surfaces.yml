@@ -2492,5 +2492,5 @@ durations:
   test_source_inheritance_own.py: 45.7  # unmeasured
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
-  test_update_point_content_embedding_4208.py: 6.0  # #4208: 7 tests, docker FalkorDB; locally measured
+  test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
   test_helpers.py: 0.0  # unmeasured
