@@ -429,12 +429,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = _load(path)
         red, unknown = check(manifest)
-        # The enforcing gates (`ci_selection --integrity`, `ci_timing.
-        # integrity_problems`) both promote a PRESENT-but-unparseable stamp to
-        # RED via `unparseable_stamp_issue`; this entry point composed only
-        # `check()` and so reported the same input as UNKNOWN. Compose the same
-        # predicate here, so the verdict cannot be half-wired.
-        red = [*red, issue] if (issue := unparseable_stamp_issue(manifest)) else red
     except Exception as exc:
         # Never a traceback and never 0: the exit code has to carry the same
         # meaning as the report does, or a caller reads "could not look" as

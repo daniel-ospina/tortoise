@@ -344,24 +344,18 @@ def test_cli_exit_codes_are_zero_one_and_two(tmp_path) -> None:
 
 
 def test_the_cli_still_distinguishes_red_from_unknown(tmp_path) -> None:
-    """#6243 review: a PRESENT-but-unparseable stamp is RED through this entry
-    point too, not the softer UNKNOWN.
+    """#6243 review cycle 2 (d): the selector-side K1 fix must NOT move the
+    validator's own contract.
 
-    `main()` composed only `check()`, whose `staleness` reports a malformed
-    stamp as UNKNOWN — while BOTH enforcing gates (`ci_selection --integrity`
-    and `ci_timing.integrity_problems`) promote it to RED via the shared
-    `unparseable_stamp_issue`. Same input, opposite verdicts, and the docstring's
-    `exit 1 = an OBSERVED defect` says which is right. So: stale but PARSEABLE
-    is RED (exit 1), and PRESENT but unparseable is now RED too; a genuinely
-    ABSENT stamp stays UNKNOWN (exit 2).
+    Through `ci_manifest.py` itself, a stale but PARSEABLE stamp stays RED
+    (exit 1), while an unparseable one and an absent one both stay UNKNOWN
+    (exit 2). The red-with-junk decision lives in the enforcing selector entry
+    point; it does not change exit-2-for-unknown here.
     """
     stale = (dt.datetime.now(dt.UTC)
              - dt.timedelta(days=ci_manifest.MAX_AGE_DAYS + 1)).isoformat()
     assert _cli(_manifest(stale), tmp_path) == 1
-    junk = _manifest("not-a-date")
-    assert ci_manifest.unparseable_stamp_issue(junk) is not None, (
-        "precondition: the shared predicate names the malformed stamp")
-    assert _cli(junk, tmp_path) == 1
+    assert _cli(_manifest("not-a-date"), tmp_path) == 2
     assert _cli(_manifest(), tmp_path) == 2
 
 
