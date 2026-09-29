@@ -978,8 +978,11 @@ def _one_line(value: object) -> str:
     annotation prefix: ``session_date``, ``speaker``, and the whole validity
     marker (``superseded_by``/``supersedes`` content snippets plus the
     valid/expired window fields). All were interpolated raw. The session id
-    beside them is safe only *by construction* (it is an index, never free
-    text), which is exactly why the free-text sources were missed.
+    beside them is NOT safe by construction — on the ask/search surface it is
+    the client-writable ``session_id``/``sessionId`` too, made safe only by the
+    identifier-shape ALLOWLIST in :func:`_safe_session_tag`. That is exactly why
+    the neighbours were missed: the guarded id LOOKED structural while its
+    siblings were plain free text.
 
     The values are free text from a captured session, so a newline inside one
     FORGES an annotation line: it fabricates a turn the reader will read as a

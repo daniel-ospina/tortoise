@@ -3,10 +3,13 @@
 `session_date` and `speaker` are interpolated into the prefix the reader sees,
 and so is the validity marker (`_validity_marker` — `superseded_by`/`supersedes`
 content snippets plus the valid/expired window fields). The session id beside
-them is safe only BY CONSTRUCTION (it is an index, never free text) — which is
-why the free-text sources were missed. A newline in any of them fabricates an
-annotation line: it renders a turn the model will read as a real `[user] …`
-message, and nothing distinguishes it from one.
+them is NOT safe by construction — on the ask/search surface it is the
+client-writable `session_id`/`sessionId` too, made safe only by the
+identifier-shape ALLOWLIST in `_safe_session_tag`. That is why the free-text
+sources were missed: the guarded id LOOKED structural while its siblings were
+plain free text. A newline in any of the three fabricates an annotation line:
+it renders a turn the model will read as a real `[user] …` message, and nothing
+distinguishes it from one.
 
 The BLOCK BODY (`content`) is deliberately NOT collapsed here: a captured turn
 is stored as `f"[{role}] {content}"` (`tortoise/sdk.py:556`), so a body line
