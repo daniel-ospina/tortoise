@@ -33,7 +33,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.pack_registry import (  # noqa: E402
+from tortoise.pack_registry import (
     MAX_PROMPT_FRAGMENT_CHARS,
     MAX_PROMPT_FRAGMENT_TOKENS,
     MAX_PROMPT_FRAGMENTS_TOKENS,
@@ -58,6 +58,13 @@ def _manifest(**extraction):
 
 def _errors(**extraction):
     return PackRegistry("/tmp/nonexistent")._validate(_manifest(**extraction))
+
+
+def _ontology_errors(**ontology):
+    """Errors from the ``ontology.*`` surface (chains/enforcement), not ``extraction.*``."""
+    m = _manifest()
+    m["ontology"] = {**m["ontology"], **ontology}
+    return PackRegistry("/tmp/nonexistent")._validate(m)
 
 
 def _extraction_errors(**extraction):
@@ -175,12 +182,36 @@ class TestRelationTemplates:
 
     def test_mitigates_is_refused_as_a_template_mechanism(self):
         """MITIGATES was RETIRED from the operator menu (ONTOLOGY v3.17, #4937 /
-        #2552) and `sdk.create_operator` refuses it. `CORE_PREDICATES` still
-        carries it, so validating against that set made this slot BROADER than
-        its own sibling `relations[].mechanism` and re-advertised a retired
-        spelling on the author-facing template."""
+        #2552) and `sdk.create_operator` refuses it. Validating against
+        `CORE_PREDICATES` once made this slot BROADER than its own sibling
+        `relations[].mechanism` and re-advertised a retired spelling on the
+        author-facing template. The two slots must agree."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "MITIGATES"}])
         assert any("must be IMPL or NAND" in e for e in errors), errors
+
+    def test_mitigates_is_refused_as_a_chain_edge(self):
+        """`MITIGATES` is not a valid chain/enforcement target either.
+
+        Objective 6's conjunct is *"the mitigation actually moves the weight,
+        not merely existing"* (#4626). `CORE_PREDICATES` admitting `MITIGATES`
+        let a pack declare the retired spelling as a chain edge without
+        declaring a relation — advertising, on the author-facing manifest, a
+        mitigation the engine **cannot build** (`sdk.create_operator` refuses
+        it since the F1 ruling), so it could never move any weight. Refusing it
+        at validation time is what makes the conjunct real on the pack surface
+        rather than merely asserted on the SDK surface (#2766 / #5322)."""
+        errors = _ontology_errors(
+            chains=[{"id": "c1", "steps": ["domainThing"], "edges": ["MITIGATES"]}])
+        assert any("MITIGATES" in e and "c1" in e for e in errors), errors
+
+    def test_impl_and_nand_remain_valid_chain_edges(self):
+        """The removal must be NARROW: the two live core predicates still pass
+        without a pack declaring them as relations."""
+        errors = _ontology_errors(chains=[
+            {"id": "c1", "steps": ["domainThing"], "edges": ["IMPL"]},
+            {"id": "c2", "steps": ["domainThing"], "edges": ["NAND"]},
+        ])
+        assert errors == [], errors
 
     def test_an_unknown_template_key_is_rejected(self):
         errors = _extraction_errors(

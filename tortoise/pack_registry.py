@@ -196,9 +196,17 @@ def registered_source_types() -> frozenset[str]:
     """
     return KNOWN_SOURCE_TYPES | frozenset(SOURCE_KIND_DEFAULTS)
 
-# Core mechanism predicates (S3 pipeline emits IMPL/NAND; MITIGATES for
-# mitigations) — valid chain-edge / enforcement targets without a pack relation.
-CORE_PREDICATES = frozenset({"IMPL", "NAND", "MITIGATES"})
+# Core mechanism predicates — valid chain-edge / enforcement targets without a
+# pack relation. IMPL/NAND ONLY. `MITIGATES` was RETIRED from the operator menu
+# by the F1 ruling (#2552, ontology v3.17) and implemented by #4937 / PR #5225:
+# `sdk.create_operator` refuses it, and a mitigation is a Point attached to the
+# operator bridge it damps — `(op:Point {is_operator:true})-[:mitigated_by]->(m)`
+# (ontology §3.9) — not a predicate at all. Admitting it here let a pack declare
+# a chain or enforcement target the engine CANNOT BUILD, so the manifest
+# advertised a mitigation that can never move a weight: objective 6's conjunct
+# ("actually moving the weight, not merely existing") defeated at validation
+# time (#4626 / #2766 / #5322).
+CORE_PREDICATES = frozenset({"IMPL", "NAND"})
 
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
 # Per-pack slots that let a pack shape extraction for its own domain while the
@@ -1114,16 +1122,14 @@ class PackRegistry:
                             f"toKind, description)"
                         )
                 mechanism = tpl.get("mechanism")
-                # IMPL|NAND — the SAME pair `relations[].mechanism` enforces,
-                # deliberately NOT `CORE_PREDICATES`. That set still carries
-                # MITIGATES, which ONTOLOGY v3.17 (#4937, the F1 ruling on
-                # #2552) RETIRED: `sdk.create_operator` refuses it, and the
-                # ontology's own PREAMBLE states that where the document and
-                # the code disagree, the DOCUMENT is right. Accepting it here
-                # would advertise, on the author-facing template, an edge the engine
-                # cannot build — and would make this slot BROADER than its own
-                # sibling. `CORE_PREDICATES` still admitting MITIGATES is a
-                # separate, pre-existing defect: #5322.
+                # IMPL|NAND — the SAME pair `relations[].mechanism` enforces.
+                # MITIGATES is RETIRED (ONTOLOGY v3.17, #4937, the F1 ruling on
+                # #2552) and `sdk.create_operator` refuses it, so accepting it
+                # here would advertise, on the author-facing template, an edge
+                # the engine cannot build. `CORE_PREDICATES` no longer carries
+                # it either (#2766 / #5322), so the two slots finally agree —
+                # this check reads the literal pair rather than the set so the
+                # agreement is explicit and cannot silently drift again.
                 # `predicate` is the one REFERENCE among these slots. The
                 # sibling `ontology.relations` requires a non-empty camelCase
                 # predicate and both kind sides, and a template naming none of
