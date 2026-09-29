@@ -1460,9 +1460,13 @@ class _EntityHandlers:
         call this instead, with the record's journal ``seq`` and the plan, so
         both engines obey one selection.
 
-        ``plan`` is keyed by the SAME ``enumerate`` seq the caller passes; a
-        seq absent from it means the record's id is not a writable str (both
-        halves are skipped). The belief half folds here, at the record's own
+        ``plan`` is keyed by the SAME ``enumerate`` seq the caller passes. The
+        plan NEVER omits a terminalizer seq: an id it cannot write maps to
+        ``(False, False)`` (both halves skipped, and the plan already logged the
+        warning). A seq ABSENT from the plan therefore means the record is not a
+        planned terminalizer at all — a non-terminalizer type, or an ``events``
+        list the plan was not built from — and both halves are skipped here.
+        The belief half folds here, at the record's own
         position — chronological, so it cannot clobber a later writer.
 
         A fold that matches NO Point warns (#3299): the apply() one-record
@@ -1526,13 +1530,34 @@ class _EntityHandlers:
         (the fold's status/validity stamp needs only the target). Returns 1
         when the edge was merged, 0 when an endpoint was absent.
 
+        An endpoint that is empty or that ``_writable_id`` rejects (NUL / lone
+        surrogate) is REFUSED here, with a warning, before it reaches the
+        query: the plan's gate covers the terminalizer's target, not this
+        successor, so a corrupt successor would otherwise reach parameter
+        encode and raise — aborting a post-wipe replay at the trailing sweep
+        (the same class the target gate exists to prevent). Note ``_writable_id``
+        alone admits ``""``, hence the explicit emptiness test. Returns 0 for
+        it; nothing is merged.
+
         The edge names the SUCCESSOR, which a chronological replay may not
         have materialized yet — the caller is responsible for the trailing
         re-apply in that case (see ``fold_deferred_corrects_edges``).
         """
+        from tortoise.projection import _writable_id
+        if (not old_id or not new_id or not _writable_id(old_id)
+                or not _writable_id(new_id)):
+            logger.warning(
+                "_merge_corrects_edge: refusing an unwritable endpoint "
+                "(old_id=%r new_id=%r) — CORRECTS edge not merged",
+                old_id, new_id)
+            return 0
+        # ``RETURN a.id`` is load-bearing: without it FalkorDB yields an empty
+        # ``result_set`` even when the MERGE CREATES the edge, so the merged-1
+        # contract below would always report 0 (a swallowed signal for any
+        # caller that reports a dropped edge).
         result = self.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "MERGE (a)-[:CORRECTS]->(b)",
+            "MERGE (a)-[:CORRECTS]->(b) RETURN a.id LIMIT 1",
             params={"new_id": new_id, "old_id": old_id},
         )
         return 1 if result.result_set else 0

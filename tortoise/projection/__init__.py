@@ -3737,7 +3737,15 @@ class FalkorProjection(
                 continue
             self.apply(ev)
         if deferred_corrects:
-            self.fold_deferred_corrects_edges(deferred_corrects)
+            # Guarded like the other two engines' sweeps: ``fold_deferred_*``
+            # must never abort a post-wipe replay (the graph was already
+            # DETACH DELETE'd above), so a failure is logged, not raised.
+            try:
+                self.fold_deferred_corrects_edges(deferred_corrects)
+            except Exception:
+                logger.exception(
+                    "rebuild: deferred CORRECTS fold failed; %d edge(s) not "
+                    "replayed", len(deferred_corrects))
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
     def rebuild_all(self, log_dir: str) -> dict:
