@@ -19,6 +19,97 @@ aboutObjects: STORAGE-ARCHITECTURE.md, records ledger, vector index, raw storage
 
 ---
 
+## ⛔ THE STORAGE UNIT IS BYTES — decision, owner, 2026-09-26 (`#4495`)
+
+**Read this before the rest of the document.** The body below is written in the **node** unit (`~25,000 quota
+nodes`, `140 MB`, `$73/GB`, per-node byte constants). The owner ruling of 2026-09-26 keeps the *bytes* and retires
+the **node as the customer-facing unit**:
+
+- **Storage is billed in MB/GB**, as both our cost input **and** the customer-facing unit — *"migrate away from
+  counting nodes and start counting in mb/gb for storage (both as a cost input for us and customer facing bill them
+  per mb/gb as they understand that) **[typos in the source silently normalised: `coutnign`, `inout`]**"*.
+- **Exceeding the storage allowance is PURCHASED OVERAGE, not refusal** — consistent with the 22 September ruling
+  that tiers price *features*, never refusal.
+- **Overage is bought with PREPAID CREDITS**, not a postpaid "max spend" approval — the owner's stated reason is
+  cashflow.
+- The tier carries a **starter amount** of storage and usage; the subscription itself is priced on **features**.
+- **Prices are NOT set by this document or by this ruling.** The owner *"calibrat[es] after the beta launch"*, from
+  measured consumption.
+
+**⚠️ Why the node unit is not merely deprecated but replaced — and what actually removes the P0.** The stored data
+*"does not shrink back on its own"* (**the wording is this issue's QUESTION comment, not the ruling's** — the
+ruling's own synthesis renders the same fact as *"stock never resets while flow does"*. The qualifier carries the
+argument, so it is kept: a node count does fall when nodes are deleted
+or purged — but **not** when one is superseded, which **does not delete the old point**: it marks it outdated and
+adds a `CORRECTS` edge. The node is still there, and the quota predicate carries no status filter, so a superseded
+point is still counted), so a customer who filled the stock cap stayed full **without doing anything further** — the
+P0 in `#4495` was **24,978 of 25,000, i.e. 22 points of headroom**, and a later capture in the same window was
+refused outright at **24,984 of 25,000 (16 points)** with no partial acceptance.
+
+⇒ **What removes the permanent-refusal state is the PURCHASE PATH, not the unit.** A byte allowance with no overage
+— or a customer who declines to buy — refuses exactly as the node cap did. The ruling therefore does **not** extend
+the never-refusal ruling to the node cap; it **removes the unit the question was about**, and pairs the new unit with
+a way to buy more. Keeping those two halves distinct matters: the guarantee comes from the overage path.
+
+**Measured basis (2026-09-25, live graph).** These are the numbers the allowance must be denominated in, and **each
+per-node figure states its base and its denominator**, because that pair is where this document has already erred
+twice:
+
+| quantity | measured | note |
+|---|---|---|
+| resident nodes | **89,701** | `MATCH (n)` |
+| nodes the quota predicate counts | **24,978** | **3.59× divergence** from the resident count — the denominator trap |
+| `GRAPH.MEMORY USAGE` | **143 MB** (indices 46 MB) | sampling estimate, `SAMPLES`=100 |
+
+**Per-node figures must not be quoted without a base.** Taking the ruling's headline reading (143 MiB):
+
+- **6,003 B per *capped* node** (143 MiB ÷ 24,978)
+- **1,672 B per *resident* node** (143 MiB ÷ 89,701)
+
+⚠️ **The ruling records `1,594 B` per resident node, and that figure is on a DIFFERENT base** — it is
+143 **decimal** MB ÷ 89,701. So the ruling's two per-node numbers (`6,003` and `1,594`) differ by **3.77×**, not by
+the **3.59×** the denominators alone imply, precisely because MiB and decimal MB were mixed. **On one base the pair
+is either `6,003 / 1,672` (MiB) or `5,725 / 1,594` (decimal)** — at most two of `{143 MB, 6,003 B, 1,594 B}` can be
+true at once. The *decision* is untouched by this (bytes remain the unit); the *derivation* is corrected here so the
+error is not propagated into the allowance.
+
+⚠️ **This block SUPERSEDES the body's older figures.** §2 and §12 read **141 MB** and **45 MB** of indices where this
+block reads **143 MB / 46 MB**, and §13's issue-map row concludes *"~3 KB per node (140 MB ÷ ~45k total nodes)"* —
+a **third** denominator (~45k, and a different residency set). The **`~3 KB` estimate is superseded by this block's
+`1,672 B` per resident node**; the figures are not interchangeable and the `~45k` node count is not re-measured here.
+§13's row carries the earlier denominator correction (the retracted 5.6 KB claim); **this block, not §1, is the
+precedent for the denominator error class** — §1 corrects a *growth-horizon* error, a different mistake.
+
+**⛔ Status of the implementation — read this as FORWARD-LOOKING, not shipped.** Nothing in the byte path is on
+`main` today:
+
+- `tortoise/graph_storage.py` is **not on `main`** (nor on this document's own revision pin `c79ba1cf2`). It exists
+  only on the **unmerged** branch `feat/5331-graph-byte-meter` (PR #5696). *"Built"* is true of an open PR only.
+- **There is no byte gate on `main`.** The gate — and with it the `max_storage_bytes` allowance key — is the
+  **separate**, also-unmerged branch `feat/5331-node-to-byte-cap`. The key is therefore **absent on `main`** (and
+  absent from the meter branch), but it is **not absent from the repository**: it is written in `tortoise/` on that
+  cap branch.
+- **The meter is measurement-only and FAIL-SOFT** — its own docstring is explicit: *"NOT A DIAL. Nothing here
+  prices, caps, tiers, refuses or throttles. It is the instrument, not the setting (#5331 is measurement only)"*,
+  and *"FAIL-SOFT … never raise"*. Do not describe the **meter** as fail-closed; the fail-closed behaviour belongs to
+  the **gate**.
+
+⇒ **The gate itself IS written — on the cap branch, not on `main`.** `_enforce_storage_allowance`
+(`tortoise/quota.py` on `feat/5331-node-to-byte-cap`) raises `QuotaCheckError` when no reading is supplied, and that
+branch's `pricing.py` describes the design as *"FAIL-CLOSED when no reading is supplied"*. The gate is therefore not
+missing. **What is missing is the WIRING**: no production caller supplies a `storage_reading`, so the gate is inert,
+and configuring an allowance today would 500 every points-gated write.
+
+⇒ **A requirement on the not-yet-done wiring, not a shipped default:** the meter must be wired into the gate **before**
+any allowance is configured. That ordering is a constraint on the work, not a statement of what exists.
+
+> **OVERRIDES:** the node-count storage cap (`max_graph_nodes`, per-node byte constants such as 1,024 B/node) as the
+> customer-facing storage unit — replaced by measured MB/GB storage with purchased overage, because per-node
+> accounting (a) declares 1,024 B/node against a measured 6,003 B/node on the capped set, (b) makes the cap permanent
+> while the number it counts never shrinks **on its own**, and (c) is a unit customers cannot reason about.
+
+---
+
 ## 1. The problem
 
 One user's graph reached **25,000 quota nodes in 3–4 active days** - **140 MB of resident memory at $73/GB/month ≈ $9.98/month for a single user, and every further GB costs another $73/month in perpetuity.** The product's constraint is a **$19 price with <$9 total cost per user**, and the graph keeps growing with tenure.
@@ -443,10 +534,12 @@ Two link types look like near-duplicates:
 
 **Merging them is the obvious tidy-up, and it is refused.** The two are **not** interchangeable in the rebuild machinery:
 
-| | in the snapshot-derivable set? | what `rebuild_all` pass-2b does |
-|---|---|---|
-| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | **re-creates it at the OLD point** from its immutable snapshot |
-| `aboutSource` | ❌ **deliberately excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+| | in the snapshot-derivable set? | moved by the live `supersede_point` transfer? | what `rebuild_all` pass-2b does |
+|---|---|---|---|
+| `aboutDocument` | ✅ **yes** (`DERIVABLE_STRUCTURAL_RELS`, `#2489`) | ✅ **yes** (`SUPERSEDE_STRUCTURAL_RELS`) | **re-creates it at the OLD point** from its immutable snapshot |
+| `aboutSource` | ❌ **deliberately excluded** | ❌ **also excluded** | **never resurrects at old** — so it gets no replay descriptor at all |
+
+**⚠️ The two omissions are independent, and `aboutSource` is the only `about*` rel absent from BOTH.** `aboutAction` and `wasDerivedFrom` are excluded from the snapshot-derivable set too, but `supersede_point` **does** transfer them live; `aboutSource` is moved by neither leg — a supersede leaves it on the old point, and pass-2b never re-creates it. So the exclusion is stronger than the transfer set's other members: a reader comparing the two sets must not read `aboutSource` as "excluded from replay, transferred live" like the other two.
 
 **⇒ Collapsing `aboutDocument` into `aboutSource` moves the edge class OUT of the replayable set. That is a durability regression**, and it would be invisible until a rebuild was actually needed. **The contradiction test caught this and disqualified the recommendation that proposed it** — which is the rule working, not the analysis failing.
 
@@ -561,6 +654,16 @@ The convergence is on **two layers with different jobs**: the **source** carries
 **⇒ This is why the version goes on the extraction link and not only on the source** — and it is why the storage cost lands on the edge, not on a document store.
 
 **Research:** `docs/research/2026-09-24-source-versioning/research-brief.md`. **Adoption gate: ADOPT** — no recorded decision contradicted; D7 governs it; the ontology's `§4.7` already declares the Source window; D30 bounds the cost. **Tracked:** `#5038` (the model) · `#5024` (the in-place mutation that blocks it) · `#5025` · `#5026`.
+
+#### ⭐ Where this stands (2026-09-25) — a status pointer, not a new rule
+
+- **The anchor shipped.** The read version rides on the `extractedFrom` link as `sourceVersion` (`#5256`, PR `#5288`), with the honest-absent rule (**`''`/blank/non-string hash ⇒ no property at all**), live == replay, and **no SDK/MCP surface change**.
+- **The currency CHECK is a read** (this section's model): it compares the recorded `sourceVersion` against the source's current `contentHash`, with **no stored `status`** field — so it belongs on the **existing** read surfaces and needs **no new tool and no new SDK method**.
+- **What a stale fact does — Policy B, REFINED by the owner on 2026-09-26** (`#5038` comment `5845802608`): *"We should not return an out-of-date fact when we have a newer one"* — so when a newer fact exists, the out-of-date fact is **withheld as an answer** and **disclosed as an FYI carrying its source** (*"let the user know that (newer fact but no source, and older fact from source X) … so I can disambiguate"*). This **refines rather than reverses** Policy B: Policy B's prohibition was on the fact being *"silently"* withdrawn, and the required disclosure is exactly what keeps this non-silent. **OVERRIDES:** the field's practice of returning a stale fact **alongside** its replacement with a flag (Zep/Graphiti's temporal fields; the RAG `is_latest` norm) — the withheld-as-answer + disclosed-as-FYI form is deliberate, because a visible flag is measurably not acted on (`arXiv 2609.08258`; `2605.06527`: 77.5% visible vs 3.3% adjudicated). The **write-time** notice the owner also asked for (*"ideally at write time it would have told me"*) is **`lane:c1-capture`'s** surface, not this one. **⚠️ Open alongside it:** how mechanical validity reconciles with **EP confidence** (owner, same comment — *"not sure how we reconcile the two here"*), tracked as **O9** in `docs/plans/2026-09-25-5038-source-version-anchor.md`; research first, and no second truth signal is added beside EP in the meantime.
+- **A non-re-read successor records no version** (owner, O1) and reads `unknown` until it is itself read from a source; `ONTOLOGY.md` §4.6 is unmodified and the §4.6 reopen was not taken.
+- **The re-inference step has no owner** — filed as **#5422**, because acceptance A2 of `#5038` cannot complete without it. **`#5024` is its precondition** (a re-fetched `:Source` currently mutates in place, unjournalled: if the old version is overwritten there is nothing to mark stale).
+
+*This pointer records status only. `ONTOLOGY.md` §4.6 is owner-gated and is NOT edited by this work.*
 
 ---
 

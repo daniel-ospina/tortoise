@@ -127,6 +127,21 @@ STALE_QUARANTINE_SUFFIX = ".reaper-stale-"
 # tortoise/embedded_lifecycle.py and imports this name lazily (no import
 # cycle: embedded_reaper deliberately stays dependency-free).
 OWNERS_DIRNAME = ".tortoise-owners"
+# #4926: the MID-CONSTRUCTION claim file inside `OWNERS_DIRNAME`. A client
+# that has adopted this socket from the redislite registry but has not yet
+# attached (it is blocked in `_wait_for_server_start`, so it holds no
+# connection) writes `<OWNER_INFLIGHT_PREFIX><pid>-<start>-<socket-digest>`
+# for the whole duration of `RedisMixin.__init__`. It is a LIVENESS-ONLY hold
+# read by `embedded_lifecycle.cotenant_holds_server` (the last-client
+# decision), so that a peer process's close cannot tear the server down under
+# the attaching construction. The prefix is load-bearing: it is deliberately
+# unparseable as a `<pid>` record name, so BOTH parsers in this module
+# ignore these files entirely — `_owner_records` (the `total`/`live`
+# arithmetic) and `_owner_record_dir_present` (which feeds
+# `_has_ownership_claim` and the `unattributed` flag). A construction claim
+# is not an owner record and must never move either. Declared here (the
+# reaper owns the owner-record format) so writer and reader cannot drift.
+OWNER_INFLIGHT_PREFIX = "inflight-"
 # #4577: the owner-hold LOCK file inside `OWNERS_DIRNAME`. The writer holds a
 # SHARED `flock(LOCK_SH)` on it for the process's lifetime; the reaper probes
 # an EXCLUSIVE non-blocking lock. A held lock is a KERNEL FACT of liveness
