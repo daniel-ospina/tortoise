@@ -73,23 +73,23 @@ that the payload does not name:
   labels are validated against a frozen vocabulary (an unknown/malformed value
   is a 0-row NO-OP, never interpolated into Cypher).
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
-  live capture MERGE is a raw write). Fields: `id`, `created_at`,
-  `turn_count`, `is_episodic`, `harness`, `actor_user_id`, and (on the
-  follow-up emission) `entity_links_attempted` / `entity_links_created`, and
-  (on a third, TRAILING emission written right after the live `SET
-  s.capture_ok / s.capture_extractor`) `capture_ok` / `capture_extractor`.
-  The first emission's payload is `{id, created_at, turn_count, is_episodic}`
-  plus `harness` / `actor_user_id` when set. Folded by
+  live capture MERGE is a raw write). Four are emitted per capture, in this
+  order: (1) the opening record — `{id, created_at, turn_count, is_episodic}`
+  plus `harness` / `actor_user_id` when set; (2) a trailing record written by
+  `sdk._write_capture_turns` right after its batched turn statement, carrying
+  `capture_redactions` (#4911); (3) after the entity-linking pass, carrying
+  `entity_links_attempted` / `entity_links_created`; (4) the final, trailing
+  record written right after the live `SET s.capture_ok /
+  s.capture_extractor`, carrying `capture_ok` / `capture_extractor`.
+  Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
   `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
-  `entity_links_attempted`, `entity_links_created`, `capture_ok` and
-  `capture_extractor` from the latest record (last writer wins). The capture
-  then emits a **second** `SessionRecorded` after the entity-linking pass
-  carrying the two outcome counters, and a **third** after the
-  attempt-outcome write carrying `capture_ok` / `capture_extractor`, so all
-  of those fields are durable on the `apply()`-based engines too (the first
-  record is emitted before either result is known and cannot carry them; a
+  `capture_redactions`, `entity_links_attempted`, `entity_links_created`,
+  `capture_ok` and
+  `capture_extractor` from the latest record (last writer wins). Each later
+  record exists so a field is durable on the `apply()`-based engines too (the
+  opening record is emitted before any result is known and cannot carry them; a
   null `capture_ok` would otherwise read as the legacy "presumed captured"
   case at the #2335 retry gate).
 

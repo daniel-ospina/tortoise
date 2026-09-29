@@ -117,10 +117,19 @@ def _count(g, cypher, params=None) -> int:
 
 def _required_sweep_clean(g) -> int:
     """REQUIRED-set invariant sweep (plan §7, I9): zero Sources with
-    null/empty url/sourceKind/contentHash/ingestedAt."""
+    null/empty url or ingestedAt, and zero PROVENANCE Sources (sourceKind
+    present) with null/empty sourceKind/contentHash.
+
+    D10 (#5026): a document Source carries `documentKind` + `url` +
+    `ingestedAt` but no `sourceKind`/`contentHash` — its version anchor lives
+    on the corpus Source. So the contentHash half is scoped to provenance
+    Sources; the url + ingestedAt invariant holds for EVERY Source.
+    """
     return _count(g, "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR "
-                     "s.sourceKind IS NULL OR s.contentHash IS NULL OR "
-                     "s.contentHash='' OR s.ingestedAt IS NULL RETURN count(s)")
+                     "s.ingestedAt IS NULL OR "
+                     "(s.sourceKind IS NOT NULL AND "
+                     " (s.contentHash IS NULL OR s.contentHash='')) "
+                     "RETURN count(s)")
 
 
 def _hash_pair_sweep(g) -> int:
@@ -223,7 +232,8 @@ class TestE2E17Dispatch:
             g = sdk._get_proj().g
             assert _count(g, "MATCH (s:Source) RETURN count(s)") == 0
             assert _count(g, "MATCH (e:Event) RETURN count(e)") == 0
-            assert _count(g, "MATCH (d:Document) RETURN count(d)") == 0
+            assert _count(g, "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+                             "RETURN count(s)") == 0
         finally:
             sdk.close()
 

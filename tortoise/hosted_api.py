@@ -38,12 +38,14 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Mount, get_route_path
 
 import tortoise
 
 # #3834: the wait-bound vocabulary's single home — read as a module attribute so
 # a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
 # of leaving a stale copy in this module.
+from tortoise import body_limits as _body_limits  # #2048 shared streaming body cap
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
@@ -118,10 +120,11 @@ from tortoise.sdk import (
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
+    _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
-    _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
+    _capture_turn_texts_with_redactions,  # #4911: the ONE stored-turn text definition + its redaction count
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
@@ -414,18 +417,119 @@ def _capture_session_release(session_key: str | None) -> None:
         _CAPTURE_SESSIONS.pop(session_key, None)
 
 
+def _graph_name_for_namespace(namespace: str | None, *,
+                              graph_name: str | None = None,
+                              uri_graph: str | None = None) -> str:
+    """Namespace → FalkorDB graph name — a mirror of ``TortoiseSDK._get_proj``.
+
+    ``tortoise/sdk.py`` owns this mapping; this is its only restatement, kept
+    here because `_data_graph_name` must name the graph a request opens WITHOUT
+    opening a projection (admission is I/O-free — #3718/#4625), and because an
+    edit to ``sdk.py`` shifts every ``sdk.py:N`` citation in
+    ``docs/product/sdk-rename-table.md`` (MEMORY.md: the sdk_rename_table trap —
+    `tests/test_sdk_rename_table.py` reds on any added/removed sdk.py line).
+    `tests/test_capture_loop_responsiveness.py::`
+    `test_capture_graph_name_mirrors_the_sdk_mapping` drives the REAL
+    ``_get_proj`` against this function through the NAMESPACE-FAMILY branches
+    (``registry`` / explicit ``graph_name`` / ``test_`` / ``test-`` / ``org_``).
+    The URI fallback is NOT covered by that guard and is not reachable from
+    `_data_graph_name` (which never passes ``uri_graph``), so a drift in
+    ``_get_proj``'s URI parsing cannot split the gate from the opened graph for
+    any real credential — see `_data_graph_name`.
+
+    Branch order and truthiness mirror ``_get_proj`` EXACTLY: ``registry``
+    first; ``graph_name is not None`` (not truthiness); the ``test_`` /
+    ``tortoise_test`` family; the hyphenated ``test-`` family; then
+    ``org_{namespace}``; a falsy namespace falls back to the URI's own graph,
+    else ``tortoise``.
+    """
+    if namespace == "registry":
+        return "registry_tortoise"
+    if graph_name is not None:
+        return graph_name
+    if namespace:
+        if namespace.startswith(("test_", "tortoise_test")):
+            return f"{namespace}_tortoise"
+        if namespace.startswith("test-"):
+            return f"{namespace.replace('-', '_')}_tortoise"
+        return f"org_{namespace}"
+    return uri_graph or "tortoise"
+
+
+def _data_graph_name(org: dict) -> str | None:
+    """The FULL DB graph name this request's data path will open — #3365.
+
+    It is the single value the ADMISSION GATE and the opener share. For a
+    graph-bound key `_data_sdk` passes it straight through as ``graph_name=``;
+    for an org-wide key the name is decided by ``TortoiseSDK._get_proj`` from
+    ``namespace=org_id``, and this function mirrors that derivation — so the two
+    agree by construction on both branches. `_capture_session_key` keys the
+    in-flight registry on the SAME value, so two credentials that route to the
+    same physical graph share one bucket whatever ``graph_id`` shape they carry.
+    `tests/test_capture_loop_responsiveness.py::`
+    `test_data_sdk_opens_the_graph_the_gate_keys_on` pins the CALL FORM the
+    opener uses for each branch (and the name it yields) against this value, and
+    `test_capture_graph_name_mirrors_the_sdk_mapping` pins this value's
+    namespace-family derivation against the real ``_get_proj``.
+
+    A falsy ``org_id`` therefore keys on the literal ``tortoise``, while
+    ``_get_proj`` would open the URI's own graph. That divergence is
+    unreachable in practice (``org_id`` is a DB key and always truthy) and
+    benign if reached (every falsy-id request resolves to the same one graph).
+
+    ``None`` = the binding's namespace did not resolve. `_data_sdk` refuses that
+    request (403 GRAPH_NOT_FOUND) BEFORE any write, so callers must keep it OUT
+    of every real graph's bucket — fail closed, never widen.
+    """
+    if org.get("graph_id"):
+        return org.get("graph_namespace") or None
+    # Org-wide key / session auth: `_data_sdk` opens `namespace=org_id`, whose
+    # resolved name is the SDK derivation. Deliberately NOT the dict's
+    # `graph_namespace`: that is `teams.graph_name`/`t.graph_name`, which
+    # `_data_sdk` ignores on purpose (the selfhost `org_{name}` lane diverges —
+    # #2023), so keying on it would bucket the request by a graph it never opens.
+    return _graph_name_for_namespace(org.get("org_id"))
+
+
 def _capture_session_key(org: dict, session_id: str | None) -> str | None:
-    """Scope an in-flight session key to its tenant (and graph) — #3129.
+    """Scope an in-flight session key to its tenant AND its graph — #3129/#3365.
 
     Session ids are CLIENT-chosen (often a generic harness name), so a bare
     session_id would let one tenant's in-flight capture refuse another tenant's
     unrelated capture of the same name (reviewer-measured 409). The admission
     COUNTER stays global (it bounds a server resource); only this key is scoped.
+
+    #3365: the graph component is the graph the capture will ACTUALLY write to
+    (`_data_graph_name`), not the credential's ``graph_id`` binding. A
+    legacy/pre-guard key bound to the org's DEFAULT graph carries that node's
+    real ``g_<hex>`` id while writing to the same physical graph an org-wide key
+    writes to; keying on the binding id split them into two buckets, so both
+    passed admission and a second same-session capture was served a 0-extract
+    replay — the #3129 silent-loss window, reopened.
+
+    Deliberately NOT normalized by the binding's ``kind`` (the shape
+    `backup_sweep.enumerate_org_graphs` uses for its PERSISTENT object keys —
+    Q4 #2313 / #2376). Those two are different artifacts with different jobs:
+    in the registry/selfhost lane an org-wide key opens ``org_{org_id}`` while a
+    default-kind binding opens ``org_{name}`` — two DIFFERENT graphs — so
+    kind-folding would refuse a legitimate capture with a false 409. This key is
+    ephemeral and process-local (`_CAPTURE_SESSIONS`), so what it must equal is
+    the physical graph, and the value is derived only from server-resolved auth
+    fields (never client input); `_data_sdk` still runs the ownership check
+    before any write.
     """
     if not session_id:
         return None
-    return (f"{org.get('org_id')}:"
-            f"{org.get('graph_id') or 'default'}:{session_id}")
+    graph = _data_graph_name(org)
+    if graph is None:
+        # Fail closed: a bound key whose namespace did not resolve opens NO
+        # graph (403 in `_data_sdk`), so it gets its own bucket — never
+        # another graph's, and never the org default's. The `::` separator is
+        # not produced by any graph-name producer (`org_…`, `test_…_tortoise`,
+        # `registry_tortoise`, `tortoise`), so the sentinel cannot collide with
+        # a real graph's bucket even if one were named `unresolved…`.
+        graph = f"unresolved::{org.get('graph_id')}"
+    return f"{org.get('org_id')}:{graph}:{session_id}"
 
 
 def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
@@ -441,7 +545,9 @@ def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
     #3129: the same reasoning for a SECOND request carrying a ``session_id``
     that is already being captured — it is refused (409) here, before any
     write, instead of racing the first capture's `capture_ok` write. The
-    caller passes an already tenant-scoped key (`_capture_session_key`).
+    caller passes a key already scoped by TENANT AND RESOLVED GRAPH
+    (`_capture_session_key`, whose graph component is `_data_graph_name` —
+    the graph the request will actually open, #3365).
     """
     global _CAPTURE_IN_FLIGHT
     session_key = session_key or None
@@ -1483,6 +1589,64 @@ async def _lifespan(app):
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
 
+# ── #2048: the residual body-buffering class ──────────────────────────────
+# The endpoints that declare `body: XxxRequest` / `body: dict` buffer the WHOLE
+# wire body inside FastAPI's `get_request_handler` BEFORE any dependency or
+# handler runs — upstream of where #2032's per-site capped read could sit.
+# `CappedBodyMiddleware` caps them where the body is still a stream and replays
+# under-cap bytes to the router. Registered FIRST so it lands INNERMOST (inside
+# CORS + the response-header middlewares), giving its 413 the SAME
+# `{"detail": ...}` body and the same response headers as a handler 413.
+#
+# Exemptions: every route that already applies its OWN `_read_capped_body` cap
+# (the #2032 sweep table + the manifest/import/stripe paths), and `/mcp` (the
+# sub-app's own middleware stack). Reading those here would either truncate a
+# legal body or MOVE an already-documented read ahead of its rate-limit / auth
+# / 503 gate (e.g. #2032's register rate-limit-before-parse and oauth
+# 503-before-parse ordering, and the `/v1/internal/` auth-ordering property
+# #4939). The middleware's scope is therefore exactly the class that had NO cap
+# before #2048: the declared `body: XxxRequest` / `body: dict` parameters, plus
+# the `/v1/sessions` capture override. Note `/v1/team/keys` is exempt by EXACT
+# path (the handler-capped POST) — the PATCH on `/v1/team/keys/{key_id}` is a
+# pydantic-body route and stays covered by the default cap.
+_APP_BODY_CAP_EXEMPT_REGEXES = (
+    # #2032 sweep sites (per-site caps live at each call site).
+    re.compile(r"^/v1/register/?$"),
+    re.compile(r"^/v1/session/login/?$"),
+    re.compile(r"^/v1/signup/email/?$"),
+    re.compile(r"^/v1/team/keys/?$"),
+    re.compile(r"^/v1/team/keys/[^/]+/rotate/?$"),
+    re.compile(r"^/v1/claim/?$"),
+    re.compile(r"^/v1/agent/signup/?$"),
+    re.compile(r"^/v1/agent/recover/?$"),
+    re.compile(r"^/v1/agent/token/revoke/?$"),
+    re.compile(r"^/oauth/consent/?$"),
+    re.compile(r"^/oauth/token/?$"),
+    re.compile(r"^/oauth/revoke/?$"),
+    re.compile(r"^/register/?$"),                     # OAuth DCR
+    # Handler-capped larger surfaces.
+    re.compile(r"^/v1/sessions/commit/?$"),           # _COMMIT_SESSION_MAX_BYTES (8 MiB)
+    re.compile(r"^/v1/packs/manifests/?$"),           # MANIFEST_WIRE_CAP_BYTES (~388 KiB)
+    re.compile(r"^/webhooks/stripe/?$"),              # _STRIPE_WEBHOOK_MAX_BYTES (1 MiB)
+    re.compile(r"^/v1/organizations/[^/]+/import/?$"),  # _IMPORT_MAX_BYTES (64 MiB)
+)
+app.add_middleware(
+    _body_limits.CappedBodyMiddleware,
+    default_max_bytes=_body_limits.BODY_MAX_BYTES,
+    default_detail=_body_limits.BODY_413_DETAIL,
+    # /v1/sessions carries session content (schema-unbounded per-turn text):
+    # the #2032 small-surface cap would false-413 a legal capture — see the
+    # CAPTURE_SESSION_MAX_BYTES note in tortoise/body_limits.py.
+    path_caps={
+        "/v1/sessions": (
+            _body_limits.CAPTURE_SESSION_MAX_BYTES,
+            _body_limits.CAPTURE_SESSION_413_DETAIL,
+        ),
+    },
+    exempt_prefixes=("/mcp", "/internal", "/v1/internal"),
+    exempt_regexes=_APP_BODY_CAP_EXEMPT_REGEXES,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
@@ -2182,6 +2346,288 @@ class McpPathCanonicalizerMiddleware:
 app.add_middleware(McpPathCanonicalizerMiddleware)
 
 
+# ── #4491: egress (response bytes) per org — the network cost dimension ────
+#
+# #4491: inbound bytes were the ONLY byte accounting in this app, and only as
+# a DoS cap (the manifest route's `content-length` guard) — a safety bound, not
+# a cost metric. NOTHING counted outbound bytes, so the network cost of serving
+# a read-heavy org (retrieval/ask result sets, graph read, export) had no
+# signal while reads are free by decision (`product/pricing.json` ->
+# `billing.reads_free: true`).
+#
+# ONE wrapper for every route, REST and the mounted MCP app alike (a FastAPI
+# mount is an ordinary route, so this middleware sees it): a new endpoint
+# cannot be born unmeasured and no handler needs editing.
+#
+# WHERE IT SITS — inside `InFlightMiddleware` and `WaitBoundMiddleware`, NOT
+# outermost:
+#   * `WaitBoundMiddleware` must stay outermost (#3834; pinned by
+#     `test_transport_wait_bound.py::test_middleware_is_installed_outermost`, and
+#     the gauge at index 1 by
+#     `test_hosted_api.py::test_in_flight_gauge_is_wired_into_the_real_app`) —
+#     an accounting wrapper must not take that seat. Starlette's `add_middleware`
+#     INSERTS at index 0, so this registration is placed BEFORE
+#     `InFlightMiddleware`'s to land at index 2.
+#   * Sitting INSIDE the bound is what makes the count truthful, not merely
+#     polite: on a breach the bound ABANDONS the handler and DROPS its response
+#     (`_guarded_send`), so bytes that never left must not be credited to the
+#     org. The drop is invisible in `send` (it returns normally), but the bound
+#     publishes it — `_WAIT_BOUND_REFUSED_STATE` — and this middleware reads
+#     that flag before recording. Without it, every breached request would
+#     credit a DISCARDED response to the org's egress.
+_WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
+
+#: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
+#: request under one is admitted on the ROUTE axis (see ``monitoring``'s
+#: two-axis note) rather than the request-derived one. That matters because a
+#: mounted surface is a primary read path: on the derived axis, eight cheap 404s
+#: on UNRELATED paths starve it for the process lifetime (measured). The prefix
+#: is the label — no per-sub-route precision is claimed for a sub-app whose
+#: inner routes this layer does not enumerate.
+_EGRESS_DECLARED_PREFIXES = ("/mcp",)
+
+#: Exact paths of the app's PLAIN Starlette routes — CODE LITERALS that FastAPI
+#: does not stamp onto the scope (``APIRoute.matches`` sets ``scope["route"]``,
+#: plain ``Route.matches`` does not), so they would otherwise be labelled on the
+#: request-derived axis with unknown traffic. ``test_declared_paths_match...``
+#: pins the list against ``app.routes`` so it cannot drift.
+_EGRESS_DECLARED_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+
+#: Bounds on the fallback (request-derived) route label. A FastAPI route
+#: template is a code literal and always short; the normalised fallback is not,
+#: so it is truncated per segment — at most two segments of
+#: ``_EGRESS_MAX_SEGMENT_LEN``, so the whole label is bounded by construction.
+_EGRESS_MAX_SEGMENT_LEN = 24
+
+
+def _route_describes(route, path: str) -> bool:
+    """Whether ``route`` is the route that served ``path``.
+
+    The route's OWN pattern is the arbiter, so path params still resolve to the
+    template (``/v1/points/{pid}`` describes ``/v1/points/abc``). This predicate
+    answers ONLY whether the pattern covers the path: it cannot itself tell the
+    serving route from a mount's INNER route, and must not be asked to — an
+    inner ``Route("/{rest:path}")`` has regex ``^(?P<rest>.*)$`` and covers the
+    prefixed path too (measured). The mount cases are excluded by the CALLER,
+    never by a pattern match here.
+
+    ``re.match``, NOT ``fullmatch``: the router matches with ``match`` against
+    ``^…$`` (``starlette.routing.compile_path``), and Python's ``$`` also matches
+    just before a TRAILING NEWLINE — so the router serves ``/v1/version\n`` with
+    the ``/v1/version`` route while ``fullmatch`` rejects it. That divergence
+    put a matched route's bytes on the untrusted axis (measured), which is
+    exactly the direction this predicate exists to prevent.
+
+    TOTAL: any failure to answer is ``False`` (fall back to the request-derived
+    label), never an exception a caller could turn into a failed request.
+    """
+    regex = getattr(route, "path_regex", None)
+    if regex is None:
+        return getattr(route, "path", None) == path
+    try:
+        return regex.match(path) is not None
+    except Exception:  # noqa: BLE001, RUF100 - a label is never worth a 500
+        return False
+
+
+def _routed_inside_a_mount(scope, entry_path: str) -> bool:
+    """Whether the matched route lives INSIDE a ``Mount`` the request descended.
+
+    A mount appends its prefix to ``root_path`` as it descends, and that happens
+    after ``entry_path`` was captured — so comparing the two answers the
+    question exactly. It has to be asked separately from the ``Mount`` check: a
+    mount's INNER route is a plain ``Route`` whose pattern is relative to the
+    mount, and a catch-all inner route (``Route("/{rest:path}")``, regex
+    ``^(?P<rest>.*)$``) describes the prefixed arrival path just as well as its
+    own, so it would stand in for the whole undeclared surface on the
+    code-literal axis (measured on starlette 1.7.0, where the sub-app's route is
+    stamped; 1.6.0 stamps nothing and fell to the derived axis — the label must
+    not depend on which version is installed).
+
+    ``entry_path`` is ``get_route_path(scope)`` at middleware entry, i.e. the
+    path minus the root_path of that moment, so the arrival's own root_path is
+    the slice of ``scope["path"]`` in front of it. A server ``--root-path``
+    prefixes EVERY request and so cancels out on both sides, leaving it
+    untouched — as it must, since a route's ``path_regex`` is matched against
+    the root_path-relative path and templates under a root_path are legitimate.
+    """
+    full_path = scope.get("path")
+    if isinstance(full_path, str) and full_path.endswith(entry_path):
+        entry_root_path = full_path[: len(full_path) - len(entry_path)]
+    else:  # cannot reconstruct it - assume the app did not change root_path
+        entry_root_path = scope.get("root_path") or ""
+    return (scope.get("root_path") or "") != entry_root_path
+
+
+def _egress_route_class(scope, entry_path: str) -> tuple[str, bool]:
+    """The route class a response is attributed to, and whether it was DERIVED.
+
+    A matched FastAPI route stamps its TEMPLATE onto the scope
+    (``scope["route"].path`` is ``/v1/points/{pid}``), which is the exact,
+    bounded label — two point ids never become two metric children. When no
+    template describes the request, the label falls back to a NORMALISED path:
+    at most two segments, with pure-numeric and long digit-bearing segments
+    collapsed to ``{id}`` (``/nope/123`` -> ``/nope/{id}``; ``/v1/...`` is
+    untouched because ``v1`` is a literal, not an id).
+
+    ``entry_path`` is the path the request ARRIVED with, and it is REQUIRED: it
+    is simply not safe to read the scope at response time (measured across the
+    two environments this suite runs in, i.e. what the lock resolves and what
+    CI's unpinned ``pip install -e '.[test,embeddings]'`` resolves). For a
+    request to ``/mcp/export`` both leave ``scope["path"]`` alone, but starlette
+    1.7.0 STAMPS ``scope["route"]`` with the sub-app's INNER route
+    (``Route('/export')``) while 1.6.0 stamps nothing — so trusting
+    ``scope["route"]`` unconditionally attributed the mounted request to
+    ``/export``. Trusting it here is conditional instead: the template must
+    describe the arrival path.
+
+    Callers must pass ``starlette.routing.get_route_path(scope)`` taken BEFORE
+    the app runs: it is the request path minus ``root_path``, which is what a
+    route's ``path_regex`` is matched against. Reading ``scope["path"]``
+    instead would break template matching outright under a server
+    ``--root-path`` (the regex is root_path-relative, the path is prefixed) and
+    — for a ``Mount`` — would also pick up the mount prefix in ``root_path``
+    once the sub-app has run.
+
+    A DECLARED path (a ``Mount`` prefix or a plain ``Route`` path — the app's
+    code literals that Starlette does not stamp onto the scope) is a
+    CODE-LITERAL label on the ROUTE axis, and the ``derived`` flag marks the
+    rest as REQUEST-DERIVED so ``monitoring.record_egress`` can admit them into
+    a separate, tightly capped budget: unknown traffic can never consume the
+    code-literal route budget and fold real routes into overflow.
+    """
+    path = entry_path or ""
+    if path in _EGRESS_DECLARED_PATHS:
+        return path, False
+    # A dot-segment path is rejected for the mount rule deliberately. The mount's
+    # sub-app DOES receive it (measured: the MCP sub-app emits the 404 for
+    # ``/mcp/../v1/version``), so this is a policy: a traversal shape must not
+    # carry the mounted surface's label.
+    if "." not in path:
+        for prefix in _EGRESS_DECLARED_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return prefix, False
+    route = scope.get("route")
+    template = getattr(route, "path", None)
+    # A ``Mount`` is NEVER the serving template: its pattern is relative to the
+    # mount and its regex matches everything beneath it
+    # (``^/mcp/(?P<path>.*)$``), so it would happily describe
+    # ``/mcp/../v1/version`` and hand a traversal shape the mount's label — the
+    # mount rule above is the only route from a mount to a label, and it covers
+    # DECLARED prefixes only. (Measured: WHICH router stamps a ``Mount`` at all
+    # depends on the parent app — FastAPI's ``APIRouter.app`` does not, while
+    # Starlette's base ``Router`` does — so the label must not depend on it.)
+    if (isinstance(template, str) and template
+            and not isinstance(route, Mount) and not _routed_inside_a_mount(scope, path)
+            and _route_describes(route, path)):
+        return template, False
+    segments = [seg for seg in path.split("/") if seg][:2]
+    if not segments:
+        return "/", True
+    bounded = []
+    for seg in segments:
+        looks_like_id = seg.isdigit() or (len(seg) >= 8 and any(c.isdigit() for c in seg))
+        bounded.append("{id}" if looks_like_id else seg[:_EGRESS_MAX_SEGMENT_LEN])
+    return "/" + "/".join(bounded), True
+
+
+class EgressBytesMiddleware:
+    """Account response body bytes per org and route class (#4491).
+
+    Pure ASGI and cheap: it wraps ``send`` and adds the ``body`` length of each
+    ``http.response.body`` message. No request/response objects, no buffering,
+    no change to what is sent, no I/O — one integer add per body message plus
+    one counter increment per response.
+
+    The org is read from the SAME ``scope["state"]`` dict the auth dependency
+    writes ``org_id`` into (Starlette's ``request.state`` IS that dict, and
+    ``Mount`` forwards the same mapping to the MCP sub-app) and it is read
+    AFTER the app returns, so an org resolved mid-request is still attributed.
+    A request that never resolved one is recorded as unattributed (``""``).
+    WHICH lanes resolve one is a real limit, stated rather than implied:
+      * the API-KEY data-plane lanes publish the org (``state["org_id"]``);
+      * the SESSION-JWT lane resolves an org but deliberately does not publish
+        it — ``state["org_id"]`` is also what ``AnalyticsMiddleware`` reads to
+        fire the ``first_api_call`` activation event, so publishing here would
+        change analytics, not just measurement;
+      * an MCP call's org is set inside the mount by ``mcp_auth`` in a
+        ContextVar this layer does not own.
+    Both non-publishing lanes are therefore attributed to ``""``: honest, and
+    the reason the figure is not yet a complete per-org cost.
+
+    WHAT IT DOES NOT COUNT, stated rather than assumed:
+      * response headers — the body is the payload cost;
+      * the bound's own refusal, sent by the OUTERMOST ``WaitBoundMiddleware``
+        outside this wrapper;
+      * a response the bound DROPPED on breach (``_WAIT_BOUND_REFUSED_STATE``);
+      * a 500 synthesized by Starlette's ``ServerErrorMiddleware``, which sits
+        OUTSIDE this wrapper (the innermost ``ExceptionMiddleware`` is inside it,
+        so every handled response is counted);
+      * a request whose handler raised BEFORE the app sent anything: measured,
+        such a request propagates the exception and no response is produced, so
+        it is not counted AT ALL — recording it would add a 0-byte observation
+        to a route that never responded, indistinguishable in the histogram from
+        a route that answered with an empty body (ASGI ends every response with
+        a ``http.response.body`` message, so the first one is the signal that a
+        response exists — a stream that breaks halfway is still counted, which
+        makes the figure a lower bound on partial sends);
+      * anything after a client disconnect whose ``send`` raised before the
+        final message (the count is "bytes handed to ``send``", so the message
+        that raised may still be credited — a bound, not an exact wire-byte
+        count; proxy compression is likewise invisible here).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not responses
+            await self.app(scope, receive, send)
+            return
+        nbytes = 0
+        # ``get_route_path`` (path minus ``root_path``) taken BEFORE the app
+        # runs: that is what a route's pattern is matched against, and it is
+        # fixed for the request — a ``Mount`` mutates ``root_path`` as it
+        # descends, so the same call at response time would no longer name it.
+        entry_path = get_route_path(scope)
+        # Whether a response was ever produced (see the docstring): an app that
+        # raises before sending must not be recorded as a 0-byte response.
+        responded = False
+
+        async def _counting_send(message):
+            nonlocal nbytes, responded
+            if message["type"] == "http.response.body":
+                responded = True
+                nbytes += len(message.get("body") or b"")
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _counting_send)
+        finally:
+            state = scope.get("state")
+            # NO `return` in this block: a `return` here would SWALLOW an
+            # in-flight exception from the app and turn a real error into a
+            # silent 200-less hang. Skip the record with a flag instead.
+            dropped = (isinstance(state, dict)
+                       and bool(state.get(_WAIT_BOUND_REFUSED_STATE)))
+            if responded and not dropped:
+                org_id = state.get("org_id") if isinstance(state, dict) else None
+                try:
+                    # Call-time attribute read (`_monitoring`), so a test or an
+                    # operator can substitute the writer; measurement must never
+                    # be a NEW failure mode for the request it measures — which
+                    # covers the LABEL derivation too, not just the increment:
+                    # a raise here would replace the app's own exception.
+                    path_label, derived = _egress_route_class(scope, entry_path)
+                    _monitoring.record_egress(
+                        org_id, path_label, nbytes, derived=derived)
+                except Exception:
+                    _logger.debug("egress accounting failed", exc_info=True)
+
+
+app.add_middleware(EgressBytesMiddleware)
+
+
 class InFlightMiddleware:
     """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
 
@@ -2647,7 +3093,11 @@ class WaitBoundMiddleware:
         # event is the only one — which is why this is a FLAG and not a
         # ``remaining <= 0`` guard at the seam.
         if isinstance(state, dict):
-            state["_wait_bound_refused"] = True
+            # Same key as ``mcp_server._WAIT_BOUND_REFUSED_KEY`` (one string, two
+            # modules) and as ``_WAIT_BOUND_REFUSED_STATE`` above, which the
+            # egress middleware reads to avoid crediting a DROPPED response
+            # (#4491) — keep the three in step by name, not by literal.
+            state[_WAIT_BOUND_REFUSED_STATE] = True
         org_id = state.get("org_id") if isinstance(state, dict) else None
         # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
         # with embedded CR/LF; logged verbatim that forges log lines. This is
@@ -3081,6 +3531,78 @@ def _validate_mint_expiry(body: dict) -> str | None:
 _PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
 _PROBE_SDK_LOCK = threading.Lock()
 
+# ── #4608: a displaced probe handle is RETIRED, never closed under a live probe
+#
+# A probe fetches the cached handle, releases ``_PROBE_SDK_LOCK`` and queries it
+# (``probe_db``) with NO lock held, so a ``_probe_sdk_reset()`` or a target
+# change landing in that window used to CLOSE the handle underneath the live
+# query. The query then failed and its ``{ok: False}`` was recorded as the
+# CURRENT generation — a spurious ``degraded`` for a reachable graph. The
+# coordinator's own ``seq`` check cannot help here: a reset does not touch
+# ``HealthProbe._seq`` at all, and on this surface ``_HEALTH_PROBE`` and
+# ``_READY_PROBE`` share this ONE cache while keeping INDEPENDENT ``_seq``
+# counters, so a reset driven by either can close a handle the other's
+# in-flight worker is using with no generation protection whatsoever.
+#
+# So the close is DEFERRED while any probe is in flight: a displaced handle goes
+# on ``_PROBE_SDK_DEFERRED`` and the last probe episode to finish closes it.
+# ``_PROBE_SDK_EPISODES`` is taken under ``_PROBE_SDK_LOCK`` BEFORE the handle
+# is fetched — the same lock the retirement decision takes — so no reset or
+# rebuild can observe "no probe in flight" while a probe sits between its fetch
+# and its release.
+_PROBE_SDK_EPISODES = 0
+_PROBE_SDK_DEFERRED: list = []
+
+
+def _retire_probe_sdk_locked(sdk):
+    """Displace ``sdk`` from the cache and decide who closes it (#4608).
+
+    Returns ``sdk`` when the CALLER must close it (no probe is in flight), or
+    ``None`` when the close is deferred to the last in-flight probe. A
+    displaced handle is never handed out again, so exactly one path closes each
+    one. Caller holds ``_PROBE_SDK_LOCK``.
+    """
+    if sdk is None:
+        return None
+    if _PROBE_SDK_EPISODES == 0:
+        return sdk
+    _PROBE_SDK_DEFERRED.append(sdk)
+    return None
+
+
+def _close_probe_sdks(sdks) -> None:
+    """Close displaced probe handles, out of the lock, never raising."""
+    for sdk in sdks:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _probe_episode():
+    """Account for ONE probe execution against the cached handle (#4608).
+
+    Held across the whole of ``_probe_db`` — handle acquisition AND query — so
+    a reset/rebuild landing at any point in between defers the close instead of
+    pulling the connection out from under this probe. Opened under
+    ``_PROBE_SDK_LOCK`` before the handle is fetched; the last episode to
+    finish performs any deferred close.
+    """
+    global _PROBE_SDK_EPISODES
+    with _PROBE_SDK_LOCK:
+        _PROBE_SDK_EPISODES += 1
+    try:
+        yield
+    finally:
+        with _PROBE_SDK_LOCK:
+            _PROBE_SDK_EPISODES -= 1
+            deferred = (list(_PROBE_SDK_DEFERRED)
+                        if _PROBE_SDK_EPISODES == 0 else [])
+            if deferred:
+                _PROBE_SDK_DEFERRED.clear()
+        _close_probe_sdks(deferred)
+
 
 def _probe_sdk_key() -> tuple:
     """Identity of the DB target the cached probe SDK is bound to.
@@ -3098,16 +3620,19 @@ def _probe_sdk_key() -> tuple:
 
 
 def _probe_sdk_reset() -> None:
-    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    """Close + drop the cached probe SDK (app startup / tests / ops).
+
+    #4608: the close is DEFERRED while a probe is in flight — the handle is
+    dropped from the cache immediately, but a live query keeps the connection
+    it is using until it releases it.
+    """
     with _PROBE_SDK_LOCK:
         sdk = _PROBE_SDK_CACHE.get("sdk")
         _PROBE_SDK_CACHE["sdk"] = None
         _PROBE_SDK_CACHE["key"] = None
-    if sdk is not None:
-        try:  # noqa: SIM105 — a stale temp DB may already be gone
-            sdk.close()
-        except Exception:
-            pass
+        close_now = _retire_probe_sdk_locked(sdk)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
 
 
 def _probe_sdk() -> TortoiseSDK:
@@ -3138,11 +3663,11 @@ def _probe_sdk() -> TortoiseSDK:
         sdk = _make_sdk(namespace=None)
         _PROBE_SDK_CACHE["sdk"] = sdk
         _PROBE_SDK_CACHE["key"] = key
-    if old is not None:
-        try:  # noqa: SIM105
-            old.close()
-        except Exception:
-            pass
+        # #4608: a target change displaces ``old``; close it only when no probe
+        # is still querying it.
+        close_now = _retire_probe_sdk_locked(old)
+    if close_now is not None:
+        _close_probe_sdks([close_now])
     return sdk
 
 
@@ -3169,12 +3694,15 @@ def _probe_db() -> dict:
     registry_control_plane on every health check.
     """
     from tortoise.monitoring import probe_db
-    try:
-        sdk = _probe_sdk()
-    except Exception as exc:
-        _probe_sdk_reset()
-        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return probe_db(sdk)
+    # #4608: the episode spans the handle fetch AND the query, so a reset or a
+    # target change cannot close this handle mid-query.
+    with _probe_episode():
+        try:
+            sdk = _probe_sdk()
+        except Exception as exc:
+            _probe_sdk_reset()
+            return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+        return probe_db(sdk)
 
 
 # The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
@@ -4345,7 +4873,11 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     org_id = org["org_id"]
     gid = org.get("graph_id")
     if gid:
-        ns = org.get("graph_namespace")
+        # The graph-bound branch of `_data_graph_name` — the ONE owner of the
+        # name this request opens. The #3129/#3365 admission gate keys on the
+        # same function, so the graph it reserves and the graph opened here
+        # cannot drift apart.
+        ns = _data_graph_name(org)
         if not ns:
             raise HTTPException(
                 status_code=403,
@@ -4982,6 +5514,19 @@ class CreatePointRequest(BaseModel):
     # seed must not duplicate state on a re-click/retry. Default False keeps
     # the existing endpoint semantics unchanged.
     dedup: bool = False
+    # #4032: the hosted client (agent-infra `scripts/tortoise-memory.mjs`,
+    # `write-points` / `write-claim` --confidence / --authored-by) sent both
+    # of these and pydantic's default `extra='ignore'` DROPPED them here, so
+    # the route never forwarded them and the write reported `ok` while the
+    # value was never stored — a silent-false-green. They are declared (and
+    # the route forwards them) because the underlying primitive already
+    # persists them: `sdk.create_point(..., confidence=, authoredBy=)` writes
+    # both as Point props and `tortoise_client.write_claim` has relied on that
+    # since before this endpoint existed. Wire names are the client's
+    # (`authoredBy`, camelCase) — the same spelling the SDK prop and the MCP
+    # tool use. A value the store cannot hold is a 422, never a silent drop.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    authoredBy: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("kind")
     @classmethod
@@ -5313,7 +5858,7 @@ def _normalize_mapped_ipv6(ip):
 
 
 async def _check_ip_bucket_rate_limit(
-    request: Request, *,
+    request: Request | None = None, *,
     buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
     detail: str | dict, retry_after_s: int | None = None,
     key: Hashable | None = None, max_entries: int = 10_000,
@@ -5333,6 +5878,17 @@ async def _check_ip_bucket_rate_limit(
     test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
     computes time-until-oldest-entry-expires (sliding-window precision).
 
+    #2050: widening this helper for a Request-FREE caller (the MCP dispatch
+    point, key-authenticated per team — no client address exists there) must
+    not widen it for the HTTP callers that already pass a Request. The
+    Request is therefore consulted FIRST: a Request with no client address
+    has no identity to bucket on and returns, exactly as before #2050. Only
+    when NO Request is passed does an explicit `key` stand alone as the
+    bucket identity. An HTTP caller's `key` is a composite that CONTAINS the
+    client IP, so admitting it on a client-less Request would collide the
+    per-IP dimension of invite-accept / invite-otp into one shared
+    (…, "ip", None) bucket across unrelated callers (#5397 review).
+
     #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
     append — the caller charges via _charge_ip_bucket at the TERMINAL
     outcome (success/401/403), so a server fault (5xx) never consumes the
@@ -5340,13 +5896,25 @@ async def _check_ip_bucket_rate_limit(
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
-        return
-    ip = key if key is not None else request.client.host
+    if request is None:
+        # Request-free arm (#2050): `key` alone is the bucket identity. There
+        # is no client address to fall back to, so a missing key is the only
+        # reason to return.
+        if key is None:
+            return
+    else:
+        # Pre-#2050 guard, restored for EVERY Request-carrying caller: a
+        # client-less request has no identity to bucket on, whether or not a
+        # `key` was supplied. This is what keeps every existing caller's
+        # behaviour identical to the merge-base.
+        if not request.client or not request.client.host:
+            return
+        if key is None:
+            key = request.client.host
     # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
     # cannot present two keys for one address. Handles both dotted-quad
     # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
-    ip = _normalize_mapped_ipv6(ip)
+    ip = _normalize_mapped_ipv6(key)
     now = time.time()
     async with lock:
         bucket = buckets[ip]
@@ -5449,9 +6017,71 @@ def _control_plane_unavailable() -> HTTPException:
     )
 
 
+class _OffloadRefused:
+    """Sentinel for a REFUSED best-effort offload (#4456).
+
+    ``_cp_offload(..., best_effort=True)`` returns THIS instead of ``None``
+    when the pool refused the submission (backlog full — or, on a cancellable
+    lane, cancelled before any worker ran it): the work did NOT happen. A
+    plain bound miss still returns ``None``, because the worker that picked
+    the submission up runs it to completion (the seam abandons only the
+    await). Callers that ignore the return value are unaffected; a
+    delivery-sensitive caller can tell a real drop from a later-than-bound
+    completion instead of reading both as ``None``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "OFFLOAD_REFUSED"
+
+
+#: Public discriminator returned by a REFUSED best-effort offload (#4456).
+OFFLOAD_REFUSED = _OffloadRefused()
+
+#: Rate limit for the ``BILLING_NOTIFY_REFUSED`` ERROR floor (#4456 plan §4).
+#: The shared telemetry pool is reachable by any tenant, so ONE saturation
+#: refuses a notify per billing webhook for EVERY tenant — the repo already
+#: ruled against per-drop alert amplification (``operator_alert._log_shed``),
+#: so the ERROR line is shed-logged too. One line per window is enough to see
+#: the outage; the suppressed count is deliberately not carried.
+_BILLING_REFUSED_LOG_INTERVAL_S = 60.0
+#: ``None`` = never logged (NOT ``0.0`` — ``time.monotonic()``'s reference
+#: point is undefined, so a fresh-boot clock would suppress every line).
+_LAST_BILLING_REFUSED_LOG: float | None = None
+_BILLING_REFUSED_LOG_LOCK = threading.Lock()
+
+
+def _log_billing_notify_refused(org_id: str | None,
+                                event_type: str | None) -> None:
+    """The rate-limited ERROR floor for a REFUSED billing notify (#4456 AC3).
+
+    Emitted BEFORE the incident escalation, so it survives the two reasons the
+    alert channel can be ABSENT (no ``DR_ISSUES_PAT``, or an unbuildable
+    object store — the documented residual): without it, a permanently-lost
+    billing notification reads only as the ``_cp_offload`` best-effort WARNING
+    plus ``alert_operator``'s "no alert channel" WARNING, indistinguishable
+    from routine telemetry noise. Never raises.
+    """
+    global _LAST_BILLING_REFUSED_LOG
+    with suppress(Exception):
+        now = time.monotonic()
+        with _BILLING_REFUSED_LOG_LOCK:
+            if (_LAST_BILLING_REFUSED_LOG is not None
+                    and now - _LAST_BILLING_REFUSED_LOG
+                    < _BILLING_REFUSED_LOG_INTERVAL_S):
+                return
+            _LAST_BILLING_REFUSED_LOG = now
+        _logger.error(
+            "webhook: billing notify REFUSED by the control-plane offload "
+            "seam (org=%s event_type=%s) — the WebhookEvent marker is already "
+            "committed, so Stripe's retry sees is_first=False and this "
+            "notification is LOST", org_id, event_type)
+
+
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
                       pool: str = "auth", timeout: float | None = None,
-                      unavailable=None):
+                      unavailable=None, cancel_on_timeout: bool = True):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -5493,6 +6123,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     await, never the worker thread (CPython #87185), so abandoning a grant that
     is mid-write would claim a retryable state it cannot observe (#2863).
 
+    ``cancel_on_timeout=False`` (#4456) makes the bound DELIVERY-preserving:
+    the bound abandons only the AWAIT, so a submission still QUEUED when the
+    bound expires STILL RUNS (the default ``True`` cancels a queued submission
+    and the worker skips it — a silent DROP, not an abandonment). A
+    ``best_effort=True`` call then returns :data:`OFFLOAD_REFUSED` — instead
+    of ``None`` — when the pool genuinely REFUSED the submission, so the
+    caller can escalate a real drop instead of swallowing it as a success.
+
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
     callers touch, and every routed site is covered by a behavioural test.
@@ -5502,13 +6140,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
         return await run_control_plane_call(
-            fn, op=op, pool=effective_pool, timeout=timeout)
+            fn, op=op, pool=effective_pool, timeout=timeout,
+            cancel_on_timeout=cancel_on_timeout)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
-            return None
+            return OFFLOAD_REFUSED if exc.refused else None
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
@@ -5704,12 +6343,33 @@ def _check_dashboard_key_login(org: dict, request: Request) -> None:
         )
 
 
+def _sensitive_op_budget(op: str, bucket_key: Hashable) -> dict | None:
+    """Admission kwargs for `_check_ip_bucket_rate_limit`, keyed by `bucket_key`.
+
+    The op → limit / window / refusal-copy mapping is stated ONCE, here. Both
+    arms of the budget — the REST per-IP arm and the MCP per-team arm (#2050)
+    — pass their own bucket identity through this seam, so the limit and the
+    refusal contract cannot drift between the two surfaces that enforce it.
+    Two implementations of one limit is how a budget stops being one.
+
+    Returns None when the op carries no budget: `_SENSITIVE_OP_LIMITS` is the
+    only authority for what is budgeted.
+    """
+    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
+    if max_per_hour is None:
+        return None
+    return {
+        "buckets": _SENSITIVE_BUCKETS, "lock": _SENSITIVE_LOCK,
+        "limit": max_per_hour, "window_s": 3600,
+        "key": bucket_key,
+        "detail": f"Rate limit exceeded for {op}. Please try again later.",
+        "retry_after_s": 3600,
+    }
+
+
 async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     """Per-IP hourly budget for sensitive org ops (export / org_delete /
     import / pack_manifest)."""
-    max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
-    if max_per_hour is None:
-        return
     # P1-FIX-1: composite (ip, op) key — export and delete keep independent
     # budgets (locked by test_export_rate_limited_independently).
     # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
@@ -5718,12 +6378,42 @@ async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
     _ip = (getattr(request.state, "client_ip", None)
            or (request.client.host if request.client else None))
     _ip = _normalize_mapped_ipv6(_ip)
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
-        limit=max_per_hour, window_s=3600,
-        key=(_ip, op),
-        detail=f"Rate limit exceeded for {op}. Please try again later.",
-        retry_after_s=3600)
+    # An unknown client has no identity to bucket on, and this composite key
+    # must never be built around a None IP. _check_ip_bucket_rate_limit
+    # enforces the same requirement for every Request-carrying caller (#5397
+    # review restored it); stated here as well so the invariant is explicit
+    # at the one place this key is formed.
+    if _ip is None:
+        return
+    kwargs = _sensitive_op_budget(op, (_ip, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(request, **kwargs)
+
+
+async def _check_sensitive_op_budget(op: str, scope_key: Hashable) -> None:
+    """#2050: the SAME sensitive-op budget, keyed by an explicit identity.
+
+    The MCP dispatch point (``mcp_server._wrapped_call_tool``) has no Request:
+    it is authenticated per TEAM, and a per-IP frame would be wrong there even
+    if one existed — an MCP caller is an agent server whose egress address is
+    shared with unrelated tenants (the #2866 DCR trusted-CIDR discussion). So
+    the MCP arm passes ``(scope_key, op)`` — the team id — as the bucket key
+    into the SAME shared ``_SENSITIVE_BUCKETS`` store, under the SAME
+    ``_SENSITIVE_OP_LIMITS`` entry and the SAME refusal contract, via the SAME
+    ``_check_ip_bucket_rate_limit`` implementation. One budget per op, enforced
+    on BOTH first-class pack-install surfaces.
+
+    ``scope_key`` must never be None: a None key would collapse to a single
+    shared bucket across every tenant. Callers without a scope (stdio, the
+    selfhost placeholder) must skip the call rather than pass one.
+    """
+    if scope_key is None:
+        raise ValueError("scope_key is required — a None key merges tenants")
+    kwargs = _sensitive_op_budget(op, (scope_key, op))
+    if kwargs is None:
+        return
+    await _check_ip_bucket_rate_limit(None, **kwargs)
 
 
 async def _check_signup_ip_rate_limit(request: Request) -> None:
@@ -5822,9 +6512,43 @@ async def _check_recovery_rate_limit(request: Request,
 # is a ONE-TIME human act, so a 2/24h budget never trips a real user while
 # capping an automated farm. Mirrors the register/sensitive-op limiter
 # posture (#1081's per-IP pattern; RATE_LIMIT_DISABLED=1 opts out in tests).
-_CLAIM_MAX_PER_24H = 2
-_CLAIM_WINDOW = 24 * 3600
-_CLAIM_BUCKETS: dict[str, list[float]] = defaultdict(list)
+#
+# #3125: the bucket key is the REAL client IP — the #1559 rule (see the
+# `#1559:` block in RateLimitMiddleware.dispatch): `request.state.client_ip`,
+# set by ClientIPMiddleware from Fly-Client-IP when
+# TORTOISE_TRUST_FLY_CLIENT_IP=1, falling back to `request.client.host`.
+# Keying on `request.client.host` behind Fly is the PROXY's IP — a constant —
+# so every user shared ONE bucket and the 2/24h budget was a GLOBAL 2/24h cap
+# on the whole claim surface (both `/v1/claim` OAuth and the email/password
+# claim path call this limiter).
+#
+# #3125: the store is BOUNDED, not merely pruned. The pre-fix branch pruned
+# only *stale* buckets, AFTER the charge (the #2866 non-bounding shape — and
+# dead code while every request shared one key): under a fresh-key flood
+# every bucket is in-window, so nothing was reclaimed and the store grew
+# without bound. Resolved with the #2866 D3/D4 policy — reclaim inactive
+# LRU-head buckets before admitting a new key, and while the store is still
+# at cap the new key gets NO bucket of its own: it is charged to one shared
+# overflow bucket, so the distinct-new-IP ceiling is `STORE_CAP + LIMIT`.
+# Fail closed: an un-tractable client is denied, never handed an unbounded
+# budget. Evicting an *active* bucket is explicitly rejected (#2866 approach
+# C) — under churn that is a limiter bypass.
+#
+# All three knobs are read AT CALL TIME via `_int_env` (the #3125 third
+# finding; the signup/recover/DCR convention, D8 of the #2866 policy) so a
+# per-environment budget is tunable without a code change.
+_CLAIM_MAX_PER_24H_DEFAULT = 2
+_CLAIM_WINDOW_DEFAULT = 24 * 3600
+_CLAIM_STORE_CAP_DEFAULT = 10_000
+# Singleton key for the at-cap overflow charge — never a client IP, so it can
+# never be confused with (or collide with) a per-IP bucket.
+_CLAIM_OVERFLOW_KEY = "\x00overflow"
+# Ordered by LAST CHARGE (`move_to_end` on a CHARGED request only) — the
+# ordering invariant `_claim_reclaim` depends on: an active LRU head implies
+# every later key is active too, so reclaim can stop at the first active
+# bucket and can never evict a live budget.
+_CLAIM_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_CLAIM_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
 # #1511: session-exchange per-IP bucket (5/hr) — real per-IP via
 # ClientIPMiddleware (PATH_LIMITS would bucket on the Fly proxy IP = global).
 _SESSION_BUCKETS: dict[str, list[float]] = defaultdict(list)
@@ -5834,31 +6558,125 @@ _SESSION_LOGIN_WINDOW_S = 3600
 _CLAIM_LOCK = asyncio.Lock()
 
 
+def _claim_reclaim(store: OrderedDict, now: float, window_s: int,
+                   cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (#3125 — the #2866 D3/D4 policy, mirroring
+    ``_oauth_dcr_reclaim``).
+
+    By the last-charge ordering invariant an active head implies every later
+    key is active too, so this stops at the first live bucket and can never
+    evict an active key (which under churn would be a limiter bypass).
+    O(1) at the hot cap, replacing the pre-fix O(n) full-store scan.
+    """
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
 async def _check_claim_rate_limit(request: Request) -> None:
-    """IP-based rate limit: 2 claim attempts per rolling 24h per IP."""
+    """IP-based rate limit: 2 claim attempts per rolling window (default 24h)
+    per REAL client IP (#1559/#3125 — `request.state.client_ip`, fallback
+    `request.client.host`; behind Fly the latter is the PROXY's IP).
+
+    Env knobs, read at call time so tests/operators tune without a reload:
+    TORTOISE_CLAIM_MAX_PER_24H (default 2),
+    TORTOISE_CLAIM_WINDOW_S (default 86400 — a non-positive value falls back
+    to the default, never to a disabled limiter),
+    TORTOISE_CLAIM_STORE_CAP (default 10000 — the per-process distinct-IP
+    ceiling; distinct new IPs per window are bounded by
+    `STORE_CAP + MAX_PER_24H`).
+
+    Accepted limitations (stated, not implied): while the store is FULL the
+    overflow bucket is ONE SHARED budget for every untracked IP — so at
+    `STORE_CAP` simultaneous live buckets the limiter degrades to the #3125
+    symptom (untracked clients share `MAX_PER_24H`); it is reachable only at
+    that cardinality and it only ever DENIES, never grants (fail closed), and
+    reclaiming inactive buckets clears it. An IP charged to the overflow
+    bucket can later obtain its own bucket, so one IP is bounded by
+    `2 * MAX_PER_24H` in the worst case — the same property the #2866 DCR
+    policy accepts, and the bound is what keeps the store finite. No IPv6
+    prefix keying: a client holding a whole IPv6 /64 gets one bucket per
+    address — the /64 gap is filed on #5490 (the shared-primitive issue);
+    this limiter does not use that primitive, so a fix there must cover this
+    site too (the claim budget is per-IP, and collapsing a shared /64 would
+    make unrelated users share one 2/24h budget).
+    """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
-    if not request.client or not request.client.host:
+    # #1559: the REAL client IP, NEVER the Fly proxy IP behind
+    # request.client.host (a constant behind the proxy ⇒ one global bucket).
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    if not ip:
         return
-    ip = request.client.host
+    # Normalize IPv4-mapped IPv6 so one dual-stack client cannot present two
+    # keys for one address (#1081 review P4). The other per-IP limiters get
+    # this inside `_check_ip_bucket_rate_limit`; this limiter does not use
+    # that helper, so it must apply it here.
+    ip = _normalize_mapped_ipv6(ip)
+    limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
+    window_s = _int_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
+    if window_s <= 0:
+        # An invalid window must never fail OPEN: with window_s <= 0 the
+        # in-window test `now - t < window_s` is never true, the bucket is
+        # emptied on every request and the limiter is silently disabled.
+        # Fall back to the default (the D6 convention for an out-of-range
+        # value) — the intended off-switch is RATE_LIMIT_DISABLED.
+        window_s = _CLAIM_WINDOW_DEFAULT
+    store_cap = _int_env("TORTOISE_CLAIM_STORE_CAP", _CLAIM_STORE_CAP_DEFAULT)
+    # User-facing period, derived so a tuned window cannot make the 429
+    # message lie (identical to "24h" at the default window).
+    period = (f"{window_s // 3600}h"
+              if window_s >= 3600 and window_s % 3600 == 0
+              else f"{window_s}s")
     now = time.time()
     async with _CLAIM_LOCK:
-        bucket = _CLAIM_BUCKETS[ip]
-        bucket[:] = [t for t in bucket if now - t < _CLAIM_WINDOW]
-        if len(bucket) >= _CLAIM_MAX_PER_24H:
+        # Phase 1: evaluate (and, only on a NEW key, evict INACTIVE buckets).
+        # A 429 leaves the stores UNCHARGED and UNGROWN — it may prune
+        # in place, but it never appends and never inserts.
+        bucket = _CLAIM_BUCKETS.get(ip)
+        on_overflow = False
+        if bucket is None:
+            _claim_reclaim(_CLAIM_BUCKETS, now, window_s, store_cap)
+            if len(_CLAIM_BUCKETS) >= store_cap:
+                on_overflow = True  # store full of LIVE buckets — no room
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = [t for t in bucket if now - t < window_s]
+
+        if on_overflow:
+            charged = _CLAIM_OVERFLOW.get(_CLAIM_OVERFLOW_KEY)
+            if charged is None:
+                charged = []
+            else:
+                charged[:] = [t for t in charged if now - t < window_s]
+        else:
+            charged = bucket
+
+        if len(charged) >= limit:
             raise HTTPException(
                 status_code=429,
-                detail=("Too many claim attempts (max 2 per 24h). "
+                detail=(f"Too many claim attempts (max {limit} per {period}). "
                         "Please try again later."),
-                headers={"Retry-After": "86400"},
+                # The advertised wait is the window itself (the pre-fix
+                # constant, here derived) — a tuned window can never
+                # advertise a wait longer than the budget it enforces.
+                headers={"Retry-After": str(window_s)},
             )
-        bucket.append(now)
-        # Bound memory growth: drop dead buckets beyond 10k entries.
-        if len(_CLAIM_BUCKETS) > 10_000:
-            stale = [ip for ip, b in _CLAIM_BUCKETS.items()
-                     if not any(now - t < _CLAIM_WINDOW for t in b)]
-            for ip in stale:
-                del _CLAIM_BUCKETS[ip]
+
+        # Phase 2: every dimension passed — charge (and only now reorder).
+        charged.append(now)
+        if on_overflow:
+            _CLAIM_OVERFLOW[_CLAIM_OVERFLOW_KEY] = charged
+            _CLAIM_OVERFLOW.move_to_end(_CLAIM_OVERFLOW_KEY)
+        else:
+            _CLAIM_BUCKETS[ip] = charged
+            _CLAIM_BUCKETS.move_to_end(ip)
 
 
 # ── Invite-accept limiter (#1134, OWASP per-token/IP/global caps) ────────────
@@ -6067,11 +6885,21 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
         # `_get_proj()` is inside the worker because its FIRST call opens the
         # projection.
         def _write_point() -> dict:
+            # #4032: forward the caller's confidence/authoredBy as props —
+            # only when SUPPLIED (passing None would stamp a null property
+            # onto a point that never asked for one). `sdk.create_point`
+            # persists both verbatim (the SDK's props passthrough).
+            _author_props: dict = {}
+            if body.confidence is not None:
+                _author_props["confidence"] = body.confidence
+            if body.authoredBy is not None:
+                _author_props["authoredBy"] = body.authoredBy
             out = sdk.create_point(
                 content=body.content,
                 kind=body.kind,
                 tags=body.tags,
                 dedup=body.dedup,
+                **_author_props,
             )
             if body.about_object:
                 # #1643: ID-based edge (never the name-resolution path, which
@@ -10256,7 +11084,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls
     # the same helper inline — the two share the helper, not the scheduling.
-    _turn_texts = _capture_turn_texts(windowed)
+    # #4194/#4911: the scrub is part of COMPUTING the stored text, so it runs
+    # HERE, off the event loop, on the capture pool, and the writer below and
+    # the linker further down REUSE this exact result instead of recomputing it.
+    # The scrub is ~3 s/MB of client-controlled text (measured: 0.97 s @220k,
+    # linear), and a legal-maximum 500x5,000 capture is 2.5 MB. Reuse removes
+    # the two passes this lane used to pay for the SAME window — the embedding
+    # batch's and the linker's. It must not run on the loop at all:
+    # `_capture_turn_texts` used to be an O(n) f-string loop, but it now scrubs,
+    # so calling it bare here would put seconds of CPU on the loop — the
+    # #3060/#3086 freeze class this file is built around (and which
+    # `test_capture_loop_responsiveness` cannot see: it counts on-loop QUERIES,
+    # and a scrub issues none). See the scoping doc for the pass COUNT this lane
+    # still pays (the extractor and the session `:Source` each scrub the same
+    # window for their own consumers; idempotence keeps the count correct).
+    _turn_texts, _redaction_counts = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_texts_with_redactions, windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
@@ -10268,10 +11111,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
     # guard and the rebuild journal all live in that one definition, so this
     # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
-    await _run_off_loop(
+    _capture_redactions = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
         windowed, now=now, turn_embs=_turn_embs,
-        session_existed=session_existed)
+        session_existed=session_existed,
+        texts_and_counts=(_turn_texts, _redaction_counts))
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -10565,6 +11409,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 "eid": event_id, "sid": session_id,
                                 "harness": source_harness, "ing": now},
                     )
+                # #4936 (mirror of the sdk capture stamp): the minted-point
+                # join above CANNOT reach an operator whose endpoint RE-KEYED
+                # to a pre-existing graph node (#4716 Part 1) — the payload
+                # point resolved to the existing node, so it is not in
+                # ``minted_ids`` (a folded-only capture mints nothing at all,
+                # leaving the join unreached). Stamp exactly the operator ids
+                # this capture CREATED, surfaced on the extraction meta by
+                # ``sdk._extract_session_v2`` (the apply_payload_operators
+                # return). ``eventId IS NULL`` is the no-clobber guard; the
+                # join's ``draft`` guard is deliberately NOT repeated (these
+                # ids are Points this call created — draft at creation — so a
+                # concurrent promotion flipping one to 'live' must not defeat
+                # the stamp). The join is kept — it is the only surface
+                # covering operators created outside apply_payload_operators
+                # (the M2 projection path).
+                operator_ids = list(meta.get("operator_ids") or [])
+                if operator_ids:
+                    proj.g.query(
+                        "MATCH (o:Point {is_operator:true}) "
+                        "WHERE o.id IN $ids "
+                        "AND o.eventId IS NULL "
+                        "SET o.eventId=$eid, o.source_session=$sid, "
+                        "    o.source_harness=$harness, "
+                        "    o.ingested_at=$ing",
+                        params={"ids": operator_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
                 if retry_failed_capture:
                     # #2335 WI-2b / review (PR #2473): a RETRY heals the
                     # failed first attempt's provenance gap (mirror of the
@@ -10611,7 +11483,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # P1 #1529 (D4): a Source materialization failure is non-fatal and
         # surfaced as an additive warning — never a 500 after writes.
         try:
-            sdk._materialize_session_source(
+            # #4911: off the event loop. The helper now scrubs every turn it is
+            # handed (bounded at 5,000 chars PER TURN, but the turn count is the
+            # caller's), and the pre-existing derivation alone measured ~0.8 s
+            # for a legal-maximum 500x5,000 session — the scrub pushed that to
+            # ~7 s of CPU that would otherwise block every other request on this
+            # loop. Non-fatal either way, same as the surrounding wrap.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR, sdk._materialize_session_source,
                 session_id, event_id, now, body.conversation)
         except Exception:
             import logging
@@ -10706,10 +11585,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # after the capture). Tracked on the Session node.
     try:
         from .session_link import link_session_entities
-        # #4194: the shared `_capture_turn_texts` is the ONE stored-text
-        # definition — the link trigger, the stored turn, and the embedded text
-        # cannot drift (#1532 D1/D2).
-        link_texts = _capture_turn_texts(windowed)
+        # #4194/#4911: the shared `_capture_turn_texts_with_redactions` is the
+        # ONE stored-text definition — the link trigger, the stored turn, and
+        # the embedded text cannot drift (#1532 D1/D2). The texts were already
+        # computed off the loop above, so the linker adds NO scrub pass of its
+        # own.
+        link_texts = _turn_texts
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
@@ -11152,6 +12033,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # yields []: nothing was added, never a fabricated count. UI rendering
     # of the marker is #1976's — this is the engine data exposure only.
     surfaced = surfaced_marker(extracted, verified_ids=set(facts))
+    # #4911: a capture that redacted a credential says so — byte-parity with
+    # the SDK receipt (`sdk.capture_session`), appended only when non-zero so
+    # an ordinary capture's warning list is unchanged.
+    if _capture_redactions:
+        extraction_warnings.append(
+            _capture_redaction_warning(_capture_redactions))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
@@ -11166,6 +12053,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # #2335 WI-1a: the hosted receipt carries the extractor
             # telemetry (sdk meta stats - real on v2, {} on replayed/M2).
             "stats": meta.get("stats") or {},
+            # #4911: credential-shaped spans redacted from this capture's turn
+            # text before persistence — always present (0 when nothing
+            # matched), byte-parity with the SDK receipt.
+            "capture_redactions": _capture_redactions,
             # #2002 (W6): first_capture=true exactly once per org — the
             # trigger for the in-conversation announcement (SKILL.md §6 copy).
             "first_capture": bool(first_capture)}
@@ -11331,12 +12222,12 @@ async def session_install_probe(body: InstallProbeRequest,
 # local path never leaves the machine. The session Source's IDENTITY is the
 # canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
 # capture path materializes and ``delete_session`` deletes; the W-7 basename
-# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
+# rides as a PROPERTY (``sourcePath`` on the Source), never in the url.
 
 
 def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
     """The payload's W-7 basename (FIRST provenance_ref) — the value written
-    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    to ``Source.sourcePath``. NOT the session Source identity (that is the
     canonical ``session:<session_id>``, #4005). Empty when the payload has no
     provenance_refs (valid empty commit). Derived through the ONE shared
     ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
@@ -11503,6 +12394,19 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
+    # #1370 / #4934: the SAME kind→label routing + gated binder as the local
+    # capture seam (anti-drift — both call `subject_binding`). Subject-kind
+    # names are excluded from the legacy `about_entities` channel below: the
+    # binder is the only confidence-gated aboutSubject producer, and the raw
+    # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
+    from tortoise.subject_binding import bind_point_subjects, is_subject_kind
+    # F6: EXACT names (no `.lower()` fold) so the skip and the case-SENSITIVE
+    # `MATCH (o:Object {name:$n})` resolution agree, derived from the entities
+    # whose KIND is a subject kind.
+    subject_entity_names = {
+        er.entity.name for er in reconcile.entities
+        if is_subject_kind(er.entity.kind)
+    }
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
     document_basename = _document_source_basename(payload)
@@ -11524,14 +12428,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "drafts": drafts},
     )
 
-    # ── 2. Document transcript (deterministic id — replay-safe MERGE). NO
-    # content on the derived path (§4.1: summary/story_arc/sessionId only). ──
+    # ── 2. Document transcript (D10, ONTOLOGY v3.15 §4.4: a document is a
+    # :Source) — deterministic id, replay-safe MERGE. NO content on the
+    # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
+    # retired (§9.5 Q3). ──
     proj.g.query(
-        "MERGE (d:Document {id:$did}) "
-        "SET d.documentKind='transcript', d.title=$title, d.summary=$summary, "
-        "    d.story_arc=$arc, d.sessionId=$sid, d.eventId=$eid, "
-        "    d.sourcePath=$srcpath, d.doc_status='extracted', d.is_episodic=true, "
-        "    d.updatedAt=$now",
+        "MERGE (s:Source {url:$did}) "
+        "SET s.id=coalesce(s.id, $did), "
+        "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
+        "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
+        "    s.sourcePath=$srcpath, s.is_episodic=true, "
+        "    s.updatedAt=$now",
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
@@ -11557,8 +12464,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "kw": [session_id], "now": now},
     )
     proj.g.query(
-        "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
-        "MERGE (e)-[:produces]->(d)",
+        "MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) "
+        "MERGE (e)-[:produces]->(s)",
         params={"eid": event_id, "did": doc_id},
     )
 
@@ -11578,11 +12485,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "now": now},
         )
         proj.g.query(
-            "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
-            "MERGE (e)-[:produces]->(d)",
+            "MATCH (e:Event {eventId:$eid}), (s:Source {url:$did}) "
+            "MERGE (e)-[:produces]->(s)",
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
+            if str(name) in subject_entity_names:
+                # #1370 (F5): DELIBERATE drop, not a hand-off. This loop writes
+                # `aboutObject` ONLY — the binder reads a Point's `slots`, not
+                # an Event's `about_entities`, so nothing replaces this edge.
+                # The attribution is intentionally not emitted because the only
+                # permitted Event→Subject writer would have to be UN-GATED
+                # (bypassing the fail-closed contract the issue exists for).
+                # No edge, no Object stub, no id-less `MERGE`. Residual recorded
+                # in the scoping doc.
+                continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities. MERGE creates the :Object on demand
@@ -11651,7 +12568,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             contentHash=src.contentHash or "", is_episodic=True,
         )
     for url in session_urls:
-        sdk.link_source_to_entity(url, doc_id, "Document")
+        sdk.link_source_to_entity(url, doc_id, "Source")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
@@ -11664,12 +12581,35 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # matching create_point); supersede candidates (changed content) get a NEW
     # content-addressed id + supersede_point (CORRECTS + outdated + edge
     # transfer, PL2). Non-episodic (the quota discriminator). ──
+    # #1370 (G1): payload point id → the id `create_point` actually RESOLVED
+    # the write to (the payload id on a fresh create, the canonical's id on a
+    # content-hash dedup hit). The binder below is keyed on this, never on the
+    # payload id, so it can only bind a Point the write actually addressed.
+    #
+    # #4970 — the SAME map is the #4716 two-id-space resolution for the hosted
+    # lane, and every consumer below reads it. ``create_point(...,
+    # dedup=True)`` does NOT necessarily write at the id it was handed: on a
+    # content-hash hit its dedup branch re-keys to the EXISTING node
+    # (``sdk._find_point_by_content``) and RETURNS that node's id, while the
+    # payload's ``pt_<sha>`` id is never minted. The §5 CONTAINS MERGE, §6's
+    # aboutObject, §6b's supersession refs and §7's operator refs used to keep
+    # naming the payload id, so they all addressed a node that does not exist
+    # (the ``operator write skipped (inputs missing?)`` silent drop of #4654).
+    # Same map, same shared ``commit_ops.remap_*`` helpers as the v2 capture
+    # path (#4716 Part 1) — no rival mechanism.
+    point_resolved_ids: dict[str, str] = {}
     for pr in reconcile.points:
         pid = pr.point.id
+        resolved_pid = pid
+        # #1370 fail-closed: stays ``None`` unless a create actually ran and
+        # returned a usable id, so the map below can never hold a
+        # requested-but-unconfirmed id.
+        _rid: str | None = None
         if pr.action == "merge":
             # MERGE bump (zero budget, PL3): updatedAt touch ONLY — never
             # re-write status (update_point refuses non-promoting transitions;
-            # a live re-capture would 500 — review fix, PR #953).
+            # a live re-capture would 500 — review fix, PR #953). The node
+            # already exists at the payload id, so the resolution is identity.
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
                 params={"pid": pid, "now": now},
@@ -11684,7 +12624,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11705,13 +12645,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # a new point property.
                 session_id=session_id, **point_props,
             )
-            sdk.supersede_point(pr.existing_id, pid)
+            # #1370: record the id the write RESOLVED to (the map the binder
+            # reads). #4970: the SUCCESSOR may itself re-key (its content
+            # already exists under another id) — supersede the prior with the
+            # id the graph actually holds, else ``supersede_point``'s lifecycle
+            # guard targets a node that was never minted and the commit fails
+            # closed.
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
+            sdk.supersede_point(pr.existing_id, resolved_pid)
         else:
             point_props = {}
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
-            sdk.create_point(
+            _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -11730,23 +12678,69 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # the same source-session attribution surface.
                 session_id=session_id, **point_props,
             )
+            # #1370: the id the write RESOLVED to. #4970: the graph id §5
+            # CONTAINS and the supersede below must use — the pre-existing
+            # node on a dedup re-key, the payload id otherwise.
+            _rid = _written.get("id") if isinstance(_written, dict) else None
+            resolved_pid = _rid if isinstance(_rid, str) and _rid else pid
+        # #1370's fail-closed contract, PRESERVED: only a CONFIRMED resolved id
+        # enters the map. ``create_point`` returning no usable id must leave the
+        # binder below to SKIP, never bind a requested-but-unconfirmed id (a
+        # phantom link: ``link_entity`` matches no endpoint, returns 0, and the
+        # binder's F7 path reads that as "already present"). When the gate is
+        # false every #4970 consumer degrades to identity — exactly the
+        # pre-fix target id, so no consumer regresses on that path.
+        #
+        # ⛔ ONE id space: keyed by the PAYLOAD point id ONLY. Every consumer
+        # names a payload point — §6b's ``supersedes_by`` and §7's operator
+        # endpoints are payload ``pt_<sha>`` ids BY construction, and §6
+        # resolves through ``pr.point.id`` below. Do NOT also key this
+        # branch's ``pid`` (the server-recomputed ``supersede_id`` on the
+        # supersede path): that is a second id space in one dict, and because
+        # ``point_content_id`` hashes CONTENT ONLY while dedup matches
+        # content+kind (#784), one record's payload id can EQUAL another's
+        # ``supersede_id`` — a ``supersede_id`` entry would then overwrite a
+        # payload-id entry (last writer wins) and silently re-point that
+        # record's aboutObject / supersession / binder lookups at the WRONG
+        # node.
+        #
+        # On the ``supersede`` action ``resolved_pid`` is the SUCCESSOR's
+        # resolved id and ``pr.point.id`` IS the PRIOR node's payload id
+        # (``reconcile_payload`` sets ``existing_id=pt.id``), so a payload ref
+        # naming that point resolves to the SUCCESSOR. Deliberate, and
+        # consistent with ``supersede_point``'s own edge transfer — an operator
+        # edge on a superseded point belongs to its successor; pinned by
+        # ``test_supersede_operator_ref_follows_the_successor``.
+        if isinstance(_rid, str) and _rid:
+            point_resolved_ids[pr.point.id] = resolved_pid
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
             "MERGE (s)-[:CONTAINS]->(p)",
-            params={"sid": session_id, "pid": pid},
+            params={"sid": session_id, "pid": resolved_pid},
         )
 
-    # ── 6. Entities — :Object nodes MERGE by name (#452); objectKind + the
-    # S5 gate-result flag (passes_frequency_gate written WITH flag, amendment
-    # §4.3 #12); aboutObject edges (the canonical predicate — aboutEntity does
-    # NOT exist, §4.2). ──
+    # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
+    # become :Subject (with subjectKind) so the Subject layer is reachable and
+    # the vocabulary does not leak into Object.objectKind; everything else stays
+    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
+    # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
+    # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
-        sdk.create_entity(
-            "object", er.entity.name,
-            objectKind=er.entity.kind,
-            passes_frequency_gate=er.entity.passes_frequency_gate,
-            is_episodic=False,
-        )
+        if is_subject_kind(er.entity.kind):
+            sdk.create_entity(
+                "subject", er.entity.name,
+                subjectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
+        else:
+            sdk.create_entity(
+                "object", er.entity.name,
+                objectKind=er.entity.kind,
+                passes_frequency_gate=er.entity.passes_frequency_gate,
+                is_episodic=False,
+            )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
     # for the Object status fold, #1350), applied via the SHARED
@@ -11773,7 +12767,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # discriminates pre-payload terminality). The step-6 entity writes above
     # have landed the payload's net-new successors.
     # ──
-    from tortoise.commit_ops import apply_supersessions
+    from tortoise.commit_ops import (
+        apply_supersessions,
+        remap_supersession_point_refs,
+    )
 
     warned = 0
 
@@ -11789,7 +12786,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         _logger.warning(msg, *args, **kwargs)
 
     applied = apply_supersessions(
-        proj, sdk, payload.supersessions,
+        proj, sdk,
+        # #4970: same remap the capture path applies (#4716 Part 1, the
+        # adjacent hole). ``supersedes_by`` is a payload ``pt_<sha>`` id BY
+        # CONSTRUCTION and shares the operators' two-id-space hole — a
+        # re-keyed successor reached ``sdk.supersede(prior, '<payload id>')
+        # with the target missing, which RAISED and was swallowed by
+        # ``apply_supersessions`` as ``point supersede '<prior>' → '<payload
+        # id>' failed: …`` (NOT the ``… ref '<payload id>' not found`` skip,
+        # which fires only when the already-graph-id ``superseded`` side is
+        # absent) — so the CORRECTS fold was lost. ``superseded`` is
+        # deliberately NOT remapped by the helper: it is already a graph id
+        # and is the record's downstream LANE DISCRIMINATOR
+        # (``startswith("pt_")``), so a map entry could silently flip a
+        # CORRECTS fold onto the entity lane.
+        remap_supersession_point_refs(payload.supersessions,
+                                      point_resolved_ids),
         session_id=session_id, warn=_supersession_warn,
     )
     if payload.supersessions:
@@ -11798,13 +12810,46 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             applied, len(payload.supersessions), session_id)
 
     for pr in reconcile.points:
+        # Pre-#4970 target: on the supersede action the edge belongs on the
+        # SUCCESSOR, whose id is the recomputed ``supersede_id``.
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
+        # #4970: the RESOLVED graph id, looked up by the PAYLOAD point id
+        # (the map has one id space) — the payload id may name no node, in
+        # which case the aboutObject MATCH below found nothing and the edge
+        # was silently absent. On a supersede the map's value IS the
+        # successor, so the lookup target and the fallback agree; the fallback
+        # keeps the pre-fix id when §5's write gate found no confirmed id.
+        pid = point_resolved_ids.get(pr.point.id, pid)
         for name in pr.point.about_entities:
+            if str(name) in subject_entity_names:
+                continue  # #1370: the gated binder owns aboutSubject
             proj.g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
                 "MERGE (p)-[:aboutObject]->(o)",
                 params={"pid": pid, "name": name},
             )
+        # #1370: write-time, confidence-gated, fail-closed subject binding —
+        # the SAME shared driver the local capture seam calls. Only for a
+        # point this commit actually WROTE, and only against the id the write
+        # actually RESOLVED to.
+        #
+        # Hosted/local parity rule (G1): the local seam binds the id
+        # `create_point` resolved to, gated on `created_here`; a content-hash
+        # dedup hit resolves to a DIFFERENT node than the payload id, so the
+        # payload id addresses nothing. Binding the payload id made
+        # `link_entity` match no endpoint, return 0, and the binder's F7 path
+        # read that as "already present" — a phantom link. So bind the id
+        # recorded in step 5, and if this point has no resolved id (no write
+        # happened here), do NOT bind (fail-closed).
+        if pr.action in ("new", "supersede") and pr.point.slots:
+            resolved_pid = point_resolved_ids.get(pr.point.id)
+            if resolved_pid:
+                try:
+                    bind_point_subjects(proj, sdk, point_id=resolved_pid,
+                                        slots=pr.point.slots)
+                except Exception:  # noqa: BLE001, RUF100 — never sinks a commit
+                    _logger.warning("subject binding failed for %s",
+                                    resolved_pid, exc_info=True)
 
     # ── 7. Operators — shared commit semantics via apply_payload_operators
     # (#1532 D3; extracted verbatim from this block so the commit and capture
@@ -11815,12 +12860,31 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # (op)-[:mitigated_by]->(m), §4.2). Same-commit map → Cypher fallback →
     # deep-miss drop (DE2E-11 negative, support-edge-first) live in the
     # helper — TestMitigates is the refactor-safety gate. ──
-    from tortoise.commit_ops import apply_payload_operators
+    from tortoise.commit_ops import (
+        apply_payload_operators,
+        remap_operator_endpoint_refs,
+        reverse_point_id_map,
+    )
+    # #4970: rewrite payload endpoint refs to the ids §5 ACTUALLY resolved the
+    # points to, BEFORE the operator write. A payload ``pt_<sha>`` that
+    # re-keyed onto a pre-existing node named nothing here, ``create_operator``
+    # raised, and the helper swallowed it as ``operator write skipped (inputs
+    # missing?)`` (the #4654 silent drop, hosted leg). Identical map + shared
+    # helper as the v2 capture path (#4716 Part 1).
+    #
+    # ⛔ The MITIGATES reason is resolved from the SAME ref, so after the remap
+    # the ref is a GRAPH id while ``payload.points`` is keyed by PAYLOAD id —
+    # hand the helper a map-aware resolver (reverse map) or a re-keyed
+    # dampener's reason degrades to its bare graph id (#4716 review P1).
+    _commit_reverse_id_map = reverse_point_id_map(point_resolved_ids)
     apply_payload_operators(
         proj, sdk,
-        [op_rec.operator for op_rec in reconcile.operators
-         if op_rec.action == "new"],
-        point_content_by_id=lambda pid: _point_content_by_id(payload, pid),
+        remap_operator_endpoint_refs(
+            [op_rec.operator for op_rec in reconcile.operators
+             if op_rec.action == "new"],
+            point_resolved_ids),
+        point_content_by_id=lambda pid: _point_content_by_id(
+            payload, _commit_reverse_id_map.get(pid, pid)),
     )
 
 
@@ -16742,7 +17806,14 @@ class _ImportVerifyError(Exception):
 # expanded invoice/dispute payloads — the bound primarily protects the
 # HMAC/verify path and defends against oversized replay bodies; note a 413
 # is non-2xx, so Stripe retries with backoff, hence the generous headroom) (1 MiB).
-_BODY_MAX_BYTES = 256 * 1024
+#
+# #2048: the 256 KiB DEFAULT is aliased from the shared module (it is also the
+# cap `CappedBodyMiddleware` applies to the pydantic/dict-body endpoints, which
+# are capped at the middleware layer — see the registration block at the top of
+# this file); the alias keeps ONE literal for the shared default. The detail
+# string is the same object the middleware emits, so a middleware 413 and a
+# handler 413 are byte-identical.
+_BODY_MAX_BYTES = _body_limits.BODY_MAX_BYTES
 _COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
 _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 
@@ -16753,7 +17824,7 @@ _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 # from the enforced test cap); production caps are import-time constants,
 # so the message stays truthful under source-level cap changes. The literal
 # values are pinned by TestDetailConstantsPinned (test_body_cap_sweep.py).
-_BODY_413_DETAIL = f"request body exceeds the size cap ({_BODY_MAX_BYTES // 1024} KiB)"
+_BODY_413_DETAIL = _body_limits.BODY_413_DETAIL
 _COMMIT_SESSION_413_DETAIL = (
     f"commit session request body exceeds the size cap "
     f"({_COMMIT_SESSION_MAX_BYTES // (1024 * 1024)} MiB)"
@@ -16774,15 +17845,16 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
     pack-manifest upload path (#2029), and every request-body read swept in
     #2032 (register/login/signup/claim/keys/agent/oauth/commit/stripe — the
     caps + detail strings live in the constants block directly above).
+
+    The streaming core lives in ``tortoise.body_limits`` (#2048) so the
+    ``/mcp`` sub-app's middleware can enforce the SAME semantics without
+    importing this module (a cycle); this wrapper keeps the #2032 call sites'
+    ``HTTPException(413)`` contract.
     """
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status_code=413, detail=detail)
-        chunks.append(chunk)
-    return b"".join(chunks)
+    try:
+        return await _body_limits.read_capped_body(request, max_bytes, detail)
+    except _body_limits.BodyTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=exc.detail) from None
 
 
 async def _read_internal_json_body(request: Request, *, required: bool = False) -> dict:
@@ -21332,9 +22404,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        # #3498/#4015: the analytics write builds a fresh httpx.Client per
-        # event — a blocking PostgREST call; off the loop via the shared entry
-        # point.
+        # #3498/#4015: the analytics write is a blocking PostgREST call
+        # (pooled ``httpx.Client`` since #4462); off the loop via the shared
+        # entry point.
         await _emit_analytics_off_loop(
             org["org_id"], "artifact_copied",
             {"harness": harness, "section": section})
@@ -22722,6 +23794,148 @@ _ANALYTICS_ALERT_LOCK = threading.Lock()
 # ephemeral JSONL — #3677's symptom reached by a different route.
 _ANALYTICS_POST_TIMEOUT_S = 5
 
+# ── #4462: the analytics sink's pooled HTTP client ──────────────────────────
+# The emit used to build a fresh ``httpx.Client(timeout=5)`` PER EVENT, so
+# every analytics row paid a new TCP+TLS handshake to Supabase. It now reuses
+# ONE process-wide client, built lazily on the first CONFIGURED emit.
+#
+# The shape is the repo's existing "lazy + env-keyed + locked + resettable
+# process-wide handle" idiom (``_PROBE_SDK_CACHE`` / ``_probe_sdk`` ABOVE): the
+# cache is a dict so tests/ops can drop it by reference, the lock guards the
+# CACHE only (never the network call), and a changed key rebuilds.
+#
+# Why ONE client can serve every caller: this sink is reached from TWO executors
+# — the dedicated 4-worker ``telemetry`` pool and the event loop's shared
+# default executor (the capture-cost lane, #4468, and the MCP lane whenever a
+# loop is running; the MCP lane's ephemeral daemon thread is its no-loop
+# fallback) — and ``httpx.Client`` is documented safe for concurrent use (the
+# repo already relies on that in ``supabase_control``). It is a SYNC client, so
+# it is bound to NO event loop: that is what makes cross-executor reuse safe,
+# and why a pooled ``AsyncClient`` was not used.
+#
+# LIFETIME: process-lifetime by design, and closed from NO production path —
+# mirroring ``SupabaseControlPlane._http`` (never closed). Closing a pool while
+# an emitter may still hold it (at shutdown, or a startup reset across an
+# in-process reload) would race an in-flight telemetry worker — the seam
+# abandons the AWAIT on a wait-bound miss but never the daemon thread (CPython
+# #87185) — and turn a delivered event into a spurious JSONL
+# fallback/degradation. That close-in-flight contract is #4608's subject and is
+# not re-derived here: the handle is dropped, never closed under a live holder,
+# and GC reclaims the sockets once no emitter holds it (at the latest at process
+# exit). ``_analytics_http_reset()`` exists for tests/ops only — it is
+# deliberately NOT wired into ``_lifespan``, because the env-keyed cache already
+# rebuilds on a changed sink and a startup close would be one more close under a
+# possible straggler for no gain.
+#
+# Why not share the other process-wide pool to the same host
+# (``SupabaseControlPlane._http``)? ``SupabaseControlPlane.__init__`` is
+# fail-closed — it RAISES when the env is unconfigured — while this sink must be
+# lazily gated on ``configured`` and must never raise (#3677/#3820). Sharing
+# would import that raise into the emit path, so the two pools stay separate by
+# design.
+_ANALYTICS_HTTP_CACHE: dict = {"key": None, "client": None}
+_ANALYTICS_HTTP_LOCK = threading.Lock()
+# Connection ceiling, pinned explicitly so it is auditable. This is an UPPER
+# BOUND, not a concurrency limiter: it sits far above the most emitters this
+# process can run at once — the telemetry pool's 4 workers, the loop's shared
+# default executor (``min(32, cpu+4)``), and the MCP lane (the SAME shared
+# default executor while a loop is running; an ephemeral daemon thread is its
+# no-loop fallback, ``mcp_server.py``) — so no emit
+# waits on a pool slot in practice. Every lane is off-loop, so even a saturated
+# pool could never stall the event loop. If emitter concurrency ever did exceed
+# it, httpcore would queue and the pool phase would expire into the never-raise
+# arm as a ``fallback`` — a documented residual, not a stall.
+_ANALYTICS_HTTP_MAX_CONNECTIONS = 100
+_ANALYTICS_HTTP_MAX_KEEPALIVE = 20
+# httpx's own default, kept deliberately. This is the window over which an idle
+# pooled connection is reused, so it BOUNDS the benefit: emits within it share
+# the handshake (the burst case), while sparser emits still pay one. It is not
+# extended because a longer window holds sockets the peer may already have
+# closed; httpcore discards an idle connection whose peer FIN has arrived, so
+# the residual is a narrow post-check race whose consequence — under the
+# never-raise guard — is a spurious JSONL ``fallback``/degradation, never an
+# ESCAPED error and never a silent loss. Observing the sink's reuse /
+# transport-failure rate is tracked with its other missing instrumentation (#5840).
+_ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S = 5.0
+
+
+def _analytics_http_key(url: str, key: str) -> tuple:
+    """Identity of the cached client.
+
+    The client itself is SINK-AGNOSTIC — it carries no base URL and no
+    credentials (the URL and the service-key headers are built per request in
+    ``_track_analytics_event``), so ``url``/``key`` do not parameterize the
+    instance. They are part of the key anyway, as the conservative choice: a
+    change to the configured sink forces a fresh pool rather than reusing one
+    warmed against the old configuration. ``_ANALYTICS_POST_TIMEOUT_S`` is in
+    the key because it genuinely parameterizes the instance — it is baked into
+    the client at construction, unlike ``url``/``key``. Production is a stable
+    key, so the client is built once.
+    """
+    return (url, key, _ANALYTICS_POST_TIMEOUT_S)
+
+
+def _analytics_http_reset() -> None:
+    """Close + drop the cached analytics client (tests / ops only).
+
+    NOT wired into ``_lifespan`` and NOT safe to call concurrently with a live
+    emit: httpx raises on a closed client, which the never-raise guard turns
+    into a JSONL ``fallback``. The env-keyed cache already rebuilds on a changed
+    sink, so a startup reset would be one more close under a possible straggler
+    (the #4608 class) for no gain. The tests that call this do so after their
+    own synchronous emits have returned.
+
+    The ``close()`` is individually guarded: this must never raise, and test
+    doubles standing in for ``httpx.Client`` do not all define ``close()``.
+    """
+    with _ANALYTICS_HTTP_LOCK:
+        client = _ANALYTICS_HTTP_CACHE.get("client")
+        _ANALYTICS_HTTP_CACHE["client"] = None
+        _ANALYTICS_HTTP_CACHE["key"] = None
+    if client is not None:
+        try:  # noqa: SIM105 — a double without close() must not fail teardown
+            client.close()
+        except Exception:
+            pass
+
+
+def _analytics_http_client(url: str, key: str):
+    """Return the process-wide pooled ``httpx.Client`` for ``(url, key)``.
+
+    CALLED ONLY INSIDE ``if configured:`` in ``_track_analytics_event`` — an
+    unconfigured or half-configured env must never build (nor have to close) a
+    client; it still degrades to the JSONL (#3677/#3820).
+
+    ``import httpx`` is hoisted above the lock so the first configured emit
+    does not serialize every other emitter behind a cold module import. The
+    lock is held across cache lookup and construction, NEVER across the POST,
+    so no slow emit can block another.
+
+    A SUPERSEDED client is dropped, NOT closed: an in-flight emitter may still
+    hold it, and closing a pool under a live request is the #4608 class — a
+    delivered event recorded as a spurious ``fallback``/degradation. The
+    supersede path is reachable only on a runtime sink/timeout change, which
+    production never performs; GC reclaims the dropped pool once no emitter
+    holds it (at the latest at process exit).
+    """
+    cache_key = _analytics_http_key(url, key)
+    import httpx
+    with _ANALYTICS_HTTP_LOCK:
+        cached = _ANALYTICS_HTTP_CACHE.get("client")
+        if cached is not None and _ANALYTICS_HTTP_CACHE.get("key") == cache_key:
+            return cached
+        client = httpx.Client(
+            timeout=_ANALYTICS_POST_TIMEOUT_S,
+            limits=httpx.Limits(
+                max_connections=_ANALYTICS_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=_ANALYTICS_HTTP_MAX_KEEPALIVE,
+                keepalive_expiry=_ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S,
+            ),
+        )
+        _ANALYTICS_HTTP_CACHE["client"] = client
+        _ANALYTICS_HTTP_CACHE["key"] = cache_key
+    return client
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> str:
@@ -22831,26 +24045,24 @@ def _track_analytics_event(org_id: str, event_name: str,
         # which can file an incident for a healthy sink.
         delivered = False
         try:
-            import httpx
-            # #4015: the client is built PER EVENT, deliberately. For the
-            # funnel sites it goes through ``_emit_analytics_off_loop`` → the
-            # telemetry pool, so a fresh TCP+TLS handshake costs a telemetry
-            # WORKER SLOT, never an event-loop stall — it is not the defect this
-            # issue names. (The capture-cost lane reaches this helper on the
-            # loop's shared default executor instead; either way, off-loop.)
-            # Reusing a pooled client is a throughput optimisation for those
-            # pools and needs its own measurement plus a lifecycle it does not
-            # have today (lazy construction gated on ``configured``, because
-            # this sink must keep serving a HALF-CONFIGURED env and degrade to
-            # the JSONL — the #3677/#3820 contract); tracked as #4462.
-            with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
-                resp = client.post(
-                    f"{url}/rest/v1/analytics_events",
-                    json=event,
-                    headers={"apikey": key, "Authorization": f"Bearer {key}",
-                             "Content-Type": "application/json",
-                             "Prefer": "return=minimal"},
-                )
+            # #4462: one process-wide pooled client, built lazily on the first
+            # configured emit and reused by every later one — including across
+            # the two executors that reach this sink (the telemetry pool and the
+            # loop's shared default executor, which serves the MCP lane too
+            # while a loop is running).
+            # The ``with`` form is deliberately NOT used: httpx 0.28 closes an
+            # externally-constructed client on ``__exit__``, which would defeat
+            # reuse on the very first emit (see ``supabase_control``). The
+            # lookup sits INSIDE ``if configured:``, so a half-configured env
+            # builds nothing and still degrades to the JSONL (#3677/#3820).
+            client = _analytics_http_client(url, key)
+            resp = client.post(
+                f"{url}/rest/v1/analytics_events",
+                json=event,
+                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json",
+                         "Prefer": "return=minimal"},
+            )
             # #3677: a REJECTED write is still a lost event. `post` does not
             # raise on a 4xx/5xx, so without this check the event was silently
             # discarded — the #3677 loss class, reachable whenever the key is
@@ -23560,9 +24772,10 @@ async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     onboarding flow).
 
     #3498/#4015: async because the write it wraps is a blocking PostgREST call
-    — ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
-    event, which used to run ON the event loop from every async caller. The
-    emit goes through the shared off-loop entry point; the strict-mode
+    — ``_track_analytics_event`` POSTs with a synchronous ``httpx.Client``
+    (pooled process-wide since #4462), which used to run ON the event loop from
+    every async caller. The emit goes through the shared off-loop entry point;
+    the strict-mode
     ``UnregisteredTelemetryKey`` still escapes (it is raised in the worker
     thread and re-raised through ``await``)."""
     try:
@@ -23690,6 +24903,39 @@ async def _exchange_github_token(code: str) -> str:
     if not access_token:
         raise HTTPException(status_code=502, detail="GitHub token exchange failed")
     return access_token
+
+
+async def _revoke_github_token(token: str) -> tuple[bool, str]:
+    """Revoke an OAuth token at GitHub (#4946) → ``(revoked, reason)``.
+
+    ``DELETE /applications/{client_id}/token`` (Basic auth with the app's
+    client id/secret) is GitHub's own revocation endpoint for a token an
+    OAuth app issued; GitHub documents exactly two outcomes for it, 204 No
+    Content and 422 Validation failed. ONLY 204 is a confirmed revocation.
+    Every other outcome — including 404/422, where an already-revoked or
+    otherwise unrecognised token may surface — is ``revoked=False`` with a
+    short machine-readable reason, because a non-204 leaves the token's
+    liveness unconfirmed and reporting it as gone would be exactly the
+    cosmetic lie this endpoint exists to remove. Missing app credentials and
+    transport failures are reported the same way.
+    """
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return False, "not_configured"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.delete(
+                f"{_GITHUB_API}/applications/{client_id}/token",
+                json={"access_token": token},
+                auth=(client_id, client_secret),
+                headers={"Accept": "application/vnd.github+json"})
+    except Exception:
+        return False, "network"
+    if r.status_code == 204:
+        return True, "revoked"
+    return False, f"http_{r.status_code}"
 
 
 def _github_repos_count(token: str) -> int | None:
@@ -23859,6 +25105,67 @@ async def github_callback(code: str | None = None, state: str | None = None,
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
+@app.post("/v1/onboarding/github/disconnect")
+async def github_disconnect(org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """Disconnect GitHub: revoke the stored OAuth token, clear it locally,
+    and flip ``github_connected`` (#4946).
+
+    The pre-#1924 "disconnect" only wrote ``github_connected: false`` while
+    leaving the stored token live, so server-side indexing kept working.
+    This is the real path: it attempts GitHub revocation FIRST, then ALWAYS
+    clears the local ciphertext and writes ``github_connected: false`` — a
+    revocation failure must never leave the token stored.
+
+    ``revoked``/``revoke_reason`` report the outcome honestly:
+
+    - ``revoked`` is True when no live token remains — GitHub CONFIRMED the
+      revocation (204), or there was no stored token to revoke at all (an
+      idempotent no-op);
+    - otherwise ``revoked`` is False and ``revoke_reason`` names why: the
+      token was already-invalid/unrecognised (a non-204 from GitHub), the
+      ciphertext could not be decrypted, the app credentials are unset, or
+      the GitHub call failed. ``revoke_reason == "revoked"`` is the only
+      GitHub-confirmed case; ``"not_connected"`` means no call was needed.
+
+    The local credential is ALWAYS cleared and ``github_connected`` always
+    written false, even when the outcome is not a confirmed revocation.
+
+    #1828 review P3: same non-gated dual-auth as the other onboarding
+    endpoints; #2300 parity: graph-bound keys rejected.
+    """
+    # #2300: clears the ORG's control-plane GitHub credential — graph-bound
+    # keys rejected (MCP/onboarding-github family parity). A per-graph key
+    # must never tear down the org's GitHub connection.
+    _reject_graph_bound_org_surface(org, "github disconnect")
+    org_id = org["org_id"]
+    encrypted, _gh_org = _github_credentials(org_id)
+    revoked = False
+    revoke_reason = "not_connected"
+    if encrypted:
+        from tortoise.crypto import decrypt_token
+        try:
+            token = decrypt_token(encrypted)
+        except ValueError:
+            # A stored-but-undecryptable ciphertext gives us nothing to send
+            # GitHub — the plaintext token may still be live there, so this
+            # is NOT a confirmed revocation. Clearing it below is still the
+            # right local action; the outcome is reported honestly.
+            revoke_reason = "undecryptable"
+        else:
+            revoked, revoke_reason = await _revoke_github_token(token)
+    else:
+        # Nothing stored: the idempotent no-op. There is no live token to
+        # revoke, so there was nothing to fail.
+        revoked = True
+    # Always clear locally, then flip the connection flag — a disconnect
+    # that leaves the ciphertext (or the flag) behind is the cosmetic
+    # behaviour this endpoint replaces.
+    _clear_github_credentials(org_id)
+    _update_onboarding_state(org_id, github_connected=False)
+    return {"connected": False, "revoked": revoked,
+            "revoke_reason": revoke_reason}
+
+
 async def _heal_github_org(org_id: str, encrypted: str,
                           org: str | None) -> str | None:
     """#1845 self-heal: return the REAL org/login for a connected token.
@@ -23919,6 +25226,33 @@ def _store_github_org(org_id: str, encrypted: str, org: str) -> None:
             "MATCH (t:Team {id: $id}) SET t.github_org = $org",
             params={"id": org_id, "org": org},
         )
+
+
+def _clear_github_credentials(org_id: str) -> None:
+    """Clear the stored GitHub token + org (#4946 disconnect).
+
+    Seam-aware mirror of the callback's store path: Supabase mode PATCHes
+    both columns to NULL via the service-role seam (github_token_enc is
+    column-REVOKEd from anon/authenticated, so the seam is the only writer);
+    registry mode SETs them to null on the Org node. Fail-closed: a write
+    failure raises rather than silently leaving the ciphertext in place.
+    """
+    from tortoise.supabase_control import (
+        clear_github_credentials as _sb_clear,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        _sb_clear(get_control_plane(), org_id)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "SET t.github_token_enc = null, t.github_org = null",
+        params={"id": org_id},
+    )
 
 
 def _cleanup_legacy_docs_corpus(org_id: str,
@@ -23987,6 +25321,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     repos_count = await _cp_offload(
         lambda: _github_repos_count(token), op="github_repos_count",
         best_effort=True)
+    if repos_count is OFFLOAD_REFUSED:
+        # #4456: a REFUSED best-effort offload never ran; keep the pre-seam
+        # client-visible outcome for this display-only count (``None``)
+        # instead of leaking the seam's sentinel into the JSON body.
+        repos_count = None
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -25220,19 +26559,18 @@ def _legacy_bucket_map(rows: list[dict], legacy: list[dict]) -> dict[str, str]:
             if str(m.get("graph_name") or "") in ns_to_gid}
 
 
-def _incident_subject(inc: dict) -> str:
-    """#2313: alert-store subject for a sweep incident.
+# #3030: the sweep-emitted guard kinds a conclusive clear run resolves, and the
+# subject rule that keys them, are both owned by ``tortoise.backup_sweep``
+# (``sweep_resolutions`` / ``graph_subject`` / ``incident_subject``) — nothing
+# sweep-domain is duplicated here.
 
-    Default-graph and org-level incidents keep the bare org subject (the
-    pre-#2313 alert surface). Custom-graph incidents use the per-graph
-    subject "{org}:{gid}" — the SAME key the watcher uses — so re-baseline
-    and the watcher can open/resolve coherently.
-    """
-    gid = inc.get("graph_id")
-    tid = inc.get("org_id", "")
-    if gid and gid != "default":
-        return f"{tid}:{gid}"
-    return tid
+
+def _incident_subject(inc: dict) -> str:
+    """#2313: alert-store subject for a sweep incident — thin alias for
+    ``backup_sweep.incident_subject``."""
+    from tortoise.backup_sweep import incident_subject
+
+    return incident_subject(inc)
 
 
 # #4144: the public backups family is ALSO served under `/v1/`. The dashboard
@@ -25899,6 +27237,64 @@ async def backups_sweep(request: Request):
                 alerts_failed.append(inc.get("kind"))
         if alerts_failed:
             result["alerts_failed"] = alerts_failed
+
+        # ── #3030: producer-side resolution for the sweep's guard kinds. ──
+        # The sweep is the authority on its own guards: a conclusive run that did
+        # NOT emit a kind, with POSITIVE evidence the guard ran/looked, is the
+        # "condition cleared" evidence — closed through the same delete-to-resolve
+        # lifecycle the watcher uses. `sweep_resolutions` owns that decision
+        # (degraded runs and un-checked graphs clear nothing).
+        #
+        # Review: the candidate list is intersected with what is actually OPEN —
+        # one LIST per kind, never an R2 GET per graph, so an hourly sweep over a
+        # few thousand graphs does not serialise thousands of reads while holding
+        # the sweep lock (nor does a listing failure close anything).
+        from tortoise.backup_sweep import sweep_resolutions
+
+        candidates = sweep_resolutions(result)
+        resolved: list[str] = []
+        failed: list[str] = []
+        open_cache: dict[str, set[str]] = {}
+        for kind, subject in candidates:
+            try:
+                if kind not in open_cache:
+                    # strict: a failed LIST must not be indistinguishable from
+                    # "nothing open" (it would make an R2 outage read as a clean
+                    # sweep — final-cycle review P2). The raise lands below.
+                    open_cache[kind] = await asyncio.to_thread(
+                        alerts.open_subjects, kind, strict=True
+                    )
+                # A platform subject has two spellings in the store: `_` (what
+                # `_key()` writes for an empty subject) and a literal `global`
+                # (the restore-drill path files that one). They are DIFFERENT
+                # objects, so match whichever is open and resolve BOTH when both
+                # are (resolving only the matched one left the other open forever
+                # — cycle-3/4 review).
+                spellings = [subject] if subject else ["", "global"]
+                targets = [
+                    t for t in spellings
+                    if (t or "_") in open_cache[kind]
+                ]
+                if not targets:
+                    continue
+                for target in targets:
+                    if await asyncio.to_thread(alerts.resolve_incident, kind, target):
+                        resolved.append(f"{kind}/{target}" if target else kind)
+            except Exception as e:
+                # A raised close (incident still open) OR a failed listing. Do not
+                # report it as resolved; surface it so the run does not read as a
+                # clean sweep.
+                failed.append(f"{kind}/{subject}" if subject else kind)
+                _logger.warning(
+                    "incident resolve failed for %s/%s: %s", kind, subject or "global", e
+                )
+        # `incidents_resolved` means "dedup objects CLEARED", which includes
+        # placeholders and tombstones — not necessarily issues closed (cycle-3
+        # review). `incidents_unresolved` is the honest counterpart.
+        if resolved:
+            result["incidents_resolved"] = resolved
+        if failed:
+            result["incidents_unresolved"] = failed
         return result
 
 
@@ -26254,10 +27650,32 @@ async def backups_rebaseline(request: Request):
         _write_json(storage, f"ops/teams/{org_id}/state.json", state)
     subject = f"{org_id}:{graph_id}" if graph_id != "default" else org_id
     alerts = _alert_store_from(_backup_config_safe())
-    alerts.resolve_incident("DATA_LOSS_CANDIDATE", subject)
-    alerts.resolve_incident("SIZE_GUARD_ABORT", subject)
-    return {"status": "rebaselined", "org_id": org_id,
-            "graph_id": graph_id, "node_count": count}
+    # The state write above already succeeded, so a resolve failure must NOT fail
+    # the request (cycle-2 review P2: `resolve_incident` now RAISES on a failed
+    # close instead of returning silently — an unguarded call here would 500 the
+    # re-baseline AFTER the operator's verdict was persisted, and the caller would
+    # reasonably retry a state write that already happened).
+    #
+    # But NOTHING else resolves these two kinds, so a failed close leaves the
+    # incident open with no retry — the response and the log must say so rather
+    # than implying a poll will retry (cycle-3 review P1). The outcome is reported
+    # per kind so the operator can re-run re-baseline after GitHub recovers.
+    incidents_failed: list[str] = []
+    for kind in ("DATA_LOSS_CANDIDATE", "SIZE_GUARD_ABORT"):
+        try:
+            alerts.resolve_incident(kind, subject)
+        except Exception:
+            incidents_failed.append(f"{kind}/{subject}")
+            _logger.warning(
+                "%s resolve failed on re-baseline of %s — the incident is STILL OPEN "
+                "and only another re-baseline (or a manual close) clears it; re-run "
+                "once the GitHub API recovers", kind, subject, exc_info=True,
+            )
+    out = {"status": "rebaselined", "org_id": org_id,
+           "graph_id": graph_id, "node_count": count}
+    if incidents_failed:
+        out["incidents_unresolved"] = incidents_failed
+    return out
 
 
 def _drill_record(
@@ -26577,13 +27995,20 @@ async def backups_drill_scheduled(request: Request):
         except Exception:
             _logger.warning("RESTORE_DRILL_FAILED open failed (RTO-breach path)", exc_info=True)
     else:
-        # success (or no eligible archive) closes any open incident
+        # success (or no eligible archive) closes any open incident. A failed
+        # close has NO retry until the next monthly drill, so report it in the
+        # response (final-cycle review P2 — the runbook claimed this field).
         try:
             await asyncio.to_thread(
                 alerts.resolve_incident, _DRILL_FAILED_KIND, "global"
             )
         except Exception:
-            _logger.warning("RESTORE_DRILL_FAILED resolve failed", exc_info=True)
+            result["incidents_unresolved"] = [f"{_DRILL_FAILED_KIND}/global"]
+            _logger.warning(
+                "RESTORE_DRILL_FAILED resolve failed — the incident is STILL OPEN "
+                "and only another drill (or a manual close) clears it",
+                exc_info=True,
+            )
     return result
 
 
@@ -27641,10 +29066,68 @@ async def webhooks_stripe(request: Request):
             # the webhook AND strand the notification — follow it. (#4352 had
             # already moved the analytics POST behind ``_cp_offload``; what
             # this change adds here is the notify-first order and the guards.)
-            notify_billing_event(
-                notify_kind, {"org_id": org_id, "tier": tier},
-                {"subscription_status": etype},
-            )
+            #
+            # #4456: the notify ITSELF is blocking sync HTTP — Resend via
+            # ``httpx.post(..., timeout=15.0)`` plus Telegram on its own 15 s
+            # timeout (tortoise/notify.py) — and ``hosted_api`` runs a SINGLE
+            # uvicorn worker, so calling it inline held the one event loop for
+            # up to ~30 s and stalled EVERY concurrent request (the #2988 /
+            # #3498 class). It is routed through the #3498 seam rather than
+            # the issue's proposed ``asyncio.to_thread`` DELIBERATELY:
+            # ``to_thread`` submits to the loop's SHARED default executor,
+            # whose workers are NON-daemon and are JOINED at shutdown (#2850),
+            # so a black-holed socket would delay uvicorn's shutdown — and a
+            # notify would park one of the six workers the /health probe and
+            # the abuse hooks also use (#3060; #4468 tracks the same residual
+            # on the capture-cost lane). The telemetry pool is a
+            # process-lifetime DAEMON pool with a bounded backlog, so a wedged
+            # notify is abandoned at the seam's wait bound instead of
+            # delaying shutdown, and it can never occupy an auth slot.
+            #
+            # #4456 P1: the wait bound must NOT cancel a QUEUED submission.
+            # ``wait_for`` cancels the awaitable, ``asyncio.wrap_future``
+            # propagates that to the concurrent future, and a queued
+            # ``Future.cancel()`` SUCCEEDS — the worker later SKIPS the
+            # callable (``set_running_or_notify_cancel()`` is False), so the
+            # notification is DROPPED, not abandoned. Because the
+            # ``WebhookEvent`` marker was committed BEFORE the notify
+            # (``is_first=True``), Stripe's retry sees ``is_first=False`` and
+            # the notification is lost PERMANENTLY. ``cancel_on_timeout=False``
+            # keeps the bound on the AWAIT — the loop is freed and the webhook
+            # still returns promptly — while guaranteeing the queued
+            # submission still runs.
+            #
+            # ``best_effort=True`` + the guard keep the never-raise contract
+            # AT THE HAND-OFF: an offload failure is swallowed by the seam —
+            # but a REFUSAL (backlog full: the callable never ran) is a REAL
+            # drop, so the seam returns ``OFFLOAD_REFUSED`` and it is escalated
+            # through the existing operator-alert path instead of being
+            # silently swallowed. Any raise is caught here rather than
+            # reaching the handler's ``except Exception`` → 500, which would
+            # strand a claimed event and cost the payment's ack.
+            try:
+                result = await _cp_offload(
+                    lambda: notify_billing_event(
+                        notify_kind, {"org_id": org_id, "tier": tier},
+                        {"subscription_status": etype}),
+                    op="billing_notify", best_effort=True,
+                    cancel_on_timeout=False)
+                if result is OFFLOAD_REFUSED:
+                    with suppress(Exception):
+                        from tortoise.operator_alert import (
+                            alert_billing_notify_refused,
+                        )
+
+                        # The ERROR line is emitted BEFORE the escalation and
+                        # the subject is platform-scoped ("") — see
+                        # ``_log_billing_notify_refused`` and
+                        # ``alert_billing_notify_refused`` (#4456).
+                        _log_billing_notify_refused(org_id, etype)
+                        alert_billing_notify_refused(org_id, etype)
+            except Exception as exc:  # noqa: BLE001, RUF100 — never 500 a webhook
+                _logger.warning(
+                    "webhook: billing notify failed (non-fatal): %s",
+                    _safe_log(exc))
             try:
                 await _async_audit(
                     request, org_id, notify_kind,
@@ -27739,8 +29222,7 @@ async def webhooks_stripe(request: Request):
 # operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
 # filings from this work: #3124 (the shared per-IP primitive + the generic
 # middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
-# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
-# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# keys on the proxy IP), #3134 (dated measurement of real DCR volume —
 # the 600/1200 aggregates are not load-validated). #3036 already covers
 # oauth_* token-table retention/GC.
 #
@@ -28068,7 +29550,8 @@ async def oauth_authorize(request: Request):
                 redirect_uri=params["redirect_uri"] or None,
                 response_type=params["response_type"] or None,
                 code_challenge=params["code_challenge"] or None,
-                code_challenge_method=params["code_challenge_method"] or None),
+                code_challenge_method=params["code_challenge_method"] or None,
+                scope=params["scope"] or None),
             op="oauth_authorize_params")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
@@ -28179,7 +29662,8 @@ async def oauth_consent(request: Request):
                 redirect_uri=body.get("redirect_uri") or None,
                 response_type=body.get("response_type") or None,
                 code_challenge=body.get("code_challenge") or None,
-                code_challenge_method=body.get("code_challenge_method") or "S256"),
+                code_challenge_method=body.get("code_challenge_method") or "S256",
+                scope=body.get("scope") or None),
             op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)

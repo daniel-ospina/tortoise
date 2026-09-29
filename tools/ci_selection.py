@@ -58,16 +58,16 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 # #3400: this is now the FALLBACK invariant, used only when the manifest
 # carries no `durations` map at all. Once measured durations exist the
 # balance invariant is DURATION (below) — LPT packs by weight, and a correct
-# pack can legitimately carry very different file counts (the real pool
-# splits 195/325 while both halves weigh 28.0m: one 855s file on one side,
-# ~130 sub-second files on the other).
+# pack can legitimately carry very different file counts: a few multi-minute
+# files on one side against the long tail of sub-second ones on the other.
 HALF_IMBALANCE_TOLERANCE = 3
 
 # #3400: with measured durations, the halves must stay DURATION-balanced
-# within this ratio. Index parity on the same pool leaves a=18.8m vs b=37.1m
-# (1.97x); the LPT pack lands at 1.00x. 1.25 is loose enough for run-to-run
-# noise and
-# tight enough that a reversion to parity (1.97x on the real pool) reds.
+# within this ratio. Index parity on the same pool leaves a tilt far above it —
+# which files land on even vs odd indices has nothing to do with what they cost
+# — while the LPT pack balances the same pool. 1.25 is loose enough for noise
+# and tight enough that a reversion to parity reds. (Do not restate either
+# figure here: both move whenever the pool does.)
 HALF_DURATION_IMBALANCE_RATIO = 1.25
 
 # #1473: weight for a fast file with no measured duration. The pack can only
@@ -78,12 +78,10 @@ DEFAULT_FAST_WEIGHT = 2.0
 # the flat default), which silently degenerated the duration-aware pack into
 # a count-based one. Floor the coverage so it cannot rot back. The check is
 # skipped entirely for an ABSENT/EMPTY map (a repo that has not adopted
-# durations is not failed) and bites once the map is populated: 90% leaves
-# ~52 files of headroom on the current 520-file pool (actual: 96.5%, after the
-# merge of main grew the pool from 500 — the 18 unmeasured files carry no hand
-# entry: 16 are main-added tests, 2 (test_helpers.py,
-# test_provenance_extractedfrom_3263.py) were already unmeasured on the branch.
-# They pack at DEFAULT_FAST_WEIGHT).
+# durations is not failed) and bites once the map is populated. Do not restate
+# the pool size or the current percentage here — the durations map's own header
+# carries the sweep that measures them, and a figure copied into this comment is
+# what went stale before (it read "520 files / 96.5%" while the pool had grown).
 DURATION_COVERAGE_MIN = 0.90
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
@@ -263,6 +261,9 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/_redirects",
                    "website/apps/dashboard/public/404.html",
                    "website/apps/dashboard/src/",
+                   # #3048: `functions/assets/[[path]].ts` (the missing-asset 404)
+                   # is already covered by the `website/apps/dashboard/functions/`
+                   # directory entry above, so no entry is added for it here.
                    # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
                    # the Stripe ?session_id= return) are BUILT here, so a change to
                    # the server-side return path must run the guard too — otherwise
@@ -480,6 +481,17 @@ SOURCE_PATTERNS = {
             # token-flow fix must change. Paired with CORE_ALSO so the
             # core-registered half is not dropped by the named-surface match.
             "tortoise/oauth.py",
+            # #3496: the consent page pins its browser auth client to a CDN
+            # specifier whose version must equal the VENDORED bundle the
+            # behavioural harness executes (test_oauth_consent_pkce.py, api).
+            # `website/` is in NON_PYTHON_PREFIXES, so a vendor-only bump matched
+            # no pattern and fell through to tier-1 smoke — the version pin
+            # would never run on the PR that can break it, and neither would the
+            # harness that executes the very file being bumped (the
+            # #1349/#3332/#4171 silent-drop class). `_selection_relevant()` lets
+            # a SOURCE_PATTERNS match beat the prefix filter, so this entry is
+            # what makes the bump select `api`.
+            "website/apps/dashboard/public/vendor/",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
             # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
@@ -765,7 +777,7 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
 def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     """Surface -> slow files that run in test-slow (slow minus carve-out).
 
-    The 6 slow carve-out files (test_reaper et al.) run in the dedicated
+    The slow carve-out files (test_reaper et al.) run in the dedicated
     URI-unset carve-out job (epic #1647 E2E-4), never the docker slow legs
     — the test-slow committed leg set is exactly slow_files - carve_out
     (pinned by the workflow's drift-guard step, #1471).
@@ -933,9 +945,16 @@ def integrity(manifest: dict) -> list[str]:
     the manifest's subdir keys.
     """
     missing = []
+    on_demand = on_demand_files(manifest)
     for f in sorted(TESTS_DIR.rglob("test_*.py")):
         rel = f.relative_to(TESTS_DIR)
         if rel.parts[0] == "e2e":
+            continue
+        # The on-demand lane is a CLASSIFICATION: the file is deliberately
+        # absent from every surface because it does not gate the merge, so
+        # asking "which surface owns it?" is the wrong question. Without this
+        # the lane reads as drift and `--integrity` reds on a correct manifest.
+        if str(rel) in on_demand or rel.name in on_demand:
             continue
         if classify_test_file(str(rel), manifest) is None:
             missing.append(str(rel))
@@ -973,8 +992,16 @@ def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
     Kept from origin/main's refactor — callers (workflow matrix checks)
     use the top-level glob; :func:`integrity` uses the recursive rglob form.
     """
+    lane = on_demand_files(manifest)
     missing = []
     for f in sorted(tests_dir.glob("test_*.py")):
+        if f.name in lane:
+            # A lane file is classified — into a LANE, not a surface. Without
+            # this, `--register` would "fix" the apparent gap by registering it
+            # into a surface, silently putting it back on the merge gate. The
+            # currently-laned file is in a subdir so it never reaches this glob;
+            # the guard is here for the top-level file that eventually joins.
+            continue
         if classify_test_file(f.name, manifest) is None:
             missing.append(f.name)
     return missing
@@ -1091,6 +1118,26 @@ def carve_out_files(manifest: dict) -> set[str]:
     return set(manifest.get("carve_out", []))
 
 
+def on_demand_files(manifest: dict) -> set[str]:
+    """Files that run only from `.github/workflows/evals-on-demand.yml`.
+
+    Excluded from every PRE-MERGE leg (fast halves, slow, carve-out). The
+    accessor exists so `fast_pool`, `push_legs` and `leg_coverage_issues`
+    read the lane through ONE definition: three independent
+    `manifest.get("on_demand", [])` reads are three places for the lane to be
+    half-adopted, and a half-adopted lane is worse than no lane — the file is
+    excluded from the gate and claimed by nothing, so it silently stops
+    running anywhere at all."""
+    # `on_demand:` with NO entries parses to None, not [] — YAML's empty value.
+    # `manifest.get("on_demand", [])` returns that None (the key IS present),
+    # and `set(None)` raises TypeError, so the guard that exists to NAME an
+    # empty lane instead crashed in every caller before it could report. The
+    # `or []` is the fix; a test pins the None form specifically, because the
+    # obvious `on_demand=[]` spelling in a test is a Python list and never
+    # reproduces the state a human actually types into the YAML.
+    return set(manifest.get("on_demand") or [])
+
+
 def fast_pool(manifest: dict) -> list[str]:
     """#3400: the full-matrix fast pool — every manifest-classified file that
     is not slow, env-broken, or carve-out. Single source of truth for the
@@ -1098,14 +1145,16 @@ def fast_pool(manifest: dict) -> list[str]:
     never disagree about which files need a weight."""
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
+    on_demand = on_demand_files(manifest)
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
+    classified.update(on_demand)
     return sorted(f for f in classified
                   if f not in slow and f not in ENV_BROKEN_FILES
-                  and f not in carve_out)
+                  and f not in carve_out and f not in on_demand)
 
 
 def push_legs(manifest: dict) -> dict:
@@ -1122,14 +1171,15 @@ def push_legs(manifest: dict) -> dict:
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
+    on_demand = on_demand_files(manifest)
     fast = fast_pool(manifest)
     # #3400: pack the push halves by measured duration (#1473 LPT) instead of
     # the duration-blind index-parity split this used to be (`fast[0::2]` /
-    # `fast[1::2]`). Parity on the real pool put 37.1m of work in half (b)
-    # against 18.8m in half (a) — 1.97x — and blew the 55m watchdog. LPT is
-    # deterministic (ties break on name) and lands the same pool at 28.0m /
-    # 28.0m. split_fast_gate returns `tests/`-prefixed names; the workflow's
-    # matrix format is bare, so strip the prefix.
+    # `fast[1::2]`). Parity on the real pool leaves a tilt far above the ratio
+    # below — the pool's cost is not index-uniform — and blew the 55m watchdog;
+    # LPT is deterministic (ties break on name) and balances the same pool.
+    # split_fast_gate returns `tests/`-prefixed names;
+    # the workflow's matrix format is bare, so strip the prefix.
     fast_a, fast_b = split_fast_gate(fast,
                                      _durations_map(manifest))
     half_a = [f[len("tests/"):] for f in fast_a]
@@ -1145,13 +1195,18 @@ def push_legs(manifest: dict) -> dict:
             # run in the URI-unset carve-out job, never the docker slow legs.
             "slow": strip(slow - carve_out),
             "env_broken": sorted(ENV_BROKEN_FILES),
-            "carve_out": strip(carve_out)}
+            "carve_out": strip(carve_out),
+            # Not a push leg: emitted so leg_coverage_issues() can account for
+            # the file. Nothing in python-ci.yml consumes this key — that is
+            # the POINT of the lane.
+            "on_demand": strip(on_demand)}
 
 
 def leg_coverage_issues(manifest: dict) -> list[str]:
     """#1472 reverse drift: every classified file in exactly one push leg."""
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
+    on_demand = on_demand_files(manifest)
     legs = push_legs(manifest)
     half_a = {f + ".py" for f in legs["half_a"]}
     half_b = {f + ".py" for f in legs["half_b"]}
@@ -1175,11 +1230,53 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
         issues.append(f"carve-out file leaked into the slow legs: {sorted(slow_leg & carve_out)}")
     if carve_out & ENV_BROKEN_FILES:
         issues.append(f"carve-out/env-broken overlap: {sorted(carve_out & ENV_BROKEN_FILES)}")
+    # ABSENT is not the same as EMPTY. A repo that has not adopted the lane
+    # has no `on_demand:` key and is fine; a repo that declares the key and
+    # leaves it empty has a no-op exclusion — the expensive file is back on
+    # the merge path with a lane that reads as a saving. Same polarity as
+    # `duration_issues`' durations guard (absent = not adopted = PASS, a
+    # present-but-unusable declaration = RED), so adopting the tool without
+    # the lane is not a portability regression.
+    if "on_demand" in manifest and not on_demand:
+        issues.append("on_demand lane is present but EMPTY — it excludes nothing")
+    if on_demand & slow:
+        issues.append(f"on-demand/slow overlap (still on the merge path): {sorted(on_demand & slow)}")
+    # REACHABLE but DORMANT with the current config: `fast_pool()` filters the
+    # lane out, and `push_extra` is EMPTY today, so this branch does not fire on
+    # the real manifest. It fires when a `push_extra` entry names a lane file —
+    # `push_legs()` appends `push_extra` into the halves AFTER `fast_pool`'s
+    # filter, so such an entry lands in a fast leg and is caught here.
+    #
+    # (This comment has now been wrong in BOTH directions: first it claimed the
+    # branch was "structurally unreachable in every constructible state" — it is
+    # not — and then, over-corrected, that it "fires today" — it does not. A
+    # claim about reachability is checkable, and both versions were checked.
+    # State reachability precisely, and do not restate the history twice: an
+    # earlier draft of this very paragraph concatenated a second copy of itself
+    # mid-line.)
+    if fast & on_demand:
+        issues.append(f"on-demand file leaked into a fast leg: {sorted(fast & on_demand)}")
+    if on_demand & carve_out:
+        issues.append(f"on-demand/carve-out overlap: {sorted(on_demand & carve_out)}")
+    if on_demand & ENV_BROKEN_FILES:
+        issues.append(f"on-demand/env-broken overlap: {sorted(on_demand & ENV_BROKEN_FILES)}")
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
+    # DEAD-ENTRY check, mirroring the carve-out lane's. The membership test
+    # that used to be here was VACUOUS: `classified` had just been updated with
+    # the lane itself, so `f not in classified` was tautologically False and the
+    # branch could never fire. (Its comment also justified the placement with a
+    # NameError that could not happen — `on_demand` is bound at the top of the
+    # function. A guard that cannot fail plus a rationale that cannot be checked
+    # is two defects wearing one.) What actually needs catching is a lane entry
+    # naming a file that does not exist: the exclusion would look healthy while
+    # excluding nothing that runs.
+    for f in sorted(on_demand):
+        if not (TESTS_DIR / f).exists():
+            issues.append(f"on-demand {f} has no tests/{f} (dead entry)")
     for f in manifest.get("push_extra", []):
         if f in classified:
             issues.append(f"push_extra {f} is a classified top-level file (move it into a surface)")
@@ -1291,7 +1388,7 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
     # #3400: the balance invariant is DURATION once measured weights exist.
     # LPT packs by weight, so a heavy file dumped entirely on one half is
     # caught even when the counts look even — and a correct duration pack may
-    # legitimately carry very different counts (195 vs 325 on the real pool).
+    # legitimately carry very different counts.
     # The ±3 count check would red that correct split, so it now applies only
     # to manifests with no durations map at all (e.g. the small test
     # fixtures, or a repo that has not adopted durations).
@@ -1437,6 +1534,10 @@ def duration_issues(manifest: dict) -> list[str]:
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
+    # Same reason as `integrity()`: an on-demand file is classified into a LANE
+    # rather than a surface, and its measured cost belongs here precisely
+    # because it is the lane's whole justification.
+    classified.update(on_demand_files(manifest))
     for name in durations:
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
@@ -2017,7 +2118,17 @@ def surface_audit(manifest: dict, repo: Path | None = None,
 
     return {
         "surfaces": by_surface,
-        "no_surface": sorted(r for r in disk if not registered_in(r)),
+        # A lane file is unregistered ON PURPOSE — that is what the lane means.
+        # Reporting it under "files in NO surface" reads as drift, and the
+        # obvious fix for that reading is to re-register the file into a
+        # surface, which silently puts it back on the merge gate. The two
+        # states are separated instead of merged.
+        "no_surface": sorted(r for r in disk
+                             if not registered_in(r)
+                             and r not in on_demand_files(manifest)),
+        "on_demand": sorted(r for r in disk
+                            if not registered_in(r)
+                            and r in on_demand_files(manifest)),
         "duplicates": {s: d for s, d in duplicates.items() if d},
         "coverage_gaps": coverage_gaps,
         "uncovered": [r for r in uncovered if r["surface"] is None],
@@ -2172,6 +2283,18 @@ def render_surface_audit(report: dict) -> str:
                  + (":" if nosurf else " — none"))
     for f in nosurf:
         lines.append(f"  {f} <- (unregistered; a tests/ change cannot select it)")
+    # Reported from the report's own `on_demand` key, populated by
+    # `surface_audit()` — which is the function that has the manifest. (An
+    # earlier version of this line read `report["manifest"]`, a key the report
+    # does not carry, so it silently evaluated to an empty list and the note
+    # never appeared. A fix that cannot fail is not a fix.)
+    lane = report.get("on_demand", [])
+    if lane:
+        lines.append(f"in the on_demand lane ({len(lane)}) — unregistered on "
+                     f"purpose; they RUN but do not gate the merge:")
+        for f in lane:
+            lines.append(f"  {f}")
+        lines.append("")
     lines.append("")
 
     dupes = report["duplicates"]

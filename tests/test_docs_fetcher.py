@@ -448,8 +448,10 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     assert stats["files_staged"] == 2
 
     def _docs_count():
+        # D10 (#5026): a document is a :Source.
         rows = sdk._get_proj().g.query(
-            "MATCH (d:Document) RETURN count(d)").result_set
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "RETURN count(s)").result_set
         return int(rows[0][0])
 
     org_root = GitHubDocsIndexer.org_root(TEAM_A)
@@ -461,7 +463,8 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     assert _docs_count() == 2
     # doc ids are repo-unique: {owner}/{repo} is embedded in the rel path
     rows = sdk._get_proj().g.query(
-        "MATCH (d:Document) RETURN d.id ORDER BY d.id").result_set
+        "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+        "RETURN s.url ORDER BY s.url").result_set
     assert rows == [["doc_acme/repo1/main/docs/README.md"],
                     ["doc_acme/repo1/main/docs/guides/setup.md"]]
 
