@@ -568,13 +568,16 @@ _KIND_FIELD_BY_ENTITY = {
 }
 
 #: #4199 — trace-entry key recording that the arm measured an EMPTY scope
-#: (the ``scope_kinds`` predicate selected NO nodes). Present only on a
-#: vector entry whose scope probe ran and whose read did not FAIL. Absent
-#: means one of: the entry measured a non-empty scope, was never scoped, or
-#: is a FAILURE record — a failure keeps its own ``reason`` and the key
-#: absent so that an empty scope cannot launder it (#4199 review P2; see
-#: :func:`run_vector_query`'s ``failure`` argument). The value is
-#: :data:`VECTOR_SCOPE_EMPTY`.
+#: (the ``scope_kinds`` predicate selected NO nodes). Present only when the
+#: probe ran, found the scope empty, and the read did not FAIL — a failure
+#: keeps its own ``reason`` with the key absent, so an empty scope cannot
+#: launder it (#4199 review P2; see :func:`run_vector_query`'s ``failure``
+#: argument). The key's ABSENCE therefore means only "no empty-scope
+#: measurement to report" and NOT "the scope was non-empty"; read ``reason``
+#: to tell those apart. Absence has more cases than any list has captured
+#: (a never-scoped arm, a FAILURE, a probe that itself raised — it fails
+#: closed and reports ``no_embeddings``): do not enumerate them; the presence
+#: predicate above is the contract. The value is :data:`VECTOR_SCOPE_EMPTY`.
 VECTOR_SCOPE_KEY = "scope"
 #: The arm's ``scope_kinds`` selected no nodes. An empty scope is a category
 #: error for ``no_embeddings`` (#2952's deliberate rule — see
