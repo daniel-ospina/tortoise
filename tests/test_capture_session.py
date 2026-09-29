@@ -1987,6 +1987,84 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
+def test_extract_session_v2_over_cap_supersession_batch_warns_bounded(
+        sdk, monkeypatch):
+    """#5654: CAPTURE applies the raw extractor batch with NO Layer-1 gate
+    (#2243 proposes a Layer-1 cap on the commit API's ``supersessions`` list —
+    PR #5648, still open at this base — which would not cover the capture
+    path anyway), so an over-cap batch reaches
+    ``commit_ops.apply_supersessions``, whose fail-open loop emitted ONE warn
+    PER RECORD. The per-record emission is
+    now bounded (the first N, then ONE summary carrying the total) — an
+    emission bound only: the batch below places records that MUST still be
+    folded AFTER the warn budget is exhausted, so the loop is proven not to
+    have become a write bound."""
+    import tortoise.extractor_v2 as ev2
+
+    # Hard-coded, deliberately NOT imported from commit_ops: an expected
+    # value taken from the thing under test asserts nothing (#5654 brief).
+    BOUND = 20
+    OVER_CAP = 25
+
+    # 25 records whose successor resolves nowhere — each warns exactly once
+    # (the entity lane's dangling-successor skip) and is skipped fail-open.
+    malformed = [
+        {"superseded": f"ghost-ref-{i}",
+         "supersedes_by": f"ghost-successor-{i}",
+         "evidence": "malformed batch record"}
+        for i in range(OVER_CAP)
+    ]
+    # 3 records that MUST still fold. The fold-order pre-pass keeps payload
+    # order here (no chain edges among them), so these sort AFTER the
+    # malformed block — they are only reached once the warn budget is spent.
+    applied_pairs = []
+    for k in range(3):
+        target, successor = f"bulk-target-{k}", f"bulk-successor-{k}"
+        sdk.create_entity("object", target, objectKind="core:strategy")
+        sdk.create_entity("object", successor, objectKind="core:strategy")
+        applied_pairs.append((target, successor))
+
+    supersessions = malformed + [
+        {"superseded": t, "supersedes_by": s, "evidence": "must still fold"}
+        for t, s in applied_pairs
+    ]
+    payload = {"session_id": "sess_5654", "story_arc": "",
+               "entities": [], "points": [], "operators": [], "events": [],
+               "supersessions": supersessions,
+               "client_commit_id": "ccid5654"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_5654", "2026-08-20T00:00:00+00:00")
+
+    assert meta["errors"] == [], meta
+    # (1) BOUNDED emission: one warn per malformed record would be 25; the
+    # bound emits BOUND of them and adds exactly ONE summary warn.
+    sup_warns = [w for w in meta["warnings"] if "supersession" in w]
+    assert len(sup_warns) == BOUND + 1, (
+        f"expected {BOUND} per-record warns + 1 summary, got "
+        f"{len(sup_warns)}: {sup_warns!r}")
+    assert len(sup_warns) < OVER_CAP, (
+        "emission must stay below one-warn-per-record")
+    # (2) the summary carries the batch size and the true warning total, so
+    # the amplification is still observable even when it is not emitted.
+    summary = sup_warns[-1]
+    assert "supersession batch of" in summary, summary
+    assert f"{len(supersessions)} record(s)" in summary, summary
+    assert f"{OVER_CAP} per-record warning(s) raised" in summary, summary
+
+    # (3) NO DATA LOSS: every foldable record still landed. These three are
+    # the last records in fold order, i.e. processed after suppression — a
+    # write bound would have dropped them.
+    proj = sdk._get_proj()
+    for target, successor in applied_pairs:
+        rows = proj.g.query(
+            "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+            params={"n": target}).result_set
+        assert rows and rows[0][0] == "superseded", (target, rows)
+        assert rows[0][1] == successor, (target, rows)
+
+
 # ── #2164 Task 4: pt_ capture routing + terminal guard + unresolved-ref
 #    meta warnings (indicators 3 + 4) — end-to-end through
 #    _extract_session_v2 (each test fails if the helper's pt_ branch were
@@ -2431,6 +2509,79 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     c_state = _entity_fold_state(proj, "successor-C")
     assert c_state is not None and (c_state[0] or "live") == "live", c_state
     assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
+
+
+def test_apply_supersessions_long_successor_dedup_and_legacy_prefix(sdk):
+    """#5370 (indicators 3+4): the fold stores the FULL successor name, and
+    the dedup/keep-first compare accepts EITHER the full name (rows folded
+    after the fix) or its 200-char prefix (rows folded before it).
+
+      * a same-successor re-ingest on the NEW (full) stored form is a SILENT
+        dedup — no spurious divergence;
+      * a LEGACY row (the old 200-char prefix) re-ingested with the full name
+        is still an idempotent dedup (applied=0, stored value kept) — never a
+        keep-first "conflict" — with the loud unverified-identity warning the
+        #2164 round-2 review added;
+      * a genuinely DIVERGENT successor is still keep-first (applied=0, stored
+        value untouched, loud conflict warning).
+    """
+    from tortoise.commit_ops import apply_supersessions
+
+    long_name = "gh-issue-title-" + ("y" * 240)
+    other_name = "other-title-" + ("z" * 240)
+    assert len(long_name) > 200 and len(other_name) > 200
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "long-target")
+    sdk.create_entity("object", long_name)
+    sdk.create_entity("object", other_name)
+    record = [{"superseded": "long-target", "supersedes_by": long_name,
+               "evidence": "#5370"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, record, session_id="s5370_a",
+                                  warn=warns.append)
+    assert applied == 1 and warns == [], (applied, warns)
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name), _entity_fold_state(proj, "long-target")
+
+    # (1) NEW full form: same-successor re-ingest → SILENT dedup.
+    applied2 = apply_supersessions(proj, sdk, record, session_id="s5370_b",
+                                   warn=warns.append)
+    assert applied2 == 0, "same successor must dedup, not re-fold"
+    assert warns == [], f"full-form dedup must be silent: {warns}"
+    assert _object_superseded_events(proj) == 1
+
+    # (2) LEGACY row (pre-#5370 200-char prefix): a full-name re-ingest still
+    #     dedups — never a keep-first conflict — and says so loudly.
+    proj.g.query("MATCH (o:Object {name:'long-target'}) "
+                 "SET o.supersededBy=$p", params={"p": long_name[:200]})
+    applied3 = apply_supersessions(proj, sdk, record, session_id="s5370_c",
+                                   warn=warns.append)
+    assert applied3 == 0, "legacy prefix must dedup, not re-fold"
+    assert len(warns) == 1, warns
+    # Round 3: the warning deliberately does NOT claim the stored value is a
+    # "legacy fold" — the same arithmetic is reached by a POST-#5370 row whose
+    # successor name is exactly 200 chars (a genuine full name). Pin the
+    # neutral wording, not a legacy claim.
+    assert "identity beyond that prefix is not verified" in warns[0], warns
+    assert "legacy" not in warns[0], \
+        f"the warning must not blame a legacy fold: {warns}"
+    assert "conflict with" not in warns[0], \
+        f"legacy dedup must not read as a divergence: {warns}"
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name[:200])
+    assert _object_superseded_events(proj) == 1
+
+    # (3) genuinely DIVERGENT successor → keep-first + loud conflict warning.
+    divergent = [{"superseded": "long-target", "supersedes_by": other_name,
+                  "evidence": "#5370"}]
+    applied4 = apply_supersessions(proj, sdk, divergent, session_id="s5370_d",
+                                   warn=warns.append)
+    assert applied4 == 0, "divergent successor must never blind-overwrite"
+    assert _entity_fold_state(proj, "long-target") == (
+        "superseded", long_name[:200])
+    assert "keep-first" in warns[-1], warns
+    assert _object_superseded_events(proj) == 1
 
 
 def test_apply_supersessions_chain_converges_both_orders(sdk):
@@ -4527,6 +4678,47 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     assert st.get("session_capture_last_error_pi"), \
         "off-switch MCP attempt must record the per-harness last error"
     assert st.get("session_capture_receipt_pi") is None
+
+
+def test_mcp_failed_recapture_names_the_stored_harness(tmp_path, monkeypatch):
+    """#4898: the MCP capture's failure path must attribute
+    ``session_capture_last_error_<harness>`` to the SESSION's stored harness,
+    never to the tool's raw ``harness`` argument — the same stored-or-claimed
+    resolution (``_observed_capture_harness``) the REST capture applies to both
+    per-harness keys (#3681 / #3700).
+
+    The forged replay below is the #3681 shape, one key down: a ``claude``
+    session re-captured with ``harness='cursor'`` and a FAILING payload. Before
+    the fix the error is written under the CALLER's declaration
+    (``session_capture_last_error_cursor``), so the dashboard paints the
+    failure on the cursor row — a harness the server's own Session record
+    contradicts.
+
+    RED mutation: restore ``_record_capture_last_error(org_id, harness, ...)``
+    (the raw tool argument) → the key becomes ``..._cursor`` → the stored-
+    harness assertion fails. GREEN: the key names the stored ``claude`` and no
+    cursor key is written.
+    """
+    from tortoise.mcp_server import tortoise_session_capture
+    with _mcp_team_context(tmp_path, monkeypatch):
+        # 1) a successful capture stamps the Session's stored harness = claude
+        first = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-4898")
+        assert not first.get("error"), first
+        # 2) forged replay: SAME session_id, a DIFFERENT caller harness, and a
+        # payload that FAILS at the empty-transcript 422 gate (the error path)
+        failed = tortoise_session_capture(
+            conversation=[], harness="cursor", session_id="s-4898")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert failed.get("status") == 422, failed
+    # the registered key set is always present (None-valued when unset), so
+    # read the SET keys — exactly one: the Session's stored harness.
+    error_keys = {k for k, v in st.items()
+                  if k.startswith("session_capture_last_error_") and v}
+    assert error_keys == {"session_capture_last_error_claude"}, (
+        f"a forged caller harness named the last-error key: {sorted(error_keys)}")
+    assert st.get("session_capture_last_error_cursor") is None, (
+        "the caller's declared harness claimed the last-error key")
 
 
 def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
