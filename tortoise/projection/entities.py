@@ -1488,8 +1488,11 @@ class _EntityHandlers:
         supported-by-``_norm`` record (#325/#3722's raw-vs-normalized class).
 
         Returns the ``(seq, old_id, successor_id)`` CORRECTS endpoints when a
-        STAMP was applied and the record names a successor (``PointSuperseded``'s
-        ``new_id`` / ``PointInvalidated``'s ``corrected_by``), else ``None``.
+        STAMP was applied and the record names a NON-EMPTY writable successor
+        (``PointSuperseded``'s ``new_id`` / ``PointInvalidated``'s
+        ``corrected_by``), else ``None`` — so every returned element is a
+        writable ``str`` and the callers' ``list[tuple[int, str, str]]``
+        buffers are accurate.
         The caller BUFFERS the triple and re-applies it after every creation —
         this pass is chronological, so the inline MERGE no-ops when the
         successor is created LATER in the journal, and only the trailing
@@ -1515,11 +1518,18 @@ class _EntityHandlers:
                 ev.get("new_id"))
         if not apply_stamp:
             return None
+        from tortoise.projection import _writable_id
         rid = ev.get("id")
         successor = ev.get("new_id") or ev.get("corrected_by")
-        if not rid or not successor:
-            # No named successor (a bare invalidate, or a supersede the fold's
-            # own applicability guard dropped): nothing to defer.
+        # Gate the BUFFERED triple to non-empty writable strs so the declared
+        # ``tuple[int, str, str]`` is the value actually handed back: the
+        # successor is read raw from the record, and a truthy non-str / NUL /
+        # lone-surrogate one would otherwise ride into the callers' buffers
+        # typed as ``str``. Nothing is lost by skipping it — the inline fold
+        # already refused the edge through ``_merge_corrects_edge`` with a
+        # warning, and the sweep would refuse it again.
+        if (not rid or not successor or not _writable_id(rid)
+                or not _writable_id(successor)):
             return None
         return (seq, rid, successor)
 
