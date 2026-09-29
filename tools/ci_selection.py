@@ -261,6 +261,9 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/_redirects",
                    "website/apps/dashboard/public/404.html",
                    "website/apps/dashboard/src/",
+                   # #3048: `functions/assets/[[path]].ts` (the missing-asset 404)
+                   # is already covered by the `website/apps/dashboard/functions/`
+                   # directory entry above, so no entry is added for it here.
                    # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
                    # the Stripe ?session_id= return) are BUILT here, so a change to
                    # the server-side return path must run the guard too — otherwise
@@ -478,6 +481,17 @@ SOURCE_PATTERNS = {
             # token-flow fix must change. Paired with CORE_ALSO so the
             # core-registered half is not dropped by the named-surface match.
             "tortoise/oauth.py",
+            # #3496: the consent page pins its browser auth client to a CDN
+            # specifier whose version must equal the VENDORED bundle the
+            # behavioural harness executes (test_oauth_consent_pkce.py, api).
+            # `website/` is in NON_PYTHON_PREFIXES, so a vendor-only bump matched
+            # no pattern and fell through to tier-1 smoke — the version pin
+            # would never run on the PR that can break it, and neither would the
+            # harness that executes the very file being bumped (the
+            # #1349/#3332/#4171 silent-drop class). `_selection_relevant()` lets
+            # a SOURCE_PATTERNS match beat the prefix filter, so this entry is
+            # what makes the bump select `api`.
+            "website/apps/dashboard/public/vendor/",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
             # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a

@@ -87,17 +87,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     MITIGATES target triples to the re-derived ids, else Layer-1 referential
     integrity fails", #1272).
 
-    ⚠️ Scope, stated honestly (an earlier revision of this docstring claimed
-    the hosted path was immune — it is NOT, and the claim was falsified by the
-    #4716 PR review; **#4970** carries the residual): the hosted commit (``hosted_api._execute_commit_writes`` §5/§7)
-    passes the RAW payload ``Operator`` models and creates its points with
-    ``create_point(..., dedup=True)``, whose internal re-key to an
-    existing-content node is NOT fed back into the operator refs — so a graph
-    holding the point's content under a non-``pt_`` id reproduces the identical
-    silent drop on the hosted lane. Wiring the remap there is a separate
-    change (it needs §5 to surface the resolved ids); #4716 deliberately scopes
-    this helper's CALL SITE to the capture commit, not its correctness claim to
-    the hosted lane.
+    ⚠️ Scope (updated by **#4970**): BOTH write paths now wire this remap —
+    the call site is no longer capture-only. The hosted commit
+    (``hosted_api._execute_commit_writes`` §5/§7) used to pass the RAW payload
+    ``Operator`` models while its ``create_point(..., dedup=True)`` re-keyed
+    to an existing-content node, so the refs named nothing and the edge
+    dropped silently (#4654). #4970 closed that residual: the hosted §5 point
+    loop surfaces the id ``create_point`` actually RESOLVED to (its
+    ``point_resolved_ids`` payload→graph map) and §7 passes the refs through
+    THIS helper — the same graph-id precondition the capture commit satisfies.
 
     Pure and total: only refs present in ``id_map`` are rewritten, everything
     else (graph ids, event ids, empty refs) passes through untouched — so an
@@ -106,6 +104,18 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     ``commit_schema`` Operator models; rewritten entries are copies, entries
     needing no change are returned as the original object, and the INPUTS are
     never mutated in place.
+
+    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids, and ONLY by
+    payload ids (ONE id space): a key the payload never named resolves
+    nothing, and a server-recomputed id (``supersede_id``) mixed into the map
+    could collide with another record's payload id (``point_content_id``
+    hashes content only). On a ``supersede`` reconcile action the payload
+    point id IS the PRIOR node's graph id, and the map keys it to the RESOLVED
+    successor — deliberate, and consistent with ``supersede_point``'s own edge
+    transfer (an operator edge on a superseded point belongs to its
+    successor); pinned by
+    ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
+    test_supersede_operator_ref_follows_the_successor``.
     """
     if not id_map:
         return list(operators or [])
@@ -140,6 +150,38 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     return out
 
 
+def reverse_point_id_map(id_map: dict) -> dict:
+    """Invert a payload-id → resolved-graph-id map for reason lookups.
+
+    ``apply_payload_operators`` resolves a MITIGATES reason from the SAME ref
+    it passes to ``sdk.mitigate_operator`` — but that ref has already been
+    remapped into GRAPH-id space, while the caller's content lookup is keyed
+    by PAYLOAD id. Handing the helper the naive resolver then degrades a
+    re-keyed dampener's reason to its bare graph id (#4716 review P1,
+    reproduced end-to-end). This builds the reverse lookup both write paths
+    pass as ``point_content_by_id``.
+
+    **FIRST payload id wins** when several ids resolved to one graph node
+    (``setdefault`` over the map's insertion order). The rule is stated HERE,
+    once, so the two call sites cannot drift on it. Both write paths key the
+    map by PAYLOAD point id alone, so the winner is always a real
+    ``payload.points`` entry and the reason resolves: two ids resolve to one
+    node only when content+kind match (``_find_point_by_content``), so their
+    normalized content is equal and either winner yields the same reason
+    TEXT. ⛔ Do NOT add a non-payload key (e.g. the server-recomputed
+    ``supersede_id``) to a caller's map: it has no ``payload.points`` entry,
+    so if it won the lookup the reason would degrade to the bare graph id —
+    exactly the #4716 review-P1 degradation this helper exists to prevent —
+    and, being a second id space (``point_content_id`` hashes CONTENT only),
+    it could collide with another record's payload id. See the §5 note in
+    ``hosted_api._execute_commit_writes``.
+    """
+    reverse: dict[str, str] = {}
+    for payload_id, resolved_id in (id_map or {}).items():
+        reverse.setdefault(resolved_id, payload_id)
+    return reverse
+
+
 def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     """#4716 Part 1 (adjacent hole) — same remap for the supersession
     reference that is a payload id BY CONSTRUCTION.
@@ -149,8 +191,12 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
     id). A ``supersedes_by`` whose payload point resolved to an existing graph
     node under a different id is the SAME two-id-space mismatch the operators
-    had — ``apply_supersessions`` would warn ``point supersession ref '<payload
-    id>' not found — skipped (fail-open)`` and the CORRECTS fold would be lost.
+    had: ``sdk.supersede(prior, '<payload id>')`` targets a node that does not
+    exist, RAISES, and ``apply_supersessions`` swallows it as ``point
+    supersede '<prior>' → '<payload id>' failed: …`` — so the CORRECTS fold
+    would be lost. (It is NOT the ``point supersession ref '<payload id>' not
+    found — skipped (fail-open)`` warning: that fires only when the
+    already-graph-id ``superseded`` side is absent.)
 
     ``superseded`` is deliberately NOT remapped (code-review P2): it is the
     record's LANE DISCRIMINATOR downstream — ``apply_supersessions`` dispatches
@@ -234,11 +280,69 @@ def apply_payload_operators(proj, sdk, operators: list, *,
 
     ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
     dict is the MITIGATES same-call lookup and is keyed on
-    ``(src, dst, op_type)``, while ``create_operator`` mints unconditionally
-    (#4971) — two payload records that re-key onto the SAME graph triple each
-    create their own node, and a dict keyed on the triple would silently drop
-    the earlier node's id from the provenance set, leaving it unstamped and
-    invisible (the very #4936 defect this return exists to close).
+    ``(src, dst, op_type)``; it must never double as the provenance set
+    (#4936). Before #4971 the two could differ — ``create_operator`` mints
+    unconditionally, so two payload records that re-keyed onto the SAME
+    graph triple each created their own node, and a dict keyed on the triple
+    would silently drop the earlier node's id from the provenance set,
+    leaving it unstamped and invisible. #4971's guard (below) now makes the
+    repeat a no-op, so a triple is unique within a call and the two agree
+    again — but the LIST stays the caller's contract: it is the ordered set
+    of ids this call CREATED, which is what a provenance stamp needs and what
+    a caller must never widen by looking at the MITIGATES dict.
+
+    ⛔ #4971 — IDEMPOTENCY GUARD, keyed on the RESOLVED ``(op_type, src,
+    dst)`` triple. ``create_operator`` mints a fresh ULID on every call with
+    no existence probe, so a commit (or a failed-capture retry) that reaches
+    this pass twice mints a SECOND operator Point for one bridge — and each
+    duplicate is a separately weighted edge (``weights.py::
+    compute_operator_weight`` is per op id), so EP propagates the same link
+    twice (silent belief inflation). The probe below is the eval lane's
+    dup-edge probe (``tools/longmem_eval/ingest_v2.py``, #1369 review P2)
+    hoisted here so the hosted (``hosted_api._execute_commit_writes`` §7) and
+    capture (``sdk._extract_session_v2``) paths share one discipline — the
+    eval lane keeps its own inline copy (it does NOT call this helper).
+
+    ⚠️ The key is the RESOLVED triple, NEVER the payload id: on a re-keyed
+    endpoint the payload id names nothing in the graph (it resolved to a
+    pre-existing node under a DIFFERENT id), so a payload-keyed probe would
+    never match and the duplicate would survive — the identical reasoning the
+    event probe in ``ingest_v2.py`` records ("the key ... NEVER the payload
+    ``id``: extractor_v2's prior-graph search REUSES a prior ... so the
+    payload ``id`` is NOT a stable idempotency key"). It is exactly why the
+    ID-SPACE PRECONDITION above is a precondition: this helper can only be
+    idempotent if its caller handed it graph ids.
+
+    ``direction`` is deliberately NOT part of the key — the acceptance is
+    ONE node per ``(op_type, src, dst)`` triple, matching the eval lane's
+    probe (so the FIRST write's direction wins; pinned by
+    ``test_direction_is_not_part_of_the_key_first_write_wins``). On a repeat
+    the guard ``continue``s (the eval lane's semantics), so the node is
+    neither re-created NOR added to the returned list: the return contract is
+    CREATED ids only, and a caller stamping provenance must never claim a node
+    a prior commit created (the #4936 rule above). Because the guard probes
+    the GRAPH, a duplicate triple WITHIN one payload collapses too, exactly as
+    it does in the eval lane — the same belief inflation otherwise survives as
+    a within-call duplicate (and that is why #4936's
+    ``test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats``
+    now pins the collapsed count instead of the old two-node list).
+
+    ⚠️ SCOPE — the probe is SINGLE-TARGET: ``idx:1`` is the only target it
+    reads, because every caller here passes ``[dst]``. ``sdk.create_operator``
+    accepts ``target_ids: list`` and IS called with several targets elsewhere
+    (``sdk.py:9895``), so a future MULTI-TARGET caller would get the first
+    target idempotent and the rest duplicated. Widen the probe to read the
+    whole target set before routing such a caller here.
+
+    ⚠️ The MITIGATES fallback below is IMPL-only (it hardcodes
+    ``op_type:'IMPL'``), so ``continue``-ing a skipped NAND leaves a
+    NAND-targeted mitigation with nothing to attach to and it is dropped with
+    a warning. Not reachable today — ``OperatorTarget.op_type`` is
+    ``Literal["IMPL"]`` (``commit_schema.py:464``) and the extractor emits
+    ``op_type: "IMPL"`` (``extractor_v2.py:5868``) — but this guard is the
+    first thing that makes that fallback load-bearing for a skipped same-call
+    operator, so extend the fallback (``t_op_type`` + the mapped edge) in the
+    same change that widens the schema.
     """
     target_op_ids: dict[tuple, str] = {}
     created_ids: list[str] = []
@@ -250,6 +354,26 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         if not op_type or not src or not dst:
             _logger.warning(
                 "operator write skipped (inputs missing?): %r", op)
+            continue
+        # #4971 — (op_type, src, dst) idempotency probe, on the RESOLVED
+        # triple (see the docstring; a payload-keyed probe never fires on a
+        # re-key). The relation type is mapped exactly as ``create_operator``
+        # maps it for the edge it writes (part/whole ops use ``hasPart``), so
+        # the probe reads the same edge the write would have created rather
+        # than inlining a raw op_type that would make it miss on those ops.
+        _edge_type = ("hasPart" if op_type not in ("IMPL", "NAND")
+                      else op_type)
+        _dup = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
+            f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
+            f"MATCH (o)-[:{_edge_type} {{idx:1}}]->(d) WHERE d.id = $dst "
+            "RETURN count(*) LIMIT 1",
+            params={"t": op_type, "src": src, "dst": dst}).result_set
+        if _dup and _dup[0][0]:
+            # Already bridged by an earlier commit/retry — a no-op. Do NOT
+            # record it in target_op_ids: the MITIGATES second pass falls
+            # back to its own Cypher probe and finds the pre-existing operator
+            # (whose ``mitigate_operator`` is itself idempotent).
             continue
         try:
             result = sdk.create_operator(

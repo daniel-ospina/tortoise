@@ -64,7 +64,10 @@ def _markdown_files(root: Path | str) -> list[Path]:
 
 
 def _cmd_rebuild(args):
+    from tortoise.log import TornTailResurrectionError
+
     print(f"Rebuilding from {args.dir} → {args.db}")
+    proj = None
     try:
         from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
@@ -177,15 +180,33 @@ def _cmd_rebuild(args):
         # so a scripted caller cannot read the refusal as success.
         print(f"Refused: {e}", file=sys.stderr)
         return 1
+    except TornTailResurrectionError as e:
+        # #3316: same contract as the episodic refusal above — a journal whose
+        # torn trailing record dropped a removal must NOT be rebuilt (replaying
+        # without it resurrects the state it removed), and the operator must
+        # see the refusal as a message, not a traceback. Nothing was wiped.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
-        from tortoise.log import EventLog  # noqa: I001
+        from tortoise.log import EventLog, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import fold
         import os
         events = []
-        for f in sorted(os.listdir(args.dir)):
-            if f.endswith('.jsonl'):
-                events.extend(EventLog(os.path.join(args.dir, f)).read_all())
+        try:
+            for f in sorted(os.listdir(args.dir)):
+                if f.endswith('.jsonl'):
+                    file_log = EventLog(os.path.join(args.dir, f))
+                    chunk = file_log.read_all()
+                    # #3316: the in-memory fallback is a replay engine too — a
+                    # dropped torn trailing removal record must not be folded
+                    # into an in-memory "success".
+                    refuse_torn_tail_revival(
+                        file_log.torn_tail_revival_records())
+                    events.extend(chunk)
+        except TornTailResurrectionError as refusal:
+            print(f"Refused: {refusal}", file=sys.stderr)
+            return 1
         points = fold(events)
         statements, ops = 0, 0
         for p in points.values():
@@ -194,6 +215,11 @@ def _cmd_rebuild(args):
             else:
                 statements += 1
         print(f"Done: {len(points)} total ({statements} statements, {ops} operators) [in-memory, no DB]")
+    finally:
+        # #3316: close the embedded projection on EVERY exit path (the refusal
+        # paths too) so a refusal cannot leave a redislite server behind.
+        if proj is not None:
+            proj.close()
 
 def _cmd_demo(args):
     from pathlib import Path  # noqa: I001
@@ -357,13 +383,27 @@ def _cmd_reconcile(args):
         return 1
 
     try:
-        from tortoise.log import EventLog
+        from tortoise.log import EventLog, TornTailResurrectionError, refuse_torn_tail_revival  # noqa: I001
         from tortoise.projection import FalkorProjection
     except ImportError:
         print("Tortoise not installed. Run: pip install -e negation-game-explorations/tortoise", file=sys.stderr)
         return 1
 
-    events = EventLog(log_path).read_all()
+    # #3316: ``reconcile`` is a replay engine too — it folds journal records
+    # into the graph, so a torn trailing REMOVAL record must not be applied
+    # over (``EventRecorded``'s connector leg deletes a superseded
+    # ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source``).
+    # Refused before the projection is even opened.
+    log = EventLog(log_path)
+    try:
+        events = log.read_all()
+        refuse_torn_tail_revival(log.torn_tail_revival_records())
+    except TornTailResurrectionError as refusal:
+        # Same operator contract as ``tortoise rebuild``: the refusal is the
+        # intended outcome for this journal, so it is a message and a non-zero
+        # exit, never a traceback. Nothing has been applied.
+        print(f"Refused: {refusal}", file=sys.stderr)
+        return 1
 
     proj = None
     try:
@@ -649,7 +689,9 @@ def _cmd_init(args):
     except ValueError as e:
         # Bad --path (e.g. relative) — clean CLI error, not a traceback (#715).
         # #720 P2 conf 95: mask userinfo — unsupported-scheme URIs fall into
-        # RELATIVE_PATH_ERROR with the RAW URI embedded (no-op for plain paths).
+        # RELATIVE_PATH_ERROR with the RAW URI embedded (a plain path with no
+        # '@' passes through unchanged; #2987 fails closed on any other.
+        # scheme-less line carrying an '@').
         print(f"  ❌ Invalid DB path: {_mask_uri_userinfo(str(e))}")
         return 1
 
@@ -1801,7 +1843,12 @@ def _resolve_config_path(include_env: bool = True, *,
       surfaces that transmit prompts (the per-turn volunteer reflex + the
       session-start hosted digest) resolve their identity from the user-global
       config only; a repo-supplied .tortoise must never authorize transmission
-      to a host the repo (attacker-controllable) chose.
+      to a host the repo (attacker-controllable) chose. The transcript-upload
+      family (#3660 — `session capture` / `session probe` / `session verify` /
+      `session list` / `session view` / `session drain` / `sessions import`)
+      resolves through `_resolve_transmit_config()`, which uses this
+      `global_only` FILE posture but leaves `include_env=True` — see that
+      function's docstring for the divergence.
     """
     import json as _json
     import os as _os
@@ -1843,6 +1890,46 @@ def _resolve_config_path(include_env: bool = True, *,
         api_url = config.get("api_url") or "https://api.premiselabs.co"
         return path, config, api_key, api_url
     return None, None, None, None
+
+
+def _resolve_transmit_config() -> tuple[Path | None, dict | None, str | None, str | None]:
+    """Resolve identity for a TRANSMITTING surface — the cwd file is excluded.
+
+    Every subcommand that reaches this resolver — `session capture`,
+    `session probe`, `session verify`, `session list`, `session view`,
+    `session drain` and `sessions import` — resolves its identity here, so the
+    exchange below applies to all of them (the resolver runs before dispatch in
+    `_cmd_session`, so even the read-only subcommands are narrowed). A
+    repo-committed `./.tortoise` is attacker-controllable and must never choose
+    the host a transcript — or a stored Bearer key — is sent to; skipping the
+    cwd candidate is what makes those surfaces fail CLOSED (no identity → no
+    transmission) instead of quietly filing content at a repo-chosen endpoint.
+
+    ⚠️ What is actually true, and where this DIVERGES from the surfaces the
+    original change claimed to mirror:
+
+    * The cwd `./.tortoise` candidate is excluded, and
+      `~/.tortoise/credentials.json` is the only *FILE* candidate.
+    * The env channel is NOT excluded. This call is
+      `_resolve_config_path(global_only=True)`, which leaves
+      `include_env=True`; `context` and `volunteer` both pass
+      `include_env=False, global_only=True`, so **env alone can still make
+      these surfaces transmit** where it cannot for those two. The
+      "same posture as context/volunteer" claim is FALSE.
+    * The D1.1 co-source rule only stops a bare `TORTOISE_API_URL` from
+      redirecting a *file*-store key. An env-supplied KEY + URL is still one
+      coherent identity that fully chooses the host, and that pair is
+      reachable from a repo-committed harness config (e.g.
+      `.claude/settings.json`'s `env` block, applied to the hook subprocesses
+      this repo installs) — so the env channel remains a complete identity
+      source for the `session capture` / `drain` / `import` uploaders.
+    * Removing env here is a USER-FACING behaviour change (env-keyed setup is
+      documented: `docs/quickstart-cloud.md`) and is PENDING AN OWNER
+      DECISION; it is deliberately not done in the #3660 commit.
+      `test_env_identity_still_honoured_for_capture` pins the current
+      behaviour as a known divergence, not as the desired end state.
+    """
+    return _resolve_config_path(global_only=True)
 
 
 def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
@@ -3535,15 +3622,25 @@ def _cmd_session(args) -> int:
         # error the caller can act on.
         return _cmd_session_drain_best_effort(args)
 
-    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
+    # Transmitting-identity resolver (#2369 D1.2, #3660): this resolver runs
+    # BEFORE dispatch, so the uploaders (`capture`) and the read-only
+    # subcommands (`probe` / `verify` / `list` / `view`) all share it — a
+    # repo/cwd `./.tortoise` must never choose the host they talk to. Note the
+    # env channel remains an identity source here (unlike `context` /
+    # `volunteer`, which pass `include_env=False`); see
+    # `_resolve_transmit_config` for the divergence.
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
     if api_key is None:
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
+        print("No .tortoise config found — session uploads resolve their "
+              "identity from the user-global config only "
+              "(~/.tortoise/credentials.json or TORTOISE_API_KEY); a repo-local "
+              "./.tortoise never chooses the upload host (#3660). Run "
+              "'tortoise init --api-key <key>' first.", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":
@@ -4077,10 +4174,11 @@ def _cmd_session_drain_best_effort(args) -> int:
     # with a traceback. The drain is backgrounded from SessionStart: whatever
     # goes wrong, its contract is exit 0 with the reason on stderr.
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
         if api_key is None:
-            print("spool drain: no .tortoise config — nothing to file",
-                  file=_sys.stderr)
+            print("spool drain: no user-global .tortoise config — nothing to file "
+                  "(a repo-local ./.tortoise never chooses the upload host, "
+                  "#3660)", file=_sys.stderr)
             return 0
         return _cmd_session_drain(api_key, api_url,
                                   getattr(args, "exclude_session_id", None))
@@ -4787,18 +4885,22 @@ def _cmd_sessions_import(args) -> int:
         return 0
 
     try:
-        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+        _cfg_path, _config, api_key, api_url = _resolve_transmit_config()
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=_sys.stderr)
         _record_capture_error(harness, f"invalid config at {e}")
         return 1
     if api_key is None:
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
+        print("No .tortoise config found — session uploads resolve their "
+              "identity from the user-global config only "
+              "(~/.tortoise/credentials.json or TORTOISE_API_KEY); a repo-local "
+              "./.tortoise never chooses the upload host (#3660). Run "
+              "'tortoise init --api-key <key>' first.",
               file=_sys.stderr)
         _record_capture_error(
-            harness, "no .tortoise config found (run 'tortoise init "
-                     "--api-key <key>')")
+            harness, "no user-global .tortoise config found (a repo-local "
+                     "./.tortoise never chooses the upload host, #3660)")
         return 1
     # Validate the URL BEFORE the request try. `Request()` raises ValueError for
     # a scheme-less URL, and the response-phase clause now takes the
@@ -5278,60 +5380,246 @@ def _mask_uri_userinfo(target: str) -> str:
     diagnosability loss and never a leak (it mirrors
     entrypoint.sh::_redact_uri). For well-formed URIs the output is
     unchanged.
+
+    #2987 fail-closed, no-'@' form: '@' is the usual userinfo marker, but it
+    is not the only credential shape. A copy-paste that dropped the '@host'
+    tail leaves `rediss://:pw` (empty user) or `rediss://user:pw`; one that
+    kept the port leaves `rediss://user:pw:6379`. The last-'@' boundary finds
+    nothing in any of them, so all used to pass through verbatim and print
+    the password. The predicate below fails closed on every shape that is not
+    a RECOGNISED-SAFE host; entrypoint.sh::_redact_uri mirrors it, and
+    tests/test_boot_regressions.py pins the two together over an enumerated
+    authority grammar.
+
+    Processing is PER LINE: a line is the unit the boot log emits, so a line
+    must be safe on its own. (The last-'@' rule used to consume a multi-line
+    value ACROSS its newline, masking one line while echoing another, which is
+    exactly the leak #2987 records; both implementations now walk lines.)
+
+    Both implementations are held to one rule at the LINE level: a malformed or
+    absent scheme is treated as "no scheme" (predicate the text after the first
+    '://'), an '@' anywhere on a line the mask did not otherwise change fails
+    closed (a continuation line may carry the userinfo while the scheme sits on
+    an earlier line; an '@' may also precede the scheme, where the
+    last-'@'-after-the-scheme rule never looks), and the authority cut set is
+    the same explicit ASCII set. (RESIDUAL,
+    #2987-followup: a continuation line with a NON-empty user, e.g.
+    `user:pw:6379`, is not distinguishable from prose (`C:\foo`, an exception
+    containing a colon) in this helper, so it is emitted — recorded on the issue
+    rather than guessed at.)
     """
     from urllib.parse import urlsplit
 
     def _scheme_ok(scheme: str) -> bool:
-        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter.
-        return (scheme[:1].isalpha()
-                and all(c.isalnum() or c in "+-." for c in scheme))
+        # RFC 3986 scheme: alpha-led, alnum/+-. thereafter. Restricted to ASCII
+        # to match entrypoint.sh's sed class `[a-zA-Z][a-zA-Z0-9+.-]*` —
+        # `str.isalpha()` alone accepts Unicode letters, which the shell does
+        # not, so a Unicode scheme would mask in one implementation and not the
+        # other.
+        return (scheme[:1].isascii() and scheme[:1].isalpha()
+                and all(c.isascii() and (c.isalnum() or c in "+-.")
+                        for c in scheme))
 
-    out: list[str] = []
-    i = 0
-    while True:
-        j = target.find("://", i)
-        if j < 0:
-            out.append(target[i:])
-            break
-        # Recover the scheme token by walking back from '://' over scheme
-        # characters (stops at prose when the URI is embedded in a message).
-        k = j
-        while k > i and (target[k - 1].isalnum() or target[k - 1] in "+-."):
-            k -= 1
-        scheme = target[k:j]
-        if not _scheme_ok(scheme):
-            out.append(target[i:j + 3])
-            i = j + 3
-            continue
-        if i == 0 and k == 0:
-            # Bare URI — urlsplit is the authoritative scheme parse.
-            try:
-                if not urlsplit(target).scheme:
-                    out.append(target[i:])
+    def _authority_region(rest: str) -> str:
+        """The authority portion of `rest` (everything after '://').
+
+        #2987: bounded by the first path/query/fragment delimiter, quote or
+        ASCII whitespace (`\t\n\v\f\r`) — the SAME cut set as
+        entrypoint.sh::_redact_uri's `candidate="${candidate%%$cut*}"` with
+        `cut=$'[/?#"\047 \t\v\f\r\n]'`. That set is spelled out rather
+        than `[[:space:]]` in BOTH implementations so it is locale-independent
+        (`[[:space:]]` matches NBSP under a UTF-8 locale in the shell but not
+        in this literal set — a parity break). It is deliberately NOT bounded
+        by ':' or '@' (the credential's own shape markers), so the two
+        implementations bound the same region on every input.
+        """
+        for idx, char in enumerate(rest):
+            if char in "/?#\"' \t\n\v\f\r":
+                return rest[:idx]
+        return rest
+
+    def _credential_shaped(region: str) -> bool:
+        """True unless a no-'@' authority is a RECOGNISED-SAFE shape.
+
+        #2987: a missing '@' does not prove there is no password. A copy-paste
+        that dropped the '@host' tail leaves `rediss://:pw` (empty user) or
+        `rediss://user:pw`; one that kept the port leaves
+        `rediss://user:pw:6379`. All are credentials. Only these pass
+        unchanged: the empty region, a plain host with no ':', a single-':'
+        `host:port` whose port is NUMERIC, or a bracketed IPv6 host (`[::1]`)
+        with an optional numeric port. Mirrors entrypoint.sh::_redact_uri's
+        predicate exactly.
+        """
+        if not region:
+            return False
+        if region.startswith("["):
+            _, sep, rest = region[1:].partition("]")
+            safe = bool(sep) and (
+                rest == ""
+                or (rest.startswith(":")
+                    and rest[1:].isascii() and rest[1:].isdigit())
+            )
+            return not safe
+        if ":" not in region:
+            return False
+        user, _, tail = region.partition(":")
+        if not user:
+            return True  # empty user before the first ':' — a dropped '@host'
+        if ":" in tail:
+            return True  # a genuine host:port has exactly one ':'
+        # ASCII digits only: `str.isdigit()` also accepts non-ASCII digits
+        # (e.g. U+0660), which the shell's `[0-9]` does not.
+        return not (tail.isascii() and tail.isdigit())
+
+    def _mask_line(line: str) -> str:
+        # A line must be safe ON ITS OWN: the boot log emits lines, and the
+        # continuation line of a multi-line value carries its own credential.
+        # This mirrors entrypoint.sh::_redact_uri's per-line decision exactly.
+        if "://" not in line:
+            # No scheme on this line. entrypoint.sh fail-closes on ANY '@' here
+            # (the userinfo marker can be present with the scheme left on an
+            # earlier line), and on a colon-led line whose colon-prefixed text
+            # is credential-shaped. Without the '@' rule a scheme-less
+            # continuation like `pw@host` is echoed verbatim — the #2987 T1
+            # leak.
+            if "@" in line:
+                return "<uri-redacted-unrecognised-shape>"
+            if (line.startswith(":")
+                    and _credential_shaped(_authority_region(line))):
+                return "<uri-redacted-unrecognised-shape>"
+            return line
+        out: list[str] = []
+        i = 0
+        while True:
+            j = line.find("://", i)
+            if j < 0:
+                out.append(line[i:])
+                break
+            # Recover the scheme token by walking back from '://' over scheme
+            # characters (stops at prose when the URI is embedded in a message).
+            k = j
+            while k > i and (line[k - 1].isalnum() or line[k - 1] in "+-."):
+                k -= 1
+            # entrypoint.sh masks only a line whose scheme is at the start
+            # (after optional whitespace); any OTHER line carrying an '@' fails
+            # closed. A pre-scheme '@' is therefore never part of a userinfo, so
+            # it must not ride through as a "prose prefix" while the tail is
+            # masked — `user:SECRETPW@rediss://user2:pw2@host` re-emitted
+            # `user:SECRETPW@` exactly that way.
+            if "@" in line[i:k]:
+                return "<uri-redacted-unrecognised-shape>"
+            scheme = line[k:j]
+            # "Bare" = nothing but whitespace precedes the scheme.
+            # entrypoint.sh replaces such a line WHOLESALE with the sentinel,
+            # while an embedded URI keeps its prose prefix.
+            bare = i == 0 and not line[:k].strip()
+            if not _scheme_ok(scheme):
+                # entrypoint.sh treats an invalid or empty scheme as "no
+                # scheme": it predicates the text after the FIRST '://' and
+                # fails closed on an '@' anywhere on the line. Mirror it, or a
+                # malformed `1://user:pw` / `://user:pw` is echoed verbatim
+                # while the shell masks it.
+                rest = line[j + 3:]
+                region = _authority_region(rest)
+                if "@" in line or _credential_shaped(region):
+                    if bare:
+                        out.append("<uri-redacted-unrecognised-shape>")
+                    else:
+                        out.append(
+                            line[i:k] + line[k:j + 3]
+                            + "<uri-redacted-unrecognised-shape>"
+                            + rest[len(region):]
+                        )
                     break
-            except ValueError:
-                pass  # malformed authority (e.g. unmatched '[') — mask below
-        # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
-        # everything that follows the scheme. A password may contain '?',
-        # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
-        # region on any of those truncates it before the real '@' and
-        # re-emits credential material. Masking to the last '@' can
-        # over-reach — past a genuine query/fragment, or across later prose
-        # or a second URI in the same message — which loses diagnosability
-        # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
-        # well-formed URIs (delimiters only after the userinfo '@') the
-        # output is unchanged.
-        rest_start = j + 3
-        authority = target[rest_start:]
-        at = authority.rfind("@")
-        if at < 0:
-            out.append(target[i:j + 3])
-            i = j + 3
-            continue
-        out.append(target[i:k])
-        out.append(f"{scheme}://:***@{authority[at + 1:]}")
-        i = len(target)
-    return "".join(out)
+                out.append(line[i:j + 3])
+                i = j + 3
+                continue
+            if i == 0 and k == 0:
+                # Bare URI — urlsplit is the authoritative scheme parse.
+                try:
+                    if not urlsplit(line).scheme:
+                        out.append(line[i:])
+                        break
+                except ValueError:
+                    pass  # malformed authority (unmatched '[') — mask below
+            # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
+            # everything that follows the scheme. A password may contain '?',
+            # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
+            # region on any of those truncates it before the real '@' and
+            # re-emits credential material. Masking to the last '@' can
+            # over-reach — past a genuine query/fragment, or across later prose
+            # or a second URI in the same message — which loses diagnosability
+            # but cannot leak the userinfo, because what FOLLOWS the '@' is
+            # judged as a target below (#2987 review). Over-reaching past a
+            # second URI without that judgement would echo the second URI's
+            # credential. For well-formed URIs (delimiters only after the
+            # userinfo '@') the output is unchanged.
+            rest_start = j + 3
+            authority = line[rest_start:]
+            at = authority.rfind("@")
+            if at < 0:
+                # #2987 fail-closed, no-'@' form: the last-'@' boundary found
+                # nothing, but a credential may still be there (`rediss://:pw`,
+                # `rediss://user:pw`, `rediss://user:pw:6379`). Replace the
+                # credential-shaped URI rather than echoing it — the app
+                # rejects a malformed URI, but only AFTER an error path may
+                # already have printed it. A recognised-safe target (a plain
+                # host, `host:port`, bracketed IPv6) is left byte-identical.
+                region = _authority_region(authority)
+                if _credential_shaped(region):
+                    if bare:
+                        # Bare URI (the whole line): the sentinel replaces it,
+                        # identical to entrypoint.sh::_redact_uri's per-line
+                        # fail-closed output on the same value.
+                        out.append("<uri-redacted-unrecognised-shape>")
+                    else:
+                        # Embedded in a message: replace only the URI so the
+                        # prose around it stays diagnosable.
+                        out.append(
+                            line[i:k] + line[k:rest_start]
+                            + "<uri-redacted-unrecognised-shape>"
+                            + line[rest_start + len(region):]
+                        )
+                    break
+                out.append(line[i:j + 3])
+                i = j + 3
+                continue
+            # #2987 review — fail-open fix. The text after the last '@' is the
+            # host for a well-formed URI, but a malformed value can carry a
+            # credential there, and this mask used to echo it verbatim:
+            #   rediss://u:pw@host:SECRET      (credential-shaped tail)
+            #   rediss://u:pw@h:1 rediss://:SECRET   (a later scheme:// this
+            #                                         walk cannot reach)
+            #   rediss://u:pw@:SECRET:6379     (empty user before the ':')
+            # Both are judged by the predicate the no-'@' branch already uses,
+            # so `host:pw` behaves the SAME with and without an '@' — that
+            # asymmetry is what let this leak past the no-'@' fix. A
+            # recognised-safe target (host, host:port, bracketed IPv6, empty)
+            # is still emitted unchanged.
+            #
+            # NOTE: this reverses the "bad port / malformed IPv6 stays readable"
+            # behaviour recorded in the #720 review (tests/test_doctor.py) —
+            # `...@127.0.0.1:notaport` and `...@[abc` now fail closed. The port
+            # value is still named by the exception text in the same message
+            # (`Port could not be cast to integer value as 'notaport'`), so the
+            # diagnostic survives; see the PR body.
+            remainder = authority[at + 1:]
+            if ("://" in remainder
+                    or _credential_shaped(_authority_region(remainder))):
+                return "<uri-redacted-unrecognised-shape>"
+            out.append(line[i:k])
+            out.append(f"{scheme}://:***@{remainder}")
+            i = len(line)
+        result = "".join(out)
+        # Mirror entrypoint.sh's unconditional guard: a line the mask did not
+        # change that carries an '@' fails closed. The pre-scheme guard above
+        # catches an '@' before the scheme; this is the final catch-all for any
+        # other unmasked '@'.
+        if result == line and "@" in line:
+            return "<uri-redacted-unrecognised-shape>"
+        return result
+
+    return "\n".join(_mask_line(_line) for _line in target.split("\n"))
 
 
 def _index_github_child_cmd(target: str, repo_root: str,
@@ -8713,6 +9001,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "restore":
         from tortoise.backup import restore
+        # No refusal handler here: the CLI's restore does not replay the
+        # journal (`into_falkor` defaults to False, so it only copies files),
+        # so it cannot resurrect removed state. The refusal lives in
+        # `backup.restore`'s replay path (`into_falkor=True`) for programmatic
+        # replay callers.
         result = restore(args.backup_dir, db_path=args.db, events_path=args.events)
         print(f"Restored {result['events']} events — {result['status']}")
         return 0

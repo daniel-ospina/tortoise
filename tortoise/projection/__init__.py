@@ -281,30 +281,40 @@ _PREWIPE_SNAPSHOT_VERSION = 4
 # file and silently ignore `config_snapshot` while its wipe landed. With the
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
 #
-# #4641: v3 was picked for `onboarding_snapshot` / `onboarding_step_links`.
-# The reasoning holds one increment on: WITHOUT a bump the writer would stamp
-# `2`, and a v2 build would accept that file and ignore the onboarding
-# sections while its wipe landed. A v1/v2 rescue file stays READABLE — it
-# carries no onboarding record (the writing build did not capture the class),
-# and the restore leg reports that as state-UNKNOWN rather than as a clean,
-# empty restore.
+# #3049: v3 adds `graph_identity` — the GRAPH the sidecar describes, not just
+# the directory it sits in. The bump carries the same rollback argument as v2
+# and it is sharper here: a v2-aware build reading a v3 sidecar REFUSES it
+# (unknown version), so a rollback cannot silently re-enter the unconditional
+# merge that this change removes. Reading v1/v2 stays required — a rescue file
+# written before this change has NO `graph_identity`, which the mismatch test
+# reads as identity-unknown and proceeds on, exactly as that build did.
+#
+# #4641: `onboarding_snapshot` / `onboarding_step_links` first claimed `3` for
+# this same reason, one increment on — WITHOUT a bump the writer would stamp
+# `2`, and a v2 build would accept that file and ignore the onboarding sections
+# while its wipe landed. A v1/v2 rescue file stays READABLE — it carries no
+# onboarding record (the writing build did not capture the class), and the
+# restore leg reports that as state-UNKNOWN rather than as a clean, empty
+# restore. `3` was later given up for `4`; see the round-8 note below.
 #
 # #4641 review round 8 — v4, NOT v3, because the format gate was made
 # asymmetric by sibling contention. The version is a FORMAT gate, and THREE
 # builds independently picked `3` for three different payloads: this change
-# (the onboarding pair), the open #5327 (`event_meta`) and the open #5241
-# (`graph_identity`). A section-set refusal inside ONE of them cannot make
-# that gate symmetric: it stops a foreign-section v3 file from being consumed
-# HERE, but a sibling that carries no such refusal still reads THIS build's
-# file, walks only its own `_SNAPSHOT_SECTIONS`, ignores the onboarding
-# sections it does not know, and lets its unconditional wipe land on the very
-# class this change exists to preserve — the fail-open, in the direction that
-# destroys data. Claiming a DISTINCT number closes it without depending on
-# the siblings: every not-yet-updated build sees version 4 as unsupported and
-# REFUSES the rebuild (fail-closed), instead of accepting the file and wiping
-# over the onboarding class. v3 stays readable because a v3 file may be this
-# build's own earlier write; the section-set refusal below still rejects a v3
-# file carrying a foreign section (#2943, #4641).
+# (the onboarding pair), the open #5327 (`event_meta`) and `graph_identity`
+# (#5241, since LANDED here as #3049 at v3 — which is exactly why `3` is no
+# longer available to this change). A section-set refusal inside ONE of them
+# cannot make that gate symmetric: it stops a foreign-section v3 file from
+# being consumed HERE, but a sibling that carries no such refusal still reads
+# THIS build's file, walks only its own `_SNAPSHOT_SECTIONS`, ignores the
+# onboarding sections it does not know, and lets its unconditional wipe land
+# on the very class this change exists to preserve — the fail-open, in the
+# direction that destroys data. Claiming a DISTINCT number closes it without
+# depending on the siblings: every not-yet-updated build sees version 4 as
+# unsupported and REFUSES the rebuild (fail-closed), instead of accepting the
+# file and wiping over the onboarding class. v3 stays readable because a v3
+# file may be this build's own earlier write OR main's `graph_identity` write;
+# the section-set refusal below still rejects a v3 file carrying a foreign
+# section (#2943, #4641).
 #
 # `_validate_prewipe_snapshot` therefore ALSO refuses a file carrying any
 # section key outside this build's `_SNAPSHOT_SECTIONS`: a build that cannot
@@ -317,8 +327,15 @@ _PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4)
 # Top-level keys that are METADATA, never a preserved class. The
 # unknown-section refusal below subtracts these so it cannot mistake the
 # envelope for a section.
+#
+# `graph_identity` is main's #3049 (#5241) envelope key: the identity mismatch
+# test reads it as a top-level key and it is never a preserved class, so it
+# belongs here. Without it this refusal rejects main's OWN rescue file — the
+# one #3049 exists to make recoverable — because that file carries the key and
+# this build's `_SNAPSHOT_SECTIONS` does not name it.
 _PREWIPE_SNAPSHOT_META_KEYS = frozenset(
-    {"version", "created_at", "completed", "onboarding_unknown"})
+    {"version", "created_at", "completed", "onboarding_unknown",
+     "graph_identity"})
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -1006,6 +1023,66 @@ _REPLAY_GAP_PROPS = ("outdated", "expiredAt", "posterior_alpha",
 def prewipe_snapshot_path(log_dir: str) -> str:
     """Durable #548/#990 pre-wipe snapshot path for an event-log directory."""
     return os.path.join(log_dir, _PREWIPE_SNAPSHOT_FILENAME)
+
+
+def _prewipe_db_path_identity(path: str | None) -> str | None:
+    """The DB-path half of a sidecar's graph identity (#3049).
+
+    ``None`` for a server/URI graph (no embedded file at all) and for the
+    in-memory pseudo-path — neither carries a FILE identity. Otherwise the
+    ``realpath`` of the expanded, absolutized path. ``realpath`` rather than a
+    bare ``abspath`` because the false-mismatch direction is the dangerous
+    one: the same database reached through a symlinked directory (macOS
+    ``/tmp`` → ``/private/tmp``, a deployment symlink) must compare EQUAL, or
+    a legitimate retry would be refused. A genuine difference refuses
+    fail-closed — the abort happens before the wipe, so nothing is destroyed
+    and the operator resolves the foreign sidecar and retries.
+    """
+    if not path or path == ":memory:":
+        return None
+    try:
+        return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except (OSError, ValueError):  # pragma: no cover — defensive
+        return None
+
+
+def _prewipe_identity_mismatch(
+        snapshot: dict, *, graph_name: str, db_path: str | None,
+) -> tuple[str, str | None] | None:
+    """The FOREIGN identity recorded in ``snapshot``, or None to proceed.
+
+    Tri-state by design (#3049):
+
+    * **identity unknown** — a legacy sidecar with no ``graph_identity``, or
+      an unusable/malformed one — returns None, so the rebuild behaves exactly
+      as it did before this change. This is the migration contract: a rescue
+      file written by an older build still merges, and is still retired.
+    * **identity equal** returns None.
+    * **identity present and different** returns ``(graph_name, db_path)`` so
+      the caller can refuse BEFORE the wipe and leave the file untouched.
+
+    ``graph_name`` alone is NOT enough: every EMBEDDED graph defaults to
+    ``graph_name='tortoise'``, so two embedded DBs over one log dir are
+    distinguishable only by their db path (#3049). The path is therefore part
+    of the identity, and this comparison is exact — a recorded ``null`` path
+    (a server graph) never matches an embedded graph's real path, and vice
+    versa.
+    """
+    ident = snapshot.get("graph_identity") if isinstance(snapshot, dict) else None
+    if not isinstance(ident, dict):
+        return None
+    recorded_name = ident.get("graph_name")
+    if not isinstance(recorded_name, str) or not recorded_name:
+        return None
+    recorded_path = ident.get("db_path")
+    if recorded_path is not None and not isinstance(recorded_path, str):
+        # Malformed path: keep the name half (still a usable identity) and
+        # fail CLOSED on the path half, which is what the caller's wipe gate
+        # needs. Coercing to None means an embedded current graph mismatches.
+        recorded_path = None
+    if recorded_name == graph_name and recorded_path == db_path:
+        return None
+    return recorded_name, recorded_path
 
 
 def _validate_prewipe_snapshot(data: dict, path: str) -> None:
@@ -2530,7 +2607,13 @@ class InMemoryProjection:
         _apply_one(self.points, event)
 
     def rebuild(self, log) -> None:
-        self.points = fold(log.read_all())
+        # #3316: the same refusal as the Falkor engines — a dropped torn
+        # trailing removal record must not be folded away into a projection
+        # that serves the removed state as current.
+        events = log.read_all()
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
+        self.points = fold(events)
 
 
 def _validate_uri_scheme(scheme: str) -> str:
@@ -2644,6 +2727,33 @@ _HARD_DELETE_LABELS = frozenset({
     "Point", "Subject", "Object", "Source", "Event",
 })
 _POINTS_MERGED_LABELS = frozenset({"Point"})
+
+
+def _refuse_revival_torn_tail(revival_records) -> None:
+    """Refuse a replay whose journal dropped a torn record that cannot be
+    proven harmless (#3316).
+
+    ``EventLog.read_all`` tolerates a torn TRAILING line because a crash
+    mid-append is expected and a dropped REGISTRATION record is only data
+    LOSS. The other direction is not symmetric: a dropped REMOVAL/terminal
+    record (``PointRetracted``, ``EntityMutated`` op=delete, a
+    ``DirectEdgeRepoint`` delete leg, …) rebuilds the graph WITHOUT the
+    removal, so state a later read serves as current is live again
+    (resurrection) — and a dropped ``EventRecorded`` loses the
+    connector-source sweep that deletes a superseded ``:Source``. A truncated
+    record cannot be reconstructed, so the only sound behaviour is to not
+    rebuild at all.
+
+    Callers MUST invoke this BEFORE any wipe/replay — a verdict after the
+    mutation cannot un-apply it. The classification and the message live in
+    :mod:`tortoise.log` so every replay engine (``rebuild`` / ``rebuild_all`` /
+    ``InMemoryProjection.rebuild`` / ``recover_from_log`` /
+    ``backup.restore`` / the ``tortoise rebuild`` CLI fallback / the
+    ``tortoise reconcile`` CLI) refuses through ONE home.
+    """
+    from tortoise.log import refuse_torn_tail_revival
+
+    refuse_torn_tail_revival(revival_records)
 
 
 def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
@@ -3782,6 +3892,12 @@ class FalkorProjection(
         # wipe. #2943: verifying only after the wipe turns a durability bug
         # into permanent data loss, so the proof has to precede the mutation.
         events = list(log.read_all())
+        # #3316: refuse BEFORE the wipe when the journal's torn tail cannot be
+        # proven harmless — replaying without a dropped removal resurrects
+        # removed state, and a registry-only/synthetic log object may not
+        # expose the attribute at all (then there is nothing to classify).
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -3801,6 +3917,24 @@ class FalkorProjection(
                 continue
             self.apply(ev)
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+
+    def _prewipe_graph_identity(self) -> dict:
+        """The graph a pre-wipe sidecar describes, stamped into its payload.
+
+        #3049: the sidecar path is a pure function of ``log_dir``, but the
+        wipe is per-GRAPH — so a sidecar keyed to nothing but its directory
+        gets merged into whichever graph is rebuilt from that directory next.
+        ``graph_name`` alone cannot separate two embedded DBs (they all
+        default to ``'tortoise'``), so the embedded ``_path`` rides along as
+        the second half.
+
+        ``db_path`` is ``None`` for a server/URI graph: its identity IS its
+        graph name, and a server projection carries no file.
+        """
+        return {
+            "graph_name": self._graph_name,
+            "db_path": _prewipe_db_path_identity(self._path),
+        }
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -4133,7 +4267,12 @@ class FalkorProjection(
         journal_source: list[int] = []
         for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
-                chunk = EventLog(os.path.join(log_dir, fname)).read_all()
+                file_log = EventLog(os.path.join(log_dir, fname))
+                chunk = file_log.read_all()
+                # #3316: same refusal as `rebuild`/`recover_from_log`, before
+                # the wipe below.
+                _refuse_revival_torn_tail(
+                    file_log.torn_tail_revival_records())
                 journal_events.extend(chunk)
                 journal_source.extend([file_idx] * len(chunk))
 
@@ -4157,6 +4296,38 @@ class FalkorProjection(
                 log_dir, os.path.dirname(os.path.abspath(self._path)), log_dir)
         leftover = _load_prewipe_snapshot(snapshot_path)
         if leftover is not None:
+            # ── #3049: the sidecar belongs to a GRAPH, not to a directory ────
+            # The path is derived from `log_dir` alone, so two graphs sharing
+            # one event-log dir would otherwise absorb each other: the merge
+            # below is additive on the REBUILDING graph, and the completion
+            # clear near the end RETIRES the file — so the graph that did not
+            # write it loses the only copy of its graph-only Points. Refuse
+            # BEFORE the wipe and leave the foreign file exactly as it is; an
+            # identity-UNKNOWN sidecar (a pre-#3049 rescue file) still unions,
+            # which is the migration contract.
+            foreign = _prewipe_identity_mismatch(
+                leftover, graph_name=self._graph_name,
+                db_path=_prewipe_db_path_identity(self._path))
+            if foreign is not None:
+                hint = (
+                    f" Run `tortoise rebuild --dir {log_dir} --db "
+                    f"{foreign[1]}` to finish the rebuild it belongs to."
+                    if foreign[1] else
+                    f" Rebuild the graph named {foreign[0]!r} to finish the "
+                    f"rebuild it belongs to."
+                )
+                raise RuntimeError(
+                    f"rebuild aborted BEFORE the graph wipe: the pending "
+                    f"pre-wipe snapshot at {snapshot_path} was written by a "
+                    f"DIFFERENT graph (graph_name={foreign[0]!r}, "
+                    f"db_path={foreign[1]!r}) than the one this rebuild "
+                    f"targets (graph_name={self._graph_name!r}, "
+                    f"db_path={_prewipe_db_path_identity(self._path)!r}) — "
+                    f"refusing to wipe the graph (#3049). Merging it would "
+                    f"contaminate this graph with another graph's nodes and "
+                    f"then retire the ONLY copy of that graph's graph-only "
+                    f"Points; the file is left UNTOUCHED.{hint}"
+                )
             logger.warning(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
@@ -4325,6 +4496,10 @@ class FalkorProjection(
                 payload: dict = {
                     "version": _PREWIPE_SNAPSHOT_VERSION,
                     "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+                    # #3049: the graph this rescue file describes, so a later
+                    # rebuild of a DIFFERENT graph over the same log dir can
+                    # refuse instead of absorbing it.
+                    "graph_identity": self._prewipe_graph_identity(),
                 }
                 # #2814: DERIVED from the section tuple and read out of
                 # `merged`, so a section dropped from the union's return

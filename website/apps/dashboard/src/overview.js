@@ -19,7 +19,11 @@
 // never asserts the categorical absence: a captured-session user has memories
 // in the graph while `harness-connected` is absent, so "Not connected" was
 // false for a reachable population.
-import { NO_CONNECTION_OBSERVED, harnessConnectionObserved } from './connectionObservation.js'
+import {
+  HARNESS_CONNECTED_STEP,
+  NO_CONNECTION_OBSERVED,
+  harnessConnectionObserved,
+} from './connectionObservation.js'
 
 export const OVERVIEW_ELEMENTS = Object.freeze([
   'connection-status',
@@ -123,12 +127,57 @@ export function overviewDigest(points) {
   }
 }
 
+// #5352: the observation the `done` arm's FILING clause is derived from.
+//
+// That clause ("your agent is filing to this Organization") is a claim about an
+// event the SERVER OBSERVES, so it may not be licensed by a completion verdict.
+// The `done` arm is reached for every `setupGuide(g).collapsed` org, and that
+// collapse is WIRE COMPLETION (`setupGuide.js` — deliberate: a grandfathered org
+// "must never render a false active checklist"). `resolve_wire_completion`'s
+// grandfather branch (`tortoise/onboarding/state.py`) reaches wire completion
+// with ZERO agent step edges, so this arm told a never-observed Organization its
+// agent was filing while element 1 on the SAME grid read "No connection observed
+// yet" and element 2 read zero filed memories.
+//
+// The observation is the `harness-connected` COMPLETED_STEP edge — the ONE edge
+// `connectionObservation.js` sanctions, and the SAME server field element 1
+// reads for the same projection. `setupGuide` carries it as its own row, built
+// from the server's `completed_steps`, and that row's `done` flag IS the shared
+// predicate's computation (`Array.isArray(state.completed_steps) &&
+// state.completed_steps.includes(HARNESS_CONNECTED_STEP)`, spelled once in
+// `setupGuide`) — so this reads the observation back through the shared step-id
+// constant rather than opening a second predicate. The row is the server's
+// observation record, never a completion inference; element 1/element 3 parity
+// is executed over the whole projection matrix in overview.test.js #5352 (C).
+function guideConnectionObserved(g) {
+  const rows = g && Array.isArray(g.rows) ? g.rows : []
+  const row = rows.find((r) => r.id === HARNESS_CONNECTED_STEP)
+  return !!(row && row.done)
+}
+
+// The ONE observation phrase, lower-cased so it reads mid-sentence — DERIVED
+// from the shared constant (never re-typed), the way connectionObservation.js
+// derives its paused heading.
+const NO_CONNECTION_OBSERVED_SENTENCE =
+  NO_CONNECTION_OBSERVED.charAt(0).toLowerCase() + NO_CONNECTION_OBSERVED.slice(1)
+
 // Next-action element from the Setup-guide derivation (setupGuide.js — the
 // card and this element render the SAME graph-held FLOW state; DE2E-6).
 // loading/degraded/collapsed are honest (never a false checklist);
 // 'active' carries the current step label so the Overview's single CTA
 // ("Open Setup guide →") knows what the user is resuming toward.
-export function overviewNextAction(g) {
+//
+// `connectionObserved` is the derivation the `done` arm ASKS whether the
+// observed connection exists — asked about the GUIDE (`g`), and defaulted to
+// `guideConnectionObserved` above, so the shipped call site passes no argument.
+// It is injectable so the guard can EXECUTE that the copy follows the
+// OBSERVATION rather than the collapse (overview.test.js #5352 D) — the shape
+// `overviewConnection(state, connectionObserved)` already uses, with ONE
+// difference that is load-bearing: the subject here is the guide, not the raw
+// projection. The sibling's state-predicate is therefore NOT a valid argument,
+// and passing it fails CLOSED (the guide carries no `completed_steps`, so the
+// answer is "not observed"), never open — pinned in test D.
+export function overviewNextAction(g, connectionObserved = guideConnectionObserved) {
   if (!g) return { kind: 'loading' }
   if (g.status === 'loading') return { kind: 'loading' }
   if (g.degraded) {
@@ -139,10 +188,19 @@ export function overviewNextAction(g) {
     }
   }
   if (g.collapsed) {
+    const observed = !!connectionObserved(g)
     return {
       kind: 'done',
       value: "You're all set ✓",
-      detail: 'Setup complete — your agent is filing to this Organization.',
+      // #5352: completion is what the collapse proves, so completion is all the
+      // detail may state unconditionally; the filing clause is added ONLY on the
+      // observed edge. The negative arm states the MISSING OBSERVATION — in the
+      // same shared phrase element 1 renders — and never the graph fact: a
+      // captured-session org can have memories filed while `harness-connected`
+      // is absent, so "nothing has been filed" would contradict element 2.
+      detail: observed
+        ? 'Setup complete — your agent is filing to this Organization.'
+        : `Setup complete — ${NO_CONNECTION_OBSERVED_SENTENCE} for this Organization.`,
     }
   }
   const cur = g.currentStep
