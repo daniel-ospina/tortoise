@@ -11,17 +11,27 @@ version: 1
 # one-line, reviewable change; the labels are positional letters so an S-adding
 # diff stays a SUPERSET of main's names (a rename would refuse every merge).
 #
-# The value (recomputable from the committed `durations` map:
-# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
-# LPT puts max(shard) at 6.8 min of test time at S=9 (30.6 min at S=2, 5.6 at
-# S=11), and the measured per-shard fixed cost is ~3.4 min, so T ≈ 10.2 min —
-# at the epic's 10-minute goal. S≥12 buys nothing more: the largest single fast
-# file (`test_onboarding_state_split.py`, 310.7 s = 5.18 min) is then
-# max(shard) itself, which is #6133's floor expressed as a number. Raising this
-# trades WALL CLOCK for AGGREGATE runner time (~61 min of test time + ~9 × 3.4
-# min of setup ≈ 92 min at S=9, the same self-hosted capacity the epic is
-# trying to enlarge), so it is a wall-clock lever, not a free win.
-fast_shards: 9
+# The value: measured on THIS manifest (691 `durations` rows, after #6137
+# relocated the slow tail), LPT over `durations` puts max(shard) at 16.2 min at
+# S=2 and 5.2 min at S=7. The target is <10 min, so S=4 (8.1 min) already meets
+# it.
+#
+# S MUST STAY AT OR BELOW 7, for a reason the max alone does not show.
+# `test_real_workflow_halves_are_consistent` asserts a 1.25x band between the
+# largest and smallest shard, and the largest single fast file
+# (`test_onboarding_state_split.py`, 310.7 s = 5.18 min) SATURATES max(shard):
+# above S=7 the critical path stops falling while the smaller shards keep
+# shrinking, so the band widens without buying wall clock. Measured against the
+# selector's own LPT pack: 1.00x at S=4-6, 1.14x at S=7, 1.33x at S=8, 1.53x at
+# S=9. S=9 was therefore strictly worse than S=7 — the same 5.2 min critical
+# path, a red balance guard, and more aggregate runner time. The 5.18 min floor
+# is #6133's, expressed as a number: to go below it, split that file or relocate
+# it, not add shards.
+#
+# Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
+# capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
+# free win.
+fast_shards: 7
 
 surfaces:
   api:
@@ -1722,6 +1732,107 @@ slow_files:
 - test_sdk_group3.py
 - test_search_engine_gaps.py
 - test_source_inheritance_own.py
+# ── #6137: relocate the slow tail out of the fast halves' critical path ───
+#
+# THE MEASUREMENT (leg-a/leg-b/slow-a/slow-b junit of full-selection run
+# 36430905427, merge-queue, 2026-09-28). The fast pool carried 3,219s of test
+# time over two halves (1,611 / 1,608s) and ran 31.3 / 31.9 min wall, while the
+# two slow legs carried 169 / 192s and ran 5.7 / 5.4 min. A FOUR-way-parallel
+# docker pool was split 5.5:1, so the critical path was the fast half for a
+# reason that is pure PACKING, not coverage.
+#
+# WHY `slow_files` AND NOT THE `on_demand:` LANE. This is a RELOCATION, not a
+# removal: a `slow_files` entry runs in the same docker lane the fast pool does
+# — both falkordb services, the same
+# `-m 'not track_b and not live and not integration'` marker, the same 300s
+# per-test timeout, the same junit coverage manifest — so every nodeid still
+# runs PRE-MERGE, one leg over. The `on_demand:` lane removes the pre-merge
+# guarantee, and #6137 is explicitly gated on the rail-parity question for
+# removals (agent-infra #1516): moving a merge-gate test off the gate is a
+# reviewed-removal decision this lane does not hold. Relocation across the two
+# pre-merge docker pools needs no such declaration and loses no coverage —
+# which is why it is the instrument used here.
+#
+# WHICH FILES, AND WHY THIS CUT. Selected in descending `durations` weight —
+# the packer's own metric, so the removal keeps the fast halves balanced by
+# construction — until the modelled halves fit 16.0 min, which lands all four
+# docker legs at 17.3–18.3 min MEASURED (the modelled-to-measured gap is RC12
+# below). 45 files, 1,563.6s of measured time. Three exclusions, all
+# load-bearing:
+#   * the `onboarding` surface is EXCLUDED. A `website/*` or docs-only PR
+#     selects `onboarding` and is pinned to `slow_run is False`
+#     (test_ci_selection.py::test_public_site_surface_change_selects_onboarding_
+#     and_skips_slow, ::test_docs_only_skips_slow_and_carve_out — the
+#     #2147/#2148/#3332 cost gates). Putting an onboarding-owned file here
+#     would make every docs/website PR pay both slow legs; that is a real cost
+#     regression on a very common PR shape, not a bookkeeping detail.
+#   * the `tier1` files are EXCLUDED: `_duration_issues` fails closed on
+#     "slow file X is also in tier1 (fast gate leak)", because a file in both
+#     lists is selected by BOTH the smoke gate and the slow leg. Two of the
+#     heavier fast-pool rows (test_quota, test_writer_inventory) sit in tier1
+#     and were dropped from the first cut for exactly this — the drift guard
+#     caught it, which is the guard working.
+#   * `test_battery_corpus.py` is NOT moved: it shells out to bare `uv run` and
+#     only the fast job pre-warms uv.
+# Everything below is otherwise lane-agnostic (verified: no `uv`, no
+# TORTOISE_ASK_LLM_REGRESSION — the fast job sets it and the slow legs do not).
+#
+# THE RESIDUAL, NAMED. The split is packed on the `durations` MAP while the
+# selection above was made on it too, so a few rows whose map weight is stale
+# (marked `# unmeasured`, e.g. test_unjournaled_mutation_class 100.0 / measured
+# 3.6s, test_probe_reset_inflight_4608 36.0 / measured 0.0s) move the pack off
+# the measured optimum. This is RC12 (the durations map is mis-ranked) — the
+# fix is a durations refresh, which `ci-timing.yml` owns and #6174/#5719 are
+# already in flight on. It is NOT half-fixed here.
+#
+# The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
+# LPT-packed halves of `slow_files - carve_out`; that job's own drift-guard step
+# fails closed if the union stops matching this list.
+- eval/harness/test_harness_benchmark.py
+- eval/retrieval/test_gate_1349.py
+- eval/retrieval/test_run.py
+- eval/why_suite/test_why_suite_benchmark.py
+- eval/write_path/test_write_path_benchmark.py
+- eval/write_path/test_write_path_runner.py
+- test_4314_inert_hooks.py
+- test_abuse_integration.py
+- test_battery_r1_seed.py
+- test_battery_setup.py
+- test_capture_install.py
+- test_capture_loop_responsiveness.py
+- test_capture_session.py
+- test_ci_selection.py
+- test_client_surface.py
+- test_commit_endpoint.py
+- test_consistency_divergence_5011.py
+- test_dr_endpoints.py
+- test_embedded_evidence.py
+- test_ep_selector.py
+- test_epic903_fixtures.py
+- test_epic903_modes.py
+- test_epic903_scheduler.py
+- test_epic903_warmstart.py
+- test_extractor_v2.py
+- test_graph_diagnostics.py
+- test_graph_write_loop_responsiveness.py
+- test_hosted_volunteer_context.py
+- test_import_endpoint.py
+- test_ingest_v2_consolidation.py
+- test_journal_embedding_5004.py
+- test_markers.py
+- test_monitoring.py
+- test_oauth_mcp.py
+- test_operator_idempotency_4971.py
+- test_platform_seams.py
+- test_probe_reset_inflight_4608.py
+- test_relationships_bounded.py
+- test_sdk_surface.py
+- test_selfhost_health_probe_executor.py
+- test_session_verify.py
+- test_skip_guard.py
+- test_surface_manifest.py
+- test_unjournaled_mutation_class.py
+- test_write_verb.py
 # Epic #1647 Task 9 (P3): the 17-file embedded carve-out set (cycle-3 P2-12
 # count — 7 Task-5 stems + 10 additions; fixtures/redis-guard/* are subprocess
 # scripts, not test modules, and test_smoke_embedded is already one of the 7;

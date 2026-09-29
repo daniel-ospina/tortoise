@@ -969,26 +969,52 @@ jobs:
           #      — not by a bad split but by the eval file GROWING from its
           #      declared 855s to a measured 24.4 min while the split stayed a
           #      hand-maintained artifact. The old a/b lists were balanced when
-          #      written (#4711) and were never rechecked. They are 1.00:1 now
-          #      (2.8 min each).
+          #      written (#4711) and were never rechecked.
+          #
+          # #6137 repacked both rows onto the MEASURED junit seconds of the
+          # source run (36430905427) rather than the `durations` map. The map's
+          # slow-pool rows are largely stale (RC12), and packing on them left
+          # the measured legs 21.3 / 15.7 min while the map read a balanced
+          # 16.3 / 16.3 — i.e. it would have made the SLOW leg the new critical
+          # path, which is the defect this relocation exists to remove. The
+          # measured pack is 962s / 962s (1.00:1); the two rows are the two
+          # LPT legs of `slow_files - carve_out`.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
           # Until then, a rebalance must be redone whenever a file in this list
-          # grows, and nothing currently reds to say so.
+          # grows, and nothing currently reds to say so. Deriving the slow legs
+          # is #6135's open design decision and is not pre-empted here.
           - half: a
             files: >-
-              test_backfill_sources test_billing test_control_plane test_dream
-              test_enumeration_surfaces test_graphcopy_boolean_index_3154
-              test_hosted_api test_index_directory test_indexes
-              test_projection test_sdk test_sdk_group3
+              eval/harness/test_harness_benchmark eval/retrieval/test_gate_1349
+              eval/retrieval/test_run eval/why_suite/test_why_suite_benchmark
+              eval/write_path/test_write_path_runner test_4314_inert_hooks
+              test_abuse_integration test_battery_setup test_capture_install
+              test_capture_loop_responsiveness test_ci_selection test_cli_context
+              test_dr_endpoints test_embedded_evidence test_ep_selector
+              test_epic903_scheduler test_event_provenance test_graph_diagnostics
+              test_graph_write_loop_responsiveness test_graphcopy_boolean_index_3154
+              test_hosted_api test_hosted_volunteer_context test_index_cli
+              test_index_directory test_indexes test_ingest test_ingest_mode
+              test_ingest_validation test_markers test_oauth_mcp
+              test_pack_shipping_wheel test_probe_reset_inflight_4608
+              test_search_engine_gaps test_selfhost_health_probe_executor
+              test_unjournaled_mutation_class test_write_verb
           - half: b
             files: >-
-              test_about_edges test_cli_context test_ep_sources
-              test_event_provenance test_index_cli test_ingest
-              test_ingest_bundle test_ingest_mode test_ingest_validation
-              test_mcp_http test_mcp_route_challenge test_pack_shipping_wheel
-              test_search_engine_gaps test_source_inheritance_own
+              eval/write_path/test_write_path_benchmark test_about_edges
+              test_backfill_sources test_battery_r1_seed test_billing
+              test_capture_session test_client_surface test_commit_endpoint
+              test_consistency_divergence_5011 test_control_plane test_dream
+              test_enumeration_surfaces test_ep_sources test_epic903_fixtures
+              test_epic903_modes test_epic903_warmstart test_extractor_v2
+              test_import_endpoint test_ingest_bundle test_ingest_v2_consolidation
+              test_journal_embedding_5004 test_mcp_http test_mcp_route_challenge
+              test_monitoring test_operator_idempotency_4971 test_platform_seams
+              test_projection test_relationships_bounded test_sdk test_sdk_group3
+              test_sdk_surface test_session_verify test_skip_guard
+              test_source_inheritance_own test_surface_manifest
     name: test-slow (${{ matrix.half }})
     timeout-minutes: 90
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
@@ -1642,6 +1668,56 @@ jobs:
     if: always() && needs.changes.result == 'success' && needs.changes.outputs.carve_out_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # #6137: the carve-out was 17.5 min of the critical path in ONE job while
+    # the other three docker legs of the same pool ran 5-6 min — the same
+    # packing defect as the fast/slow split, one level down. It is sharded
+    # three ways over the SAME 33-file set: same URI-unset embedded lane, same
+    # marker, same junit manifest, same guards. Nothing is deselected and
+    # nothing moves off the gate.
+    #
+    # ⛔ THE SHARD NAMES ARE A CONTRACT, NOT LABELS. Lane parity
+    # (`scripts/admin-merge.sh` → `lane_shards`) compares job names VERBATIM
+    # over every name starting with `test`, and it is main-MINUS-PR, so ADDING
+    # `test-carve-out (2)` / `test-carve-out (3)` is admitted while RENAMING
+    # `test-carve-out` would leave the rail unsatisfiable on main. Shard 1
+    # therefore keeps the name `test-carve-out` exactly; the drift guard below
+    # fails closed if that ever stops being true.
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+        include:
+          # Packed by MEASURED junit time of the same full-selection run
+          # (36430905427, job test-carve-out: 997 tests / 830s), LPT onto
+          # three legs — 277s / 277s / 277s measured, 1.00:1:1. The four
+          # dominant files are split so no shard owns two of them (test_reaper
+          # 196.6s, test_embedded_lifecycle 182.1s, test_longmem_runner 133.4s,
+          # test_embedded_concurrency 117.7s — 75.9% of the pool).
+          - shard: 1
+            name: test-carve-out
+            files: >-
+              test_backup_e2e test_cross_tenant_read_isolation
+              test_eval_ingest_retry test_eval_resume_retry_failed
+              test_fork_slot_wedge_3845 test_guard test_precision_leak_4028
+              test_projection_lifecycle test_reaper
+              test_rebuild_config_preservation test_write_path_unreachable_seam_5148
+          - shard: 2
+            name: test-carve-out (2)
+            files: >-
+              bench/test_smoke_embedded test_config test_embedded_lifecycle
+              test_graph_integrity_gate test_hosted_backup test_migrate_db
+              test_ops_safety test_pre_migration_safety test_reaper_orphan
+              test_redis_guard test_resume_gate_parity
+              test_vecf32_overwrite_seams_4524
+          - shard: 3
+            name: test-carve-out (3)
+            files: >-
+              test_embedded_concurrency test_embedded_durability_claim
+              test_embedded_lifecycle_fast_close test_eval_extraction_health
+              test_flip_gate test_fork_safety_3845 test_hard_reject
+              test_longmem_runner test_per_session_census
+              test_projection_embedded_socket_timeout
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
@@ -1657,16 +1733,125 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
+      - name: Carve-out shard drift guard (#6137)
+        # The shard rows above are a HAND-MAINTAINED partition of a config-owned
+        # set, which is exactly the shape that goes stale silently. Four
+        # properties are pinned, all fail-closed:
+        #   * the union of the shards is `carve_out` from config/ci-surfaces.yml
+        #     — a new carve-out file can never silently stop running (#1471's
+        #     rule for the slow legs, applied here);
+        #   * the shards do not overlap (a file in two shards runs twice, and
+        #     the coverage manifest counts it once per lane);
+        #   * `test-carve-out` still exists as a name on shard 1 (the rail and
+        #     branch protection key on the name — see the job comment);
+        #   * the `platform-gated.txt` runtime set (#4215) is reachable from
+        #     EXACTLY ONE shard. That is the hole sharding opens: the
+        #     `--manifest-only` check runs per shard against a SLICED manifest,
+        #     so if the gate file were dropped from the shard rows every shard
+        #     would skip the check and the runtime half would go silently
+        #     vacuous.
         run: |
+          python3 - <<'EOF'
+          import sys
+
+          import yaml
+
+          wf = yaml.safe_load(open(".github/workflows/python-ci.yml"))
+          inc = wf["jobs"]["test-carve-out"]["strategy"]["matrix"]["include"]
+          listing = {i["shard"]: set(i["files"].split()) for i in inc}
+          names = {i["shard"]: i["name"] for i in inc}
+          cfg = yaml.safe_load(open("config/ci-surfaces.yml"))
+          exp = {(f[:-3] if f.endswith(".py") else f) for f in cfg["carve_out"]}
+          union = set().union(*listing.values())
+          errs = []
+          if union != exp:
+              errs.append(f"union != carve_out: missing={sorted(exp - union)} "
+                          f"extra={sorted(union - exp)}")
+          entries = sum(len(v) for v in listing.values())
+          if entries != len(union):
+              errs.append(f"a file is in more than one shard: {entries} entries "
+                          f"for {len(union)} files")
+          if names.get(1) != "test-carve-out" or "test-carve-out" not in names.values():
+              errs.append(f"names {sorted(names.values())} lose the "
+                          "`test-carve-out` check identity (lane parity + branch "
+                          "protection key on the name)")
+          gated = {ln.split("::")[0].replace("tests/", "", 1)[:-3]
+                   for ln in open("config/ci-expected-nodeids/platform-gated.txt")
+                   if ln.strip() and not ln.startswith("#")}
+          for g in gated:
+              owners = [s for s, files in listing.items() if g in files]
+              if len(owners) != 1:
+                  errs.append(f"platform-gated {g} is in {len(owners)} shards — "
+                              "the runtime half (#4215) must run exactly once")
+          for s, files in listing.items():
+              if not files:
+                  errs.append(f"shard {s} is empty")
+          if errs:
+              print("❌ carve-out shard drift (#6137):")
+              for e in errs:
+                  print("  -", e)
+              sys.exit(1)
+          print(f"✅ carve-out shards: {len(listing)} shards, {len(union)} files, "
+                f"names {sorted(names.values())}")
+          EOF
+      - name: Resolve this shard's selected files (carve-out shard ${{ matrix.shard }})
+        id: shard
+        # The shard row is the PARTITION of `carve_out`; the selector's
+        # `carve_out` output is the authoritative file list for this job (today
+        # it is always the FULL set — `--emit-push-matrix` emits the whole leg
+        # and the diff-gate only decides whether the job runs at all — so the
+        # intersect below is an identity, deliberately: it is what keeps the
+        # job bound to the selector if that ever narrows to a tier-2
+        # selection, and the empty check below refuses the vacuous green that
+        # an unexpectedly-empty leg would otherwise produce).
+        run: |
+          set +e
+          SELECTED=" ${{ needs.changes.outputs.carve_out }} "
+          if [ -z "$(echo "$SELECTED" | tr -d ' ')" ]; then
+            echo "::error::carve_out_run=true but the selector's carve_out leg is empty — the embedded set has no home; refusing to green vacuously"
+            exit 1
+          fi
           FILES=""
-          for f in ${{ needs.changes.outputs.carve_out }}; do FILES="$FILES tests/$f.py"; done
+          for f in ${{ matrix.files }}; do
+            case "$SELECTED" in *" $f "*) FILES="$FILES tests/$f.py";; esac
+          done
+          if [ -z "$FILES" ]; then
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+            echo "shard ${{ matrix.shard }}: no selected carve-out file — nothing to run"
+            exit 0
+          fi
+          echo "selected=true" >> "$GITHUB_OUTPUT"
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+      - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
+        # Same step as before sharding, now consuming THIS shard's resolved
+        # file list instead of re-reading the selector output. The name is
+        # load-bearing: `test_run_marker_matches_manifest_marker` pins the
+        # collect-only marker here to the run step's `-m` filter, and skip-guard
+        # reds every run if the two ever disagree (#1787).
+        run: |
+          FILES="${{ steps.shard.outputs.files }}"
           if [ -z "$FILES" ]; then
             echo "no carve-out files selected — no manifest (guard skips)"
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+          # #4215: slice the checked-in platform-gated manifest to THIS shard.
+          # `--manifest-only` reds on any expected nodeid absent from the junit,
+          # so handing the whole file to every shard would false-red the two
+          # that do not collect it; and skip-guard fails closed on a
+          # comment-only manifest, so the two shards that get no nodeids must
+          # not invoke it (the skip-fail guard below gates on that). The
+          # comments (incl. the `allow-skipped` budget) are copied verbatim;
+          # the drift guard above fails closed if the file's owning shard
+          # disappears, which is what keeps "runs in exactly one shard" honest.
+          {
+            grep -E '^[[:space:]]*(#|$)' config/ci-expected-nodeids/platform-gated.txt || true
+            for f in ${{ matrix.files }}; do
+              grep "^tests/$f.py::" config/ci-expected-nodeids/platform-gated.txt || true
+            done
+          } > /tmp/gated-expected.txt
+          echo "gated-expected: $(grep -cvE '^[[:space:]]*(#|$)' /tmp/gated-expected.txt) nodeids for shard ${{ matrix.shard }}"
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
         # The embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
@@ -1675,10 +1860,9 @@ jobs:
         # guard/orphan gates.
         run: |
           set +e
-          FILES=""
-          for f in ${{ needs.changes.outputs.carve_out }}; do FILES="$FILES tests/$f.py"; done
+          FILES="${{ steps.shard.outputs.files }}"
           if [ -z "$FILES" ]; then
-            echo "no carve-out files selected — skipping"
+            echo "shard ${{ matrix.shard }}: no selected carve-out file — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
             # #4740: pytest never runs here, so the conftest sweep never writes
             # its report — write the explicit "no-pytest" one rather than
@@ -1686,12 +1870,11 @@ jobs:
             printf '{"sweep":{"skipped":"no-pytest"}}' > "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
             exit 0
           fi
-          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           ( while true; do
               sleep 300
               p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
               f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
-              echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
+              echo "HEARTBEAT: carve-out shard ${{ matrix.shard }} pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
           ulimit -n 65536 || true  # #1988: fd headroom for the embedded suites
@@ -1723,7 +1906,10 @@ jobs:
         # The carve-out's redislite-availability skips are the exempt reason
         # family (embedded/redislite-unavailable) — never a guard trip; a
         # vanished nodeid or a docker-availability skip still reds.
-        if: always()
+        # #6137: a shard the selector did not pick ran no pytest at all, so it
+        # has nothing to guard — without this gate the step would parse a
+        # missing /tmp/pytest.log and red on every tier-2 PR.
+        if: always() && steps.shard.outputs.selected == 'true'
         run: |
           set +e
           RC=""
@@ -1750,9 +1936,19 @@ jobs:
             # spell its way out of the junitxml. --manifest-only: this lane's
             # skips are the exempt reason family, so the docker-calibrated
             # matchers must not run here.
-            python3 tools/skip-guard.py /tmp/pytest.log \
-              --junitxml=/tmp/junit.xml \
-              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only || guard_rc=1
+            # #6137: /tmp/gated-expected.txt is this shard's SLICE of that set.
+            # skip-guard fails closed on a comment-only manifest (an empty
+            # expected-set must never vacuous-green), and only the shard that
+            # collects the file has nodeids — so the check runs in that shard
+            # and is SKIPPED elsewhere. That it runs in exactly one shard is
+            # enforced by the drift guard above, not by this condition.
+            if [ "$(grep -cvE '^[[:space:]]*(#|$)' /tmp/gated-expected.txt)" -gt 0 ]; then
+              python3 tools/skip-guard.py /tmp/pytest.log \
+                --junitxml=/tmp/junit.xml \
+                --manifest /tmp/gated-expected.txt --manifest-only || guard_rc=1
+            else
+              echo "platform-gated: no expected nodeids in shard ${{ matrix.shard }} — its owner shard runs the runtime half (#4215)"
+            fi
             exit $guard_rc
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
@@ -1771,7 +1967,9 @@ jobs:
         # `cleared: false` report does not red at any measured COUNT: `cleared`
         # reports whether the sweep's TIME BUDGET sufficed — a function of
         # runner load — not its residue (#4989).
-        if: always()
+        # #6137: nothing ran in a shard the selector did not pick, so there is
+        # no sweep report to bound and no leak this job could have caused.
+        if: always() && steps.shard.outputs.selected == 'true'
         run: |
           set +e
           RC=""
@@ -1794,7 +1992,10 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-${{ github.job }}
+          # #6137: no longer `github.job` alone — a matrix keeps the same job
+          # id for all three shards, and upload-artifact@v4 REFUSES a duplicate
+          # artifact name, which would have red the second shard on every run.
+          name: pytest-log-${{ github.job }}-${{ matrix.shard }}
           path: |
             /tmp/pytest.log
             /tmp/junit.xml
