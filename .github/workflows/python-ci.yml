@@ -616,6 +616,17 @@ jobs:
           # Reuse contract: the skip-guard step's empty-file check reads this.
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+        env:
+          # `--emit-manifest` runs `pytest --collect-only` as a SUBPROCESS, so it
+          # inherits THIS step's env — and a file gating itself on the DB URI
+          # skips itself at import without it. The run step below sets these, so
+          # the expected set lost those nodeids while the run still executed
+          # them. skip-guard reconciles in ONE direction (every expected nodeid
+          # must appear), so the omission was silent: measured, 262 nodeids over
+          # 10 fast-surface files, including the guard's own tests.
+          TORTOISE_DB_URI: ${{ env.URI }}
+          TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
+          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
       - name: Canary producer (epic #1647 Task 9 Step 6, producer shard, post-merge)
         # The D-3=A instrumented streak's producer: the fast-matrix job runs
         # PER-LEG, so exactly ONE leg must write the producer marker or
@@ -1169,6 +1180,15 @@ jobs:
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+        env:
+          # Same defect as the fast matrix's manifest step (see above): without
+          # the run's URI, a URI-gated file relocated into `slow_files` contributes
+          # no expected nodeids while still being executed. Measured on the #6137
+          # branch: test_skip_guard.py's 59 nodeids sit in `slow_files` there.
+          # Deliberately NOT on the carve-out job, which is URI-unset by design.
+          TORTOISE_DB_URI: ${{ env.URI }}
+          TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
+          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
       - name: Run slow test suite — leg ${{ matrix.half }} (known-slow files, #647)
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that

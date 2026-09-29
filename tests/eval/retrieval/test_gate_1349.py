@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import sys
 from pathlib import Path
 
 import pytest
@@ -1492,7 +1493,7 @@ def test_cli_python_dash_m_entrypoint(tmp_path):
     mpath.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     out_path = tmp_path / "verdict.json"
     proc = subprocess.run(
-        ["uv", "run", "python", "-m", "tests.eval.retrieval.gate_1349",
+        [sys.executable, "-m", "tests.eval.retrieval.gate_1349",
          "--manifest", str(mpath), "--out", str(out_path),
          "--repo", str(tmp_path)],
         capture_output=True, text=True, timeout=180, cwd=Path(__file__).resolve().parent.parent.parent.parent)
