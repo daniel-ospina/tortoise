@@ -92,9 +92,9 @@ path; **stdio** for the no-Docker single-agent eval path (quickstart §5):
 
 ```bash
 # Hosted
-claude mcp add tortoise https://api.premiselabs.co/mcp/
+claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/
 # Self-hosted — Docker path (compose daemon from §1): daemon MCP over HTTP
-claude mcp add tortoise http://localhost:8000/mcp
+claude mcp add --transport http tortoise http://localhost:8000/mcp
 ```
 
 > ℹ️ **Claude Code scope + approval.** `claude mcp add` writes **local**
@@ -106,11 +106,13 @@ claude mcp add tortoise http://localhost:8000/mcp
 > connected — `claude mcp list` is the check.
 >
 > **Sharing the config with the repo instead?** `--scope project` writes a
-> **committable** `.mcp.json` at the project root, approved once per machine
-> (⏸ Pending approval until then; `claude mcp reset-project-choices` resets
-> it). It carries no key for a local daemon — and for a hosted server it
-> expands `${TORTOISE_API_KEY}` in `url` and `headers`, so the committed file
-> still carries no secret.
+> **committable** `.mcp.json` at the project root, approved once per machine —
+> start `claude` in the project and allow the prompt, or run `/mcp`
+> (`claude mcp reset-project-choices` resets the choice). Neither command above
+> sends a `--header`, so the file carries no key; if you add one, **single-quote
+> it** (`--header 'Authorization: Bearer ${TORTOISE_API_KEY}'`) so the shell
+> passes the reference through instead of writing your key into a file you are
+> about to commit.
 
 ```bash
 # Codex

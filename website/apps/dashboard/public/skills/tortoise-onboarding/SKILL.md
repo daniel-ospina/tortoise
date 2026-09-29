@@ -246,16 +246,20 @@ Validate the config was written (`claude mcp list` shows `tortoise`).
 > was written, not that it connected; `claude mcp list` is the check.
 >
 > **Sharing the config with the repo instead?** `claude mcp add --scope project`
-> writes a **committable** `.mcp.json` at the project root, which the human
-> approves once per machine (`⏸ Pending approval` until then; `claude mcp
-> reset-project-choices` resets it). Keep the key out of that file — it
-> expands `${TORTOISE_API_KEY}` in both `url` and `headers`, so the committed
-> file carries no secret.
+> writes a **committable** `.mcp.json` at the project root. ⛔ **Single-quote
+> the header there** — `--header 'Authorization: Bearer ${TORTOISE_API_KEY}'` —
+> so the shell passes the reference through; double-quoted, the shell expands
+> it and the **literal key** lands in the file you are about to commit. (A
+> hand-written `${TORTOISE_API_KEY}` in `url` / `headers` is key-free too.)
+> A project-scope server stays `⏸ Pending approval` until the human approves
+> it once per machine: start `claude` in the project and allow the prompt, or
+> run `/mcp` and approve it there (`claude mcp reset-project-choices` resets
+> the choice). Its tools stay disabled until then.
 
 ### Cursor (self-install)
 
-Create/merge `.cursor/mcp.json` in the project — it is committed with the
-repo, so it carries the env reference, never the key:
+Create/merge `.cursor/mcp.json` in the project — the file is **committable**
+(project scope), so it carries the env reference, never the key:
 
 ```json
 { "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }

@@ -1998,10 +1998,10 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
             cfg = _harness_mcp_config("codex", api_key, api_url)
             print(f"  {cfg['command']}")
         elif harness == "claude":
-            print("Run this ONE command in your terminal:")
+            print("Run this ONE command in your terminal — writes LOCAL scope to ~/.claude.json (private, never committed):")
             print(f'  claude mcp add --transport http tortoise {endpoint} --header "Authorization: Bearer {api_key}"')
             print()
-            print("File alternative (.mcp.json) — project scope, committed with your repo; env expansion, no literal key in the file:")
+            print("File alternative (.mcp.json) — project scope, committable; env expansion, no literal key in the file:")
             print(f"  export TORTOISE_API_KEY={api_key}")
             print(_json.dumps(_harness_mcp_config(harness, api_key, api_url), indent=2))
         else:  # cursor / pi

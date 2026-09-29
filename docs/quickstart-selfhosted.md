@@ -354,7 +354,7 @@ other way around — the Docker path has no stdio config.
 The compose daemon serves MCP at `http://localhost:8000/mcp`:
 
 ```bash
-claude mcp add tortoise http://localhost:8000/mcp
+claude mcp add --transport http tortoise http://localhost:8000/mcp
 ```
 
 > ℹ️ **Claude Code scope + approval.** `claude mcp add` writes **local**
@@ -366,11 +366,12 @@ claude mcp add tortoise http://localhost:8000/mcp
 > connected — `claude mcp list` is the check.
 >
 > **Sharing the config with the repo instead?** `--scope project` writes a
-> **committable** `.mcp.json` at the project root, approved once per machine
-> (⏸ Pending approval until then; `claude mcp reset-project-choices` resets
-> it). It carries no key here — a local daemon needs none.
+> **committable** `.mcp.json` at the project root, approved once per machine —
+> start `claude` in the project and allow the prompt, or run `/mcp`
+> (`claude mcp reset-project-choices` resets the choice). This command sends no
+> `--header`, so the file carries no key at all.
 
-Or add to `.mcp.json` — **project scope, and committed with the repo** (no
+Or add to `.mcp.json` — **project scope, so the file is committable** (no
 key here: a local daemon needs none):
 
 ```json
@@ -403,7 +404,8 @@ print(status())
 
 ### No-Docker path (single-agent eval) — stdio
 
-Add a `tortoise` server to your MCP client's config (`.mcp.json` for Claude Code / Cursor, or the equivalent for your client):
+Add a `tortoise` server to your MCP client's config (`.mcp.json` for Claude
+Code, `.cursor/mcp.json` for Cursor, or the equivalent for your client):
 
 ```json
 {
