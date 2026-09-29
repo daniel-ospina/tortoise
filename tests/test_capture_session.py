@@ -4710,16 +4710,28 @@ def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
     turn that HAS content still carries its marker to the model — which is the
     recorded #4897 fidelity decision and must not be traded away by this fix.
 
-    ⛔ THE MIXED-CONVERSATION LEG BELOW IS WHAT BINDS THE ROUND-15 PREDICATE
-    (#4897 review round 15, P1). The round-14 skip tested the marker-free body
-    for BLANKNESS, which a clipped body of non-whitespace non-sentences passes:
-    ``body`` is then built from the WHOLE content (marker included), so ``_SENT``
-    joined the 1-char body to the marker and turned the MARKER into the sentence.
-    The single-turn fixtures above did not catch it because the entry gate refuses
-    these turns alone; a MIXED conversation admits them, and it is the extractor
-    transcript (not the gate's) that carries the markers. Measured end to end
-    through the m2 extractor on this exact conversation, before the fix: 3
-    extracted points — the two extras being this module's own markers.
+    ⛔ THE MIXED-CONVERSATION LEG BELOW IS WHAT BINDS THE ROUND-15 AND ROUND-16
+    PREDICATES (#4897 review rounds 15 and 16, P1). The round-14 skip tested the
+    marker-free body for BLANKNESS, which a clipped body of non-whitespace
+    non-sentences passes. The single-turn fixtures above did not catch it because
+    the entry gate refuses these turns alone; a MIXED conversation admits them, and
+    it is the extractor transcript (not the gate's) that carries the markers.
+    Measured end to end through the m2 extractor on this exact conversation, before
+    the round-15 fix: 3 extracted points — the two extras being this module's own
+    markers.
+
+    ⛔ ROUND 16: TESTING THE MARKER-FREE BODY IS NECESSARY BUT NOT SUFFICIENT.
+    The round-15 form still built the transcript line from the WHOLE content, and
+    ``_SENT`` takes a run of NON-terminators plus AT MOST one terminator — so when
+    the retained body ENDS with a sentence terminator the marker lands after it and
+    becomes its OWN match, hence its own utterance, hence (``LLMExtractor.run``
+    mints one Point per utterance 1:1) its own Point. That is the ``sentence_then_marker``
+    fixture below: ``"a" * 4958 + "." + " " * 500``, whose 4959th character is
+    ``keep = cap - len(marker)`` — a boundary any prose turn crosses constantly.
+    Measured on this branch before the round-16 fix: 3 points where ``origin/main``
+    extracts 2. The fix attaches the marker INSIDE the final sentence, immediately
+    before that sentence's own terminator, so the two are ONE match; appending it
+    after the terminator does not work.
     """
     from tortoise.sdk import (
         _CAPTURE_TRUNCATION_SENTINEL,
@@ -4727,6 +4739,12 @@ def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
         _capture_turn_window,
         _session_llm_transcript,
     )
+    # Strips the marker AND its length clause, so what remains is the text the
+    # marker rode with. A point that is ONLY the marker reduces to nothing.
+    # ``re`` is already imported at module scope — do not shadow it here (`ruff`
+    # I001 flags a first-party import placed after the function's from-imports).
+    _MARKER_STANDALONE_RE = re.compile(
+        re.escape(_CAPTURE_TRUNCATION_SENTINEL) + r" original length \d+ chars\]")
     band = " " * (_CAPTURE_TURN_CAP - 40) + "REALCONTENT" + "x" * 1000
     windowed = _capture_turn_window([{"role": "user", "content": band}])
     assert _CAPTURE_TRUNCATION_SENTINEL in windowed[0]["content"], (
@@ -4749,14 +4767,32 @@ def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
         {"role": "user", "content": "I think the auth dead-end is the top issue."},
         {"role": "user", "content": "  .  " * 2000},
         {"role": "user", "content": "X" + " " * 6000},
+        # Round 16: the boundary where the retained body ENDS with a terminator.
+        # `keep` is `cap - len(marker)`, so this is "the character at the cut is a
+        # '.'" — ordinary prose reaches it constantly, and it was the one input on
+        # which the round-15 form regressed `origin/main` (3 points vs 2).
+        {"role": "user", "content": "a" * 4958 + "." + " " * 500},
     ]
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     res = sdk.capture_session(mixed)
     assert res["ok"] is True, res["errors"]
     marked = [p for p in res["points"]
               if _CAPTURE_TRUNCATION_SENTINEL in (p.get("text") or "")]
-    assert not marked, f"a marker-only turn minted a synthetic claim: {marked}"
+    # A point may MENTION the marker (it rides inside the sentence it belongs to),
+    # but no point may BE the marker: strip the sentinel and the length clause and
+    # what remains must still be real text.
+    bare = [p for p in marked
+            if len(_MARKER_STANDALONE_RE.sub("", p["text"]).strip()) < 3]
+    assert not bare, f"a marker-only turn minted a synthetic claim: {bare}"
     assert res["extracted"] >= 1, mixed  # the real turn still extracts
+
+    # And the marker must not have been traded away to achieve that: the turn
+    # whose body really does end at the cut still carries it.
+    windowed = _capture_turn_window(
+        [{"role": "user", "content": "a" * 4958 + "." + " " * 500}])
+    transcript, _est = _session_llm_transcript(windowed)
+    assert _CAPTURE_TRUNCATION_SENTINEL in transcript, (
+        "the marker must still reach the model for a turn that has content")
 
 
 def test_the_clippers_blank_set_is_explicit():
