@@ -238,8 +238,9 @@ def test_a_failed_read_raises_instead_of_answering_no_reverts(tmp_path: Path) ->
 
     `_paths_changed`/`_numstat` returning `set()`/`{}` on a nonzero git exit
     makes "could not measure" indistinguishable from "nothing changed" — the
-    fail-open itself. Pre-fix both returned empty and this test fails with an
-    AttributeError (no MeasurementError to catch); post-fix both raise.
+    fail-open itself. Pre-fix both helpers returned empty, so the loop below
+    reaches its own explicit AssertionError (there is no MeasurementError to
+    raise); post-fix both raise.
     """
     _, feature = _make_never_fetched_branch(tmp_path)
     spec = importlib.util.spec_from_file_location("drift_guard_under_test",
@@ -256,3 +257,28 @@ def test_a_failed_read_raises_instead_of_answering_no_reverts(tmp_path: Path) ->
         raise AssertionError(
             f"{fn.__name__} swallowed a failed git read instead of raising"
         )
+
+
+def test_a_local_branch_shadowing_the_base_name_is_not_measured(
+        tmp_path: Path) -> None:
+    """`origin/main` DWIM-resolves AHEAD of refs/remotes/... — the fetch's own
+    destination is what must be measured.
+
+    gitrevisions order is $GIT_DIR/<n>, refs/<n>, refs/tags/<n>, refs/heads/<n>,
+    refs/remotes/<n>, so a LOCAL branch literally named `origin/main` shadows
+    the remote-tracking ref the gate just fetched. Measuring the caller's
+    spelling then reads the stale shadow while stamping freshness "fetched" —
+    fail-open #3 through another route. Pre-fix this fixture passes green
+    (status ok, behind 0); post-fix the canonical fetched ref is measured.
+    """
+    _, feature = _make_never_fetched_branch(tmp_path)
+    # The shadow: a local branch with the base's spelling, pinned to the stale tip.
+    _git_ok(feature, "branch", "origin/main", "refs/remotes/origin/main")
+
+    payload, p = _payload(feature)
+    assert p.returncode == 1, (
+        f"a local branch named origin/main shadowed the fetched ref: {payload!r}"
+    )
+    assert payload["status"] == "drift", payload
+    assert payload["freshness"] == "fetched", payload
+    assert {r["path"] for r in payload["reverts"]} == {"h.txt"}, payload
