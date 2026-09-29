@@ -183,11 +183,8 @@ class TestRelationTemplates:
         assert any("must be IMPL or NAND" in e for e in errors), errors
 
     def test_mitigates_is_refused_as_a_template_mechanism(self):
-        """MITIGATES was RETIRED from the operator menu (ONTOLOGY v3.17, #4937 /
-        #2552) and `sdk.create_operator` refuses it. Validating against
-        `CORE_PREDICATES` once made this slot BROADER than its own sibling
-        `relations[].mechanism` and re-advertised a retired spelling on the
-        author-facing template. The two slots must agree."""
+        """This check hardcodes the literal pair IMPL|NAND, so `MITIGATES` is
+        refused even though the spelling is a live payload op_type elsewhere."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "MITIGATES"}])
         assert any("must be IMPL or NAND" in e for e in errors), errors
 
