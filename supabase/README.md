@@ -126,6 +126,14 @@ Migrations + functions deploy via `.github/workflows/supabase-deploy.yml`.
 > (operator-executed). Gated on the `SUPABASE_ACCESS_TOKEN` repo secret
 > (token-based push since #883 — the `SUPABASE_DB_URL` secret was removed
 > there; the drift gate and apply both use the token path).
+>
+> 🔗 **The same dispatch also flips the app (#3627).** Its last step
+> dispatches `deploy-hosted.yml` — the app flip is NOT a second operator
+> action, because the tenancy rename (#3543) is a hard cut at the wire level
+> and the app and schema must land in one window. The step runs only after
+> every apply succeeded, and it fails closed: if it cannot dispatch, the run
+> goes RED rather than reporting a closed window. Dispatch FROM `main` — a
+> non-main run is refused before any migration is applied.
 
 **Migration drift gate (#1095):** `deploy-hosted.yml` runs
 `.github/scripts/check-migration-drift` before shipping app code — a fail-closed
@@ -133,8 +141,11 @@ check that repo migrations are not ahead of the linked project's applied set
 (reads `supabase_migrations.schema_migrations` via the Supabase Management API
 with `SUPABASE_ACCESS_TOKEN`). A deploy with pending table/column/function/
 unique-index migrations is BLOCKED until they are applied; index-only and
-remote-ahead drift warn. Operator sequence: dispatch `supabase-deploy` → apply
-GREEN → then deploy the app. If the gate reports `OUT OF ORDER` (a blocking
+remote-ahead drift warn. Operator sequence: dispatch `supabase-deploy` ONCE —
+it applies the migrations and (since #3627) dispatches the app flip itself as
+its last step, so step 2 and step 3 of the flip sequence share one run and
+there is no second dispatch to remember. `deploy-hosted` re-runs this same
+drift gate before it ships. If the gate reports `OUT OF ORDER` (a blocking
 version older than prod's newest applied version), resolve those FIRST — a
 forward migration, or `migration repair --linked --status applied <version>`
 when the migration is provably already in prod — because the apply pushes the
@@ -146,6 +157,7 @@ Manual fallback (equivalent):
 supabase db push --project-ref ybetwichurajbfswfeqa
 supabase functions deploy waitlist-subscribe \
   --project-ref ybetwichurajbfswfeqa --no-verify-jwt
+gh workflow run deploy-hosted.yml --ref main   # the app flip (#3627 — one window)
 ```
 
 ## Post-deploy smoke checklist (#373)

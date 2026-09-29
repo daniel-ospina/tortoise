@@ -16,20 +16,65 @@
 #      bash .github/scripts/verify-cutover --live).
 #   2. DISPATCH this workflow (migrations + waitlist-subscribe +
 #      tenant-provision Edge Functions) — the Supabase side of the flip.
-#   3. DISPATCH deploy-hosted (the app flip: reads Supabase, #767) —
-#      same operator, immediately after step 2.
+#   3. deploy-hosted (the app flip: reads Supabase, #767) — DISPATCHED BY THIS
+#      RUN, as its final step (`Dispatch deploy-hosted (the app flip)`). Step 3
+#      is no longer a second operator action: this file performs steps 2 and 3
+#      in one run (#3627). It fires only after every step-2 deploy reached
+#      success — an `if:` with no status function carries GitHub's implicit
+#      `success()` — so a failed apply leaves the app untouched AND the run red.
 #   4. Post-flip verification incl. E2E-7 (#766 — the next issue).
 #   5. Registry delete (point of no return, owner informed):
 #      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
 #      (with TORTOISE_SUPPRESS_ENUM_DELTA=1 set on the app for the flip
 #      window, per plan Task 10 P3-4).
-# Steps 2+3 together are "the single deploy" — no interim state ships.
+# Steps 2+3 together are "the single deploy" — no interim state ships. Since
+# #3627 that is ENFORCED BY THIS FILE, not by operator discipline: the two
+# halves share one run, so they cannot be split by a forgotten second dispatch.
 #
-# Guarded: steps only run when BOTH secrets are set (if: env.X != '' — GitHub
-# does not allow secrets in if: conditions). Without them, the job no-ops
-# (manual fallback in supabase/README.md). This project also hosts the hosted
-# Tortoise platform — destructive migrations stay under PR review discipline.
+# ⚠️ #3627 — WHY STEPS 2 AND 3 ARE ONE WINDOW. The tenancy rename
+# (supabase/migrations/20260915000001_tenancy_team_to_org.sql, #3543) is a HARD
+# CUT at the wire level: `provision_team` is dropped and recreated with
+# `p_org_id`, and PostgREST resolves RPCs by PARAMETER NAME, so no single app
+# revision is compatible with both the old and the new schema. Until #3627 this
+# workflow stopped after the edge functions, so the schema ALWAYS landed alone
+# and the Fly app was guaranteed stale for the whole window between the two
+# runs — every tenant-scoped read returned 0 rows and every provisioning path
+# failed closed. The `Dispatch deploy-hosted (the app flip)` step is that
+# window's closure, and it FAILS CLOSED: a dispatch that silently no-ops would
+# leave the app stale while the run looked closed, which is the exact defect
+# #3627 exists to remove (see the step's own comments).
+#
+# Guarded: the DEPLOY steps (verify-secrets, apply, both edge functions, and the
+# app-flip dispatch) run only when the SUPABASE_ACCESS_TOKEN secret is set
+# (if: env.SUPABASE_ACCESS_TOKEN != '' — GitHub does not allow secrets in if:
+# conditions). Every step that WRITES or comes after one is gated, so without
+# the secret no migration is applied and no app flip is dispatched; the ungated
+# setup steps above them (checkout, setup-cli, `Link project`) still run. Manual
+# fallback in supabase/README.md.
+# The production flip path is main-only: a non-main run is refused before any
+# migration is applied, because the app half is dispatched at main. This project
+# also hosts the hosted Tortoise platform — destructive migrations stay under PR
+# review discipline.
 name: Deploy Supabase (migrations + functions)
+
+# #3627 — THE DISPATCH'S CREDENTIAL. `Dispatch deploy-hosted (the app flip)`
+# calls GitHub's `Create a workflow dispatch event`, which requires a token
+# carrying "Actions" repository permissions (write). MEASURED, not assumed: this
+# repo's default workflow permission is `read`
+# (`repos/daniel-ospina/tortoise/actions/permissions/workflow` ->
+# {"default_workflow_permissions":"read"}), and GitHub applies that default
+# FIRST and only then adjusts it by this block ("The permissions for the
+# GITHUB_TOKEN are initially set to the default setting ... The permissions are
+# then adjusted based on any configuration within the workflow file"). So the
+# `actions: write` below is what makes the step authenticate at all; drop it and
+# the API answers 403 and the app never flips.
+# `contents: read` must be spelled out: specifying ANY permission sets every
+# unspecified one to `none`, which would strip the token `actions/checkout` uses.
+# `gh secret set`/PAT alternatives are deliberately NOT used — a PAT here would
+# be a second long-lived credential on the flip path for no added guarantee.
+permissions:
+  actions: write
+  contents: read
 
 on:
   push:
@@ -79,6 +124,26 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_PROJECT_REF: ybetwichurajbfswfeqa
     steps:
+      # ── #3627: the co-move is a MAIN-ONLY contract ────────────────────────
+      # The schema applied here comes from THIS run's checked-out ref, while
+      # the app half is dispatched at `main`. Those are the same revision only
+      # when this run IS main. A branch dispatch would therefore apply branch
+      # migrations to the linked PRODUCTION project and then flip main's app —
+      # a mismatched pair, which is the failure #3627 is about.
+      # Refusing here (FIRST step, before `supabase link` and before any
+      # `db push`) is fail-closed: nothing is written. The branch path keeps its
+      # documented manual fallback (supabase/README.md "Manual fallback") —
+      # `supabase db push` + `supabase functions deploy` against the branch tree.
+      - name: Refuse a non-main dispatch (the co-move is main-only)
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
+        env:
+          RUN_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_REF" != "refs/heads/main" ]; then
+            echo "::error::This workflow applies migrations to the PRODUCTION Supabase project and dispatches deploy-hosted at main, so it must run FROM main: gh workflow run supabase-deploy.yml --ref main. Dispatched ref: $RUN_REF. Nothing was applied."
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
         with:
@@ -145,3 +210,78 @@ jobs:
         run: |
           supabase functions deploy tenant-provision \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+      # ══ #3627: THE CO-MOVE — step 3 of the flip sequence, IN THIS RUN ══════
+      # The tenancy rename (20260915000001_tenancy_team_to_org.sql) is a hard
+      # cut at the wire level (`provision_team` recreated with `p_org_id`;
+      # PostgREST resolves RPCs by parameter NAME), so the app cannot be
+      # compatible with both schemas. Before #3627 this workflow stopped after
+      # the edge functions and the app flip was a SECOND operator dispatch:
+      # the schema always landed alone, and every tenant-scoped read returned
+      # 0 rows until that second dispatch arrived.
+      #
+      # ORDERING IS THE GUARANTEE, not the operator. This step is the LAST step
+      # of the same job as the applies, and its `if:` carries no status check
+      # function, so GitHub applies the implicit `success()` ("A default status
+      # check of success() is applied unless you include one of these
+      # functions"). A failed `db push` or edge-function deploy therefore
+      # SKIPS this step and reddens the job — the app is never flipped onto a
+      # half-applied schema.
+      #
+      # FAIL CLOSED. The dispatch API needs a token carrying `actions: write`
+      # (the workflow-level `permissions:` block is what grants it; the repo
+      # default is `read`). If that grant is ever lost the API answers 403 and
+      # this step EXITS 1 — deliberately. A dispatch that silently no-ops would
+      # leave the app stale while the run looked green, which is the exact
+      # defect #3627 removes; so a body this step cannot read is refused too.
+      #
+      # WHAT COUNTED AS "DISPATCHED" (#3627 review): `gh` exiting 0 — the API
+      # accepted the POST. The RESPONSE BODY is deliberately NOT the contract:
+      # GitHub has answered this endpoint with `204 No Content` (empty body) and
+      # with `200` + a run-details body at different times, so requiring a run id
+      # would make every successful co-move run RED — a false failure (`gh`
+      # exited 0, the run WAS created, and the error text would tell the operator
+      # to re-dispatch, duplicating the deploy). An empty body is therefore
+      # accepted as the 204 shape; a non-empty body must carry a digits-only run
+      # id, because a 2xx carrying a payload we cannot read is an answer we do
+      # not understand, and 'I do not know' is not 'closed'.
+      - name: Dispatch deploy-hosted (the app flip)
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
+        env:
+          # Bound in env, never interpolated into the run text (#4334).
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          APP_REF: main
+        run: |
+          set -euo pipefail
+          if ! resp="$(gh api --method POST \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${REPO_SLUG}/actions/workflows/deploy-hosted.yml/dispatches" \
+                -f "ref=${APP_REF}")"; then
+            echo "::error::Could not dispatch deploy-hosted. The schema HAS been applied and the app has NOT flipped: every tenant-scoped read now returns 0 rows and provisioning fails closed (#3627). Fix the credential (the workflow-level 'permissions: actions: write' grant) and re-run, or flip the app by hand: gh workflow run deploy-hosted.yml --ref ${APP_REF}"
+            exit 1
+          fi
+          if [ -z "$resp" ]; then
+            # 204 No Content (command substitution has already stripped the
+            # trailing newline): the documented "dispatch created, no body"
+            # answer. `gh` exited 0, so the API accepted it — a RED here would
+            # be a false failure, not a guard.
+            echo "✅ deploy-hosted dispatched (204 No Content — no run id returned) — the app flip shares this schema's window (#3627)"
+            echo "   follow it: https://github.com/${REPO_SLUG}/actions/workflows/deploy-hosted.yml"
+          else
+            # `|| true` is NOT used: an unparseable body must fail, and it must
+            # fail with a message an operator can act on rather than jq's.
+            if ! run_id="$(printf '%s' "$resp" | jq -r '(.workflow_run_id // empty)')"; then
+              echo "::error::dispatch of deploy-hosted answered with an unreadable body (response: $resp) — the app flip is UNCONFIRMED. Check https://github.com/${REPO_SLUG}/actions/workflows/deploy-hosted.yml before treating the window as closed (#3627)"
+              exit 1
+            fi
+            # A body we cannot read is not a success: this step must never
+            # report a closed window on an answer it did not understand.
+            case "$run_id" in
+              ''|*[!0-9]*)
+                echo "::error::dispatch of deploy-hosted returned a body with no run id (response: $resp) — the app flip is UNCONFIRMED. Check https://github.com/${REPO_SLUG}/actions/workflows/deploy-hosted.yml before treating the window as closed (#3627)"
+                exit 1
+                ;;
+            esac
+            echo "✅ deploy-hosted dispatched (run ${run_id}) — the app flip shares this schema's window (#3627)"
+            echo "   https://github.com/${REPO_SLUG}/actions/runs/${run_id}"
+          fi

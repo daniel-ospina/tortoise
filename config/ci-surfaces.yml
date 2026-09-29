@@ -595,6 +595,7 @@ surfaces:
   - test_4220_blog_residue_cleanup.py
   - test_4716_capture_operator_ref_remap.py
   - test_6131_operator_mutation_vocabulary.py
+  - test_comove_dispatch_3627.py
   # #4971: the `(op_type, src, dst)` idempotency guard hoisted into
   # `commit_ops.apply_payload_operators` — the helper is core engine code, and
   # the re-key regression drives the real embedded capture commit, so this is
@@ -633,6 +634,11 @@ surfaces:
   # test_queue_window_observe.py.
   - test_queue_conflict_census.py
   - test_registry_integrity.py
+  # NOTE (rebase): this PR also registered `test_pack_extraction_slots_v31.py`
+  # here. main has since registered it in `core` (see the `test_pack_cli.py`
+  # block) with its #1026/#5647 comment, so the PR's bare entry is dropped —
+  # keeping both would be a same-surface DUPLICATE, which `--integrity`
+  # reports (`duplicate_entries`, #2913) and which `merge=union` can emit.
   - test_rotate_key.py
   # #3981: dual-registered with `api` (the arm that fires on a tortoise/hosted_api.py-only
   # change); this `core` entry is the fallback arm, since core is only added when nothing
@@ -2480,6 +2486,7 @@ durations:
   test_crash_recovery_e2e.py: 0.1
   test_crypto.py: 0.1
   test_dataset_audit.py: 0.1
+  test_comove_dispatch_3627.py: 1.5
   test_deploy_workflow.py: 0.4
   test_deployment.py: 0.1
   test_embedder_probe.py: 0.1
