@@ -321,11 +321,11 @@ would go green on, or the list states the reason it does not.
 
 ## 10. Collision record (pre-dispatch, all surfaces)
 
-- `python3 tools/collision_preflight.py 3863` → **COLLISION (keyword-only)**, 2 hits: merged PR **#3235**
+- `uv run python tools/collision_preflight.py 3863` → **COLLISION (keyword-only)**, 2 hits: merged PR **#3235**
   and branch `fix/2938-curate-surfaces`, both matching `curate`/`surface`. **Verified homonym, not live work
   on #3863**: #3235 is the *CI test-selection* surface manifest (`ci_selection.py`), an unrelated meaning of
   "surface". #3235 is MERGED and the branch is merged into `main`. **Proceed.**
-- `python3 tools/collision_preflight.py 3849` → **COLLISION (exit 1)** on branch + worktree
+- `uv run python tools/collision_preflight.py 3849` → **COLLISION (exit 1)** on branch + worktree
   `.worktrees/3849-ask-eval-only`. Confirms #3849 is **in flight** and holds the serialization on the four
   surface files. Handled in §8.
 - **Open-PR file scan** (59 open PRs at this snapshot, all enumerated): no open PR holds `tool_registry.py` or
