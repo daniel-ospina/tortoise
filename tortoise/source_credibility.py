@@ -95,6 +95,25 @@ SOURCE_KIND_DEFAULTS: dict[str, str | None] = {
     "slack_message": None,
     "linear_card": None,
     "linear_cycle": None,   # #388: cycles are not cards — own kind, still neutral
+    # Meeting capture (#2726): raw first-hand `meeting_transcript` vs structured/
+    # mediated `meeting_minutes` — both operational captures, so NEUTRAL (None),
+    # matching `document` and the connector kinds. The tier question (#398: is a
+    # raw transcript first-hand T1 evidence and minutes a mediated T2/T3?) is
+    # intentionally left open — registering NEUTRAL changes no EP inheritance
+    # and is reversible via register_source_kind_default once decided.
+    # These — plus `agentSession` (#909 §4.3 #6) and `meeting_summary` (the
+    # index/classifier's classified-meeting sourceKind) — are registered HERE,
+    # the canonical registry, NOT in file_indexer's import-time block. A kind
+    # registered at another module's import time is visible only after that
+    # module is imported, so `extraction.sourceTypes` validation (and
+    # commit_schema's vocab) disagreed with itself across processes; owning
+    # every operational capture in one registry makes the set deterministic for
+    # all consumers. `meeting_summary` remains the kind the file_indexer
+    # classifier WRITES; registration ownership is independent of that.
+    "agentSession": None,
+    "meeting_summary": None,
+    "meeting_transcript": None,
+    "meeting_minutes": None,
 }
 
 # Assessment-factor constants (pinned in scoping resolution C / plan Task 5)

@@ -3,16 +3,30 @@
 The dashboard's capture-status surface reads these server-written onboarding
 state keys (never client state):
 
-* ``session_capture_receipt_<harness>`` proves a durable hosted 2xx capture
-  (the bare ``session_capture_receipt`` is the legacy no-harness key);
+* ``session_capture_receipt_<harness>`` records a durable hosted 2xx capture
+  under an authenticated agent credential, ATTRIBUTED to ``<harness>``. The
+  attribution is the caller's declaration, not a server observation: on a
+  fresh ``session_id`` it is ``body.harness`` (an agent self-report), and on a
+  re-capture it is the Session's STORED harness when the Session has one (itself
+  recorded from the declaration that first stamped it) or the current caller's
+  ``body.harness`` when it does not (``stored or claimed``) — a caller
+  declaration either way. No credential→harness binding exists (``tt_``/``tk_``
+  keys carry no harness, `#3700`), so nothing here proves the server OBSERVED
+  which harness captured. The bare ``session_capture_receipt`` is the
+  harness-unproven key (legacy no-harness hooks, session-JWT captures).
 * ``session_capture_last_error_<harness>`` carries the last non-2xx attempt's
-  detail (the per-harness failure sub-line).
+  detail (the per-harness failure sub-line). Same conclusion, same resolution:
+  every capture surface — the REST endpoint and the MCP
+  ``tortoise_session_capture`` tool (``tortoise/mcp_server.py``) — resolves the
+  harness with ``hosted_api._observed_capture_harness`` (stored or claimed)
+  before writing the key (#3681 / #4898). That helper is the single resolver;
+  its own docstring carries the credential and stored-harness rules.
 
-Both the hosted API (``tortoise/hosted_api.py``) and the CLI's
-``tortoise session verify`` (#3809) derive them from THIS module, so the two
-can never disagree about the key spelling.  A local copy in either caller is
-exactly the sibling-divergence class the capture lane has paid review cycles
-for — one function, two importers.
+The hosted API (``tortoise/hosted_api.py``) imports both keys from THIS module,
+and the CLI's ``tortoise session verify`` (#3809) imports ``capture_receipt_key``
+(it reads no last-error key). The hosted API also spells the per-harness keys
+itself in places (see #4893), so a change to a key name must not assume this
+module is the only place it appears.
 """
 from __future__ import annotations
 

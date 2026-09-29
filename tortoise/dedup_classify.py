@@ -27,7 +27,10 @@ single ``eventId`` property, so a collapsed cross-session node would orphan
 (or clobber) one session's memory layer (W2 snapshots are eventId-keyed).
 Paraphrase detection is the repo's committed deterministic band
 (``extractor_v2.NOOP_MIN_OVERLAP`` — token overlap), NEVER an LLM call: the
-m2 mock lane (the W2 deterministic CI lane) runs with zero provider keys.
+m2 mock lane (the W2 deterministic CI lane) runs with zero provider keys —
+and it is bounded by the D12/O4 never-across boundary
+(``extractor_v2.fold_allowed``), so a restatement that negates, re-conditions,
+re-subjects or substitutes the claim it resembles stays its own point.
 A real REPHRASE operator edge is not emitted (EventAPI validates NAND/IMPL
 only; the e7-consolidation decision pins REPHRASE as a dedup label, not a
 written operator; eval-spec §P5 defines the unimplemented edge contract).
@@ -50,6 +53,7 @@ from tortoise.extractor_v2 import (  # stdlib-only top-level imports (safe)
     NOOP_MIN_OVERLAP,
     _norm,
     _token_overlap,
+    fold_allowed,
 )
 from tortoise.ids import content_hash
 from tortoise.write_verb import (
@@ -110,6 +114,12 @@ def rephrase_hit(
     for cid, ccontent in canonical_contents[:_MAX_PARAPHRASE_CANDIDATES]:
         if _norm(ccontent) == norm:
             continue  # exact text — the content-hash leg owns it
+        if not fold_allowed(ccontent, content):
+            # D12/O4 (#5080): a fold may not cross a distinguishing
+            # difference.  This is the same boundary the against-store
+            # classifier enforces, from its one implementation (a
+            # restatement must not silently delete its rival).
+            continue
         ov = _token_overlap(ccontent, content)
         if ov < NOOP_MIN_OVERLAP:
             continue

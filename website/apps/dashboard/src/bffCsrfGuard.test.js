@@ -166,11 +166,13 @@ test('the client logout POST sends Content-Type: application/json', () => {
 // A tiny in-memory stand-in for the D1 binding, sufficient for the two SQL
 // statements the recovery flow uses.
 function fakeDb() {
-  const recovery = new Map()
+  const pending = new Map()
   const sessions = []
+  const revocations = []
   return {
-    _recovery: recovery,
+    _pending: pending,
     _sessions: sessions,
+    _revocations: revocations,
     async exec() {},
     prepare(sql) {
       const stmt = {
@@ -180,19 +182,21 @@ function fakeDb() {
           return this
         },
         async run() {
-          if (/INSERT INTO recovery_flows/.test(sql)) {
-            const [flow_id, user_id, refresh_token, email, , expires_at] = this._args
-            recovery.set(flow_id, { user_id, refresh_token, email, expires_at })
+          if (/INSERT INTO email_flow_pending/.test(sql)) {
+            const [flow_id, kind, user_id, refresh_token, email, , expires_at] = this._args
+            pending.set(flow_id, { kind, user_id, refresh_token, email, expires_at })
           } else if (/INSERT INTO sessions/.test(sql)) {
             sessions.push(this._args)
-          } else if (/DELETE FROM recovery_flows/.test(sql)) {
-            recovery.delete(this._args[0])
+          } else if (/DELETE FROM email_flow_pending/.test(sql)) {
+            if (!pending.delete(this._args[0])) return { meta: { changes: 0 } }
+          } else if (/UPDATE sessions SET revoked = 1/.test(sql)) {
+            revocations.push(this._args[0])
           }
           return { meta: { changes: 1 } }
         },
         async first() {
-          if (/FROM recovery_flows/.test(sql)) {
-            const row = recovery.get(this._args[0])
+          if (/FROM email_flow_pending/.test(sql)) {
+            const row = pending.get(this._args[0])
             return row ? { ...row } : null
           }
           return null
@@ -217,6 +221,26 @@ function withVerify(handler, email = 'victim@example.test') {
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       )
+    }
+    throw new Error(`unexpected fetch: ${u}`)
+  }
+  return Promise.resolve()
+    .then(handler)
+    .finally(() => {
+      globalThis.fetch = realFetch
+    })
+}
+
+/** Same as `withVerify`, but the provider answers 2xx with a chosen body. */
+function withVerifyBody(handler, body) {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/auth/v1/verify')) {
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
     }
     throw new Error(`unexpected fetch: ${u}`)
   }
@@ -260,7 +284,7 @@ test('a recovery GET verifies the token, renders the interstitial, and mints NO 
       'SECURITY: the GET must not mint a session — that is the fixation vector',
     )
     assert.equal(db._sessions.length, 0, 'SECURITY: no session row may be created by the GET')
-    assert.equal(db._recovery.size, 1, 'the verified recovery must be held pending confirmation')
+    assert.equal(db._pending.size, 1, 'the verified link must be held pending confirmation')
   })
 })
 
@@ -292,7 +316,7 @@ test('the CSRF-guarded continue POST mints the session and redirects to the rese
       request: new Request(`${APP}/auth/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: cookie },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ pending: cookie.slice('__Host-authflow='.length) }),
       }),
       env: env(db),
     })
@@ -300,7 +324,12 @@ test('the CSRF-guarded continue POST mints the session and redirects to the rese
     assert.match(res.headers.get('Location') ?? '', /\/welcome\?reset=1/)
     assert.match(res.headers.get('Set-Cookie') ?? '', /__Host-session=/, 'the POST mints the session')
     assert.equal(db._sessions.length, 1, 'exactly one session row is minted')
-    assert.equal(db._recovery.size, 0, 'the pending recovery is single-use')
+    assert.equal(db._pending.size, 0, 'the pending record is single-use')
+    assert.deepEqual(
+      db._revocations,
+      ['user-456'],
+      'F15 positive control: the RECOVERY POST must revoke the user\'s other sessions',
+    )
   })
 })
 
@@ -343,4 +372,141 @@ test('the continue POST is refused without JSON or from a cross-origin caller', 
     env: { APP_ORIGIN: APP },
   })
   assert.equal(cross.status, 403, 'a cross-origin continue POST must be refused')
+})
+
+// ── 4. every email type completes; and a malformed 2xx is never a 500 ──────
+// #3528: `type=email` (signup confirmation + magic link), `email_change` and
+// `invite` used to hit a class-8 branch that required a `__Host-authflow`
+// cookie NO email flow establishes, so an emailed link was answered
+// `302 /auth?interstitial=1` — which nothing consumes — and the single-use
+// `token_hash` was dropped. Email confirmation did not complete at all.
+for (const type of ['email', 'email_change', 'invite']) {
+  test(`a ${type} link completes through the interstitial like recovery`, async () => {
+    const { onRequestGet, onRequestPost } = await loadTs('functions/auth/confirm.ts')
+    const db = fakeDb()
+    await withVerify(async () => {
+      const getRes = await onRequestGet({
+        request: new Request(`${APP}/auth/confirm?token_hash=t&type=${type}`),
+        env: env(db),
+      })
+      assert.equal(getRes.status, 200, `${type} must render the consent interstitial`)
+      const body = await getRes.text()
+      assert.match(body, /victim@example\.test/, 'the interstitial must name the account')
+      assert.doesNotMatch(
+        getRes.headers.get('Set-Cookie') ?? '',
+        /__Host-session=/,
+        'SECURITY: the GET must never mint a session',
+      )
+      assert.equal(db._pending.get(flowCookie(getRes).slice('__Host-authflow='.length)).kind, type)
+
+      const cookie = flowCookie(getRes)
+      const res = await onRequestPost({
+        request: new Request(`${APP}/auth/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: cookie },
+          body: JSON.stringify({ pending: cookie.slice('__Host-authflow='.length) }),
+        }),
+        env: env(db),
+      })
+      assert.equal(res.status, 302, `${type} must complete on the confirmed POST`)
+      assert.match(res.headers.get('Set-Cookie') ?? '', /__Host-session=/)
+      assert.equal(
+        db._revocations.length,
+        0,
+        'F15 is recovery-only: a sign-in must not revoke the user\'s other sessions',
+      )
+      const location = res.headers.get('Location') ?? ''
+      assert.equal(
+        location.includes('reset=1'),
+        false,
+        `${type} is not a password reset and must not land on the reset panel`,
+      )
+    })
+  })
+}
+
+test('a malformed 2xx from the provider is 503 provider_unavailable, never 500', async () => {
+  const { onRequestGet } = await loadTs('functions/auth/confirm.ts')
+
+  // `call()` classifies success by STATUS alone, so a 200 with a partial body
+  // reaches `.user.id`. Before the guard the recovery path threw a TypeError
+  // inside the pending-INSERT try and fell back to the WRONG slug
+  // (`session_store_unavailable`), while the non-recovery path threw unhandled
+  // (#4160). Mutation: drop `requireUserSession` and this test fails on the error
+  // SLUG — `provider_unavailable` is what the guard is responsible for.
+  for (const [type, body] of [
+    ['recovery', {}],
+    ['recovery', { user: { id: 'user-456' } }],
+    ['email', { access_token: 'a', refresh_token: 'r' }],
+  ]) {
+    await withVerifyBody(async () => {
+      const res = await onRequestGet({
+        request: new Request(`${APP}/auth/confirm?token_hash=t&type=${type}`),
+        env: env(fakeDb()),
+      })
+      assert.equal(res.status, 503, `a malformed 2xx must be 503, got ${res.status}`)
+      assert.equal((await res.json()).error, 'provider_unavailable')
+    }, body)
+  }
+})
+
+test('a confirmation cannot mint ANOTHER pending record — the page id binds the consent', async () => {
+  // The `__Host-authflow` cookie is per-BROWSER, not per-tab, and every verified
+  // GET overwrites it. So: open your own link (tab A), then an attacker-issued
+  // link (tab B) in the same browser. Clicking Continue on tab A must not mint
+  // tab B's account — the POST carries the id the PAGE displayed, and a mismatch
+  // is refused rather than coerced (a page naming account A must never mint B).
+  const { onRequestGet, onRequestPost } = await loadTs('functions/auth/confirm.ts')
+  const db = fakeDb()
+  await withVerify(async () => {
+    const a = await onRequestGet({
+      request: new Request(`${APP}/auth/confirm?token_hash=a&type=email`),
+      env: env(db),
+    })
+    const aPending = flowCookie(a).slice('__Host-authflow='.length)
+    const b = await onRequestGet({
+      request: new Request(`${APP}/auth/confirm?token_hash=b&type=email`),
+      env: env(db),
+    })
+
+    const res = await onRequestPost({
+      request: new Request(`${APP}/auth/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: flowCookie(b) },
+        body: JSON.stringify({ pending: aPending }),
+      }),
+      env: env(db),
+    })
+    assert.equal(res.status, 400, 'a mismatched pending id must be refused, never coerced')
+    assert.equal(
+      db._sessions.length,
+      0,
+      'SECURITY: no session may be minted for an account the page did not name',
+    )
+  })
+})
+
+test('a replayed continue POST mints nothing the second time', async () => {
+  const { onRequestGet, onRequestPost } = await loadTs('functions/auth/confirm.ts')
+  const db = fakeDb()
+  await withVerify(async () => {
+    const getRes = await onRequestGet({
+      request: new Request(`${APP}/auth/confirm?token_hash=t&type=recovery`),
+      env: env(db),
+    })
+    const cookie = flowCookie(getRes)
+    const post = () =>
+      onRequestPost({
+        request: new Request(`${APP}/auth/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: APP, Cookie: cookie },
+          body: JSON.stringify({ pending: cookie.slice('__Host-authflow='.length) }),
+        }),
+        env: env(db),
+      })
+
+    assert.equal((await post()).status, 302, 'the first POST completes')
+    assert.equal((await post()).status, 400, 'the replay must be refused')
+    assert.equal(db._sessions.length, 1, 'the pending record is single-use')
+  })
 })

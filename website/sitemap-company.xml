@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- premiselabs.co — company page sitemap (single-page marketing site).
+<!-- premiselabs.co — company page sitemap (company marketing site + the
+     public contact page, which is an outside-product surface and therefore
+     canonicals here, not on the tortoise host — #2409).
      Same-host URLs only (Google requirement); discovered via robots.txt
      cross-submission. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -7,5 +9,10 @@
     <loc>https://premiselabs.co/</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://premiselabs.co/contact</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
   </url>
 </urlset>

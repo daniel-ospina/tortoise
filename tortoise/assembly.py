@@ -53,6 +53,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
+
 __all__ = ["AssemblyShape", "classify_question", "extract_subject_terms"]
 
 # public shape vocabulary (Task 6's fired branch keys on these)
@@ -319,6 +321,13 @@ from typing import Protocol  # noqa: E402
 # search lane itself excludes the vocabulary.
 _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES = frozenset({"retracted"})
 
+# #4061 R2: the ceiling of the FTS leg's adaptive window. The window doubles
+# while excluded Objects crowd it, so it only ever grows on a graph where
+# retracted rows genuinely out-rank live ones; the cap bounds the
+# pathological case and equals ``tortoise_fts_query``'s own ``limit`` ceiling
+# (a larger window would raise there and degrade the leg to []).
+_FTS_WINDOW_CAP = 10000
+
 
 @dataclass(frozen=True)
 class SubjectCandidate:
@@ -361,6 +370,8 @@ class ResolverPort(Protocol):
     tests; the docker adapter wraps a live TortoiseSDK/projection)."""
 
     def exact_objects(self, names: list[str]) -> list[dict]: ...
+
+    def excluded_exact_objects(self, names: list[str]) -> list[dict]: ...
 
     def fts_objects(self, term: str, limit: int = 8) -> list[dict]: ...
 
@@ -417,6 +428,31 @@ def _candidate_names(term: str) -> list[str]:
     return out
 
 
+def _excluded_exact_match(port: ResolverPort, names: list[str]) -> bool:
+    """True iff ``names`` matched an Object the exclusion set forbids.
+
+    ``exact_objects`` returns LIVE rows only (#3317), so an excluded exact
+    match is invisible to it — this probe recovers the distinction between
+    "no match" and "a match that must not be surfaced" (#4061 R1).
+
+    Fail-SAFE polarity, deliberately: a probe that cannot answer (raise) is
+    treated as an excluded match, because the alternative — falling through
+    to a weaker leg — is the fail-open subject substitution this fix exists
+    to remove. A port with no exclusion concept (a plain dict stub, the
+    embedded lane) has no excluded match to find, so an absent probe is
+    False, preserving the pre-existing fall-through for those ports.
+    """
+    if not names:
+        return False
+    probe = getattr(port, "excluded_exact_objects", None)
+    if probe is None:
+        return False
+    try:
+        return bool(probe(names))
+    except Exception:
+        return True
+
+
 def resolve_subjects(port: ResolverPort, terms: list[str], *,
                      shape: AssemblyShape | None) -> ResolveResult:
     """Deterministic no-LLM resolver: prose terms → Object candidates.
@@ -449,6 +485,17 @@ def resolve_subjects(port: ResolverPort, terms: list[str], *,
                     subject_index=idx, object_id=oid,
                     name=str(row.get("name") or ""),
                     confidence="high", source="exact", term=term))
+            continue
+        # R1 (#4061): the exact leg is the term's NAMED match. #3317's
+        # exclusion made an excluded Object invisible to it, which left the
+        # resolver unable to tell "no exact match" from "the exact match
+        # must not be surfaced" — so the weaker legs ran and a DIFFERENT,
+        # live Object was substituted for the excluded one the question
+        # actually named. Distinguish the two: a named-but-unresolvable
+        # match ABSTAINS (no candidate for the term) instead of falling
+        # through. A term that names nothing still falls through unchanged.
+        if _excluded_exact_match(port, names):
+            unresolved.append(term)
             continue
         # leg 2 — docker Object name-FTS (paraphrase recall)
         rows: list[dict] = []
@@ -498,6 +545,32 @@ def resolve_subjects(port: ResolverPort, terms: list[str], *,
                          unresolved=tuple(unresolved))
 
 
+def _excluded_object_ids(proj, ids: list[str], excluded) -> set[str]:
+    """Authoritative exclusion membership for Object ids whose search payload
+    carried NO ``status`` (#4061 R3).
+
+    ``SearchResult.to_dict`` emits ``status`` only when truthy, so a hit
+    loses the key both when its Object genuinely has no stored status AND
+    when the SDK's batch content fetch degraded (``sdk.py``'s ``except``
+    writes ``{"content": "", "kind": ""}``). The two are indistinguishable
+    from the hit, so the stored status is re-read here for exactly the
+    status-less ids. Returns the subset whose stored status IS in
+    ``excluded``; a genuinely status-less Object is NOT in that subset
+    (live, matching the Cypher legs' ``o.status IS NULL OR …`` admission).
+
+    A read failure PROPAGATES — the caller's leg then degrades to ``[]``
+    under its R10 contract, never to a live-by-default admission.
+    """
+    if not ids or not excluded:
+        return set()
+    rows = proj.g.query(
+        "MATCH (o:Object) WHERE o.id IN $ids AND o.status IN $statuses "
+        "RETURN o.id",
+        params={"ids": ids,
+                "statuses": sorted(excluded)}).result_set
+    return {str(r[0]) for r in rows}
+
+
 def docker_resolver_port(sdk) -> ResolverPort:
     """Adapter over a live TortoiseSDK: exact probe via the projection's
     Object id/name index (one batched query), FTS via
@@ -516,6 +589,16 @@ def docker_resolver_port(sdk) -> ResolverPort:
     terminal clause on ``label == 'Point'`` so an Object FTS hit still
     carries a terminal status — and its rows are filtered here instead,
     through the SAME constant so the two can never drift.
+
+    #4061 (R1/R2/R3) closes the three residuals #3317 left in THIS port:
+    ``excluded_exact_objects`` makes the exact leg's exclusion DISTINGUISHABLE
+    from an absent match (so the resolver can abstain instead of substituting
+    a weaker leg's live Object); ``fts_objects`` grows its window until the
+    exclusion has been applied before the leg's bound (a post-truncation
+    Python filter let >=limit excluded Objects starve a live candidate); and
+    an FTS hit whose payload carried no ``status`` (batch content-fetch
+    degradation) has its status re-read from the graph instead of defaulting
+    to live.
     """
     proj = sdk._get_proj()
     # Object-scoped predicate, stated inline rather than routed through
@@ -535,14 +618,6 @@ def docker_resolver_port(sdk) -> ResolverPort:
         f"(o.status IS NULL OR o.status <> '{s}')"
         for s in sorted(_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES))
     status_filter = f"AND ({status_predicate}) " if status_predicate else ""
-    #
-    # KNOWN RESIDUALS, owned by #4061 (not absorbed here): the FTS leg filters
-    # AFTER ``tortoise_fts_query``'s own ``limit`` truncation (the other two
-    # legs filter pre-bound), so >=limit matching rows can starve a live
-    # candidate; and its Python check — like both Cypher legs — ADMITS a hit
-    # with no ``status`` (the entity write path treats an absent status as
-    # live, ``live.py``); the Cypher legs simply cannot be affected by the
-    # batch content-fetch degradation, which is what drops ``status``.
 
     def exact_objects(names: list[str]) -> list[dict]:
         rows = proj.g.query(
@@ -553,16 +628,75 @@ def docker_resolver_port(sdk) -> ResolverPort:
             params={"names": names}).result_set
         return [{"id": r[0], "name": r[1]} for r in rows]
 
+    def excluded_exact_objects(names: list[str]) -> list[dict]:
+        # #4061 R1: the DISTINGUISHING probe. ``exact_objects`` returns LIVE
+        # rows only (#3317), so the resolver cannot tell "no exact match"
+        # from "the exact match is excluded". This answers the latter with
+        # the same name/id proximity, inverted onto the exclusion set — the
+        # same constant, so the two can never drift.
+        if not _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES:
+            return []
+        rows = proj.g.query(
+            "MATCH (o:Object) "
+            "WHERE (o.name IN $names OR o.id IN $names) "
+            "AND o.status IN $statuses "
+            "RETURN o.id, o.name",
+            params={"names": names, "statuses": sorted(
+                _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)}).result_set
+        return [{"id": r[0], "name": r[1]} for r in rows]
+
     def fts_objects(term: str, limit: int = 8) -> list[dict]:
         # raises on embedded (no fulltext index) — the resolver degrades
-        hits = sdk.tortoise_fts_query(term, entity_type="object",
-                                      limit=limit)
-        # #3317: this leg has no Cypher conjunct available (see docstring),
-        # so the shared constant does the exclusion on the returned rows
-        return [{"id": h.get("id", ""), "name": h.get("content", "")}
-                for h in hits or []
-                if (h.get("status") or "")
-                not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES]
+        #
+        # #4061 R2: the exclusion cannot be pushed into the SDK query
+        # (``search_engine``'s terminal-status clause is Point-gated), so the
+        # rows arrive ALREADY truncated by the SDK's own LIMIT. Filtering
+        # only those rows let >=limit excluded Objects consume the window and
+        # starve a live candidate out of the leg. The window therefore GROWS
+        # until ``limit`` LIVE rows are found or the index is exhausted, so
+        # the exclusion is applied before THIS leg's bound — the same
+        # pre-bound polarity as the exact (no LIMIT) and alias (WHERE before
+        # LIMIT) legs. The ordinary case still costs exactly one call; the
+        # results of successive windows are UNIONED so a non-monotone tie
+        # order cannot drop a candidate seen in a smaller window.
+        #
+        # #4061 R3: ``status`` is ABSENT on a hit whenever the SDK's batch
+        # content fetch degraded (``sdk.py``'s ``except`` writes
+        # ``{"content": "", "kind": ""}``) — and an Object with no stored
+        # status produces the SAME absent key, because SearchResult.to_dict
+        # emits ``status`` only when truthy. An absent status must never read
+        # as live, so it is re-read from the graph before the decision.
+        window = max(1, limit)
+        live: list[dict] = []
+        seen: set[str] = set()
+        while True:
+            hits = sdk.tortoise_fts_query(term, entity_type="object",
+                                          limit=window) or []
+            exhausted = len(hits) < window
+            # R3: authoritative status for hits the search read did not carry
+            # one for. Let a failure PROPAGATE: this leg's R10 contract is
+            # degrade-to-[] on raise, never a live-by-default admission.
+            retracted = _excluded_object_ids(
+                proj,
+                [str(h.get("id")) for h in hits
+                 if h.get("id") and not h.get("status")],
+                _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES)
+            for h in hits:
+                oid = str(h.get("id") or "")
+                if not oid or oid in seen:
+                    continue
+                seen.add(oid)
+                status = h.get("status")
+                if status:
+                    if status in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES:
+                        continue
+                elif oid in retracted:
+                    continue
+                live.append({"id": oid, "name": h.get("content", "")})
+            if (len(live) >= limit or exhausted
+                    or window >= _FTS_WINDOW_CAP):
+                return live[:limit]
+            window = min(window * 2, _FTS_WINDOW_CAP)
 
     def alias_objects(term: str, limit: int = 8) -> list[dict]:
         tokens = [t for t in re.split(r"[^a-z0-9]+", term.lower())
@@ -582,6 +716,7 @@ def docker_resolver_port(sdk) -> ResolverPort:
     # SimpleNamespace — NOT a class body: class-local assignment would shadow
     # the enclosing closure names (the classic class-body scoping gotcha)
     return types.SimpleNamespace(exact_objects=exact_objects,
+                                 excluded_exact_objects=excluded_exact_objects,
                                  fts_objects=fts_objects,
                                  alias_objects=alias_objects)
 
@@ -681,7 +816,7 @@ def _tier_and_date(row: dict) -> tuple[str, _date | None]:
 def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
                    shape: AssemblyShape | None,
                    question_date=None,
-                   per_subject_cap: int = 200) -> AssemblySlices:
+                   per_subject_cap: int = PER_ENTITY_FANOUT_CAP) -> AssemblySlices:
     """One batched typed walk over the resolved subjects → typed slices.
 
     State rows come back in a SINGLE port.state_rows call (one statement —
@@ -696,6 +831,13 @@ def collect_slices(port: WalkerPort, candidates: list[SubjectCandidate], *,
     """
     if not candidates:
         return AssemblySlices()
+    # #5010: clamp ONCE, before the fetch AND before the accounting below —
+    # the port now returns at most the adopted cap, so `rows_requested` and
+    # the post-fetch `truncated` verdict must be derived from the SAME
+    # effective bound the port used. (Deriving them from the unclamped request
+    # silently dropped rows with `truncated=False` for any caller above the
+    # cap — `resolve_limit_from_caps` accepts up to 10000.)
+    per_subject_cap = bounded_fanout(per_subject_cap)
     object_ids = [c.object_id for c in candidates]
     state_rows = list(port.state_rows(object_ids) or [])
     spine_raw = list(port.spine_rows(object_ids, per_subject_cap) or [])
@@ -776,13 +918,17 @@ def docker_walker_port(sdk) -> WalkerPort:
                  "superseded_by": r[3], "superseded_at": r[4]} for r in rows]
 
     def spine_rows(object_ids: list[str],
-                   per_subject_cap: int = 200) -> list[dict]:
+                   per_subject_cap: int = PER_ENTITY_FANOUT_CAP) -> list[dict]:
         # Deterministic + PER-SUBJECT-FAIR: one ORDER BY id LIMIT query per
         # subject per kind (bounded: 2 kinds x len(subjects) — never per-row
         # N+1). A shared LIMIT over the subject set would let a hub starve a
         # co-subject and make the surviving rows engine-order-dependent.
+        # #5010: the adopted fan-out cap (STORAGE-ARCHITECTURE.md §11.5) is a
+        # hard per-entity ceiling, so a caller may LOWER this bound but not
+        # raise it past the cap.
         if not object_ids:
             return []
+        cap = bounded_fanout(per_subject_cap)
         out: list[dict] = []
         for oid in object_ids:
             prow = proj.g.query(
@@ -792,7 +938,7 @@ def docker_walker_port(sdk) -> WalkerPort:
                 "p.expiredAt, p.ep_alpha, p.ep_beta, p.quote, "
                 "p.search_keys, p.eventId, p.lme_session_index "
                 "ORDER BY p.id LIMIT $cap",
-                params={"oid": oid, "cap": per_subject_cap}).result_set
+                params={"oid": oid, "cap": cap}).result_set
             for r in prow:
                 # validTo/expiredAt mirror the FTS-hit shape (validity-window
                 # marker parity — P1-2: [valid X -> Y] vs a misleading
@@ -810,7 +956,7 @@ def docker_walker_port(sdk) -> WalkerPort:
                 "RETURN 'event' AS kind, e.eventId, e.name, e.startedAt, "
                 "e.status, e.lme_event_id, e.lme_session_index "
                 "ORDER BY e.eventId LIMIT $cap",
-                params={"oid": oid, "cap": per_subject_cap}).result_set
+                params={"oid": oid, "cap": cap}).result_set
             for r in erow:
                 # the Event node stores its human text under `name`
                 # (create_event's first arg) — NOT `content`
@@ -839,7 +985,8 @@ def docker_walker_port(sdk) -> WalkerPort:
 #     [] to the D8 gate at Task 6 — never flips retrieval_degraded).
 #   * successor-absent (verified-empty) and torn rows render NAME-ONLY
 #     annotations — a successor is never fabricated into a date/evidence
-#     line; >200-char names truncate.
+#     line; a >200-char successor name is TRUNCATED FOR DISPLAY only (the
+#     probe/verification key is always the stored FULL name, #5370).
 #   * real rows pass through unchanged minus the pure walker derivation
 #     keys {date, tier} (no point_id — W4-OUTPUT-only).
 #   * per-subject sectioning (R12/C7): subject-major line blocks in
@@ -849,6 +996,10 @@ def docker_walker_port(sdk) -> WalkerPort:
 #     boundary (second-model P2-3) — one date source everywhere.
 # ══════════════════════════════════════════════════════════════════════════
 
+# Display-only bound on the successor name in the rendered STATE line. The
+# VERIFICATION key is always the stored FULL name (successors_verified holds
+# full names) — truncating before the membership test made a >200-char
+# successor render "no successor record found" (#5370).
 _MAX_SUCC_NAME = 200
 
 
@@ -939,7 +1090,13 @@ def _state_header_hit(sr: dict, label: str,
                       successors_verified: frozenset[str],
                       *, question_date: str | None = None) -> dict:
     status = _as_str(sr.get("status")).strip()
-    succ = _as_str(sr.get("superseded_by")).strip()
+    # #5370: successors_verified is keyed on the stored FULL successor name
+    # (the probe's name set is the raw supersededBy values). Truncate for
+    # DISPLAY only — doing it before the membership test made a >200-char
+    # successor look unverified and the renderer claimed "no successor
+    # record found" for a successor that exists and is live.
+    succ_full = _as_str(sr.get("superseded_by")).strip()
+    succ = succ_full
     if len(succ) > _MAX_SUCC_NAME:
         succ = succ[: _MAX_SUCC_NAME] + "…"
     date = _norm_date(sr.get("superseded_at"))
@@ -956,7 +1113,7 @@ def _state_header_hit(sr: dict, label: str,
         if not succ:
             text = f"STATE ({label}): superseded (successor unknown)"
             sb = {"content_snippet": ""}
-        elif succ in successors_verified:
+        elif succ_full in successors_verified:
             on = f" on {_fmt_date(date)}" if date else ""
             text = f"STATE ({label}): superseded by {succ}{on}"
             sb = {"content_snippet": succ}

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tortoise — Self-Hosted Onboarding</title>
-  <meta name="description" content="Run Tortoise on your own infrastructure — Docker compose daemon + FalkorDB sidecar, CLI setup, stdio MCP config, and the onboarding prompt.">
+  <meta name="description" content="Run Tortoise on your own infrastructure — Docker compose daemon + FalkorDB sidecar, CLI setup, stdio MCP config, and the onboarding instructions.">
   <meta name="theme-color" content="#060b14">
   <link rel="canonical" href="https://tortoise.premiselabs.co/self-hosted">
   <style>
@@ -56,7 +56,7 @@
   </header>
 
   <div class="card">
-    <p><strong>What you get:</strong> a durable FalkorDB graph (multi-writer safe) behind the daemon, the MCP server, and the same 5-question onboarding prompt your agent walks you through. The MCP tool names are identical to hosted — only the transport differs (self-hosted HTTP vs Streamable HTTP).</p>
+    <p><strong>What you get:</strong> a durable FalkorDB graph (multi-writer safe) behind the daemon, the MCP server, and the same Tortoise onboarding instructions your agent reads. The MCP tool names are identical to hosted — only the transport differs (self-hosted HTTP vs Streamable HTTP).</p>
   </div>
 
   <h2><span class="n">1</span>Install</h2>
@@ -96,7 +96,7 @@ Step 5/5: Health check
 Onboarding complete.
 Next: connect your agent (step 4)
       tortoise setup  — configure per-role memory</span></pre>
-    <p class="dim">Idempotent — re-running skips already-done steps. When it finishes, it prints the canonical onboarding prompt URL — paste that into your agent to complete setup.</p>
+    <p class="dim">Idempotent — re-running skips already-done steps. When it finishes, it prints the served onboarding instructions URL — hand that document to your agent to complete setup.</p>
   </div>
 
   <h2><span class="n">4</span>Connect your agent (MCP)</h2>
@@ -134,11 +134,12 @@ Next: connect your agent (step 4)
   </div>
 
   <div class="note">
-    <strong>Onboarding skill:</strong> after setup, install the tortoise-onboarding skill for your
-    agent — it self-adjudicates your harness, connects the MCP server, verifies with
-    <code>tortoise_health</code>, and reports the harness-connected checkpoint. Fetch it at
+    <strong>Onboarding instructions:</strong> after setup, give your agent the Tortoise
+    onboarding instructions — they self-adjudicate your harness, connect the MCP server, verify with
+    <code>tortoise_health</code>, and report the harness-connected checkpoint. Read them at
     <code><a href="https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" target="_blank" rel="noopener">app.premiselabs.co/skills/tortoise-onboarding/SKILL.md</a></code>
-    (the archived onboarding prompt was superseded by this skill, M8) or run
+    (they are a document your agent reads — never an installed skill; the archived onboarding
+    prompt was superseded by this document, M8) or run
     <code class="cmd">tortoise onboard</code> and copy the URL it prints.
   </div>
 

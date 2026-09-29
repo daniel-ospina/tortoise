@@ -2,10 +2,11 @@
 // dashboard-js-tests). The #2167 rule-4 carve-out is closed: every
 // session-mode key-management WRITE (revokeKey DELETE + toggleKeyEnabled /
 // renameKey PATCH on the API Keys tab, revokePanelKey DELETE on the Graphs
-// panel) must append the `?org_id=` pin (variable `q`) built from the
-// selected team — the server resolves the session team to memberships[0]
-// without it, so a multi-membership user whose selected team ≠ first
-// membership could not revoke/rename/toggle their non-first team's keys.
+// panel, and #4355's regenerateKey POST on the rotate route) must append the
+// `?org_id=` pin (variable `q`) built from the selected team — the server
+// resolves the session team to memberships[0] without it, so a
+// multi-membership user whose selected team ≠ first membership could not
+// revoke/rotate/rename/toggle their non-first team's keys.
 // A future edit that drops `${q}` from one of these URLs regresses #2230 the
 // same way the pre-fix dashboard did (DELETE → 403 "Not your API key";
 // PATCH pin silently ignored server-side) — this guard makes that a hard
@@ -19,10 +20,10 @@ import { dirname, join } from 'node:path'
 const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
 
 // The key-management WRITE functions (API Keys tab: toggleKeyEnabled /
-// renameKey / revokeKey; Graphs panel: revokePanelKey). Their bodies are
-// sliced so each site's URL + q construction are checked TOGETHER — a
-// global count cannot catch one site regressing while others stay pinned.
-const WRITE_FNS = ['toggleKeyEnabled', 'renameKey', 'revokeKey', 'revokePanelKey']
+// renameKey / revokeKey / regenerateKey; Graphs panel: revokePanelKey). Their
+// bodies are sliced so each site's URL + q construction are checked TOGETHER —
+// a global count cannot catch one site regressing while others stay pinned.
+const WRITE_FNS = ['toggleKeyEnabled', 'renameKey', 'revokeKey', 'regenerateKey', 'revokePanelKey']
 
 function writeFnBody(name) {
   const start = mainJsx.indexOf(`async function ${name}(`)
@@ -43,8 +44,11 @@ test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps i
   // either the bare form `/v1/team/keys${q}` (mintKey's POST create at L966 +
   // loadAll's GET list at L3159, plus #2274's per-graph mint/load in the
   // Graphs panel; wizardMintDurableKey delegates to mintKey, so it is
-  // covered transitively) or the id-scoped `/v1/team/keys/${id}${q}` (the
-  // four writes). Comments mentioning the endpoint (no backtick) are exempt.
+  // covered transitively), the id-scoped `/v1/team/keys/${id}${q}` (the four
+  // writes), or the #4355 id+action form `/v1/team/keys/${id}/rotate${q}`
+  // (rotate is a key-management WRITE — it revokes the displaced row — so it
+  // carries the same pin). Comments mentioning the endpoint (no backtick) are
+  // exempt.
   // Boundary (accepted limitation): only template-literal URLs are scanned —
   // a hypothetical string-concatenated (`'/v1/team/keys' + q`), absolute
   // (`${API_BASE}/v1/team/keys…`), or variable-built URL would evade this
@@ -53,27 +57,30 @@ test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps i
   const keyUrls = [...mainJsx.matchAll(/`(\/v1\/team\/keys[^`]*)`/g)]
     .map((m) => m[1])
     .filter((u) => u.startsWith('/v1/team/keys'))
-  assert.ok(keyUrls.length >= 8,
-    `expected the 8 known key URLs (4 mint/list + 4 writes), got ${keyUrls.length}: ${keyUrls}`)
+  assert.ok(keyUrls.length >= 9,
+    `expected the 9 known key URLs (4 mint/list + 5 writes incl. #4355 rotate), got ${keyUrls.length}: ${keyUrls}`)
   for (const u of keyUrls) {
-    assert.match(u, /^\/v1\/team\/keys(?:\/\$\{[^}]+\})?\$\{q\}$/,
+    assert.match(u, /^\/v1\/team\/keys(?:\/\$\{[^}]+\}(?:\/rotate)?)?\$\{q\}$/,
       `unpinned key-management URL (missing the \${q} pin): ${u}`)
   }
 })
 
-test('#2230: each key-management write (revoke/rename/toggle/panel-revoke) pins ?org_id= on its URL', () => {
+test('#2230: each key-management write (revoke/rename/toggle/rotate/panel-revoke) pins ?org_id= on its URL', () => {
   for (const fn of WRITE_FNS) {
     const body = writeFnBody(fn)
-    // The key-write api() URL is `/v1/team/keys/${<id>}` and must be
-    // IMMEDIATELY followed by the pin variable `${q}` — any occurrence not
-    // suffixed with `${q}` is an unpinned write (rule-4 convention, same as
-    // mintKey's create-side pin).
-    const unpinned = body.match(/\/v1\/team\/keys\/\$\{[^}]+\}(?!\$\{q\})/g) || []
+    // The key-write api() URL is `/v1/team/keys/${<id>}` — or, for #4355's
+    // rotate, `/v1/team/keys/${<id>}/rotate` — and must be IMMEDIATELY
+    // followed by the pin variable `${q}`. Every backtick key URL in the
+    // body is collected and required to be pinned, so neither an unpinned
+    // write nor an off-by-one regex (the earlier `(?:/rotate)?(?!...)` form
+    // backtracked and matched the id-scoped prefix of the pinned rotate URL)
+    // can slip past.
+    const urls = [...body.matchAll(/`(\/v1\/team\/keys[^`]*)`/g)].map((m) => m[1])
+    const unpinned = urls.filter((u) => !u.endsWith('${q}'))
     assert.deepEqual(unpinned, [],
       `${fn}: key-management URL must append the ?org_id= pin (\${q}): ${unpinned}`)
-    const pinned = body.match(/\/v1\/team\/keys\/\$\{[^}]+\}\$\{q\}/g) || []
-    assert.equal(pinned.length, 1,
-      `${fn}: expected exactly one pinned key-write URL, got ${pinned.length}`)
+    assert.equal(urls.length, 1,
+      `${fn}: expected exactly one pinned key-write URL, got ${urls.length}: ${urls}`)
   }
 })
 

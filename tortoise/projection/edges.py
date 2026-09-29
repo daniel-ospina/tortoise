@@ -1,9 +1,13 @@
 """Edge creation and linking methods for FalkorProjection."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+from tortoise.source_identity import normalize_source_url, resolve_source_key
+
+logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -39,7 +43,12 @@ STRUCTURAL_REL_LABELS = {
     'aboutObject': 'Object',
     'aboutEvent': 'Event',
     'aboutPoint': 'Point',
-    'aboutDocument': 'Document',
+    # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source, not a graph node.
+    # The label and the replay key MUST move together (below) — a retargeted
+    # label with the old key resolves to nothing and silently mis-points the
+    # rebuilt edge. aboutDocument is NOT collapsed into aboutSource: it stays
+    # in DERIVABLE_STRUCTURAL_RELS (above) and aboutSource stays out.
+    'aboutDocument': 'Source',
     'extractedFrom': 'Source',
 }
 
@@ -49,23 +58,21 @@ def stub_key(rel: str, target: dict):
 
     ``target`` is the target node's property dict (the 2b SELECT returns
     ``properties(target)``). Key map: aboutSubject/aboutObject/aboutEvent/
-    aboutPoint -> ``name``; aboutDocument -> ``coalesce(title, name)``;
-    extractedFrom -> ``url``. NEVER ``target.id`` — Subjects MERGE by name (id
-    may be a webhook stub ulid, #1918), Sources by url, Documents by
-    name-or-title (#211). Returns None for a rel outside the derivable set or an
-    unresolvable key (name-less Point from an id-targeted create_about_edge;
-    extractedFrom target lacking url) — such descriptors are un-replayable and
-    the caller must SKIP emission (those edges die at rebuild today anyway).
+    aboutPoint -> ``name``; aboutDocument/extractedFrom -> ``url`` (D10: a
+    document is a :Source, so it resolves by ``url`` — the SAME key the label
+    moved with. A title-keyed aboutDocument descriptor is no longer
+    resolvable and must not be emitted). NEVER ``target.id`` — Subjects MERGE by
+    name (id may be a webhook stub ulid, #1918), Sources by url. Returns None
+    for a rel outside the derivable set or an unresolvable key (name-less Point
+    from an id-targeted create_about_edge; a Source target lacking url) — such
+    descriptors are un-replayable and the caller must SKIP emission (those
+    edges die at rebuild today anyway).
     """
     label = STRUCTURAL_REL_LABELS.get(rel)
     if label is None:
         return None
-    if rel == 'aboutDocument':
-        key = target.get('title') or target.get('name')
-    elif rel == 'extractedFrom':
-        key = target.get('url')
-    else:
-        key = target.get('name')
+    key = (target.get('url') if rel in ('aboutDocument', 'extractedFrom')
+           else target.get('name'))
     if not isinstance(key, str) or not key:
         return None
     return (label, key)
@@ -82,11 +89,18 @@ def _mint_subject_stub(g, name: str) -> None:
     )
 
 
-def _mint_source_stub(g, url: str, source_kind: str | None = None) -> None:
+def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str:
     """MERGE the Source stub _link_source creates — single create path for live
     + replay (mirror _link_source's ON CREATE exactly: title=url, empty
     contentHash, ingestedAt now; session: refs carry is_episodic=true so the
     #1486 one-time episodic backfill does not re-match a replay-minted Source).
+
+    Returns the resolved ``url`` key of the node the stub/registration
+    addresses (S0b, #5012): a URL variant resolves to the node its canonical
+    identity already names — via the SHARED ``resolve_source_key`` — so no
+    write path can mint a second ``:Source``.  Callers MUST use the returned
+    key for their subsequent MATCH/MERGE (the raw spelling may not be the
+    node's stored ``url``).
 
     ``source_kind`` defaults to the ref-appropriate value. Ontology §4.6 +
     #909 §4.3 #6 register **agentSession** as the source-kind VALUE for session
@@ -100,17 +114,28 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> None:
     """
     if source_kind is None:
         source_kind = "agentSession" if str(url).startswith("session:") else "document"
-    params = {"url": url, "sk": source_kind, "now": _now_iso()}
+    # S0b (#5012): resolve a URL variant to the node its canonical identity
+    # already names, so the stub path cannot mint a second :Source either.
+    key = resolve_source_key(g, url)
+    canonical = normalize_source_url(key)
+    params = {"url": key, "raw_url": url, "cu": canonical,
+              "sk": source_kind, "now": _now_iso()}
     ep_clause = ""
-    if str(url).startswith("session:"):
+    if str(key).startswith("session:"):
         params["ep"] = True
         ep_clause = ", s.is_episodic=$ep"
     g.query(
         "MERGE (s:Source {url:$url}) "
         "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
-        f"    s.contentHash='', s.ingestedAt=$now{ep_clause}",
+        "    s.canonicalUrl=$cu, s.urlAliases=[$raw_url], "
+        f"    s.contentHash='', s.ingestedAt=$now{ep_clause} "
+        "ON MATCH SET s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+        "    s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+        "        THEN s.urlAliases "
+        "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END",
         params=params,
     )
+    return key
 
 
 def resolve_structural_target(g, label: str, key: str, rel: str):
@@ -143,22 +168,48 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
     if label == "Source":
-        _mint_source_stub(g, key)
+        # D10 (ONTOLOGY §4.4): aboutDocument's target is a document :Source
+        # keyed by ``url``. RESOLVE-ONLY — never mint: a miss must be logged
+        # and skipped, never turned into a phantom Source that silently
+        # mis-points the resurrected edge (adversarial class B1). By contrast,
+        # extractedFrom keeps its create-if-missing stub (live _link_source
+        # parity).
+        if rel == "aboutDocument":
+            # D10 B1 live-parity (adversarial): the LIVE auto-detect
+            # (`_try_about_edge`) resolves an aboutDocument target only when
+            # `e.documentKind IS NOT NULL`, so a session/connector/provenance
+            # Source can never become an aboutDocument target. This replay
+            # match MUST carry the same guard — without it a producer-created
+            # edge (reachable through the public `sdk.create_edge`) to a
+            # provenance Source is re-attached to that non-document Source on
+            # rebuild, i.e. live and replay disagree (the #2489 "one create
+            # path / byte-identical stubs" invariant). The guard is
+            # DELIBERATE live-parity, not an accident: a wrong target must be
+            # refused here, exactly as live refuses it.
+            rows = g.query(
+                "MATCH (s:Source {url:$url}) WHERE s.documentKind IS NOT NULL "
+                "RETURN ID(s), s.id LIMIT 1",
+                params={"url": key}).result_set
+            if not rows:
+                logger.warning(
+                    "aboutDocument replay: no Source at url=%r — descriptor "
+                    "skipped (never minted, never mis-pointed)", key)
+                return None
+            return {"internal": rows[0][0], "logical": rows[0][1]}
+        # S0b (#5012): the stub helper returns the CANONICAL key — the raw
+        # spelling may not be the node's stored ``url``, and the MATCH below
+        # must address the node the stub actually merged onto.
+        key = _mint_source_stub(g, key)
         rows = g.query(
             "MATCH (s:Source {url:$url}) RETURN ID(s), s.id LIMIT 1",
             params={"url": key}).result_set
         if not rows:
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
-    # Non-stubbable labels — resolve-only (never mint). Document matches
-    # name OR title (#211 — Documents store their display name in title);
-    # Event nodes match by name (set by create_event).
-    if label == "Document":
-        q = ("MATCH (d:Document) WHERE d.title = $key OR d.name = $key "
-             "RETURN ID(d), d.id LIMIT 1")
-    else:
-        q = (f"MATCH (x:{label} {{name:$key}}) "
-             f"RETURN ID(x), x.id LIMIT 1")
+    # Non-stubbable labels — resolve-only (never mint). Event nodes match by
+    # name (set by create_event).
+    q = (f"MATCH (x:{label} {{name:$key}}) "
+         f"RETURN ID(x), x.id LIMIT 1")
     rows = g.query(q, params={"key": key}).result_set
     if not rows:
         return None
@@ -285,8 +336,8 @@ class _EdgeHandlers:
         # Try Event
         if self._try_about_edge(source_id, entity_name, 'Event', 'aboutEvent', 'eventKind', 'other'):
             return
-        # Try Document
-        if self._try_about_edge(source_id, entity_name, 'Document', 'aboutDocument', 'documentKind', 'other'):
+        # Try Source (D10: a document IS a :Source — aboutDocument's target)
+        if self._try_about_edge(source_id, entity_name, 'Source', 'aboutDocument', 'documentKind', 'other'):
             return
         # Try Point (for Event→Point reverse direction)
         if self._try_about_edge(source_id, entity_name, 'Point', 'aboutPoint', 'pointKind', 'statement'):
@@ -308,14 +359,18 @@ class _EdgeHandlers:
                         label: str, edge_type: str, kind_field: str, kind_default: str) -> bool:
         """Try to create an about* edge to a named entity. Returns True if found.
 
-        For Document nodes, matches against both ``name`` and ``title`` properties
-        (Documents store their display name in ``title`` per _upsert_document).
+        D10 (ONTOLOGY v3.15 §4.4/§9.5 Q1): a document is a ``:Source``, so the
+        ``aboutDocument`` target is a document-bearing Source matched on ``url``
+        (its identity key — the document id) or ``title`` (its display name,
+        the old Document convention). The ``documentKind IS NOT NULL`` guard
+        keeps a session/connector/provenance Source from ever becoming an
+        ``aboutDocument`` target.
         """
-        # Documents use 'title' as their display name (#211)
-        if label == 'Document':
+        if label == 'Source':
             r = self.g.query(
-                f"MATCH (e:{label}) WHERE e.name = $name OR e.title = $name "
-                "RETURN coalesce(e.title, e.name, $name) LIMIT 1",
+                "MATCH (e:Source) WHERE (e.url = $name OR e.title = $name) "
+                "AND e.documentKind IS NOT NULL "
+                "RETURN coalesce(e.title, e.url, $name) LIMIT 1",
                 params={"name": target_name},
             ).result_set
         else:
@@ -325,10 +380,11 @@ class _EdgeHandlers:
             ).result_set
         if r:
             for n in self._resolve_entity(source_id, by_id=True):
-                if label == 'Document':
+                if label == 'Source':
                     self.g.query(
-                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:{label}) "
-                        f"WHERE e.name = $name OR e.title = $name "
+                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:Source) "
+                        "WHERE (e.url = $name OR e.title = $name) "
+                        "AND e.documentKind IS NOT NULL "
                         f"MERGE (n)-[:{edge_type}]->(e)",
                         params={"sid": n["value"], "name": target_name},
                     )
@@ -408,9 +464,12 @@ class _EdgeHandlers:
             # (_mint_source_stub — mirror query text, incl. the session: is_episodic
             # clause) so live wiring and rebuild replay mint byte-identical stubs
             # (one create path).
-            _mint_source_stub(self.g, ref, source_kind)
+            ref = _mint_source_stub(self.g, ref, source_kind)
+            # D10: a Source source-side entity resolves by ``url`` (its identity
+            # key); Point/other labels keep the id key.
+            key_clause = "{url:$pid}" if label == "Source" else "{id:$pid}"
             self.g.query(
-                f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
+                f"MATCH (n:{label} {key_clause}), (s:Source {{url:$url}}) "
                 "MERGE (n)-[:extractedFrom]->(s)",
                 params={"pid": point_id, "url": ref},
             )
@@ -424,30 +483,49 @@ class _EdgeHandlers:
         Args:
             source_url: the Source node's url (auto-created if missing)
             entity_id: the Document/Event/Object node id the source references
-            entity_label: the entity label (Document|Event|Object) for the MATCH
+            entity_label: the entity label (Source|Event|Object) for the MATCH.
+                The retired ``"Document"`` is accepted as a DEPRECATED ALIAS and
+                resolved to ``Source`` (D10, ONTOLOGY v3.15 §4.4).
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Raises:
-            ValueError: if entity_label is not one of Document, Event, Object
+            ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
         """
-        valid = {"Document", "Event", "Object"}
+        if entity_label == "Document":
+            # D10: :Document is retired — a document is a :Source. Kept as a
+            # deprecated alias so existing callers/journal replay converge on
+            # the same node instead of creating a second label.
+            entity_label = "Source"
+        valid = {"Source", "Event", "Object"}
         if entity_label not in valid:
             raise ValueError(
                 f"Invalid entity_label: {entity_label}. Must be one of {valid} "
-                f"(Action was dissolved in Ontology v3.0)."
+                f"(Action was dissolved in Ontology v3.0; 'Document' is a "
+                f"deprecated alias for 'Source')."
             )
         # MERGE Source with auto-create (mirrors _link_source) — #205
+        key = resolve_source_key(self.g, source_url)
+        canonical = normalize_source_url(key)
         self.g.query(
             "MERGE (s:Source {url:$url}) "
             "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
-            "    s.contentHash='', s.ingestedAt=$now",
-            params={"url": source_url, "sk": source_kind, "now": _now_iso()},
+            "    s.canonicalUrl=$cu, s.urlAliases=[$raw_url], "
+            "    s.contentHash='', s.ingestedAt=$now "
+            "ON MATCH SET s.canonicalUrl = coalesce(s.canonicalUrl, $cu), "
+            "    s.urlAliases = CASE WHEN $raw_url IN coalesce(s.urlAliases, []) "
+            "        THEN s.urlAliases "
+            "        ELSE coalesce(s.urlAliases, []) + [$raw_url] END",
+            params={"url": key, "raw_url": source_url, "cu": canonical,
+                    "sk": source_kind, "now": _now_iso()},
         )
+        # D10: a document is a :Source, and a Source resolves by ``url`` (not
+        # ``id``) — the same identity key the label moved with.
+        key_clause = "{url:$eid}" if entity_label == "Source" else "{id:$eid}"
         self.g.query(
-            f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {{id:$eid}}) "
+            f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "
             f"MERGE (s)-[:references]->(e)",
-            params={"url": source_url, "eid": entity_id},
+            params={"url": key, "eid": entity_id},
         )
 
     # ponytail: SDK compat alias (Phase 1b will rename caller)

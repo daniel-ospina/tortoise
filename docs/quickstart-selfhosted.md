@@ -514,7 +514,8 @@ If you are on a version without the export tool, or you prefer to re-create know
 
    ```bash
    # Sessions/transcripts you captured while self-hosted
-   tortoise session capture --file transcript.txt
+   # (session capture requires explicit consent — TORTOISE_CAPTURE=1)
+   TORTOISE_CAPTURE=1 tortoise session capture --file transcript.txt
 
    # Individual claims (or bulk via REST POST /v1/points or the SDK)
    tortoise create-point "The decision was approved" --kind statement

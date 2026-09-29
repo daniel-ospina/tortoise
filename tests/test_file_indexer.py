@@ -5,7 +5,8 @@ Covers the S1 surface (plan §8.4): canonical hash + identity derivation —
 percent-encoding (incl. ``corpus_name`` single-encode), realpath dedup,
 escape rejection (outside-root realpath → hard error), derived-id collision,
 date normalization, CRLF-immunity; the S6 sourceKind registry surface
-(import-time registration, NEUTRAL tier, ``document`` pre-registered); and
+(registry-owned NEUTRAL tier in ``source_credibility.SOURCE_KIND_DEFAULTS``,
+no file_indexer import-time registration since #2726); and
 the S3 import-flip alias regression net (``_FM_RE`` / ``compute_file_hash``
 back-compat aliases in session_indexer/ingest — zero behavior change).
 """
@@ -33,7 +34,7 @@ from tortoise.file_indexer import (
 )
 from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, resolve_source_tier
 
-# ── S6: sourceKind registry (import-time registration, §4.4) ──────────────
+# ── S6: sourceKind registry (registry-owned, §4.4) ────────────────────────
 
 
 class TestSourceKindRegistry:
@@ -55,9 +56,11 @@ class TestSourceKindRegistry:
         # T2-merge note: ``document`` was already registered in
         # SOURCE_KIND_DEFAULTS before file_indexer existed — file_indexer must
         # NOT re-register it (re-registration is state-identical, so this test
-        # asserts the observable precondition; the no-re-registration
-        # discipline is enforced by keeping §4.4's registration block to the
-        # two new kinds only).
+        # asserts the observable precondition). file_indexer no longer
+        # registers ANY kind: the operational captures (agentSession,
+        # meeting_summary, meeting_transcript, meeting_minutes) are owned by
+        # source_credibility.SOURCE_KIND_DEFAULTS so registry membership does
+        # not depend on file_indexer's import order (#2726 round-2).
         assert "document" in SOURCE_KIND_DEFAULTS
         assert SOURCE_KIND_DEFAULTS["document"] is None
 
@@ -799,10 +802,10 @@ class TestImportFlipAliases:
         assert si.extract_session_id(str(p2)) == "file_fallback"
 
     def test_sdk_imports_file_indexer_module(self):
-        # sdk.py's module-level import guarantees import-time registration
-        # whenever the SDK is the entry point: the module is bound in sdk's
-        # namespace (checked via identity, not registry state — the test
-        # module's own imports already executed registration).
+        # sdk.py's module-level import binds the module in sdk's namespace
+        # (checked via identity, not registry state — registration is
+        # registry-owned in source_credibility, not an import-time side effect
+        # of this module since #2726).
         import tortoise.sdk
 
         assert tortoise.sdk.file_indexer is tortoise.file_indexer

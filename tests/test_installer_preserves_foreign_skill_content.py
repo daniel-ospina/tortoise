@@ -2,7 +2,7 @@
 
 The destination (``~/.pi/agent/skills`` for the Pi harness) is a flat, SHARED
 namespace. Measured 2026-09-20: a different owner's tool (agent-infra) had
-already written three of the four basenames, byte-identical to its
+already written three of the basenames, byte-identical to its
 ``origin/main``, and the install replaced them verbatim — no merge, no backup,
 no message — silently dropping two machine-wide conventions carried by 95-96
 of 122 installed skills:
@@ -41,8 +41,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
              / "install-tortoise-skills.sh")
 
-SKILLS = ("how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding",
-          "tortoise-onboarding")
+# #4365: the installer ships the 3 reusable capabilities. Onboarding is
+# DELIVERED AS INSTRUCTIONS (a served document), never installed as a skill —
+# so it is deliberately absent here; re-adding it must red the suite.
+SKILLS = ("how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding")
 
 # The machine-wide conventions agent-infra adds to the skills it installs.
 FOREIGN_KEY = "subjects.team: organisation-design-team"
@@ -250,9 +252,27 @@ def test_uncollided_skill_is_written_verbatim_even_when_a_sibling_collides(
 
     assert _run(installer, home, tmp_path).returncode == 0
 
-    for name in ("how-to-use-tortoise", "tortoise-onboarding"):
+    for name in ("how-to-use-tortoise", "tortoise-file-finding"):
         assert (skills / name / "SKILL.md").read_bytes() == (
             served / name / "SKILL.md").read_bytes()
+
+
+def test_onboarding_is_not_installed_even_when_a_copy_is_present(tmp_path):
+    """#4365: onboarding is not in the installed set. A pre-existing
+    ``tortoise-onboarding/`` in the destination is neither overwritten nor
+    merged — the installer never touches a skill it does not ship."""
+    installer, home, skills, _ = _fixture(tmp_path, {})
+    dest = skills / "tortoise-onboarding" / "SKILL.md"
+    dest.parent.mkdir(parents=True)
+    original = "PRE-EXISTING ONBOARDING COPY\n"
+    dest.write_text(original, encoding="utf-8")
+
+    res = _run(installer, home, tmp_path)
+    assert res.returncode == 0, f"installer failed:\n{res.stdout}\n{res.stderr}"
+    assert dest.read_text(encoding="utf-8") == original, (
+        "the installer must not touch tortoise-onboarding — it is not shipped")
+    assert not dest.with_name("SKILL.md.bak").exists(), (
+        "no backup is made for a skill the installer does not ship")
 
 
 def test_payload_name_sanity_check_still_refuses_a_wrong_payload(tmp_path):

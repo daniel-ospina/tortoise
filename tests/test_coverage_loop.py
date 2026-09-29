@@ -243,7 +243,7 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     assert stats["loop_fired_facet"] == f"entity:{ENTITY_ANCHOR}"
     assert stats["loop_merged_added"] >= 1
     # #2517 driver-level annotation golden: the C3-1 driver's INJECTED hit
-    # must carry the WHOLE annotated key set (17), not a subset —
+    # must carry the WHOLE annotated key set (18), not a subset —
     # ``session_date`` is derived from the question's ``haystack_dates``
     # via ``lme_session_index`` and silently emptied in the pre-review
     # extraction, which a 4-field golden could not see. The base hit is
@@ -251,7 +251,13 @@ def test_loop_surfaces_missing_session_evidence_inside_topk(seeded_sdk):
     base_hit = next(h for h in on["hits"] if h["id"] == SEED_ID)
     inj_hit = next(h for h in on["hits"] if h["id"] == JOIN_ID)
     assert set(inj_hit) == set(base_hit)
-    assert len(inj_hit) == 17
+    assert len(inj_hit) == 18  # +status (C6 #2520)
+    # The C6 ``status`` key is asserted BY NAME (a count alone would pass a
+    # rename that silently disables the status-only stale clause). Its value
+    # is the search payload's ``status`` — absent from the payload for this
+    # undecorated non-terminal draft, so it lands as ``""`` here (verified
+    # by direct execution; the eval's terminal rows carry the real status).
+    assert "status" in inj_hit, inj_hit
     # session_date is derived from the QUESTION's haystack_dates, indexed by
     # the point's lme_session_index — a driver that drops ``dates`` (or the
     # props) leaves it empty. Both sessions are pinned.

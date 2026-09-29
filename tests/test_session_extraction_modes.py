@@ -587,6 +587,8 @@ def test_cmd_session_capture_mode_error_exits_1(tmp_path, monkeypatch):
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3615: capture requires explicit consent — the credential alone is not it.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     # #3963: the CLI now spools before it uploads — isolate the spool so this
     # test never writes into the developer machine's real capture spool.
     monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
@@ -621,6 +623,9 @@ def test_cmd_session_capture_mode_empty_exits_1(tmp_path, monkeypatch):
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3615: without the opt-in the function returns 1 for a DIFFERENT reason —
+    # this test must exercise the extraction-mode branch, so ask for capture.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     # #3963: spool isolation (see the mode-error test above).
     monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     f = tmp_path / "transcript.txt"
@@ -654,6 +659,8 @@ def test_cmd_session_capture_success_still_returns_0(tmp_path, monkeypatch, caps
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3615: capture requires explicit consent — the credential alone is not it.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     # #3963: spool isolation (see the mode-error test above).
     monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     f = tmp_path / "transcript.txt"
@@ -693,6 +700,12 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
     import json
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+
+    # #3682: capture is opt-in, so a test that drives the capture path must
+    # consent explicitly (the credential alone no longer does).
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    # #3963: spool isolation (see the mode-error test above).
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
 
     def _run(mode, tag):
         # A DISTINCT transcript per run. The session id is derived from the

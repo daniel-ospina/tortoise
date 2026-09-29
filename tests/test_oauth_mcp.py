@@ -20,6 +20,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -55,6 +56,7 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     _valid_redirect_uri,
     mcp_resource_url,
     org_resource_url,
+    resolve_oauth_access_token,
 )
 
 # #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
@@ -400,6 +402,32 @@ class TestAuthorizePage:
         assert "setItem(key, value) {" in r.text
         assert "removeItem(key) {" in r.text
         assert "SIZE_GUARD" in r.text  # #1225 cookie-cap guard ported
+        # #3496: the browser auth client must name an EXACT version — a mutable
+        # range (`@2`, `@2.x`, `@latest`) silently ships whatever the CDN serves.
+        # The BEHAVIOURAL half of this contract (the specifier's version EQUALS
+        # the vendored bundle the page's harness executes) is pinned by
+        # tests/test_oauth_consent_pkce.py, which runs that bundle under node:vm;
+        # this assertion is deliberately the shape-only tripwire so a version
+        # bump has exactly one derived place to satisfy.
+        assert re.search(
+            r"@supabase/supabase-js@\d+\.\d+\.\d+/dist/umd/supabase\.min\.js", r.text)
+        # The negative adds coverage only when a SECOND reference coexists, so it
+        # pins the mutable shapes a numeric-only pattern misses: `@2.x` and
+        # `@latest` carry no bare digit run before the `/`. (Not "every mutable
+        # shape" — a caret/tilde range or a non-`latest` dist-tag such as `@next`
+        # is caught by the positive above, which requires three numeric
+        # components.) The numeric arm is bounded to at most two components plus an
+        # optional `.x`, so it does NOT match the pinned full semver — an unbounded
+        # `\d+(\.\d+){0,2}` swallows `2.112.2` itself and fails on the very page
+        # this guards.
+        assert not re.search(
+            r"@supabase/supabase-js@(?:latest|x|\d+(?:\.\d+)?(?:\.x)?)[/\"]", r.text)
+        # #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
+        # browser-based client, so the flow type is explicit. The behaviour
+        # (code_challenge_method=s256, verifier routed off the cookie) is pinned
+        # by the harness above, which pairs it with an implicit control.
+        assert 'flowType: "pkce"' in r.text
+        assert "SIZE_CAP" in r.text  # #3496 item 6: derived cookie-cap refusal
 
     def test_consent_page_escapes_script_breakout(self, api_client):
         """P1 (PR #1264 review): a malicious state / client_name containing
@@ -435,8 +463,15 @@ class TestAuthorizePage:
         assert r.text.count('nonce="') == 2  # CDN + inline script tags
 
     # ═════ #1701 R1 — consent page team-chooser + hardening (static strings) ═══
-    # The page JS has no jsdom harness in this repo, so each hardening behavior
-    # is pinned by a static-string assertion on the server-rendered page.
+    # These are STATIC tripwires on the server-rendered markup. The behaviours
+    # added by #3496 — the PKCE grant type and challenge, the verifier's storage
+    # home, the terminal failure state, the item-6 write path and the return-target
+    # canonicalisation — are EXECUTED (node:vm against the vendored supabase bundle)
+    # by tests/test_oauth_consent_pkce.py. This file pins only their SHAPE:
+    # the exact CDN semver, `flowType: "pkce"`, `SIZE_GUARD` and `SIZE_CAP`.
+    # The #1701 behaviours are NOT in that harness: the multi-org picker
+    # (`org-select`), the refresh-first preview recovery, the absence of
+    # `signOut` and the in-flight guard stay static-only pins here.
 
     def _consent_html(self, api_client, *, client_name: str = "test-connector") -> str:
         tc, _ = api_client
@@ -912,6 +947,161 @@ class TestRedirectUriParserDifferential:
             tc, redirect_uris=["http://localhost/callback"])["client_id"]
 
 
+class TestCursorPrivateUseRedirectScheme:
+    """#3579 — Cursor IDE's MCP OAuth DCR sends a private-use callback scheme
+    (RFC 8252 §7.1). Registration is all-or-nothing, so before this change a
+    single `cursor://` entry rejected the WHOLE request: Cursor got no
+    client_id, never reached /oauth/authorize, and a Cursor tester had no way
+    to sign in. Reproduced live against api.premiselabs.co before the fix.
+    """
+
+    CURSOR_CB = "cursor://anysphere.cursor-mcp/oauth/callback"
+
+    def test_cursor_custom_scheme_registers(self, api_client):
+        tc, _ = api_client
+        assert _valid_redirect_uri(self.CURSOR_CB) is True
+        body = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        assert body["client_id"].startswith("ct_")
+
+    def test_cursor_mixed_registration_is_accepted_whole(self, api_client):
+        """The real Cursor payload: the documented loopback + https pair AND
+        the legacy custom scheme. One invalid entry used to sink all three."""
+        tc, _ = api_client
+        uris = ["https://www.cursor.com/agents/mcp/oauth/callback",
+                "http://localhost:8787/callback",
+                self.CURSOR_CB]
+        body = _register_client(tc, redirect_uris=uris)
+        assert body["redirect_uris"] == uris
+
+    def test_cursor_documented_pair_unchanged(self, api_client):
+        """Additive: the Cursor path that already worked still works."""
+        tc, _ = api_client
+        for uri in ("https://www.cursor.com/agents/mcp/oauth/callback",
+                    "http://localhost:8787/callback"):
+            assert _valid_redirect_uri(uri) is True, uri
+        assert _register_client(
+            tc, redirect_uris=["http://localhost:8787/callback"])["client_id"]
+
+    def test_non_allowlisted_schemes_fail_closed(self):
+        """The allowlist fails closed on every scheme not explicitly reasoned
+        about — especially the browser-executed ones, which the consent page
+        would otherwise navigate to and execute in its own origin."""
+        for uri in ("javascript:alert(1)",
+                    "data:text/html,<script>x</script>",
+                    "vbscript:msgbox(1)",
+                    "file:///etc/passwd",
+                    "vscode://x/callback",
+                    "claude://x/callback",
+                    self.CURSOR_CB + "#frag",
+                    "cursor:",
+                    "http://evil.example\\@127.0.0.1/callback"):
+            assert _valid_redirect_uri(uri) is False, uri
+
+    def test_fragment_refused_for_https_and_loopback_too(self):
+        """RFC 6749 §3.1.2. The error message already promised this; the check
+        now matches it for every scheme (registration-time only, so no existing
+        registered client is affected).
+
+        The BARE trailing `#` is the case review caught: `parsed.fragment` is
+        empty for it, so a value testing only `parsed.fragment` was a false
+        PASS on this very check."""
+        assert _valid_redirect_uri("https://app.example.com/cb#frag") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#frag") is False
+        assert _valid_redirect_uri("https://app.example.com/cb#") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb?#") is False
+        assert _valid_redirect_uri(self.CURSOR_CB + "#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb") is True
+
+    def test_cursor_scheme_still_matches_exactly_at_authorize(self):
+        """The #2846 port relaxation keys on TWO loopback hosts, so a
+        private-use scheme keeps strict exact-string matching — one Cursor
+        client can never satisfy another's registration."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m(self.CURSOR_CB, self.CURSOR_CB)
+        assert not m(self.CURSOR_CB, "cursor://evil.example/oauth/callback")
+        assert not m(self.CURSOR_CB,
+                     "cursor://anysphere.cursor-mcp/oauth/other")
+        assert not m("http://localhost:8787/callback",
+                     "http://localhost:8787/callback#")
+        assert not m("http://localhost:8787/callback#frag",
+                     "http://localhost:8787/callback#other")
+        assert not m(self.CURSOR_CB,
+                     "cursor://anysphere.cursor-mcp/oauth/callback?x=1")
+
+    def test_non_allowlisted_scheme_rejected_on_the_endpoint(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "javascript-scheme",
+            "redirect_uris": ["javascript:alert(1)"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_client_metadata"
+
+    def test_cursor_scheme_drives_the_full_flow_to_a_team_scoped_token(
+            self, api_client, session_user):
+        """Drive the REAL flow, not just the boolean helper: register ->
+        GET /oauth/authorize -> POST /oauth/consent -> /oauth/token -> resolve
+        the minted access token. Cursor failed at REGISTRATION, so every later
+        leg was unreachable; asserting each one here pins the whole path, and
+        the final leg proves the token is bound to the consented team."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        assert reg["redirect_uris"] == [self.CURSOR_CB]
+        verifier, challenge = _pkce()
+
+        page = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": self.CURSOR_CB,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-cur",
+            "scope": "mcp", "resource": ""})
+        assert page.status_code == 200, page.text
+        assert "text/html" in page.headers["content-type"]
+
+        con = _consent(tc, client_id=reg["client_id"],
+                       redirect_uri=self.CURSOR_CB, challenge=challenge)
+        assert con.status_code == 200, con.text
+
+        tok = _exchange(tc, client_id=reg["client_id"],
+                        code=con.json()["code"], verifier=verifier,
+                        redirect_uri=self.CURSOR_CB,
+                        resource=mcp_resource_url(TEST_BASE))
+        assert tok.status_code == 200, tok.text
+        access = tok.json()["access_token"]
+        assert access.startswith(ACCESS_TOKEN_PREFIX)
+
+        # The token is team-scoped by construction: its row carries the team the
+        # consent chose, and the MCP boundary resolves it to THAT team only.
+        team = resolve_oauth_access_token(cp, access)
+        assert team is not None
+        assert team["org_id"] == "team-free-001"
+
+    def test_cursor_mismatch_is_refused_on_the_authorize_endpoint(
+            self, api_client, session_user):
+        """Registration accepting the scheme must NOT widen matching: a
+        different host, path or query is refused where it counts — the
+        authorize leg that would otherwise hand over a code."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        for bad in ("cursor://evil.example/oauth/callback",
+                    "cursor://anysphere.cursor-mcp/oauth/other",
+                    "https://anysphere.cursor-mcp/oauth/callback",
+                    self.CURSOR_CB + "?x=1",
+                    self.CURSOR_CB + "#frag",
+                    self.CURSOR_CB + "#"):
+            r = tc.get("/oauth/authorize", params={
+                "client_id": reg["client_id"], "redirect_uri": bad,
+                "response_type": "code", "code_challenge": "x" * 60,
+                "code_challenge_method": "S256", "state": "st",
+                "scope": "mcp", "resource": ""})
+            assert r.status_code == 400, (bad, r.status_code, r.text)
+
+
 class TestConsentPreview:
     def test_preview_resolves_default_team(self, api_client, session_user):
         tc, _ = api_client
@@ -1127,8 +1317,15 @@ class TestCodeExchange:
 
     def test_consume_code_claim_via_fake(self, api_client, session_user):
         """The atomic claim updates in place: after a successful consume the
-        row carries used_at, and a second consume raises invalid_grant even
-        when called directly (no HTTP layer involved)."""
+        row carries used_at AND the durable 'claimed' state, and a second consume
+        cannot double-issue.
+
+        #3027: the second consume of a code whose first claim has no recorded
+        OUTCOME is terminal `invalid_grant` — the claim is consumed by an attempt
+        that may still be running, and a different request must neither re-arm it
+        (two live families) nor report it retryable (the retry can terminate).
+        The reconciler settles the residue; a code that MINTED is terminal too —
+        see `test_code_is_single_use` / `test_code_claim_is_atomic`."""
         from tortoise.oauth import OAuthError, _consume_code
         tc, cp = api_client
         session_user(_U1)
@@ -1138,6 +1335,11 @@ class TestCodeExchange:
             flow["code"].encode()).hexdigest()
         stored = cp.tables["oauth_codes"][0]
         assert stored["used_at"] is not None  # claimed in place
+        assert stored["redemption_state"] == "claimed"
+        # #3027: the second consume is TERMINAL, not retryable — the retry can
+        # terminate (the first attempt may settle `minted`), and advertising it as
+        # retryable is the untruthful signal #2863 removed. A code that actually
+        # MINTED is also terminal — see `test_code_is_single_use`.
         with pytest.raises(OAuthError) as exc:
             _consume_code(cp, flow["code"])
         assert exc.value.status == 400
@@ -2938,3 +3140,194 @@ class TestCimdOccupancy3669:
             f"a failing authorize resolution cost {len(calls)} fetch attempts "
             "— the error handler must not re-resolve (#3669 finding 2)")
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #3128 — the authorize/consent/mint scope allow-list gate
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestScopeAllowList:
+    """#3128: an OAuth ``scope`` outside SCOPES_ACCEPTED must not reach a
+    stored authorization code or a minted token claim.
+
+    The gate lives in ``tortoise.oauth.validate_scope``, called from BOTH
+    request doors (``validate_authorize_params`` → GET /oauth/authorize and
+    POST /oauth/consent) and from the token writer (``_issue_tokens``). The
+    tests below pin all three, and pin that a legitimate scope still mints.
+    """
+
+    @staticmethod
+    def _consent(tc, reg, challenge, scope, *, state="st-3128"):
+        return tc.post("/oauth/consent", json={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": state,
+            "scope": scope, "resource": None},
+            headers={"Authorization": "Bearer fake-session-jwt"})
+
+    def test_authorize_refuses_scope_outside_allow_list(
+            self, api_client):
+        """GET /oauth/authorize is the page-render door: an unadvertised scope
+        is refused with RFC 6749 §4.1.2.1 ``invalid_scope`` (redirected to the
+        registered redirect_uri), so the consent page never displays it."""
+        tc, _ = api_client
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-3128",
+            "scope": "admin", "resource": ""}, follow_redirects=False)
+        assert r.status_code == 307, r.text
+        assert "error=invalid_scope" in r.headers["location"]
+        assert "state=st-3128" in r.headers["location"]
+        # the requested tokens are not reflected into the redirect query string
+        assert "admin" not in r.headers["location"]
+
+    def test_consent_refuses_scope_outside_allow_list_and_mints_no_code(
+            self, api_client, session_user):
+        """POST /oauth/consent is the code-mint door: the unadvertised scope is
+        a 400 ``invalid_scope`` and NO authorization code row is written — so
+        it can never be exchanged into a token claim."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)          # registered scope: 'mcp'
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = self._consent(tc, reg, challenge, "admin")
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert "admin" not in r.json()["error_description"]
+        assert cp.tables.get("oauth_codes", []) == []
+        assert cp.tables.get("oauth_access_tokens", []) == []
+        assert cp.tables.get("oauth_refresh_tokens", []) == []
+
+    def test_consent_refuses_a_mixed_scope_not_just_an_unknown_one(
+            self, api_client, session_user):
+        """A request mixing a valid and an unknown token ('mcp admin') is
+        rejected whole, never narrowed to 'mcp' — an all/any inversion of the
+        membership test and the RFC 6749 §3.3 partial-ignore branch must both
+        fail this."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = self._consent(tc, reg, challenge, "mcp admin")
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert cp.tables.get("oauth_codes", []) == []
+
+    def test_consent_refuses_a_non_string_scope(
+            self, api_client, session_user):
+        """A non-string scope is malformed (RFC 6749 §4.1.2.1), not coerced
+        into a minted claim."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = self._consent(tc, reg, challenge, {"evil": 1})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert cp.tables.get("oauth_codes", []) == []
+
+    def test_mint_refuses_out_of_allow_list_scope_and_writes_no_claim(
+            self, api_client):
+        """``_issue_tokens`` is the single writer of token rows: it refuses an
+        unadvertised scope before writing, so no token claim can ever carry
+        one — even from a caller that bypasses the request doors."""
+        from tortoise.oauth import OAuthError, _issue_tokens
+        _, cp = api_client
+        # A single unknown token AND a mixed one: the gate rejects the whole
+        # request rather than narrowing to the accepted subset.
+        for bad in ("admin", "mcp admin"):
+            with pytest.raises(OAuthError) as exc:
+                _issue_tokens(cp, client_id="ct_3128", user_id=_U1,
+                              org_id="team-free-001", scope=bad, resource=None)
+            assert exc.value.error == "invalid_scope"
+        assert cp.tables.get("oauth_access_tokens", []) == []
+        assert cp.tables.get("oauth_refresh_tokens", []) == []
+
+    def test_a_legacy_code_row_cannot_mint_an_out_of_allow_list_claim(
+            self, api_client, session_user):
+        """Defence in depth: a code row that already carries an unadvertised
+        scope (written before the gate existed) cannot be exchanged into a
+        token with that claim — the mint refuses and writes nothing."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        for row in cp.tables["oauth_codes"]:
+            row["scope"] = "admin"          # model the pre-gate stored value
+        r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                      verifier=flow["verifier"])
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_scope"
+        assert [t["scope"] for t in cp.tables.get("oauth_access_tokens", [])] == []
+        assert [t["scope"] for t in cp.tables.get("oauth_refresh_tokens", [])] == []
+
+    def test_a_legacy_refresh_row_is_revoked_not_looped(
+            self, api_client, session_user):
+        """A refresh row poisoned with an unadvertised scope is revoked and
+        refused as terminal invalid_grant — the client is told to re-authorize
+        instead of looping forever on an un-refreshable credential."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        tok = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                        verifier=flow["verifier"])
+        assert tok.status_code == 200, tok.text
+        for row in cp.tables["oauth_refresh_tokens"]:
+            row["scope"] = "admin"          # model the pre-gate stored value
+        rr = tc.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "refresh_token": tok.json()["refresh_token"],
+            "client_id": flow["client_id"]})
+        assert rr.status_code == 400, rr.text
+        assert rr.json()["error"] == "invalid_grant"
+        ref_rows = cp.tables["oauth_refresh_tokens"]
+        assert len(ref_rows) == 1                       # no rotation minted
+        assert ref_rows[0]["revoked_at"] is not None    # poisoned row is dead
+
+    def test_allow_listed_scope_still_mints_the_expected_claim(
+            self, api_client, session_user):
+        """No over-correction: the advertised scopes still mint, and the
+        token's ACTUAL claim is exactly what was requested."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, scope="mcp offline_access")
+        verifier, challenge = _pkce()
+        r = self._consent(tc, reg, challenge, "mcp offline_access")
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=reg["client_id"], code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["scope"] == "mcp offline_access"
+        acc = [t for t in cp.tables["oauth_access_tokens"]
+               if t["revoked_at"] is None]
+        ref = [t for t in cp.tables["oauth_refresh_tokens"]
+               if t["revoked_at"] is None]
+        assert [t["scope"] for t in acc] == ["mcp offline_access"]
+        assert [t["scope"] for t in ref] == ["mcp offline_access"]
+
+    def test_omitted_scope_still_mints_the_default_claim(
+            self, api_client, session_user):
+        """RFC 6749 §3.3 pre-defined default: an absent scope keeps minting the
+        AS default ('mcp'), unchanged by the gate."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc)
+        verifier, challenge = _pkce()
+        r = tc.post("/oauth/consent", json={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-3128",
+            "resource": None},
+            headers={"Authorization": "Bearer fake-session-jwt"})
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=reg["client_id"], code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["scope"] == "mcp"
+        acc = [t for t in cp.tables["oauth_access_tokens"]
+               if t["revoked_at"] is None]
+        ref = [t for t in cp.tables["oauth_refresh_tokens"]
+               if t["revoked_at"] is None]
+        assert [t["scope"] for t in acc] == ["mcp"]
+        assert [t["scope"] for t in ref] == ["mcp"]

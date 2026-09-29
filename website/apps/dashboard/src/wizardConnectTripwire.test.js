@@ -22,6 +22,14 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+// #4880/#4365: the wizard's agent-facing copy moved to this JSX-free module so
+// the guards below can assert the RENDERED prompt instead of parsing source.
+import { ONBOARDING_INSTRUCTIONS, WIZARD_CAPTIONS, wizardPromptText } from './wizardPrompts.js'
+// #4637: the pin below asserts against the SHARED quote-aware stripper rather
+// than the local `stripBlockAndWholeLineComments` above, which does not remove
+// inline/trailing `//` — a trailing comment carrying the pinned text kept that
+// pin green (the file-wide unification is #3102's).
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -280,8 +288,10 @@ test('#2711: every shown-once key row can break/shrink its token', () => {
 
 // ── #2755: one explicit copy control, no nested interactive ────────────────
 test('#2755: WizardPromptCard is a plain region with exactly one copy button', () => {
+  // #4880: the end marker was `function wizardPromptText(` — that builder now
+  // lives in wizardPrompts.js, so the slice ends at the next component instead.
   const card = slice('function WizardPromptCard({ text, label })',
-                     'function wizardPromptText(', 'WizardPromptCard')
+                     'function WizardBlock(', 'WizardPromptCard')
   assert.doesNotMatch(card, /role="button"/,
     'the container must NOT be an interactive role (nested-interactive WCAG 4.1.2)')
   // #2912: the CARD container is still not a tab stop — the explicit button is
@@ -405,8 +415,14 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
   // direct Continue path (`wizardPaused` false) rendering "Your agent takes over
   // from here." beneath a "Not connected yet" heading — the #2364/#2912
   // heading-vs-body contradiction, reassembled.
-  assert.match(head, /if \(wizardStep === 3 && !serverHarnessConnected\) return null/,
-    'the step-3 lede is suppressed whenever no connection was observed')
+  // #3725: both null arms (and the build-fork suppression) are now the pure
+  // `wizardStepSub` helper, so this pin is a CALL-SHAPE backstop only — the
+  // behaviour is executed in wizardFlow.test.js. The head must still derive the
+  // lede from the same `serverHarnessConnected` flag (never `effectivelyPaused`).
+  assert.match(head, /wizardStepSub\(wizardStep, \{ hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork \}\)/,
+    'the head lede goes through wizardStepSub on the same derived flags as the <h1>')
+  assert.match(head, /if \(headSub === null\) return null/,
+    'a null lede suppresses the <p class="welcome-lede"> entirely')
   assert.doesNotMatch(head, /wizardStep === 3 && effectivelyPaused\) return null/,
     'the lede guard must not key on the local paused flag alone')
 })
@@ -430,8 +446,13 @@ test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
   const desktop = src.slice(i, desktopEnd)
   // the merged block dropped the only unrecoverable-key cue on this surface
   // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
-  assert.match(desktop, /Your API key is inside the block below — keep it private\./,
+  // #4880: the advisory is now DATA in wizardPrompts.js (it was the last live
+  // caption no invariant could observe), so assert it is the rendered string
+  // the JSX interpolates rather than a literal in the source text.
+  assert.match(desktop, /\{WIZARD_CAPTIONS\.keyPrivate\}/,
     'the Desktop surface must still say the key is private')
+  assert.match(WIZARD_CAPTIONS.keyPrivate, /keep it private/,
+    'the key-private advisory must still say the key is private')
   // #3218: this surface has no key ROW, so the shared visibility + recovery
   // note must render here too (the caption alone says neither).
   assert.match(desktop, /<p className="wizard-note">\{KEY_VISIBILITY_NOTE\}<\/p>/,
@@ -1281,23 +1302,61 @@ test('#3218: the prompt-card labels describe the prompt, never a rival step numb
   const owner = ownerBranch()
   assert.doesNotMatch(owner, /'Copy step \d prompt'/,
     'no card label may carry its own step number once the circles own the order')
-  assert.match(owner, /label="Copy the connect prompt"/, 'the block-2 card names the connect prompt')
-  assert.match(owner, /label="Copy the verify prompt"/, 'the block-3 card names the verify prompt')
-  assert.match(owner, /label="Copy the workflows prompt"/,
+  // #4880: the labels are DATA in wizardPrompts.js — assert both that the JSX
+  // renders them and that they still describe the prompt they sit on.
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.connectLabel\}/, 'the block-2 card names the connect prompt')
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.verifyLabel\}/, 'the block-3 card names the verify prompt')
+  assert.match(owner, /label=\{WIZARD_CAPTIONS\.workflowsLabel\}/,
     'the Claude Web/Desktop block-3 card names the workflows prompt')
+  assert.equal(WIZARD_CAPTIONS.connectLabel, 'Copy the connect prompt')
+  assert.equal(WIZARD_CAPTIONS.verifyLabel, 'Copy the verify prompt')
+  assert.equal(WIZARD_CAPTIONS.workflowsLabel, 'Copy the workflows prompt')
 })
 
 // #3218 (item 4): the agent is told to install the skills BEFORE it is told to
 // restart — the old order (restart, then install) made an agent that acted on
 // the cue load the skills directory before the skills existed.
 test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart note', () => {
-  const fn = slice('function wizardPromptText(', 'function wizardWorkflowsText(', 'wizardPromptText')
-  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Pi\./,
-    'Pi: skills install first, restart note last')
-  assert.match(fn, /from \$\{SKILLS_INSTALL_URL\}\.\\n\$\{twoStepNote\} Cursor\./,
-    'Cursor: skills install first, restart note last')
-  assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
-    'the restart-before-skills order must not come back')
+  // #4365/#4880: asserted on the RENDERED prompt. The builders moved to
+  // wizardPrompts.js — an importable, JSX-free module — so this now reads what
+  // the agent actually receives. The former source-shape read could not
+  // distinguish a reordered interpolation from a rendered reorder, and that
+  // mechanism is what produced five false greens (#4880).
+  for (const h of ['pi', 'cursor']) {
+    const p = wizardPromptText(h, 1, 'tk_test', 'included')
+    // the rendered body reads "Then install the Tortoise skills (…)" — the
+    // capitalised form belongs to the universal command's claim line.
+    const INSTALL = /install the Tortoise skills/i
+    const iInstall = p.search(INSTALL)
+    const iOnboarding = p.indexOf(ONBOARDING_INSTRUCTIONS)
+    const iRestart = p.indexOf('Tell me when to restart')
+    assert.ok(iInstall > -1, `${h}: the step-1 prompt tells the agent to install the skills`)
+    assert.ok(iOnboarding > iInstall,
+      `${h}: the skills install must precede the onboarding instructions`)
+    // #4365: the restart cue is a hand-back an agent may stop at, so the
+    // onboarding document — what it follows to finish setup — must not sit
+    // after it, and nothing actionable may follow it.
+    assert.ok(iRestart > iOnboarding,
+      `${h}: the onboarding instructions must precede the restart cue`)
+    assert.ok(p.slice(iRestart).startsWith(
+      `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`),
+      `${h}: the restart cue names the harness`)
+    // "Nothing actionable may follow the cue" — IMPLEMENTED, not just claimed:
+    // the cue is a hand-back, so what follows it is pinned exactly (the docs
+    // line and nothing else). A note inserted after it ("Then delete ~/.pi")
+    // was GREEN against an earlier revision that only rejected the install
+    // phrase while its comment claimed this stronger property.
+    // Line-based, not byte-exact: a trailing newline renders harmlessly and must
+    // not be a false red, while an inserted actionable note still fails.
+    const tailLines = p.slice(iRestart).split('\n')
+    assert.equal(tailLines[0], `Tell me when to restart ${h === 'pi' ? 'Pi' : 'Cursor'}.`,
+      `${h}: the restart cue names the harness`)
+    assert.deepEqual(tailLines.slice(1).filter((line) => line.trim() !== ''),
+      ['Docs: https://tortoise.premiselabs.co/docs'],
+      `${h}: the restart cue must be the last actionable line — only the docs line may follow it`)
+    assert.ok(!INSTALL.test(p.slice(iRestart)),
+      `${h}: the restart-before-skills order must not come back`)
+  }
 })
 
 // ── #2865: key-less OAuth on the LIVE Claude Desktop / Claude Web leaves ───
@@ -1442,11 +1501,38 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
   // review P2: the Overview answered "is a key live" with its own
   // `durableConnect.source === 'rows-durable'` — a second derivation that agreed
   // today but could drift. One question, one gate.
-  const src = stripBlockAndWholeLineComments(mainJsx)
+  // The shared, quote-aware stripper — NOT the local
+  // `stripBlockAndWholeLineComments` above, which leaves inline/trailing `//`
+  // intact, so a trailing comment carrying the pinned text kept a pin green
+  // (the file-wide unification is #3102's).
+  const src = stripComments(mainJsx)
   assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
     'no surface may re-derive the rows-durable source outside connectKeyGate')
-  assert.match(src, /\{snippetKey \|\| connectGate\.mode === 'existing'/,
-    'the re-entry Overview routes its live-key claim through the gate')
+  // #4637: the Overview's live-key claim is ONE derivation — `ownerKeyLive` of
+  // the gate's mode — and since the cycle-6 restructuring it is not a statement
+  // in main.jsx at all: BOTH owner arms spread `ownerCardProps({ variant,
+  // isBuildFork, connectGate })` from the note module, whose `keyLive` comes from
+  // `ownerKeyLive(connectGate.mode)`. The old inline form tested the gate but ALSO
+  // the in-memory `snippetKey`, which stays truthy after its row is revoked (the
+  // gate's `durableConnectKey` row-truth check drops it), so the card could claim
+  // a key was live with nothing usable behind it. The member arm keeps its own
+  // key-state branch: its two lead-ins assert nothing about which key is usable.
+  //
+  // A source pin is no longer the guard for the derivation: the note module's
+  // render tests EXECUTE `ownerKeyLive`/`ownerCardProps`/`keyTabAffordance`, and
+  // `onboardingEmptyStateKeyNote.test.js` additionally COMPILES these call sites
+  // and asserts the effective props for every gate mode (a spread, an alias or a
+  // wrapped second authority changes the value and fails there). What is pinned
+  // here is the negative that keeps the derivation in the module: main.jsx must
+  // not call the gate authority itself.
+  assert.doesNotMatch(src, /ownerKeyLive\(/,
+    'main.jsx must not derive the live-key fact itself — the note module owns it')
+  assert.equal((src.match(/ownerCardProps\(\{/g) || []).length, 2,
+    'both owner arms must spread the one prop derivation')
+  assert.equal((src.match(/keyTabAffordance\(\{/g) || []).length, 1,
+    'the re-entry affordance must apply the module derivation at exactly one site')
+  assert.match(src, /\(snippetKey \|\| connectGate\.mode === 'existing'/,
+    'the member arm of the re-entry card still consults the gate for its key state')
   // BOTH keyed arms render the derived affordance (no drift between them)
   assert.equal((src.match(/\bwizardKeyAffordance\b/g) || []).length, 4,
     'one definition + exactly three render sites (build fork + shared arm + Codex Desktop arm)')

@@ -286,7 +286,7 @@ AUTHORED_QUERIES: list[dict] = [
     {"id": "aq001", "query": "pricing tiers enterprise plans", "domain": "pricing", "rationale": "product/pricing.json + strategy docs"},
     {"id": "aq002", "query": "unit economics per message cost", "domain": "pricing", "rationale": "pricing research, cost-per-token economics"},
     {"id": "aq003", "query": "free tier limits graph nodes", "domain": "pricing", "rationale": "tier limits / max_graph_nodes"},
-    {"id": "aq004", "query": "launch roadmap milestones phase", "domain": "product", "rationale": "product/2026-08-10-launch-roadmap.md"},
+    {"id": "aq004", "query": "launch roadmap milestones phase", "domain": "product", "rationale": "product/archive/2026-08-10-launch-roadmap.md"},
     {"id": "aq005", "query": "beta feedback funnel onboarding", "domain": "product", "rationale": "beta feedback docs (#1199)"},
     {"id": "aq006", "query": "competitor comparison positioning", "domain": "product", "rationale": "product/competition/"},
     {"id": "aq007", "query": "three layer memory model", "domain": "product", "rationale": "product/2026-07-31-three-layer-memory-model.md"},

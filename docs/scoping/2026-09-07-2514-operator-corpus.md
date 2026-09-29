@@ -116,7 +116,11 @@ goes with the sealed llm run.
    verdict PASS on clean replay). Operator-edge audit on m2 = structural 0
    (echo lane has no relation extraction) — expected and noted, never a bar.
 2. **LLM product-lane sealed run** (REQUIRED later; NOT executed here):
-   `TORTOISE_DB_URI='docker://:falkordb@…' .venv/bin/python -m tests.eval.write_path.runner run` on the extended corpus, 5/5+ sessions emitting, then
+   run it through `tools/run-with-eval-keys.sh` (#2718 / #4860 — it strips the
+   ambient provider keys, loads the repo `.env` with override, and prints the
+   key `source` + fingerprint to paste into the receipt; without it the ambient
+   shell key is what gets billed and the 2026-09-23 sealed run 403'd 7/7):
+   `TORTOISE_DB_URI='docker://:falkordb@…' PYTHONPATH=$PWD TORTOISE_TEST_CARVE_OUT=1 tools/run-with-eval-keys.sh .venv/bin/python -m tests.eval.write_path.runner run` on the extended corpus, 5/5+ sessions emitting, then
    `bless --receipt … --corpus-bless --protocol-bless --write` to re-pin
    `baselines/main.json` (hash re-pin + mechanical v1→v2 protocol re-pin in
    ONE deliberate step, resolving the deferred Phase G pin staleness) with the

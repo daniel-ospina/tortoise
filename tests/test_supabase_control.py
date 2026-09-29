@@ -26,6 +26,7 @@ from tortoise.supabase_control import (
     active_api_keys,
     api_key_by_id,
     claim_membership,
+    clear_github_credentials,
     count_graph_keys,
     delete_graph_row,
     expired_bootstrap_keys,
@@ -693,6 +694,32 @@ class TestResolveApiKeyFailSoft:
                                    additive_tiers=[])
         assert row["deleted_at"] is None
 
+    def test_org_billing_state_reads_the_row_and_fails_soft(self, fake):
+        """#4640: the forward twin of org_id_for_stripe_customer — the portal
+        read and the checkout guard both consume it. Absent row → {}; a
+        pre-0012 schema degrades the additive columns to None while the 0006
+        base ``stripe_customer_id`` survives."""
+        from tortoise.supabase_control import org_billing_state
+
+        fake.tables["organizations"][0].update({
+            "stripe_customer_id": "cus_4640",
+            "subscription_status": "active",
+            "customer_email": "owner@example.com",
+        })
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] == "active"
+        assert state["customer_email"] == "owner@example.com"
+        # absent row → no customer anywhere
+        assert org_billing_state(fake, "no-such-org") == {}
+        # pre-0012 drift: the additive tier drops, the base column survives
+        fake.missing_columns = {"organizations": {
+            "subscription_status", "customer_email"}}
+        state = org_billing_state(fake, "team-free-001")
+        assert state["stripe_customer_id"] == "cus_4640"
+        assert state["subscription_status"] is None
+        assert state["customer_email"] is None
+
     def test_resolve_api_key_carries_suspension_state(self, fake):
         """O/I/T target 2: with the columns PRESENT, suspension state still
         resolves (enforcement is unchanged — REST 403 / MCP -32006 consume
@@ -746,6 +773,35 @@ class TestResolveApiKeyFailSoft:
             with pytest.raises(RuntimeError):
                 resolve_api_key(fake, TOKEN)
         assert any("base-only read failed" in r.message for r in caplog.records)
+
+
+class TestUpdateOrgBillingSeam:
+    """#4726 F2: ``update_org_billing`` is documented fail-closed, and a
+    PATCH that matches no row is a dropped write — not a success."""
+
+    def test_update_org_billing_raises_when_the_row_is_absent(self, fake):
+        """Absent org row → loud RuntimeError, never a silent 0-row no-op.
+
+        Failing value: a PATCH result of ``[]`` for an id not present in
+        ``organizations`` (PostgREST's ``return=minimal`` body is empty for
+        both 0 and 1 matched rows, so the seam requests representation).
+        Reachable in the fixture: ``fake`` holds ``team-free-001`` / ``team-1``,
+        so ``no-such-org`` matches nothing.
+        """
+        from tortoise.supabase_control import update_org_billing
+
+        with pytest.raises(RuntimeError, match="no organizations row matched"):
+            update_org_billing(fake, "no-such-org", {"tier": "pro"})
+
+    def test_update_org_billing_writes_the_present_row(self, fake):
+        """The 0-row guard must not red the normal path: an existing row
+        PATCHes and returns None. Reachable in the fixture:
+        ``team-free-001`` exists.
+        """
+        from tortoise.supabase_control import update_org_billing
+
+        update_org_billing(fake, "team-free-001", {"tier": "pro"})
+        assert fake.tables["organizations"][0]["tier"] == "pro"
 
 
 class TestTeamByID:
@@ -1465,6 +1521,24 @@ class TestGithubCredentials:
             store_github_credentials(ErrorControlPlane(), "team-free-001",
                                      token_enc="x", org="acme")
 
+    def test_clear_then_read_round_trip(self, fake):
+        """#4946: the disconnect path's local half is a real clear (both
+        columns NULL), not merely a dashboard flag flip."""
+        fake.tables["organizations"][0].update(
+            {"github_token_enc": "enc-blob", "github_org": "acme"})
+        clear_github_credentials(fake, "team-free-001")
+        assert github_credentials(fake, "team-free-001") == {
+            "github_token_enc": None, "github_org": None}
+
+    def test_clear_missing_team_is_a_noop(self, fake):
+        """Idempotent: a repeated disconnect (or a missing org row) must not
+        raise — the endpoint calls this unconditionally."""
+        clear_github_credentials(fake, "no-such-team")
+
+    def test_clear_fail_closed_on_error(self):
+        with pytest.raises(RuntimeError):
+            clear_github_credentials(ErrorControlPlane(), "team-free-001")
+
 
 # ── Real-client request encoding (#3686 review) ─────────────────────────────
 
@@ -1562,6 +1636,24 @@ class TestRealQueryParamEncoding:
         cp, _ = self._capturing_cp()
         with pytest.raises(ValueError, match="collides"):
             cp.query("t", filters=[("and", "gt", 1), ("and", "lt", 2)])
+
+    def test_order_is_transmitted_verbatim(self):
+        """#4037: the wire ``order`` param is exactly what the caller passed.
+        `SupabaseAbuseStore`'s three sites are pinned to ``created_at.desc`` by
+        ``tests/test_abuse.py::TestAbuseOrderParam``; this pins the seam's half
+        — no translation, no ``-col`` → ``col.desc`` rewrite."""
+        cp, seen = self._capturing_cp()
+        cp.query("abuse_events", order="created_at.desc")
+        assert seen["params"]["order"] == "created_at.desc", seen["params"]
+
+    def test_legacy_dash_order_is_not_translated(self):
+        """The seam is a deliberate pass-through: it does NOT rewrite the
+        invalid ``-col`` dialect (that 400 is PostgREST's to give). Validation
+        lives in the double + the wire-param tests, so a future "helpful"
+        translation reds here."""
+        cp, seen = self._capturing_cp()
+        cp.query("abuse_events", order="-created_at")
+        assert seen["params"]["order"] == "-created_at", seen["params"]
 
 
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────

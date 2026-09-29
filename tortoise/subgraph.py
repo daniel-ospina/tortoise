@@ -64,6 +64,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from tortoise.fanout import PER_ENTITY_FANOUT_CAP
+
 __all__ = [
     "EDGE_PRIORITY_WEIGHT",
     "HOP_DECAY",
@@ -314,11 +316,22 @@ _CYPHER_ABOUT = (
 )
 
 # The ONLY permitted 2nd hop: seed → aboutObject hub → sibling claim.
+#
+# #5010 — the fan-out cap (STORAGE-ARCHITECTURE.md §11.5) is applied HERE,
+# per hub: this is the one expansion in the read path that a high-degree
+# entity makes unbounded (a 1,200-claim hub pulls ~1,200 sibling rows PER
+# ANCHOR into memory). `ORDER BY sib.id` makes the surviving set
+# deterministic (the old query had no order, so the retained rows depended on
+# engine order), and `collect(sib)[0..$cap]` bounds each hub independently so
+# a mega-hub cannot starve a co-hub of its rows.
 _CYPHER_SIBLINGS = (
     "MATCH (n:Point) WHERE n.id = $id "
     "MATCH (n)-[:aboutObject]->(o:Object) "
     "MATCH (o)<-[:aboutObject]-(sib:Point) "
     "WHERE sib.id <> n.id AND sib.is_operator = false "
+    "WITH o, sib ORDER BY sib.id "
+    "WITH o, collect(sib)[0..$cap] AS sibs "
+    "UNWIND sibs AS sib "
     "RETURN o.id AS hub_id, o.name AS hub_name, "
     f"{_prop_projection('sib', 'sib_')}"
 )
@@ -416,7 +429,8 @@ def _collect_raw(graph: Any, anchor_id: str) -> dict[str, list]:
     return {
         "ops": _q(graph, _CYPHER_OPS, {"id": anchor_id}),
         "about": _q(graph, _CYPHER_ABOUT, {"id": anchor_id}),
-        "siblings": _q(graph, _CYPHER_SIBLINGS, {"id": anchor_id}),
+        "siblings": _q(graph, _CYPHER_SIBLINGS,
+                       {"id": anchor_id, "cap": PER_ENTITY_FANOUT_CAP}),
         "corrects_out": _q(graph, _CYPHER_CORRECTS_OUT, {"id": anchor_id}),
         "corrects_in": _q(graph, _CYPHER_CORRECTS_IN, {"id": anchor_id}),
     }

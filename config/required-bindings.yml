@@ -168,6 +168,64 @@ projects:
           (website/apps/dashboard/functions/api/v1/[[path]].ts). Without it the proxy answers
           503 proxy_not_configured.
 
+      # The public contact form (issue #2409). Absent -> ``503 not_configured``
+      # from functions/contact/submit.ts, which is the LOUD failure mode by
+      # design: the visitor is told intake is unconfigured and given the direct
+      # mailto fallback, and nothing is silently dropped.
+      #
+      # NO SEND-CAPABLE CREDENTIAL, DELIBERATELY — AND NOT FOR QUOTA REASONS. The
+      # form is an INTAKE PRODUCER: receiving is the mechanism and sending is the
+      # exception (customers email hello@/support@ and intake processes the
+      # message; outbound email belongs to replies to a user who wrote first, and
+      # to auth flows).
+      #
+      # `premise-labs#393` IS A BUDGET TO MANAGE, NEVER A REASON TO REFUSE TO
+      # BUILD. Its objective is zero quota-rejected sends, and the sender's quota
+      # is managed against it. An earlier revision of this note cited #393 at
+      # 200% of quota as the reason the form has no email leg; that rationale is
+      # RETRACTED and must not be reinstated as a build prohibition.
+      #
+      # `recommended`, NOT `required`, and that is deliberate: `required` reds the
+      # deploy, which would block the very deploy that ships the form (the
+      # endpoint does not exist yet). The feature degrades visibly while the rest
+      # of the site serves normally, so absence is a warning, not an outage.
+      # Promote this to `required` only once the endpoint is bound — at that
+      # point its removal SHOULD be an outage.
+      - name: CONTACT_INTAKE_URL
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          functions/_shared/contact-transport.ts — the intake endpoint for the
+          website contact form. The existing intake (one intake, many producers;
+          premise-labs #426): POST <org-data>/functions/v1/inbound-ingest, per
+          the relay ruling on #2409. That endpoint requires the secret below; a
+          URL alone is answered 401/403 and the submission is dropped, which is
+          why absence of EITHER variable is ``503 not_configured``.
+
+      # The intake's own inbound shared secret for this producer, sent by the
+      # seam as the `x-inbound-secret` header. The intake derives the variable
+      # NAME by uppercasing the source (``INBOUND_SECRET_${source.toUpperCase()}``),
+      # which is why the source is `website_contact` — the value set on the
+      # function is ``INBOUND_SECRET_WEBSITE_CONTACT``. This is an INBOUND
+      # credential: it can submit an item and nothing else (no send, no read, no
+      # other service), and it is deliberately distinct from any send-capable
+      # provider key — see #393.
+      #
+      # Set it in the Pages project (an operator action, never in this
+      # repository); `recommended` for the same reason as the URL: the deploy
+      # that ships the form must not be blocked by the binding it is about to
+      # need.
+      - name: CONTACT_INTAKE_SECRET
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          Shared secret for the website_contact producer, provisioned as
+          INBOUND_SECRET_WEBSITE_CONTACT on the inbound-ingest function and read
+          here only as the x-inbound-secret header. No credential is read for any
+          send path.
+
   # ─────────────────────────────────────────────────────────────────────
   # tortoise-dashboard — the MOVED BFF (#4054). It had 0 env vars and 0 D1
   # bindings, so it was not functional: every /auth/* and /api/* request

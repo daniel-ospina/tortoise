@@ -230,6 +230,9 @@ def test_real_rollout_parses_and_imports_through_the_real_cli(tmp_path, monkeypa
     # 2. The REAL CLI path, with only the network transport stubbed (a receipt
     # is a 2xx server fact; `_cmd_sessions_import` builds the request for real).
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: capture is gated on EXPLICIT consent — a credential is not consent.
+    # This test exercises the real import path, so opt in.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -288,6 +291,9 @@ def test_pre_post_capture_failure_leaves_a_local_breadcrumb(tmp_path, monkeypatc
     rollout.write_bytes(REAL_ROLLOUT.read_bytes())
 
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    # #3615: the consent gate runs FIRST and returns before any breadcrumb is
+    # written, so this test must opt in to reach the failure path it pins.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
     monkeypatch.setenv("TORTOISE_API_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
     monkeypatch.setenv("HOME", str(tmp_path))

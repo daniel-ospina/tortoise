@@ -223,22 +223,43 @@ def _make_flat_tmpdir() -> str:
     return tempfile.mkdtemp(prefix="tchaos", dir=tempfile.gettempdir())
 
 
-def _spawn_orphan_pid(tmpdir: str | None = None) -> tuple[int, str]:
-    """Spawn a no-path redislite server and SIGKILL the parent WITHOUT
+def _spawn_orphan_pid(tmpdir: str | None = None,
+                      guarded: bool = True) -> tuple[int, str]:
+    """Spawn a no-path embedded server and SIGKILL the parent WITHOUT
     close() -> a genuine orphan. Returns (server_pid, socket_path).
 
     #1365: the child prints its OWN server pid + socket (db.client.pid /
     db.client.socket_file) so the test tracks only its own orphan — never
     ambient candidates[0]. TMPDIR is set in the CHILD env (the parent's
     tempfile.gettempdir() is cached by import time) for containment.
+
+    #3767: `guarded=True` (the default) constructs through the GUARDED
+    `tortoise.FalkorDB` — production's embedded choke-point — so the orphan
+    carries the `.tortoise-owners` instrument. That instrument is what #3599
+    reads for its per-server "all owners provably dead" signal, and the
+    positive ownership claim reap() now requires before an unconfirmed kill.
+
+    `guarded=False` spawns the SAME server through RAW
+    `redislite.falkordb_client.FalkorDB`, leaving it UNINSTRUMENTED — the
+    class the #1642 FIX 3 confirmation WINDOW exists for. The distinction is
+    load-bearing for the tests, not cosmetic. For the shape this fixture
+    produces — a server with an INTACT redislite registry, so
+    `_is_path_based` is False — an instrumented orphan with a provably dead
+    owner takes the #3599 arm on the FIRST pass and never reaches the window.
+    (A registry-less-but-instrumented server is the exception: `_is_path_based`
+    fails CLOSED there, so it converges via the window instead — see #3767.)
+    A test that pins the window's two-sweep contract therefore uses
+    `guarded=False`; a test that pins the #3599 fast path uses `guarded=True`.
     """
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
     if tmpdir:
         env["TMPDIR"] = tmpdir
+    ctor = ("from tortoise import FalkorDB" if guarded
+            else "from redislite.falkordb_client import FalkorDB")
     code = (
         "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        f"{ctor}; db=FalkorDB();\n"
         "print('READY', db.client.pid, db.client.socket_file, flush=True);"
         " time.sleep(30)"
     )
@@ -900,6 +921,20 @@ def test_markerless_sweep_reaps_sigkilled_suite_orphan(monkeypatch, tmp_path):
     zero-client observation; sweep 2 confirms it (injected 0-minute
     confirmation window + empty active-suites dir → suites_active False).
     The kill-9 parent is `_spawn_orphan_pid` (parent dies without close()).
+
+    #3767: `guarded=False` — the orphan is deliberately UNINSTRUMENTED (raw
+    redislite, no `.tortoise-owners` record), which is the exact class this
+    window exists for and the class the 2026-08-30 leak was. An instrumented
+    orphan does NOT exercise the window: #3599 resolves its dead owner on
+    sweep 1 and confirms it immediately, so this test's no-kill assertion
+    would fail outright (covered by
+    `test_sweep_owner_death_confirms_orphan_despite_live_suite_marker`).
+    THIS fixture choice is what keeps the window's only END-TO-END
+    (discover → classify → mark → reap) sweep-level test real — the window's
+    arm-level units live in `tests/test_reaper.py`
+    (`test_mark_orphan_confirmation_two_sweeps` and siblings) — so the
+    assertion below is the negative control for "never kill a NOT-confirmed
+    server".
     """
     import tortoise.embedded_reaper as reaper_mod
     from tortoise.embedded_reaper import _run_sweep
@@ -914,7 +949,7 @@ def test_markerless_sweep_reaps_sigkilled_suite_orphan(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     assert not os.path.exists(str(tmp_path / "no-active-suites"))
 
-    own_pid, sock = _spawn_orphan_pid(_make_flat_tmpdir())
+    own_pid, sock = _spawn_orphan_pid(_make_flat_tmpdir(), guarded=False)
     assert _pid_alive(own_pid), "spawned orphan not alive (spawn failure)"
     time.sleep(1)
 
@@ -936,3 +971,127 @@ def test_markerless_sweep_reaps_sigkilled_suite_orphan(monkeypatch, tmp_path):
         f"markerless sweep did not reap the sigkilled-suite orphan {own_pid}"
     _wait_server_exit(own_pid, max_wait_s=15)
     assert not os.path.exists(sock), "zombie socket remains after markerless sweep"
+
+
+def test_sweep_owner_death_confirms_orphan_despite_live_suite_marker(
+        monkeypatch, tmp_path):
+    """#3599: an INSTRUMENTED orphan — a `tortoise.FalkorDB` server carrying
+    production's `.tortoise-owners` record — whose ONLY owner is provably
+    dead is orphan-CONFIRMED on the FIRST sweep and reaped in it, EVEN WITH
+    a live foreign suite marker on the host.
+
+    The confirmation signal is the #3599 PER-SERVER "no live owner" arm, and
+    it is legitimate on three counts: (1) the record is written by the
+    guarded constructor, i.e. production's own choke-point, not by a name or
+    containment heuristic; (2) `_owner_records` resolves each record with a
+    (pid, start) identity check, so a RECYCLED pid cannot inherit a dead
+    owner's record; (3) all-owners-dead is proof of orphanhood independent of
+    every other suite on the host.
+
+    WHAT MAKES THIS DECIDE THE #3599 ARM (and not some other path):
+      * The #1642 FIX 3 window arm CANNOT confirm on a first sweep at all —
+        `_mark_orphan_confirmation` requires `identity` (a PERSISTED prior
+        `first_seen` for this pid+start), which a fresh sweep has not — so a
+        sweep-1 reap can only come from the owner-death arm;
+      * the window is ALSO left at its DEFAULT (10 min) rather than injected
+        as 0, so it is unreachable on every axis, not merely on the first
+        sweep;
+      * `ACTIVE_SUITES_DIR` holds a LIVE foreign-suite marker, so
+        `suites_active` is True and asserted true. THIS is the arm's real
+        discriminating edge: the pre-#3599 reaper gated all confirmation on
+        `not suites_active`, so on a busy host nothing was ever confirmed
+        and the only_safe cron was a no-op. A re-gating of the owner-death
+        arm behind that global gate — the exact regression #3599 removed —
+        would make this test fail. (Arm-level twin:
+        `tests/test_reaper.py::test_owner_records_dead_owner_confirms_despite_live_suite_marker`.)
+
+    Because the signal is stronger than the window, sweep 1 legitimately
+    kills: `--only-safe`'s promise is "kill only orphan-CONFIRMED servers",
+    and this server IS orphan-confirmed. The window remains the path for the
+    UNINSTRUMENTED class — pinned by
+    `test_markerless_sweep_reaps_sigkilled_suite_orphan` (guarded=False).
+    """
+    import tortoise.embedded_reaper as reaper_mod
+    from tortoise.embedded_reaper import (
+        _classify_dir,
+        _mark_orphan_confirmation,
+        _owner_records,
+        _process_start_time,
+        _run_sweep,
+        active_suite_tokens,
+    )
+
+    # A LIVE foreign-suite marker (our own pid+start — a live identity), so
+    # `suites_active` is True. This is data by assertion, not by accident.
+    marker_dir = tmp_path / "active-suites"
+    marker_dir.mkdir(exist_ok=True)
+    own_start = _process_start_time(os.getpid())
+    if own_start is None:
+        pytest.skip("`ps` timed out reporting this process's start time "
+                    "(loaded host) — the live-marker premise is unverifiable")
+    (marker_dir / "other-suite").write_text(
+        f"pid={os.getpid()}\nstart={int(own_start)}\n")
+    monkeypatch.setattr(reaper_mod, "ACTIVE_SUITES_DIR", str(marker_dir))
+    monkeypatch.setattr(reaper_mod, "ZERO_CLIENT_STATE_PATH",
+                        str(tmp_path / "reaper-zero-client.json"))
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    if not active_suite_tokens():
+        pytest.skip("the live suite marker did not read active (ps timing) "
+                    "— host-contended")
+
+    own_pid, sock = _spawn_orphan_pid(_make_flat_tmpdir())  # guarded=True
+    assert _pid_alive(own_pid), "spawned orphan not alive (spawn failure)"
+    time.sleep(1)
+
+    # Precondition + (A) THE ARM'S OWN DECISION — this is what the test pins.
+    # Read the record the way the sweep does and let the SAME function that
+    # decides orphanhood decide it, then assert the flag. This cannot be
+    # SATISFIED by any other kill path (no other path sets
+    # `_orphan_confirmed`), but it CAN be INVALIDATED by a concurrent reap, so
+    # a mismatched precondition is contention when the orphan is already dead
+    # (skip) and a real failure only while it is still alive. Assert the FULL
+    # predicate the arm branches on — instrument present with no live owner,
+    # `classification == "candidate"`, `path_based False` — so a
+    # classification / `_is_path_based` drift fails HERE with an accurate
+    # message instead of at the arm assertion below, which would blame the
+    # #3599 arm for an arm that was never reached. (`_classify_dir` has a
+    # single exit, so a `rec is None` guard would be dead.)
+    owners = _owner_records(sock)
+    dbdir_real = os.path.realpath(os.path.dirname(sock))
+    rec = _classify_dir(dbdir_real, sock, known_pid=own_pid)
+    if not (owners is not None and owners[0] == 0
+            and rec.get("classification") == "candidate"
+            and rec.get("path_based") is False):
+        if not _pid_alive(own_pid):
+            pytest.skip("host-contended: a concurrent sweep reaped the "
+                        "orphan before the arm assertion")
+        raise AssertionError(
+            f"precondition not met for a LIVE orphan: owners={owners}, "
+            f"classification={rec.get('classification')!r}, "
+            f"path_based={rec.get('path_based')!r}")
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "#3599 all-owners-dead must set _orphan_confirmed on the FIRST pass, "
+        f"even with a live suite marker (owner {own_pid} provably dead, "
+        "window arm structurally unreachable on a first pass)")
+
+    # (B) END-TO-END: the sweep reaps it. `_run_sweep` called directly is
+    # UNLOCKED and host-global (only `main()` holds the reaper lock), so a
+    # concurrent sweep can legitimately reap this orphan first — and on a
+    # FULL sweep (`only_safe=False`) that kill needs NO confirmation at all
+    # (an attributed, non-`path_based` candidate), so it is NOT the #3599 arm
+    # and must not be read as this test passing. Contention is therefore a
+    # SKIP (skip ≠ pass: assertion (A) already decided the arm), and a server
+    # that is neither reaped by our sweep nor already gone is a real failure.
+    first = _run_sweep(dry_run=False, batch_size=200, only_safe=True, jobs=8,
+                       sigterm_timeout=3.0)
+    if not any(a["pid"] == own_pid for a in first):
+        if not _pid_alive(own_pid):
+            pytest.skip("host-contended: a concurrent sweep reaped the "
+                        "orphan before ours; assertion (A) already decided "
+                        "the #3599 arm")
+        raise AssertionError(
+            "#3599 all-owners-dead must orphan-confirm and reap the server "
+            f"on sweep 1 (owner {own_pid} provably dead, instrument present)")
+    _wait_server_exit(own_pid, max_wait_s=15)
+    assert not os.path.exists(sock), "zombie socket remains after sweep"

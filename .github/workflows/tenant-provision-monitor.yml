@@ -10,6 +10,12 @@
 # logs stream for tenant-provision error markers and opens a DEDUPLICATED
 # GitHub issue (with log evidence) when any appear, then fails visibly.
 #
+# #3907: the issue is the FINDING, not the occurrence. The title is a STABLE
+# dedupe key and .github/scripts/auto-file-issue.sh searches for it before
+# filing; when it is already open the run records a `Recurrence #N` comment on
+# it (the pre-fix code said "already open — not duplicating" and recorded
+# NOTHING, so an hourly escalation was invisible).
+#
 # Uses the Management API analytics endpoint (the old logs.all endpoint is
 # removed 2026-09-23 — see supabase.com/changelog/48235):
 #   GET /v1/projects/{ref}/analytics/endpoints/logs?sql=<ClickHouse>&
@@ -46,11 +52,25 @@ jobs:
           start="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
           end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           sql="select timestamp, event_message from logs where source = 'function_logs' and event_message like '%tenant-provision%' order by timestamp desc limit 500"
-          out="$(curl -sS -G "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/analytics/endpoints/logs" \
+          # A bare `curl -sS` exits 0 on an HTTP 4xx/5xx, and a Supabase error
+          # body is `{"message": …}` — NOT `{"error": …}` — so the only failure
+          # detection below (`jq -r '.error'`) stayed empty on a 403/5xx and this
+          # monitor printed `✅ no incident-class markers` and exited 0: a blind
+          # monitor reporting healthy. A transport failure is caught by `set -e`;
+          # an HTTP error is not. Require a REAL 2xx before interpreting the body
+          # (a transport failure collapses to 000 and is refused the same way).
+          log_body="$(mktemp)"
+          http="$(curl -sS -o "$log_body" -w '%{http_code}' -G "https://api.supabase.com/v1/projects/$SUPABASE_PROJECT_REF/analytics/endpoints/logs" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
             --data-urlencode "sql=$sql" \
             --data-urlencode "iso_timestamp_start=$start" \
-            --data-urlencode "iso_timestamp_end=$end")"
+            --data-urlencode "iso_timestamp_end=$end" || echo 000)"
+          out="$(cat "$log_body")"
+          rm -f "$log_body"
+          if [ "$http" != "200" ]; then
+            echo "::error::log query returned HTTP ${http} — the monitor cannot read logs; refusing to report healthy"
+            exit 1
+          fi
           err="$(printf '%s' "$out" | jq -r '.error // empty')"
           if [ -n "$err" ]; then
             echo "::error::log query failed: $err"
@@ -82,26 +102,37 @@ jobs:
               -e "tenant-provision error" \
             | sort -u | head -20 || true)"
           if [ -n "$hits" ] || [ "$deny_count" -ge 5 ]; then
+            # #3907: file the FINDING, not the occurrence. `title` is the STABLE
+            # dedupe key (no run id, no timestamp, no count); the shared
+            # substrate (.github/scripts/auto-file-issue.sh) searches for it
+            # BEFORE filing and, when it is already open, records this
+            # occurrence as a `Recurrence #N` comment on that issue.
+            #
+            # The pre-#3907 code here searched too — but on a hit it said
+            # "already open — not duplicating" and recorded NOTHING, so a
+            # monitor firing hourly on one unchanged fault read as a single
+            # quiet issue and the escalation was invisible (the other half of
+            # #3907). A failed SEARCH now refuses to file (never risk a
+            # duplicate) and fails the step loudly: the red run IS the alert,
+            # the same documented policy as welcome-e2e-monitor.sh (#2140).
             title="[monitor] incident-class errors in tenant-provision logs ($SUPABASE_PROJECT_REF)"
-            # Dedup: search must go in the URL path (-f q= 404s on this
-            # endpoint); coerce the count to a number so a failed call can
-            # never break the integer comparison.
-            q="repo:${GITHUB_REPOSITORY} is:issue is:open in:title monitor tenant-provision"
-            enc="$(printf '%s' "$q" | jq -sRr @uri)"
-            existing="$(gh api "search/issues?q=$enc" --jq '.total_count' 2>/dev/null | grep -E '^[0-9]+$' || echo 0)"
-            if [ "$existing" -eq 0 ]; then
-              body="Automatic alert from the hourly tenant-provision log monitor (workflow: $GITHUB_WORKFLOW, run: $GITHUB_RUN_ID).
+            body_file="$(mktemp)"
+            cat > "$body_file" <<EOF
+          Automatic alert from the hourly tenant-provision log monitor (workflow: $GITHUB_WORKFLOW, run: $GITHUB_RUN_ID).
 
           Evidence (last 3h, deduplicated event_message lines):
           \`\`\`
           $hits
           \`\`\`
 
-          Investigate Supabase function logs: https://supabase.com/dashboard/project/$SUPABASE_PROJECT_REF/logs/edge-functions"
-              gh api "repos/$GITHUB_REPOSITORY/issues" -f title="$title" -F body="$body" >/dev/null
-              echo "::notice::opened monitor issue for incident-class errors"
-            else
-              echo "::notice::monitor issue already open — not duplicating"
+          Investigate Supabase function logs: https://supabase.com/dashboard/project/$SUPABASE_PROJECT_REF/logs/edge-functions
+          EOF
+            af_rc=0
+            bash .github/scripts/auto-file-issue.sh file \
+              --title "$title" --body-file "$body_file" --label bug || af_rc=$?
+            rm -f "$body_file"
+            if [ "$af_rc" != "0" ]; then
+              echo "::error::auto-file failed (rc=$af_rc) — the monitor could not file or update its issue; this failing run IS the alert"
             fi
             echo "::error::incident-class markers found in tenant-provision logs:"
             printf '%s\n' "$hits"

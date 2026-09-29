@@ -1,14 +1,21 @@
 name: CI Timing Measurement
 
-# #1477 — measurement artifact only. NEVER a gate: nothing here is in
-# python-ci-gate's needs, no step here can red a required check, and the
-# refresh path opens a PR (branch-protection safe, auto-merge repo policy)
-# only when the committed artifact content actually changed — zero bot spam.
+# #1477 — measurement artifact only. NEVER a required check: nothing here is in
+# python-ci-gate's needs, and the refresh path opens a PR (branch-protection safe,
+# auto-merge repo policy) only when the committed artifact content actually changed
+# — zero bot spam.
+#
+# #5215 Task 4b: it is also the SOLE WRITER of `config/ci-surfaces.yml:durations`
+# (via `tools/ci_timing.py --refresh-durations`) — the weights `split_fast_gate`
+# packs the push halves by. So a stale/wrong weight can red `python-ci-gate` with
+# zero test failures (#3395); the workflow itself is still not a gate, but its
+# output feeds one, and the refresh is fail-closed.
 #
 # Weekly (Monday 04:30 UTC) + on demand: samples the latest completed
 # push-to-main Python CI run, extracts real per-step durations (Jobs API)
-# + per-file durations (uploaded /tmp/pytest.log artifacts), and refreshes
-# docs/ci-timing.md + docs/ci-timing.json.
+# + per-file durations (uploaded /tmp/pytest.log artifacts), refreshes
+# docs/ci-timing.md + docs/ci-timing.json, and writes those per-file durations
+# into the selection manifest's `durations:` map.
 
 on:
   schedule:
@@ -39,21 +46,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      # PyYAML only: the durations bridge validates the refreshed manifest with
+      # `ci_selection.duration_issues()` + `duration_coverage_issues()`. Pinned
+      # for the same reason `manifest-integrity` pins it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyyaml
+        run: pip install pyyaml==6.0.2
+
       - name: Find latest completed push-to-main Python CI run
         id: find
         run: |
           # #1477: comparable data requires the FULL matrix — PR smoke runs and
-          # nightlies are excluded (event=push + branch=main), cancelled runs
-          # are skipped (conclusion filter below).
-          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/python-ci.yml/runs?event=push&branch=main&status=completed&exclude_pull_requests=true&per_page=10")
-          RUN_ID=$(printf '%s' "$RUNS" | python3 -c '
-            import json, sys
-            runs = json.load(sys.stdin).get("workflow_runs", [])
-            for r in runs:
-                if r.get("conclusion") in ("success", "failure"):
-                    print(r["id"])
-                    break
-          ')
+          # nightlies are excluded (event=push + branch=main), cancelled runs are
+          # skipped. The selection lives in tools/ci_timing.py::pick_run (unit
+          # tested) — NOT as an inline `python3 -c` here: an inline block indented
+          # against this YAML scalar's dedent reached python as an indented first
+          # statement, so the step died with "IndentationError: unexpected indent"
+          # on every weekly run and the artifact steps below were skipped
+          # (#3400 / CI-audit F8). No embedded python in this file.
+          RUN_ID=$(python3 tools/ci_timing.py --pick-run --repo "$GITHUB_REPOSITORY")
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           if [ -n "$RUN_ID" ]; then
             echo "sampled run: $RUN_ID"
@@ -65,13 +78,64 @@ jobs:
         # Artifacts may legitimately be absent (older than retention, run
         # cancelled before the log existed). continue-on-error: the measure
         # job then produces step-timing-only data with a missing-log note.
+        #
+        # ⛔ `github-token` IS REQUIRED HERE AND WAS MISSING. The artifacts
+        # belong to the SAMPLED run, not to this one, and
+        # actions/download-artifact@v4 scopes its default credentials to the
+        # CURRENT run — cross-run downloads need an explicit token
+        # (README §"Download Artifacts from other workflow runs"). Without it
+        # the download fails with an auth error that `continue-on-error`
+        # swallows, so the step reported success while fetching nothing: the
+        # sampled run had eight unexpired `pytest-log-*` artifacts and the
+        # generated artifact still recorded `"files": {}` with an all-zero
+        # `counts`, i.e. no per-file durations at all. The workflow already
+        # grants `permissions: actions: read`, so the token is in scope.
+        #
+        # This is with `tools/ci_timing.py --pick-run`: the run SELECTION was
+        # fixed (#3400 / audit F8, PR #3409) and the ARTIFACT FETCH was not.
         id: download
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: pytest-log-*
           run-id: ${{ steps.find.outputs.run_id }}
+          github-token: ${{ github.token }}
           path: logs
+
+      - name: Assert the download matched the sampled run's artifacts
+        # The observability half of the token bug above. `continue-on-error` on
+        # the download is deliberate — artifacts CAN legitimately be absent —
+        # but its cost was that a FAILED download and an ABSENT artifact were
+        # indistinguishable, so a config error survived as five weeks of
+        # "successful" weekly runs each emitting an empty artifact. A step that
+        # infers absence instead of observing it is the same defect family as
+        # the report itself. This distinguishes the two and fails loudly.
+        #
+        # Only meaningful when a run was actually sampled: an empty RUN_ID
+        # already warns in the find step, and failing here would double-report.
+        if: ${{ steps.find.outputs.run_id != '' }}
+        run: |
+          set -euo pipefail
+          # ⛔ `[ -d logs ]` is load-bearing. Without it, an absent logs/ dir
+          # makes `find logs` exit non-zero, and `set -e` + `pipefail` abort the
+          # step BEFORE the echo and the comparison — turning the legitimate
+          # "no artifacts to fetch" case into a hard failure, i.e. the exact
+          # false alarm this step exists to prevent. The step's whole job is to
+          # separate "fetched nothing because the fetch failed" from "nothing to
+          # fetch"; it must not collapse them one layer up.
+          HAVE=0
+          if [ -d logs ]; then
+            HAVE=$(find logs -name '*.log' | wc -l | tr -d ' ')
+          fi
+          WANT=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/${{ steps.find.outputs.run_id }}/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name | startswith("pytest-log-"))] | length')
+          WANT=${WANT:-0}
+          echo "downloaded $HAVE pytest log(s); the sampled run has $WANT pytest-log-* artifact(s)"
+          if [ "$WANT" -gt 0 ] && [ "$HAVE" -eq 0 ]; then
+            echo "::error::the sampled run has $WANT pytest-log-* artifact(s) but none were downloaded — per-file durations would be empty. This is a FETCH failure (cross-run credentials), not an absent artifact. See the github-token note on the download step."
+            exit 1
+          fi
 
       - name: Generate CI timing artifact
         run: |
@@ -86,6 +150,39 @@ jobs:
           echo "=== ci-timing.md (head) ==="
           head -30 docs/ci-timing.md
 
+      - name: Refresh the durations map from the collector (Task 4b bridge)
+        # #5215 Task 4b / T-B: the bridge from the collector into
+        # `config/ci-surfaces.yml:durations` — the ONE map `split_fast_gate`
+        # packs the push halves by. Before this step the map was a one-off
+        # 2026-09-22 hand sweep (#3395); this step is now its only writer.
+        #
+        # Fail-closed: a zero-key projection, a collector key not classified in
+        # the manifest, or a refresh that would fail the manifest's own
+        # duration gate writes NOTHING and exits non-zero.
+        #
+        # `if` mirrors the assert step: an empty RUN_ID means nothing was
+        # sampled. A missing-log run has nothing to measure: the download step
+        # tolerates absent artifacts by design (retention, a run cancelled
+        # before the log existed), the collector then yields ZERO keys, and the
+        # bridge correctly reports that as UNKNOWN (exit 2). That absence is
+        # legitimate, not a bridge failure — guard on the logs themselves so a
+        # legal absence cannot red the whole `measure` job and, via `needs` +
+        # `success()`, suppress the weekly refresh.
+        if: ${{ steps.find.outputs.run_id != '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(find logs -name '*.log' -print -quit 2>/dev/null)" ]; then
+            echo "::notice::no pytest-log artifacts for run ${{ steps.find.outputs.run_id }} — skipping the durations refresh (legitimate absence, not a failure)"
+            exit 0
+          fi
+          python3 tools/ci_timing.py --refresh-durations \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "${{ steps.find.outputs.run_id }}" \
+            --logs-dir logs \
+            --manifest config/ci-surfaces.yml
+          echo "=== durations_captured_at ==="
+          grep -m1 '^durations_captured_at:' config/ci-surfaces.yml || true
+
       - name: Upload generated timing files
         if: always()
         uses: actions/upload-artifact@v4
@@ -94,6 +191,24 @@ jobs:
           path: |
             docs/ci-timing.md
             docs/ci-timing.json
+          if-no-files-found: ignore
+
+      - name: Upload the refreshed durations map
+        # #5215 Task 4b: the map rides its OWN artifact on purpose.
+        # `actions/upload-artifact@v4` roots an artifact at the least common
+        # ancestor of its `path` entries (v4 README, "Upload using Multiple
+        # Paths"). The `ci-timing` artifact's root is `docs/`, which is why the
+        # `refresh` job reads `generated/ci-timing.md`; adding a repo-root-level
+        # `config/ci-surfaces.yml` to THAT list would move its root to the
+        # repository root, so every `generated/<file>` read below would miss and
+        # the refresh job would fail on every run. A single-file artifact roots
+        # at `config/` instead, so the map downloads to
+        # `generated-map/ci-surfaces.yml`.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-durations-map
+          path: config/ci-surfaces.yml
           if-no-files-found: ignore
 
   refresh:
@@ -120,12 +235,19 @@ jobs:
           name: ci-timing
           path: generated
 
+      - name: Download the refreshed durations map
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-durations-map
+          path: generated-map
+
       - name: Open refresh PR if content changed
         run: |
           set -e
           BRANCH="chore/ci-timing-refresh-$(git rev-parse --short HEAD)"
           if git diff --no-index --quiet docs/ci-timing.md generated/ci-timing.md \
-             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json; then
+             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json \
+             && git diff --no-index --quiet config/ci-surfaces.yml generated-map/ci-surfaces.yml; then
             echo "timing artifact unchanged — no PR needed"
             exit 0
           fi
@@ -133,14 +255,19 @@ jobs:
           git switch -c "$BRANCH"
           cp generated/ci-timing.md docs/ci-timing.md
           cp generated/ci-timing.json docs/ci-timing.json
-          git add docs/ci-timing.md docs/ci-timing.json
+          # #5215 Task 4b: the durations map is refreshed by the bridge, and the
+          # refresh PR is gated by `manifest-integrity` (python-ci-gate.needs),
+          # which runs `ci_selection.py --integrity` — so a refresh that would
+          # unbalance the halves fails the PR rather than landing.
+          cp generated-map/ci-surfaces.yml config/ci-surfaces.yml
+          git add docs/ci-timing.md docs/ci-timing.json config/ci-surfaces.yml
           git -c user.name="tortoise-ci[bot]" -c user.email="actions@github.com" \
-            commit -m "chore(ci): refresh CI timing artifact (#1477)"
+            commit -m "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)"
           git push -u origin "$BRANCH"
           if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')" = "0" ]; then
             gh pr create --base main --head "$BRANCH" \
-              --title "chore(ci): refresh CI timing artifact (#1477)" \
-              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json). No code changes — measurement data only. Auto-merged per repo policy."
+              --title "chore(ci): refresh CI timing artifact + durations map (#1477, #5215)" \
+              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json) and, since #5215 Task 4b, the per-file \`durations\` map in config/ci-surfaces.yml — the weights the push split packs by. Measurement data only; no code changes. Gated by manifest-integrity. Auto-merged per repo policy."
           else
             echo "refresh PR already open for $BRANCH — skipping"
           fi

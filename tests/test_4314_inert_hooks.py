@@ -65,7 +65,12 @@ def _run_claude_hook(hook: Path, home: Path, *, transcript: Path,
                      cwd: Path | None = None) -> subprocess.CompletedProcess:
     """Drive the real Claude session-end hook with a controlled env."""
     (home / "tmp").mkdir(parents=True, exist_ok=True)
-    env = {"HOME": str(home), "PATH": path, "TMPDIR": str(home / "tmp")}
+    # #3615: session-end.sh's capture step is consent-gated, and these tests
+    # exercise the CAPTURE invocation (the resolved module dir, the CWE-427
+    # path hygiene). Explicit consent keeps the capture leg live for them; no
+    # test in this file pins the refusal path.
+    env = {"HOME": str(home), "PATH": path, "TMPDIR": str(home / "tmp"),
+           "TORTOISE_CAPTURE": "1"}
     env.update(extra_env or {})
     payload = json.dumps({
         "session_id": "sid-4314", "transcript_path": str(transcript),

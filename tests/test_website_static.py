@@ -20,18 +20,31 @@ Repo-local, zero network, stdlib only (the test_waitlist_form.py pattern):
    reference #pricing-grid / #pricing-usage-line / #selfhost-section /
    #btn-monthly / #btn-annual, and those element ids exist in the page; init
    wiring honors display.annual_default.
+5. Unshipped-capability claim pin (#3432): the `04 · Automate` beat's copy is
+   pinned (the beat advertised webhook delivery as available while
+   product/pricing.json marks it "planned" and no outbound webhook ships), and
+   the beat must carry a real anchor to the issue tracking the capability.
 
-Run:  python -m pytest tests/test_website_static.py -v
+Run:  TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_website_static.py -v
+      (a URI-less run fails at session setup by construction — epic #1647 P4;
+      this file is static, offline and stdlib-only, so the carve-out lane fits.)
 """
 from __future__ import annotations
 
 import json
 import re
+import sys
+from html import unescape
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:  # tests/ and tools/ are not installed packages
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests._html_links import extract_anchor_hrefs  # noqa: E402
+
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
 # #4336: the dashboard's display-name map — the second hand-maintained copy of
@@ -389,6 +402,87 @@ class TestRenderElementInventory:
         for name in ("free", "solo", "pro", "team"):
             assert f"'{name}'" in fn or f'"{name}"' in fn
 
+    def test_render_pricing_has_no_undefined_name_path(self):
+        """#4815: `names` and `labels` are separate hand-maintained lists, so a
+        tier in one but not the other used to print the literal string
+        "undefined" in customer copy — and an empty metered set dangled the
+        " — applies to " separator."""
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+
+        # Exactly one name resolver, and it carries the fallback...
+        assert "const displayName = (n) => labels[n] ||" in fn, (
+            "renderPricing() must resolve display names through one helper "
+            "with a fallback")
+        # ...so no render site indexes `labels` bare (no fallback → undefined).
+        resolver = "(n) => labels[n] ||"
+        assert "labels[" not in fn.replace(resolver, "", 1), (
+            "a bare `labels[...]` lookup renders `undefined` when the tier is "
+            "missing from the map — every use must go through displayName()")
+        # The sentence must not render its separator with nothing after it.
+        assert "overageTiers.length" in fn, (
+            "the overage line must be skipped (not left dangling) when no "
+            "tier is metered")
+
+    def test_dashboard_plan_grid_discloses_overage(self):
+        """#4815: `planOptions()` computed an `overage` flag and the plan
+        grids rendered nothing, so a metered tier was invisible on the card
+        the user upgrades from — the card Solo is bought on. The string must
+        come from pricing.json's own `display.overage_line`, never a second
+        hardcoded copy of the price.
+
+        The assertions are scoped to the LIVE surfaces: `main.jsx` carries a
+        SECOND `planOptions()` grid inside the archived
+        `LEGACY_WIZARD_ARCHIVED` block (dead code, never rendered), so a
+        whole-file substring would pass a disclosure that only ever rendered
+        there."""
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        main = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
+                / "main.jsx").read_text(encoding="utf-8")
+
+        assert "overageLine: t.overage" in js, (
+            "planOptions() must expose the disclosure only for a metered tier")
+        assert "pricing.display?.overage_line" in js, (
+            "the disclosure must be pricing.json's own display.overage_line")
+
+        # Excise the archived wizard block (same anchor/marker pair
+        # overview.test.js derives its A0 slice with) so the render assertions
+        # below can only be satisfied by code that actually runs.
+        archived_anchor = "LEGACY_WIZARD_ARCHIVED && welcomeOriented && ("
+        archived_start = main.index(archived_anchor)
+        archived_end = main.index("\n                )}\n", archived_start)
+        live = main[:archived_start] + main[archived_end:]
+
+        assert "{p.overageLine && (" in live, (
+            "the LIVE Billing plan grid must render the disclosure when the "
+            "flag is set — a line rendered only in the archived (dead) grid "
+            "is not a disclosure")
+
+        # The paid-new-org purchase dialog commits a metered subscription, so
+        # it must show the selected plan's overage line too.
+        dialog_start = live.index('id="create-org-title-purchase"')
+        dialog_end = live.index("Continue to checkout", dialog_start)
+        dialog = live[dialog_start:dialog_end]
+        assert "newOrgSelectedPlan?.overageLine && (" in dialog, (
+            "the paid-new-org purchase dialog must render the SELECTED "
+            "plan's overage line — it commits checkout for a metered "
+            "subscription")
+        # A bare `overageLine` substring is not enough: the same silent no-op
+        # this test exists to prevent is reachable by breaking the SELECTION,
+        # which leaves the render textually intact while `newOrgSelectedPlan`
+        # is undefined and nothing renders. Pin the predicate and the render
+        # variable so a predicate regression reds instead of passing.
+        assert ("team?.checkout_price_ids?.[p.tier] === createTeamPlan" in live), (
+            "the dialog's selected plan must be resolved by PRICE ID against "
+            "checkout_price_ids (the state holds a price id, not a tier key) "
+            "— matching on p.tier directly would resolve nothing and render "
+            "no disclosure")
+        assert "newOrgSelectedPlan.overageLine" in dialog, (
+            "the dialog must render the resolved plan's own overageLine")
+
+        assert "per additional 10k" not in main, (
+            "the overage price string belongs in pricing.json, not re-typed "
+            "in the dashboard")
+
     def test_set_billing_references_toggle_buttons(self):
         html = PRODUCT_HTML.read_text(encoding="utf-8")
         fn = _function_refs(html, "setBilling")
@@ -476,6 +570,163 @@ def test_welcome_provisioning_pipeline_is_dead_since_1566():
         assert dead not in src_code, (
             f"{dead} must not exist — the provisioning surface is dead "
             "(#1566) and its host bridge was removed in #3501"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. Unshipped-capability claims on the marketing page (#3432)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _automate_beat_markup() -> str:
+    """The `<section id="beat-automate">…</section>` slice, from the SECTION tag.
+
+    The slice must start at `<section`, not at the `id=` attribute: starting at
+    the attribute leaves `id="beat-automate" class="beat workflow">` outside any
+    tag for `_beat_text`'s strip, and the pinned text then carries that fragment
+    (caught in plan review as a P0). The nested-section assert below is the same
+    guard `tests/test_website_docs_consistency.py` carries for `#beat-hero`: this
+    slice stops at the FIRST `</section>`, so a claim inside a nested section
+    would be invisible to every assertion in this class.
+    """
+    src = PRODUCT_HTML.read_text(encoding="utf-8")
+    marker = 'id="beat-automate"'
+    assert marker in src, (
+        "the #beat-automate section moved or was renamed — this gate's subject is "
+        "gone; re-point it at wherever the Automate claim now lives (#3432)")
+    i = src.index(marker)
+    start = src.rindex("<section", 0, i)
+    section = src[start:src.index("</section>", start)]
+    assert "<section" not in section[section.index(">") + 1:], (
+        "a <section> is nested inside #beat-automate — this slice stops at the "
+        "first </section>, so a claim in the nested section would be invisible "
+        "to every assertion in this class (#3432)")
+    return section
+
+
+def _beat_text(markup: str) -> str:
+    """Rendered text of a markup slice: tags stripped, entities decoded, spaces collapsed."""
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", "", markup))).strip()
+
+
+def _automate_paragraph_markup() -> str:
+    section = _automate_beat_markup()
+    match = re.search(r"<p>.*?</p>", section, re.S)
+    assert match, (
+        "#beat-automate has no <p>…</p> — the beat was restructured and this "
+        "gate's subject changed shape (#3432)")
+    return match.group(0)
+
+
+class TestUnshippedCapabilityClaims:
+    """#3432: the `04 · Automate` beat advertised webhook delivery as available.
+
+    It read "Use webhooks to trigger workflows, update systems, or coordinate
+    agents…" — present tense — while every source of truth said otherwise:
+    `product/pricing.json` marks `features.webhooks` `"planned"` on pro/team and
+    `false` elsewhere, no outbound webhook exists in `tortoise/` (every hit is an
+    INBOUND receiver — `/webhooks/stripe`, the GitHub/Slack connector servers),
+    and `docs/plans/2026-08-08-432-subscriptions-plan.md` lists "webhook
+    delivery" as out of scope. #3909 tracks the capability and is explicitly
+    deferred, post-beta. Introduced by 8918a7fae (#665), so it was live for ~7
+    weeks with nothing able to catch it.
+
+    A TRIPWIRE, NOT A BINDING — six things it does NOT promise, named rather
+    than hidden:
+
+    1. The premise reads a `pricing.json` flag, and such flags LAG.
+       `features.export` still reads `"planned"` while
+       `tortoise/hosted_api.py` ships the export endpoint, so a release that
+       never moves the flag leaves this file green and the page stale.
+    2. It can therefore also RED for the wrong reason: a pure-doc realignment of
+       these schema strings (the follow-up `pricing.json`'s own `_comment`
+       describes), or a new unshipped sentinel, trips the premise although
+       nothing shipped. A new sentinel is a deliberate allow-list edit, not a
+       silence.
+    3. The copy pin is a hand-maintained SECOND COPY of a prose claim. An
+       availability sentence is not derivable today, so it is pinned rather
+       than left unguarded; the durable binding is #5063.
+    4. The scope is this beat's **static** markup in this one FILE. A claim added
+       to another beat, to another page, to whatever `_redirects` may serve at
+       `/product`, or injected at runtime by the page's own GSAP block is all
+       green here. Phrase search cannot establish a site-wide property — the
+       first sentence of this very beat was found by reading, not searching.
+    5. The route test proves a link EXISTS, not that it is reachable: the beat is
+       a `pointer-events: none` overlay until GSAP adds `.pe-on`, and it is
+       `opacity: 0` without JS. Pre-existing page architecture.
+    6. The heading `04 · Automate` is deliberately NOT pinned: it is a narrative
+       label, not an availability claim, and freezing it would make a
+       renumbering red a test whose message is about shipping status. What is
+       pinned is the paragraph.
+
+    The premise is an unshipped ALLOW-LIST rather than a boolean negation
+    because `pricing.json`'s own `_comment` describes the shipped transition as
+    `"planned"` → `"shipped"`, and `"shipped" is not True`.
+    """
+
+    # The paragraph's rendered text, exactly as #3432 leaves it (168 chars).
+    EXPECTED_PARAGRAPH_TEXT = (
+        "Poll claim events after a cursor to drive your own workflows, systems, "
+        "and agents as the graph changes. Webhook push delivery is planned, not "
+        "shipped — see issue #3909."
+    )
+    TRACKER_URL = "https://github.com/daniel-ospina/tortoise/issues/3909"
+    UNSHIPPED_VALUES = (False, "planned")
+
+    def test_pricing_json_still_marks_webhooks_unshipped(self):
+        """Premise. Reds when webhooks leave the unshipped set, and en route.
+
+        Three branches when it fires: webhooks shipped (fix the page and this
+        class), the flag was realigned/newly sentineled while nothing shipped
+        (fix the flag, or widen the allow-list deliberately and say which
+        sentinel), or a tier lost/renamed the key.
+        """
+        tiers = json.loads(PRICING_JSON.read_text(encoding="utf-8"))["tiers"]
+        observed = {}
+        for tier, spec in tiers.items():
+            features = spec.get("features")
+            observed[tier] = (features.get("webhooks")
+                              if isinstance(features, dict) else features)
+        shipped = sorted(tier for tier, value in observed.items()
+                         if value not in self.UNSHIPPED_VALUES)
+        assert not shipped, (
+            f"product/pricing.json no longer marks webhooks unshipped for "
+            f"{ {t: observed[t] for t in shipped} }. If webhooks SHIPPED, the "
+            f"#3432 pin below is now WRONG — state availability in the beat and "
+            f"update EXPECTED_PARAGRAPH_TEXT. If the flag moved only to realign "
+            f"the pricing-schema strings, or a new unshipped sentinel was "
+            f"adopted, fix the flag — or widen the allow-list deliberately and "
+            f"name the sentinel. Do not widen it to silence this."
+        )
+
+    def test_automate_beat_paragraph_is_pinned(self):
+        """The paragraph is pinned so a paraphrase cannot slip past.
+
+        A token check ("does 'webhook' appear, and is 'planned' somewhere in the
+        beat?") passes on `Use webhooks to trigger workflows… planned`, which is
+        still an availability claim. Equality does not.
+        """
+        assert _beat_text(_automate_paragraph_markup()) == self.EXPECTED_PARAGRAPH_TEXT, (
+            "the 04 · Automate paragraph changed. Before updating this pin, "
+            "answer: does the new copy state anything in the present tense that "
+            "the product does not do? The shipped surface is the PULL path "
+            "(GET /v1/events, sdk.events_poll, tortoise_events_poll); push "
+            "delivery is #3909 and is not shipped."
+        )
+
+    def test_automate_beat_links_the_capability_tracker(self):
+        """The roadmap claim must carry its route — text alone does not link.
+
+        Asserted on PARSED anchor hrefs, not a substring of the markup: a
+        substring check stays true when the URL is parked in an HTML comment, in
+        `data-href=`, or in `title="…"`. `extract_anchor_hrefs`
+        (tests/_html_links.py) returns only rendered anchors, and its own tests
+        pin all three of those rejections.
+        """
+        assert self.TRACKER_URL in extract_anchor_hrefs(_automate_beat_markup()), (
+            "the 04 · Automate beat no longer links the issue that tracks the "
+            "capability (#3909). The roadmap claim must be reachable — that is "
+            "the point of making it a claim a reader can check (#3432)."
         )
 
 

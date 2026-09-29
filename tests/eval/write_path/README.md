@@ -193,6 +193,163 @@ example (a duplicate-ingest batch race — the raw-notes 10:10Z gold item) in
 a freshly re-authored fictional session; ideas reimplemented carry no license
 obligation, and no corpus file or verbatim gold text is copied.
 
+## Additive banded semantic judge (issue #5085)
+
+The mechanical anchor metrics above stay **authoritative** for the gated
+`metrics` vocabulary — that is the recorded grading hierarchy
+(`runner.py`, plan R-row, gbrain Cat-35 ADOPT).  Issue #5085 adds a
+judged **knowledge-preservation** number *beside* them (never replacing
+them), because the anchor bar scores a paraphrase-only rewrite of a planted
+fact as 0 even when the fact is present in different words.
+
+```bash
+# product/llm lane only — the m2 CI lane is REFUSED (determinism)
+PYTHONPATH=$PWD TORTOISE_TEST_CARVE_OUT=1 tools/run-with-eval-keys.sh \
+  .venv/bin/python -m tests.eval.write_path.runner run \
+    --judge semantic --judge-samples 5 --out <receipt>
+```
+
+* **Blind** — the judge gets paraphrase-level probes + the stored memory
+  points; it NEVER sees the verbatim anchor.  The guard
+  (`judge.BandedSalienceJudge._guard`) is fail-closed on the PROBE block
+  (the memory block is observed data and may legitimately contain a stored
+  point's verbatim wording); a leak raises `JudgeBlindnessError` and fails
+  the run (plan §J4: blindness is load-bearing).
+* **Earned probability** — one binary preservation question, asked
+  `--judge-samples` (default 5) times per unit in EACH of the two prompt
+  orders; the unit's probability is the agreement fraction over the pooled
+  votes, and the two orders are averaged to blunt documented position bias
+  (arXiv 2406.07791).  No verbalized confidence is trusted (arXiv
+  2512.22245, 2508.06225); token logprobs, if a seam ever exposes them, are
+  recorded as a cross-check only.
+* **Bands** (owner-specified, #5085 D14): `same_fact` ≥ 0.80 · `likely`
+  ≥ 0.70 · `maybe` ≥ 0.50 · `likely_not` below.  The receipt carries the
+  per-unit band, the **band distribution**, and a **band-weighted score**
+  (mean of each band's interval midpoint) — so a reader can tell wording
+  shortfall from omission.
+* **Protocol pin** — `judge.SEMANTIC_JUDGE_PIN`
+  (`w2-semantic-banded-v1+w2-salience-paraphrase-v1`), recorded in the
+  receipt's `semantic_judge` block.  The receipt's `judge_pin` stays
+  `JUDGE_PIN_MECHANICAL`, so committed baselines remain comparable and a
+  mechanical-lane receipt is byte-identical to the pre-#5085 shape.
+* **Judge model ≠ extractor model** — the default judge is `solar-pro4`
+  (upstage), deliberately outside the deepseek extractor family
+  (self-preference bias).  The run records both and states any residual
+  overlap.
+
+## Calibration (κ/α pending human labels)
+
+```bash
+.venv/bin/python -m tests.eval.write_path.runner calibrate \
+  --receipt <receipt> --out tests/eval/write_path/calibration/<name>.json
+.venv/bin/python -m tests.eval.write_path.runner calibrate --sample <sample.json>
+```
+
+`calibration.build_calibration_sample` builds a deterministic, band-stratified
+sample (owner floor n ≥ 30, spanning all four bands) whose items carry the
+probe, the judge's band/probability and the session's memory notes, with
+`human_band: null`.  Until every item is labelled the report is
+`labels_pending: true` with `cohen_kappa: null` / `krippendorff_alpha: null`
+— **no κ is ever invented.**  Once labelled, `cohen_kappa` (judge vs human)
+and `krippendorff_alpha` (≥2 coders) are computed.
+
+**Deterministic NLI pre-screen (issue #5106):** added, **OFF by default**,
+and **without adding any dependency**.  The issue's premise — *"it could not
+be added without a heavy new dependency"* — was incomplete: `torch` /
+`transformers` / `sentence-transformers` are already resolved by the
+already-declared `embeddings` extra (`uv.lock`), and the product already ships
+a cross-encoder (`tortoise/rerank.py`, documented there as *"ships in the
+`embeddings` extra, NO new third-party dependency"*).  `pyproject.toml` and
+`uv.lock` are **untouched** by this change.
+
+```bash
+# opt-in only; the default (off) receipt block is byte-identical to #5085
+PYTHONPATH=$PWD TORTOISE_TEST_CARVE_OUT=1 tools/run-with-eval-keys.sh \
+  .venv/bin/python -m tests.eval.write_path.runner run \
+    --judge semantic --prescreen lexical   # or: --prescreen nli
+
+# measure it offline over ANY judged receipt — no LLM calls
+.venv/bin/python -m tests.eval.write_path.runner prescreen-audit \
+  --receipt <judged-receipt>.json --prescreen lexical
+```
+
+* **Two stages.**  `lexical` uses no model at all (content-token containment +
+  negation parity + a claim-critical guard); `nli` lazily loads a 3-class
+  NLI cross-encoder (`cross-encoder/nli-deberta-v3-small`) through the
+  already-declared `embeddings` extra.  The embedding-cosine variant is
+  deliberately **not** implemented: negated pairs score cosine ≈ 0.99, so it
+  is unsafe at both confident ends.
+* **Confident ends only.**  `same_fact` needs an entailment verdict **and**
+  the deterministic claim-critical guard (numbers/dates/entities must survive
+  verbatim — NLI models are known to miss copied-number errors).
+  `likely_not` needs a **CONTRADICTION** verdict, never merely the absence of
+  entailment (a 3-class head's low-entailment region includes NEUTRAL, and
+  short-circuiting NEUTRAL is exactly the "launder an uncertain verdict"
+  failure the design forbids).  Everything else ABSTAINS.
+* **Fail OPEN.**  Missing extra, missing weights, or any exception → the unit
+  goes to the LLM judge as before.  Nothing is ever dropped.
+* **Blindness is not exempted.**  The §J4 guard runs over the FULL probe dict
+  before the stage is consulted, and the stage never sees an anchor.
+* **Re-pin.**  With the stage ON the arm pins
+  `judge.SEMANTIC_JUDGE_PIN_PRESCREEN` (the protocol changed);
+  `SEMANTIC_JUDGE_PIN`, the bands, the thresholds and `--judge-samples` are
+  untouched, and no band or threshold was moved.
+* **What it can save.**  The judge BATCHES — one call per (session, order,
+  sample) — so a partial screen removes prompt tokens but not calls; only a
+  fully screened session removes calls (`orders × samples`).
+  `prescreen-audit` reports units screened, calls and characters removed, and
+  agreement with the judge's earned band on the short-circuited units.
+
+### ⛔ MEASURED — do NOT enable `--prescreen nli`
+
+Recomputed offline, with **no LLM calls**, over the three judged #5085 receipts
+(`~/.cache/pi-5085/receipt-full-{c,d,f}.json`; 270 units), 2026-09-26:
+
+| stage | units screened | `same_fact` fires | judge calls saved | agreement with the judge's earned band |
+|---|---|---|---|---|
+| `lexical` | **0 / 270** | 0 | **0** | n/a — never fires |
+| `nli` | **71 / 270** | **0** | **0** | **29 / 71 = 0.408** |
+
+**`lexical` is inert by construction.**  The blind probes are paraphrases, and
+the stage demands containment 1.0; measured max-containment per probe is 0.29 on
+average (0.75 corpus maximum).  It is safe and worth nothing.
+
+**`nli` is harmful, not merely inert.**  It fires only at the `likely_not` end,
+and **26 of the 71 units it short-circuits are judged `same_fact` by the LLM**
+(7 + 10 + 9 across c/d/f) — a preserved fact would be recorded as lost.  Two
+measured causes, neither fixable by tuning the 0.95 / 0.05 ends:
+
+1. **The two ends are pooled over different pairs.**  `entail` is a max over the
+   forward (note ⇒ probe) pairs only; `contradict` is a max over *both*
+   directions.  With 10–27 notes per session, some note almost always supplies a
+   pair the checkpoint calls a contradiction, so `contradict <= 0.05` — half of
+   the `same_fact` conjunction — is unsatisfiable: **`same_fact` fired 0 times
+   in 270 units.**  On run d, the same 90 units gave `entail >= 0.95` (forward)
+   for 50 of them, against `contradict >= 0.95` over the code's
+   **both-directions** pooling for **85** — both ends claim nearly the same
+   corpus.  (Forward-only contradiction alone already reaches 0.95 on 63 of
+   the 90.)
+2. **The default checkpoint confuses NEUTRAL with CONTRADICTION.**
+   `cross-encoder/nli-deberta-v3-small` scores the textbook neutral pair
+   ("The cat is on the mat." / "The dog is in the yard.") as `contradiction
+   0.9998`.  This reproduces through the raw `transformers` path with the
+   documented `DebertaV2Tokenizer` / `DebertaV2ForSequenceClassification`
+   classes and a correct `id2label`, so it is a property of the weights, not a
+   loading or label-order defect.  A probe whose fact was never stored produces
+   exactly a NEUTRAL pair — the dominant source of the false `likely_not`.
+
+No tuning can move the number that matters most: **the judge batches per
+session, so the screen saved 0 calls** (no session was ever fully screened).
+The stage stays OFF by default, carries `"recommended": false` + the measured
+note in its `audit()` (so it is visible in any receipt or audit report), and is
+retained only as an *instrument*: point `--prescreen-model` at a better
+checkpoint and re-measure with `prescreen-audit` before trusting any of it.
+
+The stage's plumbing — fail-open on abstain/error/unavailable, the
+contradiction-not-absence rule for `likely_not`, and the claim-critical guard on
+`same_fact` — is unchanged and unit-tested; the measurement indicts the
+checkpoint and the pooling, not the fail-open contract.
+
 ## Layer-2 operator-edge audit (issue #2514)
 
 Every completed run carries an additive `operator_audit` on the report +
@@ -236,3 +393,11 @@ metrics remain measured on the same corpus content).  A sealed llm run
 (corpus-bless + protocol-bless v1→v2, with the first comparable operator-edge
 numbers on the 15-edge denominator) is REQUIRED before the llm lane is
 comparable again — see the scoping note's "Sealed run required to activate".
+
+> ⚠️ **Start the llm lane through `tools/run-with-eval-keys.sh`** (#2718 /
+> #4860): this runner reads provider keys from the process env and never loads
+> the repo `.env`, so an ambient shell key is what gets billed. That is how the
+> 2026-09-23 sealed run billed an exhausted fleet key and 403'd 7/7 while
+> `.env` held a healthy evals key. The wrapper strips the ambient provider
+> keys, loads `.env` with override, and prints the source + fingerprint of
+> every key it set — paste that into the receipt.

@@ -10,9 +10,13 @@
   a question that may have been decided before.
 
 ## At session end
-- `session-end.sh` (SessionEnd hook) automatically files this session as a
-  memory Event (requires `TORTOISE_API_KEY`/`TORTOISE_API_URL`). If it isn't
-  installed, file durable decisions manually via
+- `session-end.sh` (SessionEnd hook) files this session as a memory Event
+  **only when capture is explicitly enabled** — `TORTOISE_CAPTURE=1` (truthy:
+  1/true/yes/on). `TORTOISE_API_KEY`/`TORTOISE_API_URL` are the hosted
+  credential/endpoint needed to reach the API, NOT a consent signal: exporting
+  the key for the MCP `Authorization: Bearer` header does not enable capture
+  (#3615). If the hook isn't installed, or capture is off, file durable
+  decisions manually via
   `mcp__tortoise__tortoise_create_point(kind="decision", ...)`.
 
 ## While working

@@ -36,6 +36,8 @@ import time
 
 import pytest
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -332,6 +334,165 @@ async def test_get_context_is_bounded(fast_bound):
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
     rec = await _drive(mw, _scope("/v1/context", method="GET"))
     assert rec.status == 504
+
+
+@pytest.mark.asyncio
+async def test_internal_cron_route_is_exempt(fast_bound):
+    """#4939: `/v1/internal/` is a CLASS the #3834 ruling never reached, not a
+    second instance of the `/v1/context` exemption. The ruling is about what a
+    USER experiences; every route under this prefix is an operator/cron endpoint
+    behind `_check_internal`, and its CRON callers publish their own patience
+    (`registry-cron.sh` posts the sweep with `curl -m 600`; the operator runbook
+    curls carry an explicit `--max-time` for the same reason). A user-patience
+    bound bounds no user there — it only turns a 600 s batch job into a 10 s
+    failure, which is how the DR sweep refused on every hourly run for 12 days
+    while the archives aged.
+
+    Driven through the REAL `/status` shape the DR driver depends on: if the
+    sweep is refused, nothing backs up and the refusal is what the driver reads
+    as `status=error`.
+    """
+    mw = ha.WaitBoundMiddleware(_slow_app(0.2, status=200))
+    rec = await _drive(mw, _scope("/v1/internal/backups/sweep", method="POST"))
+    assert rec.status == 200, "the DR sweep must reach its handler, not a 10 s refusal"
+
+
+@pytest.mark.parametrize("path", [
+    "/v1/internalfoo",      # a sibling that merely SHARES the letters
+    "/v1/internal",         # the bare prefix: no trailing slash, and no such route
+    "/v1/internalX/sweep",
+    "/v2/internal/sweep",
+])
+@pytest.mark.asyncio
+async def test_internal_exemption_prefix_is_boundary_exact(fast_bound, path):
+    """The MCP arm's boundary test (`test_mcp_prefix_is_boundary_exact`),
+    applied to this prefix: the exemption must not spread by spelling."""
+    mw = ha.WaitBoundMiddleware(_slow_app(5.0))
+    rec = await _drive(mw, _scope(path, method="POST"))
+    assert rec.status == 504, f"{path} must stay bounded"
+
+
+def test_the_two_readings_stay_two_constants():
+    """The exact-match SET is 'one handler whose OWN record exempts it' and the
+    PREFIX is 'a class the ruling never reached'. Folding the prefix into the set
+    would silently make the set's exactness test — and the reasoning it pins —
+    meaningless, so they are asserted separately."""
+    expected_exact = frozenset({("POST", "/v1/context")})
+    assert expected_exact == ha._TRANSPORT_WAIT_BOUND_EXEMPT
+    assert ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX == "/v1/internal/"
+
+
+def test_no_internal_route_declares_a_body_parameter():
+    """#4939 security: exempting the prefix removed the only cap on an
+    UNAUTHENTICATED body read. FastAPI parses a declared `body:` parameter in
+    `get_request_handler` BEFORE any dependency or handler body runs, so the
+    whole body was buffered before `_check_internal` could reject the caller —
+    and the 10 s transport bound used to truncate that read. There is no
+    body-size middleware on the hosted app, no Fly edge timeout, and
+    `hard_limit = 200`, so a declared body parameter on an internal route means
+    an unauthenticated caller can hold connections and grow memory unbounded.
+
+    The five routes that used to take one now call `_read_internal_json_body`
+    AFTER the key check. This test is the guard against reintroducing one.
+    """
+    offenders = []
+    for route in ha.app.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith(ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX):
+            continue
+        params = getattr(getattr(route, "dependant", None), "body_params", None) or []
+        if params:
+            offenders.append((path, [getattr(p, "name", "?") for p in params]))
+    assert offenders == [], (
+        "an internal route must read its body AFTER _check_internal via "
+        f"_read_internal_json_body; found declared body params: {offenders}"
+    )
+
+
+async def _read_internal_body(headers, raw, *, required=False):
+    """Drive `_read_internal_json_body` through a REAL Starlette `Request`."""
+    pending = [{"type": "http.request", "body": raw, "more_body": False}]
+
+    async def receive():
+        return pending.pop(0) if pending else {
+            "type": "http.request", "body": b"", "more_body": False}
+
+    req = Request(_scope("/v1/internal/x", method="POST", headers=headers), receive)
+    return await ha._read_internal_json_body(req, required=required)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers,raw,required,expected", [
+    # curl -d sends form-urlencoded unless told otherwise — the MIRROR-CHECK
+    # shape that regressed. The body must parse anyway.
+    ([("content-type", "application/x-www-form-urlencoded")],
+     b'{"bucket": "mirror"}', False, {"bucket": "mirror"}),
+    ([], b'{"bucket": "mirror"}', False, {"bucket": "mirror"}),
+    ([("content-type", "application/json; charset=utf-8")], b'{"a": 1}', False, {"a": 1}),
+    ([("content-type", "application/vnd.api+json")], b'{"a": 1}', False, {"a": 1}),
+    # absent / empty body mirrors the signature it replaced
+    ([("content-type", "application/json")], b"", False, {}),
+    ([], b"   ", False, {}),
+    ([("content-type", "application/json")], b"null", False, {}),
+    # ... and the required signature's 422s
+    ([], b"", True, 422),
+    ([("content-type", "application/json")], b"null", True, 422),
+    ([], b"{}", True, {}),
+    # malformed / non-object stay loud, as FastAPI's were
+    ([], b"{bad", False, 422),
+    ([], b"[1,2]", False, 422),
+    ([], b'"str"', False, 422),
+    ([], b"grace_days=365", False, 422),
+])
+async def test_internal_body_parse_is_content_type_agnostic(headers, raw, required, expected):
+    """#4939 regression guard. The FIRST version of the helper gated the read on
+    `content-type.startswith("application/json")`, which is STRICTER than what
+    FastAPI accepted. `curl -d '{"bucket": "<mirror>"}'` without an explicit
+    Content-Type header was therefore read as an ABSENT body, and the runbook's
+    MIRROR check silently verified the PRIMARY bucket and returned 200 — a loud
+    422 turned into a confident false pass on a disaster-recovery step. The same
+    gate silently discarded the purge's documented `grace_days` override.
+
+    So: parse whatever body is present, and mirror ONLY the absent-body and
+    null-body behaviour of the two signatures this helper replaced.
+    """
+    if expected == 422:
+        with pytest.raises(StarletteHTTPException) as exc:
+            await _read_internal_body(headers, raw, required=required)
+        assert exc.value.status_code == 422
+    else:
+        assert await _read_internal_body(headers, raw, required=required) == expected
+
+
+@pytest.mark.asyncio
+async def test_internal_body_route_authenticates_before_reading_the_body():
+    """The ORDERING the exemption made load-bearing, asserted by BEHAVIOUR
+    rather than by reading the source. `receive` never delivers a complete
+    body, so a route that parsed a `body:` parameter first (FastAPI's default,
+    and what the five internal body routes used to do) would await forever and
+    this test would time out. Authenticating first answers immediately and the
+    capped read — which sits after `_check_internal` — is never reached.
+    """
+    pulls = []
+
+    async def _never_completes():
+        pulls.append(1)
+        await asyncio.Event().wait()  # a client that never finishes its body
+
+    for path in ("/v1/internal/backups/drill",
+                 "/v1/internal/driver/heartbeat",
+                 "/v1/internal/backups/re-baseline"):
+        rec = _Recorder()
+        scope = _scope(path, method="POST",
+                       headers=[("content-type", "application/json")])
+        await asyncio.wait_for(ha.app(scope, _never_completes, rec), timeout=10.0)
+        # 503 when no internal key is configured (fail closed), 401 on a
+        # mismatch — never a 422/400 from body parsing, which would prove the
+        # body was read before the key check.
+        assert rec.status in (401, 503), (
+            f"{path} answered {rec.status}; an unauthenticated caller must be "
+            "rejected WITHOUT its body being read"
+        )
 
 
 # ── the handler is left running, never cancelled ──────────────────────────

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Contact — Premise Labs</title>
+  <meta name="description" content="Send a message to Premise Labs. The same channel our privacy, DPA and terms pages name for questions, notices and requests.">
+  <meta name="theme-color" content="#060b14">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://premiselabs.co/contact">
+  <link rel="icon" type="image/png" href="/logo.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+    .topbar { flex-wrap: wrap;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+      margin-bottom: 2.5rem; font-family: var(--mono); font-size: 0.78rem;
+    }
+    .topbar a { color: var(--text-dim); text-decoration: none; }
+    .topbar a:hover { color: var(--accent); }
+    .topbar .host { color: var(--text-dim); }
+
+    .doc-type {
+      font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
+    h1 {
+      font-family: var(--mono); font-size: 1.5rem; font-weight: 600;
+      color: var(--text); line-height: 1.35; letter-spacing: -0.01em;
+    }
+    .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
+
+    p { margin: 0.7rem 0; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(6, 182, 212, 0.25); }
+    a:hover { color: #22d3ee; border-bottom-color: var(--accent); }
+
+    /* ── Form ─────────────────────────────────────────────────────────────
+       Tokens come from the shared palette above; the card/input treatment
+       mirrors the legal/FAQ surface so this page reads as part of the site,
+       not as a bolted-on widget. */
+    form {
+      margin-top: 2rem; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem;
+      padding: 1.5rem 1.5rem 1.75rem;
+    }
+    .field { margin-bottom: 1.25rem; }
+    label {
+      display: block; font-family: var(--mono); font-size: 0.68rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-dim); margin-bottom: 0.4rem;
+    }
+    input[type="text"], input[type="email"], textarea {
+      width: 100%; background: var(--bg); color: var(--text);
+      border: 1px solid var(--text-dim); border-radius: 0.35rem;
+      padding: 0.7rem 0.9rem; font-family: var(--mono); font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    textarea { resize: vertical; min-height: 9rem; }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    input::placeholder, textarea::placeholder { color: var(--text-dim); opacity: 0.7; }
+
+    button[type="submit"] {
+      background: var(--bg); color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 0.35rem;
+      padding: 0.7rem 1.4rem; font-family: var(--mono); font-size: 0.85rem;
+      cursor: pointer; transition: background 0.2s, color 0.2s;
+    }
+    button[type="submit"]:hover { background: var(--accent); color: var(--bg); }
+    button[type="submit"][disabled] { opacity: 0.6; cursor: wait; }
+
+    /* Honeypot — hidden from humans AND from assistive tech (aria-hidden +
+       off-screen). Never `display:none`: some bots skip display:none fields. */
+    .hp-field {
+      position: absolute; left: -9999px; width: 1px; height: 1px;
+      overflow: hidden; opacity: 0;
+    }
+
+    .success-msg, .error-msg {
+      display: none; font-family: var(--mono); font-size: 0.8rem;
+      margin-top: 1rem; line-height: 1.6;
+    }
+    .success-msg { color: var(--green); }
+    .error-msg { color: #f87171; }
+    .success-msg.visible, .error-msg.visible { display: block; }
+
+    .fallback {
+      margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-size: 0.88rem; color: var(--text-dim);
+    }
+    .fallback strong { color: var(--text); font-weight: 600; }
+
+    footer {
+      margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+    }
+    footer p { margin: 0.4rem 0; }
+    footer a { color: var(--text-dim); border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    @media (max-width: 480px) {
+      .wrap { padding: 1.5rem 1rem 3rem; }
+      h1 { font-size: 1.28rem; }
+      form { padding: 1.25rem 1.1rem 1.4rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="topbar" aria-label="Site navigation">
+      <a href="/">← Back to product</a>
+      <a href="/docs">Docs</a>
+      <a href="/faq">FAQ</a>
+      <a href="/security">Security</a>
+    </nav>
+
+    <header>
+      <p class="doc-type">Contact</p>
+      <h1>Talk to us</h1>
+      <p class="lede">Questions about the product, licensing, privacy or a data request — this form reaches the same channel our <a href="/privacy">privacy policy</a>, <a href="/dpa">DPA</a> and <a href="/tos">terms</a> name: <a href="mailto:hello@premiselabs.co"><strong>hello@premiselabs.co</strong></a>. You can also write to that address directly. For account access issues, use the address associated with your account.</p>
+    </header>
+
+    <main>
+      <!-- The form works with JS disabled too: it posts to /contact/submit, which
+           accepts form-encoded bodies as well as JSON. The JS below upgrades it
+           to an in-page result so a visitor is never bounced to a JSON blob. -->
+      <form id="contact-form" method="post" action="/contact/submit">
+        <div class="field">
+          <label for="contact-name">Your name</label>
+          <input id="contact-name" type="text" name="name" maxlength="100" autocomplete="name" placeholder="Ada Lovelace" required>
+        </div>
+        <div class="field">
+          <label for="contact-email">Your email</label>
+          <input id="contact-email" type="email" name="email" maxlength="254" autocomplete="email" placeholder="you@company.com" required>
+          <p style="font-family:var(--mono);font-size:0.68rem;color:var(--text-dim);margin:0.4rem 0 0;">Only used to follow up on this message if we need to; never a mailing list.</p>
+        </div>
+        <div class="field">
+          <label for="contact-message">Message</label>
+          <textarea id="contact-message" name="message" maxlength="5000" placeholder="What would you like to ask?" required></textarea>
+        </div>
+
+        <!-- Honeypot: invisible to people, irresistible to bots. `hp-field` is
+             off-screen (never `display:none` — some bots skip those fields), and
+             the autofill hints keep password managers from filling it in for a
+             human, which would look like a bot and drop a real message. -->
+        <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off"
+               aria-hidden="true" data-lpignore="true" data-1p-ignore data-form-type="other">
+
+        <button type="submit">Send message</button>
+      </form>
+
+      <p class="success-msg" id="contact-msg" role="status"></p>
+      <p class="error-msg" id="contact-error" role="alert"></p>
+
+      <div class="fallback">
+        <p><strong>Prefer email?</strong> Write to <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a> directly. For commercial licensing, that is the same address the <a href="/license">license page</a> names.</p>
+      </div>
+
+      <noscript>
+        <p style="font-family:var(--mono);font-size:0.8rem;color:var(--text-dim);">JavaScript is off — submitting the form above still works, and will show the server's answer as plain text.</p>
+      </noscript>
+    </main>
+
+    <footer>
+      <p>
+        <a href="/">Product</a> ·
+        <a href="/docs">Docs</a> ·
+        <a href="/blog">Blog</a> ·
+        <a href="/self-hosted">Self-hosted</a> ·
+        <a href="/privacy">Privacy</a> ·
+        <a href="/tos">Terms of Service</a> ·
+        <a href="/license">License</a> ·
+        <a href="/dpa">DPA</a> ·
+        <a href="/security">Security</a>
+      </p>
+      <p>Premise Labs · Tortoise</p>
+    </footer>
+  </div>
+
+  <script>
+  /* Progressive enhancement only: the <form action> is the real path (it works
+     with this script blocked), and this handler replaces the full-page post
+     with an in-page result. The server is authoritative for every validation
+     message — nothing here decides whether a message is acceptable. */
+  (function () {
+    var form = document.getElementById('contact-form');
+    var msg = document.getElementById('contact-msg');
+    var err = document.getElementById('contact-error');
+    var button = form.querySelector('button[type="submit"]');
+
+    function show(el, text) {
+      msg.classList.remove('visible');
+      err.classList.remove('visible');
+      msg.textContent = '';
+      err.textContent = '';
+      el.classList.add('visible');
+      el.textContent = text;
+    }
+
+    function directFallback(status) {
+      if (status === 503) {
+        return 'Our message intake is not configured on this deployment, so your message was not sent. Please email hello@premiselabs.co directly — we are sorry for the detour.';
+      }
+      if (status === 429) {
+        return 'Too many messages from this connection. Please wait a few minutes, or email hello@premiselabs.co directly.';
+      }
+      return 'Something went wrong — your message was not sent. Please try again, or email hello@premiselabs.co directly.';
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      msg.classList.remove('visible');
+      err.classList.remove('visible');
+
+      var payload = {
+        name: form.elements.name.value.trim(),
+        email: form.elements.email.value.trim(),
+        message: form.elements.message.value.trim(),
+        hp: form.elements.hp.value || ''
+      };
+      if (!payload.name || !payload.email || !payload.message) {
+        show(err, 'Please fill in your name, your email, and a message.');
+        return;
+      }
+
+      var original = button.textContent;
+      button.disabled = true;
+      button.textContent = 'Sending…';
+      form.setAttribute('aria-busy', 'true');
+
+      fetch('/contact/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          if (res.ok) {
+            show(msg, data.message || "Thanks — your message is on its way.");
+            form.reset();
+          } else {
+            show(err, (data && data.message) || directFallback(res.status));
+          }
+        });
+      }).catch(function () {
+        show(err, directFallback(0));
+      }).finally(function () {
+        button.disabled = false;
+        button.textContent = original;
+        form.removeAttribute('aria-busy');
+      });
+    });
+  })();
+  </script>
+</body></html>

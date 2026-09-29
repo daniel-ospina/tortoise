@@ -5,9 +5,13 @@ import assert from 'node:assert/strict'
 import {
   CAPTURE_STATES,
   captureClaimForHarness,
+  captureErrorForHarness,
   captureStatusForHarness,
+  captureStatusLabelForHarness,
+  harnessAttributionForHarness,
   lastErrorForHarness,
 } from './captureStatus.js'
+import { HARNESS_ATTRIBUTION, HARNESS_CAPTURE_SUPPORT } from './harnesses.js'
 
 test('canonical 4-state vocabulary is off → install-pending → waiting → active', () => {
   assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
@@ -204,30 +208,146 @@ test('#3819: cursor is capture-capable — the tense follows the RECEIPT, never 
     'present')
 })
 
-test('#3428 / #3575 boundary: Pi cannot reach the present-tense claim today', () => {
-  // Pi's HARNESS_CAPTURE_SUPPORT is true while its installer ships no capture
-  // seam (#3575, lane B1), so no receipt can be produced and the present-tense
-  // sentence is UNREACHABLE for Pi — without this lane touching the install
-  // seam or the capability flag (#3575 requires that flag be *derived*).
-  // Pi's only reachable projection states today: nothing observed → the honest
-  // 'install-pending' (#3782), a probe with no receipt → 'future'.
+test('#3428: a receipt-less Pi stays install-pending / future, never present', () => {
+  // Pi's capability flag is true and its capture seam is implemented (#3575 was
+  // resolved by the in-repo seam), so the tense follows the RECEIPT: with no
+  // receipt the honest projections are 'install-pending' (#3782) and, once a
+  // probe arrives, 'future' — never the present-tense sentence. The
+  // receipt-bearing case (Pi DOES reach 'present') is asserted in the next test.
   assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, install_probe_pi: 't' }, 'pi'), 'future')
 })
 
 test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
-  // review cycle 4 (item 6): the old name ("the tense follows the RECEIPT, not
-  // the capability flag") overstated. `HARNESS_CAPTURE_SUPPORT` is a HARD
-  // PRECONDITION — `if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'` runs
-  // BEFORE the receipt read — so flipping Pi's flag makes these assertions fail:
-  // the test requires the flag to stay true (the receipt-less-'none' case is
-  // pinned by the loops above, e.g. cursor with a receipt).
-  // Guards the seam with B1: if #3575 is ever 'fixed' by flipping the flag
-  // rather than deriving the seam, a receipt-less Pi must still read
-  // 'install-pending' (#3782 — never 'present', never a promise), so the screen
+  // `HARNESS_CAPTURE_SUPPORT` is a HARD PRECONDITION —
+  // `if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'` runs BEFORE the
+  // receipt read — so flipping Pi's flag makes these assertions fail: the test
+  // requires the flag to stay true (the receipt-less-'none' case is pinned by
+  // the loops above, e.g. cursor with a receipt).
+  // A receipt-less Pi must read 'install-pending' (#3782 — never 'present',
+  // never a promise) whichever way the flag or the seam moves, so the screen
   // cannot start claiming an unobserved capture. Both sides of that boundary
-  // are asserted here (review cycle 3, P2-5 — the comment described the
-  // receipt-less case while the only assertion pinned the receipt-bearing one).
+  // are asserted here — the receipt-less case and the receipt-bearing one — so
+  // neither can be described without the other being pinned.
   assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, session_capture_receipt_pi: 't' }, 'pi'), 'present')
+})
+
+// ── #3700: the per-harness RECEIPT and PROBE attribute the harness to the ──
+// AGENT, never to the server. `session_capture_receipt_<harness>` names the
+// harness the CALLER declared (`body.harness` on a fresh session — an
+// authenticated agent self-report — or the Session's stored harness on a
+// re-capture when it has one, and the current caller's declaration when it does
+// not), and `install_probe_<h>` names the harness on the probe POST. No
+// credential→harness binding exists for tt_/tk_ keys, so the server OBSERVES the
+// capture / install signal and not the harness. The state VOCABULARY stays
+// `active` / `waiting` and the state WORDS stay plain; the disclosure is a
+// separate, renderable per-row ATTRIBUTION.
+//
+// This EXECUTES the helpers main.jsx renders from (`harnessAttributionForHarness`
+// beside the harness name, `captureErrorForHarness` for the failure line) rather
+// than scanning source. It pins each helper's DECISION; it cannot pin that
+// main.jsx calls them — this file cannot see main.jsx's call sites at all, so
+// deleting a render site would leave it green. (The render is the whole point
+// of the fix, and the e2e suite never opens Settings.)
+//
+// NAMED MUTATIONS that reinstate the defect — each must RED this test:
+//   RECEIPT_LABEL_CLAIMS_SERVER_OBSERVATION
+//     In `captureStatus.js`, make `harnessAttributionForHarness` return null, or
+//     return the constant unconditionally.
+//   FAILURE_ROW_NAMES_HARNESS_UNDISCLOSED
+//     Drop the `lastErrorForHarness` leg of the predicate — a failed first
+//     capture (no receipt, no probe ⇒ `install-pending`) then renders
+//     `Last attempt — …` under a harness name with no disclosure.
+// The state-vocabulary and plain-label assertions stay green under both, which
+// is exactly the split the fix exists to preserve.
+test('#3700: the per-harness attribution is disclosed on the row, not baked into a state word', () => {
+  const st = {
+    session_recording: true,
+    session_capture_receipt_claude: '2026-09-23T00:00:00Z',
+    install_probe_pi: '2026-09-23T00:00:00Z',
+  }
+
+  // (1) the state VOCABULARY is unchanged — this is the API the derivation
+  //     and the panel read.
+  assert.equal(captureStatusForHarness(st, 'claude'), 'active')
+  assert.equal(captureStatusForHarness(st, 'pi'), 'waiting')
+
+  // (2) the state WORDS are plain. The attribution is about the HARNESS, not
+  //     the state, so baking it into a state word (the pre-#3700-clean shape
+  //     `active (…)`) is what read as though the STATE were agent-reported —
+  //     and it collided with the row's own server text. Moving it back into a
+  //     label must fail here.
+  assert.equal(captureStatusLabelForHarness(st, 'claude'), 'active')
+  assert.equal(captureStatusLabelForHarness(st, 'pi'), 'installed — waiting for first capture')
+  assert.ok(!captureStatusLabelForHarness(st, 'claude').includes(HARNESS_ATTRIBUTION),
+    'the attribution must not be baked into a state word')
+  assert.ok(!captureStatusLabelForHarness(st, 'pi').includes(HARNESS_ATTRIBUTION),
+    'the attribution must not be baked into a state word')
+
+  // (3) the renderable ATTRIBUTION is returned for a SUPPORTED row in either of
+  //     the two states whose key embeds a harness, and for any supported row with
+  //     a recorded per-harness FAILURE (3b); null otherwise.
+  assert.equal(HARNESS_ATTRIBUTION, 'harness reported by your agent')
+  assert.equal(harnessAttributionForHarness(st, 'claude'), HARNESS_ATTRIBUTION,
+    'receipt state names a harness')
+  assert.equal(harnessAttributionForHarness(st, 'pi'), HARNESS_ATTRIBUTION,
+    'probe state names a harness')
+  // a row with no per-harness signal at all records no failure, so there is
+  // nothing to disclose.
+  assert.equal(harnessAttributionForHarness(st, 'cursor'), null,
+    'install-pending with no failure')
+  assert.equal(harnessAttributionForHarness({ session_recording: true }, 'claude'), null)
+  assert.equal(harnessAttributionForHarness(null, 'claude'), null)
+  assert.equal(harnessAttributionForHarness({ session_recording: false }, 'claude'), null)
+
+  // (3b) a first capture that failed leaves an `install-pending` row with a
+  //      recorded per-harness error, so those
+  //      SUPPORTED rows must disclose the harness too: the earlier
+  //      "state ∈ {active, waiting}" predicate left this surface live.
+  const failRow = { session_recording: true, session_capture_last_error_codex: 'Upgrade your plan.' }
+  assert.equal(captureStatusForHarness(failRow, 'codex'), 'install-pending')
+  assert.equal(harnessAttributionForHarness(failRow, 'codex'), HARNESS_ATTRIBUTION,
+    'a recorded per-harness failure names a harness even with no receipt or probe')
+  assert.equal(harnessAttributionForHarness(
+    { session_recording: false, session_capture_last_error_pi: 'x' }, 'pi'), HARNESS_ATTRIBUTION,
+    'a stale failure on a supported row is still that row naming a harness')
+  // An UNSUPPORTED row renders the registry reason and NOTHING per-harness — no
+  // pill and no failure line (main.jsx) — so the predicate must apply the same
+  // support gate: neither a state key nor a recorded failure for an unsupported
+  // harness may produce a disclosure.
+  assert.equal(HARNESS_CAPTURE_SUPPORT['claude-web'], false)
+  assert.equal(harnessAttributionForHarness(
+    { session_recording: true, 'session_capture_last_error_claude-web': 'x' }, 'claude-web'),
+  null, 'an unsupported row renders no per-harness fact, so the predicate must not fire')
+  assert.equal(harnessAttributionForHarness(
+    { session_recording: true, 'session_capture_receipt_claude-web': 't' }, 'claude-web'), null)
+
+  // (4) the sibling FAILURE sub-line reads a key whose harness is a CALLER
+  //     declaration — the REST capture resolves it
+  //     `stored or claimed`, the MCP capture records the request's own harness
+  //     (#4898) — so it is the same defect class. It renders inside a
+  //     `role="alert"` live region, so it carries the failure ALONE and must be
+  //     null (not an empty string) when there is no error, since the caller uses
+  //     it as its own render guard. The row's attribution (3) is what discloses
+  //     the harness; a caveat in here would be announced as part of the failure
+  //     and would collide with server detail ending in `)` or `.`.
+  const errState = { ...st, session_capture_last_error_claude: 'timed out' }
+  assert.equal(captureErrorForHarness(errState, 'claude'), 'Last attempt — timed out')
+  assert.ok(!captureErrorForHarness(errState, 'claude').includes(HARNESS_ATTRIBUTION),
+    'the alert must not carry the attribution')
+  assert.equal(captureErrorForHarness({ ...st, session_capture_last_error_claude: 'Upgrade your plan.' }, 'claude'),
+    'Last attempt — Upgrade your plan.',
+    'server detail ending in a full stop must not be followed by a caveat')
+  assert.equal(captureErrorForHarness({ ...st, session_capture_last_error_claude: 'empty or blank)' }, 'claude'),
+    'Last attempt — empty or blank)',
+    'server detail ending in a parenthesis must not be followed by a caveat')
+  assert.equal(lastErrorForHarness(errState, 'claude'), 'timed out',
+    'the raw accessor keeps returning the bare message')
+  assert.equal(captureErrorForHarness(st, 'claude'), null)
+
+  // (5) an undeclared harness keeps the honest no-signal label.
+  assert.equal(captureStatusLabelForHarness(st, 'cursor'), 'not installed yet')
+  assert.equal(captureStatusLabelForHarness(null, 'claude'), 'off')
+  assert.equal(captureStatusLabelForHarness({ session_recording: false }, 'claude'), 'off')
 })

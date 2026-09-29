@@ -341,11 +341,11 @@ _FIXED_STEPS: dict[tuple[str, str], tuple[str, ...]] = {
     ("attach-tortoise-domain.yml", "Attach custom domain"): ("CLOUDFLARE_API_TOKEN",),
     (
         "e2e-live-reconcile.yml",
-        "Auto-file issue on bleed detection",
+        "File or update the bleed issue",
     ): ("GITHUB_TOKEN",),
     (
         "e2e-live-reconcile.yml",
-        "Auto-file issue when the reconcile could not read counts",
+        "File or update the could-not-read issue",
     ): ("GITHUB_TOKEN",),
 }
 

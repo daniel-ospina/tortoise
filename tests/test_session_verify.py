@@ -24,6 +24,7 @@ verified RED individually.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -36,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.capture_receipts import capture_receipt_key
 from tortoise.session_verify import (
@@ -64,6 +66,12 @@ class _Graph:
         self.omit_source_field = False
         self.no_receipt = False
         self.zero_extracted = False
+        #: Write the per-harness receipt only from the Nth ``/v1/onboarding/state``
+        #: read onward — models the server writing it AFTER the session row is
+        #: visible (the abandoned handler completing), which is the real
+        #: ordering (#4675).
+        self.receipt_on_state_read: int | None = None
+        self.state_reads = 0
         self.turn_override: dict[str, int] = {}
         #: Delay (s) between STORING a captured session and answering the POST
         #: — lets a test drive ``_fire`` past its timeout while the seam has
@@ -140,6 +148,12 @@ def _make_handlers(graph: _Graph):
 
         def do_GET(self):
             if self.path == "/v1/onboarding/state":
+                graph.state_reads += 1
+                if (graph.receipt_on_state_read is not None
+                        and graph.state_reads >= graph.receipt_on_state_read
+                        and "session_capture_receipt_claude"
+                        not in graph.receipts):
+                    graph.receipts[capture_receipt_key("claude")] = graph.tick()
                 self._send(200, {"onboarding": dict(graph.receipts)})
                 return
             if self.path.startswith("/v1/sessions/"):
@@ -293,7 +307,10 @@ def _verify(hosted, home, harness, root, *, timeout=None, extra_env=None,
         timeout = _derived_fire_timeout(home, root, harness)
     _graph, api_url = hosted
     env = {**os.environ, "HOME": str(home),
-           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url}
+           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url,
+           # #3682: capture is opt-in — the credential alone no longer consents.
+           # This file exists to exercise the capture chain, so it opts in.
+           "TORTOISE_CAPTURE": "1"}
     env.update(extra_env or {})
     return verify_session_capture(
         harness, api_key="tt_test", api_url=api_url, home=home,
@@ -325,6 +342,9 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
         "HOME": str(home),
         "TORTOISE_TEST_FORK_MARKER": str(tmp_path / "calibration-fork-marker"),
         "TORTOISE_TEST_FORK_PROBE": "1",
+        # #3682: without this the hook declines at the consent gate, so the
+        # calibration measures an early exit instead of the capture fork.
+        "TORTOISE_CAPTURE": "1",
     }
     started = time.monotonic()
     subprocess.run(
@@ -898,15 +918,64 @@ def test_guard_wrong_turn_count_reds_captured(hosted, setup, monkeypatch):
 def test_guard_receipt_not_advanced_reds_captured(hosted, setup):
     """Mutation: the capture stores the session but the server never advances
     the per-harness receipt — ``captured`` FAILs on the receipt leg even though
-    the session is retrievable with the expected turns."""
+    the session is retrievable with the expected turns.
+
+    This is #3809's Scope §2 predicate ("a ``session_capture_receipt_<harness>``
+    advanced AND the session is retrievable by id with the expected turns") and
+    PR #4182's documented guard. #4675 does NOT change it; it changes when the
+    receipt is READ. The DERIVED timeout is used, not a wall-clock constant:
+    the same `timeout` bounds the FIRE, and this file's own doctrine forbids
+    hardcoding one (a 3.0 constant killed the seam's prologue on a loaded box
+    and false-REDed this guard — #3809 rr4).
+    """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     graph.no_receipt = True
     report = _verify(hosted, home, "claude", root)
     assert report["exit_code"] == EXIT_BROKEN, report
-    assert report["links"]["captured"]["status"] == "FAIL"
-    assert "did not advance" in report["links"]["captured"]["detail"]
+    captured = report["links"]["captured"]
+    assert captured["status"] == "FAIL"
+    assert "did not advance" in captured["detail"]
+    assert captured["receipt_advanced"] is False
+
+
+def test_captured_is_proven_when_the_receipt_advances_after_the_session_row(
+        hosted, setup):
+    """#4675, the real defect: the receipt is written by a handler the
+    transport bound ABANDONED, so it lands AFTER the session row is visible —
+    measured live, a seam fired 08:21:02 and `session_capture_receipt_cursor`
+    was written 08:21:06.
+
+    Reading it exactly once, on the first sighting of the session row, reported
+    "did not advance" for a capture that had landed. The predicate is unchanged
+    (#3809): the observation now polls both legs to the same deadline.
+
+    MUTATION THAT REDS THIS: read the receipt once before the loop (the old
+    behaviour) — the link FAILs for a capture that landed.
+
+    The session row is visible from the first state read and the receipt is not
+    written until the fifth, so a single pre-loop read cannot see it — and the
+    turn count has already settled at its expected value, which is the case an
+    early break must NOT take.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    # The POST must not write the receipt (that is the ordering under test) and
+    # the delayed write must arrive after the session row is already visible.
+    graph.no_receipt = True
+    # Later than the second read, so the turn count has SETTLED at the expected
+    # value while the receipt is still outstanding — the early-break bug that
+    # would end the window on a settled-but-correct count.
+    graph.receipt_on_state_read = 5
+    report = _verify(hosted, home, "claude", root)
+    captured = report["links"]["captured"]
+    assert graph.state_reads >= 5, graph.state_reads
+    assert captured["status"] == "PROVEN", report
+    assert captured["receipt_advanced"] is True, captured
+    assert captured["turns"] == 2, captured
+    assert report["links"]["memory"]["status"] == "PROVEN", report["links"]
 
 
 def test_guard_missing_source_node_reds_memory(hosted, setup):
@@ -994,15 +1063,138 @@ def test_cursor_is_honestly_unverifiable(hosted, setup):
     assert "IDE-only" in report["links"]["installed"]["detail"]
 
 
+def _names_pi(text: str) -> bool:
+    """True when ``text`` names Pi — bare (``pi`` / ``PI``) or possessive
+    (``Pi's``).  A comment block that refers to the Pi ruling only possessively
+    must still be scanned, or a wrapped line can carry a banned absolute
+    unseen (#4620)."""
+    for word in text.split():
+        token = word.strip("`*_.,;:()<>\"'").lower().replace("\u2019", "'")
+        if token.endswith("'s"):
+            token = token[:-2]
+        if token == "pi":
+            return True
+    return False
+
+
 def test_pi_is_honestly_unverifiable(hosted, setup):
-    """Pi's seam is an in-process TypeScript extension — not script-firable.
-    Installed is UNVERIFIABLE (present, not fired), never a fabricated pass."""
+    """Pi's seam is an in-process TypeScript extension — not a command this
+    verifier can execute.  Installed is UNVERIFIABLE (present, not fired),
+    never a fabricated pass.  The reason must name the suite that DOES exercise
+    it and the manual-only residual, and must never restate the over-broad
+    absolute (the seam's handlers ARE fired headlessly by its own suite, and
+    `pi -p` is non-interactive)."""
     home, _bindir, _fake = setup
     root = _install(home, "pi")
     report = _verify(hosted, home, "pi", root)
     assert report["exit_code"] == EXIT_UNVERIFIABLE
     assert report["links"]["installed"]["status"] == "UNVERIFIABLE-IN-CI"
-    assert "extension" in report["links"]["installed"]["detail"]
+    detail = report["links"]["installed"]["detail"]
+    assert "extension" in detail
+    assert "tortoise-capture.test.ts" in detail
+    assert "tests/test_pi_capture_hooks.py" in detail
+    # ⛔ Not `"installed"`: `_unverifiable_link` builds the detail as
+    # "<link> not exercised: <reason>", and the link IS "installed" — so that
+    # substring is supplied by the PREFIX and the assertion could never fail
+    # (#4620 review).  Anchor on a phrase only the reason can supply.
+    assert "installed artifact" in detail
+    assert "manual-only" in detail
+    assert "not firable by this command" in detail
+    # The over-broad absolutes must never return: the seam IS fired headlessly
+    # by its own suite (the source seam) and by the installed-artifact probe.
+    # Scan the PI RULING's own text, never the whole module.  The phrases are
+    # over-broad ABOUT PI, and one of them — "no headless trigger" — is TRUE of
+    # Cursor (`UNVERIFIABLE_REASON["cursor"]` says exactly that).  The ruling
+    # lives in the module docstring, the `UNVERIFIABLE_REASON["pi"]` value, and
+    # the comments that state it; another harness's text is out of scope.
+    # Comment blocks are JOINED before matching so a phrase wrapped across two
+    # `#` lines is still seen.
+    from tortoise import session_verify as _sv
+
+    absolutes = (
+        "cannot be executed headlessly",
+        "cannot be fired headlessly",
+        "no headless trigger",
+    )
+    for phrase in absolutes:
+        assert phrase not in detail, phrase
+    source = inspect.getsource(_sv)
+
+    def _comment_blocks(text: str) -> list[str]:
+        blocks: list[str] = []
+        current: list[str] = []
+        for raw in text.splitlines():
+            stripped = raw.lstrip()
+            if stripped.startswith("#"):
+                # Strip the marker INCLUDING Sphinx's ``#:`` colon: leaving it
+                # in injects " : " at every join, so a phrase wrapped across
+                # two ``#:`` lines would match nothing.
+                current.append(stripped.lstrip("#").lstrip(": ").rstrip())
+            else:
+                if current:
+                    blocks.append(" ".join(current))
+                    current = []
+        if current:
+            blocks.append(" ".join(current))
+        return blocks
+
+    doc = _sv.__doc__ or ""
+    # Non-vacuity: an empty or truncated read must not pass this pin trivially.
+    # Anchor on STABLE identifiers, never on copy this pin does not own — a
+    # legitimate rewording of the ruling must not be reported as a failed read
+    # (#4620 review).
+    assert "HONEST DISCLOSURE" in doc, "module docstring not read — pin is vacuous"
+    assert "def resolve_install_root" in source, "module source not read — pin is vacuous"
+    pi_comments = [block for block in _comment_blocks(source) if _names_pi(block)]
+    assert pi_comments, "no Pi ruling comment matched — pin is vacuous"
+    for text in [doc, _sv.UNVERIFIABLE_REASON["pi"], *pi_comments]:
+        for phrase in absolutes:
+            assert phrase not in text, (phrase, text[:90])
+
+
+def test_pi_stale_install_is_reported_not_unverifiable(hosted, setup):
+    """The #4680 defect, at the surface that hid it: a present-but-STALE Pi
+    seam used to report ``UNVERIFIABLE-IN-CI`` — indistinguishable from "fine"
+    — while capturing with older logic.  It must instead be a BLOCKING
+    install finding (``stale-artifact``/``unversioned-artifact``), the same
+    way the three shell seams already report ``stale-script``, and nothing may
+    be fired for it.
+
+    Mutation: restore the pre-#4680 ``_static_findings`` Pi branch (existence
+    only, no version comparison) — this REDs: a tampered seam reads
+    UNVERIFIABLE and no finding names the staleness.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "pi")
+    # The pre-contract shape: a REAL installed seam with its marker stripped —
+    # present, ours, unmarkered.  The basename is DERIVED from the contract
+    # registry, never re-typed, so a rename of the artifact cannot leave this
+    # test writing a file the installer/detector do not use (#4680 review).
+    seam = root / hook_install.ARTIFACT_CONTRACTS["pi"].install_name
+    seam.write_text(
+        "\n".join(line for line in seam.read_text(encoding="utf-8").splitlines()
+                  if not line.startswith("// tortoise-hook-version:")) + "\n",
+        encoding="utf-8")
+    graph, _url = hosted
+    report = _verify(hosted, home, "pi", root)
+    assert report["links"]["installed"]["status"] == "FAIL", report["links"]
+    detail = report["links"]["installed"]["detail"]
+    assert "not current" in detail
+    assert "unversioned-artifact" in detail
+    assert "tortoise install pi" in detail, (
+        "verify must name the sanctioned repair for the state it reports")
+    assert report["exit_code"] == EXIT_BROKEN
+    assert graph.posts == [], "nothing may be captured for a stale install"
+
+
+def test_pi_ruling_matcher_covers_the_possessive():
+    """A comment block whose only Pi reference is the possessive ``Pi's`` must
+    still count as naming the Pi ruling — otherwise a wrapped line carrying a
+    banned absolute is never scanned (#4620)."""
+    assert _names_pi("Pi's seam cannot be executed headlessly")
+    assert _names_pi("PI's seam cannot be fired headlessly")
+    assert _names_pi("must never restate the over-broad absolute about Pi")
+    assert not _names_pi("Cursor's seam cannot be executed headlessly")
 
 
 # ── hermeticity: root resolution is home-scoped, env only where one exists ──

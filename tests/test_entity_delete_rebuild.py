@@ -170,26 +170,26 @@ class TestDeleteSurvivesRebuild:
         assert _deletes(_journal(events), eid), "delete must be journaled"
 
     def test_deleted_document_absent_after_rebuild(self, env):
-        """Document — the sixth canonical label (id is a server-minted ULID).
-        Completes per-shape coverage of the #3299 delete-survival guarantee
-        (#3860 acceptance criterion 1)."""
+        """Document — a :Source keyed ``url`` (D10, ONTOLOGY v3.15 §4.4);
+        id is a server-minted ULID. Completes per-shape coverage of the #3299
+        delete-survival guarantee (#3860 acceptance criterion 1)."""
         sdk, events = env
         proj = sdk._get_proj()
         title = "delete-me-document"
         sdk.create_entity("document", title, documentKind="core:other",
                           is_episodic=False)
-        rows = _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id", t=title)
-        assert rows, "seed Document must exist live"
+        rows = _rows(proj, "MATCH (d:Source {title:$t}) RETURN d.id", t=title)
+        assert rows, "seed document Source must exist live"
         did = rows[0][0]
 
         assert sdk._delete_entity(did) is True
-        assert not _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id",
+        assert not _rows(proj, "MATCH (d:Source {title:$t}) RETURN d.id",
                          t=title)
 
         proj.rebuild_all(str(events))
-        assert not _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id",
+        assert not _rows(proj, "MATCH (d:Source {title:$t}) RETURN d.id",
                          t=title), (
-            "deleted Document resurrected on rebuild_all — #3299/#3860")
+            "deleted document Source resurrected on rebuild_all — #3299/#3860")
 
         assert _deletes(_journal(events), did), "delete must be journaled"
 

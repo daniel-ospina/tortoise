@@ -446,6 +446,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_dream",
         id="surface.dream",
+        writes=True,
         description="Run EP stabilization (dreaming, #85). "
                     "Default: incremental dirty subgraph. Set full=True for whole-graph. "
                     "mode (epic 903): explicit strategy override "
@@ -549,7 +550,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_delete_point",
         id="surface.delete_point",
         writes=True,
-        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. "
+                    "dry_run=True previews the blast radius (the point and every edge that "
+                    "would be removed) and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_point_wrapped",
@@ -558,7 +561,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_invalidate",
         id="surface.invalidate",
         writes=True,
-        description="Mark a Point outdated with a CORRECTS edge from the correcting Point.",
+        description="Mark a Point outdated with a CORRECTS edge from the correcting Point. "
+                    "dry_run=True previews the one-point transition + one edge and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="invalidate_point",
@@ -570,7 +574,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
                     "transfer_edges=True (default): full supersede — all edges move from "
                     "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer.",
+                    "+ CORRECTS edge only, no edge transfer. "
+                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="supersede",
@@ -594,7 +599,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         writes=True,
         description="Tombstone-retract a Point — status='retracted' (point stays "
                     "in graph, excluded from default surfaces). Terminal; cannot "
-                    "retract operators or already-terminal points.",
+                    "retract operators or already-terminal points. "
+                    "dry_run=True previews the status transition and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="retract_point",
@@ -745,6 +751,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_ingest_corpus",
         id="surface.ingest_corpus",
+        writes=True,
         description="DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter "
                     "from .md files, create/update Document nodes. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -870,6 +877,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_org_create",
         id="surface.org_create",
+        writes=True,
         description="Create isolated team graph via FalkorDB select_graph. "
                     "EXCLUDED from tenant HTTP — provisioning belongs to "
                     "/internal/provision behind FASTAPI_INTERNAL_KEY.",
@@ -924,6 +932,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_index_sessions",
         id="surface.index_sessions",
+        writes=True,
         description="DEPRECATED — use tortoise_index_files. Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
@@ -1033,7 +1042,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_delete_entity",
         id="surface.delete_entity",
         writes=True,
-        description="Delete any entity by ID.",
+        description="Delete any entity by ID. DESTRUCTIVE — cannot be undone. "
+                    "dry_run=True previews the node(s) and every edge that would be "
+                    "removed and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_entity",
@@ -1066,7 +1077,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.delete",
         writes=True,
         description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
-                    "confirmation. Cannot be undone.",
+                    "confirmation. Cannot be undone. dry_run=True previews the blast "
+                    "radius (which node resolves, and every edge that would go) and "
+                    "changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete",
@@ -1130,6 +1143,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_backfill_v25",
         id="surface.backfill_v25",
+        writes=True,
         description="Backfill database to ONTOLOGY v2.5 schema. "
                     "EXCLUDED from tenant HTTP — schema-level migration (operator-only).",
         annotations=_rw(),
@@ -1228,9 +1242,10 @@ def get_write_tool_names() -> frozenset[str]:
 
     Covers the SERVED set (#3883): a retired name still answers through the
     warning shim, so a write served under a retired name must not be recorded as
-    a read. No retired entry is a writer today, so the census is unchanged — the
-    derivation is stated over the served set so it cannot silently shrink when
-    one is."""
+    a read. Since #4474 two retired shims ARE writers (`tortoise_ingest_corpus`,
+    `tortoise_index_sessions`), so the served census (47) exceeds the live census
+    (45) — the derivation over the served set is what keeps them counted, and it
+    stops the census from silently shrinking when a live writer is retired."""
     return frozenset(
         t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
     )

@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -21,7 +22,8 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
-                          _RESERVED_ACTOR_PROPS)
+                          _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
+                          _supersede_window_end, _now_iso)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
@@ -40,9 +42,14 @@ _log = logging.getLogger(__name__)
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
 
-    Only sets environment keys that are empty/unset, so an explicit
-    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
-    entrypoint philosophy: the DB target must be explicit, never accidental.
+    Only sets environment keys that are ABSENT from ``os.environ`` — a key
+    that is explicitly set, even to the empty string, is never overridden.
+    That presence test is load-bearing: ``tools/ask_shape_rate.py`` narrows
+    the non-pinned provider keys to ``""`` (present-but-unkeyed) so a later
+    ``_load_dotenv()`` cannot re-arm them and defeat the reader pin (#4582).
+    An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
+    hosted entrypoint philosophy: the DB target must be explicit, never
+    accidental.
     """
     if path is None:
         path = os.path.join(
@@ -647,6 +654,65 @@ def _reject_graph_bound_mcp_org_surface(surface: str) -> None:
             f"Graph-scoped keys cannot access {surface}.")
 
 
+#: #2050 — MCP tools that perform a budgeted SENSITIVE OP in-process, mapped to
+#: the ``_SENSITIVE_OP_LIMITS`` entry the op is governed by. Enforced at the
+#: dispatch point below, NEVER inside a handler: a handler that charges its own
+#: limit is the second implementation of one budget that this seam exists to
+#: prevent, and it is the entry point the REST twin cannot see.
+_MCP_BUDGETED_OPS: dict[str, str] = {
+    # tortoise_pack_install reaches pack_manifest_store.upsert_tenant_manifest
+    # directly (no HTTP), so #2038's per-IP budget on the REST twin
+    # POST /v1/packs/manifests never applied to it.
+    "tortoise_pack_install": "pack_manifest",
+}
+
+
+async def _check_mcp_op_budget(name: str, org_id: str) -> None:
+    """#2050: charge the sensitive-op budget for an MCP tool, or refuse.
+
+    `tortoise_pack_install` is the cheapest path to the same expensive
+    operation the REST surface bounds: it calls `upsert_tenant_manifest`
+    in-process, consuming no `pack_manifest` budget at all and bounded only by
+    the generic 100/min per-key middleware — a ~1200x looser bound than the
+    REST twin's 5/hr. The dispatch point is the ONE funnel every client tool
+    call passes through on every transport, so the budget is applied HERE.
+
+    Team scope, not IP: the caller is an authenticated agent server, and a
+    per-IP frame would be both wrong (shared egress addresses) and unavailable
+    (no Request at this seam). The team-scoped bucket is charged through
+    `hosted_api._check_sensitive_op_budget` — the SAME shared
+    `_SENSITIVE_BUCKETS` store, the SAME `_SENSITIVE_OP_LIMITS` table and the
+    SAME refusal contract the REST arm uses.
+
+    Ordering mirrors the REST twin (`upload_pack_manifest` charges before its
+    scope check), so a scope-denied call still consumes budget there and here.
+    Refusal is RAISED, not returned as a `{"installed": False}` dict: a dict
+    would read to the caller as a completed call, not a refusal. Auth (401) is
+    excluded by construction — transport middleware rejects it before this
+    seam, exactly as the REST dependency does.
+
+    No scope (stdio / operator) or the selfhost placeholder org → skip: there
+    is no tenant registry to bill, mirroring `_enforce_quota`.
+    """
+    op = _MCP_BUDGETED_OPS.get(name)
+    if op is None:
+        return
+    from tortoise.mcp_auth import SELFHOST_ORG_ID
+    if not org_id or org_id == SELFHOST_ORG_ID:
+        return
+    from fastapi import HTTPException
+
+    from tortoise.hosted_api import _check_sensitive_op_budget
+    try:
+        await _check_sensitive_op_budget(op, org_id)
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        raise ToolError(
+            f"{exc.detail} (Retry-After: {exc.headers.get('Retry-After', '3600')}s)",
+        ) from None
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -663,8 +729,19 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     org_id = _current_org_id.get() or ""
+    # #2050: budget BEFORE the scope gate — the REST twin charges before its
+    # scope check too, so the two surfaces agree on what consumes budget.
+    await _check_mcp_op_budget(name, org_id)
     _enforce_mcp_tool_scope(name)
-    maybe_record_mcp_read(name, org_id, _current_org_limits.get())
+    maybe_record_mcp_read(
+        name, org_id, _current_org_limits.get(),
+        # REVIEW-FIX P2 (#4057): `arguments` is the raw PRE-validation dict, and
+        # this metering runs BEFORE the dispatch. So a tool that does not
+        # declare `dry_run` — whose schema will REJECT that key — would be
+        # recorded as a READ the caller never performed. Gate on the declared
+        # preview set, not on key presence in untrusted input.
+        dry_run=name in _dry_run_tool_names() and bool((arguments or {}).get("dry_run")),
+    )
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
@@ -846,6 +923,39 @@ from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noq
 
 WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 
+# #4057: a tool is dry-run-capable iff its SERVED HANDLER declares a `dry_run`
+# parameter — the fact this metering needs. It is deliberately NOT "the raw
+# argument dict carries a `dry_run` key": that dict is the PRE-validation
+# client input, read BEFORE the dispatch, so a caller could move the read
+# counter for a tool whose schema REJECTS the key (a READ recorded for a call
+# that is then refused). Computed from the declarations and cached (lazy — the
+# handlers are defined below this point — because it sits on the per-call
+# path). `tests/test_dry_run_preview.py::TestPreviewToolSetIsDeclared` pins it:
+# the six preview tools must be in it, a write tool without `dry_run` must not,
+# and the metering behaviour is verified through the real dispatch seam.
+_DRY_RUN_TOOLS: frozenset[str] | None = None
+
+
+def _dry_run_tool_names() -> frozenset[str]:
+    """Registry names whose served handler declares `dry_run` (computed once)."""
+    global _DRY_RUN_TOOLS
+    if _DRY_RUN_TOOLS is None:
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        names = set()
+        for entry in TOOL_REGISTRY:
+            fn = globals().get(entry.name)
+            if fn is None:
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (TypeError, ValueError):  # pragma: no cover - non-callable
+                continue
+            if "dry_run" in params:
+                names.add(entry.name)
+        _DRY_RUN_TOOLS = frozenset(names)
+    return _DRY_RUN_TOOLS
+
 
 # #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
 # keys back outbound calls; the rate limiter alone is not the bound).
@@ -989,16 +1099,20 @@ def _abuse_off() -> bool:
         return True
 
 
-def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None) -> None:
+def maybe_record_mcp_read(name: str, org_id: str, limits: dict | None,
+                          *, dry_run: bool = False) -> None:
     """#308 (R3, scoping delta 11): read-velocity counting for non-write
     tools/call. Explicit write set (WRITE_TOOL_NAMES) — writes never count
-    as reads. key_id rides the limits ContextVar (Supabase resolutions carry
-    it; registry resolutions may not → per-org counting only there).
-    Best-effort: telemetry never breaks the tool call."""
+    as reads. A ``dry_run=True`` preview of a write tool performs only READS,
+    so it is metered as a read (the alternative is an un-metered enumeration
+    channel that no read-velocity alert can see). key_id rides the limits
+    ContextVar (Supabase resolutions carry it; registry resolutions may not →
+    per-org counting only there). Best-effort: telemetry never breaks the
+    tool call."""
     try:
         if not org_id or org_id == SELFHOST_ORG_ID or _abuse_off():
             return
-        if name in WRITE_TOOL_NAMES:
+        if name in WRITE_TOOL_NAMES and not dry_run:
             return
         from tortoise import abuse as _abuse
         _abuse.record_read((limits or {}).get("key_id"), org_id)
@@ -1148,7 +1262,14 @@ ERR_INVALID = -32003
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
 _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session",
+    # #5004: the embedding's journal IDENTITY keys are server-minted. Rejected
+    # at this boundary AND in `sdk._sanitize_props` (the fail-closed backstop).
+    # `embedding` ITSELF is deliberately NOT here — `create_point` has a
+    # recorded decision (PR #3018 review P2) that a caller-supplied vector is
+    # stored verbatim; the writer marks it `embedding_verbatim` instead.
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+    "embedding_verbatim", "embedding_preserved"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -1937,6 +2058,12 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_org_sdk().get_point, id)
+    # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
+    # the non-operator guard below would match a failed call and fabricate a
+    # domain fact ('is not an operator'), discarding the real cause. Surface
+    # the typed failure FIRST (#4576; same pattern as #3926).
+    if isinstance(point, _SafeError):
+        return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
     return point
@@ -2025,21 +2152,34 @@ def tortoise_file_human_approval(approver_id: str, artifact_id: str,
                  approver_id, artifact_id, point_ids, decision_content)
 
 
-def tortoise_delete_point(id: str) -> dict:
-    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone."""
+def tortoise_delete_point(id: str, dry_run: bool = False) -> dict:
+    """Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.
+
+    dry_run=True previews the blast radius — the point and every edge that
+    would be removed — and changes nothing; dry_run=False (default) deletes.
+    """
+    if dry_run:
+        return _safe(_preview_delete_point, _get_org_sdk(), id)
     return _safe(_get_org_sdk().delete_point_wrapped, id)
 
 
-def tortoise_invalidate(id: str, corrected_by_id: str) -> dict:
+def tortoise_invalidate(id: str, corrected_by_id: str,
+                        dry_run: bool = False) -> dict:
     """Mark a Point outdated with a CORRECTS edge from the correcting Point.
 
     The `corrected_by_id` point CORRECTS the invalidated point.
     Returns {invalidated, id, corrected_by}.
+
+    dry_run=True previews the transition (one point outdated, one CORRECTS
+    edge added) and changes nothing; dry_run=False (default) applies it.
     """
+    if dry_run:
+        return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
     return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
 
 
-def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) -> dict:
+def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True,
+                       dry_run: bool = False) -> dict:
     """Atomically replace old Point with new — CORRECTS edge + outdated flag.
 
     transfer_edges=True (default): full supersede — all edges move from old to
@@ -2047,12 +2187,18 @@ def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool = True) ->
     CORRECTS edge only (no edge transfer). Absorbs tortoise_invalidate.
     Returns {invalidated, id, corrected_by} (+ edges_transferred when
     transfer_edges=True).
+
+    dry_run=True previews exactly which edges would transfer and changes
+    nothing; dry_run=False (default) applies the supersede.
     """
+    if dry_run:
+        return _safe(_preview_supersede, _get_org_sdk(),
+                     old_id, new_id, transfer_edges)
     return _safe(_quota_gated(_get_org_sdk().supersede, "points"),
                  old_id, new_id, transfer_edges=transfer_edges)
 
 
-def tortoise_retract_point(id: str) -> dict:
+def tortoise_retract_point(id: str, dry_run: bool = False) -> dict:
     """Tombstone-retract a Point — status='retracted' (point stays in graph).
 
     Terminal state transition; default query/list surfaces exclude retracted
@@ -2060,7 +2206,13 @@ def tortoise_retract_point(id: str) -> dict:
     missing, is an operator, or is already terminal (the shared terminal
     vocabulary: status in live.TERMINAL_EXCLUDED_STATUSES OR the legacy
     outdated=true flag).
+
+    dry_run=True previews the one-node status transition (and runs the same
+    guard, so a rejected input is rejected here too) and changes nothing;
+    dry_run=False (default) retracts.
     """
+    if dry_run:
+        return _safe(_preview_retract_point, _get_org_sdk(), id)
     return _safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)
 
 
@@ -2293,7 +2445,16 @@ def tortoise_health() -> dict:
     tight fast-degrade bound. The allowance is resolved at CALL time
     (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
     set in the repo-root ``.env`` — loaded after this module imports
-    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
+    ``tortoise.monitoring`` — is honoured instead of frozen at import.
+
+    #3253 (health-truthful): the ``graph_size`` taxonomy count is bounded by
+    ``monitoring.GRAPH_SIZE_TIMEOUT`` on its own worker, so this tool's total
+    is ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT`` at
+    worst — never as long as a half-broken server stalls. When the count
+    cannot be measured, the report carries the per-call ``graph_size_error``
+    marker (``None`` when ``graph_size`` was really measured, so a 0 is a
+    genuinely empty graph; a string otherwise), instead of the previous
+    indistinguishable ok/0."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
@@ -2578,8 +2739,15 @@ def tortoise_update(id: str, props: Any = None) -> dict:
                  id, **(props or {}))
 
 
-def tortoise_delete(id: str) -> dict:
-    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation."""
+def tortoise_delete(id: str, dry_run: bool = False) -> dict:
+    """Delete a Point or entity by id. DESTRUCTIVE — requires human confirmation.
+
+    dry_run=True previews the blast radius — which node resolves, and every
+    edge that would go with it — and changes nothing; dry_run=False
+    (default) deletes.
+    """
+    if dry_run:
+        return _safe(_preview_delete, _get_org_sdk(), id)
     result = _safe(_get_org_sdk().delete, id)
     if isinstance(result, _SafeError):
         return result
@@ -2798,8 +2966,15 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
         return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
 
-def tortoise_delete_entity(id: str) -> bool:
-    """Delete any entity by ID."""
+def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
+    """Delete any entity by ID.
+
+    dry_run=True returns a preview dict naming the node(s) and every edge
+    that would be removed, and changes nothing; dry_run=False (default)
+    deletes and returns whether a node was found.
+    """
+    if dry_run:
+        return _safe(_preview_delete_entity, _get_org_sdk(), id)
     return _safe(_get_org_sdk().delete_entity, id)
 
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
@@ -2893,6 +3068,128 @@ _OVERVIEW_SECTIONS = (
 )
 
 
+#: #3510 — the no-arg combined summary reports DATA-PROPORTIONAL orient
+#: sections as bounded counts, never as their full row array. A section is
+#: data-proportional when it yields one row per graph row rather than one row
+#: per graph-shape token (a fixed vocabulary) AND IS UNCAPPED — four qualify:
+#: `sources` (one row per registered URL), `tags` (one row per :Tag node),
+#: `pointkinds` (one row per pointKind PRESENT) and `structure_check` (one row
+#: per violating Point). `stale` is also one row per graph row, but it is
+#: CAPPED by the caller's `limit` (default 50 rows; still only ~3,000 rows at
+#: limit=5000), so it is not folded here. Returning any of the four wholesale
+#: made the orientation call more expensive than the list_* calls it was built
+#: to replace — measured on an embedded graph: `sources` 35,190 of 36,498 bytes
+#: (96.4%) at 300 sources, `tags` 14,000 of 15,187 bytes (92.2%) at 400 tags,
+#: `structure_check` 73,490 of 93,829 bytes (78.3%) at 400 orphaned drafts,
+#: `pointkinds` 19,200 bytes at 400 distinct kinds. Each wrapped section keeps
+#: its full array reachable via its own section=.
+_OVERVIEW_SUMMARY_TOP = 20
+
+
+#: #3510 review (P2) — the folded remainder is a SIBLING field of the summary,
+#: never a key inside the group map. `group_field` is free-form graph text (a
+#: tag name, a `sourceKind` string), so there is no in-map sentinel string a
+#: real group cannot produce: a genuine group named "other" used to be merged
+#: with the remainder (3 real `sourceKind="other"` rows reported 14). Kept out
+#: of the map, the collision is impossible by construction.
+_OVERVIEW_SUMMARY_OTHER = "other"
+
+
+def _overview_summary(rows: Any, group_field: str, out_field: str,
+                      count_field: str | None = None, *,
+                      unit: str = "rows") -> Any:
+    """Bounded summary of a data-proportional orient section (#3510).
+
+    Returns {total, <out_field>[, with_points][, other]} — never the rows.
+    `<out_field>` groups the rows by `group_field`, keeps the
+    _OVERVIEW_SUMMARY_TOP largest groups and reports the folded remainder as the
+    sibling `other`. The bound is _OVERVIEW_SUMMARY_TOP, NOT the group
+    vocabulary: `group_field` is graph text a caller can invent on every row, so
+    the vocabulary is unbounded and the top-N cut is what bounds the map (see
+    tests/test_orient_direct_consolidation.py::
+    test_fold_is_bounded_when_the_group_vocabulary_is_unbounded).
+
+    THE UNIT IS THE POINT — `unit` fixes what every number means (each
+    `<out_field>` value, `total` and `other`), or the summary misinforms:
+
+    * ``unit="magnitude"`` — the group's summed `count_field`. Used by `tags`
+      and `pointkinds`, where a group is exactly ONE row, so a row count would
+      report a literal 1 for every group while throwing away the count the row
+      carries (`tortoise_list_tags` reports {"hot": 50}; the summary must say
+      50, not 1).
+    * ``unit="rows"`` — the group's row count. Used by `sources`, where a group
+      aggregates many registered Sources, so the row count (how many sources of
+      this kind) is a real magnitude and keeps the registry's mostly-`points:0`
+      emptiness visible; and by `structure_check`, whose rows carry no separate
+      magnitude, so a violation row's count IS its count of violations.
+
+    The fold is a partition in that unit:
+    ``sum(<out_field>.values()) + other == total``, always.
+
+    `with_points` is emitted only when the unit is rows and a `count_field` was
+    given: it counts rows whose magnitude is positive — the SAME row unit as
+    `total` (e.g. "how many registered sources actually extracted points"). It
+    is omitted for a magnitude section, where a row count stranded beside a
+    magnitude `total` would be the very unit confusion this parameter exists to
+    stop.
+
+    A non-list input is an error envelope from _safe (or a mocked shape) and is
+    passed through unchanged.
+    """
+    if not isinstance(rows, list):
+        return rows
+    if unit not in ("rows", "magnitude"):
+        raise ValueError(f"_overview_summary: unknown unit {unit!r}")
+    if unit == "magnitude" and count_field is None:
+        raise ValueError("_overview_summary: unit='magnitude' needs a count_field")
+    with_points = 0
+    groups: dict[str, list[int]] = {}
+    for row in rows:
+        row = row if isinstance(row, dict) else {}
+        magnitude = 0
+        if count_field is not None:
+            value = row.get(count_field)
+            if isinstance(value, (int, float)) and value > 0:
+                with_points += 1
+                magnitude = int(value)
+        raw = row.get(group_field)
+        # "" is the group key for a row whose group value is absent or blank —
+        # a real blank value and a missing one describe the same thing, so they
+        # are the same group. (The previous "unknown" fallback was a synthetic
+        # key a real group literally named "unknown" merged into: the same
+        # collision class as the `other` remainder this function now keeps out
+        # of the map.)
+        key = raw if isinstance(raw, str) and raw else ""
+        bucket = groups.setdefault(key, [0, 0])
+        bucket[0] += 1
+        bucket[1] += magnitude
+
+    def _unit_value(bucket: list[int]) -> int:
+        return bucket[1] if unit == "magnitude" else bucket[0]
+
+    # The section's own unit ranks first: for `sources` the row count decides
+    # (how many sources of this kind), for `tags`/`pointkinds` the row counts all
+    # tie at 1 so the summed magnitude is the only thing that can order them
+    # (most-used tags first).
+    if unit == "magnitude":
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][0], kv[0]))
+    else:
+        top = sorted(groups.items(),
+                     key=lambda kv: (-_unit_value(kv[1]), -kv[1][1], kv[0]))
+    bounded = {k: _unit_value(b) for k, b in top[:_OVERVIEW_SUMMARY_TOP]}
+    other = sum(_unit_value(b) for _, b in top[_OVERVIEW_SUMMARY_TOP:])
+    total = sum(_unit_value(b) for _, b in top)
+    summary: dict[str, Any] = {"total": total}
+    if unit == "rows" and count_field is not None:
+        summary["with_points"] = with_points
+    summary[out_field] = bounded
+    # SIBLING field, never a key in `<out_field>` — see _OVERVIEW_SUMMARY_OTHER.
+    if other:
+        summary[_OVERVIEW_SUMMARY_OTHER] = other
+    return summary
+
+
 def _overview_section(section: str, entity_id: str | None,
                       days: int, limit: int) -> Any:
     """Dispatch one overview section to its original tool body."""
@@ -2939,7 +3236,19 @@ def tortoise_overview(section: str | None = None,
     Each section returns exactly what the legacy tool returned.
 
     Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id).
+    section except topics (which requires entity_id). The UNCAPPED sections
+    whose size grows with the graph's ROWS rather than its shape (a fixed
+    vocabulary) are reported as bounded counts, never as rows, so the summary
+    stays compact as the graph grows (#3510). Each number in a section's
+    summary is in that section's OWN unit:
+      `sources`         → {total, with_points, by_kind} in SOURCES (a group is
+                          many source rows, so `by_kind` counts sources)
+      `tags`            → {total, by_name} in TAGGED-POINT counts
+      `pointkinds`      → {total, by_kind} in POINT counts
+      `structure_check` → {total, by_rule} in VIOLATIONS
+    Each `by_*` map keeps its top 20 groups and reports the folded remainder as
+    the sibling `other`, in the same unit. Pass the matching section= for the
+    full array.
 
     topics: entityProfile lite for an entity — requires entity_id.
     stale: Points not updated in N days — honors days/limit.
@@ -2949,7 +3258,24 @@ def tortoise_overview(section: str | None = None,
         for sec in _OVERVIEW_SECTIONS:
             if sec == "topics":
                 continue  # requires entity_id — not part of the default summary
-            combined[sec] = _overview_section(sec, entity_id, days, limit)
+            result = _overview_section(sec, entity_id, days, limit)
+            # #3510: every data-proportional section is folded to bounded
+            # counts here — the rows themselves stay behind the explicit
+            # section= calls. `tags`/`pointkinds` fold in their section's own
+            # magnitude (each group is one row, so a row count would be a
+            # literal 1); `sources`/`structure_check` fold in rows.
+            if sec == "sources":
+                result = _overview_summary(result, "sourceKind", "by_kind",
+                                           "points")
+            elif sec == "tags":
+                result = _overview_summary(result, "name", "by_name", "count",
+                                           unit="magnitude")
+            elif sec == "pointkinds":
+                result = _overview_summary(result, "kind", "by_kind", "count",
+                                           unit="magnitude")
+            elif sec == "structure_check":
+                result = _overview_summary(result, "type", "by_rule")
+            combined[sec] = result
         return combined
     if not isinstance(section, str):
         return {"error": f"overview: section must be a string, got {type(section).__name__}"}
@@ -3610,8 +3936,10 @@ def tortoise_session_capture(conversation: list[dict],
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
+        _stored_session_harness,
         _submit_off_loop,
     )
     limits = _current_org_limits.get() or {}
@@ -3700,8 +4028,25 @@ def tortoise_session_capture(conversation: list[dict],
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+            # #4898: attribute the failure to the SESSION's stored harness, NOT
+            # the caller's raw ``harness`` argument — the SAME resolution the
+            # REST capture applies to both per-harness keys
+            # (``_observed_capture_harness``: stored or claimed,
+            # first-writer-wins; #3681 / #3700). Without it, a failed
+            # re-capture of an existing ``session_id`` whose stored harness
+            # differs writes the error under the CALLER's declaration and the
+            # dashboard paints the failure on another harness's row — the
+            # relabel class #3681 closed for the receipt key, one key down.
+            # ``_stored_session_harness`` fails open to None, which restores
+            # the fresh-session rule (the claim only ever introduces a harness
+            # the server has not stamped).
             with contextlib.suppress(Exception):
-                _record_capture_last_error(org_id, harness, str(detail))
+                _record_capture_last_error(
+                    org_id,
+                    _observed_capture_harness(
+                        org, harness,
+                        asyncio.run(_stored_session_harness(org, session_id))),
+                    str(detail))
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
@@ -3839,6 +4184,268 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
+# ── #3656: say WHY a `tools/call` is rejected ────────────────────
+# The ONLY producer of the observed signature -- HTTP 200 carrying
+# ``-32602 "Invalid request parameters"`` with ``data: ""`` -- is the MCP SDK's
+# session receive loop (``mcp/shared/session.py``), whose blanket
+# ``except Exception`` around request admission converts EVERY failure there
+# into that one message. Two consequences follow, and both are tortoise's to
+# fix:
+#
+#   1. The reason is DISCARDED. The SDK logs it (``Failed to validate
+#      request: ...``) and puts nothing actionable on the wire, which is
+#      exactly the harm #3656 reports -- "the client learns nothing
+#      actionable".
+#   2. The signature is unclassifiable after the fact. #3656 could only be
+#      reported as an observation because no artifact said which member the
+#      server objected to.
+#
+# Because a ``tools/call`` rejected here is one the SDK had already admitted at
+# the transport layer, the only way this signature appears is the request
+# reaching the session and being rejected there.
+#
+# WHAT THIS CANNOT REACH (measured, not assumed): the same ``except Exception``
+# has a SECOND arm -- any exception escaping ``ServerSession._handle_incoming``
+# (demonstrated: ``anyio.BrokenResourceError`` when the session's
+# incoming-message stream is already broken) is ALSO answered with this exact
+# ``-32602`` / ``data: ""``, for a perfectly well-formed request, with no
+# validator involved. That arm is reproduced at the SDK-session level (see
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary::
+# test_second_arm_of_the_signature_is_a_broken_incoming_stream), where the
+# session's write stream is alive and the error IS written back; it is NOT
+# reproduced through the HTTP surface, and nothing here shows the transport can
+# reach that state -- so whether it is client-visible on ``/mcp`` is
+# unestablished. It is therefore reported rather than papered over -- there is
+# no "member" to name in that arm, and inventing one would be a lie. The
+# underlying defect there is the SDK's, not tortoise's: an internal failure is
+# reported as INVALID_PARAMS.
+#
+# The fix runs the SDK's OWN model for the ENVELOPE VERDICT, so an envelope is
+# never refused that the session would serve. That guarantee is exact for the
+# envelope and is pinned against a live ``ServerSession`` in
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary. It is NOT a claim about
+# the transport gates, which are a transcription with a documented drift edge --
+# see `_transport_would_dispatch_jsonrpc_post`.
+def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
+    """The SDK's own validation errors for a ``tools/call`` envelope, or None.
+
+    Gate 3 is the producer of the arm this guard names (the receive loop is the
+    one exception SITE, and it has a second arm this guard cannot reach -- see
+    the module comment above). These are the SDK's own expressions, in the
+    order the SDK runs them:
+
+    1. ``JSONRPCMessage.model_validate(raw)`` -- the transport's pure-format
+       check. On failure the transport owns the answer (its 400 carrying
+       ``-32602 Validation error: ...``; ``-32700`` is the earlier
+       ``json.loads`` failure), so this returns None and the request passes
+       through untouched.
+    2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
+       ONLY a request; a notification / response / error body is answered
+       ``202 Accepted`` (`mcp/server/streamable_http.py`). This gate is
+       load-bearing for a body carrying ``method``/``id`` **and an ``error``
+       member**, which the union resolves to ``JSONRPCError`` (measured: a
+       ``result`` member instead resolves to a REQUEST, which always has a real
+       rejection reason and is handled by gate 3). Without this gate the guard
+       would replace that body's 202 with a ``-32602`` -- the over-strict
+       direction, which breaks a working caller.
+    3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
+       -- what ``BaseSession._receive_loop`` runs, and the producer of the
+       opaque ``-32602 "Invalid request parameters"`` this guard exists to
+       replace.
+
+    Those three gates gate the arm this guard is for: an envelope the SDK
+    rejects. The same SDK ``except`` also answers a well-formed request when
+    ``_handle_incoming`` raises, and there is no member to name in that arm --
+    the caller passes through and the SDK keeps the last word, which is why this
+    guard is a message fix and not a fix for #3656's transient (see the module
+    comment above).
+
+    The REASON comes from ``CallToolRequest``, the one variant that
+    ``method == "tools/call"`` discriminates to. A union failure reports every
+    variant's errors (a 30-entry dump naming ``PingRequest``, ``GetTaskRequest``
+    and the rest), which is noise on the wire; the concrete variant reports only
+    the members of THIS call -- ``params.name``, ``params.arguments``, ... If the
+    concrete variant unexpectedly validates anyway, the union's own errors are
+    used rather than a fabricated reason.
+
+    Returns None when the envelope is one the SDK admits -- and ALSO whenever
+    the reproduction cannot be made (models unavailable, an unexpected
+    exception). A guard that cannot reproduce the SDK's verdict must never
+    invent one: pass-through is the fail-safe direction, and it is why a stale
+    copy of these expressions can rename an error but can never refuse a
+    request the SDK would have served.
+    """
+    try:
+        from mcp.types import (CallToolRequest, ClientRequest,  # noqa: I001
+                               JSONRPCRequest, JSONRPCMessage)
+        from pydantic import ValidationError as _PydanticValidationError
+    except Exception:  # pragma: no cover - import guard, never a request failure
+        return None
+
+    def _errors(exc) -> list[dict[str, Any]]:
+        return [
+            {
+                "loc": [str(part) for part in err.get("loc", ())],
+                "msg": str(err.get("msg", "invalid")),
+                "type": str(err.get("type", "value_error")),
+            }
+            for err in exc.errors()
+        ]
+
+    try:
+        message = JSONRPCMessage.model_validate(raw)
+        # Gate 2: the transport dispatches only a REQUEST. A notification /
+        # response / error body is answered 202, not "invalid params".
+        if not isinstance(message.root, JSONRPCRequest):
+            return None
+        dumped = message.root.model_dump(by_alias=True, mode="json",
+                                        exclude_none=True)
+    except Exception:
+        return None  # the transport owns this failure; do not pre-empt it
+    try:
+        ClientRequest.model_validate(dumped)
+    except _PydanticValidationError as union_exc:
+        try:
+            CallToolRequest.model_validate(dumped)
+        except _PydanticValidationError as concrete_exc:
+            return _errors(concrete_exc)
+        except Exception:  # pragma: no cover - fall back to the union dump
+            return _errors(union_exc)
+        return _errors(union_exc)  # pragma: no cover - unreachable in practice
+    except Exception:  # pragma: no cover - never invent a reason
+        return None
+    return None
+
+
+def _routed_path(request: Any) -> str:
+    """The request path AS THE ROUTER SEES IT.
+
+    A middleware inside a MOUNTED app receives the full path with the mount
+    prefix still on it, plus ``root_path``: a POST to ``/mcp`` arrives as
+    ``path='/mcp/'`` with ``root_path='/mcp'`` (measured — Starlette's ``Mount``
+    leaves the prefix in place and the router strips it while matching). So a
+    check against the transport's own endpoint has to strip it too, or the guard
+    would never fire in production (mounted at ``/mcp``) while firing in a test
+    that mounts at the root.
+    """
+    root = request.scope.get("root_path") or ""
+    path = request.url.path
+    if root and path.startswith(root):
+        return path[len(root):] or "/"
+    return path
+
+
+def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
+                                          headers: Any) -> bool:
+    """True when the SDK's transport would DISPATCH this POST to the session.
+
+    Every gate listed below is reproduced from the transport, so the guard
+    speaks only where the SDK speaks. The middleware wraps the ROUTER, so
+    without this predicate it can answer ``200 -32602`` for a request no part of
+    the SDK ever saw. Each clause closes a MEASURED divergence of that kind:
+
+    * ``endpoint`` -- the route. A POST to a path this app does not route is a
+      404; the caller passes the same string it gives ``mcp.http_app(path=...)``
+      and the request's path as the router sees it (``_routed_path``), so the
+      guard's idea of "the endpoint" cannot drift from the route table.
+    * ``TransportSecurityMiddleware._validate_content_type`` -- the raw header
+      must START WITH ``application/json`` (its 400). This is a different and
+      STRICTER gate than the transport's own part match below: ``text/plain,
+      application/json`` is a 400, not a 415.
+    * ``StreamableHTTPServerTransport._check_content_type`` -- an EXACT
+      ``application/json`` part in the ``;``/``,``-split (its 415), so
+      ``application/jsonx`` keeps the 415 that the prefix gate above let
+      through.
+    * ``_check_accept_headers`` -- both media types, because this app is built
+      with ``json_response=False`` (SSE responses); otherwise the transport
+      answers 406.
+    * ``_validate_protocol_version`` -- absent means the negotiated default, an
+      unsupported value is the transport's 400 ``-32600``.
+    * ``RequestBodyLimitMiddleware`` -- a DECLARED length within
+      ``DEFAULT_MAX_REQUEST_BODY_SIZE``; without the bound this middleware would
+      buffer an unbounded body and then replace that limit's 413. In THIS app
+      ``mcp_auth.RequestBodySizeMiddleware`` (1 MB) binds first, so this clause
+      is the belt to that braces: it keeps the guard's own memory bounded if
+      that cap is ever reordered or removed. A chunked POST declares no length,
+      so it is passed straight through to the limiter that counts bytes.
+
+    NOT reproduced, deliberately, because each is answered before this
+    middleware or is a no-op here -- named rather than silently assumed:
+
+    * ``TransportSecurityMiddleware``'s **Host** (421) and **Origin** (403)
+      checks: ``HostOriginGuardMiddleware`` sits OUTSIDE this middleware with
+      the same allowlists and answers both
+      (``test_origin_and_host_refusals_still_precede_the_guard``).
+    * ``_validate_session``: a no-op under ``stateless_http=True``
+      (``mcp_session_id`` is None), and the initialize-only session-id 404
+      cannot apply to ``tools/call``.
+
+    The order of the header clauses here is this function's, not the SDK's
+    (the transport checks accept before content-type); each is independently
+    decisive, so the order cannot admit a request the SDK refuses.
+
+    Being STRICTER than the transport is always safe here: the request simply
+    passes through and the SDK answers, so relaxing a gate, changing the
+    response mode or raising a limit makes the guard stop intercepting rather
+    than mislabel -- and an import failure returns False for the same reason
+    (never pre-empt on a broken assumption). The converse does NOT hold, and is
+    this design's known edge: a gate the SDK ADDS, or one narrowed here by
+    mistake, makes the guard LOOSER and it would answer for a request the
+    transport refuses. The tests pin the gates enumerated below; a new upstream
+    gate is not detectable from here.
+    """
+    try:
+        from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
+        from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
+        from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+        from mcp.types import DEFAULT_NEGOTIATED_VERSION
+    except Exception:  # pragma: no cover - never pre-empt on an import failure
+        return False
+    if path != endpoint:  # ── the route: anything else is the router's 404
+        return False
+    # ── the transport's own gates, in its own order ──
+    content_type = headers.get("content-type", "")
+    if not content_type.lower().startswith(CONTENT_TYPE_JSON):
+        return False  # TransportSecurityMiddleware: 400
+    parts = [p.strip() for p in content_type.split(";")[0].split(",")]
+    if not any(p == CONTENT_TYPE_JSON for p in parts):
+        return False  # _check_content_type: 415
+    accepted = [m.strip() for m in headers.get("accept", "").split(",")]
+    has_json = any(m.startswith(CONTENT_TYPE_JSON) for m in accepted)
+    has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
+    if not (has_json and has_sse):
+        return False  # _validate_accept_header: 406
+    # The SDK substitutes the default only when the header is ABSENT (`is
+    # None`), so a present-but-empty value is its 400 -- `.get(k, default)`, not
+    # `or`, or an empty header would be silently upgraded to the default.
+    version = headers.get("mcp-protocol-version", DEFAULT_NEGOTIATED_VERSION)
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return False  # _validate_protocol_version: 400 -32600
+    declared = headers.get("content-length")
+    if declared is None:
+        return False  # chunked: RequestBodyLimitMiddleware counts the bytes
+    try:
+        if int(declared) > DEFAULT_MAX_REQUEST_BODY_SIZE:
+            return False  # RequestBodyLimitMiddleware: 413
+    except ValueError:  # pragma: no cover - a malformed length is not ours
+        return False
+    return True
+
+
+def _tools_call_rejection_message(errors: list[dict[str, Any]]) -> str:
+    """Render the field locations the SDK rejected, in the client's language.
+
+    ``loc`` from a pydantic union error is the offending MEMBER PATH (e.g.
+    ``params.name``), which is precisely what the discarded reason held and
+    what a client needs to repair the call.
+    """
+    parts = []
+    for err in errors:
+        member = ".".join(err.get("loc") or []) or "<request>"
+        parts.append(f"{member}: {err.get('msg', 'invalid')}")
+    return "Invalid params: " + "; ".join(parts)
+
+
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     allowed_hosts: list[str] | None = None,
                     rate_limit: int = 100,
@@ -3876,11 +4483,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     (route unused) and coexists with the POST/DELETE streamable-http route.
     """
     from starlette.middleware import Middleware  # noqa: I001
+    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
     from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # The transport's endpoint INSIDE this sub-app. One value, used both to
+    # build the route and to gate the #3656 admission guard -- so the guard can
+    # never intercept a path the route table does not serve (its 404).
+    mcp_path = "/"
 
     # auth_mode middleware selection. OrgResolutionMiddleware (tenant mode) is
     # imported here but only ever INSTANTIATED in the tenant branch — static/none
@@ -3946,6 +4559,76 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
             return [t for t in tools if _visible(t)]
 
+    class ToolCallAdmissionMiddleware(BaseHTTPMiddleware):
+        """Answer a rejected ``tools/call`` with the SDK's OWN reason (#3656).
+
+        See ``_tools_call_rejection`` above for why this surface has one producer
+        SITE of the OPAQUE ``-32602`` signature -- this middleware, when it
+        answers, is a second producer of ``-32602`` with a real reason -- and one
+        validator for the envelope verdict (the SDK's own model, which the guard
+        runs rather than replaces). Scope is deliberately narrow, and each
+        narrowing is a case where the SDK does NOT emit the opaque signature:
+
+        * ``POST`` only, and only to the transport's own endpoint
+          (``mcp_path``), and only when the SDK's own gates would let the body
+          through -- see ``_transport_would_dispatch_jsonrpc_post`` and
+          ``_routed_path``. Everything the transport would answer itself (404
+          for another path, 400/403/406/413/415 for its own refusals) stays the
+          transport's answer.
+        * ``jsonrpc == "2.0"`` and an ``id`` present -- so a
+          ``tools/call`` NOTIFICATION passes through (the SDK only logs those)
+          and a body missing ``jsonrpc`` passes through (the transport rejects
+          it first, with a different message).
+        * ``method == "tools/call"`` only -- every other method is untouched.
+        * A JSON object only -- a batch array is left to the transport.
+        * A body ``JSONRPCMessage`` resolves to a REQUEST -- a notification /
+          response / error root is answered 202 by the transport, and this
+          middleware must not turn that into a ``-32602``.
+
+        As the transport does, this marks the response uncacheable and
+        unbuffered (``Cache-Control: no-cache, no-transform`` and
+        ``X-Accel-Buffering: no``): a proxy must not store or coalesce a
+        JSON-RPC error, and the frame is one event long. The body framing is the
+        transport's SSE event; the headers are pinned by
+        ``test_the_named_error_is_uncacheable_and_unbuffered``.
+        """
+
+        async def dispatch(self, request, call_next):
+            if request.method != "POST":
+                return await call_next(request)
+            if not _transport_would_dispatch_jsonrpc_post(
+                    _routed_path(request), mcp_path, request.headers):
+                return await call_next(request)
+            try:
+                raw = json.loads(await request.body())
+            except Exception:
+                # The transport owns parse errors (it answers -32700), and it
+                # must still see the body -- BaseHTTPMiddleware replays it.
+                return await call_next(request)
+            if not isinstance(raw, dict):
+                return await call_next(request)
+            if (raw.get("jsonrpc") != "2.0" or "id" not in raw
+                    or raw.get("method") != "tools/call"):
+                return await call_next(request)
+            errors = _tools_call_rejection(raw)
+            if errors is None:
+                return await call_next(request)
+            from starlette.responses import Response
+            # The auth plane's one envelope builder (#5281 house primitive),
+            # framed here as the transport's SSE event instead of a JSON
+            # HTTP error. Same code, same shape, one definition.
+            body = json.dumps(_mcp_auth._jsonrpc_error_body(
+                # The SDK's own code for this failure class -- unchanged.
+                -32602,
+                _tools_call_rejection_message(errors),
+                {"method": "tools/call", "errors": errors},
+                request_id=raw["id"],
+            ))
+            return Response(f"event: message\ndata: {body}\n\n",
+                            status_code=200, media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache, no-transform",
+                                     "X-Accel-Buffering": "no"})
+
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
     # new _HTTPToolFilter to the shared module-level mcp instance (code-review
@@ -3992,13 +4675,19 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         # Sets the curation-group ContextVar for the tools/list transform.
         middleware.append(group_mw)
 
+    # #3656: INNERMOST — it runs after security headers / body-size / auth /
+    # rate-limit have each had their say, immediately before the MCP transport,
+    # so the reason it reports is the LAST word on the request rather than a
+    # substitute for an auth or quota refusal. See the class docstring.
+    middleware.append(Middleware(ToolCallAdmissionMiddleware))
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         allowed_hosts=allowed_hosts or [],
-        path="/",
+        path=mcp_path,
         middleware=middleware,
     )
 
@@ -4012,6 +4701,521 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 # "Can't connect to Tortoise". Importing callers (tortoise serve via
 # __main__.py, deployment.py) are unaffected: they import the module first
 # (which executes register_all), then call main().
+
+
+# ── Dry-run previews (#4057) ─────────────────────────────────────
+# `dry_run=True` answers "what would this destroy?" and changes NOTHING.
+#
+# A preview is READ-ONLY: it runs the same existence/lifecycle validations
+# the write path runs (so a bad input fails here exactly as the write would,
+# with the same message), then enumerates the nodes and edges the write
+# would touch. It never emits an event, never marks the projection dirty,
+# and never enters `_quota_gated` — that wrapper meters a WRITE, and a
+# preview performs none. It IS wrapped in `_safe`, so the same
+# auth/transport gate that protects the write protects the preview: a dry
+# run is a read, not an auth bypass.
+#
+# The flag is opt-in PREVIEW, not opt-in destruction: `dry_run` defaults to
+# `False`, which is today's behaviour byte-for-byte, so no existing caller
+# changes meaning. Flipping the default to True would make every existing
+# `tortoise_delete(id)` call a silent no-op — a breaking change to the
+# surface, not an additive off-by-default field (the #3986 carve-out).
+#
+# Every preview reports the concrete blast radius. Where the writer's
+# transfer rule is non-trivial (supersede), the preview mirrors the rule and
+# a differential test pins the preview count against the writer's OWN
+# `edges_transferred`, so a drift fails the suite instead of shipping a
+# preview that lies.
+
+_PREVIEW_NOTE = "No changes were made — re-call with dry_run=false to apply."
+
+
+def _preview_result(tool: str, would: str, **fields) -> dict:
+    return {"dry_run": True, "tool": tool, "would": would, **fields,
+            "note": _PREVIEW_NOTE}
+
+
+def _preview_delete_edges(sdk, internal_ids: list) -> list[dict]:
+    """All edges incident to ANY of the nodes, as {type, from, to}.
+
+    Set-based and deduped by INTERNAL edge id. A per-node loop would
+    double-count an edge whose BOTH endpoints are being deleted (once per
+    endpoint), and a logical-id match would return both nodes' edges for each
+    node; `ID(r)` dedup is exact in both cases. Endpoints are reported by
+    LOGICAL identity (id, else eventId/name/url), never the internal id.
+    DETACH DELETE removes each node and every incident edge, so this set IS
+    the delete's edge blast radius.
+    """
+    if not internal_ids:
+        return []
+    rows = sdk._get_proj().g.query(
+        "MATCH (a)-[r]-(b) WHERE ID(a) IN $nids OR ID(b) IN $nids "
+        "RETURN ID(r), type(r), "
+        "coalesce(startNode(r).id, startNode(r).eventId, startNode(r).name, startNode(r).url), "
+        "coalesce(endNode(r).id, endNode(r).eventId, endNode(r).name, endNode(r).url)",
+        params={"nids": internal_ids},
+    ).result_set
+    seen: set = set()
+    out: list[dict] = []
+    for rid, rtype, src, tgt in rows:
+        if rid in seen:
+            continue
+        seen.add(rid)
+        out.append({"type": rtype, "from": src, "to": tgt})
+    return out
+
+
+def _preview_orphan_tags(sdk, internal_ids: list) -> list[str]:
+    """Tags the writer's orphan-GC would delete alongside the Points.
+
+    `delete_point` runs, when the deleted point had any TAGGED edge, a
+    graph-wide `MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`. A tag is
+    removed iff it has no TAGGED edge from a SURVIVING point — which also
+    catches pre-existing orphans. (Only `delete_point` does this;
+    `_delete_entity` does not.)
+    """
+    if not internal_ids:
+        return []
+    rows = sdk._get_proj().g.query(
+        "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q) "
+        "WITH t, [x IN collect(ID(q)) WHERE NOT x IN $nids] AS survivors "
+        "WHERE size(survivors) = 0 RETURN coalesce(t.name, t.id, t.tag)",
+        params={"nids": internal_ids},
+    ).result_set
+    return [r[0] for r in rows]
+
+
+def _preview_delete_point(sdk, id: str) -> dict:
+    # The writer's `MATCH (n:Point {id:$id}) DETACH DELETE n` deletes EVERY
+    # matching Point, so count internal ids — not a hardcoded 1.
+    proj = sdk._get_proj()
+    internals = [row[0] for row in proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN ID(n)",
+        params={"id": id},
+    ).result_set]
+    edges = _preview_delete_edges(sdk, internals)
+    # Tag GC is gated on the deleted point having a TAGGED edge.
+    has_tags = bool(proj.g.query(
+        "MATCH (n:Point {id:$id})-[:TAGGED]->() RETURN count(*) > 0",
+        params={"id": id},
+    ).result_set[0][0]) if internals else False
+    tags = _preview_orphan_tags(sdk, internals) if has_tags else []
+    return _preview_result(
+        "tortoise_delete_point", "delete",
+        found=bool(internals),
+        target={"id": id, "label": "Point"},
+        nodes_removed=len(internals),
+        edges_removed=len(edges),
+        tags_removed=len(tags),
+        nodes=[id] * len(internals),
+        edges=edges,
+        tags=tags,
+    )
+
+
+def _preview_delete_entity(sdk, id: str) -> dict:
+    # REVIEW-FIX P2 (#4057): the label→id-property table is IMPORTED, never
+    # re-hardcoded. `_delete_entity` (sdk.py) and the replay fold
+    # (`projection._delete_entity_by_id`) both read
+    # `projection._CANONICAL_ENTITY_ID_PROPS`, so a local copy here could drift
+    # — and drift makes this preview UNDER-report the blast radius (a label
+    # whose id property moved would match nothing and silently drop out of the
+    # count), which is the dangerous direction.
+    from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
+    proj = sdk._get_proj()
+    seen: set = set()
+    nodes: list[str] = []
+    for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+        # Dedup by INTERNAL node id: a node carrying two matched labels
+        # (`:Point:Object`) is deleted ONCE — the writer's first DETACH DELETE
+        # removes it and the next label matches 0. Two DISTINCT nodes sharing
+        # an id value are both deleted, and their internal ids differ, so
+        # this neither over- nor under-counts. (Matches the writer, which
+        # never dedups by logical id.)
+        for (internal,) in proj.g.query(
+            f"MATCH (n:{label} {{{prop}:$id}}) RETURN ID(n)",
+            params={"id": id},
+        ).result_set:
+            if internal in seen:
+                continue
+            seen.add(internal)
+            nodes.append(id)
+    # `_delete_entity` does NOT run the Tag GC (only `delete_point` does).
+    edges = _preview_delete_edges(sdk, sorted(seen))
+    return _preview_result(
+        "tortoise_delete_entity", "delete",
+        found=bool(nodes),
+        target={"id": id},
+        nodes_removed=len(nodes),
+        edges_removed=len(edges),
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def _preview_delete(sdk, id: str) -> dict:
+    """Preview `tortoise_delete` — resolve the label first, exactly as
+    `TortoiseSDK.delete` does, then preview the branch it would take."""
+    resolved = sdk._get_proj()._resolve_entity(id, by_id=True, by_eventId=True)
+    if not resolved:
+        return _preview_result(
+            "tortoise_delete", "delete",
+            found=False,
+            target={"id": id, "label": None},
+            nodes_removed=0,
+            edges_removed=0,
+            nodes=[],
+            edges=[],
+        )
+    label = resolved[0]["label"]
+    out = (_preview_delete_point(sdk, id) if label == "Point"
+           else _preview_delete_entity(sdk, id))
+    out["tool"] = "tortoise_delete"
+    out["target"] = {"id": id, "label": label}
+    return out
+
+
+def _preview_retract_point(sdk, id: str) -> dict:
+    """Preview `tortoise_retract_point` — a ONE-node status flip.
+
+    The shared lifecycle guard runs first, so a missing / operator / already
+    terminal point raises exactly as the write would (no rosy preview over an
+    input the write would reject).
+    """
+    guard = sdk._assert_lifecycle_guard(id, method="retraction")
+    # The writer's CAS carries `WHERE <non-terminal>` and a duplicated id can
+    # mix a live and a terminal node — count only the rows it would stamp.
+    from tortoise.live import _terminal_excluded
+    n_affected = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE " + _terminal_excluded("n.status") +
+        " RETURN count(n)",
+        params={"id": id},
+    ).result_set[0][0]
+    return _preview_result(
+        "tortoise_retract_point", "retract",
+        found=True,
+        target={"id": id},
+        nodes_affected=n_affected,
+        nodes_removed=0,
+        edges_removed=0,
+        edges_added=0,
+        status={"id": id, "from": guard.get("status") or "live",
+                "to": "retracted", "outdated": guard.get("outdated")},
+    )
+
+
+def _preview_invalidate(sdk, id: str, corrected_by_id: str) -> dict:
+    """Preview `tortoise_invalidate` — outdate ONE point, add ONE CORRECTS
+    edge. Both lifecycle guards AND the writer's #5358 inverted-window
+    precondition run first, mirroring the write's validation order and
+    messages.
+
+    The #5358 check reads its own clock, which precedes the writer's. The
+    guarantee is therefore ONE-WAY, in the safe direction: the preview refuses
+    whenever the write would refuse (a start inside the preview→write interval
+    may be refused here and accepted there — conservative, never a false
+    "the write will succeed"). Do NOT "fix" that asymmetry by dropping the
+    shared call: a green preview must mean the write accepts."""
+    if id == corrected_by_id:
+        raise ValueError(
+            f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
+        )
+    old = sdk._assert_lifecycle_guard(
+        id, method="invalidation", role="source", missing_ok=True)
+    if old is None:
+        return _preview_result(
+            "tortoise_invalidate", "invalidate",
+            found=False, invalidated=False,
+            target={"id": id, "corrected_by": corrected_by_id},
+            nodes_affected=0, edges_removed=0, edges_added=0,
+        )
+    sdk._assert_lifecycle_guard(
+        corrected_by_id, method="invalidation", role="corrector")
+    # #5358: mirror the writer's inverted-window precondition — the SAME
+    # shared check `invalidate_point` runs — so the preview cannot report
+    # "would invalidate" for an input the write refuses (#4057's contract:
+    # a preview over an input the write would reject must reject it too).
+    # `_preview_supersede(transfer_edges=False)` reuses this function, so it
+    # inherits the check.
+    from datetime import datetime, timezone
+    sdk._assert_window_start_not_inverted(
+        id, datetime.now(timezone.utc).isoformat())  # noqa: UP017
+    # The writer is `MATCH (a:Point {id:$new}), (b:Point {id:$old}) MERGE
+    # (a)-[:CORRECTS]->(b)` — it binds EVERY matching pair, stamps EVERY
+    # matching old node, and the MERGE adds only pairs that lack the edge.
+    proj = sdk._get_proj()
+    n_old = proj.g.query("MATCH (b:Point {id:$o}) RETURN count(b)",
+                        params={"o": id}).result_set[0][0]
+    pairs_added = proj.g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) "
+        "WHERE NOT (a)-[:CORRECTS]->(b) RETURN count(*)",
+        params={"n": corrected_by_id, "o": id},
+    ).result_set[0][0]
+    edges = [{"type": "CORRECTS", "from": corrected_by_id, "to": id}
+             for _ in range(pairs_added)]
+    return _preview_result(
+        "tortoise_invalidate", "invalidate",
+        found=True, invalidated=True,
+        target={"id": id, "corrected_by": corrected_by_id},
+        nodes_affected=n_old,
+        nodes_removed=0,
+        edges_removed=0,
+        edges_added=len(edges),
+        status={"id": id, "from": old.get("status") or "live",
+                "to": "outdated", "outdated": True},
+        edges=edges,
+    )
+
+
+def _preview_supersede(sdk, old_id: str, new_id: str,
+                       transfer_edges: bool = True) -> dict:
+    """Preview `tortoise_supersede`.
+
+    transfer_edges=False is the invalidate behaviour and reuses that preview.
+    transfer_edges=True enumerates the edges the writer repoints, leg by leg:
+      * 2a operator -> old, EXCEPT `alreadyDecided` (kept on the dead prior).
+        The writer uses CREATE here, so every row becomes its own edge;
+      * 2a-DIRECT operator-less IMPL/NAND incident to old, excluding operator
+        targets. The writer MERGEs, so rows to the same target collapse;
+      * 2b the structural rels in `SUPERSEDE_STRUCTURAL_RELS` (imported from
+        the writer — sdk.py's own named constant), also MERGEs.
+    An edge whose far endpoint IS the successor is delete-only (no phantom
+    self-edge) — reported under `edges_dropped`.
+
+    `edges_transferred_from_old` is the writer's own old-side count — on any
+    graph with no direct IMPL/NAND self-loop at `old` it equals the number the
+    writer reports as `edges_transferred`, and a differential test pins the two
+    together there. It is NOT equal when BOTH of two conditions hold: `old`
+    carries a direct IMPL/NAND self-loop of type `T`, AND no edge
+    `(new)-[r:T]->(old)` of that SAME type already exists. Then the writer is the
+    one that over-counts: its out-pass repoints `(old)-[r:T]->(old)` to
+    `(new)->(old)` and MERGEs that edge into existence — and the MERGE is typed
+    by `rtype`, the self-loop's OWN type (`sdk.py`, `MERGE (new)-[nr:{rtype}]->(t)`) —
+    and its in-pass then matches the freshly created edge and delete-onlys it,
+    booking one removed edge twice — while this preview dedups the two matches
+    and counts the edge ONCE. The TYPE matters: only a same-type edge suppresses
+    the divergence, because only a same-type edge collapses that MERGE. Measured
+    across all six states (self-loop type x pre-existing edge):
+
+        no pre-existing edge   preview 2  writer 3  DIFFER
+        same type              preview 3  writer 3  agree — the MERGE collapses onto
+                                                     it and the in-pass delete-onlys
+                                                     that pre-existing edge, which this
+                                                     preview also counts, under
+                                                     `edges_dropped`
+        opposite type          preview 3  writer 4  DIFFER — nothing to collapse onto,
+                                                     so the out-pass still creates
+
+    Each condition has its own test. This
+    value is the accurate one; the self-loop is reported under `edges_dropped`
+    with the reason "self-loop on the old node". It counts every row the write
+    removes from old, INCLUDING the delete-only rows (`edges_dropped`: a
+    self-loop, or a far endpoint that is the successor / not a Point) that the
+    writer also books as "transferred" while creating nothing.
+    It is therefore NOT "the edges that arrive at the successor": those are
+    `edges_created_at_new` + `edges_already_present_at_new`.
+    `edges_remaining_at_old` is the complementary count — the edges incident to
+    old that the write neither repoints nor removes (e.g. `related`, `TAGGED`,
+    `aboutSource`, an inbound `CORRECTS`, an `alreadyDecided` operator edge via
+    `edges_kept_attached`). Without it a caller cannot read the residual blast
+    radius from any field. The `CORRECTS` edge the write ADDS is not included
+    (it does not exist yet) — see `corrects_edge`.
+    `edges_created_at_new` is the NET-NEW edge count the write creates at the
+    successor (MERGE destinations already present are excluded), and
+    `edges_already_present_at_new` names those no-ops; both are multiplied by
+    `successor_nodes` when a duplicate successor id fans the writer out.
+    """
+    if not transfer_edges:
+        out = _preview_invalidate(sdk, old_id, new_id)
+        out["tool"] = "tortoise_supersede"
+        out["would"] = "invalidate (transfer_edges=false)"
+        out["transfer_edges"] = False
+        return out
+    if old_id == new_id:
+        raise ValueError("supersede_point: old_id and new_id must differ")
+    sdk._assert_lifecycle_guard(old_id, method="supersession", role="source")
+    sdk._assert_lifecycle_guard(new_id, method="supersession", role="target")
+    proj = sdk._get_proj()
+    from tortoise.security import validate_rel_type
+    created: list[dict] = []   # 2a operator edges — CREATE, never collapse
+    merged: list[tuple] = []   # (merge_key, edge) — MERGE-backed legs
+    dropped: list[dict] = []
+    kept: list[dict] = []
+    # INTERNAL ids of every edge the write removes from old (repointed OR
+    # delete-only). Set-keyed so an edge matched by two passes is handled once;
+    # `edges_remaining_at_old` is the incident count minus this set.
+    handled_old_edge_ids: set = set()
+
+    # 2a — operator edges. The writer validates every relationship type BEFORE
+    # any mutation (a raw/imported undeclared type is an injection primitive),
+    # so the preview validates too.
+    for op_id, rtype, _idx, op_label, op_rid in proj.g.query(
+        "MATCH (op:Point {is_operator:true})-[r]->(o:Point {id:$old}) "
+        "RETURN op.id, type(r), r.idx, op.label, ID(r)",
+        params={"old": old_id},
+    ).result_set:
+        validate_rel_type(rtype)
+        if op_label == "alreadyDecided":
+            kept.append({"type": rtype, "from": op_id, "to": old_id,
+                         "reason": "alreadyDecided stays on the superseded prior"})
+        else:
+            created.append({"type": rtype, "from": op_id, "to": new_id})
+            handled_old_edge_ids.add(op_rid)
+
+    # #4021 parity — a window whose resolved END precedes the predecessor's own
+    # validFrom is refused by the writer before it mutates anything, so the
+    # preview must refuse it too (a `dry_run` that reports success on a write
+    # that will raise is the fail-open direction of the same defect).
+    # Placed AFTER the 2a loop and BEFORE `succ_rows`: the writer validates
+    # every relationship type before its window guard, so an undeclared rel
+    # type must win in BOTH. Own queries — `succ_rows` returns ID(n) only and
+    # its `[0]` indexing is relied on by every pass below.
+    win_rows = proj.g.query(
+        "MATCH (o:Point {id:$old}), (n:Point {id:$new}) "
+        "RETURN o.validFrom, n.validFrom, n.createdAt",
+        params={"old": old_id, "new": new_id},
+    ).result_set
+    if win_rows:
+        _supersede_window_end(
+            old_id=old_id, new_id=new_id,
+            # EVERY node carrying the id — the writer stamps them all, so a
+            # first-row-only read would preview success on a write the
+            # writer refuses (the fail-open direction of this same defect).
+            old_vfs=[r[0] for r in win_rows],
+            valid_from=None,  # the MCP surface exposes no valid_from kwarg
+            stored_vf=win_rows[0][1],
+            successor_created_at=win_rows[0][2],
+            now=_now_iso(),   # the writer's clock, not a new one
+        )
+    succ_rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN ID(n)",
+                            params={"id": new_id}).result_set
+    # 2b's self-edge guard mirrors the writer EXACTLY: `succ_rows[0][0]` is a
+    # scalar (the writer reads only the first successor row), so with a
+    # duplicate successor id the writer still transfers an old edge that ends
+    # at a LATER successor. `succ_count` models the writer's MATCH fan-out.
+    succ_first = succ_rows[0][0] if succ_rows else None
+    succ_count = max(len(succ_rows), 1)
+    # Pre-existing edges at the successor: the MERGE-backed legs collapse into
+    # an edge that is already there, so it is NOT net-new ("edges that would
+    # transfer" must not claim a delta the write will not make). SDK-reachable
+    # input: `new` already carrying an edge to the same destination.
+    pre_out = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (new:Point {id:$n})-[r]->(t) RETURN type(r), ID(t)",
+        params={"n": new_id}).result_set}
+    pre_in = {(r[0], r[1]) for r in proj.g.query(
+        "MATCH (t)-[r]->(new:Point {id:$n}) RETURN type(r), ID(t)",
+        params={"n": new_id}).result_set}
+
+    # 2a-DIRECT — operator-less IMPL/NAND, both directions. The writer's
+    # exclusion set is built from the far LOGICAL ids (a far node sharing an
+    # operator's id is excluded even if it is not itself an operator), and its
+    # repoint MERGE requires `(t:Point {id:$tid})` — a non-Point far endpoint
+    # is deleted at old and creates nothing.
+    seen_direct: set = set()
+    for direction in ("out", "in"):
+        if direction == "out":
+            dq = ("MATCH (o:Point {id:$old})-[r:IMPL|NAND]->(t) "
+                  "RETURN type(r), t.id, ID(t), labels(t), ID(r)")
+        else:
+            dq = ("MATCH (t)-[r:IMPL|NAND]->(o:Point {id:$old}) "
+                  "RETURN type(r), t.id, ID(t), labels(t), ID(r)")
+        direct_rows = proj.g.query(dq, params={"old": old_id}).result_set
+        far_ids = [row[1] for row in direct_rows]
+        op_ids = {r[0] for r in proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "AND coalesce(p.is_operator,false) = true RETURN p.id",
+            params={"ids": far_ids}).result_set} if far_ids else set()
+        for rtype, tid, t_internal, t_labels, rid in direct_rows:
+            if rid in seen_direct:
+                continue  # a self-loop is matched by BOTH passes
+            seen_direct.add(rid)
+            if tid in op_ids:
+                continue  # operator target — owned by 2a, never repointed
+            handled_old_edge_ids.add(rid)
+            if tid == old_id:
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "self-loop on the old node — its repoint is "
+                                          "undone by the writer's in-pass delete-only"})
+            elif tid == new_id:
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "far endpoint IS the successor — delete-only"})
+            elif "Point" not in (t_labels or []):
+                dropped.append({"type": rtype, "other": tid,
+                                "reason": "far endpoint is not a Point — the repoint "
+                                          "MERGE matches nothing (old edge removed)"})
+            else:
+                merged.append((
+                    (rtype, direction, t_internal),
+                    {"type": rtype,
+                     "from": new_id if direction == "out" else tid,
+                     "to": tid if direction == "out" else new_id},
+                ))
+
+    # 2b — structural rels (the writer's own constant — never a local copy).
+    for rel in SUPERSEDE_STRUCTURAL_RELS:
+        for rtype, tid, t_internal, rid in proj.g.query(
+            f"MATCH (o:Point {{id:$old}})-[r:{rel}]->(t) "
+            "RETURN type(r), coalesce(t.id,t.eventId,t.name,t.url), ID(t), ID(r)",
+            params={"old": old_id},
+        ).result_set:
+            handled_old_edge_ids.add(rid)
+            if succ_first is not None and t_internal == succ_first:
+                dropped.append({"type": rtype, "other": tid or new_id,
+                                "reason": "far endpoint IS the successor — delete-only"})
+            else:
+                merged.append(((rtype, "out", t_internal),
+                               {"type": rtype, "from": new_id, "to": tid}))
+
+    # Collapse ONLY the MERGE-backed legs, keyed on the far node's INTERNAL id
+    # (the writer MERGEs by node identity, not by logical id).
+    seen: set = set()
+    merged_final: list[tuple] = []
+    for key, edge in merged:
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_final.append((key, edge))
+    # A MERGE destination that already exists at the successor is a no-op.
+    created_edges: list[dict] = list(created)  # 2a operator CREATEs always create
+    already_present: list[dict] = []
+    for (rtype, direction, t_internal), edge in merged_final:
+        present = ((rtype, t_internal) in pre_out if direction == "out"
+                   else (rtype, t_internal) in pre_in)
+        (already_present if present else created_edges).append(edge)
+    removed_raw = len(created) + len(merged) + len(dropped)
+    # The writer's status write is a bare `MATCH (n:Point {id:$id}) SET …` — it
+    # binds EVERY matching node (no cardinality guard), which is exactly what
+    # `_preview_invalidate` already counts as `n_old`. Mirror it instead of
+    # hardcoding 1.
+    n_old = proj.g.query("MATCH (n:Point {id:$old}) RETURN count(n)",
+                         params={"old": old_id}).result_set[0][0]
+    # Every edge still incident to old after the write removes the handled set.
+    # The writer ADDS only `(new)-[:CORRECTS]->(old)` (reported separately), and
+    # that edge does not exist yet, so it is correctly absent here.
+    incident_at_old = proj.g.query(
+        "MATCH (o:Point {id:$old})-[r]-() RETURN count(r)",
+        params={"old": old_id},
+    ).result_set[0][0]
+    return _preview_result(
+        "tortoise_supersede", "supersede",
+        found=True,
+        transfer_edges=True,
+        target={"old_id": old_id, "new_id": new_id},
+        nodes_affected=n_old,
+        nodes_removed=0,
+        edges_transferred_from_old=removed_raw,
+        edges_remaining_at_old=incident_at_old - len(handled_old_edge_ids),
+        edges_created_at_new=len(created_edges) * succ_count,
+        edges_already_present_at_new=len(already_present) * succ_count,
+        successor_nodes=succ_count,
+        edges_transferred=removed_raw,
+        edges=created_edges + already_present,
+        edges_dropped=dropped,
+        edges_kept_attached=kept,
+        corrects_edge={"type": "CORRECTS", "from": new_id, "to": old_id},
+        status={"id": old_id, "to": "superseded", "outdated": True},
+    )
+
 
 # ── Tool Registry Adapter (#454) — registration (module bottom) ──
 # Executes after EVERY module-level tool function definition above, so the

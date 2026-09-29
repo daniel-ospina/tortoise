@@ -1,9 +1,10 @@
 """Unit tests for the canonical onboarding state module (T1, #2001 W5).
 
 Pins (scope doc §4.1/§4.3, plan T1):
-- canonical step list (6), card subset (3, ⊆ canonical), per-key semantics table
+- canonical step list (7), card subset (3, ⊆ canonical), per-key semantics table
 - fork-aware completion gate (self/build/compact, compact-first, fork=None→'self')
 - validate_step_id
+- #3451 restart_pending derivation (both directions)
 - set-once/LWW/server-owned semantics constants
 - module is importable without hosted_api (no circular import)
 """
@@ -24,15 +25,18 @@ from tortoise.onboarding.state import (
     STATUS_COMPLETE,
     STEP_IDS,
     completion_gate_satisfied,
+    resolve_wire_completion,
+    restart_pending,
     validate_step_id,
 )
 
 # ── canonical list / card subset ─────────────────────────────
 
 class TestCanonicalList:
-    def test_six_canonical_steps_in_display_order(self):
+    def test_seven_canonical_steps_in_display_order(self):
         assert tuple(STEP_IDS) == (
             "team-named",
+            "connection-written",
             "harness-connected",
             "first-points-filed",
             "decide-completed",
@@ -59,6 +63,97 @@ class TestCanonicalList:
         # row (#3913 — the build fork renders no extra row).
         assert "decide-completed" in CARD_STEPS
         assert "catalog-presented" not in CARD_STEPS
+
+    def test_connection_written_is_canonical_but_not_a_counted_row(self):
+        # #3451: the config-write trace is canonical (accepted + recorded) but
+        # NOT a completion-relevant card row — the gates are unchanged, so it
+        # must not change any fork's N-of-M.
+        assert "connection-written" in STEP_IDS
+        assert "connection-written" not in CARD_STEPS
+
+
+class TestRestartPending:
+    """#3451: the config-write trace, and the restart-pending condition
+    DERIVED from it — never a second stored field (no FLOW key, no jsonb key).
+
+    Both directions are the point: a restart-pending install must be
+    distinguishable from one whose config write never happened.
+    """
+
+    def test_written_but_not_verified_is_restart_pending(self):
+        assert restart_pending(["team-named", "connection-written"]) is True
+
+    def test_no_config_written_is_never_restart_pending(self):
+        # the abandoned install — the direction that must never be reported
+        # as waiting for a restart
+        assert restart_pending(["team-named"]) is False
+        assert restart_pending([]) is False
+
+    def test_verified_connection_is_not_restart_pending(self):
+        assert restart_pending(
+            ["team-named", "connection-written", "harness-connected"]) is False
+        # a server-observed connection alone is never 'pending'
+        assert restart_pending(["harness-connected"]) is False
+
+    def test_unavailable_marker_is_not_a_step_set(self):
+        # a graph-down read serves the literal 'unavailable' string; the helper
+        # must not string-scan it into a fabricated verdict.
+        # RED mutation: drop the isinstance guard → the `None` assert below
+        # raises TypeError. (The string assert stays False either way:
+        # set("unavailable") holds characters, not step ids.)
+        assert restart_pending("unavailable") is False
+        assert restart_pending(None) is False
+
+    def test_new_step_is_in_no_completion_gate(self):
+        # the #3913 owner ruling stands: completion is unchanged by the new
+        # step — it is never required, and it never completes anything alone
+        # RED mutation: add "connection-written" to _GATE_SELF/_GATE_BUILD →
+        # the FIRST assert (the full set) drops to False. The "alone" assert
+        # stays False either way — the gate needs the other steps regardless.
+        full = {"team-named", "harness-connected", "first-points-filed",
+                "decide-completed"}
+        for fork in ("self", "build"):
+            assert completion_gate_satisfied(full, fork, False) is True
+            assert completion_gate_satisfied(
+                full | {"connection-written"}, fork, False) is True
+            assert completion_gate_satisfied(
+                {"connection-written"}, fork, False) is False
+
+    def test_config_write_never_closes_the_grandfathered_window(self):
+        """#3451: ``connection-written`` is a CLIENT-only trace, so it must not
+        terminate the grandfathered-window guard — that window closes on the
+        first SERVER-OBSERVED act (#3913). A grandfathered org (node present,
+        status active, legacy jsonb complete=true) that follows §3 must stay
+        complete on the wire; only a real observed act may flip it.
+
+        RED mutation: drop 'connection-written' from ``_NON_AGENT_STEPS`` → the
+        second assert flips False, i.e. the config checkpoint alone regresses a
+        legitimately grandfathered org to incomplete before the restart.
+        """
+        gf = ["team-named"]
+        assert resolve_wire_completion("active", True, gf) is True
+        assert resolve_wire_completion(
+            "active", True, [*gf, "connection-written"]) is True
+        # a SERVER-OBSERVED act still closes the window (fail-closed)
+        assert resolve_wire_completion(
+            "active", True, [*gf, "harness-connected"]) is False
+
+    def test_read_only_grandfathered_mirror_agrees_on_the_config_write(self):
+        """#3451: ``_legacy_grandfathered`` is the read-only MIRROR of the same
+        grandfathered branch (the #3912 false-completion repair path reads it).
+        It must agree with ``resolve_wire_completion`` about ``connection-written``,
+        or the repair path can judge a legitimately grandfathered org falsely
+        complete and REGRESS its status.
+
+        RED mutation: revert ``_legacy_grandfathered`` to ``s != "team-named"``
+        → the second assert flips False.
+        """
+        assert onboarding_state._legacy_grandfathered(True, ["team-named"]) is True
+        assert onboarding_state._legacy_grandfathered(
+            True, ["team-named", "connection-written"]) is True
+        # a SERVER-OBSERVED act still closes the window
+        assert onboarding_state._legacy_grandfathered(
+            True, ["team-named", "harness-connected"]) is False
 
 
 class TestStepValidation:

@@ -130,6 +130,15 @@ UNVERIFIABLE_SITES = {
 # rely on that reading (#4446 review). Counts, not presence: `elastic <= declared` absorbed
 # a brand-new broken call site that merely reused a declared path — a count changes when a
 # site is added, so the new one reds the shape test.
+# These counts are a MEASUREMENT of the client, so a base move that changes the client's
+# call sites legitimately moves them: re-measure and update the keys that changed, do NOT
+# reach for the nearest round number. On the #4446 rebase the population was the same 20
+# keys before and after and the sites total 31 either way; only these two counts moved,
+# because main added a call site to the #4355 `POST /v1/team/keys/{id}/rotate` remedy and
+# consolidated one on `/v1/onboarding/state` (6->5 and 2->3, which reconciles). The routes
+# assertion above passed throughout, which is what separates "the client evolved" from
+# "a site is broken" - if that one fails, the counts are not the problem and must not be
+# touched. A key count is a measurement too: re-derive it, do not restate it from memory.
 TRAILING_HOLE_SITES = {
     ("api", "/v1/backups", "GET"): 1,
     ("api", "/v1/graphs", "PATCH"): 1,
@@ -139,7 +148,7 @@ TRAILING_HOLE_SITES = {
     ("api", "/v1/onboarding/github/repos", "GET"): 1,
     ("api", "/v1/onboarding/github/status", "GET"): 1,
     ("api", "/v1/onboarding/state", "GET"): 1,
-    ("api", "/v1/onboarding/state", "PATCH"): 6,
+    ("api", "/v1/onboarding/state", "PATCH"): 5,
     ("api", "/v1/onboarding/state/checkpoint", "POST"): 1,
     ("api", "/v1/sessions", "DELETE"): 1,
     ("api", "/v1/sessions", "GET"): 2,
@@ -147,7 +156,7 @@ TRAILING_HOLE_SITES = {
     ("api", "/v1/team/keys", "DELETE"): 2,
     ("api", "/v1/team/keys", "GET"): 2,
     ("api", "/v1/team/keys", "PATCH"): 2,
-    ("api", "/v1/team/keys", "POST"): 2,
+    ("api", "/v1/team/keys", "POST"): 3,
     ("fetch", "/v1/graphs", "DELETE"): 1,
     ("fetch", "/v1/graphs/trash", "GET"): 1,
     ("fetch", "/v1/graphs/trash", "POST"): 1,

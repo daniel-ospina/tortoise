@@ -9,39 +9,75 @@
  * `type` values are owned by SCOPE.md §5.2 and NOT restated here. The caller
  * passes the value Supabase put in the template.
  *
- * RECOVERY COMPLETES THROUGH AN INTERSTITIAL (#4104 review, cycle 2)
- * ------------------------------------------------------------------
- * The first version of this fix exempted `type=recovery` from the class-8
- * `__Host-authflow` binding and minted a full `__Host-session` from the
- * `token_hash` alone. That re-opened the exact session-fixation vector the
- * binding exists to stop: an attacker requests a password reset for THEIR OWN
+ * EVERY EMAIL FLOW COMPLETES THROUGH AN INTERSTITIAL (#3528)
+ * ----------------------------------------------------------
+ * `type=recovery` was the only type that could complete: its branch mints a
+ * pending record and a binding cookie of its own. `email` (signup confirmation
+ * AND magic link), `email_change` and `invite` fell to a class-8 branch that
+ * required a `__Host-authflow` cookie matching a live `auth_flows` row — and
+ * **no email flow establishes one**. `FLOW_COOKIE` is minted only by
+ * `/auth/start` (OAuth/PKCE) and `/auth/link` (identity linking). `/auth/reset`
+ * and `/auth/resend` set `redirect_to=/auth/confirm` without one, and
+ * `/auth/signup` sends no confirmation email at all by default (the hosted API
+ * creates the account with `email_confirm=true`, #801) — so the confirmation
+ * flow is reachable through `/auth/resend`, or when that default is deliberately
+ * flipped: see `docs/ops/auth-email-flows.md` §3.
+ * A confirmation link opened from an inbox therefore arrived with no cookie and
+ * was answered `302 /auth?interstitial=1` — which nothing consumes — dropping
+ * the single-use `token_hash` on the floor. Email confirmation did not work at
+ * all, same-browser or cross-device.
+ *
+ * The fix is to give every email type the recovery treatment instead of adding
+ * a second mechanism. The interstitial is the ONLY one that can work: an emailed
+ * link is routinely opened on a device that never started the flow, and
+ * `SCOPE.md` §8.4's `/auth/start` binding — the alternative — cannot supply a
+ * cookie to a browser that was not there to receive it. The binding here is
+ * therefore *per pending record*, created by the GET and consumed by the POST in
+ * the SAME browser, which is exactly the case §8.4 exists to protect and the
+ * case §5.3 requires to be non-silent.
+ *
+ * This SUPERSEDES §8.4's "the confirm URL carries the flow id" for the email
+ * types, as an explicit, reversible choice: §8.4 fixed only the same-browser
+ * path and §8.4 itself records that the happy path breaks without a flow-start
+ * route that signup/recovery/invite do not have. The security property §8.4 and
+ * §9 class 8 protect — no silent login from a credential the browser did not
+ * request — is preserved by informed consent instead: the page NAMES the account
+ * the link belongs to and mints nothing until it is clicked.
+ *
+ * THE INTERSTITIAL (why the GET must not mint)
+ * --------------------------------------------
+ * **The consent step is the whole mitigation.** The `__Host-authflow` cookie
+ * binding does NOT defend against the vector below — the GET hands a matching
+ * cookie to ANY browser that opens a verified link, including the victim's, so a
+ * future lane must not treat the binding as load-bearing and weaken the
+ * interstitial. What the binding does is make the pending record single-use and
+ * non-guessable, and stop a cross-browser/replayed POST. The protection against
+ * the attacker-issued link is that the page NAMES the account and mints nothing
+ * until it is deliberately confirmed.
+ *
+ * An attacker requests a password reset (or any email link) for THEIR OWN
  * address, receives a genuine, unexpired, single-use
- * `…/auth/confirm?token_hash=<attacker>&type=recovery`, and gets the victim to
- * click it. `verifyOtp` succeeds, `revokeAllForUser` revokes the attacker's OWN
- * sessions, and a session for the ATTACKER's account is minted INTO THE VICTIM'S
- * BROWSER — where the victim then operates inside the attacker's account.
+ * `…/auth/confirm?token_hash=<attacker>&type=…`, and gets the victim to click it.
+ * `verifyOtp` succeeds and a session for the ATTACKER's account is minted INTO
+ * THE VICTIM'S BROWSER — where the victim then operates inside the attacker's
+ * account. The `token_hash` cannot be the whole mitigation: it is unforgeable
+ * and single-use, but the attacker can always obtain one FOR THEIR OWN ACCOUNT.
+ * What the victim lacks is informed consent, so every type uses the interstitial
+ * every major provider uses for magic links:
  *
- * The `token_hash` cannot be the whole mitigation: it is unforgeable and
- * single-use, but the attacker can always obtain one FOR THEIR OWN ACCOUNT. What
- * the victim lacks is informed consent, so recovery uses the interstitial every
- * major provider uses for magic links:
- *
- *   GET  /auth/confirm?…&type=recovery
+ *   GET  /auth/confirm?…&type=<any>
  *        verifies the single-use `token_hash`, then renders a minimal page
  *        NAMING the account the link belongs to and mints NO session.
  *   POST /auth/confirm
- *        CSRF-guarded; `__Host-authflow` binds the pending recovery to THIS
- *        browser. It consumes the pending record, revokes the user's other
- *        sessions, mints the session, and redirects to `/welcome?reset=1`.
+ *        CSRF-guarded; `__Host-authflow` binds the pending record to THIS
+ *        browser. It consumes the record, mints the session, and redirects to
+ *        `/welcome` (recovery adds `?reset=1` and revokes the user's other
+ *        sessions — F15).
  *
- * A victim who did not request a reset sees an unexpected account and does not
- * continue. The cookie binding is safe here even though the LINK is opened
- * cross-device: the GET and the POST both happen in the SAME browser, so the
- * `__Host-authflow` cookie set by the interstitial GET is present on its POST.
- *
- * Non-recovery flows (email confirmation, invite, magic link) KEEP the original
- * class-8 binding and complete in one GET — they are started in the browser that
- * must complete them.
+ * A victim who did not request the link sees an unexpected account and does not
+ * continue. Both hops happen in the SAME browser, so the flow works
+ * cross-device: the `__Host-authflow` cookie is created by the GET, not required
+ * to pre-exist.
  *
  * Links already sent before the cutover are fragment-style and cannot be
  * redeemed here — that is an explicit unsupported-by-decision (§5.4), not an
@@ -63,38 +99,44 @@ import {
   revokeAllForUser,
 } from "../_shared/auth/session";
 import { guardStateChangingRequest } from "../_shared/auth/csrf";
-import { verifyOtp } from "../_shared/auth/supabase";
+import { requireUserSession, verifyOtp } from "../_shared/auth/supabase";
 import { cspNonce, strictCspWithNonce } from "../_shared/security-headers";
 
-interface FlowRow {
-  flow_id: string;
+/** A verified email-flow token awaiting the user's explicit confirmation. */
+interface PendingRow {
   kind: string;
-  expires_at: number;
-}
-
-interface RecoveryRow {
   user_id: string;
   refresh_token: string;
   email: string | null;
   expires_at: number;
 }
 
-/** How long the verified-but-unconfirmed recovery stays redeemable. */
+/**
+ * How long a verified-but-unconfirmed email link stays redeemable.
+ *
+ * Bounds REPLAY of the pending record, not fixation — only the consent step and
+ * the single-use delete address fixation (see the header).
+ */
 const RECOVERY_MAX_AGE_S = 10 * 60;
 
 /** Rendered responses are Functions output, so `_headers` does not reach them. */
 const HSTS = "max-age=31536000; includeSubDomains";
 
 /**
- * A pending recovery: the outcome of a VERIFIED `token_hash`, held server-side
- * until the user confirms on the interstitial. Its own table (not `auth_flows`)
- * because the credential it carries — the refresh token — must never be exposed
- * to, or controllable by, a flow-start request.
+ * A pending email-flow confirmation: the outcome of a VERIFIED `token_hash`,
+ * held server-side until the user confirms on the interstitial. Its own table
+ * (not `auth_flows`) because the credential it carries — the refresh token —
+ * must never be exposed to, or controllable by, a flow-start request.
+ *
+ * `kind` is the GoTrue `type` the link arrived with, and it is what makes
+ * recovery-only behaviour (F15 bulk revoke, the reset panel) apply to recovery
+ * and NOT to an ordinary confirmation or magic link.
  */
-async function ensureRecoveryTable(db: D1Database): Promise<void> {
+async function ensurePendingTable(db: D1Database): Promise<void> {
   await db.exec(
-    "CREATE TABLE IF NOT EXISTS recovery_flows (" +
+    "CREATE TABLE IF NOT EXISTS email_flow_pending (" +
       "flow_id TEXT PRIMARY KEY, " +
+      "kind TEXT NOT NULL, " +
       "user_id TEXT NOT NULL, " +
       "refresh_token TEXT NOT NULL, " +
       "email TEXT, " +
@@ -127,8 +169,17 @@ function escapeHtml(value: string): string {
 // this and asserts the REAL response carries `no-store`, the flow cookie, and a
 // nonce that the inline `<script>`/`<style>` actually match — a source-level
 // regex on this file would also pass on a commented-out header.
-export function recoveryInterstitial(email: string | null, pendingId: string): Response {
+export function emailInterstitial(email: string | null, pendingId: string, kind: string): Response {
   const shown = email ? escapeHtml(email) : "your account";
+  // Recovery is the one type with a post-condition the user must act on, and the
+  // one type that revokes the user's other sessions (F15). Everything else just
+  // signs in.
+  const isRecovery = kind === "recovery";
+  const lede = isRecovery
+    ? "A password-recovery link was opened for"
+    : "A sign-in link was opened for";
+  const action = isRecovery ? "continue to set a new password" : "continue to sign in";
+  const dest = isRecovery ? "/welcome?reset=1" : "/welcome";
   // #3525: this is the one self-rendered HTML page in the dashboard AND the one
   // with no inline event handlers, so it can be nonce-gated — the treatment the
   // MCP consent page already uses. The policy is NOT nonce-ONLY: it carries the
@@ -167,8 +218,8 @@ export function recoveryInterstitial(email: string | null, pendingId: string): R
   <main class="card">
     <div class="brand">tortoise<span>·</span></div>
     <h1>Confirm it's you</h1>
-    <p>A password-recovery link was opened for <span class="email">${shown}</span>.
-       If this is your account, continue to set a new password.</p>
+    <p>${lede} <span class="email">${shown}</span>.
+       If this is your account, ${action}.</p>
     <button id="continue" type="button">Sign in as <strong>${shown}</strong> — Continue</button>
     <p class="error" id="error" role="alert" aria-live="polite"></p>
     <p class="small">If this is not your account, close this page — no one is signed in yet.</p>
@@ -183,13 +234,18 @@ export function recoveryInterstitial(email: string | null, pendingId: string): R
         // A JSON POST is required by the BFF's CSRF guard (a form cannot send
         // application/json). Follow the 302 so the Set-Cookie is applied, then
         // land on the reset panel.
+        // The id of the record THIS page is asking the user to authorise. It is
+        // sent back on the POST and must equal the cookie, so a second link
+        // opened in another tab (the cookie is per-browser, not per-tab) cannot
+        // redirect the consent the user gave HERE to a DIFFERENT account. A page
+        // naming account A must never mint B.
         fetch('/auth/confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({})
+          body: JSON.stringify({ pending: '${pendingId}' })
         }).then(function (res) {
-          if (res.ok) { window.location.assign('/welcome?reset=1'); return; }
+          if (res.ok) { window.location.assign('${dest}'); return; }
           throw new Error('HTTP ' + res.status);
         }).catch(function () {
           btn.disabled = false;
@@ -204,6 +260,15 @@ export function recoveryInterstitial(email: string | null, pendingId: string): R
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "Strict-Transport-Security": HSTS,
+    // A consent page is only worth anything if the user reads WHICH account it
+    // names, so it must not be framed. (`_headers` does not reach Functions
+    // output, hence the explicit stamp. Not currently exploitable without this —
+    // a framed cross-site POST carries no `SameSite=Lax` cookie and would 400.)
+    // #4634: `X-Frame-Options` is the legacy enforcement arm of the same
+    // requirement; `frame-ancestors 'none'` is NOT restated as a second CSP
+    // header because `strictCspWithNonce` already carries it, and #3525's guard
+    // pins the served policy to exactly that one value.
+    "X-Frame-Options": "DENY",
     "Content-Security-Policy": strictCspWithNonce(nonce),
   });
   headers.append("Set-Cookie", buildCookie(FLOW_COOKIE, pendingId, RECOVERY_MAX_AGE_S));
@@ -214,7 +279,6 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
   const tokenHash = url.searchParams.get("token_hash");
   const type = url.searchParams.get("type");
-  const flowCookie = readCookie(request, FLOW_COOKIE);
 
   if (!env.SESSIONS) return json({ error: "session_store_unavailable" }, { status: 503 });
 
@@ -226,124 +290,58 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
 
   if (!tokenHash || !type) return redirect("/auth?error=invalid_link");
 
-  // ── RECOVERY: verify, then ask for consent. Never mint here. ──────────────
-  if (type === "recovery") {
-    const verified = await verifyOtp(env, tokenHash, type);
-    if (!verified.ok) {
-      const status = verified.retryable ? 503 : 401;
-      return json({ error: "verification_failed", detail: verified.error }, { status });
-    }
-
-    try {
-      await ensureRecoveryTable(env.SESSIONS);
-    } catch {
-      return json({ error: "session_store_unavailable" }, { status: 503 });
-    }
-
-    const pendingId = randomHandle();
-    const now = Date.now();
-    try {
-      await env.SESSIONS.prepare(
-        "INSERT INTO recovery_flows (flow_id,user_id,refresh_token,email,created_at,expires_at) " +
-          "VALUES (?1,?2,?3,?4,?5,?6)",
-      )
-        .bind(
-          pendingId,
-          verified.data.user.id,
-          verified.data.refresh_token,
-          verified.data.user.email ?? null,
-          now,
-          now + RECOVERY_MAX_AGE_S * 1000,
-        )
-        .run();
-    } catch {
-      return json({ error: "session_store_unavailable" }, { status: 503 });
-    }
-
-    return recoveryInterstitial(verified.data.user.email ?? null, pendingId);
-  }
-
-  // --- flow binding (class-8) ------------------------------------------------
-  // Non-recovery flows KEEP the `__Host-authflow` binding: they are started in
-  // the browser that must complete them, so a token_hash with no matching live
-  // flow on THIS browser is not honoured. A missing or stale cookie gets the
-  // interstitial, never a silent session.
-  let flow: FlowRow | null = null;
-  if (flowCookie) {
-    try {
-      flow = await env.SESSIONS.prepare(
-        "SELECT flow_id,kind,expires_at FROM auth_flows WHERE flow_id = ?1",
-      )
-        .bind(flowCookie)
-        .first<FlowRow>();
-    } catch {
-      return json({ error: "session_store_unavailable" }, { status: 503 });
-    }
-  }
-
-  if (!flowCookie) return redirect("/auth?interstitial=1");
-  if (!flow || flow.expires_at <= Date.now()) {
-    return redirect("/auth?interstitial=1", [clearCookie(FLOW_COOKIE)]);
-  }
-
-  // --- server-side completion ------------------------------------------------
-  const result = await verifyOtp(env, tokenHash, type);
-  if (!result.ok) {
+  // ── EVERY type: verify, then ask for consent. Never mint here. ────────────
+  const verified = await verifyOtp(env, tokenHash, type);
+  if (!verified.ok) {
     // A link can expire or already have been used. That is NOT a server fault,
     // and it is NOT the same as "your session ended" — say so explicitly.
-    const status = result.retryable ? 503 : 401;
-    return json({ error: "verification_failed", detail: result.error }, { status });
+    const status = verified.retryable ? 503 : 401;
+    return json({ error: "verification_failed", detail: verified.error }, { status });
   }
 
-  // Completing recovery must invalidate every other session (F15), so a stolen
-  // session does not survive the reset. (The recovery TYPE now completes on the
-  // interstitial POST; a flow row with kind `recovery` can still arrive from an
-  // older link shape, so this remains.)
-  //
-  // This runs BEFORE the new session is minted, so a failure here must stop the
-  // flow rather than be swallowed: `catch(() => 0)` asserted the F15 guarantee
-  // while leaving the stolen session alive.
-  if (flow.kind === "recovery") {
-    try {
-      await revokeAllForUser(env.SESSIONS, result.data.user.id);
-    } catch {
-      return json(
-        {
-          error: "revocation_failed",
-          message: "Could not invalidate existing sessions. Please try the reset link again.",
-        },
-        { status: 503 },
-      );
-    }
+  // A 2xx is not proof of a usable body — `call()` classifies by status alone.
+  // Without this the next lines throw a TypeError and the route answers an
+  // unhandled 500 instead of the 503 its contract declares (#4160).
+  const session = requireUserSession(verified.data);
+  if (!session) return json({ error: "provider_unavailable" }, { status: 503 });
+
+  try {
+    await ensurePendingTable(env.SESSIONS);
+  } catch {
+    return json({ error: "session_store_unavailable" }, { status: 503 });
   }
 
-  const handle = await createSession(
-    env.SESSIONS,
-    result.data.user.id,
-    result.data.refresh_token,
-    SESSION_MAX_AGE_S,
-  ).catch(() => null);
-  if (!handle) return json({ error: "session_store_unavailable" }, { status: 503 });
-
-  if (flowCookie) {
-    await env.SESSIONS.prepare("DELETE FROM auth_flows WHERE flow_id = ?1").bind(flowCookie)
-      .run()
-      .catch(() => undefined);
+  const pendingId = randomHandle();
+  const now = Date.now();
+  try {
+    await env.SESSIONS.prepare(
+      "INSERT INTO email_flow_pending (flow_id,kind,user_id,refresh_token,email,created_at,expires_at) " +
+        "VALUES (?1,?2,?3,?4,?5,?6,?7)",
+    )
+      .bind(
+        pendingId,
+        type,
+        session.userId,
+        session.refreshToken,
+        session.email,
+        now,
+        now + RECOVERY_MAX_AGE_S * 1000,
+      )
+      .run();
+  } catch {
+    return json({ error: "session_store_unavailable" }, { status: 503 });
   }
 
-  return redirect("/welcome", [
-    buildCookie(SESSION_COOKIE, handle, SESSION_MAX_AGE_S),
-    clearCookie(FLOW_COOKIE),
-  ]);
+  return emailInterstitial(session.email, pendingId, type);
 };
 
 /**
  * POST /auth/confirm — the interstitial's explicit confirmation.
  *
- * This is the ONLY place a recovery session is minted. It requires:
+ * This is the ONLY place an email-flow session is minted. It requires:
  *   - a JSON Content-Type and a same-origin `Origin` (the shared CSRF guard), and
- *   - a `__Host-authflow` cookie that MATCHES a live pending-recovery row
- *     (the class-8 binding, restored for recovery).
+ *   - a `__Host-authflow` cookie that MATCHES a live pending row
+ *     (the class-8 binding, per pending record).
  * The pending row is single-use: it is deleted before the session is created.
  */
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
@@ -357,21 +355,37 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.SESSIONS) return json({ error: "session_store_unavailable" }, { status: 503 });
 
   const pendingId = readCookie(request, FLOW_COOKIE);
-  if (!pendingId) {
+
+  // The id the PAGE displayed. The cookie alone is not enough: it is
+  // per-browser, not per-tab, and every verified GET overwrites it — so without
+  // this a second link opened in another tab would silently redirect the consent
+  // the user gave on THIS page to that other account (a page naming account A
+  // minting B). A missing or mismatched id is refused, never coerced.
+  let requested: string | null = null;
+  try {
+    const body = (await request.json()) as { pending?: unknown };
+    if (typeof body?.pending === "string") requested = body.pending;
+  } catch {
+    // Not JSON (the CSRF guard already rejected a non-JSON media type) or empty.
+  }
+  if (!pendingId || !requested || requested !== pendingId) {
     return json(
-      { error: "no_recovery_in_progress", message: "Open the recovery link from your email first." },
-      { status: 400 },
+      {
+        error: "no_email_flow_in_progress",
+        message: "Open the link from your email again.",
+      },
+      { status: 400, cookies: [clearCookie(FLOW_COOKIE)] },
     );
   }
 
-  let row: RecoveryRow | null = null;
+  let row: PendingRow | null = null;
   try {
-    await ensureRecoveryTable(env.SESSIONS);
+    await ensurePendingTable(env.SESSIONS);
     row = await env.SESSIONS.prepare(
-      "SELECT user_id,refresh_token,email,expires_at FROM recovery_flows WHERE flow_id = ?1",
+      "SELECT kind,user_id,refresh_token,email,expires_at FROM email_flow_pending WHERE flow_id = ?1",
     )
       .bind(pendingId)
-      .first<RecoveryRow>();
+      .first<PendingRow>();
   } catch {
     return json({ error: "session_store_unavailable" }, { status: 503 });
   }
@@ -380,28 +394,50 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     // The link was never opened here, already confirmed, or expired. No session
     // is minted — the whole point of the interstitial.
     return json(
-      { error: "recovery_expired", message: "This recovery link has expired. Request a new one." },
+      { error: "email_flow_expired", message: "This link has expired. Request a new one." },
       { status: 400, cookies: [clearCookie(FLOW_COOKIE)] },
     );
   }
 
-  // Single-use: consume the pending recovery before minting anything.
-  await env.SESSIONS.prepare("DELETE FROM recovery_flows WHERE flow_id = ?1")
-    .bind(pendingId)
-    .run()
-    .catch(() => undefined);
-
-  // F15: completing recovery invalidates every other session for the user.
+  // Single-use: consume the pending record before minting anything, and FAIL
+  // CLOSED if that consumption did not take. Checking the STATUS is not enough —
+  // a DELETE that matches 0 rows is not an error, and a concurrent POST that
+  // already consumed the record must not mint a second session.
+  let consumed: { meta?: { changes?: number } };
   try {
-    await revokeAllForUser(env.SESSIONS, row.user_id);
+    consumed = await env.SESSIONS.prepare("DELETE FROM email_flow_pending WHERE flow_id = ?1")
+      .bind(pendingId)
+      .run();
   } catch {
+    return json({ error: "session_store_unavailable" }, { status: 503 });
+  }
+  if ((consumed.meta?.changes ?? 0) !== 1) {
     return json(
-      {
-        error: "revocation_failed",
-        message: "Could not invalidate existing sessions. Please try the reset link again.",
-      },
-      { status: 503 },
+      { error: "email_flow_expired", message: "This link has already been used." },
+      { status: 400, cookies: [clearCookie(FLOW_COOKIE)] },
     );
+  }
+
+  // F15: completing RECOVERY invalidates every other session for the user, so a
+  // stolen session does not survive the reset. A confirmation or magic link does
+  // not touch other sessions — signing in on a new device must not sign the user
+  // out everywhere else.
+  //
+  // This runs BEFORE the new session is minted, so a failure here must stop the
+  // flow rather than be swallowed: `catch(() => 0)` asserted the F15 guarantee
+  // while leaving the stolen session alive.
+  if (row.kind === "recovery") {
+    try {
+      await revokeAllForUser(env.SESSIONS, row.user_id);
+    } catch {
+      return json(
+        {
+          error: "revocation_failed",
+          message: "Could not invalidate existing sessions. Request a new reset link.",
+        },
+        { status: 503 },
+      );
+    }
   }
 
   const handle = await createSession(
@@ -412,7 +448,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   ).catch(() => null);
   if (!handle) return json({ error: "session_store_unavailable" }, { status: 503 });
 
-  return redirect("/welcome?reset=1", [
+  return redirect(row.kind === "recovery" ? "/welcome?reset=1" : "/welcome", [
     buildCookie(SESSION_COOKIE, handle, SESSION_MAX_AGE_S),
     clearCookie(FLOW_COOKIE),
   ]);

@@ -117,15 +117,23 @@ class TestClassifyConsolidation:
             [{"id": "pt_long", "content": long_}])
         assert d.decision == "ADD"
 
-    def test_ambiguous_entity_high_overlap_noop_never_update(self):
-        """(g) ambiguous entity + high overlap → NOOP, NEVER UPDATE (E2E-11
-        owned negative — supersede would wrongly terminalize a fact)."""
+    def test_ambiguous_entity_high_overlap_is_add_never_update(self):
+        """(g) ambiguous entity + high overlap → ADD, NEVER UPDATE (E2E-11
+        owned negative — supersede would wrongly terminalize a fact).
+
+        The fold this case used to take ("yoga at 6pm" ← "gym at 6pm") is
+        refused by the D12/O4 never-across boundary (#5080): the subjects are
+        different named entities, so the two are rival claims and both
+        survive.  ADD keeps the E2E-11 intent — the prior is never
+        terminalized — without claiming a duplicate.
+        """
         d = v2.classify_consolidation(
             {"content": "yoga at 6pm", "about_entities": ["yoga"]},
             [{"id": "pt1", "content": "gym at 6pm"}],
             entity_mentions=["yoga"], current_date="2026-06-16")
-        assert d.decision == "NOOP"
-        assert "ambiguous" in d.evidence
+        assert d.decision == "ADD"
+        assert v2.distinguishing_difference(
+            "gym at 6pm", "yoga at 6pm") == "substituted_content"
 
     def test_no_self_match_identical_not_update(self):
         """(h) no self-match — identical content → NOOP, never UPDATE."""
@@ -174,9 +182,12 @@ class TestClassifyConsolidation:
             [{"id": "pt1", "content": "gym at 6pm",
               "search_keys": ["membership cost"]}],
             entity_mentions=["gym"], current_date="2026-06-16")
-        # no shared attribute AND different value sig → no UPDATE; high
-        # overlap still folds as NOOP (never UPDATE on ambiguity)
-        assert d.decision == "NOOP"
+        # no shared attribute AND a differing value → no UPDATE, and no NOOP
+        # either: 6pm vs 5pm is the D12/O4 never-across boundary (#5080), so
+        # the candidate is its own claim rather than a fold of the prior.
+        assert d.decision == "ADD"
+        assert v2.distinguishing_difference("gym at 6pm", "gym at 5pm") \
+            == "number"
 
 
 class TestExecuteEmbedConsolidation:
@@ -538,8 +549,9 @@ class TestS3BatchEnrichment:
 
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                # the REAL callee row shape (#4511): ``point_kind``, not ``kind``
                 return [{"id": "pt-1", "content": "flash is the path",
-                         "kind": "statement"}]
+                         "point_kind": "statement"}]
 
         res = v2.search_graph(MockSDK(), {"points": []}, "story")
         assert res["degraded"] is False

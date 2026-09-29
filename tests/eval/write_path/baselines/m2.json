@@ -13,7 +13,7 @@
     "seed": 42,
     "extractor_posture": "m2"
   },
-  "justification": "m2 deterministic re-measurement on the #2552 expanded operator gold (4 -> 15 planted edges): verdict PASS, every gated metric byte-identical to the staged carry-forward (macro/strict 1.0, leakage 15 structural on the echo lane, sessions/quote/provenance 1.0) \u2014 confirming the gold-only change does not move the graded metrics, as predicted (planted_operators is not a METRIC_VALUES input). run w2b-e695c315393e, head 058b427f1. Operator audit on this lane: 2/15 edge_correct (structural \u2014 the echo lane has no product relation extraction; its gate is determinism, never the operator bar), 343/343 reified operator Points eventId-stamped into the retrievable memory layer.",
+  "justification": "#4716: m2 lane re-measured at the new head after the mint-E7/operator-remap change (Parts 1-3). The m2 lane is structurally inert to this diff (it writes operators via the EventAPI projection, never execute_embed) and the corpus hash is unchanged (sha256:943a99ec...), so the metrics are byte-identical: salient_unit_survival macro/strict 1.0, provenance 1.0, quote_fidelity 1.0, distractor_leakage 15, sessions_emitting 1.0, operators 343/343 provenanced. Re-bless records the head.",
   "metrics": {
     "salient_unit_survival_macro": 1.0,
     "salient_unit_survival_strict": 1.0,
@@ -163,6 +163,20 @@
       },
       "failure_classes": [],
       "justification": "m2 deterministic re-measurement on the #2552 expanded operator gold (4 -> 15 planted edges): verdict PASS, every gated metric byte-identical to the staged carry-forward (macro/strict 1.0, leakage 15 structural on the echo lane, sessions/quote/provenance 1.0) \u2014 confirming the gold-only change does not move the graded metrics, as predicted (planted_operators is not a METRIC_VALUES input). run w2b-e695c315393e, head 058b427f1. Operator audit on this lane: 2/15 edge_correct (structural \u2014 the echo lane has no product relation extraction; its gate is determinism, never the operator bar), 343/343 reified operator Points eventId-stamped into the retrievable memory layer.",
+      "verdict": "pass"
+    },
+    {
+      "date": "2026-09-24T02:16:51Z",
+      "values": {
+        "salient_unit_survival_macro": 1.0,
+        "salient_unit_survival_strict": 1.0,
+        "distractor_leakage_per_run": 15,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 1.0,
+        "provenance_accuracy": 1.0
+      },
+      "failure_classes": [],
+      "justification": "#4716: m2 lane re-measured at the new head after the mint-E7/operator-remap change (Parts 1-3). The m2 lane is structurally inert to this diff (it writes operators via the EventAPI projection, never execute_embed) and the corpus hash is unchanged (sha256:943a99ec...), so the metrics are byte-identical: salient_unit_survival macro/strict 1.0, provenance 1.0, quote_fidelity 1.0, distractor_leakage 15, sessions_emitting 1.0, operators 343/343 provenanced. Re-bless records the head.",
       "verdict": "pass"
     }
   ]

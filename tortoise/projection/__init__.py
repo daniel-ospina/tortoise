@@ -271,7 +271,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 2
+_PREWIPE_SNAPSHOT_VERSION = 3
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -280,7 +280,15 @@ _PREWIPE_SNAPSHOT_VERSION = 2
 # `_write_prewipe_snapshot`, so without a bump a v1 build would accept this
 # file and silently ignore `config_snapshot` while its wipe landed. With the
 # bump that build REFUSES the rebuild instead (its `version != 1` check).
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2)
+#
+# #3049: v3 adds `graph_identity` — the GRAPH the sidecar describes, not just
+# the directory it sits in. The bump carries the same rollback argument as
+# v2 and it is sharper here: a v2-aware build reading a v3 sidecar REFUSES it
+# (unknown version), so a rollback cannot silently re-enter the unconditional
+# merge that this change removes. Reading v1/v2 stays required — a rescue
+# file written before this change has NO `graph_identity`, which the mismatch
+# test reads as identity-unknown and proceeds on, exactly as that build did.
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3)
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -441,6 +449,18 @@ def _config_classes() -> tuple[_ConfigClass, ...]:
     """
     global _config_classes_cache
     if _config_classes_cache is None:
+        # #5148 review — DO NOT guard these imports, and do NOT degrade to an
+        # empty tuple on failure. They reach `tortoise.embeddings` transitively
+        # (`pack_state` -> `sdk` -> `cross_lens`), and the failure propagating
+        # is LOAD-BEARING: `_capture_config_snapshot` calls this unconditionally
+        # and lets the exception reach `rebuild_all`'s `capture_failed` gate,
+        # which raises BEFORE the wipe (#2943). Returning `()` here would
+        # silence that gate, let the wipe proceed, and destroy every graph-only
+        # config node with no durable record — turning a safe refusal into
+        # silent data loss. The fail-soft discipline applied to the WRITE and
+        # REPLAY seams is CORRECT THERE and WRONG HERE: there the failure is
+        # advisory or a single write, here it is the only proof the wipe is
+        # safe.
         from tortoise.pack_manifest_store import PACK_MANIFEST_LABEL
         from tortoise.pack_state import PACK_INSTALL_LABEL
         from tortoise.sdk import TortoiseSDK
@@ -774,6 +794,66 @@ _REPLAY_GAP_PROPS = ("outdated", "expiredAt", "posterior_alpha",
 def prewipe_snapshot_path(log_dir: str) -> str:
     """Durable #548/#990 pre-wipe snapshot path for an event-log directory."""
     return os.path.join(log_dir, _PREWIPE_SNAPSHOT_FILENAME)
+
+
+def _prewipe_db_path_identity(path: str | None) -> str | None:
+    """The DB-path half of a sidecar's graph identity (#3049).
+
+    ``None`` for a server/URI graph (no embedded file at all) and for the
+    in-memory pseudo-path — neither carries a FILE identity. Otherwise the
+    ``realpath`` of the expanded, absolutized path. ``realpath`` rather than a
+    bare ``abspath`` because the false-mismatch direction is the dangerous
+    one: the same database reached through a symlinked directory (macOS
+    ``/tmp`` → ``/private/tmp``, a deployment symlink) must compare EQUAL, or
+    a legitimate retry would be refused. A genuine difference refuses
+    fail-closed — the abort happens before the wipe, so nothing is destroyed
+    and the operator resolves the foreign sidecar and retries.
+    """
+    if not path or path == ":memory:":
+        return None
+    try:
+        return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except (OSError, ValueError):  # pragma: no cover — defensive
+        return None
+
+
+def _prewipe_identity_mismatch(
+        snapshot: dict, *, graph_name: str, db_path: str | None,
+) -> tuple[str, str | None] | None:
+    """The FOREIGN identity recorded in ``snapshot``, or None to proceed.
+
+    Tri-state by design (#3049):
+
+    * **identity unknown** — a legacy sidecar with no ``graph_identity``, or
+      an unusable/malformed one — returns None, so the rebuild behaves exactly
+      as it did before this change. This is the migration contract: a rescue
+      file written by an older build still merges, and is still retired.
+    * **identity equal** returns None.
+    * **identity present and different** returns ``(graph_name, db_path)`` so
+      the caller can refuse BEFORE the wipe and leave the file untouched.
+
+    ``graph_name`` alone is NOT enough: every EMBEDDED graph defaults to
+    ``graph_name='tortoise'``, so two embedded DBs over one log dir are
+    distinguishable only by their db path (#3049). The path is therefore part
+    of the identity, and this comparison is exact — a recorded ``null`` path
+    (a server graph) never matches an embedded graph's real path, and vice
+    versa.
+    """
+    ident = snapshot.get("graph_identity") if isinstance(snapshot, dict) else None
+    if not isinstance(ident, dict):
+        return None
+    recorded_name = ident.get("graph_name")
+    if not isinstance(recorded_name, str) or not recorded_name:
+        return None
+    recorded_path = ident.get("db_path")
+    if recorded_path is not None and not isinstance(recorded_path, str):
+        # Malformed path: keep the name half (still a usable identity) and
+        # fail CLOSED on the path half, which is what the caller's wipe gate
+        # needs. Coercing to None means an embedded current graph mismatches.
+        recorded_path = None
+    if recorded_name == graph_name and recorded_path == db_path:
+        return None
+    return recorded_name, recorded_path
 
 
 def _validate_prewipe_snapshot(data: dict, path: str) -> None:
@@ -1186,6 +1266,7 @@ class _GuardedGraph:
         return getattr(self._g, name)
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
+from tortoise.fork_slot import is_fork_refusal  # noqa: E402
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
@@ -1200,6 +1281,86 @@ _WRITE_REFUSAL_MARKERS = (
     "out of memory",            # generic engine wording
 )
 
+# #3634 — a probe can fail for reasons that are neither corruption nor a
+# maxmemory refusal, and each has its OWN remedy. Collapsing them (or letting
+# them fall through to the rebuild advice) misattributes the failure: a
+# still-hydrating server or a fork-refusing one is NOT a broken graph.
+#
+# The FORK family has exactly ONE classifier — ``fork_slot.is_fork_refusal``,
+# which owns the marker vocabulary (its single home) and walks the
+# ``__cause__``/``__context__`` chain — so this table carries only the LOADING
+# cause and ``_backend_failure_message`` delegates fork detection. Do NOT
+# restate fork markers here: a second, parallel list is how ``could not fork``
+# (FalkorDB's own reply, ``cmd_copy.c``) went unrecognised while the table
+# matched only the invented ``fork failed`` stem.
+#
+# The one marker is a deliberately long phrase, NOT a bare cause word: a bare
+# ``"loading"`` would swallow unrelated text (a path, a docstring) and route
+# it to the wrong remedy.
+#
+# (marker, cause_key)
+_BACKEND_FAILURE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("redis is loading the dataset", "loading"),  # LOADING reply — RDB/AOF hydrating
+)
+
+# The per-cause body. Each NAMES its own cause and states what the cause
+# actually means, so the operator does not act on a neighbour's remedy.
+#
+# The FORK remedy is the one cause whose body is not a single literal. Its
+# refusal has TWO mechanically distinct causes with a BYTE-IDENTICAL reply
+# (`GRAPH.COPY failed, could not fork` — see tools/embedded_evidence.py): a
+# background RDB/AOF child in the fork slot, and a hung un-reaped
+# `redis-module-fork` child from a PREVIOUS fork (#3845). And its slot cure
+# exists only on the EMBEDDED lane. Asserting one cause, or prescribing
+# `recover_fork_slot` where `socket_path_of(db)` is None, is wrong on both
+# counts. The body is therefore built from a shared cause-analysis prefix
+# plus a lane-specific action, selected by `_backend_failure_message`'s
+# `embedded` flag (the call site's own `self._is_embedded` reading — the axis
+# that actually decides whether `socket_path_of(db)` is non-None, NOT
+# `is_prod`, which gates auto-recovery and never the manual slot cure), so an
+# operator is never handed a cure their handle cannot execute.
+_FORK_REMEDY_CAUSE_ANALYSIS = (
+    "DB health check failed on open: the server refused a module fork "
+    "(FalkorDB replies `GRAPH.COPY failed, could not fork`). Redis allows "
+    "ONE module-fork child at a time, and that refusal has TWO mechanically "
+    "distinct causes with a byte-identical reply: an in-flight background "
+    "RDB save (or AOF rewrite) child occupies the slot, OR a hung, "
+    "un-reaped `redis-module-fork` child from a PREVIOUS fork still holds "
+    "it. errno 17 is EEXIST (the slot is occupied), NOT memory or process "
+    "pressure; the graph is not corrupt. Discriminate before acting: if no "
+    "hung `redis-module-fork` child is found, the slot is held by an "
+    "in-flight save — wait for it to finish and retry. A refusal carrying "
+    "EAGAIN (`Resource temporarily unavailable`) is a DIFFERENT mechanism — "
+    "a real resource limit — and is not cleared by reaping a child. "
+)
+_FORK_REMEDY_EMBEDDED = _FORK_REMEDY_CAUSE_ANALYSIS + (
+    "[embedded lane] Free a hung child with "
+    "`fork_slot.recover_fork_slot(db)` (it kills this daemon's own hung "
+    "child) or kill the lingering `redis-module-fork` child directly; the "
+    "refusal clears as soon as Redis reaps it. Do NOT rebuild. See #3845 "
+    "and #3634."
+)
+_FORK_REMEDY_SERVER = _FORK_REMEDY_CAUSE_ANALYSIS + (
+    "[server lane — remote/docker FalkorDB] The client-side slot cure is "
+    "embedded-only — it applies when the handle is a local unix socket. On "
+    "the SERVER's host, reap the lingering `redis-module-fork` child or "
+    "restart the FalkorDB server; the refusal clears as soon as Redis reaps "
+    "it. Do NOT rebuild. See #3845 and #3634."
+)
+_BACKEND_FAILURE_REMEDIES: dict[str, str] = {
+    "loading": (
+        "DB health check failed on open: the server is still LOADING its "
+        "dataset (the Redis/FalkorDB reply is `LOADING Redis is loading "
+        "the dataset in memory`). The graph is neither corrupt nor full — "
+        "the server has not finished reading its snapshot. Wait for the "
+        "load to finish and retry. (Secondary note: a load that never "
+        "completes can mean the dataset exceeds the container's memory, "
+        "for which a smaller snapshot is the durable fix — but the remedy "
+        "for THIS failure is simply to wait.) Do NOT treat this as "
+        "corruption. See #3634."
+    ),
+}
+
 
 def _fmt_bytes(n: int) -> str:
     """Human byte size for an operator-facing message."""
@@ -1211,7 +1372,7 @@ def _fmt_bytes(n: int) -> str:
         val /= step
     return f"{val:.1f} TiB"
 from tortoise.embedded_lifecycle import (  # noqa: E402
-    atexit_fast_close,  # #1371: registers the batch flush
+    atexit_fast_close,  # #1371: the fast-close seam
     register_atexit_close,
     register_gc_close,
 )
@@ -1482,20 +1643,17 @@ def _journal_append_product(graph_name: str) -> None:
         cached and BEFORE ``_ensure_registry_indexes`` writes, and
         ``select_graph`` is client-side (no server call) — a raise there
         mints nothing and leaves no half-initialized registry behind;
-      * the org-mint append (``org_create``) runs AFTER the org graph's
-        TeamMeta CREATE, and its failure path DROPS that graph (best-effort —
-        if the drop fails too the graph survives and is WARNING-logged)
-        before re-raising; ``org_create``'s own handler rolls the registry
-        Org node back.
-    The other call sites are MIXED, which is why this is a per-caller
-    contract and not a property of the function: some hosted mint lanes drop
-    the graph on failure (``provision_tenant``, ``register_user``'s provision
-    lane) and some do not (``register_user``'s first lane,
-    ``_eager_provision_org_graph``) — those propagate the raise with the
-    graph left in place. The projection redirect / from_uri seams append
-    BEFORE the projection (and so the graph) is materialized, so a raise
-    there mints nothing. The ordering behind all of them (CREATE before the
-    ownership line) is the real fix and is tracked in #3390.
+      * the org-mint append (``org_create``) runs BEFORE the org graph's
+        TeamMeta CREATE (the write-ahead seam, #3390), so a raise mints
+        nothing — there is no unowned graph left to drop; ``org_create``'s
+        own handler still rolls the registry Org node back.
+    Every product mint site now journals through the write-ahead seam
+    (``journal_mint_write_ahead``, #3390), so the append precedes the CREATE
+    at all of them and a raise mints nothing to own. The hosted lanes' outer
+    rollback handlers still drop ``graph_name`` best-effort (a no-op on a
+    graph that was never created), and the projection redirect / from_uri
+    seams appended BEFORE materialization already. The ordering is now a
+    property of the seam rather than a per-caller contract.
 
     The two no-op gates above (absent path, not a test session) are
     unchanged, so production mints never reach the raise."""
@@ -1524,6 +1682,67 @@ def _journal_append_product(graph_name: str) -> None:
             f"not be recorded; a caller that already created the graph "
             f"must drop it (see #3390 for the write-ahead fix)."
         ) from e
+
+
+def journal_mint_write_ahead(graph_name: str) -> None:
+    """#3390: WRITE-AHEAD mint journaling — journal the INTENDED name BEFORE
+    the graph is materialized.
+
+    Every product mint site used to materialize the graph and journal its
+    ownership *afterwards*::
+
+        graph.query(_init_q)              # effect
+        _journal_append_product(name)     # ownership record
+
+    A kill in that gap left a graph the session's journal did not own — an
+    ORPHAN. The journal is the ownership record the journal-driven own/stale
+    sweep (``_sweep_drop``) reads, so an orphan leaks — no journal-driven sweep
+    can see it (``wipe_server`` is fail-closed to the ``test_``/``tortoise_test``
+    prefixes and never touches the ``org_*``/``team_*`` product namespace) — makes the owned-set a rebuild
+    produces diverge from live (live != rebuild), and is reclaimable only by
+    the opt-in ``_sweep_team_strays`` pass. This seam reverses the order: the
+    ownership line is journaled FIRST, so at the sites that adopt it the CREATE
+    cannot run before the line — including the two
+    ``_make_sdk(namespace=org_id)._get_proj()`` lanes, which journal before the
+    projection is constructed (``Projection.__init__`` runs ``_ensure_indexes()``,
+    a query that MATERIALIZES the graph).
+
+    The fail-closed half is ``_journal_append_product``'s raising variant
+    (#3214/#3379, landed on main): a journal WRITE failure propagates instead
+    of being swallowed at DEBUG. Paired with the order this seam supplies, a
+    raise means the CREATE never runs, so the fail-closed property comes from
+    the two together rather than from each caller dropping its own graph
+    after the fact.
+
+    The residual window is the harmless inverse — journaled-but-never-created:
+    the sweep's DETACH+DELETE of an absent graph succeeds (or logs and
+    continues, ``_drop_one_graph``), and the journal file is removed only when
+    every name dropped, so replay/rebuild converges. It is idempotent: a
+    duplicate line is set-equivalent for the sweep's owned-set delta and the
+    peer-protection read (``_live_peer_session_graphs``); a never-materialized
+    line only ADDS a name to that protected set, which can spare a graph from a
+    global sweep — it can never cause a delete.
+
+    Rollback handlers must NOT compensate by removing the line: the journaled
+    name is the ownership tombstone that lets the sweep clean up a graph whose
+    create partially landed — removing it would re-open the orphan window this
+    seam closes. Known residual (follow-up to #3390): the session's own sweep
+    (``_sweep_drop``) carries no live-peer skip (unlike ``wipe_server``'s #3074
+    guard), so a name whose create FAILED — or was never reached — here can be
+    dropped at session end while a concurrent session's same-named graph is
+    live; a pair of *successful* same-name mints already had that exposure, but
+    write-ahead adds the never-created case. A second residual: a namespaced SDK
+    whose namespace equals the org name (``TortoiseSDK(namespace=X)
+    .org_create(X)``) has its target ``org_X`` materialized by
+    ``self._get_proj()``'s ``_ensure_indexes`` before this seam at the SDK
+    org-mint site — journaling earlier would over-own an EXISTING org on the
+    duplicate-name early-return path, so the order is left as-is; no product
+    caller uses that shape today.
+
+    No-op outside a test session (``_journal_append_product`` is env- and
+    process-flag gated), exactly as the post-create call it replaces.
+    """
+    _journal_append_product(graph_name)
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
@@ -1722,6 +1941,12 @@ _NO_PROJECTION_FOLD = frozenset({
     "CalibrationRecorded",  # :Meta milestone marker (audit)
     "DedupeRecorded",       # #784 content-dedup audit
     "DedupeRejected",       # #784 content-dedup audit
+    # #1370: a refused/suspected subject binding is an AUDIT record — the
+    # edge it declined to write must NOT be replayed from it (the confidence
+    # gate is a write-time policy decision, not graph state). Recognized-and-
+    # intentionally-not-folded; without this entry every replay would log an
+    # "unrecognized event type" warning per refusal.
+    "EntityBindingRefused",
 })
 
 # ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
@@ -1769,7 +1994,7 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
 # ``sdk._update_entity``.
 _CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-    ("Document", "id"), ("Source", "id"), ("Event", "eventId"),
+    ("Source", "id"), ("Event", "eventId"),
 )
 _CANONICAL_ENTITY_LABELS: frozenset[str] = frozenset(
     label for label, _ in _CANONICAL_ENTITY_ID_PROPS)
@@ -2051,7 +2276,13 @@ class InMemoryProjection:
         _apply_one(self.points, event)
 
     def rebuild(self, log) -> None:
-        self.points = fold(log.read_all())
+        # #3316: the same refusal as the Falkor engines — a dropped torn
+        # trailing removal record must not be folded away into a projection
+        # that serves the removed state as current.
+        events = log.read_all()
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
+        self.points = fold(events)
 
 
 def _validate_uri_scheme(scheme: str) -> str:
@@ -2162,9 +2393,36 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 # them across deletes conflated an ``EntityMutated`` delete with a later
 # ``PointsMerged`` and over-suppressed a live link.
 _HARD_DELETE_LABELS = frozenset({
-    "Point", "Subject", "Object", "Document", "Source", "Event",
+    "Point", "Subject", "Object", "Source", "Event",
 })
 _POINTS_MERGED_LABELS = frozenset({"Point"})
+
+
+def _refuse_revival_torn_tail(revival_records) -> None:
+    """Refuse a replay whose journal dropped a torn record that cannot be
+    proven harmless (#3316).
+
+    ``EventLog.read_all`` tolerates a torn TRAILING line because a crash
+    mid-append is expected and a dropped REGISTRATION record is only data
+    LOSS. The other direction is not symmetric: a dropped REMOVAL/terminal
+    record (``PointRetracted``, ``EntityMutated`` op=delete, a
+    ``DirectEdgeRepoint`` delete leg, …) rebuilds the graph WITHOUT the
+    removal, so state a later read serves as current is live again
+    (resurrection) — and a dropped ``EventRecorded`` loses the
+    connector-source sweep that deletes a superseded ``:Source``. A truncated
+    record cannot be reconstructed, so the only sound behaviour is to not
+    rebuild at all.
+
+    Callers MUST invoke this BEFORE any wipe/replay — a verdict after the
+    mutation cannot un-apply it. The classification and the message live in
+    :mod:`tortoise.log` so every replay engine (``rebuild`` / ``rebuild_all`` /
+    ``InMemoryProjection.rebuild`` / ``recover_from_log`` /
+    ``backup.restore`` / the ``tortoise rebuild`` CLI fallback / the
+    ``tortoise reconcile`` CLI) refuses through ONE home.
+    """
+    from tortoise.log import refuse_torn_tail_revival
+
+    refuse_torn_tail_revival(revival_records)
 
 
 def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
@@ -2600,6 +2858,19 @@ class FalkorProjection(
         self._skip_guard = False
         self._is_embedded = (path is not None)
         self._path = path
+        # #5119: `_vector_index_api` MUST exist before the health check below.
+        # Recovery replays the journal through `apply()` -> `_upsert_point_props`,
+        # which reads `self.required_embedding_dim` to guard a journalled
+        # vector's WIDTH — and that property reads THIS attribute. Initialised
+        # only further down (after `_ensure_indexes`), it raised
+        # `AttributeError` on every replayed event, so `recover_from_log`
+        # counted zero applied events and refused with "replay produced an
+        # empty graph": a total graph loss became UNRECOVERABLE, and the only
+        # signal was a warning. `None` is the property's own documented answer
+        # while no index exists, and embedded (`redislite`) is brute-force by
+        # design, so hoisting the initialisation is behaviour-preserving for
+        # every path that reaches `_ensure_indexes`.
+        self._vector_index_api = None
         # Ops safety residual (#428): auto health check on open + transparent
         # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
         # event log when lost/corrupt; production (FLY_APP_NAME) and server
@@ -2630,7 +2901,10 @@ class FalkorProjection(
         # degradation_chain and cross-lens calls): 'cypher' engines skip the
         # failing signature-A attempt and query via signature B directly,
         # saving one failed round trip per query.
-        self._vector_index_api = None
+        #
+        # Its `None` default is set ABOVE, before the health check — the
+        # recovery replay reads it through `required_embedding_dim`, so it must
+        # exist first (#5119).
         self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
@@ -2733,6 +3007,39 @@ class FalkorProjection(
             "the shared-lane form of this."
         )
 
+    def _backend_failure_message(
+        self, exc: BaseException | None, *, embedded: bool = False
+    ) -> str | None:
+        """Cause-specific error for a recognised NON-corruption failure.
+
+        The maxmemory refusal has its own classifier (``_write_refusal_message``)
+        and keeps its message verbatim; this covers the other causes that are
+        still NOT corruption — a server that has not finished LOADING and a
+        server refusing a module fork. Returns ``None`` when no cause matches,
+        so a genuine corruption failure still reaches the rebuild advice.
+
+        ``embedded`` selects the lane-specific FORK remedy and tracks ONE
+        axis: whether this handle is an embedded unix-socket server, i.e.
+        whether ``socket_path_of(db)`` is non-None and the slot cure is
+        available. It is deliberately NOT ``is_prod``-gated — production
+        disables auto-recovery, not the manual cure. Its default is ``False``
+        — the conservative lane: a caller that has not stated its lane is
+        never told to call an embedded-only function. ``_auto_health_recover``
+        passes its own ``self._is_embedded`` reading.
+        """
+        if exc is None:
+            return None
+        # The fork family is classified by fork_slot's canonical predicate
+        # (P2-1): it walks the __cause__/__context__ chain and owns the marker
+        # vocabulary, so this call site and hosted_backup's can never drift.
+        if is_fork_refusal(exc):
+            return _FORK_REMEDY_EMBEDDED if embedded else _FORK_REMEDY_SERVER
+        text = str(exc).lower()
+        for marker, cause in _BACKEND_FAILURE_MARKERS:
+            if marker in text:
+                return _BACKEND_FAILURE_REMEDIES[cause]
+        return None
+
     def _find_local_jsonl_dir(self) -> str | None:
         """Adjacent JSONL event-log dir (same directory as the embedded DB).
 
@@ -2777,6 +3084,14 @@ class FalkorProjection(
             refusal = self._write_refusal_message(self._probe_error)
             if refusal is not None:
                 raise RuntimeError(refusal)
+            # #3634 — the other NON-corruption causes keep their own remedy
+            # instead of falling through to the rebuild advice.
+            cause_message = self._backend_failure_message(
+                self._probe_error,
+                embedded=self._is_embedded,
+            )
+            if cause_message is not None:
+                raise RuntimeError(cause_message)
             if is_prod or not self._is_embedded:
                 raise RuntimeError(
                     "DB health check failed on open (server/production mode). "
@@ -3214,6 +3529,12 @@ class FalkorProjection(
         # wipe. #2943: verifying only after the wipe turns a durability bug
         # into permanent data loss, so the proof has to precede the mutation.
         events = list(log.read_all())
+        # #3316: refuse BEFORE the wipe when the journal's torn tail cannot be
+        # proven harmless — replaying without a dropped removal resurrects
+        # removed state, and a registry-only/synthetic log object may not
+        # expose the attribute at all (then there is nothing to classify).
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -3233,6 +3554,24 @@ class FalkorProjection(
                 continue
             self.apply(ev)
         self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
+
+    def _prewipe_graph_identity(self) -> dict:
+        """The graph a pre-wipe sidecar describes, stamped into its payload.
+
+        #3049: the sidecar path is a pure function of ``log_dir``, but the
+        wipe is per-GRAPH — so a sidecar keyed to nothing but its directory
+        gets merged into whichever graph is rebuilt from that directory next.
+        ``graph_name`` alone cannot separate two embedded DBs (they all
+        default to ``'tortoise'``), so the embedded ``_path`` rides along as
+        the second half.
+
+        ``db_path`` is ``None`` for a server/URI graph: its identity IS its
+        graph name, and a server projection carries no file.
+        """
+        return {
+            "graph_name": self._graph_name,
+            "db_path": _prewipe_db_path_identity(self._path),
+        }
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -3277,6 +3616,9 @@ class FalkorProjection(
         # rebuild pass (see `_upsert_point_props`) so the report is emitted once
         # per key per pass instead of once per graph-only point.
         self._deny_drop_warned = set()
+        # #5004: the same once-per-pass de-dup for the replay's embedding-identity
+        # warnings (an embedder swap would otherwise emit one line per Point).
+        self._embed_identity_warned = set()
 
         # #3947: capture the episodic Point population BEFORE the wipe, and
         # PROVE the replay can recreate it BEFORE wiping anything (#2943: a
@@ -3333,14 +3675,21 @@ class FalkorProjection(
                     # are not node properties. `content_hash` is NOT in this
                     # list: it is `_upsert_point_props`'s CONDITIONAL write, and
                     # the pass-1b tail is its carrier for the ids the journal
-                    # did not derive (see _REPLAY_GAP_PROPS). `embedding` is
-                    # not carried by the pre-wipe snapshot (the replay
-                    # re-derives it), while a rebuild restores it from the live
-                    # pre-wipe capture when one exists; `updatedAt` is
-                    # replay-owned.
+                    # did not derive (see _REPLAY_GAP_PROPS).
+                    # `embedding` is stripped because this is a SYNTHETIC event
+                    # for a GRAPH-ONLY id — the journal holds no record of it at
+                    # all, so there is no journalled vector to carry (#5004 only
+                    # changed the path where the journal DOES carry one). The
+                    # rebuild restores it from the live pre-wipe capture in the
+                    # pass-1b tail; `updatedAt` is replay-owned.
+                    # `embedding_verbatim` is stripped WITH it: the tail is this
+                    # path's only restorer, and carrying the marker here without
+                    # the vector made `_upsert_point_props` take the verbatim
+                    # branch for a recomputed value. The tail honours the
+                    # marker instead (round-7).
                     clean = {k: v for k, v in props.items()
-                             if k not in ("embedding", "updatedAt",
-                                          "_nid", "_graph_id")}
+                             if k not in ("embedding", "embedding_verbatim",
+                                          "updatedAt", "_nid", "_graph_id")}
                     is_op = bool(props.get("is_operator") or props.get("op_type"))
                     ev_type = "OperatorAdded" if is_op else "PointAdded"
                     if is_op:
@@ -3517,7 +3866,12 @@ class FalkorProjection(
         journal_source: list[int] = []
         for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
-                chunk = EventLog(os.path.join(log_dir, fname)).read_all()
+                file_log = EventLog(os.path.join(log_dir, fname))
+                chunk = file_log.read_all()
+                # #3316: same refusal as `rebuild`/`recover_from_log`, before
+                # the wipe below.
+                _refuse_revival_torn_tail(
+                    file_log.torn_tail_revival_records())
                 journal_events.extend(chunk)
                 journal_source.extend([file_idx] * len(chunk))
 
@@ -3541,6 +3895,38 @@ class FalkorProjection(
                 log_dir, os.path.dirname(os.path.abspath(self._path)), log_dir)
         leftover = _load_prewipe_snapshot(snapshot_path)
         if leftover is not None:
+            # ── #3049: the sidecar belongs to a GRAPH, not to a directory ────
+            # The path is derived from `log_dir` alone, so two graphs sharing
+            # one event-log dir would otherwise absorb each other: the merge
+            # below is additive on the REBUILDING graph, and the completion
+            # clear near the end RETIRES the file — so the graph that did not
+            # write it loses the only copy of its graph-only Points. Refuse
+            # BEFORE the wipe and leave the foreign file exactly as it is; an
+            # identity-UNKNOWN sidecar (a pre-#3049 rescue file) still unions,
+            # which is the migration contract.
+            foreign = _prewipe_identity_mismatch(
+                leftover, graph_name=self._graph_name,
+                db_path=_prewipe_db_path_identity(self._path))
+            if foreign is not None:
+                hint = (
+                    f" Run `tortoise rebuild --dir {log_dir} --db "
+                    f"{foreign[1]}` to finish the rebuild it belongs to."
+                    if foreign[1] else
+                    f" Rebuild the graph named {foreign[0]!r} to finish the "
+                    f"rebuild it belongs to."
+                )
+                raise RuntimeError(
+                    f"rebuild aborted BEFORE the graph wipe: the pending "
+                    f"pre-wipe snapshot at {snapshot_path} was written by a "
+                    f"DIFFERENT graph (graph_name={foreign[0]!r}, "
+                    f"db_path={foreign[1]!r}) than the one this rebuild "
+                    f"targets (graph_name={self._graph_name!r}, "
+                    f"db_path={_prewipe_db_path_identity(self._path)!r}) — "
+                    f"refusing to wipe the graph (#3049). Merging it would "
+                    f"contaminate this graph with another graph's nodes and "
+                    f"then retire the ONLY copy of that graph's graph-only "
+                    f"Points; the file is left UNTOUCHED.{hint}"
+                )
             logger.warning(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
                 "graph-only point event(s), %d batch(es), %d batch link(s), "
@@ -3681,6 +4067,10 @@ class FalkorProjection(
                 payload: dict = {
                     "version": _PREWIPE_SNAPSHOT_VERSION,
                     "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+                    # #3049: the graph this rescue file describes, so a later
+                    # rebuild of a DIFFERENT graph over the same log dir can
+                    # refuse instead of absorbing it.
+                    "graph_identity": self._prewipe_graph_identity(),
                 }
                 # #2814: DERIVED from the section tuple and read out of
                 # `merged`, so a section dropped from the union's return
@@ -3932,9 +4322,20 @@ class FalkorProjection(
                 # an unavailable embedder). Targeted SET — the
                 # `_GuardedGraph` bulk-wipe guard is DETACH DELETE-only.
                 if is_recreate:
+                    # #5004 round-4: `embedding_verbatim` is wiped here TOO.
+                    # It is a declared NODE property now, and the wipe's own
+                    # premise ("a re-creation is a FRESH node live") applies to
+                    # it exactly as it does to `embedding`: its clause uses
+                    # `CASE … ELSE n.embedding_verbatim`, which PRESERVES the
+                    # dead incarnation's marker when the re-creation carries
+                    # none — so the rebuilt node would hold a property the live
+                    # node does not (the #330/#3312 parity break), and a leaked
+                    # `true` would make a later re-emit store the new vector
+                    # RAW and skip the R1 attestation.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
-                        "SET n.embedding = NULL, n.content_hash = NULL",
+                        "SET n.embedding = NULL, n.content_hash = NULL, "
+                        "    n.embedding_verbatim = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
@@ -3966,7 +4367,20 @@ class FalkorProjection(
                     # declaration). A re-creation explicitly cleared both
                     # conditional fields before the upsert, so it owns them
                     # whether or not the upsert then wrote them back.
-                    if is_recreate or wrote_embedding:
+                    #
+                    # #5004 review: key PRESENCE matters INDEPENDENTLY of
+                    # `wrote_embedding`. When the journal carried a vector the
+                    # replay REFUSED to write (a wrong-width vector this store
+                    # cannot hold), gating on `wrote_embedding` alone left the
+                    # id unmarked and the pass-1b tail re-applied the OLDER
+                    # pre-wipe snapshot — making `rebuild_all` a function of
+                    # pre-wipe graph state (a populated store, `rebuild()`, and
+                    # a fresh store then disagreed). Round-3: the mark is the
+                    # KEY's presence, not its truthiness — an owned `None` is
+                    # the journal saying "no vector here", so the tail must not
+                    # re-apply an older one either.
+                    if (is_recreate or wrote_embedding
+                            or "embedding" in p):
                         journal_embed_write.add(p["id"])
                     if is_recreate or wrote_content_hash:
                         journal_hash_write.add(p["id"])
@@ -4132,8 +4546,12 @@ class FalkorProjection(
                                        if k not in BELIEF_PROPS}
                     wrote_embedding, wrote_content_hash = (
                         self._upsert_point_props(_prom_props))
-                    # #4305: id-wide journal-owned derived marks.
-                    if wrote_embedding:
+                    # #4305: id-wide journal-owned derived marks. #5004: the
+                    # payload carrying the key is itself ownership, even when
+                    # the fold refused to write it (wrong width, or an owned
+                    # None) — otherwise the pass-1b tail re-applies the older
+                    # pre-wipe snapshot.
+                    if wrote_embedding or "embedding" in p:
                         journal_embed_write.add(p["id"])
                     if wrote_content_hash:
                         journal_hash_write.add(p["id"])
@@ -4149,8 +4567,11 @@ class FalkorProjection(
                     op_p = _promotion_point_with_operator(p)
                     wrote_embedding, wrote_content_hash = (
                         self._upsert_point_props(op_p))
-                    # #4305: id-wide journal-owned derived marks.
-                    if wrote_embedding:
+                    # #4305: id-wide journal-owned derived marks. #5004: the
+                    # payload carrying the key is itself ownership, even when
+                    # the fold refused to write it (wrong width, or an owned
+                    # None).
+                    if wrote_embedding or "embedding" in p:
                         journal_embed_write.add(p["id"])
                     if wrote_content_hash:
                         journal_hash_write.add(p["id"])
@@ -4808,10 +5229,22 @@ class FalkorProjection(
                 clauses.append("n += $props")
                 params["props"] = gap
             if restore_embedding:
-                # `vecf32()` cast exactly like `_upsert_point_props`: the HNSW
-                # index rejects a bare list, and a bare-list write would leave
-                # the restored vector unsearchable.
-                clauses.append("n.embedding = vecf32($emb)")
+                if sp.get("embedding_verbatim"):
+                    # #5004 round-7: a CALLER-owned vector must keep its RAW
+                    # form. `vecf32()` is the ONE form it must not take (it
+                    # narrows a float64 list: `0.1` -> `0.10000000149011612`),
+                    # and this path is the graph-only id's only restorer — the
+                    # synthetic event deliberately carries neither the vector
+                    # nor the marker. The marker is restored with it, or the
+                    # property exists on live and not on replay (a #330/#3312
+                    # break this change would otherwise introduce).
+                    clauses.append("n.embedding = $emb")
+                    clauses.append("n.embedding_verbatim = true")
+                else:
+                    # `vecf32()` cast exactly like `_upsert_point_props`: the
+                    # HNSW index rejects a bare list, and a bare-list write
+                    # would leave the restored vector unsearchable.
+                    clauses.append("n.embedding = vecf32($emb)")
                 params["emb"] = list(emb)
             try:
                 self.g.query(
@@ -5663,7 +6096,7 @@ class FalkorProjection(
     #: (url-only ingestion stubs from _link_source have no id).
     _RESOLVE_BRANCHES = (
         ("Point", "id"), ("Subject", "id"), ("Object", "id"),
-        ("Document", "id"), ("Source", "id"),
+        ("Source", "id"),
         ("Event", "eventId"), ("Source", "url"),
     )
 
@@ -5872,18 +6305,11 @@ class FalkorProjection(
             except Exception:
                 pass
 
-        # ── Document range indexes (#125 — structural queries filter by kind) ──
-        for prop in ("id", "documentKind"):
-            try:
-                self.g.query(f"CREATE INDEX FOR (n:Document) ON (n.{prop})")
-            except Exception as e:
-                msg = str(e).lower()
-                if "already indexed" in msg or "already exists" in msg:
-                    pass
-                else:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        "Failed to create index on Document.%s: %s", prop, e)
+        # ── D10 (ONTOLOGY v3.15 §4.4): the :Document label is retired — a
+        # document is a :Source. No :Document range index is created. A
+        # :Source(documentKind) index is deliberately NOT added: the index
+        # block declines kind-field indexes (measured 3.15x write slowdown,
+        # #522). ──
 
         # ── Range indexes on canonical entity keys (issue #327) ──
         # Point/Document are created above; these enable index-backed
@@ -5894,7 +6320,10 @@ class FalkorProjection(
         for label, props in (("Subject", ("id", "name")),
                              ("Object", ("id", "name")),
                              ("Event", ("eventId",)),
-                             ("Source", ("id", "url"))):
+                             # canonicalUrl (#5012 S0b): the S0a canonical
+                             # identity S0b resolves against, so the resolver
+                             # is an index seek, not a label scan.
+                             ("Source", ("id", "url", "canonicalUrl"))):
             for prop in props:
                 try:
                     self.g.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
@@ -5958,7 +6387,23 @@ class FalkorProjection(
                                   # by name) needs the Object FTS leg —
                                   # without it S3's entities bucket is dead
                                   # on the real backend.
-                                  ("Document", ["_searchText"])]:  # #125 Document FTS
+                                  ("Source", ["_searchText"])]:  # #125 Document FTS
+                                  # (D10: the doc node is a :Source, so the
+                                  # full-text leg rides the Source label).
+                                  # #3518: a captured session's :Source carried
+                                  # NO searchable text field, so
+                                  # `tortoise_fts_query(entity_type='source')`
+                                  # never resolved against this label (it
+                                  # degraded to `index_missing` / an empty run)
+                                  # and the captured session was unfindable.
+                                  # `_searchText` is the ONE searchable field
+                                  # and BOTH Source writers populate it through
+                                  # `sdk._source_search_text` — the indexer
+                                  # (`_upsert_source`, title) and the capture
+                                  # path (`_materialize_session_source`,
+                                  # title-else-summary). `summary`/`topics` are
+                                  # deliberately NOT indexed: a second
+                                  # vocabulary the FTS surface does not read.
                 try:
                     fields_sql = ", ".join(f"'{f}'" for f in fields)
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
@@ -6154,19 +6599,33 @@ class FalkorProjection(
         """
         if self._vector_index_api is None:
             return None  # no Point vector index → brute-force, any width
-        from ..embeddings import EMBEDDING_DIM
+        try:
+            from ..embeddings import EMBEDDING_DIM
+        except Exception:  # noqa: BLE001, RUF100
+            # #5148 review: this is read on the REPLAY path (`_upsert_point_props`,
+            # outside any `try`), so an unimportable seam here would abort every
+            # replayed event and re-enter the #5119 failure shape. The width is
+            # an ENFORCEMENT guard, not data: degrading to the property's
+            # documented "any width" answer restores the journalled vector and
+            # keeps the graph, which is strictly better than refusing to rebuild
+            # it. (An index that cannot be described is also not one this store
+            # can use to reject a vector usefully.)
+            return None
         return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:
-        """#125: set _searchText=title on Documents missing it (idempotent).
+        """#125: set _searchText on document Sources missing it (idempotent).
 
-        Covers pre-existing Documents created before the capture-fields change.
-        Returns the number of Documents backfilled.
+        D10: the document node is a :Source, so this targets document-bearing
+        Sources (``documentKind IS NOT NULL``) — never a session/connector/
+        provenance Source, which owns no _searchText.
+        Returns the number of document Sources backfilled.
         """
         rows = self.g.query(
-            "MATCH (d:Document) WHERE d._searchText IS NULL "
-            "SET d._searchText = coalesce(d.title, '') "
-            "RETURN count(d)"
+            "MATCH (s:Source) WHERE s.documentKind IS NOT NULL "
+            "AND s._searchText IS NULL "
+            "SET s._searchText = coalesce(s.title, '') "
+            "RETURN count(s)"
         ).result_set
         return rows[0][0] if rows else 0
 
@@ -6198,8 +6657,8 @@ class FalkorProjection(
             pass
 
     def _atexit_close(self) -> None:
-        """#1371: atexit seam — collect ephemeral test servers for the
-        batch flush first.
+        """#1371: atexit seam — collect ephemeral test servers so interpreter
+        exit takes the fast close.
 
         Falls through to the normal close() when the fast path does not
         apply (server-mode clients have no fast path; non-ephemeral or

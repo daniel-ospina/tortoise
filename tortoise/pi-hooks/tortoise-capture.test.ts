@@ -1,6 +1,8 @@
 // tortoise-capture.test.ts — behavioral tests for the in-repo Pi capture
 // extension (#3575). Run with: node --test tortoise/pi-hooks/tortoise-capture.test.ts
-// (Node 22+ strips TypeScript types natively — no build step, no deps.)
+// (Node 22.18+ strips TypeScript types natively — default-on type stripping;
+// on 22.7-22.17 the `--experimental-strip-types` flag is required. No build
+// step, no deps.)
 //
 // These tests pin the two claims the dashboard's `HARNESS_CAPTURE_SUPPORT.pi`
 // makes: (1) the extension fires the install-probe on load, and (2) it files
@@ -15,6 +17,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   utimesSync,
@@ -24,12 +27,17 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   HARNESS,
+  MAX_ATTEMPTS,
   MAX_TURNS,
   PROBE_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
+  RETRY_MAX_MS,
   backoffDelay,
   buildCapturePayload,
   captureKey,
+  carriedWindow,
+  clampAttempts,
+  clampWindow,
   classifyFailure,
   contentDigest,
   deriveMachineId,
@@ -695,6 +703,190 @@ test("a permanent 4xx discards with a recorded reason and is never retried", asy
   assert.equal(calls.length, 1, "exactly one POST, never a retry loop");
 });
 
+test("a quota-refused 402 defers the capture instead of destroying it (#4714)", async () => {
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-402"));
+  // The hosted quota gate refuses a capture whose ESTIMATED point cost would
+  // cross the org cap; that estimate comes from the INCOMING capture, so the
+  // same capture succeeds once a node is freed.
+  //
+  // MUTATIONS THAT RED THIS:
+  //   * drop 402 from the transient set → discarded, entry unlinked, capture GONE;
+  //   * unlink the meta/log but still count it deferred → readSpoolEntry undefined.
+  const quota = statusFetch(
+    402,
+    "Team points limit reached: 24956 in use + 48 estimated for this capture exceeds 25000. Upgrade your plan.",
+  );
+  const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: quota.fetchImpl, now: 1_000 });
+  assert.equal(first.deferred, 1, "a quota refusal must be retried, not dropped");
+  assert.equal(first.discarded.length, 0, "a quota refusal must never discard");
+  assert.ok(readSpoolEntry(spool, "sess-402"), "the spool's only copy of the session was destroyed");
+
+  // And it is genuinely retryable: once the quota allows it, the SAME entry
+  // files without a re-capture. The spool is shared with the Python leg
+  // (~/.tortoise/capture-spool), which classifies 402 retryable too — the two
+  // classifiers are a parity contract, not two independent policies.
+  const ok = statusFetch(200);
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 10 ** 12 });
+  assert.equal(second.filed, 1, "the deferred capture must file once the quota clears");
+});
+
+test("a new turn does not re-arm the retry window (#4714 review)", async () => {
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-grow", SPOOL_TURNS.slice(0, 1)));
+  // The backoff belongs to the ENTRY, not to one snapshot. `writeSpoolEntry`
+  // used to hard-code attempts=0 / next_attempt_at_ms=0, so a growing session
+  // re-armed its own window every turn and a deferred 402 was re-POSTed at turn
+  // cadence. The spool is shared with the Python leg, so any other session's
+  // drain fires it too.
+  //
+  // MUTATION THAT REDS THIS: reset attempts/next_attempt_at_ms in
+  // `writeSpoolEntry` → the window collapses and the entry is POSTed again
+  // 1 ms later.
+  const refused = statusFetch(402, "quota");
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: refused.fetchImpl, now: 1_000 });
+  const armed = readSpoolEntry(spool, "sess-grow");
+  assert.equal(armed?.attempts, 1);
+  assert.ok(
+    (armed?.next_attempt_at_ms ?? 0) > 1_000,
+    "the refusal must arm a backoff window",
+  );
+
+  // ONE new turn — the entry grows, and the window must survive it.
+  writeSpoolEntry(spool, snapshot("sess-grow", [...SPOOL_TURNS, SPOOL_TURNS[0]]));
+  const grown = readSpoolEntry(spool, "sess-grow");
+  assert.equal(grown?.attempts, 1, "a new turn reset the attempt counter");
+  assert.equal(
+    grown?.next_attempt_at_ms,
+    armed?.next_attempt_at_ms,
+    "a new turn re-armed the backoff",
+  );
+
+  // A drain 1 ms later must SKIP it, not re-POST.
+  const again = statusFetch(402, "quota");
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl: again.fetchImpl,
+    now: 1_001,
+  });
+  assert.equal(summary.attempted, 0, "an entry inside its backoff window was re-POSTed");
+  assert.equal(summary.skipped, 1);
+  assert.equal(again.calls.length, 0);
+});
+
+test("a non-finite backoff can never make an entry un-fileable (#4714 review)", async () => {
+  // The backoff is CARRIED across turns now, so a stored Infinity would be
+  // preserved on every write and the entry would be skipped forever while every
+  // surface reports "will retry". And `backoffDelay` computes 2 ** (n - 1), so
+  // an absurd attempt count must saturate rather than attempt a huge exponent.
+  //
+  // MUTATION THAT REDS THIS: return the raw value from clampWindow /
+  // clampAttempts instead of clamping.
+  assert.equal(clampWindow(Number.POSITIVE_INFINITY), 0);
+  assert.equal(clampWindow(Number.NaN), 0);
+  assert.equal(clampWindow(-5), 0);
+  assert.equal(clampWindow(1_700_000_030_000), 1_700_000_030_000);
+  assert.equal(clampAttempts(Number.POSITIVE_INFINITY), 0);
+  assert.equal(clampAttempts(1e9), MAX_ATTEMPTS);
+  assert.ok(Number.isFinite(backoffDelay(Number.POSITIVE_INFINITY)));
+  assert.equal(backoffDelay(1e9), RETRY_MAX_MS);
+
+  // End to end: a corrupt on-disk window must not stop the entry being POSTed.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-inf"));
+  const metaPath = join(
+    spool,
+    "entries",
+    `${entryKey("sess-inf")}.meta.json`,
+  );
+  const corrupt = JSON.parse(readFileSync(metaPath, "utf-8"));
+  corrupt.next_attempt_at_ms = null;   // JSON has no Infinity — this is the shape
+  corrupt.attempts = "lots";
+  writeFileSync(metaPath, `${JSON.stringify(corrupt, null, 2)}\n`);
+
+  const ok = statusFetch(200);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 1_000 });
+  assert.equal(summary.attempted, 1, "a corrupt backoff made the entry un-fileable");
+  assert.equal(summary.filed, 1);
+});
+
+test("a deferred-only flush is counted, not silent (#4714 review)", async () => {
+  // Moving 402 from "discard" to "defer" removed the flush's only signal for a
+  // quota-blocked spool: a window-held entry is neither attempted nor
+  // discarded, so `reportFlush` logged NOTHING while captures sat unfiled.
+  // `heldByBackoff` is that missing signal.
+  //
+  // MUTATION THAT REDS THIS: drop the `heldByBackoff` increment.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-wait"));
+  const first = statusFetch(402, "quota");
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: first.fetchImpl, now: 1_000 });
+
+  const again = statusFetch(402, "quota");
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: again.fetchImpl, now: 1_001 });
+  assert.equal(summary.attempted, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.heldByBackoff, 1, "a window-held entry is invisible to the flush");
+  assert.equal(again.calls.length, 0);
+});
+
+test("an absurd finite window is treated as corrupt, not honoured (#4714 review)", () => {
+  // A legitimate window is at most `written_at + RETRY_MAX_MS`; anything
+  // further out is corrupt, and because the write path CARRIES it, honouring it
+  // would strand the entry on every turn.
+  //
+  // MUTATION THAT REDS THIS: return the raw value from `carriedWindow`.
+  assert.equal(carriedWindow(9.9e15), 0);
+  assert.equal(carriedWindow(31_000), 31_000);
+  assert.equal(carriedWindow(Number.POSITIVE_INFINITY), 0);
+});
+
+test("a failure racing a successful filing does not re-arm the window (#4714 cycle-7 review)", async () => {
+  // The failure write-back re-reads the meta but never checked whether the
+  // content it failed to POST had since been FILED by a concurrent flush of the
+  // same capture_key. Re-arming the backoff there attaches a window to content
+  // that was never refused — and since writeSpoolEntry now CARRIES the window,
+  // the next turn's NEW content inherits it and waits up to RETRY_MAX_MS with no
+  // attempt behind it.
+  //
+  // MUTATION THAT REDS THIS: drop the filed_key guard in the write-back.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-race"));
+  const metaPath = join(spool, "entries", `${entryKey("sess-race")}.meta.json`);
+
+  const fetchImpl = async () => {
+    // Simulate a CONCURRENT flush completing a 2xx while our POST is in flight.
+    const onDisk = readSpoolEntry(spool, "sess-race")!;
+    onDisk.filed_key = onDisk.capture_key;
+    onDisk.attempts = 0;
+    onDisk.next_attempt_at_ms = 0;
+    writeFileSync(metaPath, `${JSON.stringify(onDisk, null, 2)}\n`);
+    return { ok: false, status: 402, json: async () => ({ detail: "quota" }) };
+  };
+
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl: fetchImpl as never,
+    now: 1_000,
+  });
+  assert.equal(summary.attempted, 1);
+  assert.equal(summary.skipped, 1, "a failure for superseded content is not a retry");
+  assert.equal(summary.deferred, 0);
+
+  const after = readSpoolEntry(spool, "sess-race")!;
+  assert.equal(after.attempts, 0, "the failure re-armed a window on filed content");
+  assert.equal(after.next_attempt_at_ms, 0, "a resurrected window was attached");
+
+  // And the NEXT turn must not inherit a window it never earned.
+  writeSpoolEntry(spool, snapshot("sess-race", [...SPOOL_TURNS, SPOOL_TURNS[0]]));
+  const grown = readSpoolEntry(spool, "sess-race")!;
+  assert.equal(
+    grown.next_attempt_at_ms,
+    0,
+    "new content inherited a backoff window it never earned",
+  );
+});
+
 test("the server's in-flight 409 is retryable, not a lost write (#3713)", async () => {
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-409"));
@@ -718,6 +910,25 @@ test("every 409 stays retryable — a policy-blocked session is never silently d
   assert.equal(classifyFailure(undefined), "retry");
   assert.equal(classifyFailure(503), "retry");
   assert.equal(classifyFailure(429), "retry");
+  // 402 is TRANSIENT (#4714, parity with the Python leg's classify_failure).
+  // The quota estimate is computed from the INCOMING capture, so the identical
+  // capture succeeds once a node is freed — permanent here unlinked the only
+  // copy of a real 3-turn session, and both legs share one spool directory.
+  assert.equal(
+    classifyFailure(402, "Team points limit reached: 24956 in use + 48 estimated for this capture exceeds 25000."),
+    "retry",
+  );
+  assert.equal(classifyFailure(402), "retry");
+  // "No status" is TOTAL. JS's `null >= 300` and `null >= 500` are both false,
+  // so `null` used to fall through to "permanent" -> discardEntry -> unlink,
+  // while the Python leg returned "retry" for the same input. A missing status
+  // is a network condition, never a server verdict.
+  assert.equal(classifyFailure(null), "retry");
+  assert.equal(classifyFailure(Number.NaN), "retry");
+  // An ABSOLUTE pin, not only a leg-vs-leg comparison: 403 stays PERMANENT
+  // (a suspended org is a reversible state, but deferring it is a separate
+  // policy question — #4895). Pinned so a same-direction drift reds here.
+  assert.equal(classifyFailure(403), "permanent");
   // A 3xx (a redirect on a stored api_url) must never delete the capture.
   assert.equal(classifyFailure(301), "retry");
   assert.equal(classifyFailure(422), "permanent");

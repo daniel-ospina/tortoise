@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from .source_credibility import SOURCE_KIND_DEFAULTS
+
 log = logging.getLogger(__name__)
 
 # Warn-once sentinel (epic #1891 WF-2, #1930): fallback/isolation warnings on
@@ -41,8 +43,24 @@ CANONICAL_OBJECT_KINDS = frozenset({
     # Core work concepts
     "Project", "WorkItem", "Problem",  # Problem: deviation from desired state — problem-family parent
     # Universal
-    "document", "user", "skill", "tool", "agent",
+    "tag", "user", "skill", "tool", "agent",
     "workflow", "agreement", "standard", "other",
+    # Commitment-state family (ONTOLOGY §5, state-centric 2026-08-12): the STATE
+    # objects commitments produce (lifecycle + derived confidence). Lowercase,
+    # like the rest of the §5 object vocabulary. #2727 aligned this set with
+    # ONTOLOGY §5 and extractor_v2.CORE_OBJECT_KEYS — the three-way diff is now
+    # empty (16 kinds each). `tag` was the other silent omission; both were
+    # missing while the §5 doc + extractor already carried them, which is why a
+    # pack could not declare `subclassOf: target`.
+    # `document` was removed from all three by D10 (#5013, ONTOLOGY v3.15, #5022):
+    # `objectKind: document` is retired — a document is a `:Source`, not a graph
+    # node, so it is not a subclassable object kind. §5 dropped it first; this set
+    # and extractor_v2.CORE_OBJECT_KEYS follow the doc (the doc is canonical).
+    # NO §5 object kind is excluded from pack-subclassing: every member here is a
+    # valid `subclassOf` parent (this set is the parent allowlist). Kinds the
+    # ontology does NOT declare (e.g. `aggregate`/`cluster`) are deliberately
+    # absent — the canonical set mirrors §5, it does not invent.
+    "strategy", "plan", "goal", "target",
 })
 
 CANONICAL_EVENT_KINDS = frozenset({
@@ -124,24 +142,178 @@ DECISION_POINT_KINDS = frozenset({
     "decision", "vision", "strategy", "plan", "goal", "target", "humanApproval",
 })
 
-# sourceKind vocabulary (ONTOLOGY §4.6) — extraction.sourceTypes must be ⊂ this
-# (R6 §6.1#3: v1 restrict to conversation/document + allowlist of the
-# connector-registered source kinds).
+# sourceKind vocabulary (ONTOLOGY §4.6) — the §5 core types + connector kinds.
+# NOT the full pack-validation set: extraction.sourceTypes validates against
+# registered_source_types() (this ∪ the registered source-kind registry ∪ the
+# escape hatch). #2726 superseded the R6 §6.1#3 "v1 restrict to conversation/
+# document" resolution — a kind registered via register_source_kind_default is a
+# first-class sourceKind and validates for packs too (the checks had drifted).
 KNOWN_SOURCE_TYPES = frozenset({
     "conversation", "document",
     "github_issue", "slack_message", "linear_card",
 })
 
 # Escape hatch for future connectors (R6 §3.5): packs may reference these
-# without a registry release. Anything outside KNOWN_SOURCE_TYPES ∪
+# without a registry release. Anything outside registered_source_types() ∪
 # SOURCE_TYPE_ESCAPE_HATCH is a validation error (typo protection).
+# #2726 open decision (c) — "escape-hatch entries to remove": reviewed, none.
+# All four values are absent from KNOWN_SOURCE_TYPES and SOURCE_KIND_DEFAULTS,
+# so every entry is still a genuine future-connector placeholder; keep all four.
 SOURCE_TYPE_ESCAPE_HATCH = frozenset({
     "email", "webpage", "discord_message", "notion_page",
 })
 
+# Source kinds a pack may declare in extraction.sourceTypes. Computed LIVE from
+# the canonical registry (never snapshotted at import) so a kind registered
+# after import — e.g. a connector calling register_source_kind_default() at load
+# time — is valid immediately, with no import-order dependence. The union is:
+#   KNOWN_SOURCE_TYPES        — §5 core types + connector kinds
+#   SOURCE_KIND_DEFAULTS      — every registered source kind (document,
+#                               github_pr/linear_cycle #388, agentSession,
+#                               meeting_summary, and
+#                               meeting_transcript/meeting_minutes #2726)
+# SOURCE_TYPE_ESCAPE_HATCH is unioned at the call site, not here.
+# This mirrors the commit_schema.CORE_SOURCE_KINDS SEMANTICS (KNOWN_SOURCE_TYPES
+# | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}). Implementation difference to
+# be aware of: this is a LIVE view; CORE_SOURCE_KINDS is an import-time frozenset
+# and compile_vocab()/refresh_vocab() union that frozen snapshot WITHOUT
+# recomputing it, so a kind registered AFTER import is accepted here immediately
+# but stays rejected by the Layer-1 gate until commit_schema recomputes (tracked
+# as #2742 — do not rely on the two diverging silently).
+# Before #2726 the check used KNOWN_SOURCE_TYPES alone, so a registered kind was
+# valid in create_source/commit_schema but rejected in pack manifests — the
+# drift class this closes. Tier-form registry keys (T0-T4) are accepted too: a
+# source's sourceKind may legitimately BE a tier form (dual-write #398), so
+# `sourceTypes: [T2]` is a meaningful activation predicate, not a typo.
+
+
+def registered_source_types() -> frozenset[str]:
+    """Every source kind currently valid in a pack's ``extraction.sourceTypes``.
+
+    Live view (the registry is mutable via ``register_source_kind_default``),
+    so callers must not cache the result across a registration. Does NOT include
+    the escape hatch — the validation site unions that separately.
+    """
+    return KNOWN_SOURCE_TYPES | frozenset(SOURCE_KIND_DEFAULTS)
+
 # Core mechanism predicates (S3 pipeline emits IMPL/NAND; MITIGATES for
 # mitigations) — valid chain-edge / enforcement targets without a pack relation.
 CORE_PREDICATES = frozenset({"IMPL", "NAND", "MITIGATES"})
+
+# ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
+# Per-pack slots that let a pack shape extraction for its own domain while the
+# engine stays pack-agnostic: the pack drives the extractor, the extractor holds
+# no domain behaviour.
+#
+# ``entityCues`` is the DECLARATIVE slot — keyed by a KIND from the pack's
+# vocabulary (its own, core, or a kind that resolves to exactly one other
+# loaded pack), so a cue names a kind rather than a name pattern. SHAPE is
+# checked per-manifest; RESOLUTION is checked across packs after load_all(),
+# because a bare name is not decidable from one manifest alone.
+VALID_EXTRACTION_KEYS = frozenset({
+    "active", "sourceTypes", "enforcement",
+    "entityCues", "relationTemplates", "valueGate", "promptFragments",
+})
+
+# ⛔ Refusals, named rather than left to the unknown-key rule.
+# The design that motivated these two slots dropped artefacts at MINT by
+# matching NAME PATTERNS. The owner ruling on #1026 chose the declarative slot
+# instead: "keep the slot, as declared entity types only — the pack declares
+# which kinds its artefacts are; no name patterns; nothing is dropped at mint."
+# OVERRIDES: the common pack-filtering default (pattern-based exclusion at
+# ingestion) — we drop nothing at mint; the pack declares kinds, and the value
+# gate judges utterances.
+# A pack author arriving with a vendor's pattern-filtering page is told WHY at
+# the point of adoption, instead of being left to infer it from "unknown key".
+REFUSED_EXTRACTION_KEYS = {
+    "excludePatterns": (
+        "name-pattern dropping is not part of v3.1 — the #1026 ruling is that "
+        "nothing is dropped at mint; a pack declares its kinds instead "
+        "(entityCues)"
+    ),
+    "entityPatterns": (
+        "name-pattern dropping is not part of v3.1 — the #1026 ruling is that "
+        "nothing is dropped at mint; a pack declares its kinds instead "
+        "(entityCues)"
+    ),
+}
+
+# Prompt-fragment budget (R6 §1.5 — "promptFragments token-capped").
+# The count is a whitespace-word PROXY, not a tokenizer: this runs at manifest
+# load, where no tokenizer is loaded, and the cap exists to stop a pack shipping
+# a wall of prose into every value brief rather than to bound a real token
+# budget. Deliberately generous — a fragment is one instruction snippet.
+MAX_PROMPT_FRAGMENT_TOKENS = 120
+MAX_PROMPT_FRAGMENTS_TOKENS = 600
+
+# Character bounds ALONGSIDE the word proxy. The proxy counts whitespace
+# tokens, so a whitespace-free blob of any size costs 1 — a minified payload or
+# a long single-line code fragment would sail through both word caps. These
+# bounds are what make the guard non-evadable by deleting the spaces.
+MAX_PROMPT_FRAGMENT_CHARS = 4 * MAX_PROMPT_FRAGMENT_TOKENS
+MAX_PROMPT_FRAGMENTS_CHARS = 4 * MAX_PROMPT_FRAGMENTS_TOKENS
+
+#: `valueGate` keys the template documents. A mistyped gate key is silent dead
+#: config of exactly the species the unknown-key rule exists to catch, so the
+#: neighbouring slot's strictness is matched here (review of PR #5647).
+VALID_VALUE_GATE_KEYS = frozenset({"keep", "drop"})
+
+
+def prompt_token_proxy(text: str) -> int:
+    """Whitespace-word count as a PROXY for a token count.
+
+    Named "proxy" so no caller mistakes it for a token-accurate count. No
+    tokenizer is loaded at manifest-load time, and the cap is a guard against a
+    pack shipping a wall of prose into every brief it activates — not a budget
+    that must be exact. Pair it with a CHARACTER bound (see
+    ``MAX_PROMPT_FRAGMENT_CHARS``): a word count alone is evaded by removing
+    the spaces.
+    """
+    return len(text.split())
+
+
+def _as_map(value: Any) -> dict:
+    """``value`` as a dict, else ``{}`` — never raises on a malformed section.
+
+    Validation reports the shape error; normalization must still return the
+    documented default shape, so a caller reading ``extraction`` never meets a
+    non-dict where the manifest documents a map.
+    """
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list:
+    """``value`` as a list, else ``[]`` — never raises, never splits a string.
+
+    ``list("abc")`` would silently become ``['a','b','c']``: the isinstance
+    guard keeps malformed input visible as the shape error validation already
+    reports for it, instead of manufacturing data the manifest never expressed.
+    """
+    return list(value) if isinstance(value, list) else []
+
+
+def _kind_ref_shape_error(ref: Any) -> str | None:
+    """Why ``ref`` is not a well-formed kind reference, else ``None``.
+
+    SHAPE ONLY — deliberately not a resolution check. Whether a reference
+    RESOLVES is a cross-pack question (a bare name may belong to exactly one
+    other loaded pack), so it is decided by ``_validate_cross_pack_refs`` once
+    every pack is loaded — the same division ``relations`` already uses, and
+    the reason an unknown BARE name must NOT be rejected here.
+
+    What it catches is the MALFORMATION itself. ``_resolve_kind_ref`` would
+    report ``":kind"``, ``"ns:"`` and ``"a:b:c"`` only as the generic "does
+    not resolve to any known kind", which does not say what is wrong with them;
+    this check names it, at the per-manifest layer that drops the pack first
+    (review of PR #5647).
+    """
+    if not isinstance(ref, str) or not ref.strip():
+        return "must be a non-empty string"
+    if ":" in ref:
+        ns, _, kind = ref.partition(":")
+        if not ns.strip() or not kind.strip() or ":" in kind:
+            return "is not a well-formed 'namespace:kind' reference"
+    return None
 
 
 # ── Pack data model ───────────────────────────────────────────────────────
@@ -186,6 +358,14 @@ class PackManifest:
                 "relations": {},
                 "chains": {},
             },
+            # v3.1 slots (#1026): present here too, so a manifest constructed
+            # directly (tests, tooling) has the SAME shape _normalize_extraction
+            # produces — a consumer indexing a slot must not KeyError on one of
+            # the two paths. Pinned by test_dataclass_default_matches_normalize.
+            "entityCues": {},
+            "relationTemplates": [],
+            "valueGate": {},
+            "promptFragments": [],
         }
     )
 
@@ -516,17 +696,27 @@ class PackRegistry:
 
         Absent in v2 manifests → active: true, no sourceTypes, warn default.
         """
-        ext = ext or {}
-        enforcement = ext.get("enforcement") or {}
+        ext = ext if isinstance(ext, dict) else {}
+        enforcement = _as_map(ext.get("enforcement"))
         return {
             "active": ext.get("active", True),
-            "sourceTypes": list(ext.get("sourceTypes") or []),
+            "sourceTypes": _as_list(ext.get("sourceTypes")),
             "enforcement": {
                 "default": enforcement.get("default", "warn"),
-                "kinds": dict(enforcement.get("kinds") or {}),
-                "relations": dict(enforcement.get("relations") or {}),
-                "chains": dict(enforcement.get("chains") or {}),
+                "kinds": _as_map(enforcement.get("kinds")),
+                "relations": _as_map(enforcement.get("relations")),
+                "chains": _as_map(enforcement.get("chains")),
             },
+            # v3.1 slots (#1026 §1.4). Empty when absent, so a v3 manifest
+            # normalizes to the documented shape unchanged (additive, backward
+            # compatible).
+            "entityCues": {
+                kind: _as_list(cues)
+                for kind, cues in _as_map(ext.get("entityCues")).items()
+            },
+            "relationTemplates": _as_list(ext.get("relationTemplates")),
+            "valueGate": _as_map(ext.get("valueGate")),
+            "promptFragments": _as_list(ext.get("promptFragments")),
         }
 
     # ── Validate ───────────────────────────────────────────────────────
@@ -575,7 +765,15 @@ class PackRegistry:
                             f"ontology.{kind_field}: '{k}' should be camelCase "
                             f"(lowercase first letter)"
                         )
-                    elif k in CANONICAL_KINDS.get(kind_field, set()):
+                    # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from
+                    # the object-kind axis to the SOURCE-kind axis (a document is
+                    # a `:Source`), so the canonical-collision check must read that
+                    # vocabulary too. Without it a pack could re-register
+                    # `objectKinds: [document]`, and `pack.object_kinds` feeds
+                    # extractor_v2's writable kind forms and the classification
+                    # index — i.e. the retired kind would be writable again.
+                    elif k in CANONICAL_KINDS.get(kind_field, set()) \
+                            or k in registered_source_types():
                         errors.append(
                             f"ontology.{kind_field}: '{k}' is already in canonical "
                             f"vocabulary — no need to register"
@@ -791,6 +989,10 @@ class PackRegistry:
         extraction = raw.get("extraction")
         if extraction is not None and not isinstance(extraction, dict):
             errors.append("extraction must be a map")
+            # Leave `extraction` a map for the sections below: the shape error is
+            # already recorded, and the slot checks that follow cannot introspect
+            # a non-map — they would raise instead of reporting.
+            extraction = {}
         else:
             extraction = extraction or {}
             if "active" in extraction and not isinstance(extraction["active"], bool):
@@ -800,11 +1002,12 @@ class PackRegistry:
                     isinstance(s, str) and s for s in source_types):
                 errors.append("extraction.sourceTypes must be a list of strings")
             else:
+                known_source_types = registered_source_types()
                 for st in source_types:
-                    if st not in KNOWN_SOURCE_TYPES and st not in SOURCE_TYPE_ESCAPE_HATCH:
+                    if st not in known_source_types and st not in SOURCE_TYPE_ESCAPE_HATCH:
                         errors.append(
                             f"extraction.sourceTypes: '{st}' is not a known source "
-                            f"type (known: {', '.join(sorted(KNOWN_SOURCE_TYPES))}; "
+                            f"type (known: {', '.join(sorted(known_source_types))}; "
                             f"escape hatch: {', '.join(sorted(SOURCE_TYPE_ESCAPE_HATCH))})"
                         )
             enforcement = extraction.get("enforcement", {})
@@ -855,6 +1058,170 @@ class PackRegistry:
                                 f"a declared {label}"
                             )
 
+        # ── Manifest v3.1 (R6 §1.4/§1.5, #1026): extraction behaviour slots ──
+        # NOTE: this loop rejects EVERY key outside VALID_EXTRACTION_KEYS,
+        # including the two named refusals. Before v3.1 the top-level
+        # `extraction` map accepted anything, so a typo such as `sourceType`
+        # (singular) parsed clean and silently did nothing.
+        for key in extraction:
+            if key in VALID_EXTRACTION_KEYS:
+                continue
+            if key in REFUSED_EXTRACTION_KEYS:
+                errors.append(f"extraction.{key}: {REFUSED_EXTRACTION_KEYS[key]}")
+            else:
+                errors.append(
+                    f"extraction: unknown key '{key}' (allowed: "
+                    f"{', '.join(sorted(VALID_EXTRACTION_KEYS))})"
+                )
+
+        # entityCues: {kind: [surface cue, ...]} — the DECLARATIVE slot. The
+        # key must be a WELL-FORMED kind reference; whether it RESOLVES is a
+        # cross-pack question, answered in _validate_cross_pack_refs.
+        entity_cues = extraction.get("entityCues")
+        if entity_cues is not None and not isinstance(entity_cues, dict):
+            errors.append(
+                "extraction.entityCues must be a map of kind -> [cue, ...]")
+        elif isinstance(entity_cues, dict):
+            for kind, cues in entity_cues.items():
+                shape = _kind_ref_shape_error(kind)
+                if shape:
+                    errors.append(f"extraction.entityCues: '{kind}' {shape}")
+                if not isinstance(cues, list) or not all(
+                        isinstance(c, str) and c.strip() for c in cues):
+                    errors.append(
+                        f"extraction.entityCues.{kind} must be a list of "
+                        f"non-empty strings"
+                    )
+
+        # relationTemplates: pack-typical IMPL/NAND shapes. The mechanism
+        # vocabulary is the pair `relations[].mechanism` already enforces — see
+        # the note at the check below for why it is NOT `CORE_PREDICATES`.
+        templates = extraction.get("relationTemplates")
+        if templates is not None and not isinstance(templates, list):
+            errors.append("extraction.relationTemplates must be a list")
+        elif isinstance(templates, list):
+            for i, tpl in enumerate(templates):
+                if not isinstance(tpl, dict):
+                    errors.append(
+                        f"extraction.relationTemplates[{i}] must be a map")
+                    continue
+                for tkey in tpl:
+                    if tkey not in ("predicate", "mechanism", "fromKind",
+                                    "toKind", "description"):
+                        errors.append(
+                            f"extraction.relationTemplates[{i}]: unknown key "
+                            f"'{tkey}' (allowed: predicate, mechanism, fromKind, "
+                            f"toKind, description)"
+                        )
+                mechanism = tpl.get("mechanism")
+                # IMPL|NAND — the SAME pair `relations[].mechanism` enforces,
+                # deliberately NOT `CORE_PREDICATES`. That set still carries
+                # MITIGATES, which ONTOLOGY v3.17 (#4937, the F1 ruling on
+                # #2552) RETIRED: `sdk.create_operator` refuses it, and the
+                # ontology's own PREAMBLE states that where the document and
+                # the code disagree, the DOCUMENT is right. Accepting it here
+                # would advertise, on the author-facing template, an edge the engine
+                # cannot build — and would make this slot BROADER than its own
+                # sibling. `CORE_PREDICATES` still admitting MITIGATES is a
+                # separate, pre-existing defect: #5322.
+                # `predicate` is the one REFERENCE among these slots. The
+                # sibling `ontology.relations` requires a non-empty camelCase
+                # predicate and both kind sides, and a template naming none of
+                # them describes nothing — but this field was checked by
+                # NEITHER pass, so `{"predicate": 123}` and `{}` both
+                # validated clean (review of PR #5647, found independently by
+                # the architecture and security agents).
+                template_pred = tpl.get("predicate")
+                if not isinstance(template_pred, str) or not template_pred:
+                    errors.append(
+                        f"extraction.relationTemplates[{i}].predicate must be "
+                        f"a non-empty string"
+                    )
+                elif not template_pred[0].islower():
+                    errors.append(
+                        f"extraction.relationTemplates[{i}].predicate "
+                        f"'{template_pred}' must be camelCase"
+                    )
+                if "fromKind" in tpl or "toKind" in tpl:
+                    if "fromKind" not in tpl or "toKind" not in tpl:
+                        errors.append(
+                            f"extraction.relationTemplates[{i}]: both fromKind "
+                            f"and toKind are required when either is given "
+                            f"(a half-declared shape cannot be matched)"
+                        )
+                if mechanism is not None and mechanism not in ("IMPL", "NAND"):
+                    errors.append(
+                        f"extraction.relationTemplates[{i}].mechanism must be "
+                        f"IMPL or NAND, got {mechanism!r}"
+                    )
+                for side in ("fromKind", "toKind"):
+                    ref = tpl.get(side)
+                    if ref is None:
+                        continue
+                    shape = _kind_ref_shape_error(ref)
+                    if shape:
+                        errors.append(
+                            f"extraction.relationTemplates[{i}].{side}: "
+                            f"'{ref}' {shape}"
+                        )
+
+        # valueGate: this pack's keep/drop HINTS for the value brief — what a
+        # valuable utterance looks like in this domain. It is NOT a mint-time
+        # drop rule: no hint can remove an artefact, only inform the
+        # utterance-level value gate.
+        value_gate = extraction.get("valueGate")
+        if value_gate is not None and not isinstance(value_gate, dict):
+            errors.append("extraction.valueGate must be a map")
+        elif isinstance(value_gate, dict):
+            for gkey, gval in value_gate.items():
+                if gkey not in VALID_VALUE_GATE_KEYS:
+                    errors.append(
+                        f"extraction.valueGate: unknown key '{gkey}' (allowed: "
+                        f"{', '.join(sorted(VALID_VALUE_GATE_KEYS))})"
+                    )
+                if not isinstance(gval, list) or not all(
+                        isinstance(g, str) and g.strip() for g in gval):
+                    errors.append(
+                        f"extraction.valueGate.{gkey} must be a list of "
+                        f"non-empty strings"
+                    )
+
+        # promptFragments: pack-authored instruction snippets declared for the
+        # value brief. Capped on BOTH words and characters so a pack cannot
+        # inflate every brief it activates — and cannot evade the word cap by
+        # shipping one whitespace-free blob.
+        fragments = extraction.get("promptFragments")
+        if fragments is not None and not isinstance(fragments, list):
+            errors.append("extraction.promptFragments must be a list")
+        elif isinstance(fragments, list):
+            total = 0
+            total_chars = 0
+            for i, frag in enumerate(fragments):
+                if not isinstance(frag, str) or not frag.strip():
+                    errors.append(
+                        f"extraction.promptFragments[{i}] must be a non-empty "
+                        f"string"
+                    )
+                    continue
+                cost = prompt_token_proxy(frag)
+                chars = len(frag)
+                total += cost
+                total_chars += chars
+                if (cost > MAX_PROMPT_FRAGMENT_TOKENS
+                        or chars > MAX_PROMPT_FRAGMENT_CHARS):
+                    errors.append(
+                        f"extraction.promptFragments[{i}] is ~{cost} words / "
+                        f"{chars} chars (caps {MAX_PROMPT_FRAGMENT_TOKENS} "
+                        f"words, {MAX_PROMPT_FRAGMENT_CHARS} chars)"
+                    )
+            if (total > MAX_PROMPT_FRAGMENTS_TOKENS
+                    or total_chars > MAX_PROMPT_FRAGMENTS_CHARS):
+                errors.append(
+                    f"extraction.promptFragments total ~{total} words / "
+                    f"{total_chars} chars (caps {MAX_PROMPT_FRAGMENTS_TOKENS} "
+                    f"words, {MAX_PROMPT_FRAGMENTS_CHARS} chars)"
+                )
+
         # Validate connectors
         for conn in raw.get("connectors", []):
             if not conn.get("source"):
@@ -892,14 +1259,38 @@ class PackRegistry:
                     errors.append(
                         f"subclassOf: '{child}' is not declared in this pack's kinds"
                     )
-                if not parent or not parent[0].isupper():
+                # Parent shape: PascalCase core entity types / named object
+                # kinds (Subject…Source, Project, WorkItem, Problem) OR a
+                # canonical lowercase object kind from ONTOLOGY §5 (document,
+                # tag, strategy, plan, goal, target — #2727). The PascalCase
+                # heuristic predates the commitment-state family and would
+                # reject those valid parents; it is therefore scoped to refs
+                # that are NOT canonical object kinds, so camelCase typos like
+                # `workItem` still error (the membership check below is the
+                # real typo guard).
+                # Known duality (pinned in tests): `document` (§5 objectKind)
+                # and `Document` (core entity type) are BOTH valid parents and
+                # expand SEPARATELY (`expand_kind` keys on the literal string).
+                # That duality is pre-existing in the core_parents membership
+                # set — this relaxation only stops the shape check from
+                # contradicting it for the lowercase half of the vocabulary.
+                # The isinstance guard keeps a malformed manifest value (list,
+                # int) on the shape-error path instead of raising TypeError out
+                # of `_validate` (which surfaced as an opaque dropped-pack error).
+                if (not isinstance(parent, str) or not parent
+                        or (not parent[0].isupper()
+                            and parent not in CANONICAL_OBJECT_KINDS)):
                     errors.append(
                         f"subclassOf: parent kind '{parent}' must be PascalCase "
-                        f"(core kinds use PascalCase)"
+                        f"or a canonical lowercase object kind "
+                        f"(e.g. {', '.join(sorted(CANONICAL_OBJECT_KINDS))})"
                     )
-                # Check parent exists in core object kinds or core concepts
+                # Check parent exists in core object kinds or core concepts.
+                # isinstance guard: a non-string parent already failed the shape
+                # check above — the frozenset membership test would otherwise
+                # raise TypeError for an unhashable value (e.g. a list).
                 core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES
-                if parent not in core_parents:
+                if isinstance(parent, str) and parent not in core_parents:
                     errors.append(
                         f"subclassOf: parent kind '{parent}' not found in core "
                         f"ontology. Must be a core entity type or core objectKind."
@@ -981,6 +1372,41 @@ class PackRegistry:
                         )
                         self.errors.setdefault(ns, []).append(msg)
 
+            # Manifest v3.1 (#1026): resolve every kind reference the v3.1
+            # extraction slots declare. SHAPE was checked per-manifest in
+            # _validate; RESOLUTION needs every pack loaded, which is why it
+            # happens here — the same split `relations` uses. Without this the
+            # slots were the one place a ref was accepted and handed to nobody,
+            # so a dangling `ns:kind` validated clean (review of PR #5647).
+            v31_kinds = self._pack_kind_set(pack)
+            v31_extraction = pack.extraction or {}
+            v31_refs: list[tuple[str, str]] = [
+                (f"extraction.entityCues: '{kind}'", kind)
+                for kind in (v31_extraction.get("entityCues") or {})
+            ]
+            for idx, tpl in enumerate(
+                    v31_extraction.get("relationTemplates") or []):
+                if not isinstance(tpl, dict):
+                    continue
+                for side in ("fromKind", "toKind"):
+                    ref = tpl.get(side)
+                    if isinstance(ref, str) and ref.strip():
+                        v31_refs.append(
+                            (f"extraction.relationTemplates[{idx}].{side}", ref))
+            for label, ref in v31_refs:
+                status = self._resolve_kind_ref(
+                    ref, v31_kinds, all_known, bare_index)
+                if status == "unknown":
+                    self.errors.setdefault(ns, []).append(
+                        f"{label} does not resolve to any known kind "
+                        f"(core or loaded pack)"
+                    )
+                elif status == "ambiguous":
+                    self.errors.setdefault(ns, []).append(
+                        f"{label} is ambiguous — declared by multiple packs; "
+                        f"use 'namespace:kind'"
+                    )
+
             # Manifest v3 (R6 §3.1/§3.5): every nearMisses target resolves
             pack_kinds = self._pack_kind_set(pack)
             for kind, kd in pack.kind_defs.items():
@@ -1051,6 +1477,14 @@ class PackRegistry:
         other pack (single-namespace); more than one match → ambiguous.
         """
         if ":" in ref:
+            if ref.startswith("core:"):
+                # `compile_value_brief` emits core kinds as `core:<kind>`
+                # (`core:Project`), and a pack author is most likely to paste a
+                # kind straight out of it. Accept the engine's OWN spelling by
+                # normalizing to the bare kind, rather than reporting an
+                # unresolvable ref for it. WIDENING only: this form was an
+                # error before, so no existing valid ref changes meaning.
+                return "ok" if ref[len("core:"):] in CORE_KINDS else "unknown"
             return "ok" if ref in all_known else "unknown"
         if ref in pack_kinds or ref in CORE_KINDS:
             return "ok"
@@ -1146,6 +1580,14 @@ class PackRegistry:
         Returns list of kind strings for Cypher IN clause.
         Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:task"]
 
+        INVARIANT (#6146): the argument is ALWAYS in its own expansion —
+        ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
+        its subclasses and equivalents, it never replaces the caller's kind with
+        namespace forms. Read paths (``query``/``paginated_query`` build
+        ``n.pointKind IN [...]`` from this list) must not turn a valid kind into
+        an empty result set, because a wrong-empty is indistinguishable from a
+        true-empty to the caller.
+
         Pre-computed at load_all() time, O(1) dict lookup at query time.
         """
         if not hasattr(self, '_kind_expansions'):
@@ -1208,9 +1650,16 @@ class PackRegistry:
                         expansions[target].append(full_kind)
 
         # Bare-kind resolution: a bare kind name (e.g., "useCase") maps to all
-        # pack-prefixed forms (e.g., "product-strategy:useCase"). The bare form
-        # itself is omitted unless it's a canonical core kind — migrate_kinds
-        # converts bare- → prefixed before queries.
+        # pack-prefixed forms (e.g., "product-strategy:useCase").
+        #
+        # #6146: the bare form ITSELF is kept. Expansion is additive; an
+        # expansion that DROPPED the argument made `query(kind=K)` build
+        # `n.pointKind IN ['dev:issue','pm:issue']`, which matches no point
+        # created with the bare `issue` kind — so a valid kind with live points
+        # returned [] and the caller could not tell that from "no points".
+        # `migrate_kinds` is a manual, opt-in normaliser (tortoise/migrate_kinds.py,
+        # run by hand), never a precondition for a READ, so bare-kinded data is a
+        # state the read path must serve rather than assume away.
         bare_to_full: dict[str, list[str]] = {}
         for full in expansions:
             if ":" in full:
@@ -1222,7 +1671,7 @@ class PackRegistry:
                     if f not in expansions[bare]:
                         expansions[bare].append(f)
             else:
-                expansions[bare] = fulls
+                expansions[bare] = [bare, *fulls]
 
         self._kind_expansions = expansions
 

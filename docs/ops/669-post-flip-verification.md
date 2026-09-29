@@ -286,7 +286,7 @@ SELECT id, org_id, email, role, status, accepted_at FROM invitations ORDER BY cr
 ### 5.1 Run the sweep (or wait for the hourly cron)
 
 ```bash
-curl -s -X POST https://api.premiselabs.co/v1/internal/backups/sweep \
+curl -s --max-time 600 -X POST https://api.premiselabs.co/v1/internal/backups/sweep \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY"
 ```
 
@@ -418,7 +418,7 @@ security = `scheme: lookup_hash_sha256` (Supabase).
 > See `docs/ops/registry-backup-dr.md` §Control plane / dialect (#2823).
 
 ```bash
-curl -s https://api.premiselabs.co/v1/internal/backups/status \
+curl -s --max-time 20 https://api.premiselabs.co/v1/internal/backups/status \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY"
 ```
 
