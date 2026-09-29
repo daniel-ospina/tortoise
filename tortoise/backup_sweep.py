@@ -46,6 +46,7 @@ from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
 from .hosted_backup import (
+    _delete_backup_objects,
     _is_supabase_source,
     create_backup,
     mirror_backup,
@@ -559,12 +560,14 @@ def read_graph_state(storage, org_id: str, graph_id: str) -> dict[str, Any]:
 
 
 def _delete_uploaded(storage, org_id: str, backup_id: str) -> None:
-    """Best-effort removal of a just-uploaded (guard-rejected) backup."""
-    for suffix in ("dump.enc", "manifest.json"):
-        try:
-            storage.delete(f"backups/{backup_id}/{suffix}")
-        except Exception as e:
-            logger.warning("cleanup of %s/%s failed: %s", backup_id, suffix, e)
+    """Best-effort removal of a just-uploaded (guard-rejected) backup.
+
+    Delegates to :func:`hosted_backup._delete_backup_objects` — the ONE delete
+    implementation (#5062) — so this path deletes the shared object set in the
+    shared order (manifest last, #5062 review F3) and a guard-rejected backup
+    can never leave an orphan ``ledger.json`` behind.
+    """
+    _delete_backup_objects(storage, backup_id)
 
 
 def _sweep_graph_list(source, org_id: str) -> list[dict[str, Any]]:
@@ -853,6 +856,10 @@ def _backup_graph(
         "node_count": node_count,
         "pruned": len(deleted),
         "mirror": mirror_result,
+        # #5062: the destination's read-back coverage. `backed_up` is reachable
+        # only through a create_backup whose ledger was read back verified, so
+        # this is evidence, not a restatement of the writer's counters.
+        "coverage": manifest.get("coverage"),
     }
 
 
@@ -937,13 +944,12 @@ def _sweep_org(
             gid = meta.get("graph_id") or ""
             if (gid and gid != "default"
                     and graph_results.get(gid, {}).get("status") == "backed_up"):
-                for suffix in ("dump.enc", "manifest.json"):
-                    try:
-                        storage.delete(f"backups/{bid}/{suffix}")
-                    except Exception as e:
-                        logger.warning(
-                            "custom-era flat cleanup of %s/%s failed: %s",
-                            org_id, bid, e)
+                # ONE delete implementation and ONE object set (#5062 review
+                # F4): the flat pool's objects are the same suffixes as a
+                # nested archive's, so this must not carry its own hardcoded
+                # pair — a flat artifact that carried a ledger.json would
+                # otherwise be orphaned here.
+                _delete_backup_objects(storage, bid)
                 flats.pop(bid, None)
     # #2466: the sweep's index write reconciles purge-erased flat bids (a
     # stale reclassification must never resurrect deleted objects) and prunes

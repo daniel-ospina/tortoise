@@ -1895,6 +1895,13 @@ And **fold only the replay tears into `ok`**, or recovery can report success on 
 
 **Not fixed here** — telling a dropped terminal-lane line from a dropped registration line requires the event type of the dropped bytes, which neither `read_all()` nor the local parse loop surfaces; that is (s). `test_recover_from_log_tolerates_a_torn_trailing_line` pins the REGISTRATION direction only and cannot detect this one; do not read it as covering both.
 
+> **Cross-reference (#3316, 2026-09-27): gap (s) is now fixed for the REPLAY lanes.** A torn trailing
+> record whose loss could revive state is REFUSED before any wipe or fold, through one classifier in
+> `tortoise/log.py` (`TORN_TAIL_HARMLESS_EVENT_TYPES`). This qualifies the "Parse tears stay
+> tolerated" line below: `EventLog.read_all` still never raises on a torn trailing line, but the
+> replay engines refuse one that cannot be proven to be the data-LOSS direction. The departure from
+> this document's blanket tolerance is recorded as an explicit `OVERRIDES:` line on issue #3316.
+
 ```python
     after = _node_count()
     # A folded-but-retained (tombstoned) node and an unfolded live node are
