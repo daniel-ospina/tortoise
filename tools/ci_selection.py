@@ -719,6 +719,19 @@ TOOL_CARVEOUTS = (
     # Pinned by
     # test_ci_selection.test_run_with_eval_keys_tool_change_fails_closed_to_full.
     "tools/run-with-eval-keys.sh",
+    # #5050: the measured-durations-map validator (tools/ci_manifest.py) owns
+    # tests/test_ci_manifest.py. Same silent-drop class as the
+    # collision-preflight carve-out above: no SOURCE_PATTERNS entry matches the
+    # path, so a validator-only change is swallowed by the flat "tools/" prefix
+    # in NON_PYTHON_PREFIXES, `changed` comes back empty, and select() takes the
+    # docs-only return — the validator's own verdict-boundary tests would never
+    # run on the PR that changes the validator. Registering
+    # tests/test_ci_manifest.py under `surfaces: core` does NOT cover this: the
+    # early docs-only return bypasses the `matched.add("core")` fallback, so a
+    # tool-only change selects NO surface at all. It lands in the unknown-path
+    # branch -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_manifest_tool_change_fails_closed_to_full.
+    "tools/ci_manifest.py",
 )
 
 
@@ -2319,6 +2332,66 @@ def render_surface_audit(report: dict) -> str:
     return NL.join(lines)
 
 
+def _ci_manifest_module():
+    """The ``tools.ci_manifest`` module, reusing an already-loaded copy.
+
+    ``ci_manifest`` imports this module back for the manifest helpers, so the
+    import is lazy and must not create a second copy under a different name
+    (which would split module state under pytest).
+    """
+    import sys as _sys
+    for _name in ("tools.ci_manifest", "ci_manifest"):
+        mod = _sys.modules.get(_name)
+        if mod is not None and hasattr(mod, "check"):
+            return mod
+    for path in (str(REPO), str(REPO / "tools")):
+        if path not in _sys.path:
+            _sys.path.insert(0, path)
+    try:
+        from tools import ci_manifest as mod
+    except ImportError:  # pragma: no cover - module shipped with the repo
+        import ci_manifest as mod
+    return mod
+
+
+def _manifest_contract_issues(manifest: dict) -> list[str]:
+    """#5050: the measured-durations-map contract, as RED issues only.
+
+    Delegated to ``tools/ci_manifest.py`` so the map's checks live in ONE place
+    and cannot be half-wired: this call replaces the three direct
+    ``duration_issues``/``leg_coverage_issues``/``duration_coverage_issues``
+    calls that used to sit in the ``--integrity`` composition, and adds the two
+    the validator contributes (a below-floor weight, a stale capture date).
+
+    An ImportError is reported as an issue, never swallowed: returning ``[]``
+    would leave ``--integrity`` GREEN with none of these checks having run —
+    the "silent omission with every gate green" class they exist to kill.
+
+    The validator's UNKNOWN verdict is printed as a NOTICE rather than added to
+    ``problems``. The two states are genuinely different: a RED map is observed
+    to be wrong, while UNKNOWN means the map's fidelity could not be observed —
+    it carries no capture date, or the repo has not adopted durations at all.
+    The second keeps this gate's documented polarity (an absent map must not
+    hard-fail a repo that never adopted it; pinned by
+    ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``), and
+    failing on it would red ``manifest-integrity`` repo-wide until a weekly data
+    refresh landed — refusing honest merges for a state no lane owns. The notice
+    keeps it visible instead of silent, and ``ci_manifest.py`` exits 2 on
+    it, so nothing anywhere reports that state as success.
+    """
+    try:
+        red, unknown = _ci_manifest_module().check(manifest)
+    except ImportError as exc:  # pragma: no cover - module shipped with the repo
+        return [
+            "the #5050 durations-map validator (tools/ci_manifest.py) could "
+            f"not be imported — the map's value/coverage/partition/staleness "
+            f"checks DID NOT RUN: {exc}"
+        ]
+    for reason in unknown:
+        print(f"⚠ durations map UNKNOWN (not gating this run): {reason}")
+    return red
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -2344,15 +2417,19 @@ def main() -> int:
 
     if args.integrity:
         missing = integrity(manifest)
-        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`.
-        # The latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
+        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`
+        # — the latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
         # durations value used to raise inside the packer before the check that
-        # names it had run — fail-closed, but with no diagnosis. (Belt and
-        # braces: `_duration_weight` also coerces, so the packer can no longer
-        # raise at all.)
+        # names it had run (fail-closed, but with no diagnosis; `_duration_weight`
+        # now coerces as well, so the packer cannot raise at all). That order is
+        # preserved inside `ci_manifest.map_issues`, which owns the composition
+        # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
+        # `duration_coverage_issues`) plus the two the validator adds (a
+        # below-floor weight, a stale capture date) are called from ONE place, so
+        # they cannot be half-wired into one entry point and missing from the
+        # other.
         problems = missing + slow_file_issues(manifest) \
-            + duration_issues(manifest) + leg_coverage_issues(manifest) \
-            + duration_coverage_issues(manifest)
+            + _manifest_contract_issues(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (space-joined matrix_* outputs) — when they do, the #1266
         # halves-parse tie check is

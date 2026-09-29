@@ -626,6 +626,20 @@ def test_run_with_eval_keys_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_ci_manifest_tool_change_fails_closed_to_full():
+    # #5050: tools/ci_manifest.py owns tests/test_ci_manifest.py. Same
+    # silent-drop class as the collision-preflight carve-out above — the flat
+    # "tools/" NON_PYTHON_PREFIXES entry swallows a tool-only change, so
+    # without a TOOL_CARVEOUTS entry `changed` is empty and the docs-only return
+    # runs tier-1 smoke only: the validator's own verdict-boundary suite would
+    # never run on the PR that changes the validator. No SOURCE_PATTERNS entry
+    # matches, so it lands in the unknown-path fail-closed branch -> FULL.
+    r = _sel(["tools/ci_manifest.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_finding_provenance_tool_change_fails_closed_to_full():
     # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
     # Same silent-drop class as the collision-preflight carve-out above — the

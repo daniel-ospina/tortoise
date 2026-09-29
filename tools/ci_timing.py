@@ -424,26 +424,35 @@ def validate_refreshed_manifest(manifest_text: str) -> list[str]:
 def integrity_problems(manifest_text: str) -> list[str]:
     """The FULL problem list `ci_selection.py --integrity` composes.
 
-    Composed by CALLING the same `ci_selection` functions, in the same order,
-    as the `--integrity` entry point — never a re-derived subset, so the two
-    cannot disagree about what a valid manifest is. The duration subset alone
-    is not enough: it is blind to `workflow_halves_issues`, so a refresh that
-    skews a weight hard enough to tilt the push halves (the #3395
-    starved-shard shape) would be accepted here and only surface later, with
-    no diagnosis, as a red `python-ci-gate` with zero test failures.
+    Composed by CALLING the same functions as the `--integrity` entry point —
+    never a re-derived subset, so the two cannot disagree about what a valid
+    manifest is. As of #5050 the durations-map half IS the entry point's own
+    contract: `ci_manifest.check` owns the map's checks (dead keys, malformed
+    values, coverage, the leg partition, a below-floor weight, a stale capture
+    date) and both callers compose it, so the invariant is structural rather
+    than a convention each caller has to re-implement. The rest of the list is
+    composed here because `ci_manifest` does not own it — most importantly
+    `workflow_halves_issues`: a refresh that skews a weight hard enough to tilt
+    the push halves (the #3395 starved-shard shape) would otherwise be accepted
+    here and surface later, with no diagnosis, as a red `python-ci-gate` with
+    zero test failures.
 
     Repo-scoped: `cs.integrity` walks this repo's `tests/` and the matrix
     checks read `python-ci.yml`, so this is defined only over this repo's own
     manifest — the refresh's only production target.
     """
+    import ci_manifest
     import ci_selection as cs
 
     manifest = _manifest_of(manifest_text)
+    # `red` only: `unknown` (an absent capture date, an absent map) is not a
+    # defect THIS gate can name — the refreshed text it is given carries a fresh
+    # stamp by construction. Parity with `--integrity` is on `red`, which is
+    # what makes the refresh refuse exactly the manifests the gate rejects.
+    red, _unknown = ci_manifest.check(manifest)
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
-                + cs.duration_issues(manifest)
-                + cs.leg_coverage_issues(manifest)
-                + cs.duration_coverage_issues(manifest))
+                + red)
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues
     if not wf_issues:
