@@ -2871,6 +2871,9 @@ class FalkorProjection(
         # design, so hoisting the initialisation is behaviour-preserving for
         # every path that reaches `_ensure_indexes`.
         self._vector_index_api = None
+        # #5440: the FTS index API is version-dependent FOR THE SAME REASON the
+        # vector one is — see `_create_fulltext_index`.
+        self._fts_index_api = None
         # Ops safety residual (#428): auto health check on open + transparent
         # corruption recovery. Embedded DBs rebuild from their adjacent JSONL
         # event log when lost/corrupt; production (FLY_APP_NAME) and server
@@ -6163,6 +6166,69 @@ class FalkorProjection(
                     f"{r['label']!r}/{r['key']!r} (contract: constant tuple only)")
         return out
 
+    def _create_fulltext_index(self, label: str, fields: list[str]) -> None:
+        """Create a FULLTEXT index on `label`/`fields`, adapting to the engine.
+
+        #5440: the FTS index API is version-dependent, exactly as the VECTOR one
+        is (#1359), and the FTS path simply never got that treatment. FalkorDB
+        4.20.4 (module `graph` 42004) registers the multi-field procedure
+        `db.idx.fulltext.createNodeIndex(label, f1, f2)`; 6.0.0 (module 60000)
+        accepts AT MOST ONE argument, so every existing call raises
+
+            ResponseError: Received 3 arguments to procedure
+            'db.idx.fulltext.createNodeIndex', expected at most 1
+
+        and the index is never created — which surfaces as six unrelated-looking
+        `test_search_engine.py` failures whose actual value is `set()`. The
+        Cypher-native DDL replaces it (`CREATE FULLTEXT INDEX FOR (n:L) ON (n.a,
+        n.b)`), and that is the same substitution #1359 made for vectors.
+
+        Which API won is recorded on `_fts_index_api` for DIAGNOSIS ONLY. Unlike
+        `_vector_index_api`, nothing consumes it, and that is not an oversight:
+        the FTS *query* statement (`db.idx.fulltext.queryNodes`) is version-
+        invariant — it is accepted by both 4.20.4 and 6.0.0, verified live on
+        both — so there is no second API for a reader to select between. The
+        attribute exists so that "which creation path did this engine take" is
+        answerable from a running instance instead of only from its version.
+        Do not claim it changes behaviour; it does not, and this sentence used
+        to say it did.
+
+        "already indexed" is NOT a failure: both APIs raise it for a pre-existing
+        index, and the caller uses that branch to drive its one-time migrations.
+        So it is re-raised unchanged for the caller to interpret.
+        """
+        fields_sql = ", ".join(f"'{f}'" for f in fields)
+        try:
+            self.g.query(
+                f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
+            self._fts_index_api = 'procedure'
+            return
+        except Exception as exc:
+            if "already" in str(exc).lower():
+                # A pre-existing index. Record the procedure API and let the
+                # caller's own "already" handling decide what to do about it —
+                # the index exists either way, so nothing here is broken.
+                self._fts_index_api = 'procedure'
+                raise
+            proc_error = exc
+        on_sql = ", ".join(f"n.{f}" for f in fields)
+        try:
+            self.g.query(
+                f"CREATE FULLTEXT INDEX FOR (n:{label}) ON ({on_sql})")
+            self._fts_index_api = 'cypher'
+        except Exception as exc:
+            if "already" in str(exc).lower():
+                self._fts_index_api = 'cypher'
+                raise
+            # Neither API worked. Surface BOTH, because a single message would
+            # hide which half is unsupported (the #1359 lesson: "unknown
+            # procedure" and "unregistered" are the same symptom, different
+            # causes, and only the pair identifies the engine).
+            raise RuntimeError(
+                f"no FTS index API available for {label}{tuple(fields)}: "
+                f"procedure API failed ({proc_error}); "
+                f"Cypher DDL failed ({exc})") from exc
+
     def _ensure_indexes(self) -> None:
         """Create indexes on frequently-filtered Point properties.
 
@@ -6405,8 +6471,7 @@ class FalkorProjection(
                                   # deliberately NOT indexed: a second
                                   # vocabulary the FTS surface does not read.
                 try:
-                    fields_sql = ", ".join(f"'{f}'" for f in fields)
-                    self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
+                    self._create_fulltext_index(label, fields)
                     if label == "Point":
                         # R2 (#1541) D3: a FRESH DB created the two-field
                         # index directly — mark the migration done so a later
@@ -6471,10 +6536,8 @@ class FalkorProjection(
                                             break
                                         except Exception:
                                             continue
-                                    self.g.query(
-                                        "CALL db.idx.fulltext.createNodeIndex("
-                                        "'Point', 'content', 'search_keys')"
-                                    )
+                                    self._create_fulltext_index(
+                                        "Point", ["content", "search_keys"])
                                     self.g.query(
                                         "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
                                     )
@@ -6495,8 +6558,24 @@ class FalkorProjection(
                                     "MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1"
                                 ).result_set
                                 if not done:
-                                    self.g.query("CALL db.idx.fulltext.dropIndex('Event')")
-                                    self.g.query("CALL db.idx.fulltext.createNodeIndex('Event', 'subject', 'name')")
+                                    # #5440: the Event branch hardcoded
+                                    # `dropIndex`, which 4.20.4 does not
+                                    # register — the Point branch above already
+                                    # loops over both spellings, and 6.0.0
+                                    # renamed it again. Try the Cypher DDL last.
+                                    for drop_stmt in (
+                                        "CALL db.idx.fulltext.drop('Event')",
+                                        "CALL db.idx.fulltext.dropIndex('Event')",
+                                        "DROP FULLTEXT INDEX FOR (n:Event) "
+                                        "ON (n.subject, n.name)",
+                                    ):
+                                        try:
+                                            self.g.query(drop_stmt)
+                                            break
+                                        except Exception:
+                                            continue
+                                    self._create_fulltext_index(
+                                        "Event", ["subject", "name"])
                                     self.g.query(
                                         "MERGE (m:Meta {key:'event_fts_v2'}) SET m.v = true"
                                     )
