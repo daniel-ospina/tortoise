@@ -9118,12 +9118,14 @@ async def _key_created_analytics(org: dict, kid: str, key_prefix: str) -> None:
     if is_supabase_enabled():
         cp = get_control_plane()
         try:
-            rows = cp.query(
-                "org_memberships",
-                select=["user_id", "identity"],
-                filters=[("org_id", "eq", org["org_id"]),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "org_memberships",
+                    select=["user_id", "identity"],
+                    filters=[("org_id", "eq", org["org_id"]),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             actor = next((r.get("user_id") or r.get("identity")
                           for r in rows if r.get("user_id") or r.get("identity")),
                          None)
@@ -14247,6 +14249,8 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
                 "p_tier": "free",
             }),
             op="provision_org")
+    except HTTPException:
+        raise
     except Exception as e:
         # 0011 unique index: a concurrent duplicate name surfaces as a
         # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
@@ -14888,11 +14892,13 @@ async def _apply_graph_recording_override(
         if graph_id == "default":
             kind = "default"
         else:
-            rows = cp.query(
-                "graphs", select=["kind"],
-                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs", select=["kind"],
+                    filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             kind = rows[0].get("kind") if rows else None
         if kind is None:
             raise HTTPException(status_code=404, detail="Unknown graph")
@@ -15002,11 +15008,13 @@ async def _apply_graph_rename(
         if graph_id == "default":
             kind = "default"
         else:
-            rows = cp.query(
-                "graphs", select=["kind"],
-                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs", select=["kind"],
+                    filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             kind = rows[0].get("kind") if rows else None
         if kind is None:
             raise HTTPException(status_code=404, detail="Unknown graph")
@@ -15119,10 +15127,12 @@ async def delete_graph(graph_id: str, org_id: str,
                             detail="Cannot delete the default graph")
     if is_supabase_enabled():
         cp = get_control_plane()
-        rows = cp.query(
-            "graphs", select=["kind", "status"],
-            filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
-        )
+        rows = await _cp_offload(
+            lambda: cp.query(
+                "graphs", select=["kind", "status"],
+                filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
+            ),
+            op="query")
         kind = rows[0].get("kind") if rows else None
     else:
         kind_rows = sdk._get_registry().query(
@@ -15251,13 +15261,16 @@ async def _graph_row_probe(org_id: str, graph_id: str) -> dict | None:
     )
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "graphs",
-                select=["kind", "status", "name", "namespace",
-                        "deleted_at", "purged_at"],
-                filters=[("id", "eq", graph_id),
-                         ("org_id", "eq", org_id)],
-            )
+            cp = get_control_plane()
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs",
+                    select=["kind", "status", "name", "namespace",
+                            "deleted_at", "purged_at"],
+                    filters=[("id", "eq", graph_id),
+                             ("org_id", "eq", org_id)],
+                ),
+                op="query")
             if not rows:
                 return None
             r = rows[0]
@@ -15299,13 +15312,15 @@ async def _rollback_restore_name_race(org_id: str, graph_id: str) -> None:
             is_supabase_enabled,
         )
         if is_supabase_enabled():
-            get_control_plane().query(
-                "graphs", method="PATCH",
-                filters=[("id", "eq", graph_id),
-                         ("org_id", "eq", org_id)],
-                json_body={"status": "deleted", "deleted_at": now,
-                           "purged_at": None, "purged_residual": False},
-            )
+            await _cp_offload(
+                lambda: get_control_plane().query(
+                    "graphs", method="PATCH",
+                    filters=[("id", "eq", graph_id),
+                             ("org_id", "eq", org_id)],
+                    json_body={"status": "deleted", "deleted_at": now,
+                               "purged_at": None, "purged_residual": False},
+                ),
+                op="query")
         else:
             sdk._get_registry().query(
                 "MATCH (g:Graph {id:$gid, org_id:$tid}) "
@@ -15334,11 +15349,13 @@ async def _trash_name_conflict(org_id: str, name: str,
     )
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "graphs", select=["id"],
-                filters=[("org_id", "eq", org_id), ("name", "eq", name),
-                         ("status", "eq", "active")],
-            )
+            rows = await _cp_offload(
+                lambda: get_control_plane().query(
+                    "graphs", select=["id"],
+                    filters=[("org_id", "eq", org_id), ("name", "eq", name),
+                             ("status", "eq", "active")],
+                ),
+                op="query")
             return any(r.get("id") != self_gid for r in rows)
         rows = sdk._get_registry().query(
             "MATCH (g:Graph {org_id:$tid, name:$name}) "
@@ -15872,11 +15889,13 @@ async def _require_owner(user_id: str, org_id: str, *,
         is_supabase_enabled,
     )
     if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "org_memberships",
-            select=["role", "status"],
-            filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id)],
-        )
+        rows = await _cp_offload(
+            lambda: get_control_plane().query(
+                "org_memberships",
+                select=["role", "status"],
+                filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id)],
+            ),
+            op="query")
         if not rows or rows[0].get("role") != "owner":
             raise HTTPException(status_code=403, detail="Requires owner role in team")
         status = rows[0].get("status")
@@ -17023,10 +17042,14 @@ async def invite_otp(body: dict, request: Request,
                     "error_code": "otp_not_required",
                     "message": "This invitation matches your email — accept directly."})
             from tortoise.supabase_control import org_by_id as _org_by_id
-            org = _org_by_id(get_control_plane(), row["org_id"])
-            return _do_send({"id": row["id"], "email": row["email"],
-                             "org_id": row["org_id"]},
-                            (org or {}).get("name"))
+            org = await _cp_offload(
+                lambda: _org_by_id(get_control_plane(), row["org_id"]),
+                op="org_by_id")
+            return await _cp_offload(
+                lambda: _do_send({"id": row["id"], "email": row["email"],
+                                  "org_id": row["org_id"]},
+                                 (org or {}).get("name")),
+                op="invitation_otp_mint")
         invite = _registry_pending_invite_by_token(_make_sdk(namespace="registry"),
                                                    token)
         if not invite:
@@ -17041,7 +17064,8 @@ async def invite_otp(body: dict, request: Request,
             params={"id": invite["org_id"]},
         ).result_set
         org_name = (_org_row[0][0].get("name") if _org_row else None)
-        return _do_send(invite, org_name)
+        return await _cp_offload(
+            lambda: _do_send(invite, org_name), op="invitation_otp_mint")
     except HTTPException:
         raise
     except Exception:
@@ -19682,6 +19706,8 @@ async def agent_signup(request: Request):
             await _cp_offload(
                 lambda: set_dashboard_key_login(get_control_plane(), org_id, True),
                 op="set_dashboard_key_login")
+        except HTTPException:
+            raise
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
@@ -19854,7 +19880,9 @@ async def agent_token_revoke(request: Request, org: dict = Depends(get_current_o
         if row.get("revoked_at") is not None:
             return {"revoked": True, "already": True, "org_id": org_id}
         try:
-            _sb_revoke(cp, token_hash, org_id)
+            await _cp_offload(
+                lambda: _sb_revoke(cp, token_hash, org_id),
+                op="revoke_signup_token")
         except HTTPException:
             raise
         except Exception:
@@ -20653,17 +20681,25 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
             timeout=15.0,
         )
     except (_httpx.HTTPError, _httpx.TimeoutException):
-        _compensate()
+        # #4350: the offload seam's own saturation error must not REPLACE the
+        # status this compensation path is about to return. A rollback that
+        # changes the response is the failure mode `_compensate` exists to
+        # prevent, so the seam error is suppressed exactly as the helper's own
+        # error already is inside `_compensate`.
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
 
     if resp.status_code == 404:
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         await _async_audit(request, "", "identity_unlink", resource_type="identity",
                            resource_id=identity_id, actor_user_id=user["user_id"],
                            detail={"status": "already_unlinked"})
         return {"unlinked": True, "already": True}
     if resp.status_code in (401, 422):
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         msg = resp.text
         if "single_identity_not_deletable" in msg:
             # #1765 review: GoTrue's floor counts IDENTITY ROWS (not password
@@ -20679,7 +20715,8 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
                                 detail="Sign in again to continue (REAUTH_REQUIRED)")
         raise HTTPException(status_code=422, detail="Unable to remove this login method")
     if resp.status_code not in (200, 204):
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         raise HTTPException(status_code=502, detail="Identity service unavailable")
 
     # Success: post-verify + consume + audit
@@ -20691,13 +20728,19 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
     except Exception:
         remaining = 1  # fail-open on the READ after a successful DELETE
     if remaining < 1:
-        _compensate()
+        with contextlib.suppress(Exception):
+            await _cp_offload(lambda: _compensate(), op="consume_unlink_permit")
         raise HTTPException(status_code=409, detail="Cannot remove the last login method")
-    import contextlib
+    # #4350: no local `import contextlib` here — it would make `contextlib`
+    # function-local for the WHOLE of `unlink_identity`, so the earlier
+    # `with contextlib.suppress(...)` on the 502/409/403 paths above would
+    # raise UnboundLocalError before this line ever ran. The module-level
+    # import is in scope throughout.
+    _consumed_at = _now_iso()
     with contextlib.suppress(Exception):
         await _cp_offload(
             lambda: consume_unlink_permit(
-                cp, user_id=user["user_id"], consumed_at=_now_iso()),
+                cp, user_id=user["user_id"], consumed_at=_consumed_at),
             op="consume_unlink_permit")
     await _async_audit(request, "", "identity_unlink", resource_type="identity",
                        resource_id=identity_id, actor_user_id=user["user_id"],
@@ -21085,7 +21128,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     user_id = user["user_id"]
 
     # #3498: the pre-lock reads are blocking PostgREST calls — off the loop.
-    # (The in-lock cap/revoke/recheck/insert calls below stay synchronous BY
+    # (The in-lock cap/revoke/recheck/insert calls below — plus the one direct
+    # ``cp.query`` candidate scan in the rotation branch — stay synchronous BY
     # DESIGN: the section runs under the per-org in-process mint lock, which
     # forbids awaits. That residual is tracked separately.)
     memberships = await _cp_offload(
@@ -23475,6 +23519,8 @@ async def _create_onboarding_org_lane(org: dict, name: str,
                     "p_tier": "free",
                 }),
                 op="provision_org")
+        except HTTPException:
+            raise
         except Exception as e:
             # 0011 unique index: a duplicate org name surfaces as a
             # PostgREST 409 → 409 (registry sdk.org_create raises
