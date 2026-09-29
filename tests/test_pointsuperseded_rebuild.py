@@ -1455,3 +1455,49 @@ def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
         # engines must not pass as "parity".
         assert via_all[1] == 1, (
             f"{name}: the CORRECTS edge was dropped on every engine: {via_all}")
+
+
+def test_supersede_then_revision_keeps_the_revision_stamp_on_every_engine(sup):
+    """#3305 (review P2): a supersede is status-TERMINAL but NOT stamp-frozen.
+
+    Live accepts a ``PointRevised`` after a supersede, so the trailing sweep
+    must not clobber that revision's ``updatedAt`` with the older journaled
+    supersede ts — the invalidate family already carried this seq-gate
+    (``skip_updated_at``); the supersede sibling did not. Pins the gate on ALL
+    three engines by asserting none of them ends at the supersede ts."""
+    from tortoise.consistency import recover_from_log
+
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    sdk.supersede_point(a, b)
+    sdk.update_point(a, content="REVISED-AFTER-SUPERSEDE")
+    records = EventLog(str(events / "events.jsonl")).read_all()
+    sup_ts = next(e["ts"] for e in records
+                  if e.get("type") == "PointSuperseded")
+    proj = sdk._get_proj()
+
+    def _row():
+        out = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status, n.content, n.updatedAt",
+            params={"id": a}).result_set[0]
+        return out[0], out[1], out[2]
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(events))
+    via_all = _row()
+
+    _apply_replay(sdk, events)
+    via_apply = _row()
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    assert recover_from_log(str(events), proj)["recovered"]
+    via_recover = _row()
+
+    for name, row in (("rebuild_all", via_all), ("rebuild", via_apply),
+                      ("recover_from_log", via_recover)):
+        assert row[0] == "superseded", f"{name}: status {row[0]!r}"
+        assert row[1] == "REVISED-AFTER-SUPERSEDE", f"{name}: content {row[1]!r}"
+        assert row[2] != sup_ts, (
+            f"{name}: the sweep clobbered the later revision's updatedAt with "
+            f"the older journaled supersede ts ({sup_ts!r})")

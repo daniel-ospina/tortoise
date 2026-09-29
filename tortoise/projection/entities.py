@@ -1402,9 +1402,12 @@ class _EntityHandlers:
         same-id re-emit advances the recreate boundary but not the
         delete/recreate one), which is why the two halves are separate flags.
 
-        ``skip_updated_at`` is the invalidate family's seq gate (see
-        ``_fold_point_invalidated``); a chronological replay never needs it —
-        a later same-id revision simply folds later.
+        ``skip_updated_at`` is the BOTH families' seq gate (see
+        ``_fold_point_superseded`` / ``_fold_point_invalidated``): it suppresses
+        only the ``updatedAt`` column when a later same-id inline writer exists,
+        so a trailing sweep cannot clobber a newer revision's stamp. A
+        chronological replay never needs it — a later same-id revision simply
+        folds later.
 
         Returns the fold's matched-row count (the #2164/#2423 fold-miss
         signal). 0 for an inapplicable record: an empty id, an id the driver
@@ -1431,7 +1434,8 @@ class _EntityHandlers:
         matched = 0
         if stamp:
             if t == "PointSuperseded":
-                matched = self._fold_point_superseded(ev)
+                matched = self._fold_point_superseded(
+                    ev, skip_updated_at=skip_updated_at)
             elif t == "PointInvalidated":
                 matched = self._fold_point_invalidated(
                     ev, skip_updated_at=skip_updated_at)
@@ -1591,7 +1595,8 @@ class _EntityHandlers:
             applied += self._merge_corrects_edge(old_id, new_id)
         return applied
 
-    def _fold_point_superseded(self, ev: dict) -> int:
+    def _fold_point_superseded(self, ev: dict,
+                               skip_updated_at: bool = False) -> int:
         """#2423: fold a PointSuperseded event into Point.status/validity +
         CORRECTS edge.
 
@@ -1639,13 +1644,26 @@ class _EntityHandlers:
         valid_to = ev.get("valid_to")
         expired_at = ev.get("expired_at") or _now_iso()
         updated_at = ev.get("ts") or _now_iso()
+        # ``skip_updated_at`` is the SAME seq-gate ``_fold_point_invalidated``
+        # applies: a LATER same-id PointRevised/PointPromoted (inline, pass-1b)
+        # is a legitimate newer writer, and the trailing sweep is otherwise the
+        # id's LAST writer and would clobber its stamp with the older journaled
+        # supersede ts. A superseded point is status-TERMINAL but its updatedAt
+        # is NOT frozen — live accepts a revision after a supersede (review P2,
+        # #3305). status/outdated/validTo/expiredAt/CORRECTS always fold; the
+        # gate suppresses ONLY the updatedAt column.
+        if skip_updated_at:
+            set_clause = ("SET n.status='superseded', n.outdated=true, "
+                          "n.validTo=$vt, n.expiredAt=$ea ")
+            params = {"id": oid, "vt": valid_to, "ea": expired_at}
+        else:
+            set_clause = ("SET n.status='superseded', n.outdated=true, "
+                          "n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua ")
+            params = {"id": oid, "vt": valid_to, "ea": expired_at,
+                      "ua": updated_at}
         result = self.g.query(
-            "MATCH (n:Point {id:$id}) "
-            "SET n.status='superseded', n.outdated=true, "
-            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
-            "RETURN n.id LIMIT 1",
-            params={"id": oid, "vt": valid_to, "ea": expired_at,
-                    "ua": updated_at},
+            "MATCH (n:Point {id:$id}) " + set_clause + "RETURN n.id LIMIT 1",
+            params=params,
         )
         if result.result_set:
             self._merge_corrects_edge(oid, new_id)

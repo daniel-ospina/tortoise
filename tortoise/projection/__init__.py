@@ -5162,10 +5162,12 @@ class FalkorProjection(
                 # _upsert_point_props already stamped every replayed node
                 # updatedAt=rebuild-now, and rebuild-now always postdates the
                 # journaled invalidate ts — a `$ts >= n.updatedAt` CASE could
-                # never fire. Unlike a superseded old (status terminal,
-                # frozen), an invalidated point stays status='live' — a LATER
-                # same-id PointRevised/PointPromoted (inline, stamped
-                # rebuild-now in pass-1b) is a legitimate newer writer.
+                # never fire. A superseded old is status-TERMINAL but its
+                # updatedAt is not frozen either (a revision after a supersede
+                # is accepted live — see the supersede arm), and an invalidated
+                # point stays status='live' — a LATER same-id
+                # PointRevised/PointPromoted (inline, stamped rebuild-now in
+                # pass-1b) is a legitimate newer writer.
                 # skip_updated_at fires when max_inline_seq[id] > this
                 # invalidate's seq: the gate suppresses ONLY the updatedAt
                 # column — outdated/validTo/expiredAt/CORRECTS fold always
@@ -5193,8 +5195,22 @@ class FalkorProjection(
             else:
                 # #3305: same shared dispatch as the invalidate arm above (and
                 # as ``apply()``). ``decay=False`` — pass-1b already applied
-                # the decay inline at the surviving supersede's seq.
-                matched = self._fold_point_restamp(ev, decay=False)
+                # the decay inline at the surviving supersede's seq. The
+                # updatedAt seq-gate is the INVALIDATE arm's, mirrored: a
+                # superseded point is status-terminal but NOT stamp-frozen —
+                # live accepts a revision after a supersede, and the
+                # chronological apply() arm keeps that revision's stamp, so
+                # without the gate the sweep clobbers it with the older
+                # journaled supersede ts and the two engines disagree (review
+                # P2, #3305). KNOWN DIVERGENCE (#6239): a ``PointPromoted``
+                # AFTER a supersede still re-livens ``status`` on the apply()
+                # arm while this sweep keeps it terminal — live refuses to
+                # promote a superseded point, so the shape is raw-producer /
+                # cross-file only. Tracked, not reconciled here.
+                later_inline = max_inline_seq.get(ev["id"])
+                skip_ua = later_inline is not None and later_inline > fsq
+                matched = self._fold_point_restamp(
+                    ev, skip_updated_at=skip_ua, decay=False)
                 if matched == 0:
                     logger.warning(
                         "rebuild: PointSuperseded fold matched no Point "
