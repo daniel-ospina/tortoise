@@ -955,9 +955,16 @@ def _render_block(h: dict) -> str:
     # must not suppress speaker attribution
     if spk and not _ROLE_PREFIX.match(h.get("content", "")):
         prefix = f"{prefix} [{spk}]"
-    marker = _validity_marker(h)
+    # The marker carries the SAME free-text class as the two values above: the
+    # superseded/supersedes snippets are stored Point content, and the
+    # valid/expired window fields are too (truncated to 10 chars only when
+    # LONGER than 10, so a short payload carrying a newline survives intact).
+    # Collapsed here rather than field by field inside _validity_marker — one
+    # choke point covers every present and future free-text field the marker
+    # interpolates.
+    marker = _one_line(_validity_marker(h))
     if marker:
-        # _validity_marker already returns self-bracketed groups
+        # _validity_marker returns self-bracketed groups
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
         # extra wrap.
         prefix = f"{prefix} {marker}"
