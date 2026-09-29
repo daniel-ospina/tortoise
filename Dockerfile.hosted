@@ -73,4 +73,13 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["uvicorn", "tortoise.hosted_api:app", "--host", "0.0.0.0", "--port", "8000"]
+# `--timeout-graceful-shutdown` (#3087 item 1): uvicorn's default here is to
+# wait INDEFINITELY for in-flight requests on SIGTERM, which is longer than
+# any kill window and so turns a rolling deploy into a SIGKILL. Bound it below
+# fly.toml's `kill_timeout` (30s) so the web server drains first and Fly's
+# window covers only the residual.
+# NOTE: this bounds uvicorn's OWN drain only. It cannot bound the later
+# `threading._shutdown` join on a capture worker already running an extraction
+# — that term is bounded by the worker's own deadline, which must stay below
+# `kill_timeout` for a mid-write SIGKILL to be avoidable.
+CMD ["uvicorn", "tortoise.hosted_api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "20"]

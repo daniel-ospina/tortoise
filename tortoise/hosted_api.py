@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import contextvars
 import functools
@@ -208,6 +209,42 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
     # deploy gate can fix).
     max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
     thread_name_prefix="capture-extract")
+
+
+# ── #3087 item 1: dispose the capture pool during THREADING SHUTDOWN, before
+# the executor's own teardown hook joins every worker.
+#
+# `concurrent.futures.thread` registers `_python_exit` — which puts a sentinel
+# on the queue and JOINS every worker — via `threading._register_atexit`, NOT
+# `atexit.register` (CPython 3.9+, bpo-39812). CPython finalizes in two phases:
+# `wait_for_thread_shutdown()` -> `threading._shutdown()` runs the
+# `_threading_atexits` list (the join happens HERE), and only afterwards
+# `call_py_exitfuncs()` runs regular `atexit` handlers. So a plain-`atexit`
+# handler is STRUCTURALLY ALWAYS TOO LATE: it runs after the workers were
+# already joined, cancelling nothing. This must be `_register_atexit` too, and
+# registered AFTER the library's so the reversed order puts ours first.
+# (Verified: with a plain `atexit` handler the queued future still RAN; with
+# `_register_atexit` it is CANCELLED.)
+#
+# LIMITATION, stated because the fix is otherwise read as complete: `shutdown`
+# cancels QUEUED futures only. A worker already inside an extraction is NOT
+# interruptible, and the `threading._shutdown` join still waits for it. So the
+# bound that actually protects the graph write is the worker's OWN deadline
+# being below fly.toml's `kill_timeout` — this handler removes the queued-work
+# term, not the running-worker term.
+def _dispose_capture_executor() -> None:
+    """Cancel queued captures and release the pool during thread shutdown."""
+    with contextlib.suppress(Exception):
+        _CAPTURE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+# `threading._register_atexit` orders against the executor's own hook (the whole
+# point); fall back to `atexit` where it is unavailable, which is strictly worse
+# (too late to cancel anything) but never crashes on import.
+if hasattr(threading, "_register_atexit"):
+    threading._register_atexit(_dispose_capture_executor)  # noqa: SLF001 — the hook the stdlib itself uses
+else:  # pragma: no cover — Python < 3.9
+    atexit.register(_dispose_capture_executor)
 
 # #3060 review: a bounded pool with an UNBOUNDED queue is a new failure mode —
 # four stalled extractions park every worker (each up to the token-scaled
@@ -1583,6 +1620,12 @@ async def _lifespan(app):
 
         # ── shutdown: disarm the watchdog before the heartbeat task is
         # cancelled (see _stop_liveness), then cancel the loop tasks.
+        # NOTE: the capture pool is deliberately NOT shut down here. See
+        # `_dispose_capture_executor` (module level, defined with the pool
+        # above) — a lifespan may legally run more
+        # than once in a process (this repo's own suite does), and shutting a
+        # process-global singleton down from a lifespan poisons every later
+        # `submit()` with "cannot schedule new futures after shutdown".
         with suppress(Exception):
             await _stop_liveness(app)
 
