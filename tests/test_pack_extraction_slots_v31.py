@@ -177,8 +177,7 @@ class TestRelationTemplates:
 
     def test_the_mechanism_vocabulary_is_the_relations_pair(self):
         """The template mechanism vocabulary is the literal pair IMPL|NAND. A
-        template must not describe an edge the engine cannot build (review of
-        PR #5647, history agent)."""
+        template must not describe an edge the engine cannot build."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "SUPPORTS"}])
         assert any("must be IMPL or NAND" in e for e in errors), errors
 
