@@ -640,6 +640,22 @@ def test_ci_manifest_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_ci_timing_tool_change_fails_closed_to_full():
+    # #5050: tools/ci_timing.py is the SOLE writer of the measured `durations`
+    # map, and the validator's own suites pin the writer's output (the
+    # `VALUE_FLOOR == ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal
+    # render pin in tests/test_ci_manifest.py). Same silent-drop class as the
+    # ci_manifest carve-out above — the flat "tools/" prefix swallows a
+    # writer-only change, `changed` is empty and select() takes the docs-only
+    # return, so neither tests/test_ci_timing.py nor tests/test_ci_manifest.py
+    # would run on the PR that changes the writer. No SOURCE_PATTERNS entry
+    # matches, so it lands in the unknown-path branch -> FULL matrix + both legs.
+    r = _sel(["tools/ci_timing.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_finding_provenance_tool_change_fails_closed_to_full():
     # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
     # Same silent-drop class as the collision-preflight carve-out above — the

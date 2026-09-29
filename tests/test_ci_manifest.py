@@ -109,6 +109,58 @@ def test_the_writers_own_stamp_format_is_accepted() -> None:
     assert (red, unknown) == ([], [])
 
 
+def test_an_unquoted_iso_stamp_is_a_timestamp_not_unknown() -> None:
+    """The artifact under validation is the FILE, so the parser is fed YAML text.
+
+    PyYAML resolves an UNQUOTED ISO-8601 scalar to ``datetime.datetime``. A
+    parser that accepted only ``str`` reported the natural YAML spelling as
+    "not a parseable timestamp" — UNKNOWN, staleness skipped, `--integrity`
+    green — so whether a stale map was caught depended on quoting alone.
+    """
+    import yaml
+
+    loaded = yaml.safe_load(
+        f"{ci_manifest.CAPTURED_AT_KEY}: 2026-09-28T04:30:00Z\n")
+    raw = loaded[ci_manifest.CAPTURED_AT_KEY]
+    assert isinstance(raw, dt.datetime) and raw.tzinfo is not None, (
+        "precondition: an unquoted ISO scalar resolves to a datetime")
+    assert ci_manifest._parse_captured_at(raw) == dt.datetime(
+        2026, 9, 28, 4, 30, tzinfo=dt.UTC)
+    assert ci_manifest.check(_manifest(raw), NOW) == ([], [])
+
+
+def test_a_date_only_stamp_is_midnight_utc() -> None:
+    """YAML's date-only scalar is a legal spelling of a capture day."""
+    import yaml
+
+    loaded = yaml.safe_load(f"{ci_manifest.CAPTURED_AT_KEY}: 2026-09-28\n")
+    raw = loaded[ci_manifest.CAPTURED_AT_KEY]
+    assert isinstance(raw, dt.date) and not isinstance(raw, dt.datetime)
+    assert ci_manifest._parse_captured_at(raw) == dt.datetime(
+        2026, 9, 28, tzinfo=dt.UTC)
+
+
+def test_an_unquoted_stale_stamp_is_red_through_the_cli(tmp_path) -> None:
+    """The CLI verdict must not flip to UNKNOWN on quoting alone.
+
+    The stamp is written UNQUOTED, so `yaml.safe_load` hands the validator a
+    ``datetime``. Before the fix that value was "not a parseable timestamp" →
+    exit 2, and the staleness check that is this PR's headline capability never
+    ran. It must be the OBSERVED defect: exit 1, not 2.
+    """
+    import yaml
+
+    stale = (dt.datetime.now(dt.UTC)
+             - dt.timedelta(days=ci_manifest.MAX_AGE_DAYS + 1))
+    text = yaml.safe_dump(_manifest("PLACEHOLDER")).replace(
+        "PLACEHOLDER", stale.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert isinstance(yaml.safe_load(text)[ci_manifest.CAPTURED_AT_KEY],
+                      dt.datetime), "precondition: the stamp is unquoted"
+    path = tmp_path / "unquoted-ci-surfaces.yml"
+    path.write_text(text)
+    assert ci_manifest.main(["--manifest", str(path)]) == 1
+
+
 def test_a_fresh_capture_date_is_green() -> None:
     stamp = (NOW - dt.timedelta(days=1)).isoformat()
     assert ci_manifest.check(_manifest(stamp), NOW) == ([], [])
@@ -166,7 +218,10 @@ def test_the_writers_precision_is_the_one_this_check_assumes() -> None:
 
     rendered, _ = ci_timing.render_refreshed_manifest(
         cs.MANIFEST.read_text(), {"test_bridge_table.py": 1.23456}, "T")
-    assert "  test_bridge_table.py: 1.2" in rendered, (
+    assert ci_manifest.VALUE_DECIMALS == 1, (
+        "the validator's precision pin drifted from the writer's one-decimal "
+        "render")
+    assert "  test_bridge_table.py: 1.2\n" in rendered, (
         "the writer no longer renders one decimal place — VALUE_DECIMALS and "
         "the plausibility check must move with it")
 
@@ -234,6 +289,23 @@ def test_a_non_string_key_is_red_not_a_crash() -> None:
     manifest["durations"][123] = 0.9
     red, _ = ci_manifest.check(manifest, NOW)
     assert any("123" in reason for reason in red), red
+
+
+def test_a_map_with_no_non_zero_weight_is_red(tmp_path) -> None:
+    """An all-sentinel map is a state the writer can NEVER produce.
+
+    The per-row tolerance for an individual `0.0` is for an honest
+    carry-forward or a pack pin; a map where EVERY weight is `0.0` carries no
+    measurement at all. The writer refuses a zero measured key and floors every
+    resolved key to `max(seconds, 0.1)`, so this map is unreachable for it —
+    leaving it green was the fail-open this module exists to close.
+    """
+    fresh = dt.datetime.now(dt.UTC).isoformat()
+    manifest = _manifest(fresh)
+    manifest["durations"] = {k: 0.0 for k in manifest["durations"]}
+    red, _ = ci_manifest.check(manifest, NOW)
+    assert any("no non-zero weight" in reason for reason in red), red
+    assert _cli(manifest, tmp_path) == 1, "the CLI verdict must be exit 1"
 
 
 def test_a_red_defect_outranks_an_unknown(tmp_path) -> None:

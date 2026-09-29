@@ -60,10 +60,15 @@ top: **it checks the measured map, it does not own it.**
 | `guard_reachability_issues` + `guard_inputs` + `guard-audit` + `ci_selection._tool_guard_surface` | **DELETED** | selection-manifest behaviour, not the measured map; a selector change, a new declared manifest block and a `git ls-files` subprocess inside `--integrity`, none of it about durations. The issues it named (#3362/#4115/#4186/#4658) stay open and are their own work |
 | `SOURCE_PATTERNS` doc entries for the two architecture docs | **DELETED** | same: a selection behaviour change (#4658), not a validator |
 | `ci_selection.fast_files_absent_from_halves` `ENV_BROKEN_FILES` subtraction | **DELETED** | a real 1-line bug fix (#4835), but it is `ci_selection`'s warning, not this map's validity |
-| `.github/workflows/python-ci.yml` slow-artifact rename | **DELETED** | it existed so the `sweep` could download one slow artifact deterministically; the sweep is gone, so it prevents nothing. `ci-timing.yml` downloads `pytest-log-*` by **pattern**, which never had the collision |
+| `.github/workflows/python-ci.yml` slow-artifact rename | **DELETED** | it existed so the `sweep` could download one slow artifact deterministically, and that `sweep` is gone. The DOWNLOAD half is genuinely collision-free — `ci-timing.yml` fetches `pytest-log-*` by **pattern** — but the UPLOAD is not: `python-ci.yml`'s `test-slow` is a `half: [a, b]` matrix and BOTH legs upload the same artifact name `pytest-log-${{ github.job }}` (= `pytest-log-test-slow`), so under `upload-artifact@v4` only one leg's log survives. The honest bound: the writer's per-file max is PARTIAL whenever a `test-slow` leg's log is dropped, which is reachable and therefore invisible to this validator. Renaming/parameterising that upload name is out of this PR's scope and tracked by issue TODO-ISSUE |
 | the 559-line test file | **REPLACED** | rewritten around the verdict's boundaries; the deleted surface's tests went with it |
 
-**Exactly one test file is touched, and NOT for the row-count pin.**
+**The test footprint, stated exactly: three test files are touched, and none for
+the row-count pin.** One EXISTING file is modified — `tests/test_ci_timing.py`,
+for the dated-stamp fix below. `tests/test_ci_manifest.py` is NEW (the
+validator's own verdict-boundary suite), and `tests/test_ci_selection.py` gains
+the `tools/ci_timing.py` carve-out regression test
+(`test_ci_timing_tool_change_fails_closed_to_full`).
 `tests/test_ci_timing.py` changes for one reason: `integrity_problems` now
 composes the validator's freshness check, and that test rendered the refreshed
 manifest with a hard-coded `2026-09-28T00:00:00Z` stamp while asserting the gate
@@ -73,8 +78,8 @@ class as the row-count pin. The test now stamps with the clock the production
 caller (`--refresh-durations`) actually uses.
 
 The row-count pin itself is **not** carried here. It was red on `main` before
-**#6155** (`2e59ff5d2` — the parent of the commit this branch is now rebased
-onto), and `main` fixed it in `552e845ec` with a key-set-identity assertion plus
+**#6155** (`552e845ec` — the commit this branch is now rebased onto), and `main`
+fixed it in that same commit with a key-set-identity assertion plus
 a mutation proof — better than the first draft of this branch's version. This
 branch takes `main`'s, and #6174 was closed as superseded.
 
@@ -126,8 +131,8 @@ now the invariant is structural.
 
 | code | meaning | conditions |
 |---|---|---|
-| **0** | observed, plausible, fresh, complete, disjoint | a parseable `durations_captured_at` within `MAX_AGE_DAYS` (21 — three missed weekly refreshes), every weight `0.0` or `>= 0.1`, and no `ci_selection` map/leg defect |
-| **1** | an **OBSERVED** defect | a weight in `(0, 0.1)`, a capture date in the future (beyond 1 day of clock skew), a capture date older than `MAX_AGE_DAYS`, or any coverage / dead-key / partition defect |
+| **0** | observed, plausible, fresh, complete, disjoint | a parseable `durations_captured_at` within `MAX_AGE_DAYS` (21 — three missed weekly refreshes), every weight `0.0` (the sentinel) or a one-decimal value `>= 0.1`, and no `ci_selection` map/leg defect |
+| **1** | an **OBSERVED** defect | a weight in `(0, 0.1)`, a weight carrying finer precision than the writer renders (one decimal place), a map whose every value is the `0.0` sentinel (no measurement at all), a capture date in the future (beyond 1 day of clock skew), a capture date older than `MAX_AGE_DAYS`, or any coverage / dead-key / partition defect |
 | **2** | **UNKNOWN** | `durations_captured_at` absent or unparseable; an empty/absent `durations` map while the manifest classifies fast-pool files; a manifest that cannot be read or parsed |
 
 **Exit 2 is never 0 and red outranks unknown.** The state in which a stale or
@@ -141,9 +146,12 @@ red `manifest-integrity` repo-wide until the weekly refresh landed: refusing
 honest merges for a state no lane owns, on the same day the ruling warns that
 gates which refuse honest merges are a cost. The gate keeps its documented
 polarity (an absent map is "this repo has not adopted durations" = PASS, pinned
-by `test_null_or_non_mapping_durations_reports_instead_of_tracebacking`), prints
-the reason, and `ci_manifest.py` exits 2 on it — so nothing anywhere reports that
-state as success.
+by `test_null_or_non_mapping_durations_reports_instead_of_tracebacking`), and
+prints the reason as a NOTICE. The ENFORCING entry point therefore exits 0 on an
+absent or unparseable stamp: `ci_selection.py --integrity` — the required
+`manifest-integrity` job — reports UNKNOWN as a notice and its exit code does
+not carry it. The strict exit-2 verdict lives in `tools/ci_manifest.py`, which
+no workflow invokes yet; wiring it as a required job is not this PR's scope.
 
 Everything the gate *can* observe is already fail-closed: the moment a capture
 date exists, a stale one, a future one and an unreachable weight are all RED and

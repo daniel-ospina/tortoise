@@ -428,7 +428,8 @@ def integrity_problems(manifest_text: str) -> list[str]:
     never a re-derived subset, so the two cannot disagree about what a valid
     manifest is. As of #5050 the durations-map half IS the entry point's own
     contract: `ci_manifest.check` owns the map's checks (dead keys, malformed
-    values, coverage, the leg partition, a below-floor weight, a stale capture
+    values, coverage, the leg partition, any weight the writer could not have
+    rendered — sub-floor, finer precision, or negative — and a stale capture
     date) and both callers compose it, so the invariant is structural rather
     than a convention each caller has to re-implement. The rest of the list is
     composed here because `ci_manifest` does not own it — most importantly
@@ -441,8 +442,13 @@ def integrity_problems(manifest_text: str) -> list[str]:
     checks read `python-ci.yml`, so this is defined only over this repo's own
     manifest — the refresh's only production target.
     """
-    import ci_manifest
     import ci_selection as cs
+
+    # The validator is reached through the selector's own accessor, never a bare
+    # `import ci_manifest`: when this module runs as `__main__` a bare import
+    # loaded a SECOND copy of the same file, so the "composed, not duplicated"
+    # invariant was only true on one of the two call paths.
+    ci_manifest = cs._ci_manifest_module()
 
     manifest = _manifest_of(manifest_text)
     # `red` only: `unknown` (an absent capture date, an absent map) is not a

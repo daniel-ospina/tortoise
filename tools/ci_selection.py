@@ -732,6 +732,18 @@ TOOL_CARVEOUTS = (
     # branch -> FULL matrix (fail closed). Pinned by
     # test_ci_selection.test_ci_manifest_tool_change_fails_closed_to_full.
     "tools/ci_manifest.py",
+    # #5050: the sole writer of the measured `durations` map (tools/ci_timing.py)
+    # is pinned by the same suites as the validator it feeds:
+    # tests/test_ci_timing.py holds the `VALUE_FLOOR ==
+    # ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal render pin, and
+    # tests/test_ci_manifest.py pins the writer's output format. A writer-only
+    # change matches no SOURCE_PATTERNS entry, so without this carve-out the
+    # flat "tools/" prefix swallows it, `changed` comes back empty and select()
+    # takes the docs-only return — a writer drift would merge green and red
+    # `main` with neither suite having run. It lands in the unknown-path branch
+    # -> FULL matrix (fail closed). Pinned by
+    # test_ci_selection.test_ci_timing_tool_change_fails_closed_to_full.
+    "tools/ci_timing.py",
 )
 
 
@@ -2337,9 +2349,21 @@ def _ci_manifest_module():
 
     ``ci_manifest`` imports this module back for the manifest helpers, so the
     import is lazy and must not create a second copy under a different name
-    (which would split module state under pytest).
+    (which would split module state under pytest). The RUNNING module is probed
+    FIRST: ``python3 tools/ci_manifest.py`` executes that file as ``__main__``,
+    which is under neither ``tools.ci_manifest`` nor ``ci_manifest``, so a
+    name-only lookup imported a SECOND copy of the same file.
     """
     import sys as _sys
+    main = _sys.modules.get("__main__")
+    if main is not None and hasattr(main, "check"):
+        _file = getattr(main, "__file__", None)
+        if _file:
+            try:
+                if Path(_file).resolve() == (REPO / "tools" / "ci_manifest.py").resolve():
+                    return main
+            except OSError:  # pragma: no cover - defensive
+                pass
     for _name in ("tools.ci_manifest", "ci_manifest"):
         mod = _sys.modules.get(_name)
         if mod is not None and hasattr(mod, "check"):
@@ -2360,8 +2384,10 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     Delegated to ``tools/ci_manifest.py`` so the map's checks live in ONE place
     and cannot be half-wired: this call replaces the three direct
     ``duration_issues``/``leg_coverage_issues``/``duration_coverage_issues``
-    calls that used to sit in the ``--integrity`` composition, and adds the two
-    the validator contributes (a below-floor weight, a stale capture date).
+    calls that used to sit in the ``--integrity`` composition, and adds the
+    plausibility/freshness checks the validator contributes (any weight the
+    writer could not have rendered — sub-floor, finer precision, or negative —
+    and a stale capture date).
 
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —
@@ -2376,8 +2402,10 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``), and
     failing on it would red ``manifest-integrity`` repo-wide until a weekly data
     refresh landed — refusing honest merges for a state no lane owns. The notice
-    keeps it visible instead of silent, and ``ci_manifest.py`` exits 2 on
-    it, so nothing anywhere reports that state as success.
+    keeps it visible instead of silent. The strict exit-2 verdict lives in
+    ``tools/ci_manifest.py``, which no workflow invokes yet: this enforcing entry
+    point reports an absent or unparseable stamp as a notice and exits 0, and
+    that polarity is deliberate (#6091-blocked).
     """
     try:
         red, unknown = _ci_manifest_module().check(manifest)
@@ -2424,8 +2452,10 @@ def main() -> int:
         # now coerces as well, so the packer cannot raise at all). That order is
         # preserved inside `ci_manifest.map_issues`, which owns the composition
         # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
-        # `duration_coverage_issues`) plus the two the validator adds (a
-        # below-floor weight, a stale capture date) are called from ONE place, so
+        # `duration_coverage_issues`) plus the plausibility/freshness checks the
+        # validator adds (any weight the writer could not have rendered —
+        # sub-floor, finer precision, or negative — and a stale capture date)
+        # are called from ONE place, so
         # they cannot be half-wired into one entry point and missing from the
         # other.
         problems = missing + slow_file_issues(manifest) \

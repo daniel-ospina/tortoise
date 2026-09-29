@@ -29,7 +29,8 @@ Each of the four checks the ruling names is implemented at ONE level:
                    in exactly one leg. The leg arithmetic BELONGS to the
                    selector; a validator-local copy of it would be a second
                    gate, free to disagree with the one that decides the legs.
-    plausibility   a weight below the collector's floor            (here)
+    plausibility   any weight the writer could not have rendered   (here)
+                   — sub-floor, finer precision, or negative
     staleness/age  ``durations_captured_at`` vs ``MAX_AGE_DAYS``   (here)
 
 ``tools/ci_selection.py --integrity`` and the refresh's own gate in
@@ -91,15 +92,34 @@ UNMEASURED_SENTINEL = 0.0
 CAPTURED_AT_KEY = "durations_captured_at"
 
 
+def _module_is(path: Path, mod: object) -> bool:
+    """True when ``mod`` was loaded from ``path`` (the same file on disk)."""
+    file = getattr(mod, "__file__", None)
+    if not file:
+        return False
+    try:
+        return Path(file).resolve() == path.resolve()
+    except OSError:  # pragma: no cover - defensive
+        return False
+
+
 def _ci_selection():
     """The loaded ``ci_selection`` module, whichever name it was imported under.
 
     ``ci_selection`` imports this module back, so the import is lazy and must
-    not create a second copy under a different name (``tools.ci_selection`` and
-    ``ci_selection`` are the same file) — two copies would split module state
-    under pytest and let ``check`` validate against a different manifest
-    constant than the caller's.
+    not create a second copy under a different name — two copies would split
+    module state under pytest and let ``check`` validate against a different
+    manifest constant than the caller's. The RUNNING module is probed FIRST:
+    ``python3 tools/ci_selection.py --integrity`` executes that file as
+    ``__main__``, which is under neither ``tools.ci_selection`` nor
+    ``ci_selection``, so a name-only lookup imported a SECOND copy of the same
+    file and the "must not be a second copy" invariant was not true on the
+    production invocation.
     """
+    main = sys.modules.get("__main__")
+    if main is not None and hasattr(main, "fast_pool") \
+            and _module_is(REPO / "tools" / "ci_selection.py", main):
+        return main
     for name in ("tools.ci_selection", "ci_selection"):
         mod = sys.modules.get(name)
         if mod is not None and hasattr(mod, "fast_pool"):
@@ -115,8 +135,13 @@ def _ci_selection():
 
 
 def _durations(manifest: dict) -> dict:
-    raw = manifest.get("durations")
-    return raw if isinstance(raw, dict) else {}
+    """`durations` as a mapping, or `{}` — delegated, never re-implemented.
+
+    The map-shape rule has ONE definition (`ci_selection._durations_map`), and a
+    validator-local copy would be a second gate free to disagree with the
+    selector about what counts as a map.
+    """
+    return _ci_selection()._durations_map(manifest)
 
 
 def _load(path: Path) -> dict:
@@ -137,6 +162,20 @@ def _load(path: Path) -> dict:
 
 
 def _parse_captured_at(raw: object) -> dt.datetime | None:
+    """A stamp from the value as the FILE spells it, not as we wish it did.
+
+    PyYAML resolves an UNQUOTED ISO-8601 scalar to ``datetime.datetime`` (and a
+    date-only scalar to ``datetime.date``), so the natural YAML spelling of the
+    stamp arrives here as a datetime rather than a string. Accepting only
+    ``str`` reported that file as "not a parseable timestamp" — UNKNOWN, the
+    staleness check skipped, ``--integrity`` green — so the map's freshness
+    flipped fail→pass on quoting alone.
+    """
+    if isinstance(raw, dt.datetime):
+        return (raw if raw.tzinfo is not None
+                else raw.replace(tzinfo=dt.UTC)).astimezone(dt.UTC)
+    if isinstance(raw, dt.date):  # date-only YAML scalar → midnight UTC
+        return dt.datetime(raw.year, raw.month, raw.day, tzinfo=dt.UTC)
     if not isinstance(raw, str):
         return None
     text = raw.strip()
@@ -223,6 +262,7 @@ def plausibility_issues(manifest: dict) -> list[str]:
     what guards those rows.
     """
     issues: list[str] = []
+    durations = _durations(manifest)
     # `str` sort keys: a hand-edited map can carry a NON-STRING key (`123: 0.9`,
     # `true: …`, `null: …` — YAML yields int/bool/None), and an unsorted
     # `sorted(items)` raises `TypeError` on the mixed types. That propagated out
@@ -230,7 +270,7 @@ def plausibility_issues(manifest: dict) -> list[str]:
     # `duration_issues` had already produced — a named defect reported as the
     # softer verdict, against this module's own "red outranks unknown". The
     # selector still names the key; this loop must not crash on the way there.
-    for name, value in sorted(_durations(manifest).items(), key=lambda kv: str(kv[0])):
+    for name, value in sorted(durations.items(), key=lambda kv: str(kv[0])):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         try:
@@ -256,6 +296,25 @@ def plausibility_issues(manifest: dict) -> list[str]:
             f"writes {UNMEASURED_SENTINEL} only as the declared unmeasured/pin "
             f"sentinel the merge preserves. Anything else is unreachable for it "
             f"— a weight is a measurement or it is an invention (#5050)"
+        )
+    # A non-empty map whose EVERY value is the unmeasured sentinel carries no
+    # measurement at all. The per-row tolerance above is for an individual `0.0`
+    # (an honest carry-forward or a pack pin), but the writer can never produce
+    # an all-zero map: it refuses a zero measured key and floors every resolved
+    # key to `max(seconds, VALUE_FLOOR)`. So this state is unreachable-and-
+    # unobserved, and leaving it green would be the fail-open the module exists
+    # to close.
+    if durations and all(
+        not isinstance(v, bool) and isinstance(v, (int, float))
+        and v == UNMEASURED_SENTINEL
+        for v in durations.values()
+    ):
+        issues.append(
+            f"every durations weight is the {UNMEASURED_SENTINEL} unmeasured "
+            f"sentinel — a map with no non-zero weight carries no measurement, "
+            f"and the writer (which floors every resolved key and refuses a zero "
+            f"measured key) cannot produce it. Unreachable for the writer, so "
+            f"unobserved for this check (#5050)"
         )
     return issues
 
@@ -297,7 +356,10 @@ def check(manifest: dict,
     # route a hand-broken `durations:` key down the empty path and report it as
     # merely UNKNOWN — a broken map must be RED.
     red = map_issues(manifest) + plausibility_issues(manifest) + stale_red
-    if not _durations(manifest):
+    # Gate on the RAW value: only absent or genuinely empty is the empty state.
+    # (See the note above — `_durations` collapses every non-mapping to `{}`.)
+    raw_durations = manifest.get("durations")
+    if raw_durations is None or raw_durations == {}:
         fast = cs.fast_pool(manifest)
         if fast:
             unknown.append(
