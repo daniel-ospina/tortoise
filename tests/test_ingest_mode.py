@@ -73,9 +73,11 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 
 # Per-run volatile props excluded from the isomorphism comparison (the
 # plan's "modulo batch_id" — extended to the other per-run-derived props:
-# ids (per-call ULIDs), timestamps (assigned at write, sdk.py:744), and
-# source defaults). Deliberately NARROW: semantic payload props (title /
-# contentHash / externalId / version on Source nodes, content on Points)
+# ids (per-call ULIDs), timestamps (assigned at write — ``sdk.py::TortoiseSDK.create_point``
+# stamps ``createdAt``/``updatedAt``, ``sdk.py::TortoiseSDK.create_source`` stamps
+# ``ingestedAt``), and source defaults). Deliberately NARROW: semantic payload
+# props (title / contentHash / externalId / version on Source nodes, content
+# on Points)
 # stay in the signature — a future regression deriving them differently
 # per mode must not be invisible (review-gate P2-1).
 _VOLATILE_PROPS = frozenset({
@@ -427,7 +429,7 @@ class TestGranularResultsKeyForKey:
     temp SDK, §7 leg-policy precedent: test_mcp_server.py runs _safe/tools
     directly in stdio mode).
 
-    operator route = {"operator_id", "deduped"} (shipped sdk.py:4153/4160)
+    operator route = {"operator_id", "deduped"} (shipped ``sdk.py::TortoiseSDK.ingest``)
     relation route = {"relation", "from", "to", "deduped"} (shipped sdk.py)
     direct-edge route = {"direct_edge", "from", "to", "deduped"} per the
       plan pin — SHIPPED DELTA documented in test_direct_edge_route below:
@@ -501,7 +503,7 @@ class TestGranularResultsKeyForKey:
 
     def test_operator_route_deduped_hit_key_for_key(self):
         # re-submission → deduped=True on the SAME key set (deduped flag on
-        # both branches, sdk.py:4153/4160 — cycle-24 pin).
+        # both branches, ``sdk.py::TortoiseSDK.ingest`` — cycle-24 pin).
         bundle = {
             "points": [
                 {"ref": "p1", "kind": "claim", "content": "A implies B."},
