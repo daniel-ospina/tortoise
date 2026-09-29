@@ -1183,13 +1183,18 @@ _WINDOW_KNOBS = [
 _WINDOW_FILES = ("tortoise/abuse.py", "tortoise/hosted_api.py")
 
 # Product-wide scan (P2-1): the guard must NOT be a hardcoded file pair, or a
-# window knob added in a new module ships unfloored — the review measured a
-# new `tortoise/operator_alert.py` with `_int_env("TORTOISE_MUT3_WINDOW_S", 900)`
-# leaving the suite green (61 passed). `_WINDOW_ENV_CALL` finds the floored
-# accessor; `_INT_ENV_CALL` finds the raw one. `_WINDOWISH_NAME` is the naming
-# heuristic: a var is window-shaped if it says WINDOW, or follows the `_S`
-# seconds-suffix the window knobs use — so a knob "named without WINDOW"
-# (`..._INTERVAL_S`, the other measured blind spot) is caught too.
+# window knob added in a new module ships unfloored. Reproduce the RED with a
+# GENUINELY NEW module — `tortoise/window_probe_mut.py` holding `from
+# tortoise.abuse import _int_env` + `_int_env("TORTOISE_MUT3_WINDOW_S", 900)`:
+# `test_no_window_is_read_with_int_env` fails. Do NOT cite a LIVE module, as
+# this comment used to (`tortoise/operator_alert.py`): it is tracked and
+# imported at module scope by THIS test file, so a probe there raises at import
+# and ERRORs the whole guard module instead of producing that RED.
+# `_WINDOW_ENV_CALL` finds the floored accessor; `_INT_ENV_CALL` finds the raw
+# one. `_WINDOWISH_NAME` is the naming heuristic: a var is window-shaped if it
+# says WINDOW, or follows the `_S` seconds-suffix the window knobs use — so a
+# knob "named without WINDOW" (`..._INTERVAL_S`, the other measured blind spot)
+# is caught too.
 _WINDOW_ENV_CALL = re.compile(r'_window_env\(\s*"([A-Z][A-Z0-9_]*)"')
 _INT_ENV_CALL = re.compile(r'_int_env\(\s*"([A-Z][A-Z0-9_]*)"')
 _WINDOWISH_NAME = re.compile(r"WINDOW|_S$")
@@ -1271,12 +1276,35 @@ class TestWindowFloor:
         assert len(records) == 2, [r.getMessage() for r in records]
 
     @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
-    def test_negative_window_falls_back_to_default(self, name, default,
-                                                   monkeypatch):
+    def test_negative_window_falls_back_to_default_and_warns(
+            self, name, default, monkeypatch, caplog):
         # `_int_env`'s isdigit() gate already treats a negative as unset; this
-        # pins that the floor never turns "-1" into a positive-looking clamp.
+        # pins that the floor never turns "-1" into a positive-looking clamp —
+        # and (#5493 review P2-1) that the operator is TOLD, rather than left
+        # with the silent fallback the `.env.example` promise had claimed was
+        # gone.
         monkeypatch.setenv(name, "-1")
-        assert abuse._window_env(name, default) == default
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            got = abuse._window_env(name, default)
+        assert got == default and got > 0
+        assert name in caplog.text
+
+    def test_negative_window_warns_once_per_distinct_value(
+            self, monkeypatch, caplog):
+        """P2-1: a NEGATIVE window must warn (it used to fall back silently)
+        and must share the SAME `(name, raw)` latch as the zero case — 1
+        record for N reads, while a second distinct negative still warns."""
+        monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "-7")
+        with caplog.at_level(logging.WARNING, logger="tortoise.abuse"):
+            for _ in range(50):
+                assert abuse._window_env(
+                    "TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+            monkeypatch.setenv("TORTOISE_ABUSE_READ_WINDOW_S", "-8")
+            assert abuse._window_env(
+                "TORTOISE_ABUSE_READ_WINDOW_S", 300) == 300
+        records = [r for r in caplog.records if "is not a valid rate-limit"
+                   in r.getMessage()]
+        assert len(records) == 2, [r.getMessage() for r in records]
 
     @pytest.mark.parametrize("name,default", _WINDOW_KNOBS)
     def test_positive_window_is_honoured(self, name, default, monkeypatch):

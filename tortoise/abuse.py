@@ -88,6 +88,24 @@ _WINDOW_WARNED: set[tuple[str, str | None]] = set()
 _WINDOW_WARN_LOCK = threading.Lock()
 
 
+def _negative_env(raw: str | None) -> bool:
+    """True when ``raw`` parses as a negative int.
+
+    ``_int_env`` gates on ``isdigit()``, which rejects ``"-1"`` — it therefore
+    returns the knob's DEFAULT, and before #5493's review it did so SILENTLY,
+    leaving the operator-facing promise (a non-positive window is reported)
+    false for the negative half. This is the test that makes it true. A value
+    that does not parse at all is not negative and keeps its existing
+    (unreported) default.
+    """
+    if raw is None:
+        return False
+    try:
+        return int(raw) < 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _window_env(name: str, default: int) -> int:
     """Env-tunable rate-limit WINDOW, floored so a non-positive value can
     never fail OPEN (#5493).
@@ -105,11 +123,13 @@ def _window_env(name: str, default: int) -> int:
       ``SignupVelocityTracker``, ``RecoveryVelocityTracker``): the prune runs
       BEFORE the append and the comparison runs AFTER it, so a non-positive
       window never prunes and the bucket collapses to this request's sample.
-      ``len(bucket) >= threshold`` is then ``1 >= threshold``: for the
-      configured thresholds (>1) the breach signal NEVER FIRES — silently
-      disabled — and the notify-dedup test ``now - last < window_s`` is never
-      true, so the once-per-window dedup is defeated too. (Not an
-      allow-everything fail-open here; a lose-the-signal one.)
+      ``len(bucket)`` is then ``1``, which clears neither
+      ``ReadVelocityTracker``'s strict ``> threshold`` nor the signup/recovery
+      ``>= threshold`` against the configured thresholds (>1): the breach
+      signal NEVER FIRES — silently disabled — and the notify-dedup test
+      ``now - last < window_s`` is never true, so the once-per-window dedup is
+      defeated too. (Not an allow-everything fail-open here; a lose-the-signal
+      one.)
 
     Either way ``0`` is a second, undocumented off-switch — the intended one
     is ``RATE_LIMIT_DISABLED=1`` — so a non-positive window falls back to the
@@ -127,15 +147,19 @@ def _window_env(name: str, default: int) -> int:
     belongs to the window knobs alone, so it lives here and not in
     ``_int_env``.
 
-    ``_int_env`` already treats a NEGATIVE value as unset (its ``isdigit()``
-    gate) and yields ``default``; the ``<= 0`` branch here is therefore what
-    catches the digit-string ``"0"`` that would otherwise slip through.
+    ``_int_env`` treats a NEGATIVE value as unset (its ``isdigit()`` gate) and
+    yields ``default`` — so a negative never arrives as a negative. The RAW
+    value is therefore inspected too: ``"0"`` (and ``"00"``) reaches the
+    warning path as a non-positive ``value``, while a negative is detected by
+    ``_negative_env``. BOTH warn through the same latch, and neither changes
+    the value returned — a non-positive window always yields the knob's
+    default.
     """
+    raw = os.environ.get(name)
     value = _int_env(name, default)
-    if value > 0:
+    if value > 0 and not _negative_env(raw):
         return value
     fallback = default if default > 0 else 1
-    raw = os.environ.get(name)
     with _WINDOW_WARN_LOCK:
         first = (name, raw) not in _WINDOW_WARNED
         _WINDOW_WARNED.add((name, raw))
