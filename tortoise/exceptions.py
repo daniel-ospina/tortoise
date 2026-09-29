@@ -360,6 +360,14 @@ class UnsupportedCypherOperatorError(ValueError):
 
     ``operator`` is the offending token (currently always ``"=~"``); the
     message names the supported alternatives.
+
+    ``cypher`` is retained as an ATTRIBUTE for a caller that wants it, but is
+    deliberately NOT interpolated into the message: this exception propagates
+    through `mcp_server`'s ``_SafeError(_scrub_error(str(e)))`` to the tenant, and
+    ``_scrub_error`` strips credentials and host:port but nothing else — so a
+    query in the message would reach a tenant verbatim. That is exactly what
+    `security.redact_error`'s contract forbids ("Never includes full Cypher,
+    query text, or tracebacks … so tenants never see DB/query internals").
     """
 
     def __init__(self, operator: str, cypher: str = ""):
@@ -370,5 +378,5 @@ class UnsupportedCypherOperatorError(ValueError):
             f"operator, and it fails SILENTLY — the query returns an EMPTY "
             f"result set indistinguishable from 'no matches' (#3595). "
             f"Use a supported operator instead: STARTS WITH / ENDS WITH / "
-            f"CONTAINS. Offending query: {cypher!r}"
+            f"CONTAINS."
         )
