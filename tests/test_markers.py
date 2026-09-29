@@ -53,6 +53,10 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
+    # 2026-09-29: test_github_connect.py:453 seeds the 'registry' namespace
+    # directly. The literal IS the code under test, so a test_* rename would
+    # seed a different namespace than the github-connect path resolves.
+    "test_github_connect.py": {"registry": "github-connect"},
     # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
@@ -192,6 +196,11 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
 #                              name, but it must stay CONSISTENT between the
 #                              seed, the call and the read-back assert.
 ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
+    # 2026-09-29: test_backup_ledger_5062.py reads the production-shaped
+    # registry_tortoise graph at 4 sites (304, 324, 399, 625). These are READS
+    # of the real graph the backup ledger is derived from, so a test_* rename
+    # would read a different graph than the code under test writes.
+    "test_backup_ledger_5062.py": {'"registry_tortoise"': "read-only"},
     "test_dr_endpoints.py": {
         'f"org_{org_id}"': "endpoint-constrained",  # seed write — drill/backup resolve org_{id}
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
