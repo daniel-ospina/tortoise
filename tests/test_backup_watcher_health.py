@@ -327,38 +327,60 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             (``if`` / ``except``), ``match`` arms, loops that may iterate zero
             times (``while`` / ``for`` / ``async for``), nested ``def`` /
             ``async def`` / ``lambda`` / ``class`` scopes (an uncalled ``def``
-            publishes nothing), and any ``with`` / ``async with`` that is not a
-            DIRECT statement of ``_lifespan``'s body. The framework's own
-            outer ``async with mcp_http_app.lifespan(...)`` frame IS a direct
-            statement and is therefore allowed: entering it is part of running
-            ``_lifespan``, and failure to enter aborts the boot. In particular
-            the ``if _watcher_expected:``/``else`` branch only logs, so a
-            publish there reaches only one of the two cases and a non-hosted
-            re-entry keeps a prior boot's ``True``, corrupting #4498's
-            distinction.
+            publishes nothing), and any ``with`` / ``async with``. The ONLY
+            ``with`` exemption is the framework's own lifespan frame: a
+            ``with`` / ``async with`` that is a DIRECT statement of
+            ``_lifespan``'s body AND whose context expression is a ``Call`` on
+            an ``Attribute`` named ``lifespan`` — the real code's
+            ``async with mcp_http_app.lifespan(mcp_http_app):``. THAT frame is
+            the composition the whole body runs inside, so it cannot silently
+            skip the publish: its body runs exactly when ``_lifespan`` runs,
+            and failing to enter it propagates out of the boot. "Direct
+            statement" alone is NOT safety — a direct
+            ``with contextlib.suppress(...)`` is also a direct statement, and
+            its ``__exit__`` swallows the very exception that would have made
+            the skip loud — so every other ``with``, direct or nested, is a
+            barrier. The exemption matches the call SHAPE; see the residual.
+            In particular the ``if _watcher_expected:``/``else`` branch only
+            logs, so a publish there reaches only one of the two cases and a
+            non-hosted re-entry keeps a prior boot's ``True``, corrupting
+            #4498's distinction.
         (2) EVERY ``try`` / ``try*`` (``TryStar``) ANCESTOR must make a skipped
             publish LOUD. A ``try/finally`` (no handlers) qualifies — an
             exception propagates out of it. A ``try`` with handlers qualifies
-            only if at least one handler assigns ``_WATCHER_START_ERROR`` (so
-            /health reports ``failed``, degraded) or bare-``raise``s; a handler
-            that only logs or ``pass``es swallows the skip, which is exactly
-            #4498's original blindness. This is checked for EVERY such
-            ancestor, not just the nearest, because an outer swallowing
-            ``try`` can skip an inner marker-setting one entirely. The rule is
-            per-``try``, not per-handler: a ``try`` with one marker-setting
-            handler and one swallowing handler still passes rule (2).
+            only if at least one handler makes the skip loud as a DIRECT
+            statement of its body: an assignment to ``_WATCHER_START_ERROR``
+            (so /health reports ``failed``, degraded) or a ``raise`` of ANY
+            form. A raised exception propagates unless some enclosing handler
+            swallows it, and any such handler is itself a ``Try`` ancestor
+            this same rule checks — so accepting ``raise SomeError(...)`` and
+            ``raise e`` as well as a bare ``raise`` cannot open a silent
+            escape. A handler that only logs or ``pass``es swallows the skip,
+            which is exactly #4498's original blindness. This is checked for
+            EVERY such ancestor, not just the nearest, because an outer
+            swallowing ``try`` can skip an inner marker-setting one entirely.
+            The rule is per-``try``, not per-handler: a ``try`` with one
+            marker-setting handler and one swallowing handler still passes
+            rule (2).
         (3) NO PRECEDING TERMINATOR in the publish's OWN enclosing statement
             list: a ``return`` / ``raise`` / ``continue`` / ``break`` sibling
             that precedes the publish leaves the block before it runs.
 
-        NOT modelled (the residual): general reachability and whole-function
-        control flow — a path that bypasses the enclosing block without any of
-        the enumerated constructs, dynamic indirection (``getattr`` / ``exec``),
-        or a handler whose exception class cannot actually occur are all
-        outside rules (1)-(3). Those rules are syntactic and deliberately local;
-        they pin the shapes that have actually regressed or been proposed
-        (#2877, #4498; mutations f/n/c2b), not ``_lifespan``'s control-flow
-        graph.
+        NOT modelled (the residual — named, not implied):
+          * a ``try`` with one marker-setting handler AND one swallowing
+            handler — the loudness rule is per-``try``, not per-handler, so
+            the swallowing handler can still take the skip;
+          * general reachability / whole-function control flow — a path that
+            bypasses the enclosing block without any of the enumerated
+            constructs (e.g. an ``if cfg is None: return`` before the plumb);
+          * a swallowing ``__exit__`` reached through a ``lifespan``-named
+            attribute that does not actually propagate — the exemption trusts
+            the call shape and cannot see the object's real behaviour;
+          * dynamic indirection (``getattr`` / ``exec``), and a handler whose
+            exception class cannot actually occur.
+        Those rules are syntactic and deliberately local; they pin the shapes
+        that have actually regressed or been proposed (#2877, #4498; mutations
+        f/n/c2b/β), not ``_lifespan``'s control-flow graph.
       * ``_WATCHER_EXPECTED`` must be named in a ``global`` statement of
         ``_lifespan``, or the assignment binds a local and the module marker
         never moves.
@@ -424,14 +446,15 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     )
 
     # Constructs that can leave the publish un-run or defer it: conditionals,
-    # loops that may iterate zero times, `match` arms, and nested
-    # function/class scopes (an uncalled `def` publishes nothing). The
-    # FastAPI/Starlette lifespan composition is `_lifespan`'s OWN scope — the
-    # function wraps its whole body in `async with mcp_http_app.lifespan(...)`,
-    # so a `with`/`async with` that is a DIRECT statement of `_lifespan` runs
-    # its body whenever `_lifespan` runs and cannot silently skip the publish
-    # (failure to enter it aborts the boot). Any `with` nested anywhere else
-    # is a barrier.
+    # loops that may iterate zero times, `match` arms, nested function/class
+    # scopes (an uncalled `def` publishes nothing), and any `with`/`async with`.
+    # The ONE exemption is the framework's own lifespan frame — see
+    # `_is_framework_lifespan_frame`: a direct `with`/`async with` whose
+    # context expression is a call on an attribute named `lifespan`. That frame
+    # cannot silently skip its body (the whole function runs inside it, and
+    # failing to enter it aborts the boot). "Direct statement" is NOT by itself
+    # safety: `with contextlib.suppress(...)` is direct too and its `__exit__`
+    # swallows the exception — so it stays a barrier (round-5 β).
     barriers = (
         ast.If,
         ast.ExceptHandler,
@@ -447,9 +470,32 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
         ast.ClassDef,
     )
 
+    def _is_framework_lifespan_frame(node: ast.AST) -> bool:
+        # The framework's own lifespan wrapper — the ONE exempt `with`.
+        # Shape-matched (never by file name, line number or the specific
+        # app object): a `with`/`async with` that is a DIRECT statement of
+        # `_lifespan`'s body AND whose context expression is a `Call` on an
+        # `Attribute` named `lifespan` (Starlette/FastMCP `...lifespan(app)`).
+        # Only THAT frame is safe: its body runs whenever `_lifespan` runs, and
+        # failing to enter it propagates and aborts the boot. A suppressing /
+        # stacking / custom `with` — `contextlib.suppress`, an `ExitStack`, a
+        # hand-rolled context manager — can swallow an exception raised in its
+        # body and is NOT exempt. Fail closed: renaming the framework call
+        # reddens the pin and names itself.
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            return False
+        if node not in lifespan.body:
+            return False
+        return any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and item.context_expr.func.attr == "lifespan"
+            for item in node.items
+        )
+
     def _barrier(node: ast.AST) -> ast.AST | None:
         for anc in _ancestors(node):
-            if isinstance(anc, (ast.With, ast.AsyncWith)) and anc in lifespan.body:
+            if _is_framework_lifespan_frame(anc):
                 continue
             if isinstance(anc, barriers):
                 return anc
@@ -460,10 +506,10 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
         "the `_WATCHER_EXPECTED` publish must run in `_lifespan`'s own body, "
         "outside every construct that can skip or defer it — a conditional "
         "branch, an `except` handler, a loop that may never iterate, a `match` "
-        "arm, a nested `def`/`class`, or a `with` that is not the function's "
-        "own outer lifespan frame — otherwise the assignment either never runs "
-        "or reaches only some of the two cases, and a boot can serve a stale "
-        "or hard-coded `expected` and #4498's distinction silently returns"
+        "arm, a nested `def`/`class`, or any `with` that is not the framework's "
+        "own `lifespan(...)` frame — otherwise the assignment either never "
+        "runs or reaches only some of the two cases, and a boot can serve a "
+        "stale or hard-coded `expected` and #4498's distinction silently returns"
     )
 
     # Rule (2) of the docstring: `Try`/`TryStar` are deliberately NOT in
@@ -472,19 +518,24 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # "the publish was skipped" into /health `failed` (degraded). So a `try`
     # ancestor is acceptable only if it cannot swallow the skip. A `try` with
     # no handlers (`try/finally`) cannot: an exception propagates out of it. A
-    # `try` with handlers can, unless at least one handler sets the marker (at
-    # any depth) or bare-`raise`s.
+    # `try` with handlers can, unless at least one handler makes the skip loud
+    # as a DIRECT statement of its body: a `raise` (ANY form — a raised
+    # exception propagates unless an enclosing handler swallows it, and any
+    # such handler is itself a `Try` ancestor this same rule checks) or an
+    # assignment to `_WATCHER_START_ERROR`. Direct statement only, so
+    # `except Exception: if False: _WATCHER_START_ERROR = ...` cannot look loud
+    # while setting nothing.
     def _is_loud_try(node: ast.Try | ast.TryStar) -> bool:
         if not node.handlers:  # try/finally — an exception is not swallowed
             return True
         for handler in node.handlers:
-            for inner in ast.walk(handler):
-                if isinstance(inner, ast.Raise) and inner.exc is None:
+            for stmt in handler.body:
+                if isinstance(stmt, ast.Raise):
                     return True
-                if isinstance(inner, ast.Assign) and any(
+                if isinstance(stmt, ast.Assign) and any(
                     isinstance(target, ast.Name)
                     and target.id == "_WATCHER_START_ERROR"
-                    for target in inner.targets
+                    for target in stmt.targets
                 ):
                     return True
         return False
@@ -505,12 +556,14 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     ]
     assert loud, (
         "every `try`/`try*` around the `_WATCHER_EXPECTED` publish must make a "
-        "skipped publish LOUD — a handler that sets `_WATCHER_START_ERROR` (so "
-        "/health reports `failed`) or a bare `raise`; a handler that only logs "
-        "or `pass`es swallows the skip, and the publish is then skipped while "
-        "/health still answers `disabled` + `ok` with a stale `expected` — "
-        "#4498's blindness. A `try/finally` is fine (an exception propagates). "
-        "Checked for EVERY `try` ancestor, not just the nearest"
+        "skipped publish LOUD — a handler that DIRECTLY sets "
+        "`_WATCHER_START_ERROR` (so /health reports `failed`) or DIRECTLY "
+        "`raise`s (any form: bare, `raise e`, `raise SomeError(...)`); a "
+        "handler that only logs or `pass`es swallows the skip, and the publish "
+        "is then skipped while /health still answers `disabled` + `ok` with a "
+        "stale `expected` — #4498's blindness. A `try/finally` is fine (an "
+        "exception propagates). Checked for EVERY `try` ancestor, not just the "
+        "nearest"
     )
 
     # Rule (3) of the docstring: no statement that unconditionally leaves the
