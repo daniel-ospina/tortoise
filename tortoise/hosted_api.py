@@ -25276,7 +25276,7 @@ class ConnectorUpdateRequest(BaseModel):
 
 @app.get("/v1/connectors")
 async def list_connectors(
-    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
     """List all connectors for the authenticated team's org."""
     from tortoise.supabase_control import (
@@ -25286,14 +25286,14 @@ async def list_connectors(
         get_control_plane,
         is_supabase_enabled,
     )
-    team_id = team["team_id"]
+    org_id = org["org_id"]
     if is_supabase_enabled():
-        return {"connectors": _sb_conn_by_org(get_control_plane(), team_id)}
+        return {"connectors": _sb_conn_by_org(get_control_plane(), org_id)}
     # Self-host: read from registry graph
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (c:Connector {org_id: $tid}) RETURN c ORDER BY c.created_at",
-        params={"tid": team_id},
+        params={"tid": org_id},
     ).result_set
     return {"connectors": [dict(row[0]) for row in rows] if rows else []}
 
@@ -25301,7 +25301,7 @@ async def list_connectors(
 @app.post("/v1/connectors")
 async def create_connector(
     body: ConnectorCreateRequest,
-    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
     """Create a new connector (no credential yet — OAuth step follows)."""
     from tortoise.supabase_control import (
@@ -25311,9 +25311,9 @@ async def create_connector(
         get_control_plane,
         is_supabase_enabled,
     )
-    team_id = team["team_id"]
+    org_id = org["org_id"]
     if is_supabase_enabled():
-        row = _sb_conn_create(get_control_plane(), org_id=team_id,
+        row = _sb_conn_create(get_control_plane(), org_id=org_id,
                               source_type=body.source_type, config=body.config)
         if not row:
             raise HTTPException(status_code=500, detail="Failed to create connector")
@@ -25324,7 +25324,7 @@ async def create_connector(
 @app.get("/v1/connectors/{connector_id}")
 async def get_connector(
     connector_id: str,
-    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
     """Get a single connector by id, scoped to the caller's org."""
     from tortoise.supabase_control import (
@@ -25349,7 +25349,7 @@ async def get_connector(
 async def update_connector(
     connector_id: str,
     body: ConnectorUpdateRequest,
-    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
     """Update connector config/sync state, scoped to the caller's org."""
     from tortoise.supabase_control import (
@@ -25375,7 +25375,7 @@ async def update_connector(
 @app.delete("/v1/connectors/{connector_id}")
 async def delete_connector(
     connector_id: str,
-    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
     """Delete a connector (disconnect source, clean up), scoped to the org."""
     from tortoise.supabase_control import (
@@ -25396,13 +25396,13 @@ async def delete_connector(
 @app.post("/v1/connectors/{source_type}/auth")
 async def connector_auth(
     source_type: str,
-    team: dict = Depends(get_current_team_session_ungated),  # noqa: B008
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
 ):
     """Initiate OAuth for a connector source type. Returns the authorize URL.
 
     Dispatches to the correct OAuth flow based on source_type.
     """
-    team_id = team["team_id"]
+    org_id = org["org_id"]
     if source_type == "github":
         # Reuse the existing GitHub OAuth flow
         import os as _os
