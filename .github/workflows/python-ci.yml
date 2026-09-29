@@ -398,7 +398,7 @@ jobs:
     # vs the 55m watchdog. The skip-fail guard step below fails closed if they skip.
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -422,7 +422,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       falkordb-legacy:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: same no-periodic-snapshot rule as the passworded falkordb
           # service above (see there for the mechanism + the reproduced
@@ -1066,7 +1066,7 @@ jobs:
     # families: 6379 passworded + 16379 passwordless legacy).
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -1090,7 +1090,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       falkordb-legacy:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: same no-periodic-snapshot rule as the passworded falkordb
           # service above (see there for the mechanism + the reproduced
@@ -1405,7 +1405,7 @@ jobs:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise"
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"
@@ -1595,7 +1595,7 @@ jobs:
       TORTOISE_TEST_SWEEP_TEAM_STRAYS: "1"
     services:
       falkordb:
-        image: falkordb/falkordb-server:latest
+        image: falkordb/falkordb-server:v4.20.6
         env:
           # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
           # fork while any child is active ("Can't fork for module: File exists"

@@ -1063,6 +1063,7 @@ surfaces:
   - test_p1_differentiators.py
   - test_pack_cli.py
   - test_pack_content_v3.py
+  - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   - test_pack_manifest_store.py
