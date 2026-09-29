@@ -644,6 +644,29 @@ def test_a_link_header_disagreeing_with_the_pages_read_is_incomplete(monkeypatch
     assert pagination["link_agrees"] is False
 
 
+def test_an_unreadable_link_header_is_incomplete_not_agreeing(monkeypatch):
+    """(a) FAILS if a failed header read is treated as "no Link header": the
+    cross-check then reports agreement it never obtained, and a page set that
+    merely LOOKS full — [100, 50] read while the API holds [100, 100, 50] —
+    passes every remaining check and reports a share over a fraction of the
+    queue. That is the truncated-census false confidence this module exists to
+    prevent.
+    (b) Reachable: the header request 403s (a secondary rate limit, live on
+    this account) while the paginated read already succeeded, so only the
+    cross-check is blind.
+    """
+    pages = [[{"number": n} for n in range(100)],
+             [{"number": n} for n in range(100, 150)]]
+    _patch_pages(monkeypatch, pages, link_last=3)
+    # ...and then the independent header read fails outright.
+    monkeypatch.setattr(q, "gh_api_headers", lambda path, timeout=60: q.UNKNOWN)
+
+    _pulls, pagination, complete = q.enumerate_open_prs()
+    assert complete is False
+    assert pagination["link_header_read"] is False
+    assert pagination["link_agrees"] is False
+
+
 def test_duplicate_pr_numbers_are_incomplete(monkeypatch):
     """(a) FAILS if a paging overlap is silently deduplicated — the population
     would be off by the overlap count.

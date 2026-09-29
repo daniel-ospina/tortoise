@@ -822,11 +822,22 @@ def gh_api(path: str, *, paginate: bool = False, timeout: int = 120):
     return UNKNOWN
 
 
-def gh_api_headers(path: str, timeout: int = 60):
-    """Response headers of a single API call (for the Link/count check)."""
+def gh_api_headers(path: str, timeout: int = 60, *, attempts: int = 3,
+                   backoff_s: float = 2.0):
+    """Response headers of a single API call (for the Link/count check).
+
+    Retried like `gh_api`. An unread header collapses to `UNKNOWN`, and
+    `enumerate_open_prs` now fails CLOSED on it — so without a retry a single
+    transient 403 would turn every run into a spurious exit 2.
+    """
     cmd = ["gh", "api", "-i", "-H", "Accept: application/vnd.github+json", path]
-    rc, out, _err = _run(cmd, timeout)
-    if rc != 0:
+    for attempt in range(attempts):
+        rc, out, _err = _run(cmd, timeout)
+        if rc == 0:
+            break
+        if attempt + 1 < attempts:
+            time.sleep(backoff_s)
+    else:
         return UNKNOWN
     headers = {}
     for line in out.splitlines():
@@ -881,18 +892,29 @@ def enumerate_open_prs():
     headers = gh_api_headers(
         f"repos/{OWNER_REPO}/pulls?state=open&per_page={PER_PAGE}&page=1"
     )
+    # An UNREAD header is not "no Link header". Collapsing the two made the
+    # only independent completeness cross-check fail OPEN: `link_last` stayed
+    # None and `link_agrees` read True, so a truncated page set ([100, 50] read
+    # while the API holds [100, 100, 50]) passed every remaining check and the
+    # census reported a share over a fraction of the queue. The page-full
+    # invariant cannot catch that on its own — it only requires every page but
+    # the last to be full.
+    header_read_failed = headers is UNKNOWN
     link_last = None
-    if headers is not UNKNOWN:
+    if not header_read_failed:
         match = re.search(r'[?&]page=(\d+)>;\s*rel="last"', headers.get("link", ""))
         if match:
             link_last = int(match.group(1))
-    link_agrees = link_last is None or link_last == len(pages)
+    link_agrees = (
+        not header_read_failed and (link_last is None or link_last == len(pages))
+    )
     complete = bool(page_full_invariant and not duplicates and link_agrees and pulls)
     pagination = {
         "per_page": PER_PAGE,
         "pages_read": len(pages),
         "page_sizes": sizes,
         "link_last_page": link_last,
+        "link_header_read": not header_read_failed,
         "link_agrees": link_agrees,
         "page_full_invariant": page_full_invariant,
         "duplicates": duplicates,

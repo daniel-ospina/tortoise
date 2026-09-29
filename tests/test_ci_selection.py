@@ -594,6 +594,20 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_queue_conflict_census_tool_change_selects_core_not_tier1():
+    # #6138 review P1: tools/queue_conflict_census.py owns
+    # tests/test_queue_conflict_census.py (`core`). Without the CORE_ALSO entry
+    # the flat "tools/" prefix swallowed the path, so a census-only change
+    # selected no surface and fell back to tier-1 smoke — the guard never ran
+    # on the PR that edits the census, which is how a measurement instrument
+    # regresses silently. Same shape as #4069 above.
+    r = _sel(["tools/queue_conflict_census.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_queue_conflict_census.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
