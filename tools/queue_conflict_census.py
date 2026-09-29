@@ -614,6 +614,13 @@ def api_vs_mergetree(records) -> dict:
     `records` carry `mergeable_bucket` and `mergetree` ∈ {conflicted, clean,
     unresolved}. The under-report count is the interesting one: it is the
     number of PRs the API called mergeable that git says conflict.
+
+    A `null` bucket is NOT an under-report: the API did not answer, so a
+    PR that is `unknown` to the API and `conflicted` to git is neither
+    under- nor over-reported. It stays visible in the bucket counts and in
+    `mergetree_conflicting`; counting it here would inflate the API's error
+    rate with the exact false-confidence population this census exists to
+    keep separate.
     """
     unresolved = [r["number"] for r in records if r.get("mergetree") == "unresolved"]
     api_conflicting = [r["number"] for r in records if r.get("mergeable_bucket") == "conflicting"]
@@ -623,7 +630,7 @@ def api_vs_mergetree(records) -> dict:
         "mergetree_conflicting": len(true_conflicting),
         "under_reported": sorted(
             r["number"] for r in records
-            if r.get("mergetree") == "conflicted" and r.get("mergeable_bucket") != "conflicting"
+            if r.get("mergetree") == "conflicted" and r.get("mergeable_bucket") == "mergeable"
         ),
         "over_reported": sorted(
             r["number"] for r in records

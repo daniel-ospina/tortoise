@@ -493,6 +493,29 @@ def test_api_under_and_over_report_are_named_not_averaged():
     assert delta["mergetree_conflicting"] == 2
 
 
+def test_a_null_bucket_conflicted_pr_is_not_an_api_under_report():
+    """(a) FAILS if `under_reported` is written `mergeable_bucket !=
+    "conflicting"` — the negation also admits `unknown`, so a PR the API never
+    resolved is scored as the API being WRONG.
+    (b) Reachable: the per-PR GET can still return `mergeable: null` (the
+    computation is in flight), and the merge-tree probe can independently
+    report `conflicted`; the artifact's own `unknown` bucket is 0 today, so
+    this is a latent conflation, pinned here so it cannot become a live one
+    silently. The PR is not dropped either — it stays counted in the buckets
+    and in `mergetree_conflicting`.
+    """
+    records = [
+        _record(1, mergeable=None, mergetree="conflicted"),
+        _record(2, mergeable=True, mergetree="conflicted"),
+        _record(3, mergeable=False, mergetree="conflicted"),
+    ]
+    delta = q.api_vs_mergetree(records)
+    assert delta["under_reported"] == [2]
+    assert delta["over_reported"] == []
+    assert delta["mergetree_conflicting"] == 3
+    assert delta["api_conflicting"] == 1
+
+
 def test_an_unresolved_probe_is_named_and_excluded_from_the_conflict_set():
     """(a) FAILS if an unresolved PR is counted as conflicted (inflating the
     path aggregation) or dropped from `unresolved_prs` (hiding the hole).
