@@ -264,7 +264,7 @@ MAX_PROMPT_FRAGMENTS_CHARS = 4 * MAX_PROMPT_FRAGMENTS_TOKENS
 
 #: `valueGate` keys the template documents. A mistyped gate key is silent dead
 #: config of exactly the species the unknown-key rule exists to catch, so the
-#: neighbouring slot's strictness is matched here (review of PR #5647).
+#: neighbouring slot's strictness is matched here.
 VALID_VALUE_GATE_KEYS = frozenset({"keep", "drop"})
 
 
@@ -313,8 +313,7 @@ def _kind_ref_shape_error(ref: Any) -> str | None:
     What it catches is the MALFORMATION itself. ``_resolve_kind_ref`` would
     report ``":kind"``, ``"ns:"`` and ``"a:b:c"`` only as the generic "does
     not resolve to any known kind", which does not say what is wrong with them;
-    this check names it, at the per-manifest layer that drops the pack first
-    (review of PR #5647).
+    this check names it, at the per-manifest layer that drops the pack first.
     """
     if not isinstance(ref, str) or not ref.strip():
         return "must be a non-empty string"
@@ -1134,8 +1133,7 @@ class PackRegistry:
                 # predicate and both kind sides, and a template naming none of
                 # them describes nothing — but this field was checked by
                 # NEITHER pass, so `{"predicate": 123}` and `{}` both
-                # validated clean (review of PR #5647, found independently by
-                # the architecture and security agents).
+                # validated clean.
                 template_pred = tpl.get("predicate")
                 if not isinstance(template_pred, str) or not template_pred:
                     errors.append(
@@ -1382,7 +1380,7 @@ class PackRegistry:
             # _validate; RESOLUTION needs every pack loaded, which is why it
             # happens here — the same split `relations` uses. Without this the
             # slots were the one place a ref was accepted and handed to nobody,
-            # so a dangling `ns:kind` validated clean (review of PR #5647).
+            # so a dangling `ns:kind` validated clean.
             v31_kinds = self._pack_kind_set(pack)
             v31_extraction = pack.extraction or {}
             v31_refs: list[tuple[str, str]] = [
