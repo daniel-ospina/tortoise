@@ -24,6 +24,13 @@ and A4 is structurally inert there — ``index_missing`` — which is the same
 blank-input trap one lane over), so it SKIPS on the embedded carve-out. The
 mutation direction is pinned too: ``search_keys=False`` reproduces #5534's
 defect shape (zero keys, empty expansion, identical arms).
+
+#5534 follow-up (two P3 review fixes): the A4 input is an EXPLICIT OPT-IN.
+``_seed_memory`` defaults to the CAPTURE-EXACT shape (``search_keys=False`` —
+capture's turn write stores none), so a caller that passes nothing gets a
+byte-identical store to pre-#5534 and the A4-bearing tests below pass
+``search_keys=True`` THEMSELVES. That makes this file evidence for BOTH
+halves: the lever moves when opted in, and the default does not move anything.
 """
 from __future__ import annotations
 
@@ -155,7 +162,7 @@ def test_harvested_aliases_drive_a_non_empty_expansion(sdk):
     non-empty ``expansion_tokens`` — the call A4 makes. Before #5534 this was
     always ``[]`` because the store carried no ``search_keys``."""
     _skip_if_no_fts(sdk)
-    _seed_memory(sdk, _QUESTION, embed=False)
+    _seed_memory(sdk, _QUESTION, embed=False, search_keys=True)
     assert _search_keys_points(sdk) > 0
     first = run_fts_query(sdk._get_proj().g, _QUESTION["question"],
                           entity_type="point", limit=20,
@@ -180,7 +187,7 @@ def test_a4_ab_ordered_hit_list_differs_between_arms(sdk, keyword_lane):
     DIFFERS between ``search_keys_prf`` False and True. A clean zero here is
     the defect, not a passing A4 — so this test fails on a zero."""
     _skip_if_no_fts(sdk)
-    _seed_memory(sdk, _QUESTION, embed=False)
+    _seed_memory(sdk, _QUESTION, embed=False, search_keys=True)
     off, on = _arms(sdk, _QUESTION["question"])
     assert off, "retrieval returned nothing — the premise is broken"
     assert on != off, (
@@ -207,8 +214,8 @@ def test_seed_without_search_keys_reproduces_5534(sdk, keyword_lane):
 def test_seed_capture_turn_store_keeps_search_keys_off(sdk):
     """The SHARED capture-exact seeder writes no ``search_keys`` by default
     (capture's turn write stores none, and the committed transcript goldens
-    seed through it). The D3 FIXTURE seeder opts in — flipping the shared
-    default instead would silently rewrite those goldens' store."""
+    seed through it). The D3 FIXTURE seeder opts in EXPLICITLY — flipping a
+    shared default instead would silently rewrite those goldens' store."""
     seed_capture_turn_store(sdk, "sess-a4", [
         {"role": "user", "content": "zanzibar migration budget"},
     ])
@@ -218,7 +225,24 @@ def test_seed_capture_turn_store_keeps_search_keys_off(sdk):
         "MATCH (p:Point {id:'sess-a4_t0'}) RETURN p.search_keys"
     ).result_set[0][0]
     assert val is None, f"shared seeder wrote search_keys by default: {val!r}"
-    assert SEED_SEARCH_KEYS_BY_DEFAULT is True
-    # sanity: the fixture seeder DOES opt in (the guard above is not vacuous)
+
+
+def test_seed_memory_defaults_to_the_capture_exact_shape(sdk):
+    """#5534 follow-up: ``_seed_memory``'s DEFAULT is the faithful capture
+    shape (``search_keys=False``), NOT the A4 opt-in. This is the separation
+    the review demanded: every non-A4 caller (``tools/profile_read_path.py``,
+    ``tools/ask_pool_admission_probe.py``, the ``w6c_*``/``w7a_*``/``4107_*``
+    diagnostics) passes nothing and must therefore produce a store
+    byte-identical to pre-#5534. Non-vacuous: the explicit opt-in below DOES
+    seed keys on the same fixture."""
+    assert SEED_SEARCH_KEYS_BY_DEFAULT is False, (
+        "the library default must stay the capture-exact OFF — flipping it ON "
+        "would silently change every non-A4 caller's store (#5534 review)")
     _seed_memory(sdk, _QUESTION, embed=False)
-    assert _search_keys_points(sdk) > 0
+    assert _search_keys_points(sdk) == 0, (
+        "a caller that does NOT opt in seeded search_keys — the default flip "
+        "is back")
+    # Non-vacuity: the same fixture, opted in, DOES carry the substrate.
+    _seed_memory(sdk, _QUESTION, embed=False, search_keys=True)
+    assert _search_keys_points(sdk) > 0, (
+        "the opt-in seeded nothing — the A4 input guard is vacuous")

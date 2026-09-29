@@ -213,13 +213,25 @@ SEED_TURNS_EMBEDDED_BY_DEFAULT = True
 #: #5534: whether the ask FIXTURE seeder (``_seed_memory``) stores the E3
 #: ``search_keys`` substrate the A4 PRF gate harvests. Single source so a
 #: receipt can NAME the mode it was produced in (a receipt that does not name
-#: its seeding mode is not evidence). ``True`` = the store carries the aliases
-#: A4 needs and the A/B can be non-zero; ``False`` = #5534's defect shape (a
-#: pure capture turn store, where A4 is structurally inert and the A/B returns
-#: a guaranteed zero). The SHARED primitive ``seed_capture_turn_store`` keeps
-#: its own default OFF — capture writes no ``search_keys`` on turns, and the
-#: committed transcript goldens seed through it.
-SEED_SEARCH_KEYS_BY_DEFAULT = True
+#: its seeding mode is not evidence).
+#:
+#: **``False`` is the faithful CAPTURE shape** (the default): ``search_keys``
+#: is an indexed Point FTS field (``tortoise/projection/__init__.py`` —
+#: ``("Point", ["content", "search_keys"])``) and capture's TURN write stores
+#: none (E3 writes it on extracted claim Points), so a capture-exact turn
+#: store has none — exactly why the SHARED primitive
+#: ``seed_capture_turn_store`` defaults OFF. Flipping this default ON would
+#: silently change the store of EVERY non-A4 caller that passes nothing
+#: (``tools/profile_read_path.py``, ``tools/ask_pool_admission_probe.py``,
+#: the ``w6c_*`` / ``w7a_*`` / ``4107_*`` runbook diagnostics), so their
+#: previously recorded numbers would stop reproducing.
+#:
+#: A caller that NEEDS A4's input opts in EXPLICITLY with ``search_keys=True``
+#: (the diagnostic and the ask-shape ruler do; both default their own CLI to
+#: the A4 behaviour). ``True`` = the store carries the aliases A4 needs and
+#: the A/B can be non-zero; ``False`` = #5534's defect shape (A4 structurally
+#: inert, the A/B a guaranteed zero).
+SEED_SEARCH_KEYS_BY_DEFAULT = False
 
 #: commit_schema.Point.search_keys entry bound (1-60 chars, at most 4
 #: entries).
@@ -503,16 +515,18 @@ def _seed_memory(sdk: TortoiseSDK, question: dict, *,
     ``p.sessionId`` prop over the CONTAINS edge, so that fixture read GREEN
     on a graph where the edge path was entirely broken.
 
-    Reproduced IN ADDITION to capture's own write (#5534): the E3
-    ``search_keys`` substrate on each turn Point, DERIVED deterministically
-    from that turn's own text (``search_keys=True``, the default), because
+    Reproduced IN ADDITION to capture's own write (#5534): callers that opt
+    in (``search_keys=True``) get the E3 ``search_keys`` substrate on each
+    turn Point, DERIVED deterministically from that turn's own text, because
     A4 (``TORTOISE_ASK_SEARCH_KEYS_PRF``) harvests ``search_keys`` from the
     first-pass top-5 hits and is STRUCTURALLY INERT on a store with none —
     the instrument's A/B then returns a guaranteed zero and cannot clear
     A4. This is the same class of instrument repair as W7A's embedding
     default: capture's TURN write stores no ``search_keys`` (E3 writes it on
     extracted claim Points), so a pure turn store leaves the lever with no
-    input. ``search_keys=False`` reproduces #5534's defect shape.
+    input. ``search_keys`` defaults OFF because that IS the capture shape;
+    the A4-bearing runs turn it on EXPLICITLY (see
+    ``SEED_SEARCH_KEYS_BY_DEFAULT``) so no non-A4 caller's store moves.
 
     Deliberately NOT reproduced (this seeds a TURN STORE, it is not a
     capture): no ``:Source``

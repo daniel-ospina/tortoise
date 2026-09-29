@@ -21,7 +21,22 @@ WHAT IT REPORTS (per question, plus a summary)
     ``expansion_tokens(<harvested>, reserved=<query tokens>)`` (the UNIT
     evidence: must be non-empty).
   * ``hits_off`` / ``hits_on`` — the ordered hit-id lists for the two arms.
-  * ``differ`` — the ARM evidence: True iff the ordered lists differ.
+  * ``differ`` — the ARM evidence: True iff the ORDERED lists differ.
+  * ``differ_membership`` / ``membership_symdiff`` — the SAME hit-id SET
+    test: the symmetric difference ``set(on) ^ set(off)``. An ordered
+    difference with an EMPTY symmetric difference is a pure ordering
+    artifact, not an A4 effect — the raw FTS leg returns an ordered list
+    whose tail at the ``--limit`` boundary is not stable across two calls,
+    so the CONTROL arm (``--no-search-keys``) is NOT guaranteed 0/21.
+    Measured: an OFF run returned 1/21 on ``e4e14d04`` (off_n=120, on_n=105)
+    while all 21 questions had ``search_keys_points=0`` and
+    ``expansion=[]`` (A4 provably inert); three isolated re-runs gave
+    ``off_n == on_n == 105`` and ``differ=False``.
+  * ``attribution`` — the LABEL that keeps the flake legible: ``identical``,
+    ``ordering_artifact`` (same membership, different order),
+    ``no_a4_input`` (a difference where the store gave A4 nothing to expand —
+    keys 0 or expansion empty, so it cannot be an A4 effect), or
+    ``a4_effect``.
 
 It changes NOTHING in the product or in ``tools/ask_shape_rate.py``'s ruler
 (legs, thresholds, fixture, reader pin, pre-registered rule). It is a
@@ -79,6 +94,27 @@ def _search_keys_for(sdk, ids: list[str]) -> dict[str, str]:
     return {r[0]: (r[1] or "") for r in rows}
 
 
+def _attribution(*, differ: bool, differ_membership: bool,
+                 search_keys_points: int, expansion: list[str]) -> str:
+    """Label an arm difference so the CONTROL's benign behaviour is legible.
+
+    The OFF arm (``--no-search-keys``) is EXPECTED to give 0/21, but the raw
+    FTS leg's ordered tail at the ``--limit`` boundary is not stable across
+    two calls, so 1/21 can appear. A future lane that sees it must not read
+    it as A4: this returns ``a4_effect`` ONLY when the store actually gave A4
+    an input (keys seeded AND a non-empty expansion).
+    """
+    if not differ:
+        return "identical"
+    if not differ_membership:
+        return "ordering_artifact"   # same hit-id set, different order
+    if search_keys_points == 0 or not expansion:
+        # A difference where A4 had NOTHING to expand is not an A4 effect by
+        # construction (the observed 1/21 OFF run: keys=0, expansion=[]).
+        return "no_a4_input"
+    return "a4_effect"
+
+
 def measure_one(q: dict, *, limit: int, embed: bool,
                 search_keys: bool) -> dict:
     """One question, one fresh scratch graph, both arms."""
@@ -132,6 +168,17 @@ def measure_one(q: dict, *, limit: int, embed: bool,
              if a != b),
             None)
         out["differ"] = off_ids != on_ids
+        # The ORDER-INDEPENDENT arm test: an ordered difference with an empty
+        # symmetric difference is a raw-FTS ordering artifact, not A4. Keep
+        # both so a reader can never mistake the control's benign flake (the
+        # OFF arm is expected 0/21 but is not guaranteed so) for an A4 effect.
+        symdiff = sorted(set(on_ids) ^ set(off_ids))
+        out["differ_membership"] = bool(symdiff)
+        out["membership_symdiff"] = symdiff
+        out["attribution"] = _attribution(
+            differ=out["differ"], differ_membership=bool(symdiff),
+            search_keys_points=out["search_keys_points"],
+            expansion=out["expansion_tokens"])
         out["hits_off"] = off_ids
         out["hits_on"] = on_ids
         out["arm_s"] = round(t4 - t3, 2)
@@ -198,26 +245,49 @@ def main() -> int:
             receipt["questions"].append(rec)
             print(f"    search_keys_points={rec['search_keys_points']} "
                   f"expansion={len(rec['expansion_tokens'])} "
-                  f"differ={rec['differ']} total={rec['total_s']}s",
+                  f"differ={rec['differ']} "
+                  f"differ_membership={rec['differ_membership']} "
+                  f"attribution={rec['attribution']} "
+                  f"total={rec['total_s']}s",
                   flush=True)
     finally:
         _drop_scratch_graph()
     receipt["wallclock_s"] = round(time.monotonic() - t_all, 1)
-    n_diff = sum(1 for r in receipt["questions"] if r["differ"])
+    questions_rec = receipt["questions"]
+    n_a4 = sum(1 for r in questions_rec if r["attribution"] == "a4_effect")
+    artifacts = [
+        {"question_id": r["question_id"], "attribution": r["attribution"],
+         "n_hits_off": r["n_hits_off"], "n_hits_on": r["n_hits_on"],
+         "membership_symdiff": r["membership_symdiff"]}
+        for r in questions_rec if r["differ"]]
     receipt["summary"] = {
-        "n_questions": len(receipt["questions"]),
-        "n_differ": n_diff,
+        "n_questions": len(questions_rec),
+        "n_differ": sum(1 for r in questions_rec if r["differ"]),
+        "n_differ_membership": sum(
+            1 for r in questions_rec if r["differ_membership"]),
+        "n_a4_effect": n_a4,
+        "n_ordering_or_unattributable": sum(
+            1 for r in questions_rec if r["differ"] and
+            r["attribution"] != "a4_effect"),
+        "differing_questions": artifacts,
+        "attribution_note": (
+            "an ordered difference with an EMPTY membership_symdiff is a raw "
+            "FTS ordering artifact, not an A4 effect; a difference carrying "
+            "search_keys_points=0 or an empty expansion had no A4 input and "
+            "cannot be one either. Only attribution='a4_effect' counts."),
         "zero_search_keys_questions": sum(
-            1 for r in receipt["questions"] if r["search_keys_points"] == 0),
+            1 for r in questions_rec if r["search_keys_points"] == 0),
         "empty_expansion_questions": sum(
-            1 for r in receipt["questions"] if not r["expansion_tokens"]),
+            1 for r in questions_rec if not r["expansion_tokens"]),
     }
     print(json.dumps(receipt["summary"], indent=2))
     if args.out:
         with open(args.out, "w") as f:
             json.dump(receipt, f, indent=2)
         print(f"receipt: {args.out}")
-    return 0 if n_diff else 1
+    # Exit on the A4-ATTRIBUTABLE count, never on a benign ordering flake: an
+    # OFF run that flakes 1/21 must still read as "A4 inert" (exit 1 here).
+    return 0 if n_a4 else 1
 
 
 if __name__ == "__main__":
