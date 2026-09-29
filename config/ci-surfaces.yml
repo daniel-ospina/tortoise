@@ -1489,6 +1489,7 @@ surfaces:
   - test_postmerge_dedup.py
   - test_product_rerank.py  # #2976: ask-lane (eval-only) rerank seam — tri-state gate, budget guard, one-impl de-fork guard (hermetic)
   - test_ci_timing.py
+  - test_ci_manifest.py  # #5050: the measured durations map validator (READ-ONLY; `ci_timing.py --refresh-durations` is the sole writer)
   - test_ids.py
   - test_log.py
   - test_longmem_reader_aggregation.py
