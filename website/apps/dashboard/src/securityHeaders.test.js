@@ -1512,9 +1512,9 @@ test('every file that emits or serves HTML is in the guarded site list', () => {
       'website/functions/contact/submit.ts',
       'the non-literal Content-Type is on an INTERNAL `Response` built only to drive ' +
         '`.formData()` for a form body (`application/x-www-form-urlencoded` or ' +
-        '`multipart/form-data`) — it is never handed back to the caller ' +
-        '(every response with a body is JSON; the OPTIONS preflight is an empty 204), ' +
-        'so no html can reach a client',
+        '`multipart/form-data`) — it is never returned to the caller, and no returned ' +
+        'response carries an html body (the only body-bearing return is JSON; the ' +
+        'OPTIONS preflight is an empty 204)',
     ],
   ])
   const unreadableCt = (rel) => nonLiteralContentTypes(rel).length > 0
