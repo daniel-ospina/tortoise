@@ -251,21 +251,21 @@ Scripts (this repo, `origin/main` worktree):
 cd .worktrees/ops/2146-orphan-cleanup            # or repo root on origin/main
 
 # 1. Enumerate → writes 2146-e2e-live-orphans.manifest.json (no writes)
-uv run python3 graph-scripts/2146_e2e_live_orphan_cleanup.py --phase enumerate
+uv run uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase enumerate
 #    expect: teams=154 users=1 api_keys=154 memberships=2 invitations=0
 #            abuse_events=154 audit_events=0   (+68/11 with --all-e2e-live)
 #    REVIEW the manifest; keep it (it is the only post-delete record).
 
 # 2. Dry-run the full delete (prints counts/statements; writes nothing)
-uv run python3 graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all
+uv run uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all
 
 # 3. Execute (needs SUPABASE_URL + SUPABASE_SERVICE_KEY for the GoTrue user
 #    delete, or --delete-users-via sql; SQL driver = CLI or SUPABASE_ACCESS_TOKEN)
-uv run python3 graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all --execute
+uv run uv run python graph-scripts/2146_e2e_live_orphan_cleanup.py --phase all --execute
 
 # 4. FalkorDB graphs — run where FALKORDB_CLOUD_URI is injectable
-uv run python3 graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json            # dry-run
-uv run python3 graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json --execute   # GRAPH.DELETE
+uv run uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json            # dry-run
+uv run uv run python graph-scripts/2146_falkordb_graph_cleanup.py --manifest 2146-e2e-live-orphans.manifest.json --execute   # GRAPH.DELETE
 ```
 
 Delete order (children first, teams last — retry-anchor semantics of the
