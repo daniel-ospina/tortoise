@@ -1086,6 +1086,20 @@ def origin_main_sha():
 # CLI
 # ==========================================================================
 
+def census_exit_code(*, complete, main_moved, read_failures, sample) -> int:
+    """The process exit contract: 0 = a complete census, 2 = UNKNOWN.
+
+    Any of the four UNKNOWN conditions makes the run's headline numbers
+    unsafe to read as a census, so the code says so to the CALLER, not only
+    in the artifact's `notes`. Pure and separately callable: this is the one
+    number the contract is about, so it must not be reachable only from the
+    live path that no test can drive.
+    """
+    if not complete or main_moved or read_failures or sample:
+        return 2
+    return 0
+
+
 def live_census(opts) -> dict:
     """Run the whole census against the live API + local git."""
     notes = []
@@ -1208,9 +1222,12 @@ def live_census(opts) -> dict:
     if read_failures:
         notes.append(f"mergeable read FAILED for {len(read_failures)} PR(s)")
 
-    exit_code = 0
-    if not complete or main_moved or read_failures or opts["sample"]:
-        exit_code = 2
+    exit_code = census_exit_code(
+        complete=complete,
+        main_moved=main_moved,
+        read_failures=read_failures,
+        sample=opts["sample"],
+    )
 
     opts.update({
         "origin_main_sha": main_before,

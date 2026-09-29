@@ -727,6 +727,26 @@ def test_an_unreadable_population_is_incomplete(monkeypatch):
     assert complete is False
 
 
+def test_each_unknown_condition_is_exit_2_and_only_a_clean_run_is_exit_0():
+    """(a) FAILS if any one of the four UNKNOWN conditions is dropped from the
+    exit-code decision — each is asserted separately, so a conjunction that
+    loses a clause (`main_moved` is the quietest: it leaves every count
+    correct and only the snapshot inconsistent) turns the matching case red.
+    (b) Reachable: all four are live — an incomplete enumeration (#6138's
+    measured short page), a failed mergeable read (rate limit), an
+    `origin/main` advance mid-sweep, and `--sample`.
+    """
+    clean = dict(complete=True, main_moved=False, read_failures=[], sample=0)
+    assert q.census_exit_code(**clean) == 0
+    for field, unknown in (
+        ("complete", False),
+        ("main_moved", True),
+        ("read_failures", [7]),
+        ("sample", 25),
+    ):
+        assert q.census_exit_code(**{**clean, field: unknown}) == 2, field
+
+
 # ==========================================================================
 # End-to-end through the CLI on a fixture
 # ==========================================================================
