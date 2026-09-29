@@ -391,36 +391,119 @@ const FUNCTION_SCOPES = new Set([
   'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod',
 ])
 
+/** The literal name of a member key, computed or not (`h.call`, `h['call']`, ``h[`call`]``), or null. */
+function memberKeyName(node) {
+  const key = node.property
+  if (!node.computed) return key?.type === 'Identifier' ? key.name : null
+  if (key?.type === 'StringLiteral') return key.value
+  if (key?.type === 'TemplateLiteral' && (key.expressions ?? []).length === 0) {
+    return key.quasis?.[0]?.value?.cooked ?? null
+  }
+  return null
+}
+
+/** True for a `.call`/`.apply`/`.bind` member (computed key included), whose target may be read
+ *  from its FIRST argument when the object is not itself a helper. */
+function isProxyMember(node) {
+  return (node?.type === 'MemberExpression' || node?.type === 'OptionalMemberExpression')
+    && CALL_PROXY_METHODS.has(memberKeyName(node))
+}
+
+/** The last expression of a `(0, f)` sequence callee — the callee actually invoked. */
+function unwrapSequence(node) {
+  let n = node
+  while (n?.type === 'SequenceExpression' && n.expressions.length > 0) {
+    n = n.expressions[n.expressions.length - 1]
+  }
+  return n
+}
+
 /**
- * Every helper NAME reachable inside `node` — a bare `wizardStageLabel`/`wizardStepSub`, an
- * identifier bound to one through an alias (`import { wizardStageLabel as wsl }`,
- * `const w = wizardStageLabel`, `const { wizardStageLabel: w } = xs`), or a member whose
- * non-computed property is a helper (`H.wizardStageLabel`).
+ * Helpers a FUNCTION's returned value reaches, added to `out`. A callee that reaches the helper
+ * through a RETURNED value is a curried invocation — `(() => h)()(…)` evaluates to `h` and then
+ * calls it — so it is a site the guard must refuse.
  *
- * This is the DETECTOR, not the resolver: it answers "does this subtree NAME a helper at all",
- * so a spelling `canonicalCallee` cannot read still becomes a site instead of being dropped. It
- * deliberately does not descend into function bodies (see `FUNCTION_SCOPES`).
+ * A helper merely CALLED inside the body is not returned, so it is not added here: that call is
+ * its own `CallExpression` and is checked separately. That distinction is what keeps the real
+ * `(() => { … wizardStepSub(…) … })()` IIFE from being refused, while still refusing
+ * `(() => wizardStageLabel)()(…)` (round 16, P1-b).
  */
-function helperRefsIn(node, aliases) {
-  const found = new Set()
+function addReturnedHelpers(fn, aliases, out) {
+  const body = fn.body
+  if (!body) return
+  // An expression-bodied arrow returns its body: `() => h`.
+  if (body.type !== 'BlockStatement') {
+    const helper = reachesHelper(body, aliases)
+    if (helper) out.add(helper)
+    return
+  }
+  // A block body returns through `return`; walk control flow but not nested functions.
   const walk = (n) => {
     if (!n || typeof n !== 'object') return
     if (Array.isArray(n)) { for (const child of n) walk(child); return }
     if (typeof n.type === 'string') {
       if (FUNCTION_SCOPES.has(n.type)) return
+      if (n.type === 'ReturnStatement') {
+        const helper = reachesHelper(n.argument, aliases)
+        if (helper) out.add(helper)
+        return
+      }
+    }
+    for (const key of Object.keys(n)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
+      walk(n[key])
+    }
+  }
+  walk(body)
+}
+
+/**
+ * Every helper NAME reachable inside `node` — a bare `wizardStageLabel`/`wizardStepSub`, an
+ * identifier bound to one through an alias (`import { wizardStageLabel as wsl }`,
+ * `const w = wizardStageLabel`, `const { wizardStageLabel: w } = xs`), or a member whose property
+ * is a helper (`H.wizardStageLabel`).
+ *
+ * This is the DETECTOR, not the resolver: it answers "does this subtree NAME a helper at all", so
+ * a spelling `canonicalCallee` cannot read still becomes a site instead of being dropped.
+ *
+ * `descendFunctions` is on for a CALLEE walk and off for the proxy ARGUMENT walk. On a callee it
+ * looks through a nested function's RETURNED value (see `addReturnedHelpers`) — a callee that only
+ * evaluates to the helper after a call cannot be read, so refusing it is the safe direction. It
+ * deliberately does not descend through a helper merely CALLED in a function body: that call is a
+ * `CallExpression` of its own and is visited separately. An argument is a deferred value position,
+ * so the walk stops at function boundaries there.
+ */
+function helperRefsIn(node, aliases, descendFunctions = false, fnReturns = null) {
+  const found = new Set()
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) { for (const child of n) walk(child); return }
+    if (typeof n.type === 'string') {
+      if (n.type === 'CallExpression' || n.type === 'OptionalCallExpression') {
+        // ⛔ `f()(…)` — THE CALL RESULT IS THE CALLEE (#5797 review round 17, P1). A function
+        // that RETURNS a helper is not an alias of it, so `f` itself is not a helper reference;
+        // but when the callee of the outer call is `f()`, the value being invoked IS the helper,
+        // and that is a site the guard must refuse. The named form is resolved through
+        // `fnReturns`; the inline form (`(() => h)()`) is handled by the function-scope branch
+        // below. Both are the same shape one indirection apart.
+        if (descendFunctions && n.callee?.type === 'Identifier'
+            && fnReturns?.has(n.callee.name)) {
+          found.add(fnReturns.get(n.callee.name))
+        }
+        return
+      }
+      if (n.type === 'NewExpression') return
+      if (FUNCTION_SCOPES.has(n.type)) {
+        if (descendFunctions) addReturnedHelpers(n, aliases, found)
+        return
+      }
       if (n.type === 'Identifier') {
         if (WIZARD_RENDER_CALLEES.has(n.name)) found.add(n.name)
         else if (aliases.has(n.name)) found.add(aliases.get(n.name))
         return
       }
       if (n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression') {
-        const key = n.property
-        const literal = n.computed
-          ? key?.type === 'StringLiteral' ? key.value
-            : key?.type === 'TemplateLiteral' && (key.expressions ?? []).length === 0
-              ? (key.quasis?.[0]?.value?.cooked ?? null)
-              : null
-          : key?.type === 'Identifier' ? key.name : null
+        const literal = memberKeyName(n)
         if (literal && WIZARD_RENDER_CALLEES.has(literal)) found.add(literal)
       }
     }
@@ -443,12 +526,10 @@ function helperRefsIn(node, aliases) {
  *   `wizardStageLabel.call(thisArg, …)`  → { form: 'call',     options at 2 }
  *   `wizardStageLabel.apply/bind(…)`     → { form: 'apply'|'bind', options: null }
  *
- * EVERYTHING ELSE IS `null`, and that is the inversion (#5797 review round 15, P1). An alias, a
- * computed `['call']`, an optional `?.call`, a `H.wizardStageLabel`, a conditional/logical callee,
- * a `(0, f.call)` sequence: each NAMES a helper but none is a form this can read, so
- * `wizardRenderSites` pushes them with `options: null` and the per-site assertion REFUSES them —
- * instead of the old whitelist's behaviour of returning `null` and silently dropping the call. The
- * default is fail-closed, so a shape nobody anticipated fails instead of shipping green.
+ * The member key may be written as a string literal — `.call` and `['call']` are the same method.
+ * EVERYTHING ELSE IS `null`, which is the inversion: an unreadable spelling is still a SITE
+ * (because its callee names a helper) and gets `options: null`, so the per-site assertion REFUSES
+ * it instead of dropping it. The default is fail-closed.
  */
 function canonicalCallee(node) {
   if (!node) return null
@@ -462,48 +543,60 @@ function canonicalCallee(node) {
     }
     return null
   }
-  if (node.type === 'MemberExpression' && node.computed === false && !node.optional
-      && node.property?.type === 'Identifier' && CALL_PROXY_METHODS.has(node.property.name)) {
+  if (isProxyMember(node)) {
     const object = canonicalCallee(node.object)
     if (object && object.form === 'direct') {
-      return { name: object.name, form: node.property.name }
+      return { name: object.name, form: memberKeyName(node) }
     }
     return null
   }
   return null
 }
 
-/** True for a `.call`/`.apply`/`.bind` member, whose target may be read from its FIRST argument. */
-function isProxyCallee(node) {
-  return node?.type === 'MemberExpression' && node.computed === false && !node.optional
-    && node.property?.type === 'Identifier' && CALL_PROXY_METHODS.has(node.property.name)
-}
-
 /**
- * The helper an initializer binds to, for the alias map: `const w = wizardStageLabel`,
- * `const w = (0, wizardStageLabel)`, `const w = H.wizardStageLabel`, or a chained
- * `const w = otherAlias`.
- *
- * An alias is NOT canonical. It is collected so a later `w(…)` becomes a REFUSED site, never so it
- * can be read as if it were a direct call.
+ * True for a callee that is a `.call`/`.apply`/`.bind` member — computed key and `(0, f.apply)`
+ * sequence included — and whose target may therefore be read from its FIRST argument.
  */
-function aliasValue(node, aliases) {
-  if (!node) return null
-  if (node.type === 'Identifier') {
-    if (WIZARD_RENDER_CALLEES.has(node.name)) return node.name
-    return aliases.get(node.name) ?? null
-  }
-  if (node.type === 'SequenceExpression' && node.expressions.length > 0) {
-    return aliasValue(node.expressions[node.expressions.length - 1], aliases)
-  }
-  if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression')
-      && node.property?.type === 'Identifier' && WIZARD_RENDER_CALLEES.has(node.property.name)) {
-    return node.property.name
-  }
-  return null
+function isProxyCallee(node) {
+  return isProxyMember(unwrapSequence(node))
 }
 
 /** Aliases bound by a destructuring pattern: `const { wizardStageLabel: w } = xs`. */
+/**
+ * Bind EVERY identifier in a binding pattern to `name`.
+ *
+ * Used where a value source is discovered from INSIDE a pattern (a destructuring default):
+ * `const { a: { b: w = h } } = { a: {} }` binds `w`, and only a full walk of the pattern finds
+ * it. The pattern is known to be a binding pattern, so a bare `Identifier` here is a bound name,
+ * not a reference.
+ */
+function bindAll(pattern, name, aliases) {
+  if (!pattern) return
+  switch (pattern.type) {
+    case 'Identifier':
+      aliases.set(pattern.name, name)
+      return
+    case 'ObjectPattern':
+      for (const prop of pattern.properties ?? []) {
+        if (prop.type === 'RestElement') { bindAll(prop.argument, name, aliases); continue }
+        bindAll(prop.value, name, aliases)
+      }
+      return
+    case 'ArrayPattern':
+      for (const el of pattern.elements ?? []) bindAll(el, name, aliases)
+      return
+    case 'AssignmentPattern':
+      bindAll(pattern.left, name, aliases)
+      return
+    case 'RestElement':
+      bindAll(pattern.argument, name, aliases)
+      return
+    default:
+      // A MemberExpression target (`o.h = …`) or anything else: nothing to bind.
+      return
+  }
+}
+
 function patternAliases(pattern, aliases) {
   if (!pattern) return
   if (pattern.type === 'ObjectPattern') {
@@ -524,16 +617,88 @@ function patternAliases(pattern, aliases) {
     for (const el of pattern.elements ?? []) patternAliases(el, aliases)
     return
   }
-  if (pattern.type === 'AssignmentPattern') { patternAliases(pattern.left, aliases); return }
+  if (pattern.type === 'AssignmentPattern') {
+    // ⛔ A DEFAULT IS A VALUE SOURCE (#5797 review round 17, P1). `const [w = h] = []`,
+    // `const { x: w = h } = {}`, `function z({ a: w = h } = {})`, `for (const [w = h] of [[]])`
+    // and `const [w = (0, h)] = []` all bind `w` to the helper, but this recursed into
+    // `pattern.left` ONLY — so `w` was never an alias, the call `w(…)` named no helper, and
+    // the widened heading shipped with all 693 tests green. A default is not decoration:
+    // it is the value the binding takes whenever the pattern does not supply one, so it is
+    // a value source exactly like `init`.
+    const viaDefault = reachesHelper(pattern.right, aliases)
+    if (viaDefault) bindAll(pattern.left, viaDefault, aliases)
+    patternAliases(pattern.left, aliases)
+    return
+  }
   if (pattern.type === 'RestElement') { patternAliases(pattern.argument, aliases); return }
 }
 
 /**
- * Every name bound to a helper — imports first, then local bindings in declaration order (the
- * order a chained alias can bind in).
+ * The helper a bound VALUE reaches, or `null` — the dataflow step for the alias fixpoint. A
+ * value reaches a helper when it IS one, reads one through a member key, or reads a name already
+ * known to be an alias; structural expressions (sequence, conditional, array/object literal) are
+ * walked, because `const [w] = [h]` and `const o = { h }` bind a helper.
+ *
+ * A CALL result is deliberately NOT a helper: `const label = wizardStageLabel(…)` binds the
+ * string the helper returned, not the helper, so descending into calls would alias every variable
+ * that ever held a rendered label and refuse unrelated calls on it. Function bodies are deferred
+ * for the same reason.
+ */
+function reachesHelper(node, aliases) {
+  let found = null
+  const walk = (n) => {
+    if (found !== null || !n || typeof n !== 'object') return
+    if (Array.isArray(n)) { for (const child of n) walk(child); return }
+    if (typeof n.type === 'string') {
+      if (FUNCTION_SCOPES.has(n.type)) return
+      if (n.type === 'CallExpression' || n.type === 'OptionalCallExpression' || n.type === 'NewExpression') return
+      if (n.type === 'Identifier') {
+        if (WIZARD_RENDER_CALLEES.has(n.name)) found = n.name
+        else if (aliases.has(n.name)) found = aliases.get(n.name)
+        return
+      }
+      if (n.type === 'MemberExpression' || n.type === 'OptionalMemberExpression') {
+        const literal = memberKeyName(n)
+        if (literal && WIZARD_RENDER_CALLEES.has(literal)) found = literal
+      }
+    }
+    for (const key of Object.keys(n)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
+      walk(n[key])
+    }
+  }
+  walk(node)
+  return found
+}
+
+/**
+ * Every name bound to a helper.
+ *
+ * ⛔ NO WHITELIST OF BINDING FORMS (#5797 review round 16, P2). The previous version enumerated
+ * the spellings it knew (an import rename, a `VariableDeclarator` with an identifier or
+ * object-destructure init) and a reviewer dropped a widened heading with five forms it did not:
+ * `const [w] = [h]`, `const o = { h }`, `for (const w of [h])`, `function z(w = h)`, and
+ * `let w; w = h`. That is the same lesson as the callee whitelist — enumeration cannot converge.
+ *
+ * So the alias set is a DATAFLOW FIXPOINT over the binding sites that introduce a name:
+ * imports, `VariableDeclarator` (any pattern), `AssignmentExpression`, `for…of`/`for…in` lefts,
+ * parameter and catch params — and, for a binding pattern, a DEFAULT NESTED INSIDE IT
+ * (`const [w = h] = []`), which is a value source like any other (round 17, P1). A site whose
+ * value reaches a helper binds an alias; the pass repeats until no alias is added, so a chain
+ * (`const a = h; const b = a`) converges whatever the order.
+ *
+ * ⛔ WHAT THIS DOES NOT CLAIM (round 17): being a fixpoint over VALUE SOURCES is not the same as
+ * “every binding form babel can produce is covered”. A helper reached only through a NON-proxy
+ * argument (`arr.map(h)`), produced by a CALL (`const w = pick(h)`), or returned by a CLASS METHOD
+ * binds nothing, and a `new`/tagged-template use of a helper is not scanned at all. Those
+ * boundaries are real and are stated in `wizardRenderSites`; an earlier version of this comment
+ * asserted coverage instead. A FUNCTION VALUE is collected here as a RETURNED-helper producer
+ * (not as an alias) so that `f()(…)` is a site while `f(…)` is not; the declaration form is
+ * collected by a separate pass, because a declaration binds a name without a `VariableDeclarator`.
  */
 function collectAliases(ast) {
   const aliases = new Map()
+  // Imports rename a helper: `import { wizardStageLabel as wsl }`.
   visitNodes(ast.program, (node) => {
     if (node.type === 'ImportSpecifier'
         && node.imported?.type === 'Identifier'
@@ -542,16 +707,76 @@ function collectAliases(ast) {
       aliases.set(node.local.name, node.imported.name)
     }
   })
+  // Every binding site, whatever introduces it, as { pattern, value }.
+  const bindings = []
   visitNodes(ast.program, (node) => {
-    if (node.type !== 'VariableDeclarator' || !node.id) return
-    if (node.id.type === 'Identifier') {
-      const name = aliasValue(node.init, aliases)
-      if (name) aliases.set(node.id.name, name)
-      return
+    switch (node.type) {
+      case 'VariableDeclarator':
+        if (node.id) bindings.push({ pattern: node.id, value: node.init ?? null })
+        break
+      case 'AssignmentExpression':
+        if (node.left) bindings.push({ pattern: node.left, value: node.right ?? null })
+        break
+      case 'ForOfStatement':
+      case 'ForInStatement':
+        if (node.left?.type === 'VariableDeclaration') {
+          for (const decl of node.left.declarations) {
+            if (decl.id) bindings.push({ pattern: decl.id, value: node.right ?? null })
+          }
+        } else if (node.left) {
+          bindings.push({ pattern: node.left, value: node.right ?? null })
+        }
+        break
+      case 'CatchClause':
+        if (node.param) bindings.push({ pattern: node.param, value: null })
+        break
+      default:
+        break
     }
-    patternAliases(node.id, aliases)
+    if (FUNCTION_SCOPES.has(node.type)) {
+      for (const p of node.params ?? []) {
+        // `function z(w = h)`: the DEFAULT is the value the parameter binds to.
+        if (p?.type === 'AssignmentPattern') {
+          bindings.push({ pattern: p.left, value: p.right ?? null })
+        }
+      }
+    }
   })
-  return aliases
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const { pattern, value } of bindings) {
+      const helper = value ? reachesHelper(value, aliases) : null
+      if (helper !== null) {
+        for (const name of patternNames(pattern, [])) {
+          if (!aliases.has(name)) { aliases.set(name, helper); changed = true }
+        }
+      }
+      const before = aliases.size
+      patternAliases(pattern, aliases)
+      if (aliases.size !== before) changed = true
+    }
+  }
+  // ⛔ A FUNCTION THAT RETURNS A HELPER IS NOT AN ALIAS OF IT (#5797 review round 17). `f` and
+  // `f()` are DIFFERENT values: `f(…)` ignores its arguments and renders nothing, while `f()(…)`
+  // calls the helper. Putting the returned value into `aliases` made every call to `f` a refused
+  // site — a false positive on a benign refactor — while STILL missing the declaration form,
+  // because a `function f() { return h }` id is not a binding site at all. They are kept apart:
+  // a call through `f` is refused only where the CALL RESULT is the callee.
+  const fnReturns = new Map()
+  const noteFunctionValue = (pattern, fn) => {
+    if (!fn) return
+    const out = new Set()
+    addReturnedHelpers(fn, aliases, out)
+    if (!out.size) return
+    for (const name of patternNames(pattern, [])) fnReturns.set(name, out.values().next().value)
+  }
+  for (const { pattern, value } of bindings) noteFunctionValue(pattern, value)
+  // A DECLARATION binds a name without a `VariableDeclarator`, so it is not in `bindings`.
+  visitNodes(ast.program, (node) => {
+    if (node.type === 'FunctionDeclaration' && node.id) noteFunctionValue(node.id, node)
+  })
+  return { aliases, fnReturns }
 }
 
 /**
@@ -572,22 +797,34 @@ function collectAliases(ast) {
  * `connected` AND WHAT ITS VALUE IS, and both are read off the parse tree.
  * Parsing the RAW source is deliberate: a commented-out call is not a call.
  *
- * ⛔ WHAT IS COVERED, EXACTLY (#5797 review rounds 14–15, P1). Round 13 required a bare
- * `Identifier` callee; round 14 replaced that with a SHAPE WHITELIST (`Identifier`,
- * `SequenceExpression`, `call`/`apply`/`bind` member) that returned `null` for anything else —
- * and `null` meant "not a site", so an unrecognised spelling was DROPPED, not refused. That
- * whitelist failed a third time: eight widened headings all shipped with the whole suite green
- * (`h['call'](…)`, `Reflect.apply(h, …)`, `h?.call(…)`, an import alias, an object property, a
- * destructured alias, a conditional callee and a logical callee), plus a wrong-index false pass
- * through `(0, h.call)(…)`.
+ * ⛔ WHAT IS COVERED, EXACTLY (#5797 review rounds 14–16). The direction is INVERTED: a call is a
+ * SITE when its callee's subtree NAMES a helper or an alias of one. The readable spellings are
+ * read precisely and everything else is refused:
  *
- * The direction is now INVERTED rather than widened. A callee that NAMES a helper ANYWHERE — as
- * an identifier, an alias, or a member property — is a SITE. The canonical spellings are READ
- * precisely (`h(…)`/`(0, h)(…)` at argument 1, `h.call(…)` at argument 2); a `.call`/`.apply`/
- * `.bind` proxy whose object is not itself a helper is read through its FIRST argument
- * (`Reflect.apply(h, …)`); EVERY OTHER spelling gets `options: null` and the per-site assertion
- * REFUSES it. A callee that names no helper at all is still not a site — and that is now the ONLY
- * way a call is dropped.
+ *   direct `h(…)` / `(0, h)(…)`           → options at argument 1
+ *   `h.call(…)` (computed `['call']` too) → options at argument 2
+ *   `h.apply` / `h.bind`                  → options: null (refused)
+ *   `Reflect.apply(h, …)`                 → the proxy's FIRST argument names `h`; options: null
+ *
+ * "NAMES" is a syntactic test on the callee subtree, looking through a nested function's RETURNED
+ * value: `(() => h)()(...)` evaluates to `h` and then calls it, so it is refused, while a helper
+ * merely CALLED inside an IIFE body belongs to that inner call (visited separately) and does not
+ * refuse the IIFE. A callee whose helper cannot be resolved (`wsl(…)`, a conditional callee,
+ * `H.h(…)`) also gets `options: null` and is refused.
+ *
+ * REMAINING BOUNDARY, stated without claiming it is closed: a helper reached only through a
+ * NON-proxy argument (`arr.map(h)`), produced by a call (`const w = pick(h)`), returned by a
+ * CLASS METHOD (`class C { static h() { return h } } C.h()(…)`), a `new`/tagged-template use of a
+ * helper, and a helper split across a member the alias walk cannot follow. The previous version
+ * asserted a callee that names no helper was the ONLY way a call could be dropped; that was false
+ * for several of these, which is how they shipped green.
+ *
+ * ⛔ A FUNCTION THAT RETURNS A HELPER IS NOT AN ALIAS OF IT (round 17, P1). `f` and `f()` are
+ * different values: `f(…)` ignores its arguments and renders nothing, while `f()(…)` calls the
+ * helper. Recording both as aliases made every call to `f` a REFUSED site — a false positive on a
+ * benign refactor — while still missing `function f() { return h }`, whose id is not a binding
+ * site at all. So a call is refused only where the CALL RESULT is the callee, and the declaration
+ * form is collected alongside the variable-bound ones.
  */
 function wizardRenderSites(src, relPath = 'main.jsx') {
   const jsx = /\.[jt]sx$/.test(relPath)
@@ -595,7 +832,7 @@ function wizardRenderSites(src, relPath = 'main.jsx') {
     sourceType: 'module',
     plugins: jsx ? ['typescript', 'jsx'] : ['typescript'],
   })
-  const aliases = collectAliases(ast)
+  const { aliases, fnReturns } = collectAliases(ast)
   const sites = []
   visitNodes(ast.program, (node) => {
     // `wizardStageLabel?.(…)` parses as an OptionalCallExpression, not a CallExpression, so a
@@ -603,7 +840,9 @@ function wizardRenderSites(src, relPath = 'main.jsx') {
     // one node type wide (round 13, P3).
     if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return
     const target = canonicalCallee(node.callee)
-    let refs = helperRefsIn(node.callee, aliases)
+    // Look through a nested function's RETURNED value: a callee that evaluates to the helper
+    // (`(() => h)()(...)`) cannot be read, so it must become a refused site, not be dropped.
+    let refs = helperRefsIn(node.callee, aliases, true, fnReturns)
     // `Reflect.apply(wizardStageLabel, …)` names the helper in its FIRST argument, not its
     // callee. A proxy method whose object is not a helper is still an invocation of the helper, so
     // it is refused rather than dropped.
