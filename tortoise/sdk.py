@@ -19041,7 +19041,21 @@ class TortoiseSDK:
                         f"the value (accepted: {sorted(RAW_ABSENT_STATES)} or "
                         f"{RAW_PRESENT!r})."
                     )
-                _undeclared = sorted(k for k in props if k not in _SOURCE_NODE_PROP_NAMES)
+                # ⛔ The retired DOCUMENT fields are deliberately OUT of this
+                # closed check: main's #5026 guard below is TARGET-AWARE
+                # (`documentKind IS NOT NULL`) because they are legitimate
+                # elsewhere — `objectKind` is the canonical Object kind, and a
+                # NON-document `:Source` may carry `content`/`objectKind` (pinned
+                # by `test_5026_b6_promotion_scrubs_inherited_retired_fields`,
+                # whose precondition is exactly that write succeeding). Leaving
+                # them to that guard lets it own the decision and its D10
+                # message; the closed surface still refuses every OTHER
+                # undeclared spelling, which is where a raw payload would land.
+                _undeclared = sorted(
+                    k for k in props
+                    if k not in _SOURCE_NODE_PROP_NAMES
+                    and k not in self._get_proj()._DOC_RETIRED_KEYS
+                )
                 if _undeclared:
                     raise ValueError(
                         f"{_undeclared!r} cannot be set on a :Source — the "
@@ -22637,7 +22651,8 @@ class TortoiseSDK:
             "WITH src, ref ORDER BY ref IS NULL LIMIT 1 "
             "RETURN properties(src) as source, "
             "properties(coalesce(ref, src)) as entity, "
-            "labels(coalesce(ref, src)) as labels",
+            "labels(coalesce(ref, src)) as labels, "
+            "ref IS NULL as entity_is_source",
             params={"pid": point_id},
         )
         return [
@@ -22656,8 +22671,17 @@ class TortoiseSDK:
                 # OPTIONAL + coalesce semantics (a source with no reference
                 # yields the SOURCE as its own terminal provenance) but are
                 # ALWAYS emitted, so the key set is stable and a caller
-                # iterating a non-empty chain cannot ``KeyError``.
-                "entity": dict(row[1]) if row[1] is not None else None,
+                # iterating a non-empty chain cannot ``KeyError``. When the
+                # coalesce FELL BACK the entity IS the source node, so the same
+                # declared-surface filter applies — otherwise the fallback
+                # re-hands the very payload the `source` filter above strips. A
+                # genuinely referenced entity is left intact: it is not a
+                # `:Source` row, so this declaration is not its to prune.
+                "entity": (
+                    filter_source_props(row[1] or {})[0]
+                    if row[3]
+                    else (dict(row[1]) if row[1] is not None else None)
+                ),
                 "labels": list(row[2]) if row[2] is not None else [],
             }
             for row in r.result_set

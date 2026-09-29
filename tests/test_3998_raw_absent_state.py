@@ -375,9 +375,9 @@ def test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge(sdk
     that iterates a non-empty chain cannot ``KeyError`` on the shape that used
     to return ``[]``.
 
-    (1) FAILS if the entity half is OMITTED rather than null (the first form
-        of this change) — a consumer reading ``item["entity"]`` on a chain it
-        used to receive as ``[]`` now raises KeyError.
+    (1) FAILS if the entity half is OMITTED rather than present — a consumer
+        reading ``item["entity"]`` on a chain it used to receive as ``[]``
+        now raises KeyError.
     (2) REACHABLE: no ``references`` edge is wired below — the shape of a raw
         indexed before extraction.
     """
@@ -387,8 +387,19 @@ def test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge(sdk
     chain = s.get_provenance_chain(pid)
     assert len(chain) == 1, "a source with no entity must not silence the chain"
     assert set(chain[0]) >= {"source", "raw", "entity", "labels"}
-    assert chain[0]["entity"] is None
-    assert chain[0]["labels"] == []
+    # The entity half keeps MAIN's OPTIONAL + coalesce semantics (D10): with no
+    # ``:references`` edge the coalesce falls back to the source itself, which
+    # IS the terminal provenance, so ``entity`` is the source — filtered to the
+    # declared surface, so the fallback cannot re-hand a raw payload. The STABLE
+    # KEY SET asserted just above is what this test is about; ``entity is None``
+    # was the branch's implementation choice, and pinning it here would
+    # contradict
+    # ``test_references_edge.py::test_provenance_chain_returns_document_without_source_url``.
+    assert chain[0]["entity"]["url"] == RAW_URL
+    assert "Source" in chain[0]["labels"]
+    assert "content" not in chain[0]["entity"], (
+        "the coalesce fallback re-handed the raw payload"
+    )
     assert chain[0]["raw"]["raw_state"] == RAW_OFFLINE
 
 
@@ -578,7 +589,16 @@ def test_the_generic_entity_route_cannot_reach_a_source_with_a_payload(sdk):
     s, _events = sdk
     s.create_source(RAW_URL, "conversation", contentHash="h1")
     body = "UPDATE_ROUTE_PAYLOAD " + ("raw transcript. " * 150)
-    for key in ("text", "transcript", "content", "body"):
+    # ⛔ `content` is deliberately NOT in this list: it is a D10-RETIRED
+    # DOCUMENT field, and main's #5026 guard for it is TARGET-AWARE
+    # (`documentKind IS NOT NULL`) — a NON-document `:Source` may carry
+    # `content`/`objectKind`, which
+    # `test_projection.py::test_5026_b6_promotion_scrubs_inherited_retired_fields`
+    # pins as a precondition. The closed surface leaves those five keys to that
+    # guard rather than overturning its decision; the raw-payload spellings
+    # below are refused on ANY `:Source`, and `create_source`'s passthrough
+    # refuses `content` unconditionally.
+    for key in ("text", "transcript", "body"):
         with pytest.raises(ValueError, match="cannot be set on a :Source"):
             s.update_entity(RAW_URL, **{key: body})
     props = _source_props(s)

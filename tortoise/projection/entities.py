@@ -475,6 +475,15 @@ class _EntityHandlers:
         # producer, so these must survive the read filter. Omitting them made
         # `get_provenance_chain` silently drop the cache it had just returned.
         "reliability", "reliabilityComponents", "reliability_derived_at",
+        # D10 B6 non-over-reach (#228, #5026): a document IS a :Source, and
+        # these ride either the document fixed clause or a deliberate
+        # main-side allowance — `domain` is written through `update_entity` and
+        # read back by the B6 non-over-reach pin, and the rest are exactly the
+        # keys main's deny-set was pinned NOT to retire. They MUST be declared
+        # here: the read filter drops anything undeclared, so omitting one
+        # silently loses a property that is on the node.
+        "domain", "status", "embedding", "about_entities",
+        "documentKind", "document_kind",
     })
     _SOURCE_EXTRA_PROPS: frozenset = frozenset({
         "credibilityTier",   # create_source(tier=)
