@@ -536,9 +536,11 @@ def test_no_on_loop_control_plane_helper_calls():
     # blocking helper defined in hosted_api.py and absent from those sets is
     # still outside the universe, and a fresh on-loop call to it is still
     # unflagged. Demonstrated by mutation in review: an on-loop
-    # `_ensure_graph_exists(...)`, and a brand-new hosted helper doing
-    # `cp.query`, both pass this guard. Widening the derivation to the
-    # hosted_api call graph (the sync-helper-reached class) is a separate change
+    # `_ensure_graph_exists(...)`, and a brand-new SYNC hosted helper doing
+    # `cp.query`, both pass this guard. (An ASYNC hosted helper doing
+    # `cp.query` IS caught — its own body is scanned as an async body. The
+    # residual class is precisely the sync-helper one.) Widening the derivation
+    # to the hosted_api call graph is a separate change
     # with its own review, not something to imply here.
     blocking |= _hosted_api_defined_seam_names()
     # (``>=`` is the ruff-SIM300 form of ``_A1_CONFIRMED_SEAMS |
