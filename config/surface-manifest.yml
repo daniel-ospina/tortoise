@@ -21,6 +21,20 @@ response_fields:
   field: capture_redactions
   emitted_when: 'always — the count of credential-shaped spans redacted from this capture''s stored turn text (0 when nothing matched)'
   unchanged_when_off: 'n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)'
+# #3998 (D30): the ABSENT-RAW state, added in the SDK layer (`tortoise/sdk.py`)
+# — NOT inside a tool function, so the D2 carve-out holds (a tool-body edit is
+# what reds the gate as "a changed implementation"). Recorded here because
+# every response-field addition is, and because the entry is the only record
+# of what we now tell agents we return. NOT flag-gated: the keys are ABSENT
+# (not null) in the sourceless case, so those responses stay byte-identical.
+- response: sdk:provenance
+  field: raw
+  emitted_when: 'the point has an extractedFrom :Source — the index entry for the raw: source_id, content_hash, raw_state, raw_state_at, available, permanent, retryable, label, message'
+  unchanged_when_off: 'n/a — not flag-gated; the key is absent when the point has no source, so a sourceless response is byte-identical'
+- response: sdk:get_provenance_chain
+  field: raw
+  emitted_when: 'always, on every returned item — the same index entry (the chain is the Source link, which exists whether or not the raw does)'
+  unchanged_when_off: 'n/a — not flag-gated; a source with no :references edge still returns the SOURCE itself as the terminal entity/labels (both keys always emitted), so the chain is never dropped'
 counts:
   tools: 82
   sdk_public_methods: 150
