@@ -351,7 +351,8 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
   pi: (key) =>
     `Set up Tortoise for this project:
 1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).
-2. Create or merge .mcp.json in this project with:
+2. Create or merge .mcp.json in this project with (the file is committed
+   with the repo, so it references the env var, never the key):
 ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
    (Onboarding is NOT a skill — it is not installed. Your agent follows the

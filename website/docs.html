@@ -205,7 +205,7 @@
       <p>The hosted server speaks Streamable HTTP at <code>https://api.premiselabs.co/mcp/</code> — the slashed form the keyed config-file rows below use. Keep your API key in an environment variable — never paste a literal <code>tt_…</code> key into a file that can be committed. In client JSON config the transport value is <code>"http"</code> (the protocol's spec name is Streamable HTTP): Claude Code accepts <code>"streamable-http"</code> as an alias and Cursor's IDE may tolerate it, but Cursor's CLI can drop the whole config file and Pi ignores <code>type</code> — so <code>"http"</code> is the only universally safe value.</p>
 
       <h4>Claude Code</h4>
-      <p>Add to <code>.mcp.json</code> in your project. Claude Code <strong>requires</strong> <code>"type": "http"</code> — a <code>url</code> entry with no <code>type</code> is read as a stdio server and skipped.</p>
+      <p><strong>Project scope:</strong> add to a <strong>committable</strong> <code>.mcp.json</code> in your project (it is checked in — keep the key as the env reference shown). Claude Code <strong>requires</strong> <code>"type": "http"</code> — a <code>url</code> entry with no <code>type</code> is read as a stdio server and skipped.</p>
       <pre><code>{
   "mcpServers": {
     "tortoise": {
@@ -215,7 +215,7 @@
     }
   }
 }</code></pre>
-      <p>Export <code>TORTOISE_API_KEY</code> in your shell profile first. Project-scoped servers need a one-time approval on first use. Equivalent one-liner: <code>claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"</code></p>
+      <p>Export <code>TORTOISE_API_KEY</code> in your shell profile first. The file above is committed with the repo, and project-scoped servers need a one-time approval on first use. <strong>Prefer the one-liner</strong>, which writes <strong>local</strong> scope into <code>~/.claude.json</code> — private to you, this project only, never committed, and no project-scope approval: <code>claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"</code>. No scope is approval-free — Claude Code asks permission the first time it calls each tool.</p>
 
       <h4>Cursor — <code>.cursor/mcp.json</code></h4>
       <p>Cursor expands <code>${env:…}</code> and infers the transport from <code>url</code>, so the entry carries <strong>no</strong> <code>type</code>.</p>

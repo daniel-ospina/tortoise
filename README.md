@@ -97,13 +97,20 @@ claude mcp add tortoise https://api.premiselabs.co/mcp/
 claude mcp add tortoise http://localhost:8000/mcp
 ```
 
-> ℹ️ **Claude Code one-time approval:** servers registered at **project
-> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
-> older clients) show as **⏸ Pending approval** in `claude mcp list` until
-> you approve them once — start `claude` in this project and allow the
-> prompt (or use `/mcp`). The tools stay disabled until then; this is
-> expected, not a failure. (The current `claude mcp add` default is *local*
-> scope — active immediately, no approval.)
+> ℹ️ **Claude Code scope + approval.** `claude mcp add` writes **local**
+> scope by default — `~/.claude.json`, under this project's entry: private to
+> you, this project only, **never committed**. It skips the project-scope
+> server approval, but no scope is approval-free: Claude Code asks permission
+> the first time it calls each MCP tool (allow it once, or pre-allow
+> `mcp__tortoise__*`). `Added …` means the entry was written, not that it
+> connected — `claude mcp list` is the check.
+>
+> **Sharing the config with the repo instead?** `--scope project` writes a
+> **committable** `.mcp.json` at the project root, approved once per machine
+> (⏸ Pending approval until then; `claude mcp reset-project-choices` resets
+> it). It carries no key for a local daemon — and for a hosted server it
+> expands `${TORTOISE_API_KEY}` in `url` and `headers`, so the committed file
+> still carries no secret.
 
 ```bash
 # Codex

@@ -193,11 +193,12 @@ Streamable HTTP, but `"streamable-http"` is only a Claude Code alias:
 Cursor's IDE may tolerate it while the Cursor CLI can drop the whole config
 file, and Pi ignores `type` entirely. Never teach `"streamable-http"`;
 `"http"` is the only universally safe value.
-Claude Code **requires** `"type": "http"` in a JSON `.mcp.json` entry (a
-`url` with no `type` is read as stdio and the server is skipped); Cursor and
-Pi infer the transport from `url` and carry **no** `type` — that is also the
-tested shape in `tortoise/__main__.py::_harness_mcp_config` and the
-dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
+Claude Code **requires** a `type` on a remote entry — `claude mcp add
+--transport http` writes `"type": "http"`, and a hand-written `.mcp.json`
+entry must carry it (a `url` with no `type` is read as stdio and the server is
+skipped); Cursor and Pi infer the transport from `url` and carry **no** `type`
+— that is also the tested shape in `tortoise/__main__.py::_harness_mcp_config`
+and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 
 > **After the config WRITE, and before you hand the restart to the user,
 > checkpoint `connection-written`.** The write is the one step no server can
@@ -233,20 +234,28 @@ claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
 ```
 
 `$TORTOISE_API_KEY` must be exported in your shell profile first
-(`export TORTOISE_API_KEY=<key>` in `~/.zshrc` / `~/.bashrc`). Validate the
-config was written (`claude mcp list` shows `tortoise`).
+(`export TORTOISE_API_KEY=<key>` in `~/.zshrc` / `~/.bashrc`). The shell
+expands it, so the key lands in **`~/.claude.json`** — local scope, under this
+project's entry: private to you, this project only, **never committed**.
+Validate the config was written (`claude mcp list` shows `tortoise`).
 
-> ⏸ **One-time approval (not a failure):** servers registered at **project
-> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
-> older clients) show as **Pending approval** in `claude mcp list` until the
-> human approves once — have them start `claude` in the project and allow
-> the prompt (or use `/mcp`). The tools stay disabled until then. (The
-> current `claude mcp add` default is *local* scope — active immediately,
-> no approval.)
+> ⏸ **Approval, on both paths (not a failure).** Local scope skips the
+> **project-scope server approval** below, but no scope is approval-free:
+> Claude Code prompts for permission the first time it calls each MCP tool —
+> allow that once, or pre-allow `mcp__tortoise__*`. `Added …` means the entry
+> was written, not that it connected; `claude mcp list` is the check.
+>
+> **Sharing the config with the repo instead?** `claude mcp add --scope project`
+> writes a **committable** `.mcp.json` at the project root, which the human
+> approves once per machine (`⏸ Pending approval` until then; `claude mcp
+> reset-project-choices` resets it). Keep the key out of that file — it
+> expands `${TORTOISE_API_KEY}` in both `url` and `headers`, so the committed
+> file carries no secret.
 
 ### Cursor (self-install)
 
-Create/merge `.cursor/mcp.json` in the project:
+Create/merge `.cursor/mcp.json` in the project — it is committed with the
+repo, so it carries the env reference, never the key:
 
 ```json
 { "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
