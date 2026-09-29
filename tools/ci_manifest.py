@@ -92,6 +92,10 @@ UNMEASURED_SENTINEL = 0.0
 
 CAPTURED_AT_KEY = "durations_captured_at"
 
+# `dt.UTC` is 3.11+ only; the 3.9 system interpreter has no such attribute, so
+# every map (red or not) reported UNKNOWN instead of a verdict. Alias it once.
+UTC = getattr(dt, "UTC", dt.timezone.utc)
+
 
 def _module_is(path: Path, mod: object) -> bool:
     """True when ``mod`` was loaded from ``path`` (the same file on disk)."""
@@ -175,9 +179,9 @@ def _parse_captured_at(raw: object) -> dt.datetime | None:
     """
     if isinstance(raw, dt.datetime):
         return (raw if raw.tzinfo is not None
-                else raw.replace(tzinfo=dt.UTC)).astimezone(dt.UTC)
+                else raw.replace(tzinfo=UTC)).astimezone(UTC)
     if isinstance(raw, dt.date):  # date-only YAML scalar → midnight UTC
-        return dt.datetime(raw.year, raw.month, raw.day, tzinfo=dt.UTC)
+        return dt.datetime(raw.year, raw.month, raw.day, tzinfo=UTC)
     if not isinstance(raw, str):
         return None
     text = raw.strip()
@@ -188,8 +192,8 @@ def _parse_captured_at(raw: object) -> dt.datetime | None:
     except ValueError:
         return None
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=dt.UTC)
-    return stamp.astimezone(dt.UTC)
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.astimezone(UTC)
 
 
 def staleness(manifest: dict,
@@ -202,7 +206,7 @@ def staleness(manifest: dict,
     ``ci_timing._set_captured_at`` records for why the key is machine-written
     rather than inferred).
     """
-    now = now or dt.datetime.now(dt.UTC)
+    now = now or dt.datetime.now(UTC)
     raw = manifest.get(CAPTURED_AT_KEY)
     if raw is None:
         return [], [
@@ -425,6 +429,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = _load(path)
         red, unknown = check(manifest)
+        # The enforcing gates (`ci_selection --integrity`, `ci_timing.
+        # integrity_problems`) both promote a PRESENT-but-unparseable stamp to
+        # RED via `unparseable_stamp_issue`; this entry point composed only
+        # `check()` and so reported the same input as UNKNOWN. Compose the same
+        # predicate here, so the verdict cannot be half-wired.
+        red = [*red, issue] if (issue := unparseable_stamp_issue(manifest)) else red
     except Exception as exc:
         # Never a traceback and never 0: the exit code has to carry the same
         # meaning as the report does, or a caller reads "could not look" as
