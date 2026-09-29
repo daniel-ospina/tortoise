@@ -1,10 +1,17 @@
 """#3844 — the reader-evidence annotation prefix could be forged by a newline.
 
-`session_date` and `speaker` are interpolated into the prefix the reader sees.
-The session id beside them is safe only BY CONSTRUCTION (it is an index, never
-free text) — which is why the pair was missed. A newline in either value
-fabricates an annotation line: it renders a turn the model will read as a real
-`[user] …` message, and nothing distinguishes it from one.
+`session_date` and `speaker` are interpolated into the prefix the reader sees,
+and so is the validity marker (`_validity_marker` — `superseded_by`/`supersedes`
+content snippets plus the valid/expired window fields). The session id beside
+them is safe only BY CONSTRUCTION (it is an index, never free text) — which is
+why the free-text sources were missed. A newline in any of them fabricates an
+annotation line: it renders a turn the model will read as a real `[user] …`
+message, and nothing distinguishes it from one.
+
+The BLOCK BODY (`content`) is deliberately NOT collapsed here: a captured turn
+is stored as `f"[{role}] {content}"` (`tortoise/sdk.py:556`), so a body line
+legitimately begins with a role bracket. Whether the body should be fenced
+anyway is a product decision, tracked separately in #6252.
 
 Class B — mechanical architecture conformance. Each test states (1) the value
 that makes it fail and (2) where the fixture reaches it.

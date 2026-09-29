@@ -974,10 +974,12 @@ def _render_block(h: dict) -> str:
 def _one_line(value: object) -> str:
     """Collapse a decoration value to a SINGLE LINE (#3844).
 
-    ``session_date`` and ``speaker`` are interpolated into the reader-evidence
-    annotation prefix, and BOTH were interpolated raw. The session id beside
-    them is safe only *by construction* (it is an index, never free text), which
-    is exactly why the pair was missed.
+    Three free-text sources are interpolated into the reader-evidence
+    annotation prefix: ``session_date``, ``speaker``, and the whole validity
+    marker (``superseded_by``/``supersedes`` content snippets plus the
+    valid/expired window fields). All were interpolated raw. The session id
+    beside them is safe only *by construction* (it is an index, never free
+    text), which is exactly why the free-text sources were missed.
 
     The values are free text from a captured session, so a newline inside one
     FORGES an annotation line: it fabricates a turn the reader will read as a
