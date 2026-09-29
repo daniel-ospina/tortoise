@@ -2292,7 +2292,13 @@ class InMemoryProjection:
         _apply_one(self.points, event)
 
     def rebuild(self, log) -> None:
-        self.points = fold(log.read_all())
+        # #3316: the same refusal as the Falkor engines — a dropped torn
+        # trailing removal record must not be folded away into a projection
+        # that serves the removed state as current.
+        events = log.read_all()
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
+        self.points = fold(events)
 
 
 def _validate_uri_scheme(scheme: str) -> str:
@@ -2406,6 +2412,33 @@ _HARD_DELETE_LABELS = frozenset({
     "Point", "Subject", "Object", "Source", "Event",
 })
 _POINTS_MERGED_LABELS = frozenset({"Point"})
+
+
+def _refuse_revival_torn_tail(revival_records) -> None:
+    """Refuse a replay whose journal dropped a torn record that cannot be
+    proven harmless (#3316).
+
+    ``EventLog.read_all`` tolerates a torn TRAILING line because a crash
+    mid-append is expected and a dropped REGISTRATION record is only data
+    LOSS. The other direction is not symmetric: a dropped REMOVAL/terminal
+    record (``PointRetracted``, ``EntityMutated`` op=delete, a
+    ``DirectEdgeRepoint`` delete leg, …) rebuilds the graph WITHOUT the
+    removal, so state a later read serves as current is live again
+    (resurrection) — and a dropped ``EventRecorded`` loses the
+    connector-source sweep that deletes a superseded ``:Source``. A truncated
+    record cannot be reconstructed, so the only sound behaviour is to not
+    rebuild at all.
+
+    Callers MUST invoke this BEFORE any wipe/replay — a verdict after the
+    mutation cannot un-apply it. The classification and the message live in
+    :mod:`tortoise.log` so every replay engine (``rebuild`` / ``rebuild_all`` /
+    ``InMemoryProjection.rebuild`` / ``recover_from_log`` /
+    ``backup.restore`` / the ``tortoise rebuild`` CLI fallback / the
+    ``tortoise reconcile`` CLI) refuses through ONE home.
+    """
+    from tortoise.log import refuse_torn_tail_revival
+
+    refuse_torn_tail_revival(revival_records)
 
 
 def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
@@ -3512,6 +3545,12 @@ class FalkorProjection(
         # wipe. #2943: verifying only after the wipe turns a durability bug
         # into permanent data loss, so the proof has to precede the mutation.
         events = list(log.read_all())
+        # #3316: refuse BEFORE the wipe when the journal's torn tail cannot be
+        # proven harmless — replaying without a dropped removal resurrects
+        # removed state, and a registry-only/synthetic log object may not
+        # expose the attribute at all (then there is nothing to classify).
+        _refuse_revival_torn_tail(
+            getattr(log, "torn_tail_revival_records", lambda: [])())
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -3843,7 +3882,12 @@ class FalkorProjection(
         journal_source: list[int] = []
         for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
-                chunk = EventLog(os.path.join(log_dir, fname)).read_all()
+                file_log = EventLog(os.path.join(log_dir, fname))
+                chunk = file_log.read_all()
+                # #3316: same refusal as `rebuild`/`recover_from_log`, before
+                # the wipe below.
+                _refuse_revival_torn_tail(
+                    file_log.torn_tail_revival_records())
                 journal_events.extend(chunk)
                 journal_source.extend([file_idx] * len(chunk))
 

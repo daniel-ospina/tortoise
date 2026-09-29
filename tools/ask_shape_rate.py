@@ -371,14 +371,37 @@ def pinned_reader_env():
     under test, and the fleet shell exports a hosted URL — with it set,
     ``run_ask_lane`` refuses (hosted mode needs a LOCAL graph; #3929 removed
     the hosted ``/v1/ask`` surface) instead of running the pinned tree.
+
+    The two PROVIDER keys are narrowed to the EMPTY STRING, never popped
+    (#4582). Popping leaves them ABSENT, and ``tortoise.mcp_server`` runs
+    ``_load_dotenv()`` at import time (``mcp_server.py``), which fills any key
+    that is not present from the repo-root ``.env`` — and that import happens
+    AFTER this pin, on the first ``_shipping_handlers``. So a popped provider
+    key was re-armed mid-run, widening the pool back to
+    ``['deepseek-direct', 'openrouter', 'venice']`` after
+    ``assert_reader_pin()`` had already passed: the #476 failover leg was live
+    again and one transient deepseek error hopped the run off the pin
+    (measured: question ``1de5cff2``, run VOID). An empty string is PRESENT,
+    so the loader's ``key not in os.environ`` guard refuses to refill it,
+    while every provider resolution reads it with ``bool(os.environ.get(...))``
+    — an empty key is unkeyed. The provider pin is then durable against any
+    later ``_load_dotenv()``, not merely order-dependent.
+
+    ``TORTOISE_API_URL`` stays POPPED rather than emptied: it is never
+    `.env`-sourced (absent from ``.env.example`` and every shipped ``.env``),
+    so popping is already durable here, and unlike the provider keys it has
+    ``os.environ.get("TORTOISE_API_URL", <default>)`` consumers in the SDK
+    and CLI (``tortoise/sdk.py``, ``tortoise/__main__.py``) for which a
+    present-but-empty value would read as a bogus URL instead of the default.
     """
     narrowed_keys = (*NARROWED_PROVIDER_KEYS, "TORTOISE_API_URL")
     saved: dict[str, str | None] = {
         k: os.environ.get(k) for k in narrowed_keys}
     saved["TORTOISE_ASK_PROVIDER"] = os.environ.get("TORTOISE_ASK_PROVIDER")
     saved["TORTOISE_ASK_MODEL"] = os.environ.get("TORTOISE_ASK_MODEL")
-    for k in narrowed_keys:
-        os.environ.pop(k, None)
+    for k in NARROWED_PROVIDER_KEYS:
+        os.environ[k] = ""
+    os.environ.pop("TORTOISE_API_URL", None)
     os.environ["TORTOISE_ASK_PROVIDER"] = PINNED_PROVIDER
     os.environ["TORTOISE_ASK_MODEL"] = PINNED_MODEL
     try:

@@ -24,7 +24,7 @@ mirroring the SQL semantics the real functions execute
 from __future__ import annotations
 
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 # #1719 (Task 3): columns whose PostgREST filter values are cast to uuid —
@@ -132,6 +132,18 @@ def _apply_order(rows: list[dict],
 # including bare `FakeControlPlane()` instances a test built itself, not just the
 # fixture's.
 _FAULT_CPS: list = []
+
+
+def _now_iso() -> str:
+    """The current UTC instant, ISO-8601 — the fake's ``now()``.
+
+    A module-level helper, deliberately: ``FakeControlPlane.rpc`` has
+    function-local ``from datetime import datetime, ...`` statements in
+    branches further down, which makes ``datetime`` LOCAL to that whole
+    function — so referencing it earlier in the same function is an
+    ``UnboundLocalError``, not an import.
+    """
+    return datetime.now(UTC).isoformat()
 
 
 def _metering_period_label(period_start) -> str | None:
@@ -371,6 +383,94 @@ class FakeControlPlane:
                     total += float(r.get("ask_cost_usd") or 0.0)
                     total += float(r.get("capture_cost_usd") or 0.0)
             return total
+        if fn == "metering_record_unmetered":
+            # #4779: the SQL writer's atomic upsert. Mirrors
+            # ``metering_record_unmetered`` (20260927000001): PK
+            # (org_id, lane, drop_class), ``first_observed_at`` PRESERVED across
+            # upserts, ``last_observed_at`` advanced, and the same strict
+            # argument guards (an empty org/lane or a zero count is refused —
+            # those are the states the table exists to distinguish). The FK and
+            # the drop_class CHECK are modelled too, so a caller that leans on a
+            # class the migration does not declare fails in CI (the fake is the
+            # only schema the Python lane runs against).
+            p = body or {}
+            org_id = p.get("p_org_id")
+            lane = p.get("p_lane")
+            drop_class = p.get("p_drop_class")
+            # An OMITTED p_n defaults to 1 (the SQL signature's DEFAULT); an
+            # EXPLICIT None is refused, exactly as the migration's
+            # ``IF p_n IS NULL OR p_n < 1 THEN RAISE`` does. Collapsing the two
+            # would let the fake encode a row the real RPC rejects.
+            if "p_n" in p and p["p_n"] is None:
+                raise RuntimeError(
+                    "metering_record_unmetered: p_n must be >= 1 (got NULL) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            n = int(p["p_n"]) if p.get("p_n") is not None else 1
+            # The RPC's guard is Python's own whitespace set, mirrored exactly by
+            # the migration's ``blank_chars`` (a bare ``btrim(x)`` would refuse
+            # fewer keys than the embedded lane does) — so this fake uses the
+            # Python test as well, for BOTH keys.
+            if org_id is None or not str(org_id).strip():
+                raise RuntimeError(
+                    "metering_record_unmetered: p_org_id is required")
+            if lane is None or not str(lane).strip():
+                raise RuntimeError(
+                    "metering_record_unmetered: p_lane is required")
+            if n < 1:
+                raise RuntimeError(
+                    f"metering_record_unmetered: p_n must be >= 1 (got {n}) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            if drop_class not in ("window_unresolvable",
+                                  "increment_write_unconfirmed"):
+                raise RuntimeError(
+                    "metering_record_unmetered: new row violates the declared "
+                    f"drop_class vocabulary ({drop_class!r})")
+            if not any(str(o.get("id")) == str(org_id)
+                       for o in self.tables.get("organizations", [])):
+                raise RuntimeError(
+                    "metering_record_unmetered: org FK violation for "
+                    f"{org_id!r}")
+            now = _now_iso()
+            rows = self.tables.setdefault("metering_unmetered_increments", [])
+            row = next((r for r in rows
+                        if str(r.get("org_id")) == str(org_id)
+                        and r.get("lane") == lane
+                        and r.get("drop_class") == drop_class), None)
+            if row is None:
+                row = {"org_id": str(org_id), "lane": lane,
+                       "drop_class": drop_class, "increments": 0,
+                       "last_error_type": p.get("p_error_type"),
+                       "first_observed_at": now, "last_observed_at": now}
+                rows.append(row)
+            row["increments"] = int(row.get("increments") or 0) + n
+            row["last_error_type"] = p.get("p_error_type")
+            row["last_observed_at"] = now
+            return row["increments"]
+        if fn == "metering_unmetered_for_org":
+            # #4779: the bounded per-org read (lanes x classes <= 12 rows).
+            p = body or {}
+            wanted = str(p.get("p_org_id"))
+            return [
+                {k: r.get(k) for k in
+                 ("lane", "drop_class", "increments", "last_error_type",
+                  "first_observed_at", "last_observed_at")}
+                for r in sorted(
+                    (r for r in self.tables.get(
+                        "metering_unmetered_increments", [])
+                     if str(r.get("org_id")) == wanted),
+                    key=lambda r: (r.get("lane") or "",
+                                   r.get("drop_class") or ""))
+            ]
+        if fn == "metering_unmetered_total":
+            # #4779: ONE scalar over the cohort — a row cap cannot truncate it.
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            return sum(int(r.get("increments") or 0)
+                       for r in self.tables.get(
+                           "metering_unmetered_increments", [])
+                       if str(r.get("org_id")) in wanted)
         if fn == "cohort_org_ids_since":
             # #3665: array_agg over a bounded subquery — one row/one array,
             # so a row cap cannot truncate the org set. Mirror the SQL's
