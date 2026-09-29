@@ -28,20 +28,30 @@ import { setupGuide } from './setupGuide.js'
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
+// #4646: the ONE observed-connection predicate, shared with the Overview's
+// connection card (connectionObservation.js). The wizard and the card state the
+// same server fact and must not each re-decide it.
+import { harnessConnectionObserved } from './connectionObservation.js'
 // #3890: the D5 empty state's ONE primary action (a real link to the live
 // home of the four source toggles — Settings → Memory sources), the
 // hash→tab deep-link resolver, and the focus mover. Extracted so the suite
 // can RENDER the live action (react-dom/server) and execute the handler
 // instead of grepping source text.
-import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
+import { OverviewEmptyActions, GraphMissingEmptyStateActions, SDK_DOCS_HREF, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
 // #3729: the member empty-state key note — the key requirement stated as
 // CONDITIONAL plus the chooser-reachable key-less route, extracted as a
 // createElement component so the suite RENDERS it (react-dom/server) instead
 // of grepping the two inline strings (onboardingEmptyStateKeyNote.test.js).
-import { MemberEmptyStateKeyNote } from './onboardingEmptyStateKeyNote.js'
+// #4637: the OWNER note and the five empty-state lead-ins live in the same
+// module — the lead-in is where the chooser route is named, so the owner arms
+// consume the same lead-in constants the member arms do instead of deciding for
+// themselves what the fork offers.
+import { MemberEmptyStateKeyNote, OwnerEmptyStateKeyNote, ownerCardProps, keyTabAffordance, graphMissingCta,
+  REENTRY_BUILD_LEAD_IN, REENTRY_SELF_LEAD_IN, REENTRY_KEYED_LEAD_IN,
+  GRAPH_MISSING_BUILD_LEAD_IN, GRAPH_MISSING_SELF_LEAD_IN } from './onboardingEmptyStateKeyNote.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel, wizardStepSub } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, docsSourceOn, formatRelativeTime, issuesSourceOn, jobStatusLine } from './memorySourcesStatus.js'
@@ -101,6 +111,12 @@ import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './d
 // #3485 remedy: 401 means signed out (may bounce), 503 means retryable
 // (render an error, NEVER a redirect).
 import { readSession, sessionGateAction } from './sessionGate.js'
+// #3930: the bounce carried the search and hash but never the PATHNAME, so an
+// unauthenticated deep link (/team?session_id=… — the Stripe return;
+// /welcome?reset=… — the recovery panel) was returned to the app root. Pure,
+// `node --test` unit-tested (authBounce.test.js), and mirrored by the /auth
+// page's return-to allowlist.
+import { authBounceTarget } from './authBounce.js'
 
 // #3501: the dashboard talks to its OWN origin. `functions/api/v1/[[path]].ts`
 // resolves the `__Host-session` cookie server-side and attaches the Bearer to
@@ -773,7 +789,13 @@ const secureAttr = () => (isLocal() ? '' : '; Secure')
 // be forwarded from here — under the BFF no fragment carries a credential, and
 // forwarding one would reintroduce the #1566 drop/loop.
 function bounceToAuth(search = "", hash = "") {
-  window.location.replace("/auth" + search + hash)
+  // #3930: carry the requested pathname (+ query) as /auth's `next`, so a
+  // signed-out deep link returns to the page asked for. Path-only, same-origin
+  // by construction — `authBounceTarget` reads this document's own pathname and
+  // the /auth page re-validates it against the mirrored allowlist.
+  window.location.replace(
+    authBounceTarget({ pathname: window.location.pathname, search, errorHash: hash }),
+  )
 }
 
 
@@ -1230,13 +1252,12 @@ function claimIntentInFlight() {
   // key reveal; for returning empty-graph users it re-opens at step 0
   // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
-  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setWizardCopyFailed(false); setWizardConnectError('') }, [])
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
 
-  // Wizard connect step: reset persisted 'chatgpt' value (legacy default) to a valid tab
   React.useEffect(() => {
     // #2912: 'codexDesktop' is a first-class leaf now (the Codex chooser's
-    // Desktop surface), so it is a valid persisted value too.
+    // Desktop surface), so it is a valid value too.
     if (!['pi', 'cursor', 'claude', 'codex', 'codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
       setWizardHarness('pi')
     }
@@ -1256,10 +1277,6 @@ function claimIntentInFlight() {
   // could not safely list the later-declared harnessKey). The
   // tdzDepsTripwire analyzer still guards the whole file against that class.
   const [wizardCopied, setWizardCopied] = React.useState('')
-  // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
-  // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
-  // appears ONLY after a failure (the user explicitly asserts the copy).
-  const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
   // #2328/#2912: Codex has two surfaces — CLI (shell) and Desktop (GUI app,
   // NO terminal, does not inherit shell exports). Since #2912 the SURFACE is
   // the leaf `wizardHarness` value ('codex' vs 'codexDesktop') chosen by the
@@ -1445,8 +1462,15 @@ function claimIntentInFlight() {
   // `serverHarnessConnected` is now the ONLY source, read straight from the
   // server projection (refreshOnboarding at wizard-open + the step-3 landing
   // refresh keep it fresh).
-  const serverHarnessConnected = Array.isArray(onboarding && onboarding.completed_steps) &&
-    onboarding.completed_steps.includes('harness-connected')
+  //
+  // #4646: the read is the SHARED observed-connection predicate
+  // (connectionObservation.js), which the Overview's connection card consumes
+  // too — the two surfaces state ONE fact. It is deliberately edge-only: a
+  // completion verdict (`status === 'complete'` / `onboarding_complete`) is a
+  // different thing, and the grandfathered population reaches wire completion
+  // with no observed edge. The guard that a graph-down `'unavailable'` string
+  // never reads as connected lives in the helper.
+  const serverHarnessConnected = harnessConnectionObserved(onboarding)
   // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
   // escapes — the keyless/owner nav, the cap-remedy nav, and the main
   // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
@@ -3001,11 +3025,8 @@ function claimIntentInFlight() {
   // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
   // longer WRITES the harness-connected checkpoint — that click-writer was
   // deleted, so this flag covers the refresh that sharpens the done step's read
-  // of the server projection. review cycle 4 (item 7): `wizardConnectError` is
-  // CLEARED by that advance (`setWizardConnectError('')`) and never given a
-  // message there; the only writer of a message is the copy-failure path.
+  // of the server projection.
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
-  const [wizardConnectError, setWizardConnectError] = React.useState('')
   const [wizardKeyMode, setWizardKeyMode] = React.useState('included')
   // #1998 fold-in (durable connect key, PR #2161 finding): the connect step's
   // universal command must embed a DURABLE key. #2246 (ADR-010): the browser
@@ -3088,28 +3109,6 @@ function claimIntentInFlight() {
     }
     api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
-  }
-
-  // #1701 R2: chatgpt's copy handler is AWAITED — Continue (the checkpoint)
-  // must never be reachable without a successful copy, so the clipboard write
-  // resolves BEFORE the sticky wizardCopied='harness' state lands (mirrors
-  // claude-web's gate: copying ≠ setup done). The PATCH beacon fires on
-  // resolution only; wizardCopy above stays fire-and-forget so the 6 keyed
-  // harnesses keep byte-identical behavior.
-  async function wizardCopyChatgpt() {
-    setWizardConnectError('')
-    const text = HARNESS_INSTALL.chatgpt()
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      setWizardCopyFailed(true)
-      setWizardConnectError('Copy failed — select the prompt below and press ⌘/Ctrl-C, then Continue below')
-      return
-    }
-    setWizardCopyFailed(false)
-    setWizardCopied('harness')
-    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ harness: 'chatgpt', section: 'config' }) }).catch(() => {})
   }
 
   const stopGithubPoll = () => {
@@ -4946,7 +4945,6 @@ function claimIntentInFlight() {
   // checkpoint the AGENT wrote.
   async function wizardHarnessContinue() {
     setWizardConnectBusy(true)
-    setWizardConnectError('')
     // Best-effort, matching every other refreshOnboarding call site: it only
     // sharpens the done step's reading of the server projection, and the write
     // that used to justify a blocking error is gone.
@@ -6880,8 +6878,9 @@ function claimIntentInFlight() {
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
   // The build-fork re-entry lead-in is used by BOTH re-entry arms (existing-key
-  // and no-key) — one literal, so they cannot drift.
-  const REENTRY_BUILD_LEAD_IN = 'Your Organization is live — finish the setup below. '
+  // and no-key) — one literal, so they cannot drift. #4637: it now lives in
+  // `onboardingEmptyStateKeyNote.js` beside the notes (and the owner arms) that
+  // consume it, together with the other four lead-ins.
   // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
   // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
@@ -6911,6 +6910,21 @@ function claimIntentInFlight() {
   // same source) said an existing key was usable. Consumed by
   // `wizardKeyAffordance` below.
   const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
+  // #4637: the Overview empty-state cards' "the Organization's key is already
+  // live" state is NOT decided here. `ownerCardProps` (note module) derives it
+  // from the gate — ONE authority — and `keyTabAffordance` derives the re-entry
+  // card's API Keys affordance from the same fact, so both are values the note
+  // module's render tests execute. This file supplies the gate and the
+  // in-memory `snippetKey` (welcomeKey || apiKey, below) and holds no key-state
+  // branch of its own: `snippetKey` is NOT accepted as a live-key signal (the
+  // in-memory `welcomeKey` reveal is truthy after its row is
+  // revoked/disabled/rotated, while `durableConnectKey`'s row-truth check drops
+  // it and the gate resolves 'mint'/'existing' — so the card could claim a key
+  // was live while the connect step had none to offer). The graph-missing
+  // card's snippet branch reads the gate's held plaintext (`connectGate.key`)
+  // instead: `keyIsLive` is true in mode 'existing', where the gate deliberately
+  // holds no plaintext at all. (No localStorage is involved: the legacy key slot
+  // was removed in #2246 and mintTripwire.test.js pins its absence.)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -7281,8 +7295,14 @@ function claimIntentInFlight() {
                     // over from here." beneath a "Not connected yet" <h1> — the
                     // #2364/#2912 heading-vs-body contradiction, reassembled. It
                     // is now keyed on the same derived flag the <h1> uses.
-                    if (wizardStep === 0 && welcomeHasOrg) return null
-                    if (wizardStep === 3 && !serverHarnessConnected) return null
+                    //
+                    // #3725: the arm is now the pure `wizardStepSub` helper
+                    // (wizardFlow.js, unit-tested) — the build fork's step 3
+                    // carries a connection but never hands over to an agent, so
+                    // its lede is suppressed rather than contradicting its own
+                    // "Keep calling the SDK from your app." body.
+                    const headSub = wizardStepSub(wizardStep, { hasOrg: welcomeHasOrg, connected: serverHarnessConnected, buildFork: isBuildFork })
+                    if (headSub === null) return null
                     // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
                     // pick's copy, but step 2 has THREE bodies — only the
                     // owner/self branch is a harness pick.
@@ -7330,8 +7350,7 @@ function claimIntentInFlight() {
                       }
                       if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
                     }
-                    const sub = WIZARD_STEPS[wizardStep].sub
-                    return <p className="welcome-lede">{sub}</p>
+                    return <p className="welcome-lede">{headSub}</p>
                   })()}
                 </div>
                 <span className="sr-only" role="status" aria-live="polite">
@@ -7552,7 +7571,7 @@ function claimIntentInFlight() {
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                               {wizardConnectBusy ? 'Checking…' : "I've set it up — Continue →"}
                             </button>
-                            <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
+                            <a className="ghost" href={SDK_DOCS_HREF} target="_blank" rel="noreferrer">
                               SDK documentation →
                             </a>
                           </div>
@@ -7703,7 +7722,7 @@ function claimIntentInFlight() {
                                 <button key={f.id} type="button"
                                   className={'harness-family' + (activeFamily.id === f.id ? ' active' : '')}
                                   aria-pressed={activeFamily.id === f.id}
-                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardDurableError('') }}>
                                   {f.name}
                                 </button>
                               ))}
@@ -7714,7 +7733,7 @@ function claimIntentInFlight() {
                                   <button key={s.id} type="button"
                                     className={'harness-surface' + (wizardHarness === s.id ? ' active' : '')}
                                     aria-pressed={wizardHarness === s.id}
-                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardDurableError('') }}>
                                     <span className="harness-surface-name">{s.name}</span>
                                     {s.hint && <span className="harness-surface-hint">{s.hint}</span>}
                                   </button>
@@ -7847,7 +7866,6 @@ function claimIntentInFlight() {
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                                 {wizardConnectBusy ? 'Checking…' : (wizardKeyless
                                   ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
@@ -8288,7 +8306,7 @@ function claimIntentInFlight() {
                       </div>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
-                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                        <a className="ghost" href={SDK_DOCS_HREF} target="_blank" rel="noreferrer">Read the docs</a>
                       </div>
                       {welcomeKey && team && (
                         <div className="welcome-plans" style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border,#1e293b)' }}>
@@ -8887,23 +8905,37 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || connectGate.mode === 'existing'
-                ? (isOwnerAdmin
-                    ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
+              {/* #4637: the OWNER arm's key state and the fork both come from
+                  `ownerCardProps` (note module) — one derivation, executed by
+                  the note module's render tests. The member arm keeps its own
+                  key-state branch to SELECT copy: its two lead-ins assert
+                  nothing about which key is usable (its live arm says "You're
+                  in"), so it never needs the owner's derivation. */}
+              {isOwnerAdmin
+                ? <OwnerEmptyStateKeyNote {...ownerCardProps({ variant: 'reentry', isBuildFork, connectGate })} />
+                : (snippetKey || connectGate.mode === 'existing'
+                    ? <>{isBuildFork
+                        ? REENTRY_BUILD_LEAD_IN
+                        : REENTRY_KEYED_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>
                     : <>{isBuildFork
                         ? REENTRY_BUILD_LEAD_IN
-                        : "You're in — finish the setup below to connect your agent. "}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)
-                : (isOwnerAdmin
-                    ? "Your Organization is live — finish the setup below to connect your agent. No API key yet? One is created on the connect step when you get there."
-                    : <>{isBuildFork
-                        ? REENTRY_BUILD_LEAD_IN
-                        : 'Your Organization is live — finish the setup below to connect your agent. '}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
+                        : REENTRY_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="reentry" buildFork={isBuildFork} /></>)}
             </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
-              {!snippetKey && (
+              {keyTabAffordance({ snippetKey, connectGate }) && (
+                // #4637: the gate, not `snippetKey`, decides this affordance too
+                // — `keyTabAffordance` (note module) is the one derivation, and
+                // its verdict is executed by the note module's tests. The owner
+                // MINT clause names the API Keys tab, and the button must be
+                // there whenever the gate says no key is live, including the
+                // stale reveal case (`snippetKey` truthy, gate says 'mint'),
+                // where the old `!snippetKey` gate withheld it in the same
+                // render that told the owner to go there. The `!snippetKey` half is kept so the
+                // pre-existing affordance for a key-less organization is
+                // unchanged.
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>
                   Go to API Keys →
                 </button>
@@ -8916,17 +8948,36 @@ function claimIntentInFlight() {
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
             <h2>Continue setting up {shownOrgName || 'your organization'}</h2>
-            {snippetKey ? (
+            {connectGate.key ? (
               // #1831 P2-1: only show the copyable snippet when a real key
               // exists — after a recoverable mint failure (#1830) the state
               // is '' and the snippet would render `Bearer ` with an empty
               // key (and the "key is live" copy would be false). #2246: the
               // key source is snippetKey (welcomeKey || apiKey) — the
               // first-timer's in-memory reveal, never a localStorage read.
+              // #4637: the condition is the GATE's own held plaintext,
+              // `connectGate.key` — ONE fact, not the conjunction of two. It is
+              // exactly the key `firstDataSnippet` prints: `connectKeyGate`
+              // returns the validated `welcomeKey` here and nothing in any other
+              // mode, so `snippetKey` (welcomeKey || apiKey) equals it whenever
+              // this branch renders. Keying the branch on `snippetKey` alone
+              // printed "Your Organization and API key are live" over a reveal
+              // whose row was revoked/rotated, and even `snippetKey &&
+              // keyIsLive` let that through whenever the Organization happened
+              // to hold a DIFFERENT usable row (mode 'existing'): the gate then
+              // holds no plaintext at all, so any truthy `snippetKey` is stale.
+              // If the gate holds no plaintext the card renders the note below,
+              // which takes its own live/no-key arm from the same gate mode.
+              // The reveal path itself: `welcomeKey` truthy ⇒ the gate resolves
+              // 'embed' while the rows are unloaded, so the snippet is not
+              // flickered away while the keys GET is in flight.
               <>
                 <p className="dim">
+                  {/* #4637: the call to action names the connect route too, so it
+                      is fork-derived from the same shared source as the arms
+                      above (the build fork sets up the SDK and has no chooser). */}
                   Your Organization and API key are live — the graph is created the moment
-                  you add data. Connect your agent, or add a memory yourself:
+                  you add data. {graphMissingCta(isBuildFork)}
                 </p>
                 <div className="snippet-wrap">
                   <pre className="snippet">{firstDataSnippet}</pre>
@@ -8948,23 +8999,32 @@ function claimIntentInFlight() {
               // a second fresh create would 402 once the 2-key allowance is
               // used. Members get the ask-owner path; the keys tab is still
               // one click away for owners (their only first-party surface).
+              // ⚠️ The gate-mode clause below is NOT cap-aware (#4637): the
+              // allowance check (`capNotice`/`wizardDurableCapped`) is the
+              // wizard affordance's, not this card's — the same blind spot the
+              // pre-change string had. See OWNER_NO_KEY_AT_STEP in the note
+              // module.
+              // #4637: the owner's key state comes from `ownerCardProps` (note
+              // module) — the same gate-derived fact the re-entry arm uses, not
+              // this card's `snippetKey` branch.
               <p className="dim">
                 {isOwnerAdmin
-                  ? (connectGate.mode === 'existing'
-                      ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
-                      : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
+                  ? <OwnerEmptyStateKeyNote {...ownerCardProps({ variant: 'graph-missing', isBuildFork, connectGate })} />
                   : <>{isBuildFork
-                      ? 'Your Organization is live. '
-                      : 'Your Organization is live — connect your agent below. '}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
+                      ? GRAPH_MISSING_BUILD_LEAD_IN
+                      : GRAPH_MISSING_SELF_LEAD_IN}<MemberEmptyStateKeyNote variant="graph-missing" buildFork={isBuildFork} /></>}
               </p>
             )}
             <div className="empty-actions">
-              <button type="button" className="btn-primary" onClick={() => setTab('keys')}>
-                Go to API Keys →
-              </button>
-              <a className="ghost" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
-                Connect your agent →
-              </a>
+              {/* #4637: the second action names a ROUTE — the agent-connection
+                  route, whose destination for the self fork is the onboarding
+                  funnel URL (overviewEmptyAction.js documents that it is not a
+                  chooser for a signed-in user; that dead end is #3890's). The
+                  BUILD fork renders no such route at all. The action set is a
+                  component (overviewEmptyAction.js), derived from the same
+                  `isBuildFork` the notes consume, so a build-fork organization
+                  is offered the SDK route its own step 2 offers. */}
+              <GraphMissingEmptyStateActions buildFork={isBuildFork} onGoToKeys={() => setTab('keys')} />
             </div>
           </section>
         )}

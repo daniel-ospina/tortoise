@@ -15,6 +15,7 @@ Nothing here touches the billing path: the customer-visible unit stays
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import sys
@@ -1469,15 +1470,472 @@ def test_counter_proxy_forwards_public_writes_but_keeps_its_own_count():
     assert proxy.count == 2 and not hasattr(model, "count")
 
 
+class _UsageReportingSessionModel:
+    """An M2-stage model that fires the REAL #2185 usage seam exactly like
+    ``models.OpenAICompatModel`` does (``_emit_usage_sink`` with the
+    response-local usage block), over deterministic offline content.
+
+    ``send_usage=False`` models a provider response with NO usage block at
+    all — the shape that must be disclosed with zeros, never priced with
+    invented tokens.
+    """
+
+    provider = _PROVIDER
+
+    def __init__(self, model_id, *, prompt_tokens=100, completion_tokens=10,
+                 cost_usd=0.001, ledger=None, send_usage=True):
+        from tortoise.extractor import MockModel
+
+        self.id = model_id
+        self.usage_sink = None
+        self._pt = prompt_tokens
+        self._ct = completion_tokens
+        self._cost = cost_usd
+        self._ledger = [] if ledger is None else ledger
+        self._send_usage = send_usage
+        self._inner = MockModel(model_id)
+
+    def complete(self, *, system, user):
+        from tortoise.models import _emit_usage_sink
+
+        out = self._inner.complete(system=system, user=user)
+        usage = None
+        if self._send_usage:
+            usage = {"prompt_tokens": self._pt,
+                     "completion_tokens": self._ct}
+            if self._cost is not None:
+                usage["cost"] = self._cost
+        self._ledger.append(usage)
+        _emit_usage_sink(self, usage)
+        return out
+
+
+def _m2_meta(tmp_path, monkeypatch, *, send_usage=True, cost_usd=0.001):
+    """Drive the REAL ``_extract_session_llm`` on the M2 lane with stub
+    models that fire the REAL usage seam (no network, no provider).
+
+    Returns ``(ledger, extracted, meta)``; ``ledger`` records what each
+    served call reported (``None`` = no usage block).
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import TortoiseSDK, _session_llm_extractor
+
+    ledger: list = []
+    point = _UsageReportingSessionModel(
+        "point-model", prompt_tokens=100, completion_tokens=10,
+        cost_usd=cost_usd, ledger=ledger, send_usage=send_usage)
+    relation = _UsageReportingSessionModel(
+        "rel-model", prompt_tokens=200, completion_tokens=20,
+        cost_usd=cost_usd, ledger=ledger, send_usage=send_usage)
+    extractor = _session_llm_extractor(point, relation)
+    monkeypatch.setattr(sdk_mod, "_build_session_llm_extractor",
+                        lambda: extractor)
+    sdk_obj = TortoiseSDK(db_path=str(tmp_path / "m2-cost.db"))
+    extracted, meta = sdk_obj._extract_session_llm(
+        _conv(), "sess-m2-cost", "2026-09-27T00:00:00+00:00")
+    return ledger, extracted, meta
+
+
+def test_m2_usage_sink_prices_the_spend_the_lane_incurred(tmp_path, monkeypatch):
+    """#3747: the M2 lane makes real billed calls, and before this fix it
+    dropped their usage — so the #3359 row could only DISCLOSE the calls
+    (#3824 ``unattributed``), never price them. With the #2185 sink bound on
+    the lane's models, the tokens/charge reach ``meta["stats"]["llm"]`` and
+    the emitted row carries them.
+
+    REDs on: removing the sink attachment (``stats`` collapses back to the
+    unpriced disclosure) and on any dropped/zeroed measured field.
+    """
+    from tortoise import hosted_api as ha
+
+    ledger, extracted, meta = _m2_meta(tmp_path, monkeypatch)
+    assert extracted, "the M2 lane must really have run"
+    assert len(ledger) == 2, "point + relation stage, one call each"
+    assert all(u is not None for u in ledger), "the stub reported usage"
+
+    expected_cost = round(sum(u.get("cost") or 0.0 for u in ledger), 6)
+    llm = meta["stats"]["llm"]
+    assert llm["calls"] == len(ledger)
+    assert llm["prompt_tokens"] == sum(u["prompt_tokens"] for u in ledger)
+    assert llm["completion_tokens"] == sum(
+        u["completion_tokens"] for u in ledger)
+    assert llm["cost_usd"] == pytest.approx(expected_cost, abs=1e-9)
+    # a fully-metered capture attributes every call — no residual disclosure
+    assert "unattributed" not in meta["stats"]
+
+    props = ha._capture_cost_props("sess-m2-cost", meta)
+    assert props is not None
+    assert props["calls"] == len(ledger)
+    assert props["prompt_tokens"] == 300
+    assert props["completion_tokens"] == 30
+    assert props["cost_usd"] == pytest.approx(expected_cost, abs=1e-9)
+    assert props["calls_without_usage"] == 0
+    assert props["unattributed"] == 0
+    assert set(props["by_stage"]) == {"m2"}
+
+
+def test_m2_a_raising_usage_sink_must_not_erase_the_call():
+    """#5822 review P2 — the ORDER of the count inside the sink is load-bearing.
+
+    ``_emit_usage_sink`` swallows an accumulator raise by design ("a metering
+    observer must NEVER flip a call outcome"), so a MALFORMED provider payload
+    raises INSIDE ``_accumulate_call_cost`` — ``{"prompt_tokens": "abc"}``
+    trips ``int("abc")``, and a JSON ``1e309`` parses to ``inf`` and trips
+    ``int(inf)``. The point is that such a payload is well-formed JSON from a
+    provider, not a hand-built object.
+
+    If the sink bumped ``attempts`` BEFORE accumulating, the caller would see
+    ``llm_calls == calls_made``, compute ``unattributed = max(0, calls_made -
+    calls) == 0``, leave the roll-up empty, and have ``_capture_cost_props``
+    return ``None`` — ERASING every call from the report. That is strictly
+    worse than the #3824 ``unattributed`` disclosure the lane had before this
+    sink existed: the fix must never launder the blind spot into silence.
+    Counting AFTER keeps the residual honest.
+
+    REDs on: counting before accumulating (the pre-review order).
+    """
+    from tortoise.sdk import _session_llm_usage_sink
+
+    bad_payloads = (
+        {"prompt_tokens": "abc"},          # int("abc") -> ValueError
+        {"prompt_tokens": float("inf")},   # JSON 1e309 -> int(inf) -> OverflowError
+        {"completion_tokens": "def"},
+        {"completion_tokens": float("inf")},
+    )
+    for bad in bad_payloads:
+        stats: dict = {}
+        sink = _session_llm_usage_sink(stats)
+        with contextlib.suppress(Exception):
+            # the emitter suppresses it; we only care about the resulting state
+            sink(provider="openai", model_id="m",
+                 usage=bad, usage_present=True)
+        assert stats.get("attempts", 0) == 0, (
+            "a raise inside the accumulator must leave the count untouched, so "
+            "the caller's residual still discloses the call — got "
+            f"{stats!r} for {bad!r}")
+
+
+def test_accumulate_call_cost_is_atomic_on_a_bad_charge():
+    """#5822 review P3 — a payload the PROVIDER controls must never half-land.
+
+    ``cost_usd`` is the last value ``_accumulate_call_cost`` coerces, and it
+    used to be coerced AFTER the token counters were bumped. A well-formed-JSON
+    usage block with a string ``cost`` (``"abc"``) or an integer with 400
+    digits (``float()`` OverflowError) therefore left the failing call's TOKENS
+    in ``stats['cost']`` while ``by_route`` was never created. The M2 sink
+    counts AFTER this function returns, so the same call was disclosed as
+    ``unattributed`` AND priced into the row's top-level ``prompt_tokens`` —
+    which then contradicted the row's own priced ``by_stage`` breakdown.
+
+    Atomicity is the invariant: a call that cannot be parsed contributes
+    NOTHING, so the residual can disclose it cleanly.
+
+    REDs on: coercing ``cost_usd`` after the token mutations (the pre-review
+    order) — ``stats['cost']['prompt_tokens']`` reads 200 instead of 0.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    for label, make_bad_cost in (("non-numeric", lambda: "abc"),
+                                 ("overflowing", lambda: float(10 ** 400))):
+        stats: dict = {}
+        with contextlib.suppress(Exception):
+            # NB: the bad value must be produced INSIDE the guard — building the
+            # tuple eagerly would raise while constructing it, not in the call.
+            _accumulate_call_cost(
+                stats, prompt_tokens=200, completion_tokens=20,
+                cost_usd=make_bad_cost(), provider="openrouter",
+                model="point-model")
+        cost = stats.get("cost", {})
+        assert cost.get("prompt_tokens", 0) == 0, (
+            "a call whose charge cannot be parsed must contribute no tokens — "
+            f"got {cost!r} for a {label} cost")
+        assert cost.get("completion_tokens", 0) == 0, cost
+        assert cost.get("calls", 0) == 0, cost
+        assert "by_route" not in cost, (
+            f"a partial accumulation must not create a route bucket: {cost!r}")
+        assert stats.get("attempts", 0) == 0, stats
+
+
+def test_m2_bad_charge_does_not_contradict_the_row_it_is_disclosed_on():
+    """The end-to-end form of the atomicity invariant, on the lane that owns
+    the defect: after one GOOD call and one whose ``cost`` cannot be parsed,
+    the emitted row's top-level token count must agree with its priced
+    ``by_stage`` breakdown — the failing call's tokens must appear NOWHERE in
+    the priced totals, only in the ``unattributed`` count.
+    """
+    from tortoise.sdk import _session_llm_usage_sink
+
+    stats: dict = {}
+    sink = _session_llm_usage_sink(stats)
+    # call 1: priced normally
+    sink(provider="openrouter", model_id="point-model",
+         usage={"prompt_tokens": 100, "completion_tokens": 10,
+                "cost": 0.001}, usage_present=True)
+    # call 2: valid tokens, unparseable charge -> must land NOWHERE
+    with contextlib.suppress(Exception):
+        sink(provider="openrouter", model_id="point-model",
+             usage={"prompt_tokens": 200, "completion_tokens": 20,
+                    "cost": "abc"}, usage_present=True)
+
+    cost = stats["cost"]
+    assert cost["prompt_tokens"] == 100, cost
+    assert cost["completion_tokens"] == 10, cost
+    assert cost["calls"] == 1, cost
+    assert cost["cost_usd"] == 0.001, cost
+    # the priced breakdown must agree with the totals (the P3 contradiction)
+    assert cost["by_route"]["openrouter"]["point-model"]["prompt_tokens"] == 100
+    # and the residual the caller derives is exactly the unpriced call
+    assert max(0, 2 - stats.get("attempts", 0)) == 1
+
+
+def test_accumulate_call_cost_rejects_a_non_finite_charge():
+    """#5822 review P3 — ``float()`` does NOT raise on ``inf``/``nan``, so the
+    non-finite charge is the one provider-controlled ``cost`` that slips past
+    both earlier guards and lands on the row.
+
+    Consequences, both reproduced: ``_track_analytics_event`` encodes with
+    httpx's ``allow_nan=False``, so one non-finite value raises ``ValueError``
+    and the capture_cost row is written ONLY to the local JSONL fallback — it
+    never reaches ``analytics_events``, the table
+    ``cost_per_session_distribution`` scans. And because ``round(nan + x, 6)``
+    stays ``nan``, a single ``nan`` SWALLOWS every later valid charge.
+
+    An unusable charge must be treated exactly like an absent one: disclosed
+    via ``calls_without_cost``, never a non-finite row — while the TOKENS are
+    still kept so the row stays repricable from the pricing map.
+
+    REDs on: accepting the parsed value unconditionally (the pre-review order).
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    for label, bad in (("json 1e400 -> inf", float("inf")),
+                       ("-inf", float("-inf")),
+                       ("nan", float("nan")),
+                       ("string nan", "nan")):
+        stats: dict = {}
+        _accumulate_call_cost(
+            stats, prompt_tokens=100, completion_tokens=10, cost_usd=bad,
+            provider="openrouter", model="point-model")
+        cost = stats["cost"]
+        assert math.isfinite(cost.get("cost_usd", 0.0)), (
+            f"a non-finite charge must never land on the row ({label}): {cost!r}")
+        assert cost.get("cost_usd", 0.0) == 0.0, cost
+        assert cost["calls_without_cost"] == 1, (
+            f"an unusable charge is disclosed as without-cost ({label}): {cost!r}")
+        assert cost["prompt_tokens"] == 100, cost   # tokens survive for repricing
+        assert cost["completion_tokens"] == 10, cost
+
+    # and the sharper half: a nan must not swallow a LATER valid charge
+    stats = {}
+    _accumulate_call_cost(stats, prompt_tokens=100, completion_tokens=10,
+                          cost_usd="nan", provider="p", model="m")
+    _accumulate_call_cost(stats, prompt_tokens=10, completion_tokens=1,
+                          cost_usd=0.001, provider="p", model="m")
+    cost = stats["cost"]
+    assert cost["cost_usd"] == 0.001, (
+        "a poisoned session total must not swallow the next valid charge: "
+        f"{cost!r}")
+    assert math.isfinite(cost["cost_usd"]), cost
+    assert cost["calls_without_cost"] == 1, cost
+
+
+def test_accumulate_call_cost_bounds_the_accumulated_total():
+    """#5822 cycle-4 P3 — guarding the OPERAND cannot bound the RESULT.
+
+    Both charges here are FINITE, so the ``math.isfinite(cost_val)`` guard
+    passes them; only their SUM overflows. ``1e308 + 1e308 == inf``, and the
+    consequences are exactly the ones the non-finite-input fix addressed: the
+    emitted row raises ``ValueError`` under httpx's ``allow_nan=False`` and is
+    dropped from ``analytics_events`` (surviving only in the JSONL fallback),
+    and ``inf + x == inf`` swallows every later valid charge in the session.
+
+    The overflowed charge is disclosed instead of written.
+
+    REDs on: summing into ``acc``/``lane`` without re-checking finiteness.
+    """
+    from tortoise.extractor_v2 import _accumulate_call_cost
+
+    stats: dict = {}
+    for _ in range(2):
+        _accumulate_call_cost(
+            stats, prompt_tokens=100, completion_tokens=10, cost_usd=1e308,
+            provider="openrouter", model="point-model")
+
+    cost = stats["cost"]
+    assert math.isfinite(cost["cost_usd"]), (
+        f"the accumulated total must never be inf: {cost!r}")
+    assert cost["cost_usd"] == 1e308, cost      # the first, representable charge
+    assert cost["calls"] == 2, cost             # both calls still counted
+    assert cost["calls_without_cost"] == 1, (
+        f"the overflowed charge is disclosed, not written: {cost!r}")
+
+    lane = cost["by_route"]["openrouter"]["point-model"]
+    assert math.isfinite(lane["cost_usd"]), lane
+    assert lane["calls_without_cost"] == 1, lane
+
+    # and the row must remain JSON-encodable exactly as the analytics sink does
+    assert math.isfinite(json.loads(json.dumps(cost))["cost_usd"]), cost
+
+
+def test_rollup_does_not_reintroduce_a_non_finite_total():
+    """#5822 cycle-5 P3 — the AGGREGATION seam undoes a per-stage guard.
+
+    ``_accumulate_call_cost`` now bounds its own running total, but
+    ``_rollup_llm`` is called ONCE PER STAGE into the same ``llm_stats``, and it
+    re-summed with a plain ``round(a + b, 6)``. Two stages whose totals are each
+    finite (``1e308``) therefore overflow at the roll-up, and the emitted row
+    carries ``inf`` again: httpx encodes with ``allow_nan=False``, so the row is
+    dropped from ``analytics_events``, and ``inf + x == inf`` swallows every
+    later charge.
+
+    Reachable on the DEFAULT v2 lane (a provider reporting ``usage.cost``), not
+    only the opt-in M2 lane.
+
+    REDs on: summing the cross-stage total without re-checking finiteness.
+    """
+    from tortoise.extractor_v2 import _rollup_llm
+
+    llm: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                 "deadline_aborts": 0}
+    for stage in ("s1", "s2"):
+        _rollup_llm(
+            llm,
+            {"cost": {"calls": 1, "prompt_tokens": 100,
+                      "completion_tokens": 10, "cost_usd": 1e308}},
+            stage=stage)
+
+    assert math.isfinite(llm["cost_usd"]), (
+        f"the rolled-up total must never be inf: {llm!r}")
+    assert llm["cost_usd"] == 1e308, llm     # the first representable total
+    assert llm["calls_without_cost"] == 1, (
+        f"the unrepresentable aggregate is disclosed: {llm!r}")
+    # the row must survive the exact encoding the analytics sink performs
+    assert math.isfinite(json.loads(json.dumps(llm))["cost_usd"]), llm
+
+
+def test_m2_missing_usage_block_is_disclosed_never_fabricated(
+        tmp_path, monkeypatch):
+    """A provider response with NO usage block must not be turned into a
+    measurement: the lane reports ZERO tokens/charge and DISCLOSES the calls
+    (``calls_without_usage``), so the row is excluded from the priced
+    distribution rather than reading as a fabricated $0 sample.
+
+    REDs on: a sink that invents tokens/charge when ``usage`` is ``None``
+    (the fabricated block would both raise ``prompt_tokens`` and drop
+    ``calls_without_usage`` to 0, putting the row INTO the distribution).
+    """
+    from tortoise import hosted_api as ha
+
+    ledger, extracted, meta = _m2_meta(tmp_path, monkeypatch, send_usage=False)
+    assert extracted and len(ledger) == 2
+    assert all(u is None for u in ledger)
+
+    llm = meta["stats"]["llm"]
+    assert llm["calls"] == 2            # the calls really happened
+    assert llm["prompt_tokens"] == 0    # and no token was invented
+    assert llm["completion_tokens"] == 0
+    assert llm["cost_usd"] == 0.0
+    assert llm["calls_without_usage"] == 2
+    assert llm["calls_without_cost"] == 2
+    assert all(bucket["usage_present"] is False
+               for providers in llm["by_stage"].values()
+               for models_ in providers.values()
+               for bucket in models_.values())
+
+    props = ha._capture_cost_props("sess-m2-cost", meta)
+    assert props is not None
+    assert props["prompt_tokens"] == 0 and props["cost_usd"] == 0.0
+
+    dist = costing.cost_per_session_distribution([{"properties": props}])
+    assert dist["n"] == 0                       # NOT priced as a $0 session
+    assert dist["excluded_unmeasured"] == 1      # disclosed, never measured
+    assert dist["calls_without_usage"] == 2
+
+
+def test_m2_failed_extraction_still_reports_the_spend_it_incurred(
+        tmp_path, monkeypatch):
+    """A ``run()`` that raises AFTER a successful billed call must still
+    report that call's usage: the spend is real whether or not the extraction
+    succeeded. The roll-up is read after the fail-closed try/except, so the
+    accumulator survives a provider 500 — the same reason the #3824 call
+    counter is read there."""
+    from tortoise import hosted_api as ha
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import TortoiseSDK, _session_llm_extractor
+
+    ledger: list = []
+    extractor = _session_llm_extractor(
+        _UsageReportingSessionModel("point-model", ledger=ledger),
+        _UsageReportingSessionModel("rel-model", ledger=ledger))
+
+    class _CallThenBoom:
+        version = extractor.version
+        _call_counters = extractor._call_counters
+        _cost_stats = extractor._cost_stats
+
+        def run(self, transcript, source_id, api):
+            extractor.points.model.complete(
+                system="extract_points json",
+                user=json.dumps({"utterances": {}}))
+            raise RuntimeError("provider 500 after the first billed call")
+
+    monkeypatch.setattr(sdk_mod, "_build_session_llm_extractor",
+                        lambda: _CallThenBoom())
+    sdk_obj = TortoiseSDK(db_path=str(tmp_path / "m2-boom.db"))
+    extracted, meta = sdk_obj._extract_session_llm(
+        _conv(), "sess-m2-boom", "2026-09-27T00:00:00+00:00")
+
+    assert extracted == []
+    assert meta["mode"] == "error"
+    assert any("RuntimeError" in e for e in meta["errors"])
+    llm = meta["stats"]["llm"]
+    assert llm["calls"] == 1                 # the one call that landed
+    assert llm["prompt_tokens"] == 100
+    props = ha._capture_cost_props("sess-m2-boom", meta)
+    assert props is not None and props["calls"] == 1
+    assert props["prompt_tokens"] == 100
+
+
+def test_m2_real_extractor_stamps_the_configured_provider(monkeypatch):
+    """The REAL M2 model build must carry its provider id, or the emitted
+    row's ``(provider, model)`` lane is ``unknown`` and a cost-SILENT
+    provider (deepseek-direct reports no ``usage.cost``) can never be
+    repriced from the versioned map — the #3359 report path's whole point.
+
+    Builds models only (no call, no network): ``OpenAICompatModel`` carries
+    no provider of its own, so this is the only place it is known.
+    """
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MODEL", raising=False)
+    for env_name in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-no-call")
+
+    from tortoise.sdk import _build_session_llm_extractor
+
+    extractor = _build_session_llm_extractor()
+    assert extractor is not None
+    assert extractor.points.model.provider == "openrouter"
+    assert extractor.relations.model.provider == "openrouter"
+
+
 def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         tmp_path, monkeypatch, _b7_capture_client):
     """#3824 — THE EMISSION ACCEPTANCE. An M2 capture issues real provider
-    calls and discards their usage (``sdk.py:_extract_session_llm`` offers no
-    ``llm`` roll-up at all). Driving the REAL REST handler, the row handed to
-    the REAL analytics writer must EXIST and deep-equal the payload the
-    capture implies, with ``unattributed >= 1`` — never be absent. Absence is
-    what made billed spend and a clean $0 the same shape, and #3780's
-    cohort-cap denominator was set from that undercount.
+    calls; under this fixture's offline mock seam (``TORTOISE_SESSION_LLM_MOCK``)
+    the model exposes NO #2185 usage seam, so the lane produces no PRICED
+    ``llm`` roll-up — only the #3824 call-evidence disclosure. Driving the
+    REAL REST handler, the row handed to the REAL analytics writer must EXIST
+    and deep-equal the payload the capture implies, with ``unattributed >= 1``
+    — never be absent. Absence is what made billed spend and a clean $0 the
+    same shape, and #3780's cohort-cap denominator was set from that
+    undercount.
+
+    NOTE (updated by #3747): the absence of ``llm`` HERE is a property of the
+    mock's model, not of the lane — the real-provider M2 path now DOES price
+    its spend (``test_m2_usage_sink_prices_the_spend_the_lane_incurred``). The
+    F2 invariant this test protects is unchanged: an unaccounted-for call is
+    disclosed on a row, never erased.
 
     REDs on: restoring ``return None`` for a ``stats`` with no ``llm``
     roll-up (the collapse), or dropping the producer's call evidence at the
@@ -1489,8 +1947,8 @@ def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         "conversation": _conv(), "harness": "pi",
         "session_id": "sess-b7-unattributed"})
     assert resp.status_code == 200, resp.text
-    # Pin the premise: the M2 lane really extracted (extracted > 0) and
-    # really produced NO ``llm`` roll-up — this is F2, not F1.
+    # Pin the premise: the M2 lane really extracted (extracted > 0) and its
+    # mock model produced no PRICED roll-up — this is F2, not F1.
     assert resp.json()["extracted"] > 0
     assert "llm" not in (resp.json()["stats"] or {})
 
