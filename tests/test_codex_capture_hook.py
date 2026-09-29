@@ -54,23 +54,62 @@ def _fake_tortoise(bindir: Path, log: Path, *, sleep_s: float = 0.0) -> None:
 
 
 def _install_fake_nohup(bindir: Path) -> Path:
-    """A `nohup` shim that records every worker spawn, then runs the real one.
+    """A `nohup` shim that records every worker spawn AND its exit.
 
     The synchronous hook hands off by `nohup "$SELF" --worker &`; recording
     that call is the only way to observe "was a worker spawned at all?" — the
     capture log can be silent because the WORKER bailed on a later guard
     (a different defect than the hook spawning one it should not have).
+
+    The shim deliberately does NOT `exec` the real `nohup`: it waits for it,
+    then records ``NOHUP-DONE``. That marker is the worker's completion EVENT,
+    which is what the negative tests ("the worker captured nothing") actually
+    need — waiting on the clock instead made them guess.
     """
     log = bindir / "nohup.log"
     script = bindir / "nohup"
     script.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "NOHUP %s\\n" "$*" >> {log}\n'
-        'exec /usr/bin/nohup "$@"\n',
+        '/usr/bin/nohup "$@"\n'
+        f'printf "NOHUP-DONE\\n" >> {log}\n',
         encoding="utf-8",
     )
     script.chmod(0o755)
     return log
+
+
+def _wait_for_worker(nohup_log: Path, timeout: float = 12) -> None:
+    """Bounded wait for the detached worker to EXIT.
+
+    ``NOHUP-DONE`` (written by the fake `nohup` shim once the real one
+    returns) is the completion event; a deadline plus a legible message keeps
+    a wedged worker a failure rather than a hang.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if nohup_log.exists() and "NOHUP-DONE" in nohup_log.read_text(
+                encoding="utf-8"):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"the detached capture worker never exited: {nohup_log}")
+
+
+def _assert_no_worker_spawned(bindir: Path, settle: float = 1.0) -> None:
+    """The parent must NOT spawn the detached worker.
+
+    A negative cannot be confirmed by an event, so bound the window — but
+    ASSERT INSIDE it rather than sleeping and asserting after: the shim records
+    `NOHUP` within milliseconds of the fork, so a real spawn is caught, whereas
+    a sleep-then-assert goes blind the instant it expires (a mutation that adds
+    the spawn is silently green if it lands after the sleep).
+    """
+    log = bindir / "nohup.log"
+    deadline = time.monotonic() + settle
+    while time.monotonic() < deadline:
+        assert not log.exists(), (
+            "the hook spawned the detached capture worker it must skip")
+        time.sleep(0.05)
 
 
 def _run_hook(stdin_json: str, *, home: Path, bindir: Path, timeout: float = 15):
@@ -356,7 +395,7 @@ def test_hook_is_fail_open_when_transcript_path_is_null(tmp_path):
                     "reason": "other"}),
         home=home, bindir=bindir)
     assert proc.returncode == 0, proc.stderr
-    time.sleep(1.0)
+    _wait_for_worker(bindir / "nohup.log")
     assert not log.exists(), "a null transcript_path still invoked the capture"
     assert (bindir / "nohup.log").exists(), (
         "the parent must hand off — the null-path rejection lives in the "
@@ -382,7 +421,7 @@ def test_hook_is_fail_open_when_transcript_is_missing_on_disk(tmp_path):
                     "reason": "other"}),
         home=home, bindir=bindir)
     assert proc.returncode == 0, proc.stderr
-    time.sleep(1.0)
+    _wait_for_worker(bindir / "nohup.log")
     assert not log.exists(), "a missing transcript still invoked the capture"
 
 
@@ -403,10 +442,8 @@ def test_hook_exits_zero_on_empty_stdin(tmp_path):
 
     proc, _ = _run_hook("", home=home, bindir=bindir)
     assert proc.returncode == 0, proc.stderr
-    time.sleep(1.0)
     assert not log.exists()
-    assert not (bindir / "nohup.log").exists(), (
-        "empty stdin still spawned the detached capture worker")
+    _assert_no_worker_spawned(bindir)
 
 
 def test_installed_hook_is_executable_by_its_owner(tmp_path):

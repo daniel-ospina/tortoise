@@ -119,7 +119,10 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
     "test_onboarding_truth_surface.py": {"registry": "prod-coupled"},  # #3670/#3671/#3681: registry-resolve seeding for the server-owned capture receipts (same _make_sdk(namespace="registry") lane as the siblings above)
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
-    "test_onboarding_state_split.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_checkpoint.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_init.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_patch.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split_projection.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
     "test_pack_state.py": {
         "tenant-a": "team-identity", "tenant-b": "team-identity",
@@ -234,9 +237,20 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # otherwise, #1970 main hygiene).
         'f"org_{org_id}"': "endpoint-constrained",
     },
-    "test_onboarding_state_split.py": {
+    "test_onboarding_state_split_checkpoint.py": {
+        # #2001 W5: no select_graph("org_*") site in this split (registry lane
+        # only) — a deliberate "considered, nothing to route" entry.
+    },
+    "test_onboarding_state_split_init.py": {
         'f"org_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
         'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
+    },
+    "test_onboarding_state_split_patch.py": {
+        'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
+    },
+    "test_onboarding_state_split_projection.py": {
+        # #2001 W5: no select_graph("org_*") site in this split (endpoint/registry
+        # reads only) — a deliberate "considered, nothing to route" entry.
     },
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert

@@ -11,22 +11,36 @@ version: 1
 # one-line, reviewable change; the labels are positional letters so an S-adding
 # diff stays a SUPERSET of main's names (a rename would refuse every merge).
 #
-# The value: measured on THIS manifest (691 `durations` rows, after #6137
-# relocated the slow tail), LPT over `durations` puts max(shard) at 16.2 min at
-# S=2 and 5.2 min at S=7. The target is <10 min, so S=4 (8.1 min) already meets
-# it.
+# The value: measured on THIS manifest (694 `durations` rows, after #6133 split
+# the 310.7 s onboarding file), LPT over `durations` puts max(shard) at 16.2 min
+# at S=2, 4.62 min at S=7 and 3.59 min at S=9. The target is <10 min, so S=4
+# (8.1 min) already meets it.
 #
-# S MUST STAY AT OR BELOW 7, for a reason the max alone does not show.
-# `test_real_workflow_halves_are_consistent` asserts a 1.25x band between the
-# largest and smallest shard, and the largest single fast file
-# (`test_onboarding_state_split.py`, 310.7 s = 5.18 min) SATURATES max(shard):
-# above S=7 the critical path stops falling while the smaller shards keep
-# shrinking, so the band widens without buying wall clock. Measured against the
-# selector's own LPT pack: 1.00x at S=4-6, 1.14x at S=7, 1.33x at S=8, 1.53x at
-# S=9. S=9 was therefore strictly worse than S=7 — the same 5.2 min critical
-# path, a red balance guard, and more aggregate runner time. The 5.18 min floor
-# is #6133's, expressed as a number: to go below it, split that file or relocate
-# it, not add shards.
+# S IS NO LONGER CAPPED BY THE FLOOR. #6133 split
+# `test_onboarding_state_split.py` (310.7 s), which used to SATURATE
+# max(shard): at S>=7 the critical path stopped falling while the smaller
+# shards kept shrinking, so `test_real_workflow_halves_are_consistent`'s 1.25x
+# band widened without buying wall clock (1.14x at S=7, 1.33x at S=8, 1.53x at
+# S=9) and S=9 was strictly worse than S=7. With the largest single fast file
+# now 2.06 min (the split's checkpoint chunk), the LPT pack is 1.00x at every S
+# from 2 to 12 and max(shard) keeps falling: 4.62 min at S=7, 3.59 at S=9.
+#
+# S STAYS AT 7: the fast pool and the carve-out leg are CO-CRITICAL here.
+# `python-ci-gate` needs BOTH `test` and `test-carve-out`, and on this manifest
+# the S=7 pack puts max(shard) at 277.3 s (the seven shards span 277.2-277.3 s)
+# while #6137's carve-out split puts each of its three legs at 276.7 s (LPT over
+# the run's measured junit seconds, 1.0002:1). Above S=7 the fast pool
+# falls BELOW that — 4.04 min at S=8, 3.59 at S=9 — so the carve-out leg becomes
+# the max and raising S buys NO wall clock: the gate still waits its ~277 s.
+# Raising S is a no-op for the critical path. The lever is the carve-out leg.
+#
+# ⚠️ But read 277 s as MAP time, not wall time — `shard_imbalance_minutes` is
+# OBSERVED wall time, not the map (plan 2026-09-26-5215, rows M8 and S8). On
+# 2-shard run 36430905427 the fast halves carried 3218.5 s of junit testcase
+# time (53.6 min) against this map's 1940.7 s (32.3 min) for the same pool — a
+# 1.66x understatement — and per-job overhead measured 3.7-5.1 min. The four
+# split files' weights are count-apportioned seeds (55.8/123.5/91.6/39.8) and
+# inherit that caveat; the durations bridge (Task 4b) refreshes both sides.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
@@ -1404,7 +1418,10 @@ surfaces:
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
-  - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_init.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_checkpoint.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_patch.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_state_split_projection.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
   # #2006 (W11): the funnel-event exact-once guard (emission gated on the
@@ -1991,7 +2008,10 @@ durations:
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_backup_watcher_health.py: 0.2
   eval/retrieval/test_integration.py: 1523.4
-  test_onboarding_state_split.py: 310.7
+  test_onboarding_state_split_init.py: 55.8
+  test_onboarding_state_split_checkpoint.py: 123.5
+  test_onboarding_state_split_patch.py: 91.6
+  test_onboarding_state_split_projection.py: 39.8
   test_onboarding_truth_surface.py: 4.0
   eval/write_path/test_write_path_benchmark.py: 101.8
   test_tortoise_client.py: 11.9
@@ -2716,3 +2736,29 @@ durations:
 #   sub-second) stay in the merge path — they are real contracts.
 on_demand:
   - eval/retrieval/test_integration.py
+
+# ── #6133: WHAT SET THE FAST GATE'S FLOOR (two bounds, neither a share) ──
+#
+# 1. The fast pool is 1940.7s across 620 files; the slow (`slow_files`,
+#    2462.9s / 79) and carve-out (808.4s / 33) legs are SEPARATE jobs, and the
+#    `on_demand` row above (1523.4s) is off every pre-merge leg per #5961 —
+#    the whole map's declared mass is 6283.9s. At N fast shards the floor is
+#    max(the largest single fast file, 1940.7/N), because one file's weight is
+#    not divisible. Before #6133 the largest was
+#    `test_onboarding_state_split.py` at 310.7s, which SATURATED that max for
+#    every N >= 7 (1940.7/7 = 277.2s): the critical path could not fall below
+#    5.18 min however many shards were added. #6133 split it, and the largest
+#    is now 123.5s — so the floor is the mean (1940.7/N) alone and the
+#    saturated-max bound is gone.
+#
+# 2. DECLARED sleep is not gate cost, and ranking by it produces a wrong floor.
+#    #6133 was filed on a census that summed the suite's literal `time.sleep`
+#    arguments to ~16,000s ("4.5h the suite chose to wait"). The suite's
+#    largest such file, tests/test_battery_real_deadline.py, declares 7,200.0s
+#    of it in a hang SIMULATION — a 3600s sleep on a DAEMON thread
+#    that a 2-3s deadline abandons; a paid-sleep probe measured 0.0s of it. The
+#    600s values in test_monitoring.py / test_hosted_api.py are the same shape
+#    (`_hang()` under a 0.05-0.3s monkeypatched bound). Read the floor from the
+#    measured weights above; never from the sum of sleep() arguments.
+#    Census: https://github.com/daniel-ospina/tortoise/issues/6133 (the
+#    per-file census command and the paid-vs-declared probe are recorded there).

@@ -490,7 +490,6 @@ def test_e2e15_h_two_consecutive_fire_truncate(tmp_path):
     # child's daemon release (the db .settings registry disappears when the
     # child's redislite daemon closes on exit — the next fire's truncate
     # can then be observed without a stale-offset race)
-    _time.sleep(1)
     for _ in range(60):
         done = Path(cap).exists() and "file_count" in Path(cap).read_text()
         settled = not Path(db + ".settings").exists()
@@ -500,7 +499,6 @@ def test_e2e15_h_two_consecutive_fire_truncate(tmp_path):
     size1 = Path(cap).stat().st_size if Path(cap).exists() else 0
     r2 = _run_hook(env=env, transcript_path=transcript)
     assert r2.returncode == 0
-    _time.sleep(1)
     for _ in range(60):
         done = Path(cap).exists() and "file_count" in Path(cap).read_text()
         settled = not Path(db + ".settings").exists()
@@ -545,7 +543,6 @@ def test_e2e15_g_nonexistent_corpus_zero_count(tmp_path):
     assert r.returncode == 0
     # deterministic drain: poll for the child's report (the child spawns its
     # own daemon, indexes the zero-count no-op, writes the capture, exits)
-    _time.sleep(1)
     for _ in range(60):
         if Path(cap).exists() and Path(cap).stat().st_size > 0:
             break
@@ -603,7 +600,6 @@ def test_e2e15_b_d2_symlink_root_escape(tmp_path):
     def _drain_settled():
         """Poll for the child's daemon release (redislite .settings registry
         disappears when the child's daemon closes on exit)."""
-        _time.sleep(1)
         for _ in range(60):
             if not Path(db + ".settings").exists():
                 return True
@@ -626,7 +622,6 @@ def test_e2e15_b_d2_symlink_root_escape(tmp_path):
     cap = str(tmp_path / "child-d2.log")
     r2 = _fire(cap=cap)
     assert r2.returncode == 0, r2.stderr
-    _time.sleep(1)
     for _ in range(60):
         if Path(cap).exists() and "ValueError" in Path(cap).read_text():
             break
@@ -677,7 +672,6 @@ def test_e2e15_c_lock_contention(tmp_path):
         }
         r = _run_hook(env=env, transcript_path=transcript)
         assert r.returncode == 0, r.stderr
-        _time.sleep(1)
         for _ in range(60):
             if Path(cap).exists() and "file_count" in Path(cap).read_text():
                 break
@@ -687,7 +681,6 @@ def test_e2e15_c_lock_contention(tmp_path):
     assert Path(cap).exists() and "file_count" in Path(cap).read_text(), \
         f"sweep never reported: {Path(cap).read_text() if Path(cap).exists() else 'no capture'}"
     # drain: the child's daemon closes on exit → open FRESH and read
-    _time.sleep(1)
     for _ in range(60):
         if not Path(db + ".settings").exists():
             break
@@ -743,7 +736,6 @@ def test_e2e15_e2_graph_unreachable_dead_uri(tmp_path):
     os.makedirs(env["TORTOISE_INDEX_LOCK_DIR"], exist_ok=True)
     r = _run_hook(env=env, transcript_path=transcript)
     assert r.returncode == 0, r.stderr
-    _time.sleep(1)
     for _ in range(60):
         if Path(cap).exists() and "graph unreachable" in Path(cap).read_text():
             break
@@ -875,7 +867,6 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
     # fire 1: kill the sweep child mid-report (partial capture)
     r1 = _run_hook(env=env, transcript_path=transcript)
     assert r1.returncode == 0
-    _time.sleep(1)
     for _ in range(30):
         if Path(cap).exists() and Path(cap).stat().st_size > 0:
             break
@@ -886,13 +877,14 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
             os.kill(proc, _sig.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+    # settle the SIGKILL (a fixed 1s wait — the killed child leaves no event to
+    # wait on); no read of the partial file: it was dead (`# noqa: F841`), and
+    # only fire 2's COMPLETE report is asserted below.
     _time.sleep(1)
-    partial = Path(cap).read_text() if Path(cap).exists() else ""  # noqa: F841
     # fire 2: the truncate clears the partial → the file holds the COMPLETE
     # second report (JSON line parseable, no partial residue)
     r2 = _run_hook(env=env, transcript_path=transcript)
     assert r2.returncode == 0
-    _time.sleep(1)
     for _ in range(60):
         if Path(cap).exists() and "file_count" in Path(cap).read_text():
             break
