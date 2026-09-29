@@ -21,14 +21,31 @@ The absence half (D5b) is a dead-man's switch, split by role:
 These tests pin the app half behaviourally. The driver half is pinned by
 ``.github/scripts/registry-cron.test.sh``.
 
-RED mutations each test is built to catch:
-* delete the heartbeat write in ``_analytics_note_success`` → T3/T6 fail;
+RED mutations each test is built to catch. Every entry below was MEASURED
+(ablated in a scratch copy) and is named by the TEST that fails — an earlier
+revision of this list carried ordinal labels that resolved to no numbering
+anywhere in the repo, and two of them pointed at tests the mutation does not
+fail:
+* delete the heartbeat write in ``_analytics_note_success`` →
+  ``test_tick_emits_through_the_real_sink_path`` and
+  ``test_heartbeat_refreshes_on_any_delivered_write_not_only_the_canary`` fail;
 * make the canary skip whenever the sink is only half-configured (gate on
-  ``configured`` instead of ``intended``) → T5 fails;
-* seed the heartbeat at boot (a last-attempt stamp) → T4 fails;
-* emit from the canary before sleeping → T8 fails;
+  ``configured`` instead of ``intended``) →
+  ``test_tick_attempts_a_half_configured_sink`` fails;
+* emit from the canary before sleeping →
+  ``test_canary_loop_does_not_emit_before_its_first_period`` fails;
 * drop ``_analytics_canary_task`` from ``_LIVENESS_TASK_ATTRS`` → the boot
-  regression pin fails (tests/test_boot_regressions.py).
+  regression pin fails (tests/test_boot_regressions.py);
+* delete or rename the ARM (the ``app.state._analytics_canary_task = …``
+  assignment) → the same boot regression pin fails on its module-wide
+  armed-set check (the tuple alone would disarm a task nothing armed).
+
+NOT listed, because it is NOT caught: seeding ``_ANALYTICS_LAST_DELIVERED_AT``
+at import (the last-attempt stamp the design rejects). The conftest reset and
+the per-test ``monkeypatch.setattr`` both override the module initializer, so
+no test observes it. Listed here so a future reader does not add a label
+claiming coverage that does not exist — the module docstring above states the
+intent, and pinning it would take a source-level assertion.
 """
 
 from __future__ import annotations
