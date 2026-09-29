@@ -78,6 +78,10 @@
     ],
     "check": [
       [
+        "availability-liveness.yml",
+        "check"
+      ],
+      [
         "skip-bypass-expiry.yml",
         "check"
       ]
@@ -226,6 +230,12 @@
       [
         "post-merge-validation.yml",
         "lint"
+      ]
+    ],
+    "main-health": [
+      [
+        "main-health-nightly.yml",
+        "main-health"
       ]
     ],
     "manifest-integrity": [
@@ -463,7 +473,7 @@
       ]
     ]
   },
-  "gate_digest": "969f7a26879dc39136cb1229ba007562232bc584c1f20b5e3ad06811608699e2",
+  "gate_digest": "537d96d656dd2b9886951ee2d03b66a56fb8af5a2aa132ae5ed16dbe0f0ef3e6",
   "live_checked_at": "2026-09-28T05:36:59Z",
   "live_observed_contexts": [
     "docs",
@@ -485,5 +495,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-09-28T13:43:24Z"
+  "verified_at": "2026-09-29T02:29:23Z"
 }
