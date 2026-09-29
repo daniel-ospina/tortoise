@@ -92,3 +92,4 @@ data/kind_index/*
 .tortoise-prewipe-snapshot.json
 .tortoise-prewipe-*.tmp
 .venv
+.pytest_cache/

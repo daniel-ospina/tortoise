@@ -372,14 +372,20 @@ jobs:
     # Outer cap: setup (checkout+install+cache) + manifest collect-only
     # (epic #1647 Task 6 — half b gains a full-list --collect-only step
     # BEFORE pytest, off the watchdog) + watchdog (55m) + SIGINT grace
-    # (10s) + tail print. Cap 65m ≈ 55m watchdog + ~5m setup + ~2m
-    # collect-only + margin — the 60m cap (55m + 5m setup) would let a
-    # loaded runner cancel the job mid-summary once the collect-only step
-    # joins the wall (the exact #798 death mode; E2E-5's step-wall
-    # measurement — the flip's purpose — must never be lost to a runner
-    # kill). Divergence note: the plan's "timeout-minutes: 60, the current
-    # spec" predates the collect-only step's wall cost.
-    timeout-minutes: 65
+    # (10s) + tail print. A 60m cap (55m + 5m setup) would let a loaded
+    # runner cancel the job mid-summary once the collect-only step joins the
+    # wall (the exact #798 death mode; E2E-5's step-wall measurement — the
+    # flip's purpose — must never be lost to a runner kill). Divergence note:
+    # the plan's "timeout-minutes: 60, the current spec" predates the
+    # collect-only step's wall cost.
+    #
+    # #6142: the last-failed PRE-PHASE adds a second bounded pytest run
+    # (~7m setup + <=10m pre-phase + <=55m gating run + ~10s grace + tail).
+    # 90m covers that worst case with margin, so the gating run can never be
+    # cut short by the runner cap on a push that carries last-failed state
+    # (the pre-phase's own 10m watchdog bounds the extra wall — see the run
+    # step).
+    timeout-minutes: 90
     # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
     # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
     # green while EP tests never ran — masked #1382). Two services cover BOTH probe
@@ -612,13 +618,39 @@ jobs:
           else
             echo "canary producer: half a — no producer marker (half b only)"
           fi
+      - name: Restore pytest last-failed state (#6142)
+        # #6142: persist .pytest_cache across runs of the SAME PR so the
+        # fast-fail pre-phase below can re-run the tests that failed on the
+        # previous push, instead of re-paying the full 33-39 min half to learn
+        # the same thing. Keyed per (job, matrix half, PR ref) so state can
+        # never bleed between the two halves or between PRs; the exact key is
+        # unique per push (github.sha) and restore-keys picks the most recent
+        # entry for this ref. A missing/empty cache is the fail-OPEN case: the
+        # pre-phase is skipped and the FULL set runs — never the other way.
+        # PR-only: `main` must always run the full set (see the pre-phase guard).
+        # continue-on-error: a cache-SERVICE error (transport/503) must never
+        # fail this step — the implicit success() would then skip the entire
+        # test run and red the job with ZERO tests executed. A miss/empty
+        # cache is the fail-open case the pre-phase already handles.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: .pytest_cache
+          key: pytest-lastfailed-${{ github.job }}-${{ matrix.half }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            pytest-lastfailed-${{ github.job }}-${{ matrix.half }}-${{ github.ref_name }}-
+
       - name: Run fast test suite (slow files run in the test-slow job)
         id: pytest-run
         # #798: in-step watchdog + guaranteed summary tail. pytest gets
         # SIGINT at 55m (SIGKILL 10s later if stuck inside a test — pytest
         # ignores INT mid-test); the step then prints counts + tail + real
         # exit code. The runner's own timeout-minutes is NOT what bounds
-        # pytest, so a silent runner cancel is impossible.
+        # pytest, so a silent runner cancel is impossible. #6142 keeps that
+        # invariant: the last-failed pre-phase below has its OWN 10m watchdog
+        # (never the 55m gating one) and the job cap is sized for
+        # setup + pre-phase + gating, so the gating run always keeps its 55m.
         # #964: liveness heartbeat. pytest writes to /tmp/pytest.log (for
         # the guaranteed tail), so the job log shows no output for 25-50
         # min — previously read as "stuck in_progress". The background
@@ -663,7 +695,85 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #6142: last-failed FAST-FAIL pre-phase. On a PR whose PREVIOUS
+          # push left a non-empty .pytest_cache/v/cache/lastfailed (restored
+          # above), re-run ONLY those tests first. A known failure that still
+          # fails reds the job in ~1 min instead of re-paying the full half.
+          #
+          # SAFETY (#4164 — the pre-merge selection must not be narrowed):
+          # this pre-phase never gates a GREEN result on its own. When it
+          # passes — or when there is no last-failed state, or the state names
+          # no test in THIS half (explicit nodeids, see below) — the FULL set
+          # runs unchanged as phase 2. Every path that can reach green still
+          # runs the complete half, and the skip-guard manifest (which pins the
+          # full expected nodeid set) still reconciles.
+          #
+          # The nodeids are passed EXPLICITLY (not via pytest's `--lf`): the
+          # `--lf` plugin FALLS BACK to running the whole selection when the
+          # restored keys intersect nothing collected (verified against pytest's
+          # LFPlugin), which on the tier-2 shape — where the half is re-split per
+          # push — would run the full half in the pre-phase AND again in phase 2.
+          # rc 4/5 ("no tests ran": a nodeid vanished or the marker deselected
+          # it) is NOT a failure — it falls through to the full run, the
+          # fail-OPEN direction the issue requires.
+          #
+          # RESIDUAL (#6142): when this pre-phase fails, this half did
+          # NOT run the tests outside the last-failed set, so the `FAILED`
+          # nodeids printed below are a SUBSET of the half. The merge rail
+          # (`scripts/ci-failure-set.sh` → `admin-merge.sh`) reads that as the
+          # head's complete failure set and could exempt a persisting main-side
+          # failure while a NEW failure goes unrun. The normal merge path does
+          # re-assert the gate on the composed tree — the Mergify queue runs
+          # `merge_conditions: check-success=python-ci-gate` on the queue
+          # branch (`.mergify.yml`), whose ref has no cached lastfailed and
+          # whose push event never runs this pre-phase; the marker line below
+          # is the hook for the rail follow-up. The cache
+          # provider stays enabled on BOTH phases so phase 2 writes the new
+          # lastfailed set the next push reads; `main` never runs the pre-phase.
+          # The nodeids are read one-per-line into a bash ARRAY: parametrized
+          # nodeids contain spaces (`test_x[case one]`), so an unquoted word
+          # list would word-split into a pytest UsageError (rc 4) and the
+          # optimization would silently never apply to spaced ids.
+          LF_RC=0
+          LF_NODEIDS=()
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -s .pytest_cache/v/cache/lastfailed ]; then
+            while IFS= read -r LF_NID; do LF_NODEIDS+=("$LF_NID"); done < <(printf '%s' "$FILES" | python3 -c 'import json,sys; files=set(sys.stdin.read().split()); d=json.load(open(".pytest_cache/v/cache/lastfailed")); print("\n".join(n for n in d if n.split("::",1)[0] in files))' 2>/dev/null || true)
+          fi
+          if [ -n "${LF_NODEIDS[*]}" ]; then
+            echo "last-failed fast-fail: re-running ${#LF_NODEIDS[@]} test(s) that failed on the previous push"
+            # Its OWN watchdog (10m), NOT the 55m gating watchdog: a handful of
+            # last-failed tests must never eat the gating run's budget.
+            timeout -s INT -k 10 10m stdbuf -oL python -m pytest "${LF_NODEIDS[@]}" -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit-lf.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+            LF_RC=$?
+            echo "last-failed fast-fail phase: rc=$LF_RC"
+            # FAIL-OPEN on 0 (passed — the full half still runs), 4/5 (nothing
+            # collected: a nodeid vanished or the marker deselected it) and
+            # 2/124/137 (interrupted, or the PRE-PHASE watchdog fired — 10m on
+            # a handful of tests is not a verdict, so the full run decides, and
+            # the job cap is sized to hold it). Anything else — 1 (a real
+            # failure), 3 (internal error) — is a failing pre-phase.
+            if [ "$LF_RC" -ne 0 ] && [ "$LF_RC" -ne 2 ] && [ "$LF_RC" -ne 4 ] && [ "$LF_RC" -ne 5 ] && [ "$LF_RC" -ne 124 ] && [ "$LF_RC" -ne 137 ]; then
+              echo "==================== pytest summary (last-failed, tail) ===================="
+              tail -n 200 /tmp/pytest.log
+              echo "==================== pytest failure nodeids ===================="
+              grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+              echo "ci-selection: last-failed-subset (#6142) — this half ran only its previous failures; the FULL half did NOT run in this job"
+              echo "$LF_RC" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+              kill $HB_PID 2>/dev/null || true
+              wait $HB_PID 2>/dev/null || true
+              echo "$SECONDS" > /tmp/step_wall.txt
+              echo "step_wall=$SECONDS" >> "$GITHUB_OUTPUT"
+              echo "==================== pytest exit code: $LF_RC (last-failed fast-fail) ===================="
+              exit $LF_RC
+            fi
+            if [ "$LF_RC" -eq 2 ] || [ "$LF_RC" -eq 124 ] || [ "$LF_RC" -eq 137 ]; then
+              passed=$(grep -c ' PASSED' /tmp/pytest.log)
+              failed=$(grep -c ' FAILED' /tmp/pytest.log)
+              errored=$(grep -c ' ERROR' /tmp/pytest.log)
+              echo "==================== WATCHDOG: last-failed pre-phase interrupted/killed (rc=$LF_RC; $passed passed, $failed failed, $errored errored) — inconclusive, falling through to the FULL half ===================="
+            fi
+          fi
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -746,6 +856,21 @@ jobs:
           # journal-blind team_* stray pass live in CI (opt-in only; the
           # shared dev container never sets it — issue #1884).
           TORTOISE_TEST_SWEEP_TEAM_STRAYS: ${{ env.SWEEP_TEAM_STRAYS }}
+
+      - name: Save pytest last-failed state (#6142)
+        # Persist the state the pre-phase reads on the NEXT push. `always()`
+        # so a RED run's failures are saved (that is the whole point). A
+        # re-run of the same sha cannot reserve an existing key, so the save is
+        # dropped and the PREVIOUSLY saved state is retained — conservative:
+        # at worst the next push re-runs a test that now passes.
+        # continue-on-error keeps that non-gating.
+        # PR-only: only a PR retry reads this state.
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .pytest_cache
+          key: pytest-lastfailed-${{ github.job }}-${{ matrix.half }}-${{ github.ref_name }}-${{ github.sha }}
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload so ci-timing.yml can extract per-file

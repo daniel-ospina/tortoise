@@ -1867,14 +1867,22 @@ def test_canary_streak_job_consumes_half_b_artifacts_only():
 
 
 def _extract_pytest_marker(run_script: str) -> str:
-    """Pull the `-m <marker>` filter from a job's pytest run script. The
+    """Pull the `-m <marker>` filter from a job's GATING pytest run. The
     docker lanes quote it (`-m 'not track_b and not live'`); the track-b
     job's is bare (`-m track_b`). The launcher's own `python -m pytest`
-    module form is never a marker — the unquoted fallback skips 'pytest'."""
-    quoted = _re.search(r"-m '([^']+)'", run_script)
+    module form is never a marker — the unquoted fallback skips 'pytest'.
+
+    #6142: the `test` job now has a SECOND pytest invocation — the last-failed
+    pre-phase, whose junit is /tmp/junit-lf.xml. Scanning the whole script
+    silently retargets this pin to the pre-phase (the same class of bug fixed
+    in tests/test_skip_guard.py), so the pre-phase line is dropped and the
+    search stays on the canonical gating invocation."""
+    searchable = "\n".join(
+        ln for ln in run_script.splitlines() if "junit-lf.xml" not in ln)
+    quoted = _re.search(r"-m '([^']+)'", searchable)
     if quoted:
         return quoted.group(1)
-    for m in _re.finditer(r"-m\s+([^\s]+)", run_script):
+    for m in _re.finditer(r"-m\s+([^\s]+)", searchable):
         if m.group(1) != "pytest":
             return m.group(1)
     raise AssertionError(f"no -m marker found in run script:\n{run_script}")

@@ -179,6 +179,12 @@ class TestGuardAcceptsCleanLog:
             # 30m->45m->55m as the corpus grew; only the -r summary contract
             # matters here)
             if re.search(r"timeout -s INT -k 10 \d+m", l) and "-m pytest" in l
+            # #6142: the last-failed PRE-PHASE also matches the watchdog
+            # pattern, but it writes /tmp/junit-lf.xml and is NOT the run the
+            # skip guard reconciles. Pin on the canonical junit so this guard
+            # cannot silently retarget to the pre-phase (it did, and passed
+            # only by coincidence while the real gating run was unchecked).
+            and "--junitxml=/tmp/junit.xml" in l
         ]
         assert fast_run, "fast-suite pytest invocation not found"
         assert "-r fEs" in fast_run[0], (
