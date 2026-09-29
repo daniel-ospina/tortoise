@@ -594,6 +594,22 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_drift_guard_tool_change_selects_core_not_tier1():
+    # #4174 review P1: tools/drift-guard.py owns tests/test_drift_guard.py. The
+    # flat "tools/" NON_PYTHON_PREFIXES entry swallowed the path, so a
+    # guard-only change selected NO surface and fell back to tier-1 smoke — the
+    # suite pinning the guard never ran on the PR that changed the guard. Same
+    # silent-drop class as #4069 above, and the same defect #4174 describes a
+    # gate having. Mutation check: removing the CORE_ALSO entry filters the path
+    # out (docs-only early return → empty surfaces, tier-1 smoke) and fails
+    # every assert below.
+    r = _sel(["tools/drift-guard.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_drift_guard.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
