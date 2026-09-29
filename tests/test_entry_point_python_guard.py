@@ -77,6 +77,18 @@ Declared bounds — what this file does NOT verify
   interpreter a minimal-PATH cron is guaranteed). Guarding it would convert a
   working scheduled job into a refusal with no diagnostic benefit.
   `test_the_runtime_39_exclusion_is_accurate` re-derives the 3.9-clean claim.
+* **`tools/merge_throughput.py`** and **`tools/queue_window_observe.py`** are also
+  deliberately 3.9-IMPORTABLE (`RUNTIME_39`). Both are stdlib-only and suppress
+  `datetime.UTC` modernization (`# noqa: UP017 - must import on 3.9`) precisely so
+  the merge-throughput plan's §11 criteria commands — `python3
+  tools/merge_throughput.py …` and `python3 tools/queue_window_observe.py …`,
+  documented in `docs/ci/merge-throughput-measurements.md` — keep working on the
+  ambient `python3` (3.9.6 here). Guarding `merge_throughput.py` additionally
+  reds a test in main rather than converting a crash into a named refusal:
+  `tests/test_merge_throughput.py::test_tool_runs_under_the_documented_system_python3`
+  RUNS it under `/usr/bin/python3` and asserts the contract's exit `2` (a guard
+  exits `1`), and `…_for_triage` imports the module under the same interpreter.
+  `test_the_runtime_39_exclusion_is_accurate` re-derives both 3.9-runnable claims.
 * **`tools/**/__init__.py`** are package markers, not entry points.
 """
 
@@ -123,12 +135,30 @@ RUNTIME_39: dict[str, str] = {
         "interpreter a minimal-PATH cron is guaranteed) — the guard would turn a "
         "working scheduled job into a refusal with no diagnostic benefit"
     ),
+    "tools/merge_throughput.py": (
+        "deliberately 3.9-IMPORTABLE: stdlib-only, with `datetime.UTC` "
+        "modernization suppressed (`# noqa: UP017 - must import on 3.9`) so the "
+        "merge-throughput plan's §11 criteria (documented `python3 "
+        "tools/merge_throughput.py …`) run on the ambient 3.9 interpreter — "
+        "`tests/test_merge_throughput.py::"
+        "test_tool_runs_under_the_documented_system_python3` RUNS it under "
+        "`/usr/bin/python3` and asserts exit 2, so a guard would red a test in "
+        "main rather than convert a crash into a named refusal"
+    ),
+    "tools/queue_window_observe.py": (
+        "deliberately 3.9-IMPORTABLE (mirrors tools/merge_throughput.py): same "
+        "suppressed `datetime.UTC` modernization and the same documented "
+        "`python3 tools/queue_window_observe.py …` invocations in "
+        "docs/ci/merge-throughput-measurements.md — the guard would remove a "
+        "working documented command rather than name a crash"
+    ),
 }
 
 #: A small floor: the corpus is the measured tracked `tools/**/*.py` +
 #: `graph-scripts/*.py` set. A glob that silently stopped matching must fail,
-#: never pass vacuously. (142 at the #5128 head: 144 tracked entry points, minus
-#: `UNGUARDABLE`, minus `RUNTIME_39`.)
+#: never pass vacuously. (145 at the #5136 rebased head: 152 tracked `.py` in the
+#: corpus dirs, minus 3 `__init__.py` package markers, minus `UNGUARDABLE`, minus
+#: the 3 `RUNTIME_39` entries.)
 MIN_CORPUS = 140
 
 
