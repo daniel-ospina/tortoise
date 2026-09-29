@@ -1820,9 +1820,12 @@ class CollisionPreflightTest(unittest.TestCase):
         # The failure reproduces locally only when git is made to demand an
         # explicit identity — `GIT_CONFIG_GLOBAL` carrying
         # `[user] useConfigOnly = true`, with no system config. That is the
-        # REPRODUCTION CONDITION, not a setting this repo's CI declares: no
-        # workflow, script or config here sets any git identity (or
-        # `useConfigOnly`) at all.
+        # REPRODUCTION CONDITION, not a setting this repo's CI declares:
+        # nothing here CONFIGURES a git identity (or `useConfigOnly`). The only
+        # identities in the tree are per-command (`-c user.name=…` on the two
+        # refresh-job commits) and per-test-fixture — and those two refresh
+        # jobs pass `-c` for the very reason this fixture must: the runner
+        # carries no configured identity to inherit.
         other = self._sibling_repo("other-repo", "other-owner/other-repo")
 
         self.gh_fixtures(open_prs=[{
