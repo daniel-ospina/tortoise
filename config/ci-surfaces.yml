@@ -3285,3 +3285,25 @@ durations:
 #   sub-second) stay in the merge path — they are real contracts.
 on_demand:
   - eval/retrieval/test_integration.py
+
+# ── THE CRITICAL-PATH FLOOR: two bounds that sharding cannot divide (#6133) ──
+#
+# 1. This map's total is 6160.7s and the lane row above is 1523.4s of it
+#    (24.7%). #5961 moved that file off EVERY pre-merge leg, and the row is
+#    retained only as the lane's justification (pinned in test_ci_selection) —
+#    so the pre-merge total modelled here is 4637.3s, not 6160.7s. At N shards
+#    the floor is max(the largest single-file weight on the critical leg,
+#    4637.3/N): a weight is not divisible, which is why this number is the
+#    bound on every shard-count optimisation and not a share of it.
+#
+# 2. DECLARED sleep is not gate cost, and ranking by it produces a wrong floor.
+#    #6133 was filed on a census that summed the suite's literal `time.sleep`
+#    arguments to ~16,000s ("4.5h the suite chose to wait"). The suite's
+#    largest such file, tests/test_battery_real_deadline.py, declares 7,200.0s
+#    of it in a hang SIMULATION — a 3600s sleep on a DAEMON thread
+#    that a 2-3s deadline abandons; a paid-sleep probe measured 0.0s of it. The
+#    600s values in test_monitoring.py / test_hosted_api.py are the same shape
+#    (`_hang()` under a 0.05-0.3s monkeypatched bound). Read the floor from the
+#    measured weights above; never from the sum of sleep() arguments.
+#    Census: https://github.com/daniel-ospina/tortoise/issues/6133 (the
+#    per-file census command and the paid-vs-declared probe are recorded there).
