@@ -56,6 +56,7 @@ from .projection import (
     _load_prewipe_snapshot,
     _norm,
     _promotion_point_with_operator,
+    _writable_id,
     journal_hard_delete_seqs,
     prewipe_snapshot_path,
 )
@@ -769,11 +770,35 @@ def _fold_journal(events: list[dict]) -> dict:
         # then `new_content is not None and _annotator_value_ok`), read from the
         # same projection function rather than re-spelled, so a content value
         # the fold refused cannot drop a vector here.
+        #
+        # #5238 review P2: the drop is correct ONLY when the vector was
+        # DERIVED — i.e. the record owns no `embedding`. When a caller supplies
+        # BOTH `content` and `embedding` (a supported #5046 shape), the vector
+        # is caller-owned, NOT recomputed: the graph holds the caller's vector
+        # while `replay(journal)` re-encodes (the declared #5046 exemption), so
+        # live != rebuild. Popping here would delete the fold's only vector,
+        # the comparison would declare the caller-owned graph-only vector
+        # faithful for a recompute path it is not on, and the durability gate
+        # would go blind to a real divergence. Leaving the fold's existing
+        # (creation) vector in place is the honest signal the fold CAN give:
+        # it does not equal the caller-owned graph vector, so the divergence is
+        # reported. (Writing the record's claimed vector onto the fold instead
+        # would make both sides equal — but `replay` does NOT honour that
+        # vector, so the fold would lie about replay and hide the divergence
+        # for ever.) `"embedding" not in` is deliberate: an explicit
+        # `embedding: null` clear is a caller write too, and the same blindness
+        # applies.
         if t == "PointRevised":
             _nev = _norm(ev)
             _nc = _nev.get("new_content")
-            if _nc is not None and _annotator_value_ok(_nc):
-                _entry = by_id.get(_nev.get("id"))
+            if (_nc is not None and _annotator_value_ok(_nc)
+                    and "embedding" not in _nev):
+                # #5238 review P3: `_apply_one` guards every id lookup with
+                # `_writable_id` (#331 review r4); a JSON-legal non-string id
+                # (list/dict) must degrade to "no entry", not raise
+                # `TypeError: unhashable type` out of the durability fold.
+                _rid = _nev.get("id")
+                _entry = by_id.get(_rid) if _writable_id(_rid) else None
                 if isinstance(_entry, dict):
                     _entry.pop("embedding", None)
     return by_id

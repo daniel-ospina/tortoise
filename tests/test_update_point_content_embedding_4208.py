@@ -210,6 +210,97 @@ def test_a_caller_supplied_vector_is_not_recomputed(sup):
     assert _vector(sdk, pid) == caller_vec
 
 
+def test_a_caller_vector_with_a_content_edit_is_a_consistency_divergence(sup):
+    """#5238 P2: the vector drop must not blind the gate on a caller vector.
+
+    The #4208 fold pop is gated on "a content edit was applied" — but when the
+    caller supplies BOTH `content` and `embedding`, the vector is NOT
+    re-derived: the graph holds the caller's vector while `replay(journal)`
+    re-encodes from the new content (the declared #5046 exemption), so
+    ``live != rebuild``. Popping the fold's vector made the comparison declare
+    the caller-owned graph-only vector faithful for a recompute path it is not
+    on, and `check_consistency` reported ``ok: True`` while a rebuild
+    measurably changed the vector. The pop is therefore gated on the record
+    NOT owning a vector.
+
+    (1) Fails at the #5238 head: the pop fires anyway, `check_consistency`
+    reports ``ok: True``, and the assertion below fails. (2) Reachable: the
+    SDK's own `update_point(content=…, embedding=…)` — the exact #5046 shape,
+    and the one the scope guard above does NOT exercise (it supplies no
+    content, so the pop can never fire there).
+    """
+    events, sdk = sup
+    pid = sdk.create_point("statement", "original").get("id")
+    caller_vec = [0.9] * _DIM
+    with mock.patch(_EMBED_PATCH, _embed_a):
+        sdk.update_point(pid, content="replacement", embedding=caller_vec)
+    assert _vector(sdk, pid) == caller_vec, (
+        "premise: the caller's vector is the live value"
+    )
+    revises = [e for e in _events(events) if e.get("type") == "PointRevised"]
+    assert any("embedding" in e for e in revises), (
+        "premise: the record OWNS the caller's vector (#5046 shape)"
+    )
+
+    from tortoise.consistency import check_consistency
+    r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert r["ok"] is False, (
+        "the durability gate went blind: it must see live != rebuild"
+    )
+    assert r["divergence"] == "content", r
+    assert any("embedding" in d["fields"] for d in r["divergent_points"]), r
+
+    # The divergence is REAL: a rebuild re-encodes and moves the vector.
+    with mock.patch(_EMBED_PATCH, _embed_a):
+        sdk._get_proj().rebuild_all(str(events))
+    assert _vector(sdk, pid) != caller_vec, (
+        "the rebuild must re-encode, or this is not a divergence"
+    )
+    assert _vector(sdk, pid) == _embed_a("replacement")
+
+
+def test_a_derived_edit_clears_a_stale_verbatim_marker(sup):
+    """#5238 P3: a derived re-encode must clear the caller-verbatim marker.
+
+    A node that took a caller-supplied vector carries ``embedding_verbatim``
+    (the #5004 round-8 block sets it). A later plain
+    `update_point(content=…)` re-derives the vector but ran AFTER that block,
+    so it never cleared the marker — the node advertised a SERVER-derived
+    vector as caller-owned. That marker selects raw-vs-`vecf32` storage on
+    every later re-emit and flips the consistency comparison to an
+    exact-float compare, while a rebuild drops it (`_revise_point` re-encodes
+    and never reads it): live != rebuild.
+
+    (1) Fails at the #5238 head: the marker survives (`True` beside the
+    re-encoded vector) and both assertions below fail. (2) Reachable: caller
+    vector then derived content edit — the exact sequence in the finding.
+    """
+    events, sdk = sup
+    pid = sdk.create_point("statement", "original").get("id")
+    sdk.update_point(pid, embedding=[0.9] * _DIM)
+    with mock.patch(_EMBED_PATCH, _embed_a):
+        sdk.update_point(pid, content="replacement")
+
+    def _props() -> dict:
+        return sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN properties(n)",
+            params={"id": pid}).result_set[0][0]
+
+    live = _props()
+    assert list(live["embedding"]) == _embed_a("replacement"), (
+        "premise: the derived branch re-encoded the vector"
+    )
+    assert live.get("embedding_verbatim") is None, (
+        "a server-derived vector inherited the caller 'verbatim' marker"
+    )
+
+    with mock.patch(_EMBED_PATCH, _embed_a):
+        sdk._get_proj().rebuild_all(str(events))
+    assert _props().get("embedding_verbatim") is None, (
+        "live and rebuild disagree on the marker"
+    )
+
+
 # ── reachability: the consolidated `update()` routes through the same writer ─
 
 def test_the_consolidated_update_route_recomputes_too(sup):

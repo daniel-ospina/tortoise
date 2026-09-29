@@ -6094,6 +6094,16 @@ class TortoiseSDK:
             except Exception:
                 props["embedding"] = None
             _derived_embedding = True
+            # #5238 review P3: the vector just derived is NOT caller-owned, so
+            # a node that previously held a CALLER-supplied vector (and still
+            # carries `embedding_verbatim=true`) must have that marker cleared —
+            # exactly as the `embedding=None` path above does. Left set, the
+            # node advertises a SERVER-derived vector as caller-owned: the
+            # marker selects raw-vs-`vecf32` storage on every later re-emit and
+            # flips the consistency comparison to an exact-float compare, while
+            # a rebuild drops it (`_revise_point` re-encodes and never reads
+            # the marker) — live != rebuild, the round-6 false-verbatim class.
+            props["embedding_verbatim"] = None
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
