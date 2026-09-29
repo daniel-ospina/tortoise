@@ -15,6 +15,13 @@ import time
 
 import pytest
 
+# #3752: every scan below must target the PRIVATE per-session temp root.
+# `scan_root()` asserts the isolation is installed and refuses to hand back the
+# shared system temp dir, so a socket/pid lookup can never again walk the whole
+# host temp tree (2 min at 53% CPU) nor match a concurrent suite's
+# redis.socket / redis.pid.
+from tests._tmpdir_hygiene import scan_root
+
 pytest.importorskip("redislite")
 
 
@@ -74,7 +81,7 @@ def _count_redis_servers(path=None):
     # Map each server's socket tempdir -> check its redis.config for the path.
     # Use realpath on BOTH sides (macOS /var -> /private/var symlink).
     import glob as _glob  # noqa: F401
-    tmp = os.path.realpath(tempfile.gettempdir())
+    tmp = os.path.realpath(scan_root())  # #3752: private root, not the shared temp dir
     want_dir = os.path.realpath(os.path.dirname(path))
     want_name = os.path.basename(path)
     n = 0
@@ -214,13 +221,38 @@ def _kill_pid(pid: int) -> None:
         pass
 
 
+# AF_UNIX sun_path cap: the kernel refuses a bind path of >= 104 bytes on
+# macOS (redislite reports "unix socket path too long (108), must be under
+# 104"). Redislite nests its autogen dir (tempfile's default prefix + 8 random
+# chars) under the child's TMPDIR, so the bind path is TMPDIR + this tail —
+# DERIVED from tempfile's own prefix rather than hand-written (#3752).
+_AF_UNIX_SOCKET_BUDGET = 104
+_REDISLITE_AUTOGEN = tempfile.gettempprefix() + "x" * 8
+
+
 def _make_flat_tmpdir() -> str:
     """Short flat dir under the tempdir root for child TMPDIR containment.
 
-    AF_UNIX socket paths cap at ~108 bytes on Linux — the child's autogen
-    redislite dir nests under TMPDIR, so a short shallow path is required.
+    AF_UNIX socket paths are capped (the kernel needs < 104 bytes on macOS)
+    and the child's autogen redislite dir nests under TMPDIR
+    (``<TMPDIR>/tmpXXXXXXXX/redis.socket``), so the child TMPDIR must stay
+    short.
+
+    #3752: the suite's scratch root now lives under a SHORT temp base (see
+    ``tests/_tmpdir_hygiene.py``), so this path is normally shorter than
+    before — but the base falls back to ``$TMPDIR`` where ``/tmp`` is
+    unusable, and the budget is ASSERTED here so a host that leaves no room
+    fails by name instead of surfacing as an empty spawn error.
     """
-    return tempfile.mkdtemp(prefix="tchaos", dir=tempfile.gettempdir())
+    root = tempfile.mkdtemp(prefix="", dir=tempfile.gettempdir())
+    bind_path = os.path.join(root, _REDISLITE_AUTOGEN, "redis.socket")
+    assert len(bind_path) < _AF_UNIX_SOCKET_BUDGET, (
+        f"child TMPDIR {root!r} leaves no room for the redislite socket path "
+        f"({len(bind_path)} bytes >= {_AF_UNIX_SOCKET_BUDGET}): the #3752 "
+        f"private session temp root ({len(tempfile.gettempdir())} bytes) "
+        f"plus redislite's autogen tail must stay under the AF_UNIX cap"
+    )
+    return root
 
 
 def _spawn_orphan_pid(tmpdir: str | None = None,
@@ -314,7 +346,7 @@ def _clean_spawned_residue():
         except Exception:
             return None
         dirs: set[str] = set()
-        tmp = tempfile.gettempdir()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
         try:
             for entry in os.scandir(tmp):
                 if entry.is_dir() and (
@@ -358,7 +390,7 @@ def _sweep_stale_residue():
     """Module-start dead-dir cleanup — the test_reaper pattern (#1365):
     remove socket dirs whose redis.pid belongs to a provably dead process
     (crashed/killed prior run), never touching live servers."""
-    tmp = tempfile.gettempdir()
+    tmp = scan_root()  # #3752: private root, never the shared temp dir
     try:
         for entry in os.scandir(tmp):
             if not entry.is_dir():
