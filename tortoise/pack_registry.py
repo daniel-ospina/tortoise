@@ -197,15 +197,16 @@ def registered_source_types() -> frozenset[str]:
     return KNOWN_SOURCE_TYPES | frozenset(SOURCE_KIND_DEFAULTS)
 
 # Core mechanism predicates — valid chain-edge / enforcement targets without a
-# pack relation. IMPL/NAND ONLY. `MITIGATES` was RETIRED from the operator menu
-# by the F1 ruling (#2552, ontology v3.17) and implemented by #4937 / PR #5225:
-# `sdk.create_operator` refuses it, and a mitigation is a Point attached to the
-# operator bridge it damps — `(op:Point {is_operator:true})-[:mitigated_by]->(m)`
-# (ontology §3.9) — not a predicate at all. Admitting it here let a pack declare
-# a chain or enforcement target the engine CANNOT BUILD, so the manifest
-# advertised a mitigation that can never move a weight: objective 6's conjunct
-# ("actually moving the weight, not merely existing") defeated at validation
-# time (#4626 / #2766 / #5322).
+# pack relation. IMPL/NAND ONLY. `MITIGATES` is not a predicate: the F1 ruling
+# (#2552, ontology v3.17, implemented by #4937 / PR #5225) retired it from the
+# OPERATOR MENU, and a mitigation is a Point attached to the operator bridge it
+# damps — `(op:Point {is_operator:true})-[:mitigated_by]->(m)`, ontology §3.9.
+# `MITIGATES` does survive as a PAYLOAD op_type some writers still emit (see
+# `commit_schema`), routed to `sdk.mitigate_operator`; that spelling is not this
+# set, and the distinction matters. Admitting it HERE let a pack declare
+# `chains[].edges: [MITIGATES]` and validate clean WITHOUT declaring a relation —
+# advertising a chain edge the engine cannot build.
+# (#4626 / #2766 / #5322)
 CORE_PREDICATES = frozenset({"IMPL", "NAND"})
 
 # ── Manifest v3.1 (epic #909 §1.4/§1.5): extraction behaviour slots (#1026) ──
@@ -1127,9 +1128,8 @@ class PackRegistry:
                 # #2552) and `sdk.create_operator` refuses it, so accepting it
                 # here would advertise, on the author-facing template, an edge
                 # the engine cannot build. `CORE_PREDICATES` no longer carries
-                # it either (#2766 / #5322), so the two slots finally agree —
-                # this check reads the literal pair rather than the set so the
-                # agreement is explicit and cannot silently drift again.
+                # it either (#2766 / #5322), so the two slots finally agree:
+                # both read the SAME literal pair, IMPL and NAND.
                 # `predicate` is the one REFERENCE among these slots. The
                 # sibling `ontology.relations` requires a non-empty camelCase
                 # predicate and both kind sides, and a template naming none of

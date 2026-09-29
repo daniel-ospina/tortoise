@@ -61,7 +61,9 @@ def _errors(**extraction):
 
 
 def _ontology_errors(**ontology):
-    """Errors from the ``ontology.*`` surface (chains/enforcement), not ``extraction.*``."""
+    """ALL validation errors for a manifest whose ONLY non-default part is the
+    ``ontology.*`` keys passed here (the base manifest is otherwise valid), so
+    any error returned is attributable to them."""
     m = _manifest()
     m["ontology"] = {**m["ontology"], **ontology}
     return PackRegistry("/tmp/nonexistent")._validate(m)
@@ -190,19 +192,24 @@ class TestRelationTemplates:
         assert any("must be IMPL or NAND" in e for e in errors), errors
 
     def test_mitigates_is_refused_as_a_chain_edge(self):
-        """`MITIGATES` is not a valid chain/enforcement target either.
+        """`MITIGATES` is not a valid chain target.
 
-        Objective 6's conjunct is *"the mitigation actually moves the weight,
-        not merely existing"* (#4626). `CORE_PREDICATES` admitting `MITIGATES`
-        let a pack declare the retired spelling as a chain edge without
-        declaring a relation — advertising, on the author-facing manifest, a
-        mitigation the engine **cannot build** (`sdk.create_operator` refuses
-        it since the F1 ruling), so it could never move any weight. Refusing it
-        at validation time is what makes the conjunct real on the pack surface
-        rather than merely asserted on the SDK surface (#2766 / #5322)."""
+        `CORE_PREDICATES` admitting `MITIGATES` let a pack declare the retired
+        spelling as a chain edge without declaring a relation, so validation
+        accepted a chain edge the engine cannot build (`sdk.create_operator`
+        refuses the spelling; a mitigation is a `mitigated_by` Point, §3.9).
+        This asserts the validator rejects it (#2766 / #5322)."""
         errors = _ontology_errors(
             chains=[{"id": "c1", "steps": ["domainThing"], "edges": ["MITIGATES"]}])
         assert any("MITIGATES" in e and "c1" in e for e in errors), errors
+
+    def test_mitigates_is_refused_as_an_enforcement_relation(self):
+        """The SECOND read site of the same set: `enforcement.relations` keys are
+        validated against `declared_preds | CORE_PREDICATES`. Both arms must
+        refuse the retired spelling, not just the chain one."""
+        errors = _extraction_errors(
+            enforcement={"relations": {"MITIGATES": "warn"}})
+        assert any("MITIGATES" in e for e in errors), errors
 
     def test_impl_and_nand_remain_valid_chain_edges(self):
         """The removal must be NARROW: the two live core predicates still pass
