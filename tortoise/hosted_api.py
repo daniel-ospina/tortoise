@@ -6622,14 +6622,14 @@ async def _check_claim_rate_limit(request: Request) -> None:
     # that helper, so it must apply it here.
     ip = _normalize_mapped_ipv6(ip)
     limit = _int_env("TORTOISE_CLAIM_MAX_PER_24H", _CLAIM_MAX_PER_24H_DEFAULT)
-    window_s = _int_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
-    if window_s <= 0:
-        # An invalid window must never fail OPEN: with window_s <= 0 the
-        # in-window test `now - t < window_s` is never true, the bucket is
-        # emptied on every request and the limiter is silently disabled.
-        # Fall back to the default (the D6 convention for an out-of-range
-        # value) — the intended off-switch is RATE_LIMIT_DISABLED.
-        window_s = _CLAIM_WINDOW_DEFAULT
+    # #5493: the WINDOW is read through the floored accessor — with a
+    # non-positive window the in-window test `now - t < window_s` is never
+    # true, the bucket is emptied on every request and this limiter is
+    # silently disabled (fail OPEN). `_window_env` falls back to the default
+    # and warns once per distinct misconfig; the intended off-switch is
+    # RATE_LIMIT_DISABLED. `limit`/`store_cap` stay on `_int_env`: a
+    # non-positive limit is a legitimate fail-CLOSED deny-all.
+    window_s = _window_env("TORTOISE_CLAIM_WINDOW_S", _CLAIM_WINDOW_DEFAULT)
     store_cap = _int_env("TORTOISE_CLAIM_STORE_CAP", _CLAIM_STORE_CAP_DEFAULT)
     # User-facing period, derived so a tuned window cannot make the 429
     # message lie (identical to "24h" at the default window).
