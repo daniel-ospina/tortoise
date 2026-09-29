@@ -2291,6 +2291,16 @@ durations:
   test_namespace_uri_mode.py: 0.1
   test_onboarding_state.py: 0.6
   test_pack_content_v3.py: 0.4
+  # #1026 Stage 2 / #5647 residual: measured TWICE clean at 227.89s and
+  # 247.27s (2026-09-29, 44 passed both runs), of which 110-128s is TEARDOWN.
+  # Registered without this entry the packer treats a ~4-minute file as ~1s and
+  # mis-packs whichever half it lands in. The high value is deliberate: an
+  # under-estimate is the defect being fixed, so the entry takes the slower of
+  # the two measurements. An earlier single reading of 98.4s was a warm-cache
+  # under-estimate and was caught by the verifier, not by me. Own issue: the
+  # per-test fixture cost (a large share of the setup/teardown is the
+  # function-scoped autouse stack, not the tests themselves).
+  test_pack_extraction_slots_v31.py: 247.3
   test_pack_registry_gaps.py: 0.4
   test_provisioning_edge_function.py: 0.2
   test_reader.py: 0.7
