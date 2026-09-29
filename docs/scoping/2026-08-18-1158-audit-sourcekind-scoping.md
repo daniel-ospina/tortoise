@@ -69,4 +69,4 @@ Both changes are pure Cypher predicate changes; no schema/write-path impact.
   Source) → check 1 flagged; point with untiered Source → check 7 flagged only;
   Source with neutral-resolving kind → check 7 flagged; explicit tier beats
   neutral kind → check 7 clean. Existing test suite green.
-- `python3 tools/ci_selection.py --integrity` passes.
+- `uv run python tools/ci_selection.py --integrity` passes.
