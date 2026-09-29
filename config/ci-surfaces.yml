@@ -2483,6 +2483,7 @@ durations:
   test_dashboard_unknown_address.py: 0.1
   test_dream_noop_3139.py: 4.0
   test_durability_posture.py: 1.1
+  test_embed_metering.py: 12.0  # unmeasured — #4488: locally measured (58 tests, embedded lane: 10.9–16.0s across runs, ~12s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_embedder_provision.py: 0.9
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 10.6
