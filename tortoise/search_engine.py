@@ -750,7 +750,8 @@ def require_hybrid_read(leg_trace: list[dict] | None,
     False}`` only when at least one NOT-degraded, IN-SCOPE vector entry RAN
     (:func:`_vector_leg_healthy` skips an arm that measured an EMPTY scope),
     or when EVERY vector arm measured an empty scope (#2952's empty-scope
-    rule — C1 declares nothing there, so C2 must not refuse it). It raises
+    rule; ``declared_degraded_read`` is consulted first, so a marker it does
+    return refuses here too). It raises
     :class:`~tortoise.exceptions.HybridReadUnavailableError` otherwise —
     including for ``leg_trace=None`` / empty / structural-only traces (a
     surface that cannot positively prove the vector leg fails closed).
@@ -761,8 +762,8 @@ def require_hybrid_read(leg_trace: list[dict] | None,
     read is keyword-only). This is deliberately STRICTER than the #3005
     battery capability gate, which asks only whether the vector strategy was
     SUBMITTED (``ran`` regardless of ``degraded``); a battery lane that
-    records a score should delegate to this predicate so the two gates can
-    never disagree on the same trace. It is not a both-legs health check
+    records a score should delegate to this predicate so the capability it
+    reports cannot be looser than this one. It is not a both-legs health check
     (the fts leg's own degrade is surfaced separately in the trace).
 
     Opt-in only: nothing in the product calls this by default, so healthy-
@@ -779,10 +780,11 @@ def require_hybrid_read(leg_trace: list[dict] | None,
         elif _vector_leg_healthy(entries):
             return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
         elif _all_vector_arms_measured_empty_scope(entries):
-            # #4199 review P1: EVERY vector arm measured an EMPTY scope, so
-            # C1 declared nothing (#2952's empty-scope rule). C2 must apply
-            # the SAME rule or the pair disagrees — a read whose dense leg
-            # RAN over a scope with no nodes is not a refusal.
+            # #4199 review P1: on THIS trace every vector arm measured an
+            # EMPTY scope, and C1 declared nothing (``declared`` is None
+            # here, or its marker would have been raised above) — applying
+            # the same rule keeps the two gates aligned on this trace: a read
+            # whose dense leg RAN over a scope with no nodes is not a refusal.
             return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
         else:
             # Positive proof required: an absent marker on a non-hybrid trace

@@ -533,8 +533,8 @@ def test_every_arm_empty_scope_does_not_declare():
 
     When EVERY vector arm measured an empty scope the read is empty
     regardless of the dense leg — ``no_embeddings`` would be a category
-    error, so nothing is declared. #4199 review P1: the SIBLING gate
-    (``require_hybrid_read``) must reach the same verdict — before the fix it
+    error, so nothing is declared. #4199 review P1: on THIS trace the SIBLING
+    gate (``require_hybrid_read``) must not fall through — before the fix it
     fell through to ``_degraded_read_marker("leg_absent", ...)`` and RAISED,
     so ``retrieval_legs`` reported ``hybrid=False`` with a
     ``declared_degraded_read=None`` that contradicted it.
@@ -546,7 +546,6 @@ def test_every_arm_empty_scope_does_not_declare():
                    scope=VECTOR_SCOPE_EMPTY),
     ]
     assert declared_degraded_read(trace) is None, trace
-    # C1 and C2 must not disagree on the same trace.
     assert require_hybrid_read(trace) == {
         "hybrid": True, VECTOR_LEG_UNAVAILABLE: False}, trace
 
