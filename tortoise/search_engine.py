@@ -612,6 +612,20 @@ def _vector_leg_healthy(entries: list[dict]) -> bool:
         for e in entries)
 
 
+def _all_vector_arms_measured_empty_scope(entries: list[dict]) -> bool:
+    """True when EVERY vector entry measured an EMPTY scope (#4199 review P1).
+
+    ``#2952``'s empty-scope rule: a scope that selected NO nodes at all makes
+    ``no_embeddings`` a category error, so such a read is neither declared
+    degraded (C1) nor refused as non-hybrid (C2). Shared by both so the two
+    gates cannot disagree on the same trace — the defect that let C1 return
+    ``None`` while C2 raised ``leg_absent``.
+    """
+    vecs = [e for e in entries if e.get("leg") == "vector"]
+    return bool(vecs) and all(
+        e.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY for e in vecs)
+
+
 def _degraded_read_marker(reason: str, entries: list[dict]) -> dict:
     """The single marker shape (one construction site, #2952).
 
@@ -706,7 +720,7 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     # NOT degraded) — a degraded vector leg contributes no semantic results.
     if _vector_leg_healthy(entries):
         return None
-    if vecs_all and not vecs:
+    if _all_vector_arms_measured_empty_scope(entries):
         # EVERY vector arm measured an EMPTY scope: the read's scope holds no
         # nodes at all, so the dense leg is not to blame (#2952's empty-scope
         # rule — ``no_embeddings`` would be a category error there).
@@ -728,13 +742,16 @@ def require_hybrid_read(leg_trace: list[dict] | None,
 
     Capability for real-lane measurement (aligns with the #2985 / PR #3005
     fail-loud pattern): returns ``{"hybrid": True, "vector_leg_unavailable":
-    False}`` only when at least one NOT-degraded vector entry RAN, and raises
+    False}`` only when at least one NOT-degraded, IN-SCOPE vector entry RAN
+    (:func:`_vector_leg_healthy` skips an arm that measured an EMPTY scope),
+    or when EVERY vector arm measured an empty scope (#2952's empty-scope
+    rule — C1 declares nothing there, so C2 must not refuse it). It raises
     :class:`~tortoise.exceptions.HybridReadUnavailableError` otherwise —
     including for ``leg_trace=None`` / empty / structural-only traces (a
     surface that cannot positively prove the vector leg fails closed).
 
     This proves the VECTOR (semantic) leg specifically — the #2952 failure
-    class: at least one vector entry RAN and was NOT degraded (a
+    class: at least one IN-SCOPE vector entry RAN and was NOT degraded (a
     ``degraded=True`` vector leg contributed no semantic results, so the
     read is keyword-only). This is deliberately STRICTER than the #3005
     battery capability gate, which asks only whether the vector strategy was
@@ -755,6 +772,12 @@ def require_hybrid_read(leg_trace: list[dict] | None,
         if declared is not None:
             marker = declared
         elif _vector_leg_healthy(entries):
+            return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
+        elif _all_vector_arms_measured_empty_scope(entries):
+            # #4199 review P1: EVERY vector arm measured an EMPTY scope, so
+            # C1 declared nothing (#2952's empty-scope rule). C2 must apply
+            # the SAME rule or the pair disagrees — a read whose dense leg
+            # RAN over a scope with no nodes is not a refusal.
             return {"hybrid": True, VECTOR_LEG_UNAVAILABLE: False}
         else:
             # Positive proof required: an absent marker on a non-hybrid trace
@@ -1030,7 +1053,8 @@ def run_vector_query(
     _scope_embedded: int | None = None
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
-                count: int, mechanism: str | None = None) -> None:
+                count: int, mechanism: str | None = None,
+                failure: bool = False) -> None:
         if leg_trace is None:
             return
         if _scope_hollow and ran and not degraded:
@@ -1047,10 +1071,14 @@ def run_vector_query(
         entry = _trace_entry("vector", ran=ran, degraded=degraded,
                              reason=reason, count=count,
                              mechanism=mechanism)
-        if _scope_empty:
+        if _scope_empty and not failure:
             # #4199: mark the entry NEUTRAL — the empty-scope rule keeps its
             # ``ok``/degraded record, but the declaration skips it (see
             # :func:`declared_degraded_read`).
+            # #4199 review P2: a FAILURE is never neutral. An empty scope
+            # cannot launder ``query_failed`` / ``index_missing`` into "no
+            # scope, nothing to say" — that is the same laundering the
+            # empty-scope rule exists to stop, keyed on scope instead of arm.
             entry[VECTOR_SCOPE_KEY] = VECTOR_SCOPE_EMPTY
         leg_trace.append(entry)
 
@@ -1370,17 +1398,17 @@ def run_vector_query(
             logger.info("Vector index not available — skipping vector strategy")
             _breaker_record("vector", True)
             _record(ran=True, degraded=True, reason="index_missing", count=0,
-                    mechanism=scan_mechanism)
+                    mechanism=scan_mechanism, failure=True)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
             _breaker_record("vector", True)
             _record(ran=True, degraded=True, reason="no_embeddings", count=0,
-                    mechanism=scan_mechanism)
+                    mechanism=scan_mechanism, failure=True)
         else:
             logger.warning("Vector query failed: %s", e)
             _breaker_record("vector", False)
             _record(ran=True, degraded=True, reason="query_failed", count=0,
-                    mechanism=scan_mechanism)
+                    mechanism=scan_mechanism, failure=True)
         return []
 
 

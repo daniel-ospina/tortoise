@@ -58,11 +58,13 @@ import numpy as np
 import pytest
 
 from tortoise.embeddings import EmbeddingModel
+from tortoise.exceptions import HybridReadUnavailableError
 from tortoise.search_engine import (
     VECTOR_LEG_UNAVAILABLE,
     VECTOR_SCOPE_EMPTY,
     VECTOR_SCOPE_KEY,
     declared_degraded_read,
+    require_hybrid_read,
     reset_circuit_breakers,
     run_vector_query,
 )
@@ -348,6 +350,40 @@ def test_unscoped_read_keeps_reporting_hybrid(
     assert legs["hybrid"] is True, legs
 
 
+def test_empty_kind_scope_read_is_not_refused(
+        sdk_factory, embedder, monkeypatch):
+    """#4199 review P1 (end to end): an empty scope is not a refusal.
+
+    ``kind="kind-nobody-wrote"`` selects no nodes for the read's own scope,
+    so EVERY vector arm measured an EMPTY scope. C1 declares nothing (#2952's
+    empty-scope rule), but before the review fix C2 fell through to
+    ``_degraded_read_marker("leg_absent", ...)`` and refused — ``hybrid`` came
+    back False with ``refusal_reason="leg_absent"`` on a read whose dense leg
+    RAN. The two gates must agree: ``declared_degraded_read is None`` implies
+    ``hybrid`` is True and there is no refusal reason. (Regression on head
+    ``104f746e5``; ``67980bea`` returned ``hybrid=True`` here.)
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _embedder(monkeypatch, embedder)
+        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        legs = sdk.retrieval_legs(
+            "auth dead-end", kind="kind-nobody-wrote", limit=5)
+    finally:
+        sdk.close()
+
+    assert legs["declared_degraded_read"] is None, legs["legs"]
+    assert legs["hybrid"] is True, (
+        "C2 refused a read whose every vector arm measured an EMPTY scope "
+        f"({legs['hybrid_refusal_reason']!r}): {legs['legs']}")
+    assert legs["hybrid_refusal_reason"] is None, legs
+    vecs = _vector_entries(legs["legs"])
+    assert vecs, legs["legs"]
+    assert all(v.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY for v in vecs), (
+        f"the fixture must build the all-empty-scope shape: {vecs}")
+
+
 # ── 3. The guard, hermetically: scope-aware counts, fail-closed probe ──────
 
 VEC = [0.1] * 384
@@ -499,7 +535,11 @@ def test_every_arm_empty_scope_does_not_declare():
 
     When EVERY vector arm measured an empty scope the read is empty
     regardless of the dense leg — ``no_embeddings`` would be a category
-    error, so nothing is declared.
+    error, so nothing is declared. #4199 review P1: the SIBLING gate
+    (``require_hybrid_read``) must reach the same verdict — before the fix it
+    fell through to ``_degraded_read_marker("leg_absent", ...)`` and RAISED,
+    so ``retrieval_legs`` reported ``hybrid=False`` with a
+    ``declared_degraded_read=None`` that contradicted it.
     """
     trace = [
         _vec_entry(degraded=False, reason="ok", count=1,
@@ -508,6 +548,29 @@ def test_every_arm_empty_scope_does_not_declare():
                    scope=VECTOR_SCOPE_EMPTY),
     ]
     assert declared_degraded_read(trace) is None, trace
+    # C1 and C2 must not disagree on the same trace.
+    assert require_hybrid_read(trace) == {
+        "hybrid": True, VECTOR_LEG_UNAVAILABLE: False}, trace
+
+
+def test_require_hybrid_read_docstring_states_the_in_scope_rule():
+    """#4199 review P3: the public docstring must describe what the code does.
+
+    ``require_hybrid_read`` is the fail-loud capability lanes read; its
+    docstring claimed ``hybrid`` iff "at least one NOT-degraded vector entry
+    RAN", which is now false — :func:`_vector_leg_healthy` additionally
+    requires ``scope != 'empty'``. A lane trusting the old wording would read
+    an out-of-scope arm as proof the read was served. The docstring must name
+    the IN-SCOPE rule (matching ``_vector_leg_healthy``'s own) and the
+    all-empty-scope escape.
+    """
+    doc = require_hybrid_read.__doc__ or ""
+    assert "IN-SCOPE" in doc, (
+        "require_hybrid_read's docstring omits the in-scope rule: "
+        f"{doc!r}")
+    assert "at least one NOT-degraded vector entry RAN" not in doc, (
+        "the docstring still claims a bare 'ran' proves hybrid: " f"{doc!r}")
+    assert "EVERY vector arm measured an empty scope" in doc, doc
 
 
 def test_scope_with_dense_material_is_untouched_by_the_fix():
@@ -544,6 +607,42 @@ def test_empty_scope_is_not_declared_un_embedded():
     # blamed for) another arm's coverage — the #4199 review aggregation rule.
     assert vec.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY, vec
     assert declared_degraded_read(trace) is None, trace
+
+
+def test_empty_scope_cannot_launder_a_leg_failure():
+    """#4199 review P2: a FAILURE is never neutralised by an empty scope.
+
+    The scope probe reports ``(0, 0)`` — the scope is genuinely empty — and
+    then the scan RAISES. Before the review fix ``_record`` tagged the
+    failure entry ``scope=empty``, the declaration skipped it as neutral, and
+    a keyword-only read whose dense leg ERRORED was reported with no
+    declaration at all: the same laundering the empty-scope rule exists to
+    stop, keyed on scope instead of arm. ``index_missing`` is the other
+    failure reachable post-probe; both are covered.
+    """
+    for message, reason in (("kaboom", "query_failed"),
+                            ("no such index for vector", "index_missing")):
+        graph = _RoutingGraph([
+            ("count(n.embedding)", [(0, 0)], None),
+            ("euclideanDistance", [], RuntimeError(message)),
+        ])
+        trace: list[dict] = []
+        out = _scoped_run(graph, trace)
+        assert out == [], out
+        vec = _vector_entry(trace)
+        assert vec["reason"] == reason, vec
+        assert vec.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY, (
+            f"a leg FAILURE ({reason}) was tagged NEUTRAL by an empty "
+            f"scope: {vec}")
+        marker = declared_degraded_read(trace)
+        assert marker is not None, (
+            f"the empty scope laundered a {reason} failure: {trace}")
+        assert marker["reason"] == reason, marker
+        assert marker[VECTOR_LEG_UNAVAILABLE] is True, marker
+        # C2 agrees with C1: the failure is itself the refusal reason.
+        with pytest.raises(HybridReadUnavailableError) as exc:
+            require_hybrid_read(trace)
+        assert exc.value.reason == reason, exc.value.marker
 
 
 def test_unmeasurable_scope_fails_closed():
