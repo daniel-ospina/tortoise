@@ -2181,7 +2181,8 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # contract this function owns. ``VACUITY_BELIEF`` is the single
             # declaration both arms render, so they cannot re-drift.
             # (``updatedAt`` is the one prop this fold still does not
-            # stamp; that divergence is #4666's subject, not this one.)
+            # stamp; that divergence is a #5048 symptom — recorded from
+            # #4666 — not this one.)
             p["status"] = "retracted"
             p.update(VACUITY_BELIEF)
     elif t == "PointsMerged":

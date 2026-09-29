@@ -17,12 +17,13 @@ Pinned contracts here:
       unconditionally, so the pure fold must too);
   (b) the decay values are the ONE declaration ``decay_clause`` renders —
       a second hand-maintained copy is exactly how they drifted;
-  (b2) the copies that CANNOT be consolidated here stay pinned to the
-      declaration instead of silently drifting from it: ``consistency._DECAY``
-      (the journal side of the divergence detector) is asserted equal to it in
-      case (e). Two hand-declared copies of the triple remain besides
-      ``VACUITY_BELIEF`` — that one, and the ``assess_source`` payload in
-      ``tortoise/sdk.py``; neither is edited here.
+  (b2) the one copy that can be pinned without an overlapping change stays
+      pinned to the DECLARATION: ``consistency._DECAY`` (the journal side of the
+      divergence detector) is asserted equal to ``VACUITY_BELIEF`` in case (e),
+      so moving the declaration without moving that copy reds. Two hand-declared
+      copies of the triple remain besides ``VACUITY_BELIEF`` — that one (pinned)
+      and the ``assess_source`` payload in ``tortoise/sdk.py`` (held to the
+      contract by values only); neither is edited here.
   (c) ``fold()`` and ``rebuild_all()`` agree on a retract produced by the REAL
       emitters (``create_point`` + ``retract_point``), which is also what makes
       the synthetic shapes above reachable rather than invented;
@@ -206,11 +207,15 @@ def test_4542_detector_journal_side_is_pinned_to_the_declaration():
     side of the divergence detector that measures this invariant — so a drift
     there would silently corrupt the verdict (`check_consistency` would report
     the writer's own graph as diverged, or a real divergence as clean). That
-    module is not edited here, so the copy is PINNED to the declaration instead:
-    if the declaration moves, this reds and names the copy that must follow it.
+    module is not edited here, so the copy is PINNED to the DECLARATION instead:
+    move `VACUITY_BELIEF` without moving this copy and this reds.
 
-    (1) Fails if `_DECAY` drifts from the contract values below.
-    (2) Reachable: the object is imported from the shipped module.
+    (1) Fails if `_DECAY` stops following `VACUITY_BELIEF`.
+    (2) Reachable: both objects are imported from the shipped modules. The
+        declaration's own values are separately pinned to the contract literal
+        by `test_4542_fold_retract_decay_is_the_one_declaration_decay_clause_renders`,
+        so the chain is literal -> declaration -> copy.
     """
     from tortoise.consistency import _DECAY  # hand-declared copy of the triple
-    assert dict(_DECAY) == VACUITY_LITERAL
+    from tortoise.live import VACUITY_BELIEF as _declaration
+    assert dict(_DECAY) == dict(_declaration)
