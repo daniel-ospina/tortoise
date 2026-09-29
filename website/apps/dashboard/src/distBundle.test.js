@@ -162,7 +162,8 @@ test('#3661: the shipped bundle states the capture opt-in and never claims captu
     `${entryName} must not promise capture on a hook seam without naming the per-machine opt-in (#3661)`)
   // Both the Claude note and the Pi copy must keep the probe disclosure: the
   // probe reaches the server without consent, so a "nothing is sent" reading
-  // would be false.
+  // would be false. (This literal is the Claude note's; the Pi copy states its
+  // own wording, pinned by the wizardPrompts snapshot.)
   assert.ok(js.includes('install probe'),
     `${entryName} must disclose the ungated install probe (harness + timestamp only, no content)`)
   // The negative leg runs over EVERY shipped script, not just the entry chunk:

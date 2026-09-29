@@ -549,6 +549,12 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
   cursor: CURSOR_CAPTURE_INSTALL,
 }
 
+// #3661: the claude-web filing paragraph, extracted so the gated-off branch is
+// pinnable. It is `''` at render while HARNESS_CAPTURE_SUPPORT['claude-web'] is
+// false, so no rendered-value assertion and no snapshot can reach it.
+export const CLAUDE_WEB_FILING =
+  `4) Session filing — nothing is filed unless you call it, and your team's Agent sessions toggle (Memory sources > Agent sessions; default ON, ToS-covered, #1927) can refuse the file with a 409 — this path has no automatic capture. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
+
 // #1728 Slice 3 (Task 16/17): per-harness disabled-with-reason copy for the
 // sessions rows — pinned in the plan (web = "session capture for web is in
 // progress — not available yet" until the Task 13 spike verdict flips
@@ -557,12 +563,6 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
 // reason map covers the DISABLED harnesses only — a supported harness renders
 // the capture step, never a reason. Never hidden rows — disabled with an
 // honest reason.
-// #3661: the claude-web filing paragraph, extracted so the gated-off branch is
-// pinnable. It is `''` at render while HARNESS_CAPTURE_SUPPORT['claude-web'] is
-// false, so no rendered-value assertion and no snapshot can reach it.
-export const CLAUDE_WEB_FILING =
-  `4) Session filing — nothing is filed unless you call it, and your team's Agent sessions toggle (Memory sources > Agent sessions; default ON, ToS-covered, #1927) can refuse the file with a 409 — this path has no automatic capture. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
-
 export const HARNESS_CAPTURE_REASON = {
   'claude-desktop': 'backfill import only — no live install path yet',
   'claude-web': 'session capture for web is in progress — not available yet',
