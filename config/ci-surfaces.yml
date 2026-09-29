@@ -2215,7 +2215,7 @@ durations:
   test_user_identity_authority.py: 2.3
   test_ci_expected_manifests.py: 0.6
   test_ci_guard_invocation.py: 0.6
-  test_drift_guard.py: 27.6  # unmeasured — #4174: locally measured 27.6s (7 hermetic local-git fixtures); no CI junit value yet
+  test_drift_guard.py: 27.6  # unmeasured — #4174: locally measured 27.6s (carried-forward prior; the file now carries 8 hermetic local-git fixtures); no CI junit value yet
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1

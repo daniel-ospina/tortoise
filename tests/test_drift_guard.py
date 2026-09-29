@@ -282,3 +282,6 @@ def test_a_local_branch_shadowing_the_base_name_is_not_measured(
     assert payload["status"] == "drift", payload
     assert payload["freshness"] == "fetched", payload
     assert {r["path"] for r in payload["reverts"]} == {"h.txt"}, payload
+    # The verdict must name the ref it MEASURED, not the spelling that was
+    # shadowed — otherwise the report attests to a different commit.
+    assert payload["measured_base"] == "refs/remotes/origin/main", payload

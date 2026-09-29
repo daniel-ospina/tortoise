@@ -62,11 +62,11 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
         ["git", "-C", str(root), *args],
         capture_output=True, text=True, check=False,
         # A path inside a git object may hold bytes that are not valid UTF-8
-        # (legal on every filesystem, and reachable from CI). Strict decoding
-        # raises UnicodeDecodeError from inside subprocess.run — BEFORE any
-        # returncode check — which is a traceback where this tool's contract
-        # promises exit 2. surrogateescape round-trips the bytes so set
-        # comparisons stay byte-exact; _safe_text repairs the display.
+        # (legal on ext4/Linux — what the CI job runs; APFS rejects them and
+        # NTFS cannot represent them at all). Strict decoding raises
+        # UnicodeDecodeError from inside subprocess.run — BEFORE any returncode
+        # check — which is a traceback where this tool's contract promises
+        # exit 2 for an unmeasurable arm, and leaves the arm unmeasured.
         errors="surrogateescape",
     )
 
@@ -96,7 +96,11 @@ def repo_root() -> Path:
     """Repo root via git — robust to worktrees, symlinks, relative __file__."""
     r = _git(Path.cwd(), "rev-parse", "--show-toplevel")
     if r.returncode != 0:
-        sys.exit(f"drift-guard: not a git repository: {r.stderr.strip()}")
+        # Exit 2, not sys.exit(str)'s 1: "not a git repo" is the environment
+        # error the docstring's exit-code table promises (#4174 review).
+        print(f"drift-guard: not a git repository: {r.stderr.strip()}",
+              file=sys.stderr)
+        sys.exit(2)
     return Path(r.stdout.strip())
 
 
@@ -293,6 +297,8 @@ def main() -> int:
                      "freshness": freshness},
                     [f"ERROR {msg}"], 2)
 
+    base_sha = base_ok.stdout.strip()
+
     ahead = _git(root, "rev-list", "--count",
                  f"{measured_base}..{args.head}").stdout.strip()
     behind = _git(root, "rev-list", "--count",
@@ -333,10 +339,18 @@ def main() -> int:
 
     drifted = behind_n > max_behind
     status = "drift" if (drifted or reverts) else "ok"
+    # What was MEASURED, not what was asked for. `args.base` DWIM-resolves
+    # ahead of refs/remotes/, so under the shadow this PR guards against the
+    # two spellings name different commits — a verdict about one of them must
+    # not be reported as a verdict about the other (#4174 round-3 review).
+    base_label = (args.base if measured_base == args.base
+                  else f"{args.base} (measured {measured_base})")
     report = {
         "status": status,
         "branch": branch,
         "base": args.base,
+        "measured_base": measured_base,
+        "base_sha": base_sha,
         "freshness": freshness,
         "ahead": ahead_n,
         "behind": behind_n,
@@ -350,7 +364,7 @@ def main() -> int:
     if status == "ok":
         return emit(
             report,
-            [f"OK  {branch}: {behind_n} behind {args.base} "
+            [f"OK  {branch}: {behind_n} behind {base_label} "
              f"(<= {max_behind}), {ahead_n} ahead (base {freshness}) — gate green"],
             0,
         )
@@ -358,14 +372,14 @@ def main() -> int:
     lines: list[str] = []
     if drifted:
         lines.append(
-            f"FAIL {branch}: {behind_n} behind {args.base} "
+            f"FAIL {branch}: {behind_n} behind {base_label} "
             f"(> {max_behind} max) — branch drifted; fetch and reconcile onto "
             f"{args.base} before this lands (epic #1509 P3: every "
             f"real-backend E2E gates on 'worktree == origin/main')")
     if reverts:
         lines.append(
             f"FAIL {branch}: SILENTLY REVERTING {len(reverts)} path(s) that "
-            f"{args.base} changed and this branch never took "
+            f"{base_label} changed and this branch never took "
             f"(base {freshness}, merge-base {mb[:12]}):")
         for r in reverts[:MAX_REPORTED_PATHS]:
             lines.append(f"    {r['path']}  +{r['added']}/-{r['deleted']}")
@@ -374,7 +388,7 @@ def main() -> int:
         lines.append(
             f"    ({len(reverts)} file(s), {revert_lines} line(s)) — the "
             f"conflict-free revert: from inside the branch this is invisible, "
-            f"from outside it deletes {args.base}'s newer work. Fetch and "
+            f"from outside it deletes {base_label}'s newer work. Fetch and "
             f"reconcile before this lands (#4174).")
     return emit(report, lines, 1)
 
