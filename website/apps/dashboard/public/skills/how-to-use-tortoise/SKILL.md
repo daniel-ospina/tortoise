@@ -23,7 +23,7 @@ The graph-write operations in this skill are identical for every Tortoise deploy
 
 ### Hosted (cloud)
 
-Your agent reaches the graph through the Tortoise **MCP server** at `https://api.premiselabs.co/mcp/`, authenticated with a Bearer API key (`TORTOISE_API_KEY`). If you installed the skills via the onboarding wizard, the MCP server is already wired. Configuring it by hand? Use the equivalent project-scoped `.mcp.json` entry: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}` — that file is **committable**, so it carries the env reference, never the key. Every operation below maps to a `tortoise_*` MCP tool. No local database, SDK, `.env`, or graph-scripts.
+Your agent reaches the graph through the Tortoise **MCP server** at `https://api.premiselabs.co/mcp/`, authenticated with a Bearer API key (`TORTOISE_API_KEY`). If you installed the skills via the onboarding wizard, the MCP server is already wired. Configuring it by hand? Use the equivalent project-scoped `.mcp.json` entry: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}` — that file is **committable**, so it carries the env reference, never the key. A project-scope server stays **⏸ Pending approval** until you approve it once — start `claude` in the project and allow the prompt, or run `/mcp`. Every operation below maps to a `tortoise_*` MCP tool. No local database, SDK, `.env`, or graph-scripts.
 
 ### Self-hosted
 

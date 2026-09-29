@@ -38,7 +38,7 @@ tortoise signup
 
 The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **streamable-http** — that's the only correct hosted pattern. Auth is a Bearer header with your API key. In client JSON the transport value is `"http"` — Claude Code accepts `"streamable-http"` as an alias, but Cursor's CLI can drop the whole config file and Pi ignores `type`, so `"http"` is the only universally safe value.
 
-Export the key first, then add this to your client's `.mcp.json` (Claude Code and Pi read this file; Cursor reads `.cursor/mcp.json` and expands only the `${env:…}` form) — the file is **committable**, so it carries the env reference, never the key:
+Export the key first. For one machine, prefer the one-liner — it writes **local** scope to `~/.claude.json` (private, never committed): `claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"`. To share the config through the repo, add this to your client's `.mcp.json` (Claude Code and Pi read this file; Cursor reads `.cursor/mcp.json` and expands only the `${env:…}` form) — the file is **committable**, so it carries the env reference, never the key:
 
 ```bash
 export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell; use a non-committed include in your profile if it is version-controlled

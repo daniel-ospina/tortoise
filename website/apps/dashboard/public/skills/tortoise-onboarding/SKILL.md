@@ -269,9 +269,10 @@ Create/merge `.cursor/mcp.json` in the project — the file is **committable**
 ```
 
 Set `TORTOISE_API_KEY` in the environment Cursor is launched with — your shell
-profile when you start Cursor from a shell, or the system environment for a
-Finder launch (`launchctl setenv TORTOISE_API_KEY …`, then relaunch). Restart
-Cursor so it picks up the config.
+profile when you start Cursor from a shell (if that profile is
+version-controlled, use a non-committed include instead), or the system
+environment for a Finder launch (`launchctl setenv TORTOISE_API_KEY …`, then
+relaunch). Restart Cursor so it picks up the config.
 
 ### Codex CLI (self-install)
 
