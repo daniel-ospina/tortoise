@@ -289,7 +289,8 @@ def test_health_non_hosted_default_reports_expected_false(monkeypatch):
     *publication* half — that a non-hosted ``_lifespan`` never publishes True.
     The publication is pinned structurally, for both the hosted and the
     non-hosted case, by
-    ``test_watcher_expected_publish_is_unconditional_and_global`` below.
+    ``test_watcher_expected_publish_happens_outside_conditionals_and_in_module_scope``
+    below.
     """
     hosted_api._WATCHER = None
     hosted_api._WATCHER_START_ERROR = None
@@ -303,7 +304,7 @@ def test_health_non_hosted_default_reports_expected_false(monkeypatch):
     assert body["backup_watcher"]["expected"] is False
 
 
-def test_watcher_expected_publish_is_unconditional_and_global():
+def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_scope():
     """#4498 structural guard: the FIELD is worthless without the BOOT PLUMB.
 
     ``/health`` reads the module marker ``_WATCHER_EXPECTED``, and the only
@@ -311,14 +312,21 @@ def test_watcher_expected_publish_is_unconditional_and_global():
     inside ``_lifespan``. The tests above assign the marker by hand, so they
     exercise the handler and never the plumb that feeds it — deleting that one
     line left this suite green. This is the analog of the
-    ``_WATCHER_START_ERROR`` pin above, and it carries three conditions:
+    ``_WATCHER_START_ERROR`` pin above, and it carries four conditions:
 
       * the assignment must EXIST in ``_lifespan`` (an unqualified search would
         otherwise be satisfied by the module default);
-      * it must sit OUTSIDE every conditional — in particular the
-        ``if _watcher_expected:``/``else`` branch, which only logs: inside that
-        branch only the True case is republished, so a non-hosted re-entry
-        keeps a prior boot's ``True`` and #4498's distinction is corrupted;
+      * its VALUE must be the boot value ``_watcher_expected`` — a constant, a
+        call or any other expression hard-codes one of the two cases while the
+        published field still looks populated;
+      * it must run at ``_lifespan``'s own scope, outside every construct that
+        can skip or defer it — conditional branches, loops, ``match`` arms and
+        nested ``def``/``class`` scopes (the framework's own outer
+        ``async with`` lifespan frame is ``_lifespan``'s scope, not a barrier);
+        in particular the ``if _watcher_expected:``/``else`` branch, which only
+        logs: inside that branch only the True case is republished, so a
+        non-hosted re-entry keeps a prior boot's ``True`` and #4498's
+        distinction is corrupted;
       * ``_WATCHER_EXPECTED`` must be named in a ``global`` statement of
         ``_lifespan``, or the assignment binds a local and the module marker
         never moves.
@@ -349,9 +357,11 @@ def test_watcher_expected_publish_is_unconditional_and_global():
             parents[child] = parent
 
     def _ancestors(node: ast.AST) -> list[ast.AST]:
+        # Strictly BETWEEN the node and `_lifespan`'s own body: `_lifespan` is
+        # the module scope this pin requires, so it is not itself a barrier.
         chain: list[ast.AST] = []
         current = parents.get(node)
-        while current is not None:
+        while current is not None and current is not lifespan:
             chain.append(current)
             current = parents.get(current)
         return chain
@@ -369,17 +379,57 @@ def test_watcher_expected_publish_is_unconditional_and_global():
         "default (#4498)"
     )
 
-    unconditional = [
+    sourced = [
         node
         for node in publishes
-        if not any(
-            isinstance(anc, (ast.If, ast.ExceptHandler)) for anc in _ancestors(node)
-        )
+        if isinstance(node.value, ast.Name) and node.value.id == "_watcher_expected"
     ]
-    assert unconditional, (
-        "the `_WATCHER_EXPECTED` publish must sit OUTSIDE every conditional — "
-        "inside the `if _watcher_expected:`/`else` log branch (or the "
-        "`_not_started_reason` branch) only ONE of the two cases reaches the "
-        "marker, so a non-hosted re-entry can serve a stale `True` and #4498's "
-        "distinction silently returns"
+    assert sourced, (
+        "the `_WATCHER_EXPECTED` publish must take its VALUE from the boot "
+        "value `_watcher_expected` — a constant or any other expression "
+        "hard-codes one of the two cases while the plumb still looks intact, "
+        "so #4498's distinction is silently lost"
+    )
+
+    # Constructs that can leave the publish un-run or defer it: conditionals,
+    # loops that may iterate zero times, `match` arms, and nested
+    # function/class scopes (an uncalled `def` publishes nothing). The
+    # FastAPI/Starlette lifespan composition is `_lifespan`'s OWN scope — the
+    # function wraps its whole body in `async with mcp_http_app.lifespan(...)`,
+    # so a `with`/`async with` that is a DIRECT statement of `_lifespan` runs
+    # its body whenever `_lifespan` runs and cannot silently skip the publish
+    # (failure to enter it aborts the boot). Any `with` nested anywhere else
+    # is a barrier.
+    barriers = (
+        ast.If,
+        ast.ExceptHandler,
+        ast.While,
+        ast.For,
+        ast.AsyncFor,
+        ast.Match,
+        ast.With,
+        ast.AsyncWith,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.Lambda,
+        ast.ClassDef,
+    )
+
+    def _barrier(node: ast.AST) -> ast.AST | None:
+        for anc in _ancestors(node):
+            if isinstance(anc, (ast.With, ast.AsyncWith)) and anc in lifespan.body:
+                continue
+            if isinstance(anc, barriers):
+                return anc
+        return None
+
+    reachable = [node for node in sourced if _barrier(node) is None]
+    assert reachable, (
+        "the `_WATCHER_EXPECTED` publish must run in `_lifespan`'s own body, "
+        "outside every construct that can skip or defer it — a conditional "
+        "branch, a loop that may never iterate, a `match` arm, a nested "
+        "`def`/`class`, or a `with` that is not the function's own outer "
+        "lifespan frame — otherwise the assignment either never runs or "
+        "reaches only some of the two cases, and a boot can serve a stale or "
+        "hard-coded `expected` and #4498's distinction silently returns"
     )
