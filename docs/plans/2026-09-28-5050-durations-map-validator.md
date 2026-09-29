@@ -143,22 +143,24 @@ invented weight is indistinguishable from a measured one is exactly the state in
 which the map must not be reported as valid, and "we could not look" is not "it
 is fine".
 
-**In the merge gate, UNKNOWN is a NOTICE, not a failure — deliberately.** An
-absent capture date is currently the real state of `main`, so gating on it would
-red `manifest-integrity` repo-wide until the weekly refresh landed: refusing
-honest merges for a state no lane owns, on the same day the ruling warns that
-gates which refuse honest merges are a cost. The gate keeps its documented
-polarity (an absent map is "this repo has not adopted durations" = PASS, pinned
-by `test_null_or_non_mapping_durations_reports_instead_of_tracebacking`), and
-prints the reason as a NOTICE. The ENFORCING entry point therefore exits 0 on an
-ABSENT stamp — and ONLY on absence: `ci_selection.py --integrity` — the required
-`manifest-integrity` job — reports the genuinely-UNKNOWN states as a notice and
-its exit code does not carry them. A stamp that is PRESENT but unparseable is a
-MALFORMED manifest value, an OBSERVED defect, and stays RED (exit 1): softening
-it too would invert fail-closed, because degrading a stale-but-parseable stamp
-(RED) to `'not-a-date'` would turn exit 1 into exit 0. The strict exit-2 verdict
-lives in `tools/ci_manifest.py`, which no workflow invokes yet; wiring it as a
-required job is not this PR's scope.
+**In the merge gate, UNKNOWN is a NOTICE only for genuine ABSENCE — a present
+but malformed value is RED.** An absent capture date is currently the real state
+of `main`, so gating on it would red `manifest-integrity` repo-wide until the
+weekly refresh landed (#6091 blocks that refresh from opening its PR at all — see
+below): refusing honest merges for a state no lane owns, on the same day the
+ruling warns that gates which refuse honest merges are a cost. The gate keeps its
+documented polarity (an absent map is "this repo has not adopted durations" =
+PASS, pinned by
+`test_null_or_non_mapping_durations_reports_instead_of_tracebacking`), and
+prints the reason as a NOTICE. The ENFORCING entry point `ci_selection.py
+--integrity` — the required `manifest-integrity` job — therefore exits 0 on an
+ABSENT stamp, and that is the ONLY stamp state it softens: presence is the KEY'S,
+so a `durations_captured_at` that is PRESENT but unparseable is a MALFORMED
+manifest value, an OBSERVED defect, and is RED (exit 1). Softening it too would
+invert fail-closed, because degrading a stale-but-parseable stamp (RED) to
+`'not-a-date'` would turn exit 1 into exit 0. The strict exit-2 verdict lives in
+`tools/ci_manifest.py`, which no workflow invokes yet; wiring it as a required
+job is not this PR's scope.
 
 Everything the gate *can* observe is already fail-closed: the moment a capture
 date exists, a stale one, a future one and an unreachable weight are all RED and
@@ -184,8 +186,9 @@ which trades an unobserved map for a frozen queue.
   three exit codes, the writer's own `Z`-suffixed stamp format, absence vs
   unparseable vs stale vs future, the `(0, 0.1)` window, the `0.0` sentinel
   staying legal, a malformed map RED where an absent one is UNKNOWN, red
-  outranking unknown, an unreadable manifest, and the gate's
-  notice-but-do-not-fail polarity. (No count is written here on purpose: a
+  outranking unknown, an unreadable manifest, and the gate's narrowed polarity
+  (a GENUINELY ABSENT stamp is a notice; a present-but-unparseable one is RED).
+  (No count is written here on purpose: a
   literal test count in prose is the same stale-able pin the 688 assertion was.)
 - `test_the_committed_map_carries_no_red_defect` — **the behaviour-neutrality
   pin**: the validator is not red on the tree it lands on, and the declared

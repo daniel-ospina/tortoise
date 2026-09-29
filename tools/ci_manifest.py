@@ -235,6 +235,42 @@ def staleness(manifest: dict,
     return [], []
 
 
+def unparseable_stamp_issue(manifest: dict) -> str | None:
+    """The RED issue for a capture stamp that is PRESENT but unparseable.
+
+    ``staleness`` answers "can the map's AGE be observed?" — absence and
+    unparseability are both UNKNOWN there, because neither yields an age. This
+    answers the narrower question the enforcing gates need: is the stamp's
+    VALUE malformed? The distinction is presence, and presence is the KEY'S,
+    never the value's:
+
+    * the key is ABSENT → ``None`` — ``staleness``'s UNKNOWN stays the
+      non-gating notice (#6091 blocks the refresh from carrying a date, so
+      gating on mere absence would red ``manifest-integrity`` repo-wide);
+    * the key is PRESENT with any value ``_parse_captured_at`` rejects — ``""``,
+      an explicit ``null``, ``"   "``, ``"not-a-date"``, ``0``, ``[]``, ``{}``
+      → the issue text, because a present stamp describes a map whose age is
+      claimed but not legible, and degrading a stale-but-parseable stamp to
+      junk must not turn RED (exit 1) into GREEN (exit 0).
+
+    The decision is the PARSER'S VERDICT plus the key's presence — never a
+    hand-rolled value tuple, and never a substring of a reason string (wording
+    a downstream rewrite would silently disarm). Both enforcing entry points
+    (``ci_selection --integrity`` and ``ci_timing.integrity_problems``) call
+    THIS, so their verdicts on the stamp cannot drift apart.
+    """
+    if CAPTURED_AT_KEY not in manifest:
+        return None
+    raw = manifest[CAPTURED_AT_KEY]
+    if _parse_captured_at(raw) is not None:
+        return None
+    return (
+        f"`{CAPTURED_AT_KEY}` is {raw!r}, which is not a parseable timestamp — "
+        f"a malformed stamp is an OBSERVED defect in the manifest, not the "
+        f"unobserved 'never refreshed' state, so it is RED (#5050)"
+    )
+
+
 # ── value plausibility ───────────────────────────────────────────────────
 
 

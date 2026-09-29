@@ -2398,27 +2398,34 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     the "silent omission with every gate green" class they exist to kill.
 
     The validator's UNKNOWN verdict is printed as a NOTICE rather than added to
-    ``problems``. The two states are genuinely different: a RED map is observed
-    to be wrong, while UNKNOWN means the map's fidelity could not be observed —
-    it carries no capture date, or the repo has not adopted durations at all.
-    The second keeps this gate's documented polarity (an absent map must not
-    hard-fail a repo that never adopted it; pinned by
-    ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``), and
-    failing on it would red ``manifest-integrity`` repo-wide until a weekly data
-    refresh landed — refusing honest merges for a state no lane owns. The notice
-    keeps it visible instead of silent.
+    ``problems`` — for every reason EXCEPT the one observed defect below. The
+    states are genuinely different: a RED map is observed to be wrong, while
+    UNKNOWN means the map's fidelity could not be observed. The notice keeps
+    the genuinely-UNKNOWN cases visible instead of silent and preserves this
+    gate's documented polarity (an absent map must not hard-fail a repo that
+    never adopted it; pinned by
+    ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``):
+    failing on absence would red ``manifest-integrity`` repo-wide until a weekly
+    data refresh landed — refusing honest merges for a state no lane owns.
 
-    ABSENCE ONLY is softened. A ``durations_captured_at`` that is PRESENT but
-    unparseable is a MALFORMED manifest value — an OBSERVED defect — and is
-    added to ``problems`` (RED). Softening it too would invert fail-closed: a
-    stale-but-parseable stamp is RED, so degrading that same value to
-    ``'not-a-date'`` would turn exit 1 into exit 0 — strictly worse data,
-    strictly better verdict — and a one-character typo would silently disable
-    the staleness control at this, the only CI-invoked, entry point. The strict
-    exit-2 verdict for the genuinely-UNKNOWN states lives in
-    ``tools/ci_manifest.py``, which no workflow invokes yet: this enforcing
-    entry point exits 0 on an ABSENT stamp until #6091 lets a refresh carry a
-    real date.
+    ABSENCE ONLY is softened, and absence is the KEY'S. A
+    ``durations_captured_at`` that is PRESENT but unparseable is a MALFORMED
+    manifest value — an OBSERVED defect — and is added to ``problems`` (RED).
+    The predicate is structural: ``durations_captured_at not in manifest`` is
+    the sole non-gating case; otherwise ``ci_manifest._parse_captured_at``
+    decides, and a ``None`` verdict there is RED. So ``""``, an explicit
+    ``null``, ``"   "``, ``"not-a-date"``, ``0``, ``[]`` and ``{}`` are ALL
+    red, while a MISSING key stays the notice. Softening any present
+    unparseable value would invert fail-closed: a stale-but-parseable stamp is
+    RED, so degrading that same value to ``'not-a-date'`` would turn exit 1
+    into exit 0 — strictly worse data, strictly better verdict — and a
+    one-character typo would silently disable the staleness control at this,
+    the only CI-invoked, entry point. The strict exit-2 verdict for the
+    genuinely-UNKNOWN states lives in ``tools/ci_manifest.py``, which no
+    workflow invokes yet: this enforcing entry point exits 0 on an ABSENT
+    stamp until #6091 lets a refresh carry a real date. The promotion is
+    decided and worded in ONE place — ``ci_manifest.unparseable_stamp_issue`` —
+    so this gate and ``ci_timing.integrity_problems`` cannot disagree.
     """
     try:
         module = _ci_manifest_module()
@@ -2429,28 +2436,28 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
             f"not be imported — the map's value/coverage/partition/staleness "
             f"checks DID NOT RUN: {exc}"
         ]
+    # #6243 review cycle 3: the promotion is STRUCTURAL. `unparseable_stamp_issue`
+    # decides from the PARSER's verdict plus the KEY's presence — never a
+    # hand-rolled value tuple (which exempted `""` and an explicit `null`, so a
+    # blanked stamp read as absence and exited 0 while the same stale value
+    # exited 1), and never a substring of another module's reason string (which
+    # a reword silently disabled). It is computed FIRST, because it also decides
+    # which UNKNOWN reasons stay non-gating.
+    stamp_issue = module.unparseable_stamp_issue(manifest)
+    promoted: set[str] = set()
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
+        # One condition must not be reported as BOTH "not gating this run" and
+        # RED, and an OBSERVED defect must not travel the soft channel.
+        # `staleness` owns the stamp's reason, so it names exactly the ones this
+        # promotion replaces — by IDENTITY, not by their wording. (An explicit
+        # `null` reaches `staleness`'s absent branch, so that reason is
+        # suppressed here too; the missing-key case never promotes.)
+        promoted = set(module.staleness(manifest)[1])
     for reason in unknown:
+        if reason in promoted:
+            continue
         print(f"⚠ durations map UNKNOWN (not gating this run): {reason}")
-    # #6243 review cycle 2 (K1): a stamp that is PRESENT but UNPARSEABLE is a
-    # MALFORMED manifest value — an observed defect — NOT the unobserved
-    # "never refreshed" state the notice is for. Absence stays a notice (see
-    # the docstring), but presence-with-junk is RED, or degrading a stale stamp
-    # to `'not-a-date'` would flip exit 1 to exit 0 (a fail-open inversion).
-    # The raw value is already in hand, so the parser's verdict (from `unknown`)
-    # is combined with presence rather than re-parsing the stamp here.
-    raw_stamp = manifest.get(module.CAPTURED_AT_KEY)
-    unparseable = any(
-        module.CAPTURED_AT_KEY in reason
-        and "not a parseable timestamp" in reason
-        for reason in unknown
-    )
-    if raw_stamp not in (None, "") and unparseable:
-        red.append(
-            f"`{module.CAPTURED_AT_KEY}` is {raw_stamp!r}, which is not a "
-            f"parseable timestamp — a malformed stamp is an OBSERVED defect in "
-            f"the manifest, not the unobserved 'never refreshed' state, so it "
-            f"is RED (#5050)"
-        )
     return red
 
 

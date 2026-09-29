@@ -854,6 +854,31 @@ def test_integrity_problems_agrees_with_the_integrity_cli(
                for p in ci_timing.integrity_problems(skewed))
 
 
+def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
+    """#6243 review cycle 3 (L3): the refresh gate composes the SAME promotion
+    as `--integrity`, so the claimed parity is real.
+
+    A refreshed manifest is NOT guaranteed a parseable stamp:
+    `render_refreshed_manifest` writes the caller's `captured_at` verbatim via
+    `_set_captured_at` — it OVERWRITES any stamp the input carried rather than
+    preserving it, so nothing validates it — the `CI_TIMING_NOW` override can
+    set it to anything, and this file's own tests render with `"T"`. Gating on
+    `check`'s `red` alone therefore accepted exactly the manifests the gate
+    rejects. A present-but-unparseable stamp must be refused here too, while a
+    GENUINELY ABSENT one stays the one soft class.
+    """
+    before = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    rendered, _ = ci_timing.render_refreshed_manifest(
+        before, {"test_bridge_table.py": 12.0}, "T")
+    # The DURATION subset is blind to it — which is why the full gate is what
+    # must catch it, and why this test exists rather than trusting the subset.
+    assert ci_timing.validate_refreshed_manifest(rendered) == []
+    problems = ci_timing.integrity_problems(rendered)
+    assert any("not a parseable timestamp" in p for p in problems), problems
+    # Absence is still the notice-only class: no stamp key, no problem.
+    assert ci_timing.integrity_problems(before) == []
+
+
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
     """Task 4b makes this tool the writer of the weights the balancer packs by,
     so the old unconditional 'never gates CI' invariant was false (#3395)."""

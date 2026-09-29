@@ -432,7 +432,12 @@ def integrity_problems(manifest_text: str) -> list[str]:
     rendered — sub-floor, finer precision, or negative — a non-empty map whose
     every weight is the `0.0` sentinel, and a stale capture date) and both
     callers compose it, so the invariant is structural rather
-    than a convention each caller has to re-implement. The rest of the list is
+    than a convention each caller has to re-implement. The one UNKNOWN class the
+    enforcing gate promotes to RED — a capture stamp that is PRESENT but
+    unparseable — is likewise one shared decision,
+    `ci_manifest.unparseable_stamp_issue`, composed by BOTH callers (see the
+    note in the body for why a refreshed manifest can carry one at all). The
+    rest of the list is
     composed here because `ci_manifest` does not own it — most importantly
     `workflow_halves_issues`: a refresh that skews a weight hard enough to tilt
     the push halves (the #3395 starved-shard shape) would otherwise be accepted
@@ -452,11 +457,20 @@ def integrity_problems(manifest_text: str) -> list[str]:
     ci_manifest = cs._ci_manifest_module()
 
     manifest = _manifest_of(manifest_text)
-    # `red` only: `unknown` (an absent capture date, an absent map) is not a
-    # defect THIS gate can name — the refreshed text it is given carries a fresh
-    # stamp by construction. Parity with `--integrity` is on `red`, which is
-    # what makes the refresh refuse exactly the manifests the gate rejects.
+    # `red` PLUS the ONE UNKNOWN class the enforcing gate promotes. Parity with
+    # `--integrity` is on the SERVED verdict, and `--integrity` promotes a
+    # PRESENT-but-unparseable stamp to RED; gating on `check`'s `red` alone
+    # would accept exactly that stamp here while the gate rejects it. This is a
+    # REAL gap, not a hypothetical one: `render_refreshed_manifest` writes the
+    # caller's `captured_at` verbatim via `_set_captured_at` (it OVERWRITES any
+    # stamp the input carried, so nothing validates it), the `CI_TIMING_NOW`
+    # override sets it to anything, and this file's own tests render with `"T"`.
+    # Both entry points call the same `ci_manifest.unparseable_stamp_issue`, so
+    # the parity is structural rather than a claim each side re-implements.
     red, _unknown = ci_manifest.check(manifest)
+    stamp_issue = ci_manifest.unparseable_stamp_issue(manifest)
+    if stamp_issue is not None:
+        red = [*red, stamp_issue]
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
                 + red)

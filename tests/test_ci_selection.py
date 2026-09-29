@@ -3186,17 +3186,27 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
 
 # ── #6243 review cycle 2 (K1): presence-with-junk is RED, absence is a notice ──
 
-def _integrity_with_stamp(tmp_path, monkeypatch, stamp):
+# Distinguishes "remove the key" from "the key is present with a `null` value"
+# — the two states the whole promotion turns on, and which a bare `None` default
+# would collapse (a present explicit `null` is a MALFORMED value, not absence).
+_ABSENT = object()
+
+
+def _integrity_with_stamp(tmp_path, monkeypatch, stamp=_ABSENT):
     """Drive the real `--integrity` CLI over the committed manifest with the
-    capture date set to `stamp` (removed entirely when `stamp is None`)."""
+    capture date set to `stamp` (the key is removed entirely when `stamp` is
+    left out)."""
     import sys as _sys
 
     import yaml
 
     from tools import ci_selection as cs
-    m = dict(cs.load_manifest())
+    # The committed map, read from the REPO path — never through `cs.MANIFEST`,
+    # which a previous call in the same test has already monkeypatched.
+    base = cs.REPO / "config" / "ci-surfaces.yml"
+    m = dict(cs._normalize_surfaces(yaml.safe_load(base.read_text())))
     m.pop("durations_captured_at", None)
-    if stamp is not None:
+    if stamp is not _ABSENT:
         m["durations_captured_at"] = stamp
     path = tmp_path / "stamped-ci-surfaces.yml"
     path.write_text(yaml.safe_dump(m))
@@ -3225,15 +3235,57 @@ def test_integrity_reds_a_present_but_unparseable_stamp(tmp_path, monkeypatch):
         "exit 1 to exit 0 (fail-open, K1)")
 
 
+def test_integrity_reds_every_present_but_unparseable_spelling(
+        tmp_path, monkeypatch):
+    """#6243 review cycle 3 (L1): pin the CLASS, not one spelling.
+
+    The predicate is the KEY'S PRESENCE plus `_parse_captured_at`'s verdict,
+    so no present value the parser rejects can slip through the soft channel —
+    in particular `""` and an explicit `null`, which a value-tuple test
+    (`raw_stamp not in (None, "")`) exempted as absence. Only a genuinely
+    MISSING key is the non-gating notice (pinned by the next test).
+    """
+    for stamp in ("", None, "   ", "not-a-date", 0, [], {}, False):
+        assert _integrity_with_stamp(tmp_path, monkeypatch, stamp) == 1, (
+            f"a present-but-unparseable stamp {stamp!r} must be RED (exit 1)"
+        )
+
+
+def test_integrity_never_lets_blanking_a_stale_stamp_exit_zero(
+        tmp_path, monkeypatch):
+    """The exact inversion pair, in ONE test: the same manifest with a stale
+    parseable stamp exits 1, and blanking that stamp to `""` must STILL exit 1
+    — never 0. A blanked stamp is a MALFORMED value, not an absent one."""
+    assert _integrity_with_stamp(
+        tmp_path, monkeypatch, "2000-01-01T00:00:00Z") == 1
+    assert _integrity_with_stamp(tmp_path, monkeypatch, "") == 1, (
+        "blanking a stale stamp must not turn exit 1 into exit 0")
+
+
 def test_integrity_still_notices_an_absent_stamp_and_exits_zero(
         tmp_path, monkeypatch, capsys):
-    # (c) Absence is the never-refreshed state no lane owns until #6091 lets a
-    # refresh carry a real date, so it must STAY a notice: exit 0, with the
+    # (c) Absence — the key GENUINELY MISSING, which is the ONLY case that stays
+    # soft — is the never-refreshed state no lane owns until #6091 lets a
+    # refresh carry a real date, so it must stay a NOTICE: exit 0, with the
     # reason still printed (visible, not silent).
-    assert _integrity_with_stamp(tmp_path, monkeypatch, None) == 0
+    assert _integrity_with_stamp(tmp_path, monkeypatch) == 0
     out = capsys.readouterr().out
     assert "durations map UNKNOWN (not gating this run)" in out, out
     assert "durations_captured_at" in out, out
+
+
+def test_integrity_prints_a_promoted_stamp_once_with_red_wording(
+        tmp_path, monkeypatch, capsys):
+    """#6243 review cycle 3 (L2): an OBSERVED defect must not ALSO be announced
+    through the soft channel. `--integrity` used to print the UNKNOWN notice
+    for the promoted reason and gate on it at the same time."""
+    assert _integrity_with_stamp(tmp_path, monkeypatch, "not-a-date") == 1
+    out = capsys.readouterr().out
+    assert "durations map UNKNOWN (not gating this run)" not in out, out
+    problems = next(line for line in out.splitlines()
+                    if line.startswith("❌ manifest drift:"))
+    assert "not a parseable timestamp" in problems, problems
+    assert problems.count("not a parseable timestamp") == 1, problems
 
 
 # ── #4378: changed-set diffs must disable rename detection ──────────────

@@ -384,12 +384,17 @@ def test_an_unreadable_manifest_is_unknown_not_a_traceback(tmp_path) -> None:
 def test_integrity_notices_unknown_and_still_fails_red(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """UNKNOWN must be visible in the gate but must not gate it.
+    """An ABSENT stamp must be visible in the gate but must not gate it.
 
-    Failing on it would red `manifest-integrity` repo-wide until a weekly data
-    refresh landed, refusing honest merges for a state no lane owns — while
-    silence would let an unobserved map read as a validated one. So: a notice,
-    plus `ci_manifest.py` exiting 2. A RED defect is a defect either way.
+    Not every UNKNOWN is soft: a stamp that is PRESENT but unparseable IS an
+    observed defect and gates (pinned by
+    ``test_integrity_reds_a_present_but_unparseable_stamp`` in the selector
+    suite). This test builds the ABSENT case only, and that one must stay a
+    notice: failing on it would red `manifest-integrity` repo-wide until a
+    weekly data refresh landed (#6091), refusing honest merges for a state no
+    lane owns — while silence would let an unobserved map read as a validated
+    one. So: a notice, plus `ci_manifest.py` exiting 2. A RED defect is a
+    defect either way.
     """
     import yaml
 
