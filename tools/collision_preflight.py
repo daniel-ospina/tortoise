@@ -1322,37 +1322,34 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
 #: A `mergify/merge-queue/<hash>` branch is created and deleted by the merge
 #: queue for each queued PR, so its name is a hash and carries no intent.
 #:
-#: ⛔ THE WIDTH OF THIS TUPLE IS A FAIL-CLOSED DECISION, NOT A CONVENIENCE. An
-#: earlier version listed the whole `mergify/` namespace, justified by
-#: "no lane can claim one" — a claim measured ONLY for `mergify/merge-queue/*`.
-#: A lane can create `refs/heads/mergify/3061-lane` locally, and that branch was
-#: then invisible on a BLOCKING surface: a false CLEAN, which for this tool is
-#: strictly worse than a false COLLISION (review cycle 1, PR #6267). Name the
-#: sub-namespace that was actually measured, and widen it only with a decision
-#: and a test that pins the widening.
+#: ⛔ THE WIDTH OF THIS TUPLE IS A FAIL-CLOSED DECISION, NOT A CONVENIENCE. A
+#: lane can create `refs/heads/mergify/3061-lane` locally, and a namespace listed
+#: more broadly than what was measured would render that branch invisible on a
+#: BLOCKING surface: a false CLEAN, which for this tool is strictly worse than a
+#: false COLLISION. Name the sub-namespace that was actually measured, and widen
+#: it only with a decision and a test that pins the widening.
 #:
-#: ⚠️ TWO GENERATED NAMESPACES, both measured in this repo's real refs (review
-#: cycle 2, PR #6267). `mq/merge-queue/` is a SECOND Mergify merge-queue
-#: namespace. `chore/ci-timing-refresh-` is minted by this repo's own workflow
-#: from a short SHA, and a short SHA can LEAD with an issue number exactly like
-#: the hash this filter exists for.
-#:
-#: Each entry must be narrow enough that no lane would choose it. `chore/`
-#: alone would be far too wide; the full bot-minted prefix is what is excluded.
+#: Every entry must be narrow enough that no lane would choose it. Each one below
+#: is a bot-minted namespace whose refs were verified against their committer
+#: identity in this repo (`mergify/merge-queue/`, `mq/merge-queue/`).
 _GENERATED_BRANCH_PREFIXES = (
     "mergify/merge-queue/",
     "mq/merge-queue/",
 )
 
-#: The CI bot's refresh branch is under a LANE-OWNED namespace (`chore/`), so its
-#: prefix alone is too wide: `chore/ci-timing-refresh-3061-manual` is a name a
-#: lane could reasonably write, and excluding it would hide a claim on a BLOCKING
-#: surface — the direction that is strictly worse than a false COLLISION (review
-#: cycle 3, PR #6267). The workflow mints `chore/ci-timing-refresh-<short SHA>`,
-#: so the tail is anchored to what the generator actually produces: a hex run.
-#: A tail with any non-hex character stays a claim.
+#: The CI bot's refresh branch sits under a LANE-OWNED namespace (`chore/`), so
+#: its prefix alone would be too wide: `chore/ci-timing-refresh-3061-manual` is a
+#: name a lane could reasonably write, and excluding it would hide a claim on a
+#: BLOCKING surface — again the direction that is strictly worse than a false
+#: COLLISION. The generator mints `<prefix><short SHA>`, so the tail is anchored
+#: to what it actually produces. Anything else stays a claim.
 _CI_TIMING_PREFIX = "chore/ci-timing-refresh-"
 _CI_TIMING_TAIL_MIN = 7
+#: ⚠️ NOT `_HEX_DIGITS`: that set deliberately includes `A-F` because digest
+#: matching needs it, but `git rev-parse --short` emits LOWERCASE only. An
+#: uppercase tail is therefore a name only a lane could write, and filtering it
+#: would be a false CLEAN on a blocking surface.
+_CI_TIMING_TAIL_DIGITS = frozenset("0123456789abcdef")
 
 
 def _is_generated_branch(name: str) -> bool:
@@ -1382,9 +1379,8 @@ def _is_generated_branch(name: str) -> bool:
 
     The name is tested AFTER stripping the ref prefix the surfaces actually
     carry: `git for-each-ref` hands over `refs/remotes/origin/mergify/…` and
-    `refs/heads/fix/…`, so a bare `startswith("mergify/")` test never fires on
-    the real input (measured: the first version of this filter did not match,
-    and #6160 still read exit 1)."""
+    `refs/heads/fix/…`, so a test on the bare name never fires on the real
+    input."""
     stripped = name
     for prefix in ("refs/remotes/", "refs/heads/"):
         if stripped.startswith(prefix):
@@ -1397,7 +1393,7 @@ def _is_generated_branch(name: str) -> bool:
     if stripped.startswith(_CI_TIMING_PREFIX):
         tail = stripped[len(_CI_TIMING_PREFIX):]
         return (len(tail) >= _CI_TIMING_TAIL_MIN
-                and all(c in _HEX_DIGITS for c in tail))
+                and all(c in _CI_TIMING_TAIL_DIGITS for c in tail))
     return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
 
 

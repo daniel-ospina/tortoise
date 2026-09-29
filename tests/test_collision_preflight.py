@@ -1489,8 +1489,7 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn(f"refs/remotes/origin/{ref}", out)
 
     def test_second_mergify_namespace_and_ci_bot_branch_are_not_claims(self):
-        # Review cycle 2 (PR #6267): TWO more generated namespaces exist in
-        # this repo's real refs and were unfiltered by the first fix.
+        # Two more generated namespaces exist in this repo's real refs.
         # `mq/merge-queue/` is a second Mergify merge-queue namespace;
         # `chore/ci-timing-refresh-` is minted by this repo's own workflow from
         # `git rev-parse --short HEAD`, so a short SHA can LEAD with an issue
@@ -1506,12 +1505,9 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertNotIn(ref, out)
 
     def test_worktree_on_a_generated_branch_is_still_found_by_its_path(self):
-        # ⛔ THE WORKTREE HALF IS THE LOAD-BEARING ONE, and it is the half a
-        # one-line mutation can silently break (review cycle 2, PR #6267). The
-        # filter skips only the BRANCH; the PATH must still be matched in full,
-        # or a real worktree on a generated branch becomes invisible on a
-        # BLOCKING surface. Mutating the filter to `continue` past the whole
-        # block left every other worktree test passing, so this pins it.
+        # ⛔ THE WORKTREE HALF IS THE LOAD-BEARING ONE. The filter skips only the
+        # BRANCH; the PATH must still be matched in full, or a real worktree on a
+        # generated branch becomes invisible on a BLOCKING surface.
         self.add_worktree(f"{ISSUE}-queue-wt",
                           branch=f"mergify/merge-queue/{ISSUE}bad001")
         rc, out = self.run_tool()
@@ -1521,13 +1517,14 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn(f"{ISSUE}-queue-wt", out)
 
     def test_ci_timing_branch_with_a_descriptive_tail_is_still_a_claim(self):
-        # Review cycle 3 (PR #6267): `chore/ci-timing-refresh-` sits under the
-        # LANE-OWNED `chore/` namespace, so the bare prefix was too wide — a lane
-        # could write a descriptive tail. The bot mints a short SHA, so the tail
-        # is anchored to hex; anything else must stay a claim, because hiding one
-        # on a BLOCKING surface is worse than a false COLLISION.
+        # `chore/ci-timing-refresh-` sits under the LANE-OWNED `chore/`
+        # namespace, so the bare prefix would be too wide — a lane could write a
+        # descriptive tail. The generator mints a lowercase short SHA, so the
+        # tail is anchored to lowercase hex; anything else stays a claim, because
+        # hiding one on a BLOCKING surface is worse than a false COLLISION.
         for ref in (f"chore/ci-timing-refresh-{ISSUE}-manual",
-                    f"chore/ci-timing-refresh-{ISSUE}"):
+                    f"chore/ci-timing-refresh-{ISSUE}",
+                    f"chore/ci-timing-refresh-{ISSUE}BAd001"):
             with self.subTest(ref=ref):
                 _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
                 rc, out = self.run_tool()
