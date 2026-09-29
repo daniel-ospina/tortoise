@@ -229,14 +229,15 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 ### Claude Code (self-install)
 
 ```bash
+export TORTOISE_API_KEY=tt_YOUR_KEY   # this shell
 claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
   --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 ```
 
-`$TORTOISE_API_KEY` must be exported in the shell you run this in — and in
-your profile for later sessions
-(`export TORTOISE_API_KEY=tt_YOUR_KEY` in `~/.zshrc` / `~/.bashrc` — if that
-profile is version-controlled, use a non-committed include instead). The shell
+The export must reach the shell you run this in — a profile edit does not — and
+you'll want it in your profile for later sessions (`~/.zshrc` / `~/.bashrc`; if
+that profile is version-controlled, use a non-committed include instead). The
+shell
 expands it, so the key lands in **`~/.claude.json`** — local scope, under this
 project's entry: private to you, this project only, **never committed**.
 Validate the config was written (`claude mcp list` shows `tortoise`).
@@ -267,9 +268,10 @@ Create/merge `.cursor/mcp.json` in the project — the file is **committable**
 { "mcpServers": { "tortoise": { "url": "https://api.premiselabs.co/mcp/", "headers": { "Authorization": "Bearer ${env:TORTOISE_API_KEY}" } } } }
 ```
 
-Set `TORTOISE_API_KEY` in Cursor's own MCP settings environment — a Cursor
-launched from Finder does not read `~/.zshrc`. Restart Cursor so it picks up the
-config.
+Set `TORTOISE_API_KEY` in the environment Cursor is launched with — your shell
+profile when you start Cursor from a shell, or the system environment for a
+Finder launch (`launchctl setenv TORTOISE_API_KEY …`, then relaunch). Restart
+Cursor so it picks up the config.
 
 ### Codex CLI (self-install)
 
@@ -278,7 +280,8 @@ export TORTOISE_API_KEY=tt_YOUR_KEY
 codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-var TORTOISE_API_KEY
 ```
 
-Persist the export in your shell profile. The skill installer writes Codex
+Persist the export in your shell profile — if it is version-controlled, use a
+non-committed include instead. The skill installer writes Codex
 skills to `.agents/skills` (Codex's documented skill root — NOT `.codex/skills`,
 which Codex never loads) and adds a repo-root AGENTS.md standing-instructions
 block:
@@ -354,7 +357,8 @@ What gates hosted capture is **per-surface**, and not yet uniform (#3615):
   until it closes, treat that export on a Pi host as a data-sharing opt-in, not
   a credential-only change.
 
-**2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
+**2. Create/merge the committable `.mcp.json` (project scope) in this project**
+(MERGE — never replace an
 existing `mcpServers` block; if the EFFECTIVE config already has a `tortoise`
 entry — even one that only lives in the home/base config — run the collision
 protocol below BEFORE writing):

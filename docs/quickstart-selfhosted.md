@@ -104,7 +104,7 @@ tortoise init --yes    # same, no prompts (auto-indexes the repo you're inside, 
 To index an existing repo's markdown files:
 
 ```bash
-tortoise index github https://github.com/your/repo --db <path-or-uri>
+tortoise index github https://github.com/your/repo --db '<path-or-uri>'
 ```
 
 `index github` clones the repo (or accepts a local path), extracts deterministically with offline mock models, and writes Points/Operators to the graph — idempotent across runs. For richer LLM-based extraction, use the standalone ingest CLI instead — `tortoise-ingest transcript.txt --db <path-or-uri>` (or `python -m tortoise.ingest`). It ingests a transcript file, requires `--db`, and defaults to offline mock models; pass `--point-model`/`--relation-model` (e.g. `ollama:llama3.2:3b`) to use a real LLM. `tortoise onboard` runs the full init → index → demo → doctor flow and passes the same resolved DB target to each step, so it works in embedded-only mode too (it used to crash; fixed in #705).
@@ -282,7 +282,7 @@ python -c 'from tortoise.sdk import TortoiseSDK; TortoiseSDK().rebuild_all("<eve
 3. Re-index the corpus:
 
 ```bash
-tortoise index directory <corpus-dir>
+tortoise index directory '<corpus-dir>'
 ```
 
 4. **Verify — including an EDGE check.** `session_index_health` is edge-blind;
@@ -483,13 +483,13 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
 3. **Connect a working directory to cloud**:
 
    ```bash
-   tortoise init --api-key tt_<your-key>   # saves .tortoise config in this directory
+   tortoise init --api-key 'tt_<your-key>'   # saves .tortoise config in this directory
    ```
 
 4. **Import the artifact** into the team graph (owner session auth — the import endpoint is owner-scoped, like export):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
+   curl -X POST "https://api.premiselabs.co/v1/organizations/<org_id>/import" \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \

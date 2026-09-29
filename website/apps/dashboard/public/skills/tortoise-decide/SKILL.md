@@ -23,7 +23,7 @@ evidence lands.
 ## Which Tortoise are you on?
 
 - **Hosted (cloud):** your agent uses the Tortoise MCP tools (`tortoise_*`),
-  configured via `claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ --header "Authorization: Bearer $TORTOISE_API_KEY"` or the project-scoped `.mcp.json` entry — that file is **committable**, so it must carry the env reference (`Bearer ${TORTOISE_API_KEY}`), never the key.
+  configured via the project-scoped `.mcp.json` entry (`"headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}` — that file is **committable**, so it carries the env reference, never the key).
 - **Self-hosted:** your agent uses the same `tortoise_*` MCP tools against a
   local MCP server pointed at your own FalkorDB, or runs
   `graph-scripts/decide.py` / the Python SDK directly.
