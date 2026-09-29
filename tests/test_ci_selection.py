@@ -9,6 +9,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shlex
 import shutil
@@ -3156,10 +3157,11 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
 
 # ── #4378: changed-set diffs must disable rename detection ──────────────
 #
-# The predicate below is per COMMAND, not per line: `python-ci.yml`'s "Tiered
-# selection" step carries TWO `git diff` invocations on ONE line joined by `||`,
-# so a whole-line substring check is satisfied by the flag on either side —
-# removing it from the second command reintroduces #4378 while the check still
+# The predicate below is per COMMAND, not per line: a workflow step MAY write two
+# `git diff` invocations on ONE line joined by `||` (that was `python-ci.yml`'s
+# "Tiered selection" shape until #3442 collapsed it to one canonical merge-base
+# diff), and a whole-line substring check is satisfied by the flag on either side
+# — removing it from the second command reintroduces #4378 while the check still
 # passes. These helpers are module-level so the parser can be exercised directly
 # on synthetic shell text.
 
@@ -3577,11 +3579,14 @@ def test_every_changed_set_diff_scan_covers_yaml_workflows(tmp_path):
 def test_changed_set_parser_reads_commands_not_lines():
     """#4378 FIX 1: two `git diff`s on one `||` line are TWO commands.
 
-    `python-ci.yml`'s "Tiered selection" step carries
-    `... || git diff --no-renames --name-only ...`.
-    A whole-line substring predicate is satisfied by the flag on EITHER side, so
-    removing it from the second command reintroduced #4378 undetected. The
-    synthetic inputs below freeze that regression.
+    A changed-set computation can put two `git diff`s on one `||` line (the
+    `... || git diff --no-renames --name-only ...` shape). A whole-line
+    substring predicate is satisfied by the flag on EITHER side, so removing it
+    from the second command would reintroduce #4378 undetected. The synthetic
+    inputs below freeze that regression. (#3442 removed this shape from
+    `python-ci.yml`'s "Tiered selection" step — it is one canonical merge-base
+    diff now — but the parser must keep splitting commands, because any workflow
+    may still write it.)
     """
     one_flagged = (
         'CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" '
@@ -3847,8 +3852,8 @@ def test_changed_set_parser_cross_check_fails_closed_on_colocation():
     """#4378 FIX 1: an unparsed changed-set diff cannot hide beside a parsed one.
 
     `unparsed_changed_set_diff_lines` used to mark a whole line "covered" as soon
-    as ONE parsed command started on it, so this shape — `python-ci.yml:188`'s two
-    changed-set diffs on one line, with the second written in a spelling the
+    as ONE parsed command started on it, so this shape — two changed-set diffs on
+    one line, with the second written in a spelling the
     parser does not recognise (`--name-status`, no flag) — passed the pin clean
     (`offenders=[]`, `unparsed=[]`) while the second command computed a changed set
     with rename detection ON. The cross-check must count the flag spellings, not
@@ -3984,9 +3989,10 @@ def test_every_changed_set_diff_disables_rename_detection():
     * It is per COMMAND, not per line (`iter_shell_commands`): `||`/`&&`/`;`/`|`/`&`
       split a line into commands, a backslash-continued invocation is joined first,
       and comments and ordinary quoted text are dropped. `python-ci.yml`'s "Tiered
-      selection" step carries TWO diffs on one line, so a line-level check would
+      selection" step carried TWO diffs on one line, so a line-level check would
       let the second lose the flag undetected — the regression the parser tests
-      above freeze. The bare `|`/`&` joiners are load-bearing, not decorative: with
+      above freeze. (#3442 collapsed that step to one merge-base diff; the
+      parser tests keep the two-command case frozen synthetically.) The bare `|`/`&` joiners are load-bearing, not decorative: with
       only the doubled forms in the separator set,
       `git diff --no-renames --name-only A | git diff --name-status B` was ONE
       merged command whose token list carried both spellings, so the ownership
@@ -4089,21 +4095,22 @@ def test_every_changed_set_diff_disables_rename_detection():
         the eval-drift gate — are filed as follow-ups, not covered here.
     * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
       three. It is counted from the PARSED commands above — measured today as
-      FOUR: two on `python-ci.yml`'s "Tiered selection" step, one on `ci.yml`'s
+      THREE: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
+      two `||`-joined diffs into one canonical merge-base diff), one on `ci.yml`'s
       "Compute per-surface path gates (#2149)" step, and one on the dead step
       below. So a comment cannot satisfy it (and a comment mentioning the flag
-      cannot inflate it). Because the other THREE commands satisfy the floor by
-      themselves, deleting the dead step alone leaves `checked == 3` and needs NO
-      floor change; the floor has to come down to 2 only if a SECOND command is
-      removed, once just two remain.
-    * The dead FOURTH command — from the "Get changed markdown files" step in
+      cannot inflate it). The floor now has ZERO headroom: the two LIVE commands
+      fall one short of it, so deleting the dead step alone leaves `checked == 2` and
+      FAILS the floor — the floor must come down to 2 BEFORE that step is removed.
+    * The dead third command — from the "Get changed markdown files" step in
       `ci.yml` (cited by step name, not line number, because line numbers drift)
       — is INERT today. That step builds a lint-target list, and the `docs` job
       checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
       the diff fails, `|| true` leaves `FILES` empty and the consuming
       markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
-      check (#2802)" step comment records this. Do not let the floor drift above
-      the number of live commands.
+      check (#2802)" step comment records this. Do not let the floor drift above the
+      PARSED count — today 3, of which only 2 are live, so this inert step is the
+      only thing holding the floor at 3 rather than 2.
     * The same step's `--no-renames` is still deliberate and the rule applies to
       it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
       the DELETED source path of a `.md`->`.md` rename is tolerated —
@@ -4143,6 +4150,141 @@ def test_every_changed_set_diff_disables_rename_detection():
         "changed_set_git_diff_commands the new spelling (#4378):\n  "
         + "\n  ".join(unparsed)
     )
+
+
+# ── #3442: the changed-set derivation must be ONE canonical question ──────
+# The `changes` job is a required, always-runs hub, so its selection must be a
+# deterministic function of the diff it claims to measure. Two ways it could
+# silently stop being one, both frozen below: (1) the old
+# `git diff "$BASE...HEAD" 2>/dev/null || git diff "$BASE" HEAD` chain answered a
+# DIFFERENT question (the two-ref form folds in the base branch's own advances,
+# and an unrelated history with no merge base) whenever the first form failed,
+# and (2) a swallowed failure left `CHANGED` empty, which `select()` maps to the
+# tier-1 smoke set — a stripped suite that still reports green.
+
+
+def _tiered_selection_run_text() -> str:
+    """The `run` script of python-ci.yml's `changes` → `Tiered selection` step."""
+    wf = _load_python_ci()
+    for step in wf["jobs"]["changes"]["steps"]:
+        if step.get("id") == "select":
+            return step["run"]
+    raise AssertionError("python-ci.yml has no `changes` step with id `select`")
+
+
+def test_tiered_selection_asks_one_canonical_merge_base_question():
+    """#3442: the changed set comes from ONE loud merge-base diff.
+
+    The old chain silently answered a different question on failure and rendered
+    the fallback reachable only when it would produce a *different* answer, so
+    "the same diff" could select different tests. The pin is on the workflow
+    text, because the defect is the shell shape, not the selector (whose own
+    determinism is frozen by the hashseed test below).
+    """
+    run_text = _tiered_selection_run_text()
+    commands = changed_set_git_diff_commands(run_text)
+    assert len(commands) == 1, (
+        "the `changes` job must compute the changed set with exactly ONE `git "
+        f"diff` (the merge-base question) — #3442. Found {commands}"
+    )
+    diff_lines = [ln for ln in run_text.splitlines() if "git diff" in ln]
+    assert len(diff_lines) == 1, (
+        f"exactly ONE `git diff` line may compute the changed set — #3442. {diff_lines}"
+    )
+    diff_line = diff_lines[0]
+    assert '"$BASE...HEAD"' in diff_line, (
+        "the single changed-set diff must ask the MERGE-BASE question "
+        f"(`\"$BASE...HEAD\"`) — #3442. Got: {diff_line}"
+    )
+    assert '"$BASE" HEAD' not in diff_line, (
+        "the two-ref `git diff \"$BASE\" HEAD` form is a DIFFERENT question "
+        "(it folds in the base branch's own advances) and must not be reachable "
+        f"— #3442. Got: {diff_line}"
+    )
+    assert "2>/dev/null" not in diff_line, (
+        "a swallowed diff failure is how the empty changed set silently degraded "
+        f"to the tier-1 smoke set — #3442. Got: {diff_line}"
+    )
+    assert "||" not in diff_line, (
+        f"no silent fallback to a different diff question — #3442. Got: {diff_line}"
+    )
+
+
+def test_tiered_selection_fails_loudly_on_a_diff_it_cannot_compute():
+    """#3442: an absent base, or an empty changed set, REDs instead of degrading.
+
+    `select([])` is `full=false, slow_run=false, carve_out_run=false` — the
+    ~31-file tier-1 smoke set. That is a legitimate answer for a genuinely
+    docs-only diff and a catastrophic one for a diff that failed to compute, and
+    nothing downstream can tell them apart. Both guards must `exit 1`.
+    """
+    run_text = _tiered_selection_run_text()
+    assert 'git rev-parse --verify --quiet "$BASE^{commit}"' in run_text, (
+        "the base commit must be proven present before the diff is taken — #3442"
+    )
+    assert '-z "$CHANGED"' in run_text, (
+        "an empty changed set must be rejected, not handed to select() — #3442"
+    )
+    assert run_text.count("exit 1") >= 2, (
+        "both guards (absent base, empty changed set) must fail the job — #3442"
+    )
+    lowered = run_text.lower()
+    assert "::error::" in run_text and "refusing" in lowered, (
+        "each guard must name its refusal as an ::error:: so the red is legible "
+        "— #3442"
+    )
+    # The guessable-but-wrong alternative: substituting origin/main for an
+    # absent base SHA would change WHICH diff is measured while still exiting 0.
+    # `origin/main` must therefore appear ONLY in the documented fallback for an
+    # EMPTY base ref, never inside the absent-commit guard.
+    assert run_text.count("origin/main") == 1, (
+        "an absent base must fail, not be swapped for origin/main (a different "
+        "diff) — #3442"
+    )
+
+
+def _run_selector(args: list[str], stdin: str, hashseed: str, artifact_dir: Path):
+    import os
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = hashseed
+    env["CI_SELECTION_ARTIFACT_DIR"] = str(artifact_dir)
+    return subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"), *args],
+        input=stdin, capture_output=True, text=True, env=env, cwd=str(artifact_dir),
+        check=True,
+    ).stdout
+
+
+def test_changes_job_selection_is_hashseed_deterministic(tmp_path):
+    """#3442 O/ I/T: the same diff selects the same tests on every run.
+
+    `set` iteration order is randomised per interpreter (PYTHONHASHSEED), so a
+    selection (or a `--split` half) derived from an unsorted set would differ
+    between two runs of the SAME diff. This runs the three commands the `changes`
+    job runs — select, the push matrix, and the tier-2 split — under two hash
+    seeds and requires byte-identical output.
+    """
+    changed = "\n".join([
+        "tortoise/ep/engine.py",
+        "tortoise/connectors/falkor.py",
+    ]) + "\n"
+    for seed in ("1", "4242"):
+        (tmp_path / seed).mkdir()
+    first = _run_selector(["--changed-files", "-", "--event", "pull_request"],
+                          changed, "1", tmp_path / "1")
+    second = _run_selector(["--changed-files", "-", "--event", "pull_request"],
+                           changed, "4242", tmp_path / "4242")
+    assert first == second, "select() output depends on PYTHONHASHSEED — #3442"
+
+    matrix_a = _run_selector(["--emit-push-matrix"], "", "1", tmp_path / "1")
+    matrix_b = _run_selector(["--emit-push-matrix"], "", "4242", tmp_path / "4242")
+    assert matrix_a == matrix_b, "--emit-push-matrix depends on PYTHONHASHSEED — #3442"
+
+    selected = json.loads(first)["test_files"]
+    assert isinstance(selected, list) and selected, selected
+    split_a = _run_selector(["--split"], json.dumps(selected), "1", tmp_path / "1")
+    split_b = _run_selector(["--split"], json.dumps(selected), "4242", tmp_path / "4242")
+    assert split_a == split_b, "--split depends on PYTHONHASHSEED — #3442"
 
 
 # ── #4740 review 4: the orphan-assert steps' fail-closed pgrep probe ───────
