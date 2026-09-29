@@ -2956,6 +2956,60 @@ def test_foreign_shapes_are_not_ours_in_both_modules(tmp_path, command):
     assert hook_install.detect_install(tmp_path, "claude") == []
 
 
+def test_non_dict_hooks_is_refused_by_both_modules_and_blocks_merge_delegation(
+        tmp_path):
+    """A ``settings.json`` whose top level IS a JSON object but whose
+    ``"hooks"`` is NOT one is refused by the installer (bytes untouched) and
+    reported by ``hooks status`` as a MANUAL fix — the two modules agree, so
+    neither may claim it repairable.
+
+    It also pins WHY ``merge_capture_hooks`` is the one half not delegated to
+    #3866's ``_merge_settings`` — the delegation #3915 preferred.  That
+    function has no refusal arm for a non-dict ``"hooks"``: it REPLACES the
+    user's value with ``{}`` and merges into the replacement, so delegating
+    the merge would route both harnesses through the clobbering arm and lose
+    the installer's never-clobber contract (the class
+    ``test_claude_install_refuses_to_clobber_invalid_settings`` pins for
+    unparsable JSON).  The shared classifier / entry reader / predicates plus
+    this pin keep the surfaces in step instead.
+
+    Mutation: delegate ``merge_capture_hooks`` to ``_merge_settings`` (or drop
+    its ``"hooks" is not a JSON object`` refusal) — the refusal and
+    bytes-unchanged assertions RED.  If ``_merge_settings`` ever GROWS a
+    non-dict refusal the asymmetry block REDs as well: that is a signal to
+    revisit the delegation decision, not to delete the pin.
+    """
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    original = json.dumps({"hooks": [], "keep": "me"}, indent=2)
+    target.write_text(original)
+
+    res = install_capture("claude", root=tmp_path)
+
+    assert not res.ok, "a non-object 'hooks' was silently merged into"
+    assert "not a JSON object" in res.error, res.error
+    assert target.read_text() == original, "the user's file was modified"
+
+    # `hooks status` calls the same document a MANUAL fix and `hooks upgrade`
+    # refuses it, so the installer's refusal cannot mask a state the repair
+    # path would happily rewrite.
+    manual = {f.kind for f in hook_install.detect_install(tmp_path, "claude")
+              if hook_install.is_manual_fix(f.kind)}
+    assert "unreadable-settings" in manual, manual
+    assert hook_install.upgrade_install(tmp_path, "claude").refused is not None
+    assert target.read_text() == original
+
+    # The concrete case that blocks delegating the MERGE (not the matchers):
+    # `_merge_settings` has no refusal arm — it clobbers the non-dict value.
+    data = {"hooks": [], "keep": "me"}
+    changed = hook_install._merge_settings(
+        hook_install.get_layout("claude"), data, [], tmp_path)
+    assert changed is True
+    assert data["hooks"] != [], (
+        "_merge_settings now respects a non-dict 'hooks' — if it grew the "
+        "refusal, merge delegation is worth revisiting (see the docstring)")
+
+
 def test_float_timeout_parity_between_install_and_status(tmp_path):
     """A float timeout is preserved by BOTH sides: the installer leaves 120.0
     alone and #3866 neither reports it as drift nor lowers it on upgrade.
@@ -3232,12 +3286,16 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # #4314 left two red assertions behind.
 # claude 5→6 is the #3615 consent gate merged over main's 5 (the hooks changed
 # behaviour again, so an already-installed copy must read as stale).
+# claude 6→7 is the #3797 hook-run observation: the hooks changed behaviour
+# once more — `session-start.sh` now writes the local hook-run record — so an
+# already-installed copy must read as stale, or the record never reaches it.
 # pi 1 is the FIRST generation of the Pi seam's contract (#4680): the seam is a
 # TypeScript extension rather than a shell hook, so it has no `HarnessLayout` —
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 6, "codex": 2, "cursor": 2, "pi": 1}
+_EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 2, "cursor": 2,
+                             "pi": 1}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3247,7 +3305,12 @@ def test_shipped_install_contract_generations(harness):
     3→4, codex 1→2, cursor 1→2.  #3971 then changed the claude hooks'
     BEHAVIOUR again (the CWE-427 sys.path scrub), so claude moved 4→5: an
     already-installed copy must be detected as stale, otherwise the security
-    fix never reaches it.  Those numbers are a reviewed decision, not a
+    fix never reaches it.  #3797 changed the claude hooks' BEHAVIOUR once
+    more (session-start.sh now writes the local hook-run observation that
+    lets an installed-but-unconfigured install report that it RAN), so claude
+    moved 6→7 — the bump is what carries it to already-installed hosts, whose
+    hook bytes are frozen at install time.  Those numbers are a reviewed
+    decision, not a
     detail, so they are pinned once and explicitly.
 
     `pi` (#4680) reaches the same table through the ARTIFACT half of the

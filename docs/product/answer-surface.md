@@ -123,7 +123,7 @@ answer path for search.
 - **Superseded/terminal evidence:** the ask lane always retrieves with
   `include_terminal=True` — superseded points are included WITH their
   `[SUPERSEDED BY]` markers so the reader stays honest about staleness
-  (cost-bounded by the resolved caps, default 200/200/16000/derived).
+  (cost-bounded by the resolved caps, default 200/400/200/16000/128000).
 
 ## Retrieval (ask lane — #2070 optimisation loop)
 
@@ -154,11 +154,17 @@ measurement justifies a change.
   (`TORTOISE_FUSION_WEIGHTS` → `{"vector": 1.5}`) unchanged.
 - **A6 `TORTOISE_ASK_RETRIEVAL_LIMIT` / `_CONTEXT_ITEM_CAP` /
   `_CONTEXT_TOKEN_CAP` / `_CONTEXT_BYTE_CAP` / `_POOL_SIZE` (default
-  200/200/16000/derived/200, #4105):** the retrieval-window limit (the
+  200/400/200/16000/128000 — limit/pool/item-cap/token-cap/byte-cap —
+  #4105, with the pool raised to the SDK's `limit*2` candidate floor by
+  #4235):** the retrieval-window limit (the
   `result_ids[:limit]` cut inside `tortoise_fts_query`) is threaded IN
   TANDEM with the assembly caps AND the pool floor — `limit >= item_cap`
-  and `pool_size >= limit` always hold, so raising one can never be
-  silently half-applied. The BYTE ceiling is resolved, not a literal: when
+  and `pool_size >= limit` always hold, and `pool_size >= limit*2` holds
+  while `limit*2` fits the 10000 engine bound, so raising one can never be
+  silently half-applied. Past that bound the pool is clamped to 10000, the
+  bound `tortoise_fts_query` and the engine both stop at; the stated
+  guarantee there is `pool_size >= limit`. The BYTE ceiling is resolved,
+  not a literal: when
   `_CONTEXT_BYTE_CAP` is unset it is DERIVED from the token cap
   (`max(32768, token_cap × 8)`), so a token raise cannot be neutralised by
   a fixed 32 KiB ceiling; `assemble_context` reports which bound dropped

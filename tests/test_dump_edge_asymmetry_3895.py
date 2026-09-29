@@ -613,8 +613,11 @@ class _PhantomEdge:
     def query(self, q, **kw):
         res = self._g.query(q, **kw)
         if q.lstrip().startswith("MATCH (a)-[r]->(b)"):
+            # #5062: the edge read now selects id(r) as its keyset cursor column
+            # (paging), so the injected phantom row carries one too.
             return _Rows([*res.result_set,
-                          [self._src, self._phantom, "STALE_BOOKKEEPING", {}]])
+                          [self._src, self._phantom, "STALE_BOOKKEEPING", {},
+                           10**9]])
         return res
 
     def __getattr__(self, name):

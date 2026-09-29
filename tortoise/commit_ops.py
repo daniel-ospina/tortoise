@@ -87,17 +87,15 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     MITIGATES target triples to the re-derived ids, else Layer-1 referential
     integrity fails", #1272).
 
-    ⚠️ Scope, stated honestly (an earlier revision of this docstring claimed
-    the hosted path was immune — it is NOT, and the claim was falsified by the
-    #4716 PR review; **#4970** carries the residual): the hosted commit (``hosted_api._execute_commit_writes`` §5/§7)
-    passes the RAW payload ``Operator`` models and creates its points with
-    ``create_point(..., dedup=True)``, whose internal re-key to an
-    existing-content node is NOT fed back into the operator refs — so a graph
-    holding the point's content under a non-``pt_`` id reproduces the identical
-    silent drop on the hosted lane. Wiring the remap there is a separate
-    change (it needs §5 to surface the resolved ids); #4716 deliberately scopes
-    this helper's CALL SITE to the capture commit, not its correctness claim to
-    the hosted lane.
+    ⚠️ Scope (updated by **#4970**): BOTH write paths now wire this remap —
+    the call site is no longer capture-only. The hosted commit
+    (``hosted_api._execute_commit_writes`` §5/§7) used to pass the RAW payload
+    ``Operator`` models while its ``create_point(..., dedup=True)`` re-keyed
+    to an existing-content node, so the refs named nothing and the edge
+    dropped silently (#4654). #4970 closed that residual: the hosted §5 point
+    loop surfaces the id ``create_point`` actually RESOLVED to (its
+    ``point_resolved_ids`` payload→graph map) and §7 passes the refs through
+    THIS helper — the same graph-id precondition the capture commit satisfies.
 
     Pure and total: only refs present in ``id_map`` are rewritten, everything
     else (graph ids, event ids, empty refs) passes through untouched — so an
@@ -106,6 +104,18 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     ``commit_schema`` Operator models; rewritten entries are copies, entries
     needing no change are returned as the original object, and the INPUTS are
     never mutated in place.
+
+    ⛔ Caller contract — the map MUST be keyed by PAYLOAD ids, and ONLY by
+    payload ids (ONE id space): a key the payload never named resolves
+    nothing, and a server-recomputed id (``supersede_id``) mixed into the map
+    could collide with another record's payload id (``point_content_id``
+    hashes content only). On a ``supersede`` reconcile action the payload
+    point id IS the PRIOR node's graph id, and the map keys it to the RESOLVED
+    successor — deliberate, and consistent with ``supersede_point``'s own edge
+    transfer (an operator edge on a superseded point belongs to its
+    successor); pinned by
+    ``tests/test_commit_endpoint.py::TestRekeyedPointResolvedIds::
+    test_supersede_operator_ref_follows_the_successor``.
     """
     if not id_map:
         return list(operators or [])
@@ -140,6 +150,38 @@ def remap_operator_endpoint_refs(operators: list, id_map: dict) -> list:
     return out
 
 
+def reverse_point_id_map(id_map: dict) -> dict:
+    """Invert a payload-id → resolved-graph-id map for reason lookups.
+
+    ``apply_payload_operators`` resolves a MITIGATES reason from the SAME ref
+    it passes to ``sdk.mitigate_operator`` — but that ref has already been
+    remapped into GRAPH-id space, while the caller's content lookup is keyed
+    by PAYLOAD id. Handing the helper the naive resolver then degrades a
+    re-keyed dampener's reason to its bare graph id (#4716 review P1,
+    reproduced end-to-end). This builds the reverse lookup both write paths
+    pass as ``point_content_by_id``.
+
+    **FIRST payload id wins** when several ids resolved to one graph node
+    (``setdefault`` over the map's insertion order). The rule is stated HERE,
+    once, so the two call sites cannot drift on it. Both write paths key the
+    map by PAYLOAD point id alone, so the winner is always a real
+    ``payload.points`` entry and the reason resolves: two ids resolve to one
+    node only when content+kind match (``_find_point_by_content``), so their
+    normalized content is equal and either winner yields the same reason
+    TEXT. ⛔ Do NOT add a non-payload key (e.g. the server-recomputed
+    ``supersede_id``) to a caller's map: it has no ``payload.points`` entry,
+    so if it won the lookup the reason would degrade to the bare graph id —
+    exactly the #4716 review-P1 degradation this helper exists to prevent —
+    and, being a second id space (``point_content_id`` hashes CONTENT only),
+    it could collide with another record's payload id. See the §5 note in
+    ``hosted_api._execute_commit_writes``.
+    """
+    reverse: dict[str, str] = {}
+    for payload_id, resolved_id in (id_map or {}).items():
+        reverse.setdefault(resolved_id, payload_id)
+    return reverse
+
+
 def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     """#4716 Part 1 (adjacent hole) — same remap for the supersession
     reference that is a payload id BY CONSTRUCTION.
@@ -149,8 +191,12 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
     ``supersedes_by`` (the NEW payload point's content-addressed ``pt_<sha>``
     id). A ``supersedes_by`` whose payload point resolved to an existing graph
     node under a different id is the SAME two-id-space mismatch the operators
-    had — ``apply_supersessions`` would warn ``point supersession ref '<payload
-    id>' not found — skipped (fail-open)`` and the CORRECTS fold would be lost.
+    had: ``sdk.supersede(prior, '<payload id>')`` targets a node that does not
+    exist, RAISES, and ``apply_supersessions`` swallows it as ``point
+    supersede '<prior>' → '<payload id>' failed: …`` — so the CORRECTS fold
+    would be lost. (It is NOT the ``point supersession ref '<payload id>' not
+    found — skipped (fail-open)`` warning: that fires only when the
+    already-graph-id ``superseded`` side is absent.)
 
     ``superseded`` is deliberately NOT remapped (code-review P2): it is the
     record's LANE DISCRIMINATOR downstream — ``apply_supersessions`` dispatches
@@ -183,7 +229,7 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
 
 
 def apply_payload_operators(proj, sdk, operators: list, *,
-                            point_content_by_id=None) -> None:
+                            point_content_by_id=None) -> list[str]:
     """Apply Layer-1 payload operators with commit semantics (#1532 D3).
 
     IMPL/NAND first via ``sdk.create_operator`` (promote_source=False, #780);
@@ -218,8 +264,88 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     Passing payload ids here is not an error the function can detect: the
     operator write is swallowed as ``operator write skipped (inputs
     missing?)``.
+
+    Returns the ids of the IMPL/NAND operator Points THIS call CREATED, in
+    creation order (#4936). A capture must stamp exactly those nodes with its
+    ``sessionCaptured`` eventId: joining on the MINTED point set instead
+    misses every operator whose endpoint RE-KEYED to a pre-existing graph
+    node (#4716 Part 1) — a folded-only capture has no minted ids at all,
+    so the operator topology was left unstamped and invisible to the
+    eventId-keyed retrievable layer (``operator_counts == {}``). Only
+    CREATED nodes are returned: the MITIGATES Cypher fallback can resolve an
+    operator this call did not write, and a caller stamping provenance must
+    never claim a node a prior session created. The derived-commit call site
+    (``hosted_api._execute_commit_writes`` §7) ignores the value — it has no
+    capture eventId to stamp.
+
+    ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
+    dict is the MITIGATES same-call lookup and is keyed on
+    ``(src, dst, op_type)``; it must never double as the provenance set
+    (#4936). Before #4971 the two could differ — ``create_operator`` mints
+    unconditionally, so two payload records that re-keyed onto the SAME
+    graph triple each created their own node, and a dict keyed on the triple
+    would silently drop the earlier node's id from the provenance set,
+    leaving it unstamped and invisible. #4971's guard (below) now makes the
+    repeat a no-op, so a triple is unique within a call and the two agree
+    again — but the LIST stays the caller's contract: it is the ordered set
+    of ids this call CREATED, which is what a provenance stamp needs and what
+    a caller must never widen by looking at the MITIGATES dict.
+
+    ⛔ #4971 — IDEMPOTENCY GUARD, keyed on the RESOLVED ``(op_type, src,
+    dst)`` triple. ``create_operator`` mints a fresh ULID on every call with
+    no existence probe, so a commit (or a failed-capture retry) that reaches
+    this pass twice mints a SECOND operator Point for one bridge — and each
+    duplicate is a separately weighted edge (``weights.py::
+    compute_operator_weight`` is per op id), so EP propagates the same link
+    twice (silent belief inflation). The probe below is the eval lane's
+    dup-edge probe (``tools/longmem_eval/ingest_v2.py``, #1369 review P2)
+    hoisted here so the hosted (``hosted_api._execute_commit_writes`` §7) and
+    capture (``sdk._extract_session_v2``) paths share one discipline — the
+    eval lane keeps its own inline copy (it does NOT call this helper).
+
+    ⚠️ The key is the RESOLVED triple, NEVER the payload id: on a re-keyed
+    endpoint the payload id names nothing in the graph (it resolved to a
+    pre-existing node under a DIFFERENT id), so a payload-keyed probe would
+    never match and the duplicate would survive — the identical reasoning the
+    event probe in ``ingest_v2.py`` records ("the key ... NEVER the payload
+    ``id``: extractor_v2's prior-graph search REUSES a prior ... so the
+    payload ``id`` is NOT a stable idempotency key"). It is exactly why the
+    ID-SPACE PRECONDITION above is a precondition: this helper can only be
+    idempotent if its caller handed it graph ids.
+
+    ``direction`` is deliberately NOT part of the key — the acceptance is
+    ONE node per ``(op_type, src, dst)`` triple, matching the eval lane's
+    probe (so the FIRST write's direction wins; pinned by
+    ``test_direction_is_not_part_of_the_key_first_write_wins``). On a repeat
+    the guard ``continue``s (the eval lane's semantics), so the node is
+    neither re-created NOR added to the returned list: the return contract is
+    CREATED ids only, and a caller stamping provenance must never claim a node
+    a prior commit created (the #4936 rule above). Because the guard probes
+    the GRAPH, a duplicate triple WITHIN one payload collapses too, exactly as
+    it does in the eval lane — the same belief inflation otherwise survives as
+    a within-call duplicate (and that is why #4936's
+    ``test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats``
+    now pins the collapsed count instead of the old two-node list).
+
+    ⚠️ SCOPE — the probe is SINGLE-TARGET: ``idx:1`` is the only target it
+    reads, because every caller here passes ``[dst]``. ``sdk.create_operator``
+    accepts ``target_ids: list`` and IS called with several targets elsewhere
+    (``sdk.py:9895``), so a future MULTI-TARGET caller would get the first
+    target idempotent and the rest duplicated. Widen the probe to read the
+    whole target set before routing such a caller here.
+
+    ⚠️ The MITIGATES fallback below is IMPL-only (it hardcodes
+    ``op_type:'IMPL'``), so ``continue``-ing a skipped NAND leaves a
+    NAND-targeted mitigation with nothing to attach to and it is dropped with
+    a warning. Not reachable today — ``OperatorTarget.op_type`` is
+    ``Literal["IMPL"]`` (``commit_schema.py:464``) and the extractor emits
+    ``op_type: "IMPL"`` (``extractor_v2.py:5868``) — but this guard is the
+    first thing that makes that fallback load-bearing for a skipped same-call
+    operator, so extend the fallback (``t_op_type`` + the mapped edge) in the
+    same change that widens the schema.
     """
     target_op_ids: dict[tuple, str] = {}
+    created_ids: list[str] = []
     for op in operators:
         op_type = _op_attr(op, "op_type")
         if op_type == "MITIGATES":
@@ -228,6 +354,26 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         if not op_type or not src or not dst:
             _logger.warning(
                 "operator write skipped (inputs missing?): %r", op)
+            continue
+        # #4971 — (op_type, src, dst) idempotency probe, on the RESOLVED
+        # triple (see the docstring; a payload-keyed probe never fires on a
+        # re-key). The relation type is mapped exactly as ``create_operator``
+        # maps it for the edge it writes (part/whole ops use ``hasPart``), so
+        # the probe reads the same edge the write would have created rather
+        # than inlining a raw op_type that would make it miss on those ops.
+        _edge_type = ("hasPart" if op_type not in ("IMPL", "NAND")
+                      else op_type)
+        _dup = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
+            f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
+            f"MATCH (o)-[:{_edge_type} {{idx:1}}]->(d) WHERE d.id = $dst "
+            "RETURN count(*) LIMIT 1",
+            params={"t": op_type, "src": src, "dst": dst}).result_set
+        if _dup and _dup[0][0]:
+            # Already bridged by an earlier commit/retry — a no-op. Do NOT
+            # record it in target_op_ids: the MITIGATES second pass falls
+            # back to its own Cypher probe and finds the pre-existing operator
+            # (whose ``mitigate_operator`` is itself idempotent).
             continue
         try:
             result = sdk.create_operator(
@@ -240,6 +386,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
                 "operator write skipped (inputs missing?): %s", e)
             continue
         target_op_ids[(src, dst, op_type)] = result["id"]
+        created_ids.append(result["id"])
     for op in operators:
         if _op_attr(op, "op_type") != "MITIGATES":
             continue
@@ -278,6 +425,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             reason = str(src)
         sdk.mitigate_operator(op_id, reason=reason,
                               strength=_op_attr(op, "strength") or 0.5)
+    return created_ids
 
 
 # ── Supersession application (#2164 Task 3) ────────────────────────────
@@ -436,6 +584,52 @@ def _supersession_fold_order(proj, records):
     return order
 
 
+#: #5654: cap on the per-record WARN emission from ``apply_supersessions``.
+#: Its record loop is fail-open — ``warn(...)`` + ``continue`` per record — so
+#: an over-cap batch turns malformed input into ONE WARN line per record.
+#: #2243 proposes a Layer-1 cap on ``len(payload.supersessions)`` (PR #5648,
+#: still OPEN at #5654's base). Until it lands the ``supersessions`` LIST is
+#: Layer-1-ungated on every path — capture, hosted commit §6b and eval ingest
+#: all hand this helper the uncapped records (the hosted endpoint does run
+#: ``validate_layer1``, but it caps points/entities/operators only; eval splits
+#: a payload into two kind-bucketed calls, so its budget is per call) — so this
+#: emission bound is the only limit on the storm. It bounds the EMISSION,
+#: never the writes: every record is still attempted, and the withheld count
+#: is reported in ONE summary warn. 20 keeps every realistic batch (a handful
+#: of records) fully verbose while capping a pathological one.
+_MAX_SUPERSESSION_WARNS = 20
+
+
+class _PerRecordWarnBudget:
+    """Bound a per-record ``warn()`` emission to a fixed budget (#5654).
+
+    Wraps the caller's warn callable: the first ``limit`` messages are
+    emitted verbatim, later ones are counted but not emitted, so a caller
+    that warns once per record cannot amplify a malformed batch into one
+    WARN line per record. The bound is on the EMISSION only — the caller's
+    control flow is untouched (every record is still attempted) — and
+    ``suppressed`` lets the caller report the withheld count in ONE summary
+    warn.
+    """
+
+    __slots__ = ("_emit", "_limit", "total")
+
+    def __init__(self, emit, limit: int) -> None:
+        self._emit = emit
+        self._limit = limit
+        self.total = 0
+
+    def __call__(self, msg, *args, **kwargs) -> None:
+        self.total += 1
+        if self.total <= self._limit:
+            self._emit(msg, *args, **kwargs)
+
+    @property
+    def suppressed(self) -> int:
+        """Per-record messages counted but not emitted."""
+        return max(0, self.total - self._limit)
+
+
 def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     """Apply canonical supersession records — the ONE consumer-side
     discipline (producer side: extractor_v2._supersession_records).
@@ -444,8 +638,29 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     full provenance) + _fold_object_superseded (count-verified).
     #2164/#2193: shared by capture (_extract_session_v2), eval ingest_v2,
     and the hosted commit endpoint (_execute_commit_writes §6b). warn()
-    receives every skip/failure —
-    never a silent drop — with ONE explicit asymmetry (final-review
+    receives the skip/failure of every record UP TO
+    ``_MAX_SUPERSESSION_WARNS`` per call; the per-record messages beyond that
+    budget are COUNTED, not emitted, and the call then closes with ONE
+    summary warn carrying the batch size, the true warning total and the
+    withheld count (#5654). An over-cap batch therefore stays SIZED — the
+    summary reports the batch size and the true warning total — but its
+    records past the budget are not named individually, and the summary does
+    not distinguish a withheld benign warning from a withheld malformed one.
+    The bound is on the EMISSION only — every record is still
+    attempted by the same gates below. The per-record guarantees recorded
+    earlier (#2242's "exactly one warn" on a lost concurrent fold, #2164's
+    "unresolved refs warn loudly") hold verbatim for any call raising at
+    most ``_MAX_SUPERSESSION_WARNS`` per-record warnings; a call above the
+    budget has
+    its withheld warnings counted, sized and reported in the summary but not
+    named individually — whatever their cause (a legitimate batch can exceed
+    the budget, e.g. many concurrent-race losses, so exceeding it is not by
+    itself evidence of malformed input). Caller-side comments that still
+    promise a per-record "never a silent drop" (``sdk._extract_session_v2``'s
+    docstring and call site, ``hosted_api`` §6b, ``tools/longmem_eval/ingest_v2``)
+    describe the pre-#5654 contract; this bound NARROWS that promise, and the
+    comment updates are tracked in #5723. With ONE explicit
+    asymmetry (final-review
     P3): terminal pt_ olds are treated as idempotent re-ingests and
     skipped SILENTLY regardless of the claimed successor (no
     divergence probe — supersede_point would raise on a terminal old);
@@ -491,6 +706,19 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         warn(f"supersession fold-order pre-pass failed ({exc}) — "
              f"falling back to payload order")
         fold_order = list(range(len(records)))
+    # #5654: bound the EMISSION of the per-record warns in the loop below.
+    # Write semantics are untouched — every record is still attempted by the
+    # same fail-open gates — this only stops a malformed batch from producing
+    # one WARN line per record. `warn` is caller-supplied (capture passes
+    # ``warnings.append``, hosted passes a counting logger delegate, eval
+    # passes ``logger.warning``), so the bound applies at this one seam shared
+    # by every path. Deliberately a BLANKET bound, not a per-class exemption:
+    # exempting the actionable classes would let a broken graph (every fold
+    # failing) storm again. The cost is that a warning past the budget is not
+    # emitted individually — the summary below reports the withheld count so
+    # the malfunction stays visible.
+    _raw_warn = warn
+    warn = _PerRecordWarnBudget(warn, _MAX_SUPERSESSION_WARNS)
     for i in fold_order:
         record = records[i]
         ref = str(_sr_attr(record, "superseded") or "").strip()
@@ -851,4 +1079,13 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 applied += 1
         except Exception as exc:
             warn(f"ObjectSuperseded emit/fold failed for {obj_name!r}: {exc}")
+    if warn.suppressed:
+        _raw_warn(
+            f"supersession batch of {len(records)} record(s): "
+            f"{warn.total} per-record warning(s) raised — the first "
+            f"{_MAX_SUPERSESSION_WARNS} were reported individually, "
+            f"{warn.suppressed} withheld (not individually logged). "
+            f"Every record was still applied or skipped by the same "
+            f"fail-open gates."
+        )
     return applied
