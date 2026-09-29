@@ -38,11 +38,11 @@ import pytest  # noqa: I001
 
 from tortoise.commit_schema import (
     CORE_POINT_KINDS,
-    CORE_SOURCE_KINDS,
     EVENT_KINDS,
     compile_vocab,
     validate_payload_dict,
 )
+from tortoise.pack_registry import registered_source_types
 from tortoise.extractor_v2 import (
     CORE_OBJECT_KEYS,
     _build_master_from_brief,
@@ -344,7 +344,7 @@ class TestCompileVocabGating:
         """
         core_by_leg = {
             "point_kinds": CORE_POINT_KINDS,
-            "source_kinds": CORE_SOURCE_KINDS,
+            "source_kinds": registered_source_types(),
             "event_kinds": EVENT_KINDS,
         }
         gated = compile_vocab(installed_namespaces={DEV})

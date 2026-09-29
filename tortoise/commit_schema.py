@@ -58,8 +58,8 @@ from .ids import content_hash
 from .pack_registry import (
     CANONICAL_POINT_KINDS,
     DECISION_POINT_KINDS,
-    KNOWN_SOURCE_TYPES,
     PackRegistry,
+    registered_source_types,
 )
 from .quota import (
     MAX_ENTITIES,
@@ -67,7 +67,6 @@ from .quota import (
     MAX_PAYLOAD_POINTS,
     MAX_VALUE_POINTS_PER_SESSION,
 )
-from .source_credibility import SOURCE_KIND_DEFAULTS
 
 _logger = logging.getLogger(__name__)
 
@@ -76,7 +75,7 @@ __all__ = [  # noqa: RUF022
     "BUDGET_SOFT", "BUDGET_HARD", "BUDGET_CEILING",
     "REQUIRED_FIELDS", "VALID_COMMIT_STATUSES",
     # vocab
-    "Vocab", "CORE_POINT_KINDS", "CORE_SOURCE_KINDS",
+    "Vocab", "CORE_POINT_KINDS",
     "compile_vocab", "get_vocab", "refresh_vocab",
     # models
     "ProvenanceRef", "Source", "Entity", "Point", "OperatorTarget",
@@ -116,9 +115,16 @@ BUDGET_CEILING = MAX_VALUE_POINTS_PER_SESSION["ceiling"]  # 50 → 402 fail-clos
 CORE_POINT_KINDS: frozenset[str] = frozenset(
     CANONICAL_POINT_KINDS | {"humanApproval", "event"}
 )
-CORE_SOURCE_KINDS: frozenset[str] = frozenset(
-    KNOWN_SOURCE_TYPES | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}
-)
+# The CORE source-kind leg has no module constant on purpose (#2742). It used
+# to be `CORE_SOURCE_KINDS`, an import-time frozenset over the MUTABLE
+# `source_credibility.SOURCE_KIND_DEFAULTS`, so a `register_source_kind_default`
+# call after import was accepted by pack validation (which reads the registry
+# live) but stayed rejected by the Layer-1 gate until the process restarted.
+# `registered_source_types()` is the same union (`KNOWN_SOURCE_TYPES` ∪ every
+# registered kind, incl. the explicitly-registered `agentSession`) and is the
+# helper pack validation already reads, so `compile_vocab()` calls it directly:
+# one definition, read live. A second snapshot is the same defect with a longer
+# fuse.
 
 # The canonical core event-kind set (ONTOLOGY §5 + the derived session
 # events). #1933 (epic #1891): this module-level set is the CORE BASE the
@@ -167,8 +173,8 @@ def compile_vocab(packs_dir: Path | str | None = None,
     today's behaviour, and the mandatory back-compat path when a graph has
     no ``:PackInstall`` records, indicator 3); a collection = only those
     namespaces contribute pack pointKinds/sourceTypes/eventKinds. The CORE
-    legs (CORE_POINT_KINDS / CORE_SOURCE_KINDS / EVENT_KINDS) are never
-    gated — a graph always accepts core vocabulary. This is the WRITE-gate
+    legs (CORE_POINT_KINDS / ``registered_source_types()`` / EVENT_KINDS) are
+    never gated — a graph always accepts core vocabulary. This is the WRITE-gate
     twin of ``compile_value_brief``'s prompt-side gate: both accept the
     output of the same resolver (``pack_state.graph_installed_namespaces``),
     so the set the extractor is *offered* and the set it may *write* are
@@ -200,7 +206,7 @@ def compile_vocab(packs_dir: Path | str | None = None,
         pack_events.update(f"{ns}:{k}" for k in pack.event_kinds)
     return Vocab(
         point_kinds=frozenset(CORE_POINT_KINDS | pack_point),
-        source_kinds=frozenset(CORE_SOURCE_KINDS | pack_sources),
+        source_kinds=frozenset(registered_source_types() | pack_sources),
         event_kinds=frozenset(EVENT_KINDS | pack_events),
     )
 

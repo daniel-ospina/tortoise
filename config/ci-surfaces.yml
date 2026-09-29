@@ -667,6 +667,7 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_eval_reinjection_cap_resume.py
   - test_capture_entity_attachment_3664.py
+  - test_source_kind_runtime_registration.py
   # #1370: write-time subject binding — the confidence-gated, fail-closed
   # Point→aboutSubject producer + its audit/quality-gate tooling. Registered
   # under `core` like its sibling binder guard (test_capture_entity_attachment_
