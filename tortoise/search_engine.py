@@ -623,11 +623,11 @@ def _all_vector_arms_measured_empty_scope(entries: list[dict]) -> bool:
     whose every arm failed therefore returns ``False`` and still fails
     closed.
 
-    ``#2952``'s empty-scope rule: a scope that selected NO nodes at all makes
-    ``no_embeddings`` a category error, so such a read is neither declared
-    degraded (C1) nor refused as non-hybrid (C2). Shared by both so the two
-    gates cannot disagree on the same trace — the defect that let C1 return
-    ``None`` while C2 raised ``leg_absent``.
+    ``#2952``'s empty-scope rule is shared by C1 and C2 so the two gates
+    cannot disagree on the same trace — the defect that let C1 return
+    ``None`` while C2 raised ``leg_absent``. What counts as an empty scope,
+    and the failure carve-out above, are stated once in
+    :func:`run_vector_query`.
     """
     vecs = [e for e in entries if e.get("leg") == "vector"]
     return bool(vecs) and all(
@@ -1031,9 +1031,9 @@ def run_vector_query(
     and a ``leg_trace`` is being recorded, the leg's material is judged
     against THAT scope rather than the whole label: a scope that HAS nodes
     but NONE of them embedded means this read's dense leg can contribute
-    nothing, so every healthy outcome record is written as
-    ``no_embeddings``/``degraded`` (the #2952 vocabulary — no term is
-    minted). The zero-row guard's count is likewise taken over the scope, so
+    nothing: the record is degraded, with whatever reason the read's own path
+    assigns it (the #2952 vocabulary — no term is minted). The zero-row
+    guard's count is likewise taken over the scope, so
     a corpus whose only embeddings are out of scope no longer reports
     ``empty_results`` ("there are embeddings, just no near neighbour").
     Retrieval itself is UNCHANGED: the rows the unscoped query returns are
