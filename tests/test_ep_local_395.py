@@ -570,16 +570,51 @@ def test_ac2_noarg_draft_only_no_factors():
 def test_ac3_max_hops_none_both_impls_and_run_contract():
     """AC3 — max_hops=None returns the full connected subgraph in BOTH BFS
     implementations (terminates on frontier-empty, no range(None) crash);
-    run() keeps its 2-tuple; _last_affected == run set."""
+    run() keeps its 2-tuple; _last_affected == run set.
+
+    #5566: membership is factor-bearing-only — a claim wired to an operator
+    ONLY by a non-logical (`related`) edge is not in the run and keeps its
+    stored prior/confidence.
+    """
     from tortoise.analyze import _bfs_select_operators
     with _fresh_sdk() as sdk:
         a = _make_claim(sdk, "m1")
         b = _make_claim(sdk, "m2")
         c = _make_claim(sdk, "m3")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("IMPL", b["id"], [c["id"]])
+        op1 = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op2 = sdk.create_operator("IMPL", b["id"], [c["id"]])
         proj = sdk._get_proj()
         ep = sdk._get_ep()
+        # #5566: m4/m5 reach the graph ONLY through a non-logical (`related`)
+        # edge onto an operator, and carry a persisted prior + stored
+        # confidence. A structural predicate is not a factor, so neither may
+        # enter the affected set — otherwise `_update_claim_posterior`
+        # recomputes them from empty natural parameters as Beta(1,1),
+        # discarding both. m4 hangs off the SEED-adjacent operator (caught at
+        # seed time by `_live_neighbors`); m5 off the far operator (caught by
+        # the BFS hop) — the two admission paths the fix narrows.
+        m4 = _make_claim(sdk, "m4")
+        m5 = _make_claim(sdk, "m5")
+        for _op, _m in ((op1["id"], m4["id"]), (op2["id"], m5["id"])):
+            proj.g.query(
+                "MATCH (o:Point {id:$o}), (m:Point {id:$m}) "
+                "CREATE (o)-[:related]->(m)",
+                params={"o": _op, "m": _m},
+            )
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                "SET n.ep_alpha=5.0, n.ep_beta=1.0, n.confidence=0.8333",
+                params={"id": _m},
+            )
+        # Same sink, reverse-only `IMPL`: the mitigation back-link
+        # `(mit)-[:IMPL]->(op)` is not an operator INPUT either, so the
+        # directed hop must not admit the mitigation point (whose prior is a
+        # calibrated baseline `mitigate_operator` set).
+        mit = sdk.mitigate_operator(op1["id"], "weakness", strength=0.3)["id"]
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.confidence=0.7",
+            params={"id": mit},
+        )
         # ep BFS
         affected = ep._affected_claims([a["id"]], max_hops=None)
         assert {a["id"], b["id"], c["id"]} <= affected
@@ -591,6 +626,31 @@ def test_ac3_max_hops_none_both_impls_and_run_contract():
         assert isinstance(iterations, int) and isinstance(converged, bool)
         assert ep._last_affected == affected
         assert ep._last_affected == {a["id"], b["id"], c["id"]}
+        # ...the non-logical claims did NOT enter, and kept their prior
+        # (ep_alpha/ep_beta) and stored confidence unchanged (#5566).
+        for _m in (m4["id"], m5["id"]):
+            assert _m not in ep._last_affected
+            stored = proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                "RETURN n.ep_alpha, n.ep_beta, n.confidence",
+                params={"id": _m},
+            ).result_set[0]
+            assert list(stored) == [5.0, 1.0, 0.8333], (
+                f"structural-edge claim {_m} moved: {stored}")
+        assert mit not in ep._last_affected
+        mit_stored = proj.g.query(
+            "MATCH (n:Point {id:$id}) "
+            "RETURN n.posterior_alpha, n.posterior_beta, n.confidence",
+            params={"id": mit},
+        ).result_set[0]
+        assert list(mit_stored) == [None, None, 0.7], (
+            f"mitigation point moved: {mit_stored}")
+        # The dream coverage denominator (`_window_closure`) mirrors
+        # `_affected_claims` and must exclude the same non-factor claims, or a
+        # fully-resolved window reports coverage < 1.0 forever (#5566).
+        closure = sdk._window_closure([a["id"]], max_hops=2)
+        assert {m4["id"], m5["id"], mit} & closure == set()
+        assert {a["id"], b["id"], c["id"]} <= closure
 
 
 def test_ac3_last_affected_no_stale_writeback():

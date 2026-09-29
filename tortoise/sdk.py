@@ -14840,13 +14840,22 @@ class TortoiseSDK:
         """Claim-hop closure of a dream window (I1 coverage denominator:
         the claims a pass COULD reach from its window).
 
-        Mirrors ``TortoiseEP._affected_claims``'s batched per-hop expansion
-        exactly (operators are transparent bridges — one claim-hop per BFS
-        level; operator-less direct edges via #888 W5 semantics; #780 draft
-        exclusion) so the denominator matches the pass's universe:
-        affected ⊆ closure, and a converged pass over its whole window
-        reports coverage = 1.0. The window members themselves are reachable
-        at 0 claim-hops (an operator-less isolated claim is its own window).
+        Shares ``TortoiseEP._affected_claims``'s per-hop narrowing (operators
+        are transparent bridges — one claim-hop per BFS level; the operator
+        hop is typed `IMPL|NAND` AND directed, #5566, so only operator inputs
+        are bridged; operator-less direct edges via #888 W5 semantics; #780
+        draft exclusion). The window members themselves are reachable at 0
+        claim-hops (an operator-less isolated claim is its own window).
+
+        ⚠️ It is **not** an exact mirror, and ``affected ⊆ closure`` is **not**
+        guaranteed — do not reinstate that claim. Two pre-existing gaps, filed
+        separately as **#6597** (both predate #5566): (a) **hop accounting** —
+        ``_affected_claims`` expands its seeds by ONE claim-hop before its
+        loop while this starts at 0, so ``affected`` can exceed ``closure``
+        and ``coverage`` can exceed 1.0 on chains of ≥4 claims; (b) the
+        **liveness filter** here is draft-only rather than ``_live_only``, so a
+        terminal/outdated bridge is counted here but can never be reached by
+        EP.
 
         Two batched queries per hop (operator-bridge + direct-edge), seeded
         with the whole window — cheap for the scheduler's large windows
@@ -14869,8 +14878,14 @@ class TortoiseSDK:
             if frontier:
                 # Operator-mediated bridges (op_type OR is_operator — legacy
                 # operator detection parity, #943). Never hops through drafts.
+                # #5566: typed AND directed, mirroring _affected_claims — only
+                # operator INPUTS are bridged (a structural predicate or the
+                # reverse-only mitigation `IMPL` forms no factor and would
+                # inflate the denominator, permanently under-reporting
+                # coverage).
                 nbr_rows = proj.g.query(
-                    "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                    "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                    "-[r2:IMPL|NAND]->(m:Point) "
                     "WHERE n.id IN $ids AND m.id <> n.id "
                     "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                     "AND (op.status IS NULL OR op.status <> 'draft') "

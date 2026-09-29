@@ -693,6 +693,25 @@ class TortoiseEP:
         excluded, draft operator nodes are skipped as sources, and the BFS
         expansion never hops through draft claims — a draft-connected
         operator must change NO live claim's posterior.
+
+        Membership contract (#5566): every claim admitted here is a
+        FACTOR PARTICIPANT. Operator-mediated admissions are operator
+        INPUTS — the targets of an operator's outgoing `IMPL`/`NAND` edge,
+        the direction `_affected_factors` reads; direct-edge admissions are
+        the endpoints of an operator-less `IMPL`/`NAND` edge (#888 W5). A
+        structural predicate (`related`, `aboutSubject`, `memberOf`, the
+        §3.9 set) or a reverse-only `IMPL` such as the mitigation back-link
+        `(m)-[:IMPL]->(op)` forms no factor, so it must never admit a claim:
+        otherwise `_update_claim_posterior` would recompute that node from
+        empty natural parameters as `Beta(1,1)` and discard its persisted
+        prior. This is the neutral-link rule (#5025, ONTOLOGY §3.9/§8).
+        KNOWN EXCEPTION, not fixed here: a factor with fewer than 2
+        PARTICIPATING inputs (draft/terminal inputs are stripped before
+        `_update_factor`, and a unidirectional operator whose source was
+        stripped is skipped entirely) no-ops, so an admitted input can still
+        reach `_update_claim_posterior` with no message and be recomputed as
+        `Beta(1,1)` — #5566's second half, owner-reserved (belief model,
+        DECISION-LEDGER §22).
         """
         live_c = _live_only("c.status", include_draft)
         live_o = _live_only("o.status", include_draft)
@@ -803,8 +822,15 @@ class TortoiseEP:
                     # hop), and
                     # (2) operator-less direct edges (#888 W5) with the same
                     # live-endpoint filters.
+                    # #5566: an operator-mediated bridge is factor-bearing
+                    # only in the operator→input DIRECTION (`_affected_factors`
+                    # reads `(op)-[:IMPL|NAND]->(input)`). Both hops are
+                    # therefore typed AND directed: a reverse-only `IMPL`
+                    # (e.g. the mitigation back-link `(m)-[:IMPL]->(op)`)
+                    # forms no factor and must not admit its far endpoint.
                     nbr_rows = self.g.query(
-                        "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                        "MATCH (n:Point)<-[r:IMPL|NAND]-(op:Point)"
+                        "-[r2:IMPL|NAND]->(m:Point) "
                         "WHERE n.id IN $ids AND m.id <> n.id "
                         "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                         f"AND {_live_only('op.status', include_draft)} "
@@ -907,10 +933,19 @@ class TortoiseEP:
     def _live_neighbors(self, node_id: str, include_draft: bool) -> list[str]:
         """Operator-mediated neighborhood hop that never crosses drafts (#780).
 
-        Mirrors proj._neighbors (propagation.py) but excludes hops THROUGH
-        draft operator nodes and TO draft endpoints — a draft-connected
-        operator must change NO live claim's posterior, so the affected-set
-        expansion must not reach live claims via a draft bridge.
+        Operator-mediated neighborhood hop for the affected-set expansion —
+        the same typed-and-directed narrowing as `_affected_claims` (#5566) —
+        with draft exclusion: it excludes hops THROUGH draft operator nodes
+        and TO draft endpoints, because a draft-connected operator must change
+        NO live claim's posterior, so the affected-set expansion must not
+        reach live claims via a draft bridge.
+
+        Only an operator's INPUTS are traversed (#5566): the hop is typed
+        `IMPL|NAND` AND directed `(input)<-(op)->(input)`. A structural
+        predicate onto an operator is not a belief path, and neither is a
+        reverse-only `IMPL` (the mitigation back-link `(m)-[:IMPL]->(op)`) —
+        neither forms a factor, so neither may admit its far endpoint into the
+        affected set.
         """
         if include_draft:
             # Escape hatch (#780): drafts ARE allowed as bridge endpoints —
@@ -919,7 +954,8 @@ class TortoiseEP:
             # so drafts pass while retracted/superseded/outdated/archived
             # nodes (and the ``outdated=true`` flag) stay excluded.
             rows = self.g.query(
-                "MATCH (n:Point {id:$id})-[r]-(op:Point)-[r2]-(m:Point) "
+                "MATCH (n:Point {id:$id})<-[r:IMPL|NAND]-(op:Point)"
+                "-[r2:IMPL|NAND]->(m:Point) "
                 "WHERE m.id <> $id "
                 "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                 f"AND {_live_only('op.status', include_draft)} "
@@ -934,7 +970,8 @@ class TortoiseEP:
         # operator). Matching only {is_operator:true} would leave legacy
         # operator bridges invisible to the draft exclusion (#943 review).
         rows = self.g.query(
-            "MATCH (n:Point {id:$id})-[r]-(op:Point)-[r2]-(m:Point) "
+            "MATCH (n:Point {id:$id})<-[r:IMPL|NAND]-(op:Point)"
+            "-[r2:IMPL|NAND]->(m:Point) "
             "WHERE m.id <> $id "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             f"AND {_live_only('op.status', include_draft)} "

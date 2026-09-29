@@ -4,7 +4,7 @@ type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-28
+updated: 2026-09-29
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
@@ -57,6 +57,18 @@ doc_status: live
 >   longer holds.
 >   This entry records only what the code now does. (The two entries below that both carry
 >   "v3.18" are a pre-existing duplicated label — filed as **#7214**, not renumbered here.)
+>
+> **Changelog v3.18 (2026-09-29 — issue #5566 — the EP affected-set traversal is factor-bearing-only):**
+> - `TortoiseEP._affected_claims` / `_live_neighbors` admitted a claim through **any**
+>   edge onto an operator, so a structural predicate (`related`, `aboutSubject`,
+>   `memberOf`, …) — or a reverse-only `IMPL` (the mitigation back-link
+>   `(m)-[:IMPL]->(op)`) — pulled a factorless node into the run, where
+>   `_update_claim_posterior` recomputed it as `Beta(1,1)` and **discarded its prior**.
+>   The operator-mediated hops are now typed **and directed**
+>   (`(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)`): only operator **inputs** are admitted,
+>   which are exactly the relations `_affected_factors` turns into factors. The §3.9 and
+>   §8 status notes are updated accordingly; `related` is now weight-free in fact, not
+>   only by the #5025 decision.
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 >
@@ -758,13 +770,20 @@ wasDerivedFrom
 > durability, not weight** — do not read their enforcement as the rule above being
 > true in the code.
 >
-> ⛔ **"Carries no epistemic weight" is a DECISION WITH A KNOWN BREACH — it is the
-> target, not today's behaviour.** The EP affected-set traversal is **unfiltered on
-> relation** (`ep.py:807`, `:922`, `:937`), so a `related` edge that lands on an
-> operator *does* reach `_update_claim_posterior` (`ep.py:625+`), which recomputes
-> that node as `Beta(1,1)` and **discards its prior** — **#5566**. Until that is
-> fixed, `related` **can** change a belief number. Tracked as its own defect and
-> owner-reserved (belief model, DECISION-LEDGER §22).
+> ⛔ **"Carries no epistemic weight" — the decision held, and the breach that
+> undercut it is now closed (#5566).** The EP affected-set traversal was unfiltered
+> on relation (`ep.py` `_affected_claims` / `_live_neighbors`), so a `related` edge
+> landing on an operator *did* reach `_update_claim_posterior`, which recomputed that
+> node as `Beta(1,1)` and **discarded its prior**. The operator-mediated hops are now
+> **factor-bearing-only**: typed `IMPL|NAND` *and* directed
+> (`(n)<-[r:IMPL|NAND]-(op)-[r2:IMPL|NAND]->(m)`), so only operator **inputs** — the
+> relations `_affected_factors` actually turns into factors — are admitted. Neither a
+> structural predicate (`related`, `aboutSubject`, `memberOf`, …) nor a reverse-only
+> `IMPL` (the mitigation back-link `(m)-[:IMPL]->(op)`) can admit a claim. `related`
+> therefore **cannot** change a belief number, in fact as well as by decision. Pinned
+> by `tests/test_ep_local_395.py::test_ac3_max_hops_none_both_impls_and_run_contract`.
+> *(The owner reservation on the belief model proper — DECISION-LEDGER §22 — stands;
+> this change only brings the traversal into line with the #5025 decision above.)*
 >
 > **Wiring a producer requires revisiting both sets first.** Per #2489 a predicate's
 > label and its replay key are one unit: `STRUCTURAL_REL_LABELS` holds the target
@@ -1296,8 +1315,9 @@ edge attribute.
   synonyms:
   `extractedFrom` is structural and **does** carry weight, via the Beta prior set in
   `_apply_source_inheritance`. A predicate is neutral only when no read path traverses it
-  — see §3.9 for the breach that currently leaves `related`'s neutrality a target rather
-  than a fact (#5566).
+  — §3.9 records the breach that left `related`'s neutrality a target rather than a fact,
+  closed by **#5566** (the affected-set traversal is now `IMPL`/`NAND`-filtered **and**
+  directed, so only operator inputs are admitted).
 
 - **Operator-less propagation:** an IMPL/NAND edge may be direct Point→Point
   (no operator); EP propagates over it the same way.
