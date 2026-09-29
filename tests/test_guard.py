@@ -238,5 +238,6 @@ def test_redislite_import_alone_installs_the_lifecycle_guards():
         "import tortoise, redislite.client as c;"
         "print(getattr(c.RedisMixin, '_tortoise_owner_record_patch', False),"
         " getattr(c.RedisMixin, '_tortoise_partial_init_guard', False),"
-        " getattr(c.RedisMixin, '_tortoise_dead_socket_guard', False))"
-    ) == "True True True"
+        " getattr(c.RedisMixin, '_tortoise_dead_socket_guard', False),"
+        " getattr(c.RedisMixin, '_tortoise_missing_dbdir_guard', False))"
+    ) == "True True True True"

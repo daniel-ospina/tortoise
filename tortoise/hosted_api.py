@@ -22529,9 +22529,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        # #3498/#4015: the analytics write builds a fresh httpx.Client per
-        # event — a blocking PostgREST call; off the loop via the shared entry
-        # point.
+        # #3498/#4015: the analytics write is a blocking PostgREST call
+        # (pooled ``httpx.Client`` since #4462); off the loop via the shared
+        # entry point.
         await _emit_analytics_off_loop(
             org["org_id"], "artifact_copied",
             {"harness": harness, "section": section})
@@ -23919,6 +23919,148 @@ _ANALYTICS_ALERT_LOCK = threading.Lock()
 # ephemeral JSONL — #3677's symptom reached by a different route.
 _ANALYTICS_POST_TIMEOUT_S = 5
 
+# ── #4462: the analytics sink's pooled HTTP client ──────────────────────────
+# The emit used to build a fresh ``httpx.Client(timeout=5)`` PER EVENT, so
+# every analytics row paid a new TCP+TLS handshake to Supabase. It now reuses
+# ONE process-wide client, built lazily on the first CONFIGURED emit.
+#
+# The shape is the repo's existing "lazy + env-keyed + locked + resettable
+# process-wide handle" idiom (``_PROBE_SDK_CACHE`` / ``_probe_sdk`` ABOVE): the
+# cache is a dict so tests/ops can drop it by reference, the lock guards the
+# CACHE only (never the network call), and a changed key rebuilds.
+#
+# Why ONE client can serve every caller: this sink is reached from TWO executors
+# — the dedicated 4-worker ``telemetry`` pool and the event loop's shared
+# default executor (the capture-cost lane, #4468, and the MCP lane whenever a
+# loop is running; the MCP lane's ephemeral daemon thread is its no-loop
+# fallback) — and ``httpx.Client`` is documented safe for concurrent use (the
+# repo already relies on that in ``supabase_control``). It is a SYNC client, so
+# it is bound to NO event loop: that is what makes cross-executor reuse safe,
+# and why a pooled ``AsyncClient`` was not used.
+#
+# LIFETIME: process-lifetime by design, and closed from NO production path —
+# mirroring ``SupabaseControlPlane._http`` (never closed). Closing a pool while
+# an emitter may still hold it (at shutdown, or a startup reset across an
+# in-process reload) would race an in-flight telemetry worker — the seam
+# abandons the AWAIT on a wait-bound miss but never the daemon thread (CPython
+# #87185) — and turn a delivered event into a spurious JSONL
+# fallback/degradation. That close-in-flight contract is #4608's subject and is
+# not re-derived here: the handle is dropped, never closed under a live holder,
+# and GC reclaims the sockets once no emitter holds it (at the latest at process
+# exit). ``_analytics_http_reset()`` exists for tests/ops only — it is
+# deliberately NOT wired into ``_lifespan``, because the env-keyed cache already
+# rebuilds on a changed sink and a startup close would be one more close under a
+# possible straggler for no gain.
+#
+# Why not share the other process-wide pool to the same host
+# (``SupabaseControlPlane._http``)? ``SupabaseControlPlane.__init__`` is
+# fail-closed — it RAISES when the env is unconfigured — while this sink must be
+# lazily gated on ``configured`` and must never raise (#3677/#3820). Sharing
+# would import that raise into the emit path, so the two pools stay separate by
+# design.
+_ANALYTICS_HTTP_CACHE: dict = {"key": None, "client": None}
+_ANALYTICS_HTTP_LOCK = threading.Lock()
+# Connection ceiling, pinned explicitly so it is auditable. This is an UPPER
+# BOUND, not a concurrency limiter: it sits far above the most emitters this
+# process can run at once — the telemetry pool's 4 workers, the loop's shared
+# default executor (``min(32, cpu+4)``), and the MCP lane (the SAME shared
+# default executor while a loop is running; an ephemeral daemon thread is its
+# no-loop fallback, ``mcp_server.py``) — so no emit
+# waits on a pool slot in practice. Every lane is off-loop, so even a saturated
+# pool could never stall the event loop. If emitter concurrency ever did exceed
+# it, httpcore would queue and the pool phase would expire into the never-raise
+# arm as a ``fallback`` — a documented residual, not a stall.
+_ANALYTICS_HTTP_MAX_CONNECTIONS = 100
+_ANALYTICS_HTTP_MAX_KEEPALIVE = 20
+# httpx's own default, kept deliberately. This is the window over which an idle
+# pooled connection is reused, so it BOUNDS the benefit: emits within it share
+# the handshake (the burst case), while sparser emits still pay one. It is not
+# extended because a longer window holds sockets the peer may already have
+# closed; httpcore discards an idle connection whose peer FIN has arrived, so
+# the residual is a narrow post-check race whose consequence — under the
+# never-raise guard — is a spurious JSONL ``fallback``/degradation, never an
+# ESCAPED error and never a silent loss. Observing the sink's reuse /
+# transport-failure rate is tracked with its other missing instrumentation (#5840).
+_ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S = 5.0
+
+
+def _analytics_http_key(url: str, key: str) -> tuple:
+    """Identity of the cached client.
+
+    The client itself is SINK-AGNOSTIC — it carries no base URL and no
+    credentials (the URL and the service-key headers are built per request in
+    ``_track_analytics_event``), so ``url``/``key`` do not parameterize the
+    instance. They are part of the key anyway, as the conservative choice: a
+    change to the configured sink forces a fresh pool rather than reusing one
+    warmed against the old configuration. ``_ANALYTICS_POST_TIMEOUT_S`` is in
+    the key because it genuinely parameterizes the instance — it is baked into
+    the client at construction, unlike ``url``/``key``. Production is a stable
+    key, so the client is built once.
+    """
+    return (url, key, _ANALYTICS_POST_TIMEOUT_S)
+
+
+def _analytics_http_reset() -> None:
+    """Close + drop the cached analytics client (tests / ops only).
+
+    NOT wired into ``_lifespan`` and NOT safe to call concurrently with a live
+    emit: httpx raises on a closed client, which the never-raise guard turns
+    into a JSONL ``fallback``. The env-keyed cache already rebuilds on a changed
+    sink, so a startup reset would be one more close under a possible straggler
+    (the #4608 class) for no gain. The tests that call this do so after their
+    own synchronous emits have returned.
+
+    The ``close()`` is individually guarded: this must never raise, and test
+    doubles standing in for ``httpx.Client`` do not all define ``close()``.
+    """
+    with _ANALYTICS_HTTP_LOCK:
+        client = _ANALYTICS_HTTP_CACHE.get("client")
+        _ANALYTICS_HTTP_CACHE["client"] = None
+        _ANALYTICS_HTTP_CACHE["key"] = None
+    if client is not None:
+        try:  # noqa: SIM105 — a double without close() must not fail teardown
+            client.close()
+        except Exception:
+            pass
+
+
+def _analytics_http_client(url: str, key: str):
+    """Return the process-wide pooled ``httpx.Client`` for ``(url, key)``.
+
+    CALLED ONLY INSIDE ``if configured:`` in ``_track_analytics_event`` — an
+    unconfigured or half-configured env must never build (nor have to close) a
+    client; it still degrades to the JSONL (#3677/#3820).
+
+    ``import httpx`` is hoisted above the lock so the first configured emit
+    does not serialize every other emitter behind a cold module import. The
+    lock is held across cache lookup and construction, NEVER across the POST,
+    so no slow emit can block another.
+
+    A SUPERSEDED client is dropped, NOT closed: an in-flight emitter may still
+    hold it, and closing a pool under a live request is the #4608 class — a
+    delivered event recorded as a spurious ``fallback``/degradation. The
+    supersede path is reachable only on a runtime sink/timeout change, which
+    production never performs; GC reclaims the dropped pool once no emitter
+    holds it (at the latest at process exit).
+    """
+    cache_key = _analytics_http_key(url, key)
+    import httpx
+    with _ANALYTICS_HTTP_LOCK:
+        cached = _ANALYTICS_HTTP_CACHE.get("client")
+        if cached is not None and _ANALYTICS_HTTP_CACHE.get("key") == cache_key:
+            return cached
+        client = httpx.Client(
+            timeout=_ANALYTICS_POST_TIMEOUT_S,
+            limits=httpx.Limits(
+                max_connections=_ANALYTICS_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=_ANALYTICS_HTTP_MAX_KEEPALIVE,
+                keepalive_expiry=_ANALYTICS_HTTP_KEEPALIVE_EXPIRY_S,
+            ),
+        )
+        _ANALYTICS_HTTP_CACHE["client"] = client
+        _ANALYTICS_HTTP_CACHE["key"] = cache_key
+    return client
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> str:
@@ -24028,26 +24170,24 @@ def _track_analytics_event(org_id: str, event_name: str,
         # which can file an incident for a healthy sink.
         delivered = False
         try:
-            import httpx
-            # #4015: the client is built PER EVENT, deliberately. For the
-            # funnel sites it goes through ``_emit_analytics_off_loop`` → the
-            # telemetry pool, so a fresh TCP+TLS handshake costs a telemetry
-            # WORKER SLOT, never an event-loop stall — it is not the defect this
-            # issue names. (The capture-cost lane reaches this helper on the
-            # loop's shared default executor instead; either way, off-loop.)
-            # Reusing a pooled client is a throughput optimisation for those
-            # pools and needs its own measurement plus a lifecycle it does not
-            # have today (lazy construction gated on ``configured``, because
-            # this sink must keep serving a HALF-CONFIGURED env and degrade to
-            # the JSONL — the #3677/#3820 contract); tracked as #4462.
-            with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
-                resp = client.post(
-                    f"{url}/rest/v1/analytics_events",
-                    json=event,
-                    headers={"apikey": key, "Authorization": f"Bearer {key}",
-                             "Content-Type": "application/json",
-                             "Prefer": "return=minimal"},
-                )
+            # #4462: one process-wide pooled client, built lazily on the first
+            # configured emit and reused by every later one — including across
+            # the two executors that reach this sink (the telemetry pool and the
+            # loop's shared default executor, which serves the MCP lane too
+            # while a loop is running).
+            # The ``with`` form is deliberately NOT used: httpx 0.28 closes an
+            # externally-constructed client on ``__exit__``, which would defeat
+            # reuse on the very first emit (see ``supabase_control``). The
+            # lookup sits INSIDE ``if configured:``, so a half-configured env
+            # builds nothing and still degrades to the JSONL (#3677/#3820).
+            client = _analytics_http_client(url, key)
+            resp = client.post(
+                f"{url}/rest/v1/analytics_events",
+                json=event,
+                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json",
+                         "Prefer": "return=minimal"},
+            )
             # #3677: a REJECTED write is still a lost event. `post` does not
             # raise on a 4xx/5xx, so without this check the event was silently
             # discarded — the #3677 loss class, reachable whenever the key is
@@ -24757,9 +24897,10 @@ async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     onboarding flow).
 
     #3498/#4015: async because the write it wraps is a blocking PostgREST call
-    — ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
-    event, which used to run ON the event loop from every async caller. The
-    emit goes through the shared off-loop entry point; the strict-mode
+    — ``_track_analytics_event`` POSTs with a synchronous ``httpx.Client``
+    (pooled process-wide since #4462), which used to run ON the event loop from
+    every async caller. The emit goes through the shared off-loop entry point;
+    the strict-mode
     ``UnregisteredTelemetryKey`` still escapes (it is raised in the worker
     thread and re-raised through ``await``)."""
     try:
@@ -24887,6 +25028,39 @@ async def _exchange_github_token(code: str) -> str:
     if not access_token:
         raise HTTPException(status_code=502, detail="GitHub token exchange failed")
     return access_token
+
+
+async def _revoke_github_token(token: str) -> tuple[bool, str]:
+    """Revoke an OAuth token at GitHub (#4946) → ``(revoked, reason)``.
+
+    ``DELETE /applications/{client_id}/token`` (Basic auth with the app's
+    client id/secret) is GitHub's own revocation endpoint for a token an
+    OAuth app issued; GitHub documents exactly two outcomes for it, 204 No
+    Content and 422 Validation failed. ONLY 204 is a confirmed revocation.
+    Every other outcome — including 404/422, where an already-revoked or
+    otherwise unrecognised token may surface — is ``revoked=False`` with a
+    short machine-readable reason, because a non-204 leaves the token's
+    liveness unconfirmed and reporting it as gone would be exactly the
+    cosmetic lie this endpoint exists to remove. Missing app credentials and
+    transport failures are reported the same way.
+    """
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return False, "not_configured"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.delete(
+                f"{_GITHUB_API}/applications/{client_id}/token",
+                json={"access_token": token},
+                auth=(client_id, client_secret),
+                headers={"Accept": "application/vnd.github+json"})
+    except Exception:
+        return False, "network"
+    if r.status_code == 204:
+        return True, "revoked"
+    return False, f"http_{r.status_code}"
 
 
 def _github_repos_count(token: str) -> int | None:
@@ -25056,6 +25230,67 @@ async def github_callback(code: str | None = None, state: str | None = None,
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
+@app.post("/v1/onboarding/github/disconnect")
+async def github_disconnect(org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
+    """Disconnect GitHub: revoke the stored OAuth token, clear it locally,
+    and flip ``github_connected`` (#4946).
+
+    The pre-#1924 "disconnect" only wrote ``github_connected: false`` while
+    leaving the stored token live, so server-side indexing kept working.
+    This is the real path: it attempts GitHub revocation FIRST, then ALWAYS
+    clears the local ciphertext and writes ``github_connected: false`` — a
+    revocation failure must never leave the token stored.
+
+    ``revoked``/``revoke_reason`` report the outcome honestly:
+
+    - ``revoked`` is True when no live token remains — GitHub CONFIRMED the
+      revocation (204), or there was no stored token to revoke at all (an
+      idempotent no-op);
+    - otherwise ``revoked`` is False and ``revoke_reason`` names why: the
+      token was already-invalid/unrecognised (a non-204 from GitHub), the
+      ciphertext could not be decrypted, the app credentials are unset, or
+      the GitHub call failed. ``revoke_reason == "revoked"`` is the only
+      GitHub-confirmed case; ``"not_connected"`` means no call was needed.
+
+    The local credential is ALWAYS cleared and ``github_connected`` always
+    written false, even when the outcome is not a confirmed revocation.
+
+    #1828 review P3: same non-gated dual-auth as the other onboarding
+    endpoints; #2300 parity: graph-bound keys rejected.
+    """
+    # #2300: clears the ORG's control-plane GitHub credential — graph-bound
+    # keys rejected (MCP/onboarding-github family parity). A per-graph key
+    # must never tear down the org's GitHub connection.
+    _reject_graph_bound_org_surface(org, "github disconnect")
+    org_id = org["org_id"]
+    encrypted, _gh_org = _github_credentials(org_id)
+    revoked = False
+    revoke_reason = "not_connected"
+    if encrypted:
+        from tortoise.crypto import decrypt_token
+        try:
+            token = decrypt_token(encrypted)
+        except ValueError:
+            # A stored-but-undecryptable ciphertext gives us nothing to send
+            # GitHub — the plaintext token may still be live there, so this
+            # is NOT a confirmed revocation. Clearing it below is still the
+            # right local action; the outcome is reported honestly.
+            revoke_reason = "undecryptable"
+        else:
+            revoked, revoke_reason = await _revoke_github_token(token)
+    else:
+        # Nothing stored: the idempotent no-op. There is no live token to
+        # revoke, so there was nothing to fail.
+        revoked = True
+    # Always clear locally, then flip the connection flag — a disconnect
+    # that leaves the ciphertext (or the flag) behind is the cosmetic
+    # behaviour this endpoint replaces.
+    _clear_github_credentials(org_id)
+    _update_onboarding_state(org_id, github_connected=False)
+    return {"connected": False, "revoked": revoked,
+            "revoke_reason": revoke_reason}
+
+
 async def _heal_github_org(org_id: str, encrypted: str,
                           org: str | None) -> str | None:
     """#1845 self-heal: return the REAL org/login for a connected token.
@@ -25116,6 +25351,33 @@ def _store_github_org(org_id: str, encrypted: str, org: str) -> None:
             "MATCH (t:Team {id: $id}) SET t.github_org = $org",
             params={"id": org_id, "org": org},
         )
+
+
+def _clear_github_credentials(org_id: str) -> None:
+    """Clear the stored GitHub token + org (#4946 disconnect).
+
+    Seam-aware mirror of the callback's store path: Supabase mode PATCHes
+    both columns to NULL via the service-role seam (github_token_enc is
+    column-REVOKEd from anon/authenticated, so the seam is the only writer);
+    registry mode SETs them to null on the Org node. Fail-closed: a write
+    failure raises rather than silently leaving the ciphertext in place.
+    """
+    from tortoise.supabase_control import (
+        clear_github_credentials as _sb_clear,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        _sb_clear(get_control_plane(), org_id)
+        return
+    sdk = _make_sdk(namespace="registry")
+    sdk._get_registry().query(
+        "MATCH (t:Team {id: $id}) "
+        "SET t.github_token_enc = null, t.github_org = null",
+        params={"id": org_id},
+    )
 
 
 def _cleanup_legacy_docs_corpus(org_id: str,
@@ -29085,8 +29347,7 @@ async def webhooks_stripe(request: Request):
 # operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
 # filings from this work: #3124 (the shared per-IP primitive + the generic
 # middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
-# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
-# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# keys on the proxy IP), #3134 (dated measurement of real DCR volume —
 # the 600/1200 aggregates are not load-validated). #3036 already covers
 # oauth_* token-table retention/GC.
 #
@@ -29414,7 +29675,8 @@ async def oauth_authorize(request: Request):
                 redirect_uri=params["redirect_uri"] or None,
                 response_type=params["response_type"] or None,
                 code_challenge=params["code_challenge"] or None,
-                code_challenge_method=params["code_challenge_method"] or None),
+                code_challenge_method=params["code_challenge_method"] or None,
+                scope=params["scope"] or None),
             op="oauth_authorize_params")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
@@ -29525,7 +29787,8 @@ async def oauth_consent(request: Request):
                 redirect_uri=body.get("redirect_uri") or None,
                 response_type=body.get("response_type") or None,
                 code_challenge=body.get("code_challenge") or None,
-                code_challenge_method=body.get("code_challenge_method") or "S256"),
+                code_challenge_method=body.get("code_challenge_method") or "S256",
+                scope=body.get("scope") or None),
             op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)

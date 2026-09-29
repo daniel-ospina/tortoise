@@ -896,6 +896,44 @@ def fetch_statuses(sha: str):
     return statuses, body.get("total_count")
 
 
+# --- Task 8 (#5215 D13): the main-health job-id -> context map --------------
+# The five contexts below are emitted ONLY by ci.yml, which was
+# `pull_request:`-only — so `main` had no signal for them.
+# `.github/workflows/main-health-nightly.yml` calls ci.yml via
+# `on.workflow_call` (`main_health: true`), so the SAME jobs emit check-runs on
+# main — but a reusable workflow's check runs are named
+# `<caller job> / <called job>`: verified live in this repo on
+# `dashboard-js-tests`' node-ci call (`dashboard-js-tests / unit-test`). The
+# nightly therefore emits `main-health / docs`, NOT a bare `docs`, so the
+# mapping MUST strip the caller prefix; without it every context reads
+# NO_MAIN_SIGNAL after a green nightly — the exact false negative Task 8 exists
+# to remove. The inner job id -> context name map is identity today (none of the
+# five carries a `name:`), pinned by
+# `test_main_health_context_mapping_pins_the_real_reusable_name_shape`.
+MAIN_HEALTH_CALLER = "main-health"
+MAIN_HEALTH_JOB_ID_TO_CONTEXT = {
+    "pricing-artifact": "pricing-artifact",
+    "docs": "docs",
+    "test-isolation": "test-isolation",
+    "license-surface": "license-surface",
+    "legal-e2e": "legal-e2e",
+}
+
+
+def main_health_context(name):
+    """Resolve a check-run name emitted via the main-health reusable call.
+
+    Strips the `<caller> / ` prefix GitHub puts on a reusable workflow's check
+    runs, then maps the called job id to the required context. A bare name is
+    accepted unchanged (the non-reusable shape) and an unrecognised name is
+    returned as-is, so `_strict_main_gate`'s behaviour for every other run is
+    unchanged.
+    """
+    s = str(name)
+    inner = s[len(MAIN_HEALTH_CALLER) + 3:] if s.startswith(MAIN_HEALTH_CALLER + " / ") else s
+    return MAIN_HEALTH_JOB_ID_TO_CONTEXT.get(inner, s)
+
+
 def required_contexts():
     body = _gh_api(f"repos/{OWNER_REPO}/branches/main/protection")
     if body is UNKNOWN or not isinstance(body, dict):
@@ -1223,7 +1261,9 @@ def _strict_main_gate(runs, required) -> int:
     observed = 0
     for name in required:
         name = str(name)
-        name_runs = [run for run in runs if str(run.get("name")) == name]
+        name_runs = [
+            run for run in runs if main_health_context(run.get("name")) == name
+        ]
         if not name_runs:
             excluded.append(name)
             continue
