@@ -1330,7 +1330,23 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
 #: strictly worse than a false COLLISION (review cycle 1, PR #6267). Name the
 #: sub-namespace that was actually measured, and widen it only with a decision
 #: and a test that pins the widening.
-_GENERATED_BRANCH_PREFIXES = ("mergify/merge-queue/",)
+#:
+#: ⚠️ TWO GENERATED NAMESPACES, both measured in this repo's real refs (review
+#: cycle 2, PR #6267). `mq/merge-queue/` is a SECOND Mergify merge-queue
+#: namespace — `git for-each-ref refs/remotes/origin/mq/merge-queue` returns real
+#: bot-authored refs, and they persist locally long after they leave origin (159
+#: stale local `mergify/merge-queue/*` vs 3 live). `chore/ci-timing-refresh-` is
+#: minted by this repo's own workflow, which hardcodes
+#: `chore/ci-timing-refresh-$(git rev-parse --short HEAD)`; a short SHA can LEAD
+#: with an issue number exactly like the hash this filter exists for.
+#:
+#: Each entry must be narrow enough that no lane would choose it. `chore/`
+#: alone would be far too wide; the full bot-minted prefix is what is excluded.
+_GENERATED_BRANCH_PREFIXES = (
+    "mergify/merge-queue/",
+    "mq/merge-queue/",
+    "chore/ci-timing-refresh-",
+)
 
 
 def _is_generated_branch(name: str) -> bool:

@@ -1488,6 +1488,38 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("VERDICT: COLLISION", out)
                 self.assertIn(f"refs/remotes/origin/{ref}", out)
 
+    def test_second_mergify_namespace_and_ci_bot_branch_are_not_claims(self):
+        # Review cycle 2 (PR #6267): TWO more generated namespaces exist in
+        # this repo's real refs and were unfiltered by the first fix.
+        # `mq/merge-queue/` is a second Mergify merge-queue namespace;
+        # `chore/ci-timing-refresh-` is minted by this repo's own workflow from
+        # `git rev-parse --short HEAD`, so a short SHA can LEAD with an issue
+        # number exactly like the hash this filter exists for.
+        for ref in (f"mq/merge-queue/{ISSUE}bad001",
+                    f"chore/ci-timing-refresh-{ISSUE}bad001"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
+                self.assertNotIn(ref, out)
+
+    def test_worktree_on_a_generated_branch_is_still_found_by_its_path(self):
+        # ⛔ THE WORKTREE HALF IS THE LOAD-BEARING ONE, and it is the half a
+        # one-line mutation can silently break (review cycle 2, PR #6267). The
+        # filter skips only the BRANCH; the PATH must still be matched in full,
+        # or a real worktree on a generated branch becomes invisible on a
+        # BLOCKING surface. Mutating the filter to `continue` past the whole
+        # block left every other worktree test passing, so this pins it.
+        self.add_worktree(f"{ISSUE}-queue-wt",
+                          branch=f"mergify/merge-queue/{ISSUE}bad001")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[local worktrees]", out)
+        self.assertIn(f"{ISSUE}-queue-wt", out)
+
     def test_local_branch_hit(self):
         _git(self.repo, "branch", "fix/3061-collision-preflight")
         rc, out = self.run_tool()
