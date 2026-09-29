@@ -99,6 +99,21 @@ CASES: tuple[tuple[str, str, str], ...] = (
     # floor can silently regress. Assembled at runtime (see ``_synth``).
     ("deepseek", "deepseek_api_key",
      _synth("sk-", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6")),
+    # #6158: Tortoise's OWN minted credentials. `tortoise/oauth.py::_new_token`
+    # is `prefix + secrets.token_urlsafe(32)` — 43 URL-SAFE chars, so the
+    # `[0-9a-f]{32}` bodies above cannot match it; the signup token is
+    # `token_hex(32)` — 64 lowercase hex, twice the API-key width. Assembled at
+    # runtime (see `_synth`) so no contiguous token appears in the source.
+    ("tortoise_oauth_access", "tortoise_oauth_access_token",
+     _synth("oat_", _fill(43))),
+    ("tortoise_oauth_refresh", "tortoise_oauth_refresh_token",
+     _synth("ort_", _fill(43))),
+    ("tortoise_oauth_client_id", "tortoise_oauth_client_id",
+     _synth("ct_", _fill(43))),
+    ("tortoise_oauth_client_secret", "tortoise_oauth_client_secret",
+     _synth("cs_", _fill(43))),
+    ("tortoise_signup", "tortoise_signup_token",
+     _synth("st_", "a1b2c3d4e5f6a7b8" * 8)),
     ("jev", "jev_api_key", "jv_live_" + _fill(24)),
     ("github_classic", "github_token", "ghp_" + _fill(36)),
     ("github_fine_grained", "github_token", "github_pat_" + _fill(60)),
@@ -852,3 +867,149 @@ def test_redaction_is_idempotent_under_the_capture_double_pass():
     # re-match, so the writer's recomputation cannot inflate the recorded count.
     assert c2 == {}
     assert redact_secrets(once)[0].count("[REDACTED:") == 2
+
+
+# ── #6158: the rule list is tied to the MINT SITES, not to memory ───────────
+#
+# The root cause of #6158 is not the three missing prefixes — it is that
+# `_SECRET_SHAPES` has NO exhaustiveness guard: every rule so far was added
+# AFTER the fact, by hand, in response to a finding, so the next family added to
+# `oauth.py`/`hosted_api.py` re-opens the gap silently. These tests convert
+# "someone remembers" into a red test.
+
+_MINT_MODULES: tuple[str, ...] = ("tortoise/oauth.py", "tortoise/hosted_api.py")
+
+#: The helpers that yield secret material. A prefix is only a CREDENTIAL if the
+#: value it is concatenated with comes from one of these — otherwise every
+#: f-string that merely ends in `_` would be counted as a mint site.
+_TOKEN_HELPERS = ("token_hex", "token_urlsafe")
+
+
+def _names_a_token_helper(node: ast.AST) -> bool:
+    """True when this subtree references a secret-yielding helper."""
+    return any(
+        (isinstance(inner, ast.Attribute) and inner.attr in _TOKEN_HELPERS)
+        or (isinstance(inner, ast.Name) and inner.id in _TOKEN_HELPERS)
+        for inner in ast.walk(node)
+    )
+
+
+def _mint_sites(source: str) -> set[str]:
+    """Credential prefixes this source MINTS, read from the parsed tree.
+
+    Two shapes are in use: ``_new_token("<prefix>")`` — resolving a module-level
+    constant where the prefix is passed BY NAME, as ``ACCESS_TOKEN_PREFIX`` and
+    ``REFRESH_TOKEN_PREFIX`` are — and the signup token's
+    ``f"<prefix>{token_hex(32)}"``.
+
+    Parsing rather than scanning text is load-bearing in BOTH directions: a
+    reformatted call is still found, and a prefix merely NAMED in a comment or
+    docstring is not counted as a mint site.
+    """
+    found: set[str] = set()
+    tree = ast.parse(source)
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    consts[target.id] = node.value.value
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+            if name != "_new_token" or not node.args:
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                found.add(arg.value)
+            elif isinstance(arg, ast.Name) and arg.id in consts:
+                found.add(consts[arg.id])
+        elif isinstance(node, ast.JoinedStr) and node.values:
+            head = node.values[0]
+            if not (isinstance(head, ast.Constant) and isinstance(head.value, str)
+                    and head.value.endswith("_")):
+                continue
+            if any(_names_a_token_helper(tail) for tail in node.values[1:]):
+                found.add(head.value)
+    return found
+
+
+def _minted_widths() -> tuple[str, str]:
+    """One body per minted SHAPE: 43 URL-safe chars, and 64 lowercase hex."""
+    return _fill(43), "a1b2c3d4e5f6a7b8" * 8
+
+
+def _has_a_rule(prefix: str) -> bool:
+    """True when SOME rule redacts this prefix at one of the minted widths."""
+    for body in _minted_widths():
+        value = prefix + body
+        out, _ = redact_secrets("value=" + value + " end")
+        if value not in out:
+            return True
+    return False
+
+
+def test_the_mint_site_scanner_reports_a_prefix_that_has_no_rule():
+    """The guard must be able to FAIL — twice over.
+
+    A scanner that always returns ``set()`` and a ``_has_a_rule`` that always
+    returns True would each make the exhaustiveness test below green while
+    covering nothing — the "a test that cannot fail" defect this repo has been
+    bitten by. Both halves are pinned against a fabricated source.
+    """
+    fabricated = (
+        "def _new_token(prefix):\n"
+        "    return prefix\n"
+        'OTHER_PREFIX = "zzbogus_"\n'
+        'client = _new_token(OTHER_PREFIX)\n'
+    )
+    assert _mint_sites(fabricated) == {"zzbogus_"}
+    assert not _has_a_rule("zzbogus_")
+
+
+def test_the_scanner_ignores_a_prefix_that_is_only_NAMED_in_prose():
+    """A prefix mentioned in a comment or docstring is NOT a mint site."""
+    fabricated = (
+        "# the oat_ prefix is minted elsewhere\n"
+        '\"\"\"Docstrings mentioning st_ and cs_ are not mint sites.\"\"\"\n'
+        "x = 1\n"
+    )
+    assert _mint_sites(fabricated) == set()
+
+
+def test_every_credential_the_product_mints_has_a_redaction_rule():
+    """#6158: enumerate the MINT SITES; every minted prefix must have a rule.
+
+    This is the mechanism whose ABSENCE let ``oat_``/``ort_``/``st_`` ship with
+    no rule at all while every test stayed green: the rule list was maintained
+    by hand and nothing derived it from the producers. When a value slips
+    through, the turn is stored verbatim with ``capture_redactions: 0`` — the
+    exact fail-open path #4911 was filed for.
+    """
+    sites: dict[str, str] = {}
+    for rel in _MINT_MODULES:
+        source = (_REPO / rel).read_text(encoding="utf-8")
+        for prefix in _mint_sites(source):
+            sites[prefix] = rel
+    # Vacuity check first: if the scanner ever stops matching, an empty dict
+    # would satisfy the assertion below while proving nothing.
+    assert sites, ("the mint-site scanner found NO credential prefixes in "
+                   f"{_MINT_MODULES} — it has stopped scanning")
+    # Pin the discovered set so a REMOVED mint site is visible too: a
+    # one-directional guard would let the set shrink towards empty unnoticed,
+    # and adding a family must be a deliberate edit here.
+    assert sites == {"oat_": "tortoise/oauth.py",
+                     "ort_": "tortoise/oauth.py",
+                     "ct_": "tortoise/oauth.py",
+                     "cs_": "tortoise/oauth.py",
+                     "st_": "tortoise/hosted_api.py"}, sites
+    unruled = sorted(f"{p} (minted in {sites[p]})" for p in sites
+                     if not _has_a_rule(p))
+    assert not unruled, (
+        "these credential prefixes are MINTED by the product but no rule in "
+        "_SECRET_SHAPES redacts them, so a value pasted into a captured turn is "
+        "stored verbatim — add a rule with the family's OWN body width and a "
+        "CASES row:\n  " + "\n  ".join(unruled))

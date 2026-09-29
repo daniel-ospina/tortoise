@@ -385,6 +385,54 @@ _REDACTION_VALUE = "[REDACTED:{kind}]"
 
 #: ``(kind, pattern, replacement)`` — ordered, and the ORDER IS LOAD-BEARING.
 _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    # ── Tortoise's OWN minted credentials ───────────────────────────────────
+    # FIRST, for the same reason `sk-ant-` precedes the generic `sk-`: these are
+    # the narrowest anchors in the table, so they must win the label when a
+    # value is also reachable by a broader rule (a `Bearer oat_…` is matched by
+    # the bare-bearer rule too, and the credit belongs here).
+    #
+    # ⛔ THE BODIES DIFFER PER FAMILY AND THE FLOOR CARRIES A `,` — that comma
+    # is the whole fix (#6158). `tortoise/oauth.py::_new_token` is
+    # `prefix + secrets.token_urlsafe(32)`, i.e. URL-SAFE BASE64-ish text
+    # (mixed case, `-`, `_`, exactly 43 chars after `.rstrip("=")`), so the
+    # `[0-9a-f]{32}` body used for the API-key shapes CANNOT match it. `st_` is
+    # minted by `token_hex(32)` — SIXTY-FOUR lowercase hex, twice the API-key
+    # width — so anchoring it at `{32}` (no comma) would replace a PREFIX and
+    # leave the tail in cleartext, the defect filed as #5470 for
+    # `deepseek_api_key`. `{N,}` matches every real token AND cannot leave a
+    # suffix behind.
+    #
+    # ⛔ `ct_` IS A CLIENT ID, NOT A SECRET — INCLUDED DELIBERATELY. Exempting
+    # it would force the exhaustiveness guard in
+    # `tests/test_capture_secret_redaction_4911.py` to carry an exemption list,
+    # and that list is exactly the drift surface the guard exists to remove
+    # (#6158). Redacting a non-secret is the safe direction; omitting a rule is
+    # not.
+    #
+    # ⛔ THE TRAILING LOOKAHEAD CLASS IS THE BODY CLASS MINUS ITS OWN
+    # CHARACTERS, WHICH IS WHAT KEEPS THIS LINEAR. For the `oat_`/`ort_`/`ct_`/
+    # `cs_` family the body is `[A-Za-z0-9_-]` and the lookahead is
+    # `[A-Za-z0-9]` — a subset — so after a greedy body match the next character
+    # can never be alnum and the lookahead succeeds on the FIRST try (no
+    # backtracking). The `st_` body is `[0-9a-f]` only, so its lookahead
+    # excludes hex rather than alnum: with an alnum lookahead a body followed
+    # by a non-hex letter (`st_…g`) would backtrack one character at a time and
+    # scan quadratically — the failure mode #4911 was fixed for.
+    ("tortoise_oauth_access_token",
+     re.compile(r"(?<![A-Za-z0-9])oat_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_access_token")),
+    ("tortoise_oauth_refresh_token",
+     re.compile(r"(?<![A-Za-z0-9])ort_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_refresh_token")),
+    ("tortoise_oauth_client_id",
+     re.compile(r"(?<![A-Za-z0-9])ct_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_client_id")),
+    ("tortoise_oauth_client_secret",
+     re.compile(r"(?<![A-Za-z0-9])cs_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_client_secret")),
+    ("tortoise_signup_token",
+     re.compile(r"(?<![A-Za-z0-9])st_[0-9a-f]{64,}(?![0-9a-f])"),
+     _REDACTION_VALUE.format(kind="tortoise_signup_token")),
     # Anthropic — BEFORE the generic `sk-` (see the ordering rule above).
     ("anthropic_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])"),
