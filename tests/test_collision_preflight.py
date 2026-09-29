@@ -1810,14 +1810,15 @@ class CollisionPreflightTest(unittest.TestCase):
         # issue number, so the hit comes from `closingIssuesReferences` and only
         # the self-identity gate can suppress it.
         _git(self.repo, "checkout", "-q", "-b", "release/hub-work")
-        other = self.tmp / "other-repo"
-        other.mkdir()
-        _git(other, "init", "-q", "-b", "main", "--template=")
-        _git(other, "remote", "add", "origin",
-             "https://github.com/other-owner/other-repo.git")
-        (other / "seed.txt").write_text("seed\n")
-        _git(other, "add", "seed.txt")
-        _git(other, "commit", "-qm", "seed")
+        # ⛔ USE THE SHARED FIXTURE HELPER — do not hand-roll this repo. This
+        # block was an inline copy of `_sibling_repo` that had dropped its two
+        # identity lines (`config user.email` / `config user.name`), so the seed
+        # commit raised `exit status 128` wherever git is configured to REQUIRE
+        # an explicit identity (`user.useConfigOnly = true` — the CI runner's
+        # setting), while passing on any dev box whose ambient/global config
+        # supplies one. The assertions below were therefore never reached in CI:
+        # a test that passed for a reason it did not name.
+        other = self._sibling_repo("other-repo", "other-owner/other-repo")
 
         self.gh_fixtures(open_prs=[{
             "number": 5199, "title": "fix: land the thing",
