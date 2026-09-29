@@ -16,14 +16,25 @@ Usage:
     python scripts/redis-guard.py            # scan repo, exit 1 on violations
     python scripts/redis-guard.py <files...> # scan specific files
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/redis-guard.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/redis-guard.py`"
+    )
 
 import re
-import sys
-from pathlib import Path
 
 # Repo root via git (robust to worktrees, symlinks, relative __file__)
 import subprocess as _sp
+from pathlib import Path
+
 _REPO_ROOT = _sp.run(
     ["git", "rev-parse", "--show-toplevel"],
     capture_output=True, text=True).stdout.strip()
