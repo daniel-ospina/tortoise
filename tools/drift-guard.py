@@ -61,7 +61,24 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True, text=True, check=False,
+        # A path inside a git object may hold bytes that are not valid UTF-8
+        # (legal on every filesystem, and reachable from CI). Strict decoding
+        # raises UnicodeDecodeError from inside subprocess.run — BEFORE any
+        # returncode check — which is a traceback where this tool's contract
+        # promises exit 2. surrogateescape round-trips the bytes so set
+        # comparisons stay byte-exact; _safe_text repairs the display.
+        errors="surrogateescape",
     )
+
+
+def _safe_text(text: str) -> str:
+    """Repair surrogate-escaped git output for display (#4174).
+
+    Surrogates are for byte-exact comparison, not for a terminal — printing
+    one raises UnicodeEncodeError. The JSON path needs no help (json.dumps
+    escapes non-ASCII by default).
+    """
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 class MeasurementError(RuntimeError):
@@ -101,8 +118,8 @@ def _split_remote_ref(root: Path, base: str) -> tuple[str, str] | None:
     return remote, branch
 
 
-def fetch_base(root: Path, base: str) -> tuple[str | None, str]:
-    """Bring `base` up to date. Returns (error_or_None, freshness).
+def fetch_base(root: Path, base: str) -> tuple[str | None, str, str]:
+    """Bring `base` up to date. Returns (error_or_None, freshness, measured_ref).
 
     Freshness is "fetched" only when the fetch succeeded. There is NO opt-out:
     a local ref cannot be proven fresh, and a fetch failure is returned as an
@@ -115,21 +132,30 @@ def fetch_base(root: Path, base: str) -> tuple[str | None, str]:
     ref while stamping freshness "fetched" (#4174's own failure mode, behind a
     green freshness label). Naming the destination makes the measured ref the
     fetched one.
+
+    `measured_ref` is that CANONICAL destination, and it — never the caller's
+    spelling — is what every measurement must use. `origin/main` is
+    DWIM-resolved in the gitrevision order ($GIT_DIR/<n>, refs/<n>,
+    refs/tags/<n>, refs/heads/<n>, refs/remotes/<n>), so a local branch or tag
+    literally named `origin/main` SHADOWS the fetched ref: the gate would
+    measure the stale one while stamping freshness "fetched" — fail-open #3
+    through another route.
     """
     remote_ref = _split_remote_ref(root, base)
     if remote_ref is None:
         return (f"base '{base}' is not a remote-tracking ref — the gate cannot "
                 f"prove its freshness (pass origin/<branch>); an unproven base "
-                f"is not a pass"), "unproven"
+                f"is not a pass"), "unproven", base
     remote, branch = remote_ref
-    refspec = f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"
+    measured = f"refs/remotes/{remote}/{branch}"
+    refspec = f"+refs/heads/{branch}:{measured}"
     r = _git(root, "fetch", remote, refspec, "--quiet")
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip().splitlines()
         return (f"could not fetch {remote}/{branch} — the base ref's freshness "
                 f"cannot be proven, so this is not a pass "
-                f"({detail[0] if detail else 'fetch failed'})"), "unproven"
-    return None, "fetched"
+                f"({detail[0] if detail else 'fetch failed'})"), "unproven", measured
+    return None, "fetched", measured
 
 
 def _paths_changed(root: Path, a: str, b: str) -> set[str]:
@@ -234,11 +260,12 @@ def main() -> int:
             print(json.dumps(payload))
         else:
             for line in text_lines:
-                print(line, file=sys.stderr if rc != 0 else sys.stdout)
+                print(_safe_text(line),
+                      file=sys.stderr if rc != 0 else sys.stdout)
         return rc
 
     # ── freshness first: a possibly-stale ref is never a pass (#4174) ──────
-    fetch_err, freshness = fetch_base(root, args.base)
+    fetch_err, freshness, measured_base = fetch_base(root, args.base)
     if fetch_err is not None:
         payload = {"status": "error", "reason": fetch_err,
                    "base": args.base, "freshness": freshness}
@@ -250,7 +277,8 @@ def main() -> int:
 
     # Base must be resolvable — a wrong/missing ref is an environment error,
     # not a clean gate.
-    base_ok = _git(root, "rev-parse", "--verify", "--quiet", f"{args.base}^{{commit}}")
+    base_ok = _git(root, "rev-parse", "--verify", "--quiet",
+                   f"{measured_base}^{{commit}}")
     if base_ok.returncode != 0:
         msg = (f"drift-guard: base ref '{args.base}' not resolvable "
                f"(fetch-depth 0 required in CI); cannot compare")
@@ -265,8 +293,10 @@ def main() -> int:
                      "freshness": freshness},
                     [f"ERROR {msg}"], 2)
 
-    ahead = _git(root, "rev-list", "--count", f"{args.base}..{args.head}").stdout.strip()
-    behind = _git(root, "rev-list", "--count", f"{args.head}..{args.base}").stdout.strip()
+    ahead = _git(root, "rev-list", "--count",
+                 f"{measured_base}..{args.head}").stdout.strip()
+    behind = _git(root, "rev-list", "--count",
+                  f"{args.head}..{measured_base}").stdout.strip()
     try:
         ahead_n, behind_n = int(ahead), int(behind)
     except ValueError:  # pragma: no cover — git always prints ints
@@ -279,7 +309,7 @@ def main() -> int:
     # every path main moved since the common ancestor is present in head and
     # the revert set is provably empty. With `behind_n > 0` the arm MUST run —
     # an unreadable merge base is "could not measure", which is not a pass.
-    mb_proc = _git(root, "merge-base", args.base, args.head)
+    mb_proc = _git(root, "merge-base", measured_base, args.head)
     mb = mb_proc.stdout.strip()
     if behind_n > 0 and (mb_proc.returncode != 0 or not mb):
         detail = (mb_proc.stderr or "").strip().splitlines()
@@ -292,7 +322,7 @@ def main() -> int:
                     [f"ERROR {msg}"], 2)
     if mb and behind_n > 0:
         try:
-            reverts = silent_reverts(root, mb, args.base, args.head)
+            reverts = silent_reverts(root, mb, measured_base, args.head)
         except MeasurementError as exc:
             msg = (f"drift-guard: the silent-revert arm could not be measured "
                    f"(merge-base {mb[:12]}): {exc}")
