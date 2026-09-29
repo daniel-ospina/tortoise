@@ -28,6 +28,7 @@ import pytest
 
 from tortoise.config import is_db_uri
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
+from tortoise.graph_delete_guard import safe_graph_delete
 from tortoise.projection import FalkorProjection
 
 # ── #4439: no RDB snapshot storm from ephemeral harness fixtures ──────────
@@ -1026,8 +1027,12 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         # with no conditional/transactional delete spanning the two.
         if peer_journals and g in _peer_journaled_graphs(peer_journals):
             continue  # a live PEER session owns this graph
+        # #2961: presence-gated (detach-only at this phase). A blind
+        # `MATCH (n) DETACH DELETE n` against a name a concurrent session
+        # just dropped RE-CREATES it as an AOF-invisible phantom, and the
+        # GRAPH.DELETE below then poisons the shared append-only file.
         try:
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+            safe_graph_delete(proj.db, g, detach=True, drop=False)
         except Exception as e:  # P2-7: collect + re-raise, never pass silently
             failures.append((g, e))
         else:
@@ -1042,13 +1047,14 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
             # Cycle-6 P1-0 (FM-2): graph.delete() rides execute_command —
             # NEVER query("GRAPH.DELETE") (that transmits GRAPH.QUERY <g>
             # "GRAPH.DELETE" --compact, a Cypher parse error).
-            proj.db.select_graph(g).delete()
+            # Cycle-5 P2-3 + #2961: safe_graph_delete re-checks presence
+            # under the cross-process lock, so a graph already dropped by a
+            # concurrent suite (last-suite-standing) or an earlier stale
+            # sweep is a SUCCESS that transmits NO command — the poisoning
+            # GRAPH.DELETE is never sent.
+            safe_graph_delete(proj.db, g, detach=False, drop=True)
         except Exception as e:
-            # Cycle-5 P2-3: a graph already dropped by a concurrent suite
-            # (last-suite-standing) or an earlier stale sweep is SUCCESS;
-            # only genuine command errors collect.
-            if _is_missing_graph_error(e):
-                continue
+            # Cycle-5 P2-3: only genuine command errors collect.
             failures.append((g, e))
     if failures:
         raise RuntimeError(
@@ -1140,7 +1146,10 @@ def _proj_for_uri(uri: str):
 def _sweep_proj(uri: str):
     """Context manager yielding a host-mode projection for sweep operations;
     best-effort cleanup deletes the probe graph so a sweep never leaves a
-    mint behind (the projection's _ensure_indexes creates it)."""
+    mint behind (the projection's _ensure_indexes creates it). #2961: the
+    cleanup is presence-gated — the probe graph may never have been
+    materialised, and a GRAPH.DELETE on the resulting phantom key poisons
+    the shared AOF."""
     from contextlib import contextmanager
 
     @contextmanager
@@ -1150,7 +1159,9 @@ def _sweep_proj(uri: str):
             yield proj
         finally:
             try:  # noqa: SIM105
-                proj.db.select_graph(proj.graph_name).delete()
+                # #2961: presence-gated — never GRAPH.DELETE an absent graph.
+                safe_graph_delete(proj.db, proj.graph_name,
+                                  detach=False, drop=True)
             except Exception:
                 pass
             try:  # noqa: SIM105
@@ -1164,11 +1175,20 @@ def _sweep_proj(uri: str):
 def _drop_one_graph(proj, g: str, *, drop: bool) -> bool:
     """DETACH-then-DELETE one graph (cycle-4 P1-9 + cycle-6 P1-0:
     graph.delete() rides execute_command, never query("GRAPH.DELETE")).
-    Log-and-continue on error (cycle-8 P2-3 — hygiene never fails the suite)."""
+
+    #2961: both commands are SKIPPED entirely when the graph is not
+    currently present. A blind DETACH against a name a concurrent sweep
+    just dropped re-creates it as an AOF-invisible phantom (FalkorDB
+    persists effects, and an empty graph emits none) whose later
+    GRAPH.DELETE poisons the append-only file and crash-loops the shared
+    container. ``safe_graph_delete`` presence-gates inside a cross-process
+    lock, so the race cannot reproduce the phantom.
+
+    Log-and-continue on error (cycle-8 P2-3 — hygiene never fails the suite).
+    An already-absent graph still returns True: the journal entry is
+    satisfied and must not be retried forever (keep-on-partial)."""
     try:
-        proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
-        if drop:
-            proj.db.select_graph(g).delete()
+        safe_graph_delete(proj.db, g, detach=True, drop=drop)
         return True
     except Exception as e:
         logging.getLogger(__name__).warning(
@@ -1372,8 +1392,9 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
         if not g.startswith(_PRODUCT_GRAPH_PREFIXES):
             continue
         try:
-            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
-            proj.db.select_graph(g).delete()
+            # #2961: presence-gated + serialized — an already-absent graph
+            # transmits NO command instead of the poisoning GRAPH.DELETE.
+            safe_graph_delete(proj.db, g, detach=True, drop=True)
             dropped.append(g)
         except Exception as e:
             logging.getLogger(__name__).warning(
