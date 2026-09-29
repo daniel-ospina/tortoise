@@ -501,7 +501,10 @@ def classify_query(
 #: {"leg", "ran", "degraded", "reason", "count"}. ``reason`` is never null
 #: when ``degraded`` is true (shape rule). #4999 adds one OPTIONAL key —
 #: ``mechanism`` — present only on an entry whose leg records WHICH path it
-#: took. Legs that do not pass one are byte-identical to the shared shape.
+#: took. #4199 adds a second OPTIONAL key — ``scope``
+#: (:data:`VECTOR_SCOPE_KEY`, value :data:`VECTOR_SCOPE_EMPTY`) — present
+#: only on a vector entry whose ``scope_kinds`` predicate selected NO nodes.
+#: Legs that do not pass either key are byte-identical to the shared shape.
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
                  reason: str | None, count: int,
                  mechanism: str | None = None) -> dict:
@@ -564,6 +567,21 @@ _KIND_FIELD_BY_ENTITY = {
     "subject": "subjectKind",
 }
 
+#: #4199 — trace-entry key recording that the arm measured an EMPTY scope
+#: (the ``scope_kinds`` predicate selected NO nodes). Present only on a
+#: vector entry whose scope probe ran; absent means the entry measured a
+#: non-empty scope or was never scoped. The value is
+#: :data:`VECTOR_SCOPE_EMPTY`.
+VECTOR_SCOPE_KEY = "scope"
+#: The arm's ``scope_kinds`` selected no nodes. An empty scope is a category
+#: error for ``no_embeddings`` (#2952's deliberate rule — see
+#: :func:`test_empty_scope_is_not_declared_un_embedded`), so such an entry
+#: neither proves the read hybrid nor declares it degraded: it is NEUTRAL in
+#: the aggregation. It exists so one arm measuring a DIFFERENT (empty) scope
+#: cannot launder another arm's genuine degradation — the ``object_centric``
+#: Point+Object laundering #4199's review found.
+VECTOR_SCOPE_EMPTY = "empty"
+
 
 # ── (C) #2952: declared degraded reads ──────────────────────────────────────
 # The leg trace records WHAT each leg did; a consumer that would otherwise
@@ -579,9 +597,18 @@ VECTOR_LEG_UNAVAILABLE = "vector_leg_unavailable"
 
 
 def _vector_leg_healthy(entries: list[dict]) -> bool:
-    """True when at least one vector entry did run, undegraded (#2952)."""
+    """True when at least one IN-SCOPE vector entry did run, undegraded (#2952).
+
+    #4199: an entry whose arm measured an EMPTY scope
+    (:data:`VECTOR_SCOPE_EMPTY`) is not evidence the read was served — it is
+    skipped. ``recall_state(object_centric=True)`` submits one vector arm per
+    entity, and an arm whose kind scope holds no nodes scans the whole label
+    and can return out-of-scope rows recorded ``ok``; that healthy entry must
+    not launder another arm's genuine degradation.
+    """
     return any(
         e.get("leg") == "vector" and e.get("ran") and not e.get("degraded")
+        and e.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY
         for e in entries)
 
 
@@ -641,6 +668,14 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     EMPTY trace, by contrast, reports nothing and is declared
     ``leg_trace_unavailable`` (fail closed). A fallback-only (TF-IDF) trace
     reports a text leg whose vector leg is absent → ``leg_absent``.
+
+    #4199 empty-scope aggregation: ``recall_state(object_centric=True)``
+    submits one vector arm per entity, and an arm whose ``scope_kinds``
+    selected NO nodes (:data:`VECTOR_SCOPE_EMPTY`) is NEUTRAL — it neither
+    proves the read hybrid nor declares it degraded. An arm that measured a
+    different, empty scope therefore cannot launder another arm's genuine
+    degradation, and a trace in which EVERY vector arm measured an empty
+    scope returns ``None`` (the #2952 empty-scope rule).
     """
     if leg_trace is None:
         return None
@@ -656,12 +691,25 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     # healthy-but-empty vector entry must not launder a fallback read).
     if _results_bearing_fallback(entries) is not None:
         return _degraded_read_marker("tfidf_fallback", entries)
-    vecs = [e for e in entries if e.get("leg") == "vector"]
+    vecs_all = [e for e in entries if e.get("leg") == "vector"]
+    # #4199: an arm that measured an EMPTY scope is NEUTRAL — it neither
+    # proves the read hybrid nor declares it degraded. Drop it before the
+    # aggregation so it cannot launder (or be blamed for) another arm's
+    # coverage: ``recall_state(object_centric=True)`` submits a Point arm and
+    # an Object arm, and the Object arm's kind scope is often empty while its
+    # unscoped scan still returns rows.
+    vecs = [e for e in vecs_all
+            if e.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY]
     # ``recall_state(object_centric=True)`` appends one entry per query
-    # (Point + Object), so a single healthy vector entry proves the leg ran.
-    # NOTE: stricter than the #3005 battery submission gate (ran AND NOT
-    # degraded) — a degraded vector leg contributes no semantic results.
+    # (Point + Object), so a single healthy IN-SCOPE vector entry proves the
+    # leg ran. NOTE: stricter than the #3005 battery submission gate (ran AND
+    # NOT degraded) — a degraded vector leg contributes no semantic results.
     if _vector_leg_healthy(entries):
+        return None
+    if vecs_all and not vecs:
+        # EVERY vector arm measured an EMPTY scope: the read's scope holds no
+        # nodes at all, so the dense leg is not to blame (#2952's empty-scope
+        # rule — ``no_embeddings`` would be a category error there).
         return None
     vec = vecs[0] if vecs else None
     if vec is not None:
@@ -960,7 +1008,11 @@ def run_vector_query(
     Retrieval itself is UNCHANGED: the rows the unscoped query returns are
     still returned (the read's kind filter owns dropping them), and a scope
     with no embedded nodes is still searched. Default None = pre-#4199
-    behavior, byte-identical.
+    behavior, byte-identical. A scope that selects NO nodes is recorded
+    NEUTRAL on the trace entry (:data:`VECTOR_SCOPE_KEY` →
+    :data:`VECTOR_SCOPE_EMPTY`): its ``ok``/degraded record stands, but
+    :func:`declared_degraded_read` skips it so it can neither prove the read
+    hybrid nor declare it degraded (the empty-scope rule).
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
@@ -971,6 +1023,10 @@ def run_vector_query(
     #: #4199 — the read's OWN scope carries no dense material. Resolved once
     #: below (before the query) and applied to every HEALTHY outcome record.
     _scope_hollow = False
+    #: #4199 — the scope probe selected NO nodes. Such an entry is NEUTRAL in
+    #: the declaration (neither healthy nor degraded): an arm measuring a
+    #: different, empty scope must not launder another arm's degradation.
+    _scope_empty = False
     _scope_embedded: int | None = None
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
@@ -988,10 +1044,15 @@ def run_vector_query(
                 degraded = True
             else:
                 degraded, reason, count = True, "no_embeddings", 0
-        leg_trace.append(_trace_entry("vector", ran=ran,
-                                      degraded=degraded,
-                                      reason=reason, count=count,
-                                      mechanism=mechanism))
+        entry = _trace_entry("vector", ran=ran, degraded=degraded,
+                             reason=reason, count=count,
+                             mechanism=mechanism)
+        if _scope_empty:
+            # #4199: mark the entry NEUTRAL — the empty-scope rule keeps its
+            # ``ok``/degraded record, but the declaration skips it (see
+            # :func:`declared_degraded_read`).
+            entry[VECTOR_SCOPE_KEY] = VECTOR_SCOPE_EMPTY
+        leg_trace.append(entry)
 
     if not query_vec:
         return []
@@ -1056,6 +1117,7 @@ def run_vector_query(
                 _scope_total = int(_scope_rows[0][0] or 0)
                 _scope_embedded = int(_scope_rows[0][1] or 0)
                 _scope_hollow = _scope_total > 0 and _scope_embedded == 0
+                _scope_empty = _scope_total == 0
         except Exception as e:  # noqa: BLE001, RUF100 — fail CLOSED
             logger.debug("dense scope probe failed (%s) — declaring the "
                          "scope un-embedded", e)

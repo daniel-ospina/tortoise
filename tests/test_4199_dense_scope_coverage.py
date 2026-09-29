@@ -60,6 +60,8 @@ import pytest
 from tortoise.embeddings import EmbeddingModel
 from tortoise.search_engine import (
     VECTOR_LEG_UNAVAILABLE,
+    VECTOR_SCOPE_EMPTY,
+    VECTOR_SCOPE_KEY,
     declared_degraded_read,
     reset_circuit_breakers,
     run_vector_query,
@@ -213,6 +215,61 @@ def test_partial_turn_corpus_read_is_declared_degraded(
     assert turn_ids, "sanity: the turn fixtures exist"
 
 
+def test_an_out_of_scope_object_arm_cannot_launder_the_read(
+        sdk_factory, embedder, monkeypatch):
+    """#4199 review P1: the Object arm must not launder the Point arm.
+
+    ``recall_state(object_centric=True)`` submits a Point arm AND an Object
+    arm. With ``kind='event'`` the Object arm's ``objectKind`` scope is EMPTY
+    (the production "plus any embedded Object" shape), so it is NEUTRAL — but
+    before the review fix its unscoped scan still returned the out-of-scope
+    Object, recorded ``ran=True, degraded=False, reason='ok'``, and
+    ``_vector_leg_healthy`` accepted that as proof the read was hybrid while
+    the Point arm — the arm that actually carries the read's material — had no
+    embeddings in scope. The declaration must be honest per scope: an arm made
+    neutral by an empty scope can neither prove nor disprove the read.
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-obj")
+        _embedder(monkeypatch, embedder)
+        # Extracted Points ARE embedded (the in-scope half of the corpus).
+        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        # An embedded Object OUTSIDE the read's objectKind scope — the
+        # production "plus any embedded Object" shape that laundered.
+        obj = sdk.create_object("website config", objectKind="other")
+
+        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+    finally:
+        sdk.close()
+
+    vecs = _vector_entries(legs["legs"])
+    assert len(vecs) == 2, (
+        f"expected a Point arm and an Object arm, got {vecs}")
+    in_scope = [v for v in vecs if v.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY]
+    neutral = [v for v in vecs if v.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY]
+    assert len(in_scope) == 1 and len(neutral) == 1, (
+        f"the Object arm's empty scope must be marked neutral: {vecs}")
+    # The Point arm (the read's own material) is the degraded one.
+    assert in_scope[0]["ran"] is True, in_scope
+    assert in_scope[0]["degraded"] is True, in_scope
+    assert in_scope[0]["reason"] == "no_embeddings", in_scope
+    # The Object arm scanned a row but measured an EMPTY scope — NEUTRAL, not
+    # proof of a hybrid read.
+    assert neutral[0]["ran"] is True, neutral
+    assert neutral[0]["reason"] == "ok", neutral
+
+    marker = legs["declared_degraded_read"]
+    assert marker is not None, (
+        "an out-of-scope Object arm laundered the Point arm's degradation: "
+        f"{legs['legs']}")
+    assert marker["reason"] == "no_embeddings", marker
+    assert marker["hybrid"] is False, marker
+    assert legs["hybrid"] is False, legs
+    assert obj["id"], "sanity: the Object fixture exists"
+
+
 def test_the_returned_material_is_keyword_only_for_the_turns(
         sdk_factory, embedder, monkeypatch):
     """The dense score is absent from every turn hit — the claim being denied.
@@ -336,13 +393,21 @@ def test_zero_row_guard_counts_the_scope_not_the_whole_label():
     """The issue's literal evidence: an out-of-scope-only embedding set.
 
     The unscoped scan finds NO rows (all dense rows live outside the read's
-    kind) while the whole label HAS embeddings. Pre-fix that recorded
+    kind) while the whole label HAS embeddings. Pre-fix the guard ran the
+    unscoped count, saw those label-wide embeddings, and recorded
     ``empty_results`` ("there are embeddings, no near neighbour"); the honest
-    verdict is ``no_embeddings`` for THIS read.
+    verdict is ``no_embeddings`` for THIS read. The guard must therefore take
+    its count from the scope probe and NOT issue the unscoped count at all.
+
+    The route table therefore models BOTH states — the read's scope (2 nodes,
+    0 dense) and the whole label (5 dense) — so reverting the guard to the
+    unscoped count has a defined, observable response instead of falling
+    through to the mock's empty default.
     """
     graph = _RoutingGraph([
-        ("count(n.embedding)", [(2, 0)], None),   # the read's scope
-        ("euclideanDistance", [], None),          # unscoped scan: no rows
+        ("count(n.embedding)", [(2, 0)], None),  # the read's scope: nodes, no dense
+        ("RETURN count(*)", [(5,)], None),       # the WHOLE label: 5 embedded
+        ("euclideanDistance", [], None),         # unscoped scan: no rows
     ])
     trace: list[dict] = []
     out = _scoped_run(graph, trace)
@@ -353,6 +418,14 @@ def test_zero_row_guard_counts_the_scope_not_the_whole_label():
     assert vec["degraded"] is True, vec
     assert vec["reason"] == "no_embeddings", (
         f"the scope's zero dense coverage was reported as {vec['reason']!r}")
+    # The guard's whole point: the read's OWN scope count (2 nodes, 0 dense)
+    # decided it. The unscoped whole-label count (5 dense) must never be
+    # issued — for a hollow scope the #4199 ``_record`` rewrite ALSO turns
+    # ``empty_results`` into ``no_embeddings``, so the absence of this query is
+    # the only place the guard's own behaviour is observable.
+    assert not any("n.embedding IS NOT NULL RETURN count(*)" in c
+                   for c in graph.seen), (
+        f"the unscoped whole-label count ran: {graph.seen}")
     assert declared_degraded_read(trace)["reason"] == "no_embeddings"
 
 
@@ -375,6 +448,66 @@ def test_out_of_scope_dense_rows_do_not_serve_the_read():
     vec = _vector_entry(trace)
     assert vec["degraded"] is True and vec["reason"] == "no_embeddings", vec
     assert vec["count"] == 0, vec
+
+
+def _vec_entry(*, degraded, reason, count=0, scope=None, ran=True):
+    """A hand-built vector trace entry (the shared R3/#4199 shape)."""
+    entry = {"leg": "vector", "ran": ran, "degraded": degraded,
+             "reason": reason, "count": count}
+    if scope is not None:
+        entry[VECTOR_SCOPE_KEY] = scope
+    return entry
+
+
+def test_degraded_arm_is_not_laundered_by_a_neutral_empty_scope_arm():
+    """#4199 review P1 (hermetic): the exact trace shape of the laundering.
+
+    The Point arm (in scope) ran degraded; the Object arm measured an EMPTY
+    scope and its unscoped scan returned a row (``ok``). Before the review
+    fix that ``ok`` entry proved the read hybrid — the empty-scope arm is
+    NEUTRAL and must be skipped.
+    """
+    trace = [
+        _vec_entry(degraded=True, reason="no_embeddings"),
+        _vec_entry(degraded=False, reason="ok", count=1,
+                   scope=VECTOR_SCOPE_EMPTY),
+    ]
+    marker = declared_degraded_read(trace)
+    assert marker is not None, trace
+    assert marker["reason"] == "no_embeddings", marker
+    assert marker["hybrid"] is False, marker
+    assert marker[VECTOR_LEG_UNAVAILABLE] is True, marker
+
+
+def test_in_scope_healthy_arm_still_proves_hybrid_despite_empty_scope_arms():
+    """The null round: a neutral arm never over-declares a healthy read.
+
+    The Point arm is embedded and healthy; the Object arm's empty scope is
+    neutral. The read stays hybrid — the fix is scope-precise, not a blanket
+    degrade (the Object arm must keep its ``ok`` record).
+    """
+    trace = [
+        _vec_entry(degraded=False, reason="ok", count=2),
+        _vec_entry(degraded=False, reason="ok", count=1,
+                   scope=VECTOR_SCOPE_EMPTY),
+    ]
+    assert declared_degraded_read(trace) is None, trace
+
+
+def test_every_arm_empty_scope_does_not_declare():
+    """The #2952 empty-scope rule survives the aggregation change.
+
+    When EVERY vector arm measured an empty scope the read is empty
+    regardless of the dense leg — ``no_embeddings`` would be a category
+    error, so nothing is declared.
+    """
+    trace = [
+        _vec_entry(degraded=False, reason="ok", count=1,
+                   scope=VECTOR_SCOPE_EMPTY),
+        _vec_entry(degraded=True, reason="no_embeddings",
+                   scope=VECTOR_SCOPE_EMPTY),
+    ]
+    assert declared_degraded_read(trace) is None, trace
 
 
 def test_scope_with_dense_material_is_untouched_by_the_fix():
@@ -407,6 +540,10 @@ def test_empty_scope_is_not_declared_un_embedded():
 
     vec = _vector_entry(trace)
     assert vec["degraded"] is False and vec["reason"] == "ok", vec
+    # …and the empty scope is recorded NEUTRAL so it can never launder (or be
+    # blamed for) another arm's coverage — the #4199 review aggregation rule.
+    assert vec.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY, vec
+    assert declared_degraded_read(trace) is None, trace
 
 
 def test_unmeasurable_scope_fails_closed():
