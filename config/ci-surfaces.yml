@@ -313,6 +313,11 @@ surfaces:
   - test_mcp_server_auth_modes.py
   - test_mcp_telemetry.py
   - test_metering.py
+  # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
+  # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
+  # `api` (metering/supabase seam) and `core` (the new module's default surface), so
+  # a change to EITHER select this file.
+  - test_graph_storage.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
   - test_oauth_mcp.py
   - test_oauth_token_fault.py  # #2863: /oauth/token fault-injection suite (fake CP + local HTTPServer seam)
@@ -581,6 +586,10 @@ surfaces:
   - test_ci_verdict.py
   - test_env_isolation.py
   - test_graph_name_ownership.py
+  # #5331: the graph byte meter (tortoise/graph_storage.py + the metering/
+  # supabase graph-storage lane). Dual-registered with `api`: a change to the new
+  # module selects no api-owned pattern, so `core` is the surface that must run it.
+  - test_graph_storage.py
   # #3634: guards the graph-name ownership vocabulary (the prefix sets that
   # authorise a sweep) — the register, the deny-safe residue predicate, and the
   # AST pin keeping the opt-in legacy sweep out of every default path.
