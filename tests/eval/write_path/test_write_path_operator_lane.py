@@ -703,20 +703,23 @@ def test_fold_lane_commit_leg_rekey_stamps_the_operators_it_created(
 
 def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
         _deterministic_lane, monkeypatch):
-    """#4936 (code-review P1): two payload operator records that resolve onto
-    the SAME ``(src, dst, op_type)`` triple each create their own node —
-    ``sdk.create_operator`` mints unconditionally, with no idempotency guard
-    (#4971) — so the capture's provenance set must be the CREATION LIST, not
-    the MITIGATES lookup dict. Building it from ``target_op_ids.values()``
-    collapses the duplicate and silently drops the earlier node's id: that
-    node stays ``eventId IS NULL`` and invisible to the eventId-keyed layer,
-    re-introducing the exact #4936 defect the fix removes.
+    """#4936 (code-review P1) → #4971: a repeated ``(src, dst, op_type)``
+    triple must be stamped exactly like every other created node.
 
-    A duplicate triple is reachable two ways, both real: two identical
-    emitted records (``extractor_v2`` guards MITIGATES against
-    ``emitted_edges`` but appends IMPL/NAND unconditionally), and two
-    DISTINCT payload records that re-key onto one graph pair (the #4716 remap
-    is not injective). Both create two nodes; both must be stamped.
+    #4936 wrote this against the then-true behaviour that
+    ``sdk.create_operator`` mints unconditionally, so two payload operator
+    records resolving onto one triple each created their own node, and the
+    capture's provenance set had to be the CREATION LIST rather than the
+    MITIGATES lookup dict — otherwise the earlier node's id was dropped and
+    it stayed ``eventId IS NULL``, invisible to the eventId-keyed layer.
+
+    #4971 hoists the eval lane's dup-edge probe into
+    ``apply_payload_operators``, so the repeat is now a NO-OP: the duplicate
+    record creates no second node. The invariant this test exists for is
+    unchanged — every operator node the capture created carries the
+    session's ``sessionCaptured`` eventId — and is now asserted over the
+    COLLAPSED set, which simultaneously pins #4971's idempotency on the
+    capture lane.
     """
     import tortoise.extractor_v2 as ev2
 
@@ -752,8 +755,11 @@ def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
     rows = proj.g.query(
         "MATCH (o:Point {is_operator:true}) RETURN o.id, o.eventId"
     ).result_set
-    assert len(rows) == impl_nand, (
-        f"{len(rows)}/{impl_nand} operator nodes created")
+    # #4971: the duplicate triple is now a no-op, so 3 records collapse to
+    # 2 operator nodes (one per distinct resolved triple).
+    assert len(rows) == 2, (
+        f"{len(rows)} operator nodes for 2 distinct triples from 3 records — "
+        "#4971's guard must collapse the repeated triple")
     unstamped = [r[0] for r in rows if not r[1]]
     assert not unstamped, (
-        f"duplicate-triple operator nodes left unstamped: {unstamped}")
+        f"operator nodes left unstamped: {unstamped}")

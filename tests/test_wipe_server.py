@@ -135,8 +135,18 @@ def test_wipe_server_clears_only_test_prefixed(server_proj):
     swept_b = f"team_ws_{uuid.uuid4().hex[:8]}"
     for g in (swept_a, swept_b):
         proj.db.select_graph(g).query("CREATE (:Point {id:'keep'})")
+    # Ownership (#3133/#5222): a scope=None (server-global) sweep SPARES every
+    # graph recorded in a LIVE PEER session's journal (#3074/#3214), and the
+    # fixture's fixed literal is the SAME name in every session that runs this
+    # file — so a peer that journalled it makes the global sweep fail closed
+    # and leave it, correctly. Name the graphs THIS test created as the
+    # caller's own scope (the documented per-session ownership mechanism,
+    # `wipe_server(scope=...)`) — the non-test names included, so the scope
+    # check admits them and the fail-closed PREFIX gate stays the only thing
+    # sparing them (drop that gate and the survivors red).
+    scope = {proj.graph_name, non_test, swept_a, swept_b}
     try:
-        wipe_server(proj)
+        wipe_server(proj, scope=scope)
         # test-prefixed graph emptied
         assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
         # non-test graphs untouched (delta: the seeded nodes survive)
@@ -299,6 +309,34 @@ def test_wipe_server_scope_explicit_ignores_peer_protection(monkeypatch,
         f"caller's own graph is always the caller's to sweep; got {db.detached}")
 
 
+def test_scope_reclaims_the_shared_literal_a_peer_sweep_spares(
+        monkeypatch, tmp_path):
+    """Ownership is the journal, not the name (#7795): a name-SHAPE gate never
+    outvotes it. A fixed, shared literal that a live peer session also journaled
+    is therefore SPARED by a scope=None sweep (fail closed, #3074/#3214) — the
+    session cannot tell its copy of the literal from the peer's — while the
+    SAME graph is reclaimed through the caller's own explicit scope, which
+    names the caller's own graphs and is deliberately exempt from peer
+    arbitration. Hermetic: fake db + fake peer marker, no server required."""
+    shared = "test_ws_shared_literal"
+    journal = _peer_env(monkeypatch, tmp_path, "peer00000005")
+    journal.write_text(shared + "\n")
+
+    db_global = _FakeDb()
+    db_global.graphs = [shared]
+    wipe_server(_FakeProj(db_global), scope=None)
+    assert db_global.detached == [], (
+        "a scope=None sweep must fail closed on a graph a live peer journals; "
+        f"detached={db_global.detached}")
+
+    db_scoped = _FakeDb()
+    db_scoped.graphs = [shared]
+    wipe_server(_FakeProj(db_scoped), scope={shared})
+    assert db_scoped.detached == [shared], (
+        "the caller's own explicit scope must reclaim the shared literal; "
+        f"detached={db_scoped.detached}")
+
+
 def test_live_peer_session_graphs_is_the_peer_journal_union(monkeypatch,
                                                             tmp_path):
     """#3214: the ownership primitive is the union of the LIVE peers' journal
@@ -332,7 +370,13 @@ def test_wipe_server_localhost_acceptance(uri_env):
     try:
         assert proj._host == "localhost"  # recorded on the projection (P0-1)
         proj.g.query("CREATE (:Point {id:'x'})")
-        wipe_server(proj)  # must NOT raise RuntimeError
+        # Ownership (#3133/#5222): the literal is a name EVERY session that
+        # runs this file journals, so a scope=None sweep may legitimately
+        # spare it as a live peer's (#3074/#3214). The projection's OWN graph
+        # is this session's, so name it explicitly — the acceptance property
+        # here is the loopback host check plus the wipe actually running, not
+        # peer arbitration.
+        wipe_server(proj, scope={proj.graph_name})  # must NOT raise RuntimeError
         assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
     finally:
         proj.close()
@@ -382,7 +426,13 @@ def test_wipe_server_completeness(server_proj, monkeypatch):
         server_proj.db.select_graph(g).query("CREATE (:Point {id:'x'})")
         created.append(g)
     monkeypatch.setattr(server_proj.db, "list_graphs", lambda: created)
-    wipe_server(server_proj)
+    # Ownership (#3133/#5222): scope = exactly the graphs THIS test created is
+    # the documented per-session ownership path, so the completeness property
+    # (every enumerated graph is cleared) is asserted against the caller's own
+    # set instead of the peer-arbitrated global sweep — a live peer journaling
+    # the shared literal would otherwise spare it and this pin would read as a
+    # wipe defect (#3074/#3214).
+    wipe_server(server_proj, scope=set(created))
     for g in created:
         n = server_proj.db.select_graph(g).query(
             "MATCH (n) RETURN count(n)").result_set[0][0]
@@ -394,8 +444,12 @@ def test_wipe_server_failure_is_collected(server_proj, monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("injected")
     monkeypatch.setattr(server_proj.db, "select_graph", _boom)
+    # Ownership (#3133/#5222): scope names the caller's own graph, so the
+    # enumeration is THIS test's set — under the peer-arbitrated scope=None
+    # sweep a live peer journaling the fixed literal spares it and the
+    # injected failure is never raised for it (#3074/#3214).
     with pytest.raises(RuntimeError, match="test_ws_wipe_target"):
-        wipe_server(server_proj)
+        wipe_server(server_proj, scope={"test_ws_wipe_target"})
 
 
 def test_drop_delete_uses_command_vector(monkeypatch):
