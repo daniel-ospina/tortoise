@@ -4728,10 +4728,13 @@ def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
     mints one Point per utterance 1:1) its own Point. That is the ``sentence_then_marker``
     fixture below: ``"a" * 4958 + "." + " " * 500``, whose 4959th character is
     ``keep = cap - len(marker)`` — a boundary any prose turn crosses constantly.
-    Measured on this branch before the round-16 fix: 3 points where ``origin/main``
-    extracts 2. The fix attaches the marker INSIDE the final sentence, immediately
-    before that sentence's own terminator, so the two are ONE match; appending it
-    after the terminator does not work.
+    ⛔ THE NUMBERS BELONG TO THE CONVERSATION THEY WERE MEASURED ON (round 17, P3):
+    on the MIXED conversation below the round-15 form extracted 3 points where
+    ``origin/main`` extracts 2, but on this SINGLE fixture the same defect measured 2
+    against 1 — attributing the 3/2 to the fixture was itself a defect. The fix
+    attaches the marker INSIDE the final sentence, immediately before that sentence's
+    own terminator, so the two are ONE match; appending it after the terminator does
+    not work.
     """
     from tortoise.sdk import (
         _CAPTURE_TRUNCATION_SENTINEL,

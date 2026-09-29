@@ -741,13 +741,16 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
         # ~1 in 80 in prose) the marker sits AFTER that terminator and `_SENT` carves it into a
         # SECOND match. `_utterances` then yields it as its own utterance and `LLMExtractor.run`
         # mints one Point per utterance 1:1 — a Point whose entire content is this module's own
-        # marker. Measured on `"a" * 4958 + "." + " " * 500`: this branch extracted 3 points
-        # where `origin/main` extracted 2, the extra being the marker. Appending the marker to
-        # the last sentence does NOT fix it (the terminator is between them); it is placed
-        # INSIDE the final sentence, immediately before that sentence's own terminator, so
-        # marker and sentence are ONE `_SENT` match. The node still stores the marker verbatim
-        # as written; this is the TRANSCRIPT view, and relocating it within the turn is what
-        # lets it reach the model WITHOUT becoming a claim of its own.
+        # marker. Measured on the MIXED test conversation (a real turn plus two clipped ones):
+        # this branch extracted 3 points where `origin/main` extracted 2, the extra being the
+        # marker. On the single fixture `"a" * 4958 + "." + " " * 500` the same defect measured
+        # 2 against 1 — a different count because it is a different conversation, and attributing
+        # the 3/2 to the fixture was itself a defect (round 17, P3). Appending the marker to the
+        # last sentence does NOT fix it (the terminator is between them); it is placed INSIDE the
+        # final sentence, immediately before that sentence's own terminator, so marker and sentence
+        # are ONE `_SENT` match. The node still stores the marker verbatim as written; this is the
+        # TRANSCRIPT view, and relocating it within the turn is what lets it reach the model
+        # WITHOUT becoming a claim of its own.
         body_only, marker = _split_truncation_marker(content)
         sents = _extractable_sentences(body_only)
         if not sents:
