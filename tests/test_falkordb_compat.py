@@ -41,12 +41,18 @@ class _EngineGraph:
 
     ``vector_api``: 'procedure' | 'cypher' | 'none' — how index creation and
     queryNodes behave on this engine.
+    ``fts_api``: 'procedure' | 'cypher' | 'already' | 'none' — how the FULLTEXT
+    index API behaves (#5440). It is a SEPARATE axis because the two APIs moved
+    independently: a real engine can have a working vector procedure and a dead
+    fulltext one, which is exactly the FalkorDB 6.0.0 state that reds main.
     """
 
-    def __init__(self, vector_api: str = "cypher"):
+    def __init__(self, vector_api: str = "cypher", fts_api: str = "procedure"):
         self.vector_api = vector_api
+        self.fts_api = fts_api
         self.calls: list[str] = []
         self._vector_index_created = False
+        self._fts_index_created = False
 
     def query(self, cypher: str, params=None, timeout=None):
         self.calls.append(cypher)
@@ -76,7 +82,37 @@ class _EngineGraph:
             # Signature A: (label, attr, vec, k) → node
             return _ResultSet([("near-1",), ("near-2",)])
         if "db.idx.fulltext.create" in low:
-            return _ResultSet([])  # FTS index creation succeeds
+            # #5440: the multi-field procedure. FalkorDB 4.20.4 registers it;
+            # 6.0.0 accepts AT MOST ONE argument and raises the arity error —
+            # which is the exact failure that reds `test (b)` on main. This arm
+            # used to return success unconditionally, so the FTS path was never
+            # exercised against a version that lacks it.
+            if self.fts_api == "already":
+                raise Exception("Attribute 'content' is already indexed")
+            if self.fts_api == "procedure":
+                if self._fts_index_created:
+                    raise Exception("Attribute 'content' is already indexed")
+                self._fts_index_created = True
+                return _ResultSet([])
+            if self.fts_api == "cypher":
+                # Reproduce the ARITY error verbatim rather than a generic
+                # failure: a real 6.0.0 says "expected at most 1", and a guard
+                # that only catched "unknown function" would not cover it.
+                raise Exception(
+                    "Received 3 arguments to procedure "
+                    "'db.idx.fulltext.createNodeIndex', expected at most 1")
+            raise Exception("Unknown function 'db.idx.fulltext.createNodeIndex'")
+        if "create fulltext index" in low:
+            # The Cypher-native replacement. Only engines whose procedure is
+            # gone (6.0.0) can reach here.
+            if self.fts_api in ("cypher", "already"):
+                if self.fts_api == "already" and "create" in low:
+                    raise Exception("Attribute 'content' is already indexed")
+                if self._fts_index_created:
+                    raise Exception("Attribute 'content' is already indexed")
+                self._fts_index_created = True
+                return _ResultSet([])
+            raise Exception("CREATE FULLTEXT INDEX not supported")
         return _ResultSet([])  # range indexes / everything else
 
 
@@ -89,6 +125,7 @@ def _bare_projection(graph) -> FalkorProjection:
     proj.g = graph
     proj._falkordb_version = (4, 18, 3)
     proj._vector_index_api = None
+    proj._fts_index_api = None
     return proj
 
 
@@ -306,6 +343,83 @@ class TestEnsureIndexesVectorApi:
         assert proj._vector_index_api is None
         assert any("Failed to create vector index" in r.message
                    for r in caplog.records)
+
+
+# ── _ensure_indexes FTS branch ──────────────────────────────────────────────
+
+class TestEnsureIndexesFtsApi:
+    """The FULLTEXT index must adapt to the engine exactly as the vector one does.
+
+    #5440. Before this, the mock engine's FTS arm returned success
+    unconditionally, so nothing could catch an engine that lacks the procedure —
+    and when CI's unpinned `falkordb/falkordb-server:latest` moved from graph
+    module 42004 to 60000, `db.idx.fulltext.createNodeIndex` started accepting at
+    most one argument and **every** FTS index silently stopped being created.
+    """
+
+    @pytest.mark.parametrize("fts_api,expected", [
+        ("procedure", "procedure"),
+        ("cypher", "cypher"),
+    ])
+    def test_fts_index_created_with_engine_api(self, fts_api, expected):
+        graph = _EngineGraph(fts_api=fts_api)
+        proj = _bare_projection(graph)
+        proj._create_fulltext_index("Point", ["content", "search_keys"])
+
+        assert proj._fts_index_api == expected
+        assert any("fulltext" in c.lower() for c in graph.calls), graph.calls
+
+    def test_the_6000_arity_error_triggers_the_cypher_fallback(self):
+        """The EXACT main-red failure: at most 1 arg → the Cypher DDL must run.
+
+        This is the pin that matters. The engine reproduces 6.0.0's arity error
+        verbatim, so a guard that only caught "unknown function" would redden
+        here — the two are different symptoms of the same missing procedure.
+        """
+        graph = _EngineGraph(fts_api="cypher")
+        proj = _bare_projection(graph)
+        proj._create_fulltext_index("Point", ["content", "search_keys"])
+
+        assert proj._fts_index_api == "cypher"
+        ddl = [c for c in graph.calls if "CREATE FULLTEXT INDEX" in c]
+        assert ddl, "the Cypher DDL fallback never ran"
+        # Both fields must be indexed, not just the first: a fallback that
+        # dropped `search_keys` would still create an index and still be wrong.
+        assert "n.content" in ddl[0] and "n.search_keys" in ddl[0], ddl[0]
+
+    def test_a_procedure_engine_does_not_reach_for_the_cypher_ddl(self):
+        """4.20.4 must be untouched — the fallback is a fallback."""
+        graph = _EngineGraph(fts_api="procedure")
+        proj = _bare_projection(graph)
+        proj._create_fulltext_index("Point", ["content", "search_keys"])
+
+        assert proj._fts_index_api == "procedure"
+        assert not any("CREATE FULLTEXT INDEX" in c for c in graph.calls)
+
+    def test_neither_api_available_surfaces_both_failures(self):
+        """A third engine must be loud, and must name BOTH halves.
+
+        Reporting only the last error would hide which API is unsupported, and
+        "unknown procedure" versus "expected at most 1" distinguish the engine.
+        """
+        graph = _EngineGraph(fts_api="none")
+        proj = _bare_projection(graph)
+
+        with pytest.raises(RuntimeError, match="no FTS index API available"):
+            proj._create_fulltext_index("Point", ["content"])
+
+    def test_an_already_indexed_error_is_re_raised_not_swallowed(self):
+        """`already` drives the caller's ONE-TIME migrations — it must propagate.
+
+        The callers key their drop→recreate migrations off the `already`
+        message, so a fallback that swallowed it would silently disable the
+        Point/Event FTS migrations (#1541, #244).
+        """
+        graph = _EngineGraph(fts_api="already")
+        proj = _bare_projection(graph)
+
+        with pytest.raises(Exception, match="already"):
+            proj._create_fulltext_index("Point", ["content"])
 
 
 # ── run_vector_query / degradation_chain consume _vector_index_api ─────────
