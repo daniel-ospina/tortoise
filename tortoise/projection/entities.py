@@ -1454,7 +1454,7 @@ class _EntityHandlers:
 
     def apply_journal_point_restamp(
             self, ev: dict, seq: int,
-            plan: dict[int, tuple[bool, bool]]) -> tuple[str, str] | None:
+            plan: dict[int, tuple[bool, bool]]) -> tuple[int, str, str] | None:
         """#3305: apply the shared whole-journal plan to ONE terminalizer.
 
         The apply()-based whole-journal engines (``rebuild(EventLog)``,
