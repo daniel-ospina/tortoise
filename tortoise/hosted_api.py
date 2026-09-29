@@ -7576,7 +7576,9 @@ async def _session_login_exchange(
     # KEY_NOT_USER_MINTED.
     cp = get_control_plane()
     try:
-        target = mint_target_user_for_key(cp, created_by, org_id)
+        target = await _cp_offload(
+            lambda: mint_target_user_for_key(cp, created_by, org_id),
+            op="mint_target_user_for_key")
     except RuntimeError:
         # #1719 (Task 4): the mint-path org_memberships read failed for a
         # control-plane reason (outage/schema-cache/column grant) — degrade
@@ -7594,8 +7596,10 @@ async def _session_login_exchange(
         # acceptance; the inline re.fullmatch is DELETED, not shadowed).
         try:
             anon = (created_by is not None and created_by != "api"
-                    and not _is_uuid(created_by)
-                    and is_anon_org(cp, org_id))
+                    and not _is_uuid(created_by))
+            if anon:
+                anon = await _cp_offload(
+                    lambda: is_anon_org(cp, org_id), op="is_anon_org")
         except RuntimeError:
             raise _control_plane_unavailable() from None
         if anon:
@@ -7902,7 +7906,9 @@ async def register_user(request: Request, response: Response):
     if is_supabase_enabled():
         cp = get_control_plane()
         try:
-            if org_by_email(cp, email):
+            _existing_org = await _cp_offload(
+                lambda: org_by_email(cp, email), op="org_by_email")
+            if _existing_org:
                 raise HTTPException(
                     status_code=409,
                     detail={"message": "already_registered", "email": email},
@@ -7916,7 +7922,10 @@ async def register_user(request: Request, response: Response):
             import hashlib as _hl2
             reg_id = f"reg-{_hl2.sha256(email.lower().encode()).hexdigest()[:12]}"
             from tortoise.supabase_control import membership_by_identity
-            if membership_by_identity(cp, reg_id):
+            _existing_reg = await _cp_offload(
+                lambda: membership_by_identity(cp, reg_id),
+                op="membership_by_identity")
+            if _existing_reg:
                 raise HTTPException(
                     status_code=409,
                     detail={"message": "already_registered", "email": email},
@@ -7984,22 +7993,24 @@ async def register_user(request: Request, response: Response):
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
-            provision_org(cp, **{
-                "p_user_id": None,
-                # deterministic per-email anchor: a re-register after a
-                # failed/rolled-back attempt reconciles the same membership
-                # row instead of accumulating anon rows (0010 identity
-                # upsert refreshes in place).
-                "p_identity": f"reg-{_hashlib.sha256(email.lower().encode()).hexdigest()[:12]}",
-                "p_org_id": org_id,
-                "p_org_name": org_name,
-                "p_api_key": api_key,
-                "p_key_hash": key_hash,
-                "p_lookup_hash": lookup_hash(api_key),
-                "p_graph_name": graph_name,
-                "p_email": email,
-                "p_key_prefix": org_id[:8],
-            })
+            await _cp_offload(
+                lambda: provision_org(cp, **{
+                    "p_user_id": None,
+                    # deterministic per-email anchor: a re-register after a
+                    # failed/rolled-back attempt reconciles the same membership
+                    # row instead of accumulating anon rows (0010 identity
+                    # upsert refreshes in place).
+                    "p_identity": f"reg-{_hashlib.sha256(email.lower().encode()).hexdigest()[:12]}",
+                    "p_org_id": org_id,
+                    "p_org_name": org_name,
+                    "p_api_key": api_key,
+                    "p_key_hash": key_hash,
+                    "p_lookup_hash": lookup_hash(api_key),
+                    "p_graph_name": graph_name,
+                    "p_email": email,
+                    "p_key_prefix": org_id[:8],
+                }),
+                op="provision_org")
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
@@ -8758,8 +8769,10 @@ async def send_onboarding_offer_email_endpoint(request: Request):
             _inflight_onboarding_emails.discard(org_id)
 
         if result.get("status") == "sent":
-            stamped = set_org_onboarding_email_sent(
-                get_control_plane(), org_id)
+            stamped = await _cp_offload(
+                lambda: set_org_onboarding_email_sent(
+                    get_control_plane(), org_id),
+                op="set_org_onboarding_email_sent")
             if not stamped:
                 # Another process stamped concurrently (cross-replica race) —
                 # the provider Idempotency-Key collapsed the duplicate send;
@@ -9780,8 +9793,10 @@ async def list_api_keys(graph_id: str | None = None,
     )
     if is_supabase_enabled():
         try:
-            keys = org_api_keys(get_control_plane(), org["org_id"],
-                                 graph_id=graph_id)
+            keys = await _cp_offload(
+                lambda: org_api_keys(
+                    get_control_plane(), org["org_id"], graph_id=graph_id),
+                op="org_api_keys")
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -9954,7 +9969,9 @@ async def revoke_api_key(key_id: str, request: Request, org: dict = Depends(get_
                 return {"revoked": True, "already": True, "key_id": key_id}
             from datetime import datetime
             now = datetime.now(UTC).isoformat()
-            _sb_revoke(get_control_plane(), key_id, now)
+            await _cp_offload(
+                lambda: _sb_revoke(get_control_plane(), key_id, now),
+                op="revoke_api_key")
         except HTTPException:
             raise
         except Exception:
@@ -13961,7 +13978,9 @@ async def _count_active_free_memberships(user_id: str) -> int:
     )
     if is_supabase_enabled():
         import asyncio as _asyncio
-        count = _sb_count(get_control_plane(), user_id)
+        count = await _cp_offload(
+            lambda: _sb_count(get_control_plane(), user_id),
+            op="count_active_free_memberships")
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return count
     reg = _make_sdk(namespace="registry")._get_registry()
@@ -14010,7 +14029,9 @@ async def _owned_free_org_ids(user_id: str) -> list[str]:
     )
     if is_supabase_enabled():
         import asyncio as _asyncio
-        ids = _sb_ids(get_control_plane(), user_id)
+        ids = await _cp_offload(
+            lambda: _sb_ids(get_control_plane(), user_id),
+            op="owned_free_org_ids")
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return ids
     reg = _make_sdk(namespace="registry")._get_registry()
@@ -14171,15 +14192,18 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     # twin of the registry owner-membership count (#743(b) semantics:
     # role='owner' rows created within the last hour).
     since = (datetime.now(UTC) - _td(hours=1)).isoformat()
-    recent = membership_count_since(
-        cp, cutoff=since, user_id=user["user_id"], role="owner")
+    recent = await _cp_offload(
+        lambda: membership_count_since(
+            cp, cutoff=since, user_id=user["user_id"], role="owner"),
+        op="membership_count_since")
     if recent >= 3:
         raise HTTPException(status_code=429,
                             detail="Too many organizations created — try again later")
     # Duplicate-name 409 (registry org_create raises ControlPlaneError
     # 'already exists'; the 0011 unique index is the atomic guard — the
     # pre-check is the friendly fast-path, the RPC 409 is authoritative).
-    if org_by_name(cp, name):
+    _dup_org = await _cp_offload(lambda: org_by_name(cp, name), op="org_by_name")
+    if _dup_org:
         raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (role='owner'), not membership. Any active owned org without an
@@ -14209,18 +14233,20 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
         # mirroring create_onboarding_org's #1716 keyless provision.
-        provision_org(cp, **{
-            "p_user_id": user["user_id"],
-            "p_identity": None,
-            "p_org_id": org_id,
-            "p_org_name": name,
-            "p_api_key": None,
-            "p_key_hash": None,
-            "p_lookup_hash": None,
-            "p_key_prefix": None,
-            "p_graph_name": graph_name,
-            "p_tier": "free",
-        })
+        await _cp_offload(
+            lambda: provision_org(cp, **{
+                "p_user_id": user["user_id"],
+                "p_identity": None,
+                "p_org_id": org_id,
+                "p_org_name": name,
+                "p_api_key": None,
+                "p_key_hash": None,
+                "p_lookup_hash": None,
+                "p_key_prefix": None,
+                "p_graph_name": graph_name,
+                "p_tier": "free",
+            }),
+            op="provision_org")
     except Exception as e:
         # 0011 unique index: a concurrent duplicate name surfaces as a
         # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
@@ -14870,7 +14896,9 @@ async def _apply_graph_recording_override(
             kind = rows[0].get("kind") if rows else None
         if kind is None:
             raise HTTPException(status_code=404, detail="Unknown graph")
-        written = sb_set_rec(cp, org_id, graph_id, body.recording)
+        written = await _cp_offload(
+            lambda: sb_set_rec(cp, org_id, graph_id, body.recording),
+            op="set_graph_recording")
     else:
         # Registry: probe the node (id match OR kind='default' for the
         # literal id) so unknown graphs 404 before any write.
@@ -15015,8 +15043,10 @@ async def _apply_graph_rename(
                                     detail="Graph name already exists")
         try:
             if is_supabase_enabled():
-                written = sb_set_name(get_control_plane(), org_id,
-                                      graph_id, name)
+                written = await _cp_offload(
+                    lambda: sb_set_name(get_control_plane(), org_id,
+                                        graph_id, name),
+                    op="set_graph_name")
             else:
                 written = sdk.graph_set_name(org_id, graph_id, name)
         except Exception as _exc:
@@ -15106,11 +15136,23 @@ async def delete_graph(graph_id: str, org_id: str,
     if kind is None:
         raise HTTPException(status_code=404, detail="Unknown graph")
     if is_supabase_enabled():
-        deleted = soft_delete_graph(cp, org_id, graph_id)
-        key_ids = sb_graph_key_ids(cp, org_id, graph_id)
+        deleted = await _cp_offload(
+            lambda: soft_delete_graph(cp, org_id, graph_id),
+            op="soft_delete_graph")
+        key_ids = await _cp_offload(
+            lambda: sb_graph_key_ids(cp, org_id, graph_id),
+            op="graph_key_ids")
     else:
-        deleted = sdk.graph_delete(org_id, graph_id)
-        key_ids = sdk.graph_key_ids(org_id, graph_id)
+        # #4350: DATA plane, not control plane — the embedded SDK's graph work
+        # goes through #3773's dedicated `graph` pool (`_graph_offload`), never
+        # the auth pool `_cp_offload` uses. Same seam `_data_sdk` takes (#3773,
+        # :4906). Routing `graph_delete` here too: it was left synchronous while
+        # its sibling below was wrapped, which is the inconsistency, not a
+        # deliberate exemption.
+        deleted = await _graph_offload(
+            lambda: sdk.graph_delete(org_id, graph_id), op="graph_delete")
+        key_ids = await _graph_offload(
+            lambda: sdk.graph_key_ids(org_id, graph_id), op="graph_key_ids")
     if not deleted:
         # Kind was non-default and present a moment ago — belt-and-
         # suspenders only (no code path reaches here).
@@ -15127,7 +15169,9 @@ async def delete_graph(graph_id: str, org_id: str,
     for kid in key_ids:
         try:
             if is_supabase_enabled():
-                sb_revoke(get_control_plane(), kid)
+                await _cp_offload(
+                    lambda kid=kid: sb_revoke(get_control_plane(), kid),
+                    op="revoke_api_key")
             else:
                 sdk.apikey_revoke(kid)
         except Exception:
@@ -15649,8 +15693,10 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
         if g.get("kind") == "default":
             key_count = 0
         elif is_supabase_enabled():
-            key_count = count_graph_keys(
-                get_control_plane(), org_id, g["graph_id"])
+            key_count = await _cp_offload(
+                lambda g=g: count_graph_keys(
+                    get_control_plane(), org_id, g["graph_id"]),
+                op="count_graph_keys")
         else:
             key_count = sdk.graph_active_key_count(org_id, g["graph_id"])
         out.append({
@@ -15959,17 +16005,26 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             async with _invite_org_lock(org_id):
                 if tier == "pro":
                     from datetime import datetime as _dt
-                    active = [m for m in org_members(get_control_plane(), org_id)
+                    _org_member_rows = await _cp_offload(
+                        lambda: org_members(get_control_plane(), org_id),
+                        op="org_members")
+                    active = [m for m in _org_member_rows
                               if m.get("status") == "active"]
                     now = _dt.now(UTC).isoformat()
-                    pending = [i for i in pending_invitations(get_control_plane(), org_id)
+                    _pending_rows = await _cp_offload(
+                        lambda: pending_invitations(get_control_plane(), org_id),
+                        op="pending_invitations")
+                    pending = [i for i in _pending_rows
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
                                             detail="Member limit reached — upgrade to invite more")
-                inv = invitation_mint(get_control_plane(), org_id, email, role,
-                                      invited_by=user["user_id"],
-                                      inviter_email=(user.get("email") or None))
+                inv = await _cp_offload(
+                    lambda: invitation_mint(
+                        get_control_plane(), org_id, email, role,
+                        invited_by=user["user_id"],
+                        inviter_email=(user.get("email") or None)),
+                    op="invitation_mint")
             # #307: best-effort invite email — never blocks the mint.
             try:
                 from tortoise.email_notify import send_invite_email
@@ -16256,8 +16311,11 @@ async def accept_invite(body: dict, request: Request,
             # two concurrent accepts cannot both read count==0 and mint two
             # free memberships.
             async with _org_create_lock(user["user_id"]):
-                res = _sb_accept(get_control_plane(), token, user["user_id"],
-                                 user_email=user.get("email"))
+                res = await _cp_offload(
+                    lambda: _sb_accept(
+                        get_control_plane(), token, user["user_id"],
+                        user_email=user.get("email")),
+                    op="invitation_accept")
             # #2003 (W7): arm the invitee's member slot (fail-soft; never
             # masks the accept response).
             _arm_invitee_member_progress(res.get("org_id") or "",
@@ -16862,9 +16920,12 @@ async def _accept_mismatch_v2(body: dict, request: Request, user: dict,
             # user so the loser re-checks AFTER the winner's commit and 409s
             # before any write.
             async with _org_create_lock(user["user_id"]):
-                res = _sb_accept_v2(get_control_plane(), token, user["user_id"],
-                                    user_email=user_email,
-                                    mismatch_override=path, otp_code=otp_code)
+                res = await _cp_offload(
+                    lambda: _sb_accept_v2(
+                        get_control_plane(), token, user["user_id"],
+                        user_email=user_email,
+                        mismatch_override=path, otp_code=otp_code),
+                    op="invitation_accept")
         except _InvErr as e:
             # P2 (merge review): the seam's REACHABLE wrong/expired-code
             # reject is "Invalid or expired verification code" (lowercase
@@ -16952,7 +17013,9 @@ async def invite_otp(body: dict, request: Request,
     try:
         if is_supabase_enabled():
             from tortoise.supabase_control import invitation_row_by_token
-            row = invitation_row_by_token(get_control_plane(), token)
+            row = await _cp_offload(
+                lambda: invitation_row_by_token(get_control_plane(), token),
+                op="invitation_row_by_token")
             if not row:
                 raise HTTPException(status_code=400, detail="Invalid or expired invite token")
             if (row.get("email") or "").lower() == user_email:
@@ -17006,8 +17069,11 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
 
     if is_supabase_enabled():
         try:
-            res = _sb_resend(get_control_plane(), invitation_id, org_id,
-                             actor_user_id=user["user_id"])
+            res = await _cp_offload(
+                lambda: _sb_resend(
+                    get_control_plane(), invitation_id, org_id,
+                    actor_user_id=user["user_id"]),
+                op="invitation_resend")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         try:
@@ -17097,8 +17163,11 @@ async def expire_invite(invitation_id: str, org_id: str,
     await _require_owner_admin(user["user_id"], org_id)
     if is_supabase_enabled():
         try:
-            return _sb_expire(get_control_plane(), invitation_id, org_id,
-                              actor_user_id=user["user_id"])
+            return await _cp_offload(
+                lambda: _sb_expire(
+                    get_control_plane(), invitation_id, org_id,
+                    actor_user_id=user["user_id"]),
+                op="invitation_expire")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -17144,7 +17213,9 @@ async def list_invites(org_id: str, user: dict = Depends(get_current_user)):  # 
     if is_supabase_enabled():
         try:
             await _require_owner_admin(user["user_id"], org_id)
-            return pending_invitations(get_control_plane(), org_id)
+            return await _cp_offload(
+                lambda: pending_invitations(get_control_plane(), org_id),
+                op="pending_invitations")
         except HTTPException:
             raise
         except Exception:
@@ -17177,8 +17248,10 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
     if not email:
         return {"invites": []}
     if is_supabase_enabled():
-        return {"invites": pending_invitations_for_email(
-            get_control_plane(), email)}
+        _invites = await _cp_offload(
+            lambda: pending_invitations_for_email(get_control_plane(), email),
+            op="pending_invitations_for_email")
+        return {"invites": _invites}
     sdk = _make_sdk(namespace="registry")
     from datetime import datetime as _dt
     now = _dt.now(UTC).isoformat()
@@ -17326,9 +17399,11 @@ async def accept_invite_by_id(invitation_id: str,
             # #1954: the join-side free-cap + membership write are
             # read-then-write — serialize per user (see _org_create_lock).
             async with _org_create_lock(user["user_id"]):
-                res = invitation_accept_by_id(
-                    get_control_plane(), invitation_id, user["user_id"],
-                    user.get("email"))
+                res = await _cp_offload(
+                    lambda: invitation_accept_by_id(
+                        get_control_plane(), invitation_id, user["user_id"],
+                        user.get("email")),
+                    op="invitation_accept_by_id")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         # #2003 (W7): arm the invitee's member slot (fail-soft).
@@ -17357,8 +17432,10 @@ async def decline_invite(invitation_id: str,
     email = (user.get("email") or "").lower()
     if is_supabase_enabled():
         try:
-            return decline_invitation_by_email(
-                get_control_plane(), invitation_id, email)
+            return await _cp_offload(
+                lambda: decline_invitation_by_email(
+                    get_control_plane(), invitation_id, email),
+                op="decline_invitation_by_email")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -17419,8 +17496,10 @@ async def rescind_invite(invitation_id: str, org_id: str,
             # registry branch below). invitation_rescind re-checks RBAC
             # internally (harmless duplicate).
             await _require_owner_admin(user["user_id"], org_id)
-            return invitation_rescind(get_control_plane(), invitation_id,
-                                      org_id, user["user_id"])
+            return await _cp_offload(
+                lambda: invitation_rescind(
+                    get_control_plane(), invitation_id, org_id, user["user_id"]),
+                op="invitation_rescind")
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         except HTTPException:
@@ -17462,7 +17541,9 @@ async def list_members(org_id: str, user: dict = Depends(get_current_user)):  # 
     )
     if is_supabase_enabled():
         try:
-            return org_members(get_control_plane(), org_id)
+            return await _cp_offload(
+                lambda: org_members(get_control_plane(), org_id),
+                op="org_members")
         except Exception:
             raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -17494,12 +17575,17 @@ async def remove_member(org_id: str, user_id: str, user: dict = Depends(get_curr
     )
     if is_supabase_enabled():
         try:
-            role = membership_role(get_control_plane(), org_id, user_id)
+            role = await _cp_offload(
+                lambda: membership_role(get_control_plane(), org_id, user_id),
+                op="membership_role")
             if role is None:
                 raise HTTPException(status_code=404, detail="Member not found")
             if role == "owner":
                 raise HTTPException(status_code=409, detail="Owner cannot be removed")
-            set_membership(get_control_plane(), org_id, user_id, status="removed")
+            await _cp_offload(
+                lambda: set_membership(
+                    get_control_plane(), org_id, user_id, status="removed"),
+                op="set_membership")
         except HTTPException:
             raise
         except Exception:
@@ -17540,12 +17626,17 @@ async def change_member_role(org_id: str, user_id: str, body: dict, user: dict =
     )
     if is_supabase_enabled():
         try:
-            role = membership_role(get_control_plane(), org_id, user_id)
+            role = await _cp_offload(
+                lambda: membership_role(get_control_plane(), org_id, user_id),
+                op="membership_role")
             if role is None:
                 raise HTTPException(status_code=404, detail="Member not found")
             if role == "owner":
                 raise HTTPException(status_code=409, detail="Owner role cannot be changed")
-            set_membership(get_control_plane(), org_id, user_id, role=new_role)
+            await _cp_offload(
+                lambda: set_membership(
+                    get_control_plane(), org_id, user_id, role=new_role),
+                op="set_membership")
         except HTTPException:
             raise
         except Exception:
@@ -19207,9 +19298,13 @@ async def reconcile(request: Request):
     result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
 
     if is_supabase_enabled():
-        expired = expired_bootstrap_keys(get_control_plane(), now)
+        expired = await _cp_offload(
+            lambda: expired_bootstrap_keys(get_control_plane(), now),
+            op="expired_bootstrap_keys")
         for row in expired:
-            revoke_api_key(get_control_plane(), row["id"], now)
+            await _cp_offload(
+                lambda row=row: revoke_api_key(get_control_plane(), row["id"], now),
+                op="revoke_api_key")
             result["expired_keys_swept"] += 1
         result["notes"].append("bootstrap-expiry sweep complete")
         return result
@@ -19359,13 +19454,15 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         api_key = f"tt_{_uuid.uuid4().hex}"
         lookup_hash = _lookup_hash(api_key)
         try:
-            recover_org_key(
-                cp,
-                token_hash=token_hash,
-                org_id=org_id,
-                lookup_hash=lookup_hash,
-                key_prefix=api_key[:10],
-                max_api_keys=int(lim.get("max_api_keys", 2)))
+            await _cp_offload(
+                lambda: recover_org_key(
+                    cp,
+                    token_hash=token_hash,
+                    org_id=org_id,
+                    lookup_hash=lookup_hash,
+                    key_prefix=api_key[:10],
+                    max_api_keys=int(lim.get("max_api_keys", 2))),
+                op="recover_org_key")
         except SignupTokenRecoveryError as e:
             # token revoked between resolve and recover (revoke race) or org
             # soft-deleted concurrently — uniform 422, never a partial mint
@@ -19556,27 +19653,29 @@ async def agent_signup(request: Request):
             # (provision_team_with_token) is NEW-named: provision_org stays
             # untouched at 15 args (CREATE OR REPLACE with a trailing param
             # would create an overload — scope cycle-2 P1).
-            provision_org_with_token(get_control_plane(), **{
-                "p_user_id": None,
-                "p_identity": identity,
-                "p_org_id": org_id,
-                "p_org_name": org_name,
-                "p_api_key": api_key,
-                "p_key_hash": key_hash,
-                "p_lookup_hash": lookup_hash,
-                "p_graph_name": graph_name,
-                "p_tier": "free",
-                # key_prefix = api_key[:10] — registry-path parity (review
-                # P2, PR #874: without this the RPC default left(org_id, 8)
-                # applied, so the dashboard showed a different prefix per
-                # mode for the same mint type).
-                "p_key_prefix": api_key[:10],
-                "p_max_users": mu,
-                "p_max_graphs": mg,
-                "p_ops_allowance": ops,
-                "p_graph_size_cap": nodes,
-                "p_signup_token_hash": signup_token_hash,
-            })
+            await _cp_offload(
+                lambda: provision_org_with_token(get_control_plane(), **{
+                    "p_user_id": None,
+                    "p_identity": identity,
+                    "p_org_id": org_id,
+                    "p_org_name": org_name,
+                    "p_api_key": api_key,
+                    "p_key_hash": key_hash,
+                    "p_lookup_hash": lookup_hash,
+                    "p_graph_name": graph_name,
+                    "p_tier": "free",
+                    # key_prefix = api_key[:10] — registry-path parity (review
+                    # P2, PR #874: without this the RPC default left(org_id, 8)
+                    # applied, so the dashboard showed a different prefix per
+                    # mode for the same mint type).
+                    "p_key_prefix": api_key[:10],
+                    "p_max_users": mu,
+                    "p_max_graphs": mg,
+                    "p_ops_allowance": ops,
+                    "p_graph_size_cap": nodes,
+                    "p_signup_token_hash": signup_token_hash,
+                }),
+                op="provision_org_with_token")
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
@@ -19746,7 +19845,8 @@ async def agent_token_revoke(request: Request, org: dict = Depends(get_current_o
             revoke_signup_token as _sb_revoke,
         )
         cp = get_control_plane()
-        row = signup_token_row(cp, token_hash)
+        row = await _cp_offload(
+            lambda: signup_token_row(cp, token_hash), op="signup_token_row")
         if row is None:
             raise HTTPException(status_code=404, detail="Signup token not found")
         if row.get("org_id") != org_id:
@@ -19926,7 +20026,8 @@ async def claim_org(request: Request):
     )
     cp = get_control_plane()
     try:
-        anon = is_anon_org(cp, org_id)
+        anon = await _cp_offload(
+            lambda: is_anon_org(cp, org_id), op="is_anon_org")
     except RuntimeError:
         # #1719 (Task 4): the claim funnel shares the unwrapped
         # org_memberships reads — an outage must degrade to 503, never a
@@ -19940,8 +20041,11 @@ async def claim_org(request: Request):
     #    intact).
     from tortoise.auth import lookup_hash as _lookup_hash
     try:
-        claim_membership(cp, lookup_hash=_lookup_hash(api_key),
-                         user_id=user_id, email=email)
+        await _cp_offload(
+            lambda: claim_membership(
+                cp, lookup_hash=_lookup_hash(api_key),
+                user_id=user_id, email=email),
+            op="claim_membership")
     except ClaimError as e:
         raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     except RuntimeError:
@@ -20026,7 +20130,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     # invariant today, reject minted keys anyway for symmetry.
     _reject_minted_delegated_key(org, "claim")
     try:
-        anon = is_anon_org(cp, org_id)
+        anon = await _cp_offload(
+            lambda: is_anon_org(cp, org_id), op="is_anon_org")
     except RuntimeError:
         # #1719 (Task 4): claim funnel control-plane outage → honest 503.
         raise _control_plane_unavailable() from None
@@ -20053,8 +20158,11 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
 
     # 3. claim_membership RPC links the new user to the org's owner row
     try:
-        claim_membership(cp, lookup_hash=_lookup_hash(api_key),
-                         user_id=user_id, email=email)
+        await _cp_offload(
+            lambda: claim_membership(
+                cp, lookup_hash=_lookup_hash(api_key),
+                user_id=user_id, email=email),
+            op="claim_membership")
     except ClaimError as e:
         # The RPC's already_claimed guard may fire if a concurrent OAuth
         # claim won first — surface as a plain conflict.
@@ -20121,7 +20229,9 @@ async def claim_status(request: Request):
         return {"claimable": False}
     org_id = org["org_id"]
     try:
-        anon = is_anon_org(get_control_plane(), org_id)
+        anon = await _cp_offload(
+            lambda: is_anon_org(get_control_plane(), org_id),
+            op="is_anon_org")
     except RuntimeError:
         # #1719 (Task 4): claim_status's is_anon_org read failed — the
         # welcome/claim guard must NOT 500 (and must not report claimable).
@@ -20252,7 +20362,9 @@ async def get_user_identity(request: Request, user: dict = Depends(get_current_u
         return {"unsupported": True}
     cp = get_control_plane()
     try:
-        inv = user_identity_inventory(cp, user["user_id"])
+        inv = await _cp_offload(
+            lambda: user_identity_inventory(cp, user["user_id"]),
+            op="user_identity_inventory")
     except Exception:
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
     admin = _identity_admin_user(user["user_id"])
@@ -20316,8 +20428,11 @@ async def create_link_intent(request: Request, body: LinkIntentRequest,
     intent_ref = _b64.urlsafe_b64encode(payload.encode()).decode().rstrip("=") + "." + sig
     cp = get_control_plane()
     try:
-        store_link_intent(cp, nonce=nonce, user_id=user["user_id"],
-                          provider=provider, expires_at=expires.isoformat())
+        await _cp_offload(
+            lambda: store_link_intent(
+                cp, nonce=nonce, user_id=user["user_id"],
+                provider=provider, expires_at=expires.isoformat()),
+            op="store_link_intent")
     except Exception:
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
     return {"intent_ref": intent_ref, "expires_in": _LINK_INTENT_TTL_S,
@@ -20400,8 +20515,11 @@ async def commit_link_intent(request: Request, body: LinkCommitRequest,
                             detail="Confirm your email before adding a login method")
     # Consumed-once (guarded UPDATE; 0 rows = already consumed/expired/wrong user)
     try:
-        consumed = consume_link_intent(cp, nonce=nonce, user_id=intent_user,
-                                       consumed_at=now.isoformat())
+        consumed = await _cp_offload(
+            lambda: consume_link_intent(
+                cp, nonce=nonce, user_id=intent_user,
+                consumed_at=now.isoformat()),
+            op="consume_link_intent")
     except Exception:
         raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
     if consumed == 0 or expired:
@@ -20504,7 +20622,10 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
     except ValueError:
         raise HTTPException(status_code=422, detail="identity_id must be a UUID")  # noqa: B904
     try:
-        reserve_unlink(cp, user_id=user["user_id"], identity_id=identity_id)
+        await _cp_offload(
+            lambda: reserve_unlink(
+                cp, user_id=user["user_id"], identity_id=identity_id),
+            op="reserve_unlink")
     except ClaimError as e:
         raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     except Exception:
@@ -20563,7 +20684,9 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
 
     # Success: post-verify + consume + audit
     try:
-        inv = user_identity_inventory(cp, user["user_id"])
+        inv = await _cp_offload(
+            lambda: user_identity_inventory(cp, user["user_id"]),
+            op="user_identity_inventory")
         remaining = int(inv.get("login_methods", 0))
     except Exception:
         remaining = 1  # fail-open on the READ after a successful DELETE
@@ -20572,7 +20695,10 @@ async def unlink_identity(request: Request, body: UnlinkRequest,
         raise HTTPException(status_code=409, detail="Cannot remove the last login method")
     import contextlib
     with contextlib.suppress(Exception):
-        consume_unlink_permit(cp, user_id=user["user_id"], consumed_at=_now_iso())
+        await _cp_offload(
+            lambda: consume_unlink_permit(
+                cp, user_id=user["user_id"], consumed_at=_now_iso()),
+            op="consume_unlink_permit")
     await _async_audit(request, "", "identity_unlink", resource_type="identity",
                        resource_id=identity_id, actor_user_id=user["user_id"],
                        detail={"remaining_login_methods": remaining})
@@ -23335,18 +23461,20 @@ async def _create_onboarding_org_lane(org: dict, name: str,
             # guard, migration 20260825214233). #1748: USER path — the
             # session user is the owner member (p_user_id, identity NULL),
             # mirroring POST /v1/organizations (create_org).
-            provision_org(get_control_plane(), **{
-                "p_user_id": owner_user_id,
-                "p_identity": None,
-                "p_org_id": org_id,
-                "p_org_name": name,
-                "p_api_key": None,
-                "p_key_hash": None,
-                "p_lookup_hash": None,
-                "p_key_prefix": None,
-                "p_graph_name": graph_name,
-                "p_tier": "free",
-            })
+            await _cp_offload(
+                lambda: provision_org(get_control_plane(), **{
+                    "p_user_id": owner_user_id,
+                    "p_identity": None,
+                    "p_org_id": org_id,
+                    "p_org_name": name,
+                    "p_api_key": None,
+                    "p_key_hash": None,
+                    "p_lookup_hash": None,
+                    "p_key_prefix": None,
+                    "p_graph_name": graph_name,
+                    "p_tier": "free",
+                }),
+                op="provision_org")
         except Exception as e:
             # 0011 unique index: a duplicate org name surfaces as a
             # PostgREST 409 → 409 (registry sdk.org_create raises
@@ -25080,7 +25208,10 @@ async def github_callback(code: str | None = None, state: str | None = None,
         store_github_credentials as _sb_store,
     )
     if is_supabase_enabled():
-        _sb_store(get_control_plane(), org_id, token_enc=encrypted, org=org)
+        await _cp_offload(
+            lambda: _sb_store(
+                get_control_plane(), org_id, token_enc=encrypted, org=org),
+            op="store_github_credentials")
     else:
         sdk = _make_sdk(namespace="registry")
         sdk._get_registry().query(
@@ -29039,8 +29170,11 @@ async def webhooks_stripe(request: Request):
         # Stripe's retry reprocesses it.
         if is_supabase_enabled():
             cp = get_control_plane()
-            tier = org_tier(cp, org_id)
-            is_first = webhook_event_marker(cp, event_id, etype)
+            tier = await _cp_offload(
+                lambda: org_tier(cp, org_id), op="org_tier")
+            is_first = await _cp_offload(
+                lambda: webhook_event_marker(cp, event_id, etype),
+                op="webhook_event_marker")
         else:
             tier_rows = sdk._get_registry().query(
                 "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}
