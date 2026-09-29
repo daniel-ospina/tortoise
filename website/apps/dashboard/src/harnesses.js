@@ -376,9 +376,10 @@ ${PI_CAPTURE_INSTALL}
   chatgpt: () => WORKFLOWS_PROMPT,
 }
 
-// #1643: the official skill installer — served from the product site (the
-// public source of truth is github.com/daniel-ospina/tortoise-skills-and-
-// integrations). Installs the 3 core skills into the harness's project-
+// #1643: the official skill installer — served from the product site. Its
+// source of truth is THIS repo (github.com/daniel-ospina/tortoise): the file
+// website/apps/dashboard/public/install-tortoise-skills.sh, emitted to dist/
+// by the vite build. Installs the 3 core skills into the harness's project-
 // scoped skills dir (personal for Pi). Appended to each harness's copy.
 export const SKILLS_INSTALL_URL =
   'https://app.premiselabs.co/install-tortoise-skills.sh'
