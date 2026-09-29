@@ -623,8 +623,8 @@ jobs:
           # while the run step below — which sets the URI — still executed it.
           # skip-guard reconciles in ONE direction (every expected nodeid must
           # appear; extra junit entries are fine), so the omission was silent.
-          # Measured: 8 fast-surface files / 196 nodeids; CI confirms the delta
-          # (emit-manifest 8229 -> 8400 between main and this change).
+          # Measured on this leg alone: emit-manifest 8229 (main) -> 8400 (with
+          # the URI), +171; the two fast legs together cover 196 such nodeids.
           # Only the DB URI can change collection: EXPECT_URI/CARVE_OUT are read
           # by session-scoped fixtures, which do not run under --collect-only.
           TORTOISE_DB_URI: ${{ env.URI }}
@@ -1185,9 +1185,10 @@ jobs:
           # Same defect class as the fast matrix's manifest step (see above): the
           # collect must see what the run sees, or the expected set silently omits
           # nodeids the run then executes. NO file in `slow_files` gates on the DB
-          # URI today (all 71 collect without it), so this changes nothing now —
-          # it keeps the step's stated contract true if one is relocated here,
-          # which is exactly how the fast job's 196-nodeid hole appeared.
+          # URI today — 34 files, 26 across the legs, and each collects the same
+          # count with and without the URI — so this changes nothing now. It keeps
+          # the step's stated contract true if one is relocated here, which is
+          # exactly how the fast job's hole appeared.
           # Deliberately NOT on the carve-out job, which is URI-unset by design.
           TORTOISE_DB_URI: ${{ env.URI }}
       - name: Run slow test suite — leg ${{ matrix.half }} (known-slow files, #647)
