@@ -24,7 +24,7 @@ mirroring the SQL semantics the real functions execute
 from __future__ import annotations
 
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 # #1719 (Task 3): columns whose PostgREST filter values are cast to uuid —
@@ -57,12 +57,93 @@ def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | N
             ) from None
 
 
+# #4037: PostgREST's `order` grammar is a comma-separated list of
+# `field[.asc|.desc][.nullsfirst|.nullslast]`. The fake used to speak a private
+# `-col` dialect (`col = order.lstrip("-")`), which ACCEPTED the form PostgREST
+# rejects (a leading `-` is not part of the grammar → PGRST100 / HTTP 400) AND
+# silently NO-OP'd the form it accepts (`col.desc` looked up a column literally
+# named `"created_at.desc"`). So `SupabaseAbuseStore`'s `order="-created_at"`
+# was green in CI while 400ing in prod: Stage-2 suspension never ran and
+# `/v1/team/alerts` was permanently empty (the 400 is swallowed fail-soft).
+#
+# This parser is deliberately an INDEPENDENT oracle — it must NOT import a
+# production order helper, because a shared implementation would share its
+# blind spot, which is the exact failure #4037 fixes. It is a stated SUBSET of
+# the wire grammar: JSON-path (`col->>key`) and embedded-resource ordering raise
+# loudly rather than being silently accepted, and no call site uses them.
+_ORDER_DIRECTIONS = {"asc": False, "desc": True}
+_ORDER_NULLS = {"nullsfirst": True, "nullslast": False}
+
+
+def _is_order_field(token: str) -> bool:
+    """A PostgREST field name, minus the JSON-path/embedded-resource forms the
+    fake does not model. A leading `-` is refused — that is the #4037 defect."""
+    if not token or token[0] == "-":
+        return False
+    if not (token[0].isalpha() or token[0] == "_"):
+        return False
+    return all(c.isalnum() or c in "_$-" for c in token)
+
+
+def _parse_order(table: str, order: str) -> list[tuple[str, bool, bool | None]]:
+    """Parse a PostgREST ``order`` string into ``(field, descending,
+    nulls_first|None)`` terms. An unparseable term raises the same
+    ``RuntimeError(... HTTP 400)`` surface the real client produces when
+    PostgREST rejects the query string (``PGRST100``)."""
+    terms: list[tuple[str, bool, bool | None]] = []
+    for raw in order.split(","):
+        parts = raw.split(".")
+        field = parts.pop(0)
+        if not _is_order_field(field):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400")
+        descending = False
+        nulls_first: bool | None = None
+        if parts and parts[0] in _ORDER_DIRECTIONS:
+            descending = _ORDER_DIRECTIONS[parts.pop(0)]
+        if parts and parts[0] in _ORDER_NULLS:
+            nulls_first = _ORDER_NULLS[parts.pop(0)]
+        if parts:
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400")
+        terms.append((field, descending, nulls_first))
+    return terms
+
+
+def _apply_order(rows: list[dict],
+                 terms: list[tuple[str, bool, bool | None]]) -> list[dict]:
+    """Apply PostgREST order terms (most-significant first) as successive
+    STABLE sorts, so a tie on a later term keeps the earlier term's order.
+    NULL placement follows Postgres: ``asc`` → nulls last, ``desc`` → nulls
+    first, overridable by an explicit ``nullsfirst``/``nullslast`` token."""
+    for field, descending, nulls_first in reversed(terms):
+        if nulls_first is None:
+            nulls_first = descending
+        present = [r for r in rows if r.get(field) is not None]
+        nulls = [r for r in rows if r.get(field) is None]
+        present.sort(key=lambda r: r.get(field), reverse=descending)
+        rows = (nulls + present) if nulls_first else (present + nulls)
+    return rows
+
+
 # #2863: module-level registry of every control plane a `fail_query` was installed
 # on. The autouse `_no_silent_faults` guard in the OAuth fault suite reads it to
 # fail a test whose injector never fired (a stale matcher is a silent green test) —
 # including bare `FakeControlPlane()` instances a test built itself, not just the
 # fixture's.
 _FAULT_CPS: list = []
+
+
+def _now_iso() -> str:
+    """The current UTC instant, ISO-8601 — the fake's ``now()``.
+
+    A module-level helper, deliberately: ``FakeControlPlane.rpc`` has
+    function-local ``from datetime import datetime, ...`` statements in
+    branches further down, which makes ``datetime`` LOCAL to that whole
+    function — so referencing it earlier in the same function is an
+    ``UnboundLocalError``, not an import.
+    """
+    return datetime.now(UTC).isoformat()
 
 
 def _metering_period_label(period_start) -> str | None:
@@ -302,6 +383,94 @@ class FakeControlPlane:
                     total += float(r.get("ask_cost_usd") or 0.0)
                     total += float(r.get("capture_cost_usd") or 0.0)
             return total
+        if fn == "metering_record_unmetered":
+            # #4779: the SQL writer's atomic upsert. Mirrors
+            # ``metering_record_unmetered`` (20260927000001): PK
+            # (org_id, lane, drop_class), ``first_observed_at`` PRESERVED across
+            # upserts, ``last_observed_at`` advanced, and the same strict
+            # argument guards (an empty org/lane or a zero count is refused —
+            # those are the states the table exists to distinguish). The FK and
+            # the drop_class CHECK are modelled too, so a caller that leans on a
+            # class the migration does not declare fails in CI (the fake is the
+            # only schema the Python lane runs against).
+            p = body or {}
+            org_id = p.get("p_org_id")
+            lane = p.get("p_lane")
+            drop_class = p.get("p_drop_class")
+            # An OMITTED p_n defaults to 1 (the SQL signature's DEFAULT); an
+            # EXPLICIT None is refused, exactly as the migration's
+            # ``IF p_n IS NULL OR p_n < 1 THEN RAISE`` does. Collapsing the two
+            # would let the fake encode a row the real RPC rejects.
+            if "p_n" in p and p["p_n"] is None:
+                raise RuntimeError(
+                    "metering_record_unmetered: p_n must be >= 1 (got NULL) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            n = int(p["p_n"]) if p.get("p_n") is not None else 1
+            # The RPC's guard is Python's own whitespace set, mirrored exactly by
+            # the migration's ``blank_chars`` (a bare ``btrim(x)`` would refuse
+            # fewer keys than the embedded lane does) — so this fake uses the
+            # Python test as well, for BOTH keys.
+            if org_id is None or not str(org_id).strip():
+                raise RuntimeError(
+                    "metering_record_unmetered: p_org_id is required")
+            if lane is None or not str(lane).strip():
+                raise RuntimeError(
+                    "metering_record_unmetered: p_lane is required")
+            if n < 1:
+                raise RuntimeError(
+                    f"metering_record_unmetered: p_n must be >= 1 (got {n}) — a "
+                    "zero increment is the state this table exists to "
+                    "distinguish")
+            if drop_class not in ("window_unresolvable",
+                                  "increment_write_unconfirmed"):
+                raise RuntimeError(
+                    "metering_record_unmetered: new row violates the declared "
+                    f"drop_class vocabulary ({drop_class!r})")
+            if not any(str(o.get("id")) == str(org_id)
+                       for o in self.tables.get("organizations", [])):
+                raise RuntimeError(
+                    "metering_record_unmetered: org FK violation for "
+                    f"{org_id!r}")
+            now = _now_iso()
+            rows = self.tables.setdefault("metering_unmetered_increments", [])
+            row = next((r for r in rows
+                        if str(r.get("org_id")) == str(org_id)
+                        and r.get("lane") == lane
+                        and r.get("drop_class") == drop_class), None)
+            if row is None:
+                row = {"org_id": str(org_id), "lane": lane,
+                       "drop_class": drop_class, "increments": 0,
+                       "last_error_type": p.get("p_error_type"),
+                       "first_observed_at": now, "last_observed_at": now}
+                rows.append(row)
+            row["increments"] = int(row.get("increments") or 0) + n
+            row["last_error_type"] = p.get("p_error_type")
+            row["last_observed_at"] = now
+            return row["increments"]
+        if fn == "metering_unmetered_for_org":
+            # #4779: the bounded per-org read (lanes x classes <= 12 rows).
+            p = body or {}
+            wanted = str(p.get("p_org_id"))
+            return [
+                {k: r.get(k) for k in
+                 ("lane", "drop_class", "increments", "last_error_type",
+                  "first_observed_at", "last_observed_at")}
+                for r in sorted(
+                    (r for r in self.tables.get(
+                        "metering_unmetered_increments", [])
+                     if str(r.get("org_id")) == wanted),
+                    key=lambda r: (r.get("lane") or "",
+                                   r.get("drop_class") or ""))
+            ]
+        if fn == "metering_unmetered_total":
+            # #4779: ONE scalar over the cohort — a row cap cannot truncate it.
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            return sum(int(r.get("increments") or 0)
+                       for r in self.tables.get(
+                           "metering_unmetered_increments", [])
+                       if str(r.get("org_id")) in wanted)
         if fn == "cohort_org_ids_since":
             # #3665: array_agg over a bounded subquery — one row/one array,
             # so a row cap cannot truncate the org set. Mirror the SQL's
@@ -805,6 +974,12 @@ class FakeControlPlane:
         # 22P02 in prod is method-agnostic.
         if self.uuid_fidelity:
             _assert_uuid_fidelity(table, filters)
+        # #4037: an order term PostgREST would 400 on (PGRST100) must fail here
+        # too — and, like 22P02, that is method-agnostic → parse BEFORE the
+        # method dispatch below. `if order:` mirrors the real seam, which drops
+        # a falsy order (`supabase_control.query`: `if order:`), so `""`/None
+        # are NOT false refusals.
+        order_terms = _parse_order(table, order) if order else []
         if method == "PATCH":
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED
@@ -897,11 +1072,29 @@ class FakeControlPlane:
                 # escalation decomposition's sweep/health tests.
                 raise RuntimeError(
                     f"Supabase control-plane query failed ({table}): HTTP 400")
+            if (self.missing_columns and table in self.missing_columns
+                    and order_terms
+                    and self.missing_columns[table]
+                    & {f for f, _, _ in order_terms}):
+                # Ordering by an absent column is the SAME PostgREST rejection as
+                # the `select`/`filter` drift above: real PostgREST 400s on an
+                # undefined column (PGRST204) rather than returning the rows
+                # unordered. Left accepted, it reintroduces the exact #4037 mask
+                # — an invalid order term that 400s in production but is masked
+                # in CI, with a fail-soft consumer reading `rows[0]` after
+                # `limit=1`. The user-facing outcome is identical, so the fake
+                # must not be the one place it stays invisible.
+                raise RuntimeError(
+                    f"Supabase control-plane query failed ({table}): HTTP 400")
+            # #4037: order BEFORE the projection — PostgREST orders server-side
+            # before projecting, so an ordered column need not be in `select`
+            # (the old fake sorted after the projection, silently no-oping any
+            # order on a non-selected column, e.g. `active_membership_org_ids`
+            # `select=["org_id"], order="created_at.asc"`).
+            if order_terms:
+                rows = _apply_order(rows, order_terms)
             if select:
                 rows = [{k: r.get(k) for k in select} for r in rows]
-            if order:
-                col = order.lstrip("-")
-                rows.sort(key=lambda r: r.get(col) or "", reverse=order.startswith("-"))
             if limit is not None:
                 rows = rows[:limit]
             return rows
