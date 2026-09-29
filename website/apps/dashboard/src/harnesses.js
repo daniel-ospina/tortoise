@@ -95,6 +95,18 @@ export const HARNESS_CAPTURE_SUPPORT = {
   chatgpt: false,        // #1701: cloud-hosted — no server-visible filing signal
 }
 
+// #3661: which capture seams the PER-MACHINE opt-in still gates. A sentence that
+// promises capture is only honest for the seams nothing further gates, so this
+// map — not prose — decides the wording on the success screen: the hook seams
+// file nothing until `TORTOISE_CAPTURE=1`, while installing the Pi extension IS
+// its opt-in (claude-web has no automatic path at all and is not a seam here).
+export const HARNESS_CAPTURE_REQUIRES_OPT_IN = {
+  claude: true,
+  codex: true,
+  cursor: true,
+  pi: false,
+}
+
 const CURSOR_MCP_CONFIG_ENV = {
   mcpServers: {
     tortoise: {
@@ -263,11 +275,14 @@ export function captureInstallNote({ heading, inert, stays, optIn = true }) {
 // connect-wizard snippet and the Memory-sources row) — the same sharing rule the
 // Pi/Codex/Cursor constants already follow, so the two Claude surfaces cannot
 // drift and one pin covers both.
-export const CLAUDE_CAPTURE_NOTE = captureInstallNote({
+export const CLAUDE_CAPTURE_NOTE = `${captureInstallNote({
   heading: 'Session capture (#1727 T1)',
   inert: 'these hooks file no session to Tortoise Cloud',
   stays: 'Transcripts stay on this machine (spooled under ~/.tortoise/capture-spool/)',
-})
+})}
+# The SessionStart hook separately sends an install probe — harness + timestamp
+# only, no content. It is NOT consent-gated (it is install telemetry, not a
+# session), so "no session" above is exact and this line is the disclosure.`
 
 // #3575: the Pi capture-INSTALL step — the in-repo extension that makes Pi
 // sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.pi (the setup
@@ -302,7 +317,8 @@ elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
   mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
 fi
 cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
-# Backfill past Pi sessions with:
+# Backfill past Pi sessions with (the EXTENSION files automatically; this
+# import command is a separate, consent-gated path — it needs TORTOISE_CAPTURE=1):
 tortoise sessions import --harness pi --file <session.jsonl>`
 
 // #3818: the Codex capture-INSTALL step — the in-repo SessionEnd hook that
@@ -407,9 +423,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
     // single source of truth (web is currently false: disabled-with-reason).
-    const filing = HARNESS_CAPTURE_SUPPORT['claude-web']
-      ? `\n\n4) Session filing — nothing is filed unless you call it, and your team's Agent sessions toggle (Memory sources > Agent sessions; default ON, ToS-covered, #1927) can refuse the file with a 409 — this path has no automatic capture. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
-      : ''
+    const filing = HARNESS_CAPTURE_SUPPORT['claude-web'] ? `\n\n${CLAUDE_WEB_FILING}` : ''
     return base + filing
   },
   codex: (key) =>
@@ -543,6 +557,12 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
 // reason map covers the DISABLED harnesses only — a supported harness renders
 // the capture step, never a reason. Never hidden rows — disabled with an
 // honest reason.
+// #3661: the claude-web filing paragraph, extracted so the gated-off branch is
+// pinnable. It is `''` at render while HARNESS_CAPTURE_SUPPORT['claude-web'] is
+// false, so no rendered-value assertion and no snapshot can reach it.
+export const CLAUDE_WEB_FILING =
+  `4) Session filing — nothing is filed unless you call it, and your team's Agent sessions toggle (Memory sources > Agent sessions; default ON, ToS-covered, #1927) can refuse the file with a 409 — this path has no automatic capture. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
+
 export const HARNESS_CAPTURE_REASON = {
   'claude-desktop': 'backfill import only — no live install path yet',
   'claude-web': 'session capture for web is in progress — not available yet',

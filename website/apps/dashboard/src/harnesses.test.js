@@ -14,7 +14,7 @@ import {
   PI_CAPTURE_INSTALL,
   HARNESS_OAUTH, CANONICAL_MCP_URL, ONBOARDING_INSTRUCTIONS_URL, SKILLS_CLAIM,
   SKILLS_LIST,
-  CAPTURE_OPT_IN_ENV, CAPTURE_OPT_IN_LINE,
+  CAPTURE_OPT_IN_ENV, CAPTURE_OPT_IN_LINE, CLAUDE_WEB_FILING, HARNESS_CAPTURE_REQUIRES_OPT_IN,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
@@ -442,21 +442,11 @@ test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double
 // refused by the team off-switch — demanding the env var there would be the
 // mirror of the bug this test exists for (an overstatement of the gate).
 test('#3661: every capture surface names the opt-in, and none claims capture happens by default', () => {
-  // Surfaces whose capture is gated by the host opt-in: these must NAME the
-  // variable (the negative half is the source scan below).
-  const optInSurfaces = {
-    'HARNESS_CAPTURE_INSTALL.claude': HARNESS_CAPTURE_INSTALL.claude,
-    'HARNESS_CAPTURE_INSTALL.codex': HARNESS_CAPTURE_INSTALL.codex,
-    'HARNESS_CAPTURE_INSTALL.cursor': HARNESS_CAPTURE_INSTALL.cursor,
-    'HARNESS_CAPTURE_INSTALL.pi': HARNESS_CAPTURE_INSTALL.pi,
-    'HARNESS_INSTALL.claude': HARNESS_INSTALL.claude(KEY),
-    'HARNESS_INSTALL.codex': HARNESS_INSTALL.codex(KEY),
-    'HARNESS_INSTALL.pi': HARNESS_INSTALL.pi(KEY),
-    // the connect-wizard steps (the archived LEGACY_WIZARD_ARCHIVED render, a
-    // retained rollback path) carry the Cursor scope disclosure in prose.
-    'HARNESS_STEPS.cursor': HARNESS_STEPS('cursor', KEY)
-      .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n'),
-  }
+  // The surface set is DERIVED from the module, not hand-listed: a new capture
+  // seam that forgot the variable must RED, and a hand-maintained list would
+  // silently stop covering it. `HARNESS_CAPTURE_INSTALL` is the capture-snippet
+  // registry, and `HARNESS_CAPTURE_REQUIRES_OPT_IN` declares per seam whether
+  // the opt-in gates it (Pi's extension is the one that does not).
   // The name is pinned as a LITERAL, not compared only against the module's own
   // constant: `text.includes(CAPTURE_OPT_IN_ENV)` alone stays green if someone
   // renames the constant on both sides, telling users to export a variable the
@@ -467,10 +457,35 @@ test('#3661: every capture surface names the opt-in, and none claims capture hap
   assert.equal(CAPTURE_OPT_IN_ENV, OPT_IN_NAME,
     'the disclosed variable must be the one tortoise/capture_consent.py reads')
   assert.equal(CAPTURE_OPT_IN_LINE, `${OPT_IN_NAME}=1`)
-  for (const [name, text] of Object.entries(optInSurfaces)) {
-    assert.ok(text.includes(OPT_IN_NAME),
-      `${name} must name ${OPT_IN_NAME} — after #3615 the hooks file no session without it (#3661)`)
+  assert.deepEqual(Object.keys(HARNESS_CAPTURE_REQUIRES_OPT_IN).sort(),
+    Object.keys(HARNESS_CAPTURE_INSTALL).sort(),
+    'every capture seam must declare whether the per-machine opt-in gates it')
+  for (const [h, gated] of Object.entries(HARNESS_CAPTURE_REQUIRES_OPT_IN)) {
+    const snippet = HARNESS_CAPTURE_INSTALL[h]
+    assert.ok(snippet.includes(OPT_IN_NAME),
+      `HARNESS_CAPTURE_INSTALL.${h} must name ${OPT_IN_NAME} — after #3615 the hooks file no session without it (#3661)`)
+    if (gated) {
+      // naming the variable is not enough: the user has to be told the syntax.
+      assert.ok(snippet.includes(CAPTURE_OPT_IN_LINE),
+        `HARNESS_CAPTURE_INSTALL.${h} must show the line to run (${CAPTURE_OPT_IN_LINE})`)
+    }
+    // Where the wizard snippet EMBEDS the capture step, it inherits the duty.
+    // (Cursor's does not — its body is MCP config only — which is why this is
+    // conditional rather than a hand list.)
+    const install = HARNESS_INSTALL[h]
+    if (typeof install === 'function') {
+      const body = install(KEY)
+      if (body.includes(snippet)) {
+        assert.ok(body.includes(OPT_IN_NAME),
+          `HARNESS_INSTALL.${h} embeds the capture step, so it must name ${OPT_IN_NAME}`)
+      }
+    }
   }
+  // The connect-wizard steps (the archived LEGACY_WIZARD_ARCHIVED render, a
+  // retained rollback path) carry the Cursor scope disclosure in prose.
+  assert.ok(HARNESS_STEPS('cursor', KEY)
+    .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n').includes(OPT_IN_NAME),
+  'HARNESS_STEPS.cursor carries the Cursor capture disclosure, so it must name the opt-in')
   // The local-spool claim is PER SEAM: only the Claude Code seam spools without
   // consent (session-turn.sh runs `tortoise session spool` ungated). Codex and
   // Cursor route through `sessions import`, which refuses BEFORE it can write —
@@ -478,29 +493,32 @@ test('#3661: every capture surface names the opt-in, and none claims capture hap
   // issue's own defect class, so pin the asymmetry.
   assert.match(HARNESS_CAPTURE_INSTALL.claude, /capture-spool/,
     'the Claude seam DOES spool locally without consent — its copy must disclose that')
-  for (const name of ['HARNESS_CAPTURE_INSTALL.codex', 'HARNESS_CAPTURE_INSTALL.cursor']) {
-    assert.doesNotMatch(optInSurfaces[name], /capture-spool/,
-      `${name} must not claim a local spool — its seam refuses before anything is written`)
+  for (const h of ['codex', 'cursor']) {
+    assert.doesNotMatch(HARNESS_CAPTURE_INSTALL[h], /capture-spool/,
+      `HARNESS_CAPTURE_INSTALL.${h} must not claim a local spool — its seam refuses before anything is written`)
   }
   // The negative half is a SOURCE scan, not a list of rendered values: the
-  // claude-web filing paragraph is currently gated off
-  // (HARNESS_CAPTURE_SUPPORT['claude-web'] is false — disabled-with-reason), so
-  // no rendered-value assertion can ever reach it, and a hand-maintained surface
-  // list silently stops covering a newly added one. Scanning the module covers
-  // every branch, live or gated, and still discriminates: the pre-fix source
-  // matched the old claim at six copy sites and does not match it now. The
-  // server-policy sentence is unaffected — it says `default-ON`, which is TRUE of
-  // the organization toggle and is not the old claim.
+  // claude-web filing paragraph is gated off (HARNESS_CAPTURE_SUPPORT['claude-web']
+  // is false — disabled-with-reason), so no rendered-value assertion and no
+  // snapshot can reach it, and a hand-maintained surface list silently stops
+  // covering a newly added one. Scanning the module covers every branch, live or
+  // gated. LIMIT, stated: it recognises the two phrasings the stale copy actually
+  // used, so a fresh PARAPHRASE evades it — this repo deliberately rejects
+  // semantic copy-nets (wizardPrompts.test.js header: eight reviews found ~41
+  // defects in the net and none in the product), so the exact-match snapshot is
+  // the guard for rendered copy and this scan is the backstop for gated branches.
+  // The server-policy sentence is unaffected — it says `default-ON`, which is
+  // TRUE of the organization toggle and is not the old claim.
   const src = readFileSync(new URL('./harnesses.js', import.meta.url), 'utf8')
   assert.doesNotMatch(src, /recording is\s+ON by default|files every session/i,
     'harnesses.js still claims capture happens by default somewhere — #3615 made ' +
     'every in-repo hook fail closed on the explicit opt-in; state it via captureInstallNote')
-  // The hook seams must show the line to run, not merely the variable name —
-  // naming `TORTOISE_CAPTURE` without `=1` leaves the user to guess the syntax.
-  for (const name of ['HARNESS_CAPTURE_INSTALL.claude', 'HARNESS_CAPTURE_INSTALL.codex', 'HARNESS_CAPTURE_INSTALL.cursor']) {
-    assert.ok(optInSurfaces[name].includes(CAPTURE_OPT_IN_LINE),
-      `${name} must show the line to run (${CAPTURE_OPT_IN_LINE})`)
-  }
+  // The gated-off claude-web paragraph is reachable by no render, so it is pinned
+  // as the exported constant itself (the source scan above is the only other net).
+  assert.match(CLAUDE_WEB_FILING, /nothing is filed unless you call it/,
+    'the claude-web filing paragraph must state that filing is the agent\'s own call')
+  assert.doesNotMatch(CLAUDE_WEB_FILING, /on by default/i,
+    'the claude-web filing paragraph must not claim capture happens by default')
   // The one deliberate exception, pinned so a future edit cannot quietly
   // generalize the hook wording onto Pi: its extension reads no
   // TORTOISE_CAPTURE (installing it IS the opt-in), so its copy must state the

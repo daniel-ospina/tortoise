@@ -155,6 +155,16 @@ test('#3661: the shipped bundle states the capture opt-in and never claims captu
     `${entryName} must keep the Settings sentence that separates the organization permission from the per-machine opt-in (#3661)`)
   assert.ok(js.includes('installing the extension is the opt-in'),
     `${entryName} must keep the Pi exception — the Pi seam reads no TORTOISE_CAPTURE (#3575)`)
+  // The success screen promises capture from an install PROBE, which is not
+  // consent-gated — so on a hook seam the promise must name the remaining
+  // requirement. Pinned exactly because main.jsx is JSX and cannot be imported.
+  assert.ok(js.includes('once this machine opts in'),
+    `${entryName} must not promise capture on a hook seam without naming the per-machine opt-in (#3661)`)
+  // Both the Claude note and the Pi copy must keep the probe disclosure: the
+  // probe reaches the server without consent, so a "nothing is sent" reading
+  // would be false.
+  assert.ok(js.includes('install probe'),
+    `${entryName} must disclose the ungated install probe (harness + timestamp only, no content)`)
   // The negative leg runs over EVERY shipped script, not just the entry chunk:
   // this file's own history (#3428 mutation b) is that an entry-only scan stays
   // green while the claim lives in a code-split chunk or a `public/`-copied

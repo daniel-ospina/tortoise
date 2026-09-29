@@ -13,7 +13,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_REQUIRES_OPT_IN, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -7992,7 +7992,16 @@ function claimIntentInFlight() {
                                     installed seam" class is pinned by the
                                     harness registry's tests, not here. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
-                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                {/* #3661: a capture PROMISE is only honest for the seams the opt-in
+                                    does not gate. The install probe proves an install was observed,
+                                    not that capture will happen — a hook seam files nothing until
+                                    this machine exports TORTOISE_CAPTURE=1, so the sentence names
+                                    what is still required instead of promising the capture. Pi is
+                                    the exception (installing the extension IS its opt-in), which is
+                                    why the map decides rather than a blanket clause. */}
+                                {doneCaptureClaim === 'future' && (HARNESS_CAPTURE_REQUIRES_OPT_IN[wizardHarness]
+                                  ? `Tortoise will capture your agent's sessions once this machine opts in (export ${CAPTURE_OPT_IN_LINE}). `
+                                  : "Tortoise will capture your agent's sessions. ")}
                                 {doneCaptureClaim === 'install-pending' && `Session capture is ${doneCaptureStatusLabel}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
