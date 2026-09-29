@@ -1520,6 +1520,21 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("[local worktrees]", out)
         self.assertIn(f"{ISSUE}-queue-wt", out)
 
+    def test_ci_timing_branch_with_a_descriptive_tail_is_still_a_claim(self):
+        # Review cycle 3 (PR #6267): `chore/ci-timing-refresh-` sits under the
+        # LANE-OWNED `chore/` namespace, so the bare prefix was too wide — a lane
+        # could write a descriptive tail. The bot mints a short SHA, so the tail
+        # is anchored to hex; anything else must stay a claim, because hiding one
+        # on a BLOCKING surface is worse than a false COLLISION.
+        for ref in (f"chore/ci-timing-refresh-{ISSUE}-manual",
+                    f"chore/ci-timing-refresh-{ISSUE}"):
+            with self.subTest(ref=ref):
+                _git(self.repo, "update-ref", f"refs/remotes/origin/{ref}", "HEAD")
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"ref={ref!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(ref, out)
+
     def test_local_branch_hit(self):
         _git(self.repo, "branch", "fix/3061-collision-preflight")
         rc, out = self.run_tool()

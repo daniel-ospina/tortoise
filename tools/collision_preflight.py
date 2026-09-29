@@ -1333,20 +1333,26 @@ def _inside_hex_digest(text: str, start: int, end: int) -> bool:
 #:
 #: ⚠️ TWO GENERATED NAMESPACES, both measured in this repo's real refs (review
 #: cycle 2, PR #6267). `mq/merge-queue/` is a SECOND Mergify merge-queue
-#: namespace — `git for-each-ref refs/remotes/origin/mq/merge-queue` returns real
-#: bot-authored refs, and they persist locally long after they leave origin (159
-#: stale local `mergify/merge-queue/*` vs 3 live). `chore/ci-timing-refresh-` is
-#: minted by this repo's own workflow, which hardcodes
-#: `chore/ci-timing-refresh-$(git rev-parse --short HEAD)`; a short SHA can LEAD
-#: with an issue number exactly like the hash this filter exists for.
+#: namespace. `chore/ci-timing-refresh-` is minted by this repo's own workflow
+#: from a short SHA, and a short SHA can LEAD with an issue number exactly like
+#: the hash this filter exists for.
 #:
 #: Each entry must be narrow enough that no lane would choose it. `chore/`
 #: alone would be far too wide; the full bot-minted prefix is what is excluded.
 _GENERATED_BRANCH_PREFIXES = (
     "mergify/merge-queue/",
     "mq/merge-queue/",
-    "chore/ci-timing-refresh-",
 )
+
+#: The CI bot's refresh branch is under a LANE-OWNED namespace (`chore/`), so its
+#: prefix alone is too wide: `chore/ci-timing-refresh-3061-manual` is a name a
+#: lane could reasonably write, and excluding it would hide a claim on a BLOCKING
+#: surface — the direction that is strictly worse than a false COLLISION (review
+#: cycle 3, PR #6267). The workflow mints `chore/ci-timing-refresh-<short SHA>`,
+#: so the tail is anchored to what the generator actually produces: a hex run.
+#: A tail with any non-hex character stays a claim.
+_CI_TIMING_PREFIX = "chore/ci-timing-refresh-"
+_CI_TIMING_TAIL_MIN = 7
 
 
 def _is_generated_branch(name: str) -> bool:
@@ -1388,6 +1394,10 @@ def _is_generated_branch(name: str) -> bool:
     if name.startswith("refs/remotes/"):
         _, _, rest = stripped.partition("/")
         stripped = rest or stripped
+    if stripped.startswith(_CI_TIMING_PREFIX):
+        tail = stripped[len(_CI_TIMING_PREFIX):]
+        return (len(tail) >= _CI_TIMING_TAIL_MIN
+                and all(c in _HEX_DIGITS for c in tail))
     return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
 
 
