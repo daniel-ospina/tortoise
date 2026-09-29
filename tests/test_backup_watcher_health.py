@@ -329,9 +329,9 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             ``async def`` / ``lambda`` / ``class`` scopes (an uncalled ``def``
             publishes nothing), and any ``with`` / ``async with``. The ONLY
             ``with`` exemption is the framework's own lifespan frame: a
-            ``with`` / ``async with`` that is a DIRECT statement of
-            ``_lifespan``'s body AND whose context expression is a ``Call`` on
-            an ``Attribute`` named ``lifespan`` — the real code's
+            SINGLE-item ``with`` / ``async with`` that is a DIRECT statement of
+            ``_lifespan``'s body AND whose ONLY context expression is a
+            ``Call`` on an ``Attribute`` named ``lifespan`` — the real code's
             ``async with mcp_http_app.lifespan(mcp_http_app):``. THAT frame is
             the composition the whole body runs inside, so it cannot silently
             skip the publish: its body runs exactly when ``_lifespan`` runs,
@@ -340,14 +340,22 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             ``with contextlib.suppress(...)`` is also a direct statement, and
             its ``__exit__`` swallows the very exception that would have made
             the skip loud — so every other ``with``, direct or nested, is a
-            barrier. The exemption matches the call SHAPE; see the residual.
+            barrier. Requiring a SINGLE item matters independently: stacking a
+            ``lifespan`` item beside any other context manager
+            (``with suppress(...), lifespan(...):``) leaves the suppressing
+            sibling's ``__exit__`` free to swallow the skip, so a multi-item
+            ``with`` is never exempt however its items are ordered. The
+            exemption matches the call SHAPE; see the residual.
             In particular the ``if _watcher_expected:``/``else`` branch only
             logs, so a publish there reaches only one of the two cases and a
             non-hosted re-entry keeps a prior boot's ``True``, corrupting
             #4498's distinction.
         (2) EVERY ``try`` / ``try*`` (``TryStar``) ANCESTOR must make a skipped
-            publish LOUD. A ``try/finally`` (no handlers) qualifies — an
-            exception propagates out of it. A ``try`` with handlers qualifies
+            publish LOUD. A ``try/finally`` (no handlers) qualifies only when
+            its ``finally`` cannot discard the pending exception: a ``return``
+            / ``break`` / ``continue`` at ANY depth in ``finalbody`` leaves the
+            frame and drops the in-flight exception, so such a ``try/finally``
+            is not loud. A ``try`` with handlers qualifies
             only if at least one handler makes the skip loud as a DIRECT
             statement of its body: an assignment to ``_WATCHER_START_ERROR``
             (so /health reports ``failed``, degraded) or a ``raise`` of ANY
@@ -449,12 +457,15 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # loops that may iterate zero times, `match` arms, nested function/class
     # scopes (an uncalled `def` publishes nothing), and any `with`/`async with`.
     # The ONE exemption is the framework's own lifespan frame — see
-    # `_is_framework_lifespan_frame`: a direct `with`/`async with` whose
-    # context expression is a call on an attribute named `lifespan`. That frame
-    # cannot silently skip its body (the whole function runs inside it, and
-    # failing to enter it aborts the boot). "Direct statement" is NOT by itself
-    # safety: `with contextlib.suppress(...)` is direct too and its `__exit__`
-    # swallows the exception — so it stays a barrier (round-5 β).
+    # `_is_framework_lifespan_frame`: a SINGLE-item direct `with`/`async with`
+    # whose ONLY context expression is a call on an attribute named `lifespan`.
+    # That frame cannot silently skip its body (the whole function runs inside
+    # it, and failing to enter it aborts the boot). "Direct statement" is NOT by
+    # itself safety: `with contextlib.suppress(...)` is direct too and its
+    # `__exit__` swallows the exception — so it stays a barrier (round-5 β).
+    # Nor is a stacked item safe: `with suppress(...), lifespan(...):` still has
+    # the suppressing sibling's `__exit__`, so `len(node.items) == 1` is
+    # required (round-6 P3-1).
     barriers = (
         ast.If,
         ast.ExceptHandler,
@@ -473,24 +484,29 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     def _is_framework_lifespan_frame(node: ast.AST) -> bool:
         # The framework's own lifespan wrapper — the ONE exempt `with`.
         # Shape-matched (never by file name, line number or the specific
-        # app object): a `with`/`async with` that is a DIRECT statement of
-        # `_lifespan`'s body AND whose context expression is a `Call` on an
-        # `Attribute` named `lifespan` (Starlette/FastMCP `...lifespan(app)`).
-        # Only THAT frame is safe: its body runs whenever `_lifespan` runs, and
-        # failing to enter it propagates and aborts the boot. A suppressing /
-        # stacking / custom `with` — `contextlib.suppress`, an `ExitStack`, a
-        # hand-rolled context manager — can swallow an exception raised in its
-        # body and is NOT exempt. Fail closed: renaming the framework call
-        # reddens the pin and names itself.
+        # app object): a SINGLE-item `with`/`async with` that is a DIRECT
+        # statement of `_lifespan`'s body AND whose ONLY context expression is
+        # a `Call` on an `Attribute` named `lifespan` (Starlette/FastMCP
+        # `...lifespan(app)`). Only THAT frame is safe: its body runs whenever
+        # `_lifespan` runs, and failing to enter it propagates and aborts the
+        # boot. A suppressing / stacking / custom `with` — `contextlib.suppress`,
+        # an `ExitStack`, a hand-rolled context manager — can swallow an
+        # exception raised in its body and is NOT exempt. Fail closed: renaming
+        # the framework call reddens the pin and names itself.
         if not isinstance(node, (ast.With, ast.AsyncWith)):
             return False
         if node not in lifespan.body:
             return False
-        return any(
+        if len(node.items) != 1:
+            # A stacked sibling item beside the lifespan call keeps its own
+            # `__exit__` (`with suppress(...), lifespan(...):`), so only a
+            # SOLE-item `with` is exempt.
+            return False
+        (item,) = node.items
+        return (
             isinstance(item.context_expr, ast.Call)
             and isinstance(item.context_expr.func, ast.Attribute)
             and item.context_expr.func.attr == "lifespan"
-            for item in node.items
         )
 
     def _barrier(node: ast.AST) -> ast.AST | None:
@@ -506,8 +522,9 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
         "the `_WATCHER_EXPECTED` publish must run in `_lifespan`'s own body, "
         "outside every construct that can skip or defer it — a conditional "
         "branch, an `except` handler, a loop that may never iterate, a `match` "
-        "arm, a nested `def`/`class`, or any `with` that is not the framework's "
-        "own `lifespan(...)` frame — otherwise the assignment either never "
+        "arm, a nested `def`/`class`, or any `with` that is not a single-item "
+        "`with` whose only context is the framework's own `lifespan(...)` call "
+        "— otherwise the assignment either never "
         "runs or reaches only some of the two cases, and a boot can serve a "
         "stale or hard-coded `expected` and #4498's distinction silently returns"
     )
@@ -517,8 +534,10 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # whose `except` sets `_WATCHER_START_ERROR`, which is precisely what turns
     # "the publish was skipped" into /health `failed` (degraded). So a `try`
     # ancestor is acceptable only if it cannot swallow the skip. A `try` with
-    # no handlers (`try/finally`) cannot: an exception propagates out of it. A
-    # `try` with handlers can, unless at least one handler makes the skip loud
+    # no handlers (`try/finally`) cannot swallow the skip UNLESS its `finally`
+    # leaves the frame — a `return`/`break`/`continue` at ANY depth in
+    # `finalbody` discards the pending exception, so that shape is not loud. A
+    # `try` with handlers can swallow, unless at least one handler makes it loud
     # as a DIRECT statement of its body: a `raise` (ANY form — a raised
     # exception propagates unless an enclosing handler swallows it, and any
     # such handler is itself a `Try` ancestor this same rule checks) or an
@@ -526,8 +545,18 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # `except Exception: if False: _WATCHER_START_ERROR = ...` cannot look loud
     # while setting nothing.
     def _is_loud_try(node: ast.Try | ast.TryStar) -> bool:
-        if not node.handlers:  # try/finally — an exception is not swallowed
-            return True
+        if not node.handlers:
+            # try/finally: loud only if the `finally` cannot discard the
+            # in-flight exception. `ast.walk` (not just the top-level
+            # statements) because a `return`/`break`/`continue` nested in an
+            # `if` inside the `finally` still leaves the frame and drops the
+            # pending exception — the skipped publish then goes silent, which
+            # is #4498 all over again.
+            return not any(
+                isinstance(inner, (ast.Return, ast.Break, ast.Continue))
+                for stmt in node.finalbody
+                for inner in ast.walk(stmt)
+            )
         for handler in node.handlers:
             for stmt in handler.body:
                 if isinstance(stmt, ast.Raise):
@@ -561,9 +590,10 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
         "`raise`s (any form: bare, `raise e`, `raise SomeError(...)`); a "
         "handler that only logs or `pass`es swallows the skip, and the publish "
         "is then skipped while /health still answers `disabled` + `ok` with a "
-        "stale `expected` — #4498's blindness. A `try/finally` is fine (an "
-        "exception propagates). Checked for EVERY `try` ancestor, not just the "
-        "nearest"
+        "stale `expected` — #4498's blindness. A `try/finally` is fine only "
+        "when its `finally` does not `return`/`break`/`continue` (which would "
+        "discard the pending exception). Checked for EVERY `try` ancestor, not "
+        "just the nearest"
     )
 
     # Rule (3) of the docstring: no statement that unconditionally leaves the
