@@ -39,7 +39,9 @@ Exit codes:
     0  no drift and no silent revert — gate green
     1  drift beyond threshold OR a silent revert — gate red
     2  environment error (not a git repo / base not a remote-tracking ref /
-       base unreachable / fetch failed — freshness unprovable)
+       base unreachable / fetch failed — freshness unprovable / the
+       silent-revert arm could not be MEASURED — an unreadable merge base or
+       diff is not an empty revert set)
 """
 from __future__ import annotations
 
@@ -60,6 +62,17 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
         ["git", "-C", str(root), *args],
         capture_output=True, text=True, check=False,
     )
+
+
+class MeasurementError(RuntimeError):
+    """A git read the revert arm depends on failed.
+
+    An empty path set is a LEGITIMATE answer ("nothing differs"), so a failed
+    read must never be allowed to produce one — that is exactly how a
+    fail-closed gate becomes fail-open: "could not measure" is reported as
+    "no reverts found" and the gate goes green (#4174). Raised by the read
+    helpers and turned into exit 2 by ``main``.
+    """
 
 
 def repo_root() -> Path:
@@ -94,6 +107,14 @@ def fetch_base(root: Path, base: str) -> tuple[str | None, str]:
     Freshness is "fetched" only when the fetch succeeded. There is NO opt-out:
     a local ref cannot be proven fresh, and a fetch failure is returned as an
     error — never a green (#4174: a possibly-stale read is not a pass).
+
+    The fetch uses an EXPLICIT destination refspec. `git fetch <remote>
+    <branch>` updates `refs/remotes/<remote>/<branch>` only when
+    `remote.<remote>.fetch` happens to map that branch; otherwise it writes
+    `FETCH_HEAD` alone and still exits 0, leaving the gate measuring the old
+    ref while stamping freshness "fetched" (#4174's own failure mode, behind a
+    green freshness label). Naming the destination makes the measured ref the
+    fetched one.
     """
     remote_ref = _split_remote_ref(root, base)
     if remote_ref is None:
@@ -101,7 +122,8 @@ def fetch_base(root: Path, base: str) -> tuple[str | None, str]:
                 f"prove its freshness (pass origin/<branch>); an unproven base "
                 f"is not a pass"), "unproven"
     remote, branch = remote_ref
-    r = _git(root, "fetch", remote, branch, "--quiet")
+    refspec = f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"
+    r = _git(root, "fetch", remote, refspec, "--quiet")
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip().splitlines()
         return (f"could not fetch {remote}/{branch} — the base ref's freshness "
@@ -111,10 +133,18 @@ def fetch_base(root: Path, base: str) -> tuple[str | None, str]:
 
 
 def _paths_changed(root: Path, a: str, b: str) -> set[str]:
-    """Paths differing between <a> and <b>, NUL-separated (rename-free)."""
+    """Paths differing between <a> and <b>, NUL-separated (rename-free).
+
+    Raises :class:`MeasurementError` on a failed read. An empty set means
+    "nothing differs", and a git failure must never be allowed to answer that.
+    """
     r = _git(root, "diff", "--no-renames", "--name-only", "-z", a, b)
     if r.returncode != 0:
-        return set()
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git diff {a}..{b} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
     return {p for p in r.stdout.split("\0") if p}
 
 
@@ -123,11 +153,18 @@ def _numstat(root: Path, a: str, b: str) -> dict[str, tuple[int, int]]:
 
     `--numstat -z` emits one NUL-terminated record per file, fields
     tab-separated: `added\\tdeleted\\tpath`. A binary file uses `-`.
+
+    Raises :class:`MeasurementError` on a failed read — line counts that could
+    not be read must not be silently reported as `+0/-0`.
     """
     r = _git(root, "diff", "--no-renames", "--numstat", "-z", a, b)
-    out: dict[str, tuple[int, int]] = {}
     if r.returncode != 0:
-        return out
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        raise MeasurementError(
+            f"git diff --numstat {a}..{b} failed (rc {r.returncode}): "
+            f"{detail[0] if detail else 'no detail'}"
+        )
+    out: dict[str, tuple[int, int]] = {}
     for rec in r.stdout.split("\0"):
         if not rec:
             continue
@@ -238,9 +275,30 @@ def main() -> int:
 
     # ── silent-revert arm (#4174) ─────────────────────────────────────────
     reverts: list[dict] = []
-    mb = _git(root, "merge-base", args.base, args.head).stdout.strip()
+    # `behind_n == 0` needs no merge base: base is an ancestor of head, so
+    # every path main moved since the common ancestor is present in head and
+    # the revert set is provably empty. With `behind_n > 0` the arm MUST run —
+    # an unreadable merge base is "could not measure", which is not a pass.
+    mb_proc = _git(root, "merge-base", args.base, args.head)
+    mb = mb_proc.stdout.strip()
+    if behind_n > 0 and (mb_proc.returncode != 0 or not mb):
+        detail = (mb_proc.stderr or "").strip().splitlines()
+        msg = (f"drift-guard: cannot find the merge base of '{args.head}' and "
+               f"'{args.base}' while behind by {behind_n} — the silent-revert "
+               f"arm cannot be measured, and an unmeasured arm is not a pass "
+               f"({detail[0] if detail else 'no common ancestor'})")
+        return emit({"status": "error", "reason": msg, "base": args.base,
+                     "freshness": freshness, "merge_base": None},
+                    [f"ERROR {msg}"], 2)
     if mb and behind_n > 0:
-        reverts = silent_reverts(root, mb, args.base, args.head)
+        try:
+            reverts = silent_reverts(root, mb, args.base, args.head)
+        except MeasurementError as exc:
+            msg = (f"drift-guard: the silent-revert arm could not be measured "
+                   f"(merge-base {mb[:12]}): {exc}")
+            return emit({"status": "error", "reason": msg, "base": args.base,
+                         "freshness": freshness, "merge_base": mb},
+                        [f"ERROR {msg}"], 2)
     revert_lines = sum(r["added"] + r["deleted"] for r in reverts)
 
     drifted = behind_n > max_behind

@@ -650,6 +650,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # ran on the PR that edits it (the #1349/#3332/#3616 silent-drop
              # class, and the same gap tools/drift-guard.py carries).
              "tools/queue_conflict_census.py",
+             # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
+             # `core`-registered, but `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
+             # tools/drift-guard.py — so a guard-only fix selected NO surface,
+             # dropped to tier-1 smoke, and never ran the tests that pin the
+             # guard. Same silent-drop class as tools/tmpdir_sweep.py above,
+             # and the same defect #4174 describes a gate having.
+             "tools/drift-guard.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS

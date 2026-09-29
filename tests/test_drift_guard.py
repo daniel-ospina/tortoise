@@ -25,6 +25,7 @@ exercised for the red/green proof with:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -197,3 +198,61 @@ def test_local_ref_base_is_refused(tmp_path: Path) -> None:
     payload, p = _payload(feature, "--base", "main")
     assert p.returncode == 2, f"unprovable local base was not refused: {payload!r}"
     assert payload.get("freshness") == "unproven", payload
+
+
+# ── fail closed when the revert arm cannot be MEASURED ────────────────────
+# "No reverts" and "could not measure reverts" are different answers, and an
+# empty path set is the legitimate form of the first. A gate that reports the
+# second as the first is green on a branch it never evaluated — the third
+# fail-open, found by the #4174 round-1 review.
+
+
+def test_unmeasurable_merge_base_fails_closed(tmp_path: Path) -> None:
+    """Behind the base with NO common ancestor ⇒ refusal, not a green.
+
+    `git merge-base` exits 1 on unrelated histories. Pre-fix that left
+    `mb == ""`, so the entire revert arm was skipped and the gate emitted
+    `status: ok` with `merge_base: null` and exit 0 — a green for an arm that
+    was never evaluated. The orphan root here shares no history with main, so
+    the branch really is behind and "cannot measure" must be exit 2.
+    """
+    _, feature = _make_never_fetched_branch(tmp_path)
+    _git_ok(feature, "checkout", "-q", "--orphan", "orphan-root")
+    _write(feature, "z.txt", "unrelated history\n")
+    _git_ok(feature, "add", "z.txt")
+    _git_ok(feature, "-c", "user.email=b@example.com", "-c", "user.name=B",
+            "commit", "-q", "-m", "unrelated root")
+    # The fixture is what it claims: no common ancestor with the base.
+    assert _git(feature, "merge-base", "origin/main",
+                "orphan-root").returncode != 0
+
+    payload, p = _payload(feature, "--head", "orphan-root")
+    assert p.returncode == 2, (
+        f"an unmeasurable revert arm was not a refusal: {payload!r}")
+    assert payload["status"] == "error", payload
+    assert "merge base" in payload["reason"].lower(), payload
+
+
+def test_a_failed_read_raises_instead_of_answering_no_reverts(tmp_path: Path) -> None:
+    """A failed git read must RAISE, never return an empty set.
+
+    `_paths_changed`/`_numstat` returning `set()`/`{}` on a nonzero git exit
+    makes "could not measure" indistinguishable from "nothing changed" — the
+    fail-open itself. Pre-fix both returned empty and this test fails with an
+    AttributeError (no MeasurementError to catch); post-fix both raise.
+    """
+    _, feature = _make_never_fetched_branch(tmp_path)
+    spec = importlib.util.spec_from_file_location("drift_guard_under_test",
+                                                 _script())
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    for fn in (mod._paths_changed, mod._numstat):
+        try:
+            fn(feature, "no-such-ref-xyz", "HEAD")
+        except mod.MeasurementError:
+            continue
+        raise AssertionError(
+            f"{fn.__name__} swallowed a failed git read instead of raising"
+        )
