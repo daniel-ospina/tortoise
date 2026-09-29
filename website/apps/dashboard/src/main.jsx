@@ -111,6 +111,12 @@ import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './d
 // #3485 remedy: 401 means signed out (may bounce), 503 means retryable
 // (render an error, NEVER a redirect).
 import { readSession, sessionGateAction } from './sessionGate.js'
+// #3930: the bounce carried the search and hash but never the PATHNAME, so an
+// unauthenticated deep link (/team?session_id=… — the Stripe return;
+// /welcome?reset=… — the recovery panel) was returned to the app root. Pure,
+// `node --test` unit-tested (authBounce.test.js), and mirrored by the /auth
+// page's return-to allowlist.
+import { authBounceTarget } from './authBounce.js'
 
 // #3501: the dashboard talks to its OWN origin. `functions/api/v1/[[path]].ts`
 // resolves the `__Host-session` cookie server-side and attaches the Bearer to
@@ -783,7 +789,13 @@ const secureAttr = () => (isLocal() ? '' : '; Secure')
 // be forwarded from here — under the BFF no fragment carries a credential, and
 // forwarding one would reintroduce the #1566 drop/loop.
 function bounceToAuth(search = "", hash = "") {
-  window.location.replace("/auth" + search + hash)
+  // #3930: carry the requested pathname (+ query) as /auth's `next`, so a
+  // signed-out deep link returns to the page asked for. Path-only, same-origin
+  // by construction — `authBounceTarget` reads this document's own pathname and
+  // the /auth page re-validates it against the mirrored allowlist.
+  window.location.replace(
+    authBounceTarget({ pathname: window.location.pathname, search, errorHash: hash }),
+  )
 }
 
 
@@ -1240,13 +1252,12 @@ function claimIntentInFlight() {
   // key reveal; for returning empty-graph users it re-opens at step 0
   // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
-  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)); setWizardCopyFailed(false); setWizardConnectError('') }, [])
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
 
-  // Wizard connect step: reset persisted 'chatgpt' value (legacy default) to a valid tab
   React.useEffect(() => {
     // #2912: 'codexDesktop' is a first-class leaf now (the Codex chooser's
-    // Desktop surface), so it is a valid persisted value too.
+    // Desktop surface), so it is a valid value too.
     if (!['pi', 'cursor', 'claude', 'codex', 'codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
       setWizardHarness('pi')
     }
@@ -1266,10 +1277,6 @@ function claimIntentInFlight() {
   // could not safely list the later-declared harnessKey). The
   // tdzDepsTripwire analyzer still guards the whole file against that class.
   const [wizardCopied, setWizardCopied] = React.useState('')
-  // #1701 R2: a failed clipboard write must not strand the ChatGPT flow — the
-  // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
-  // appears ONLY after a failure (the user explicitly asserts the copy).
-  const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
   // #2328/#2912: Codex has two surfaces — CLI (shell) and Desktop (GUI app,
   // NO terminal, does not inherit shell exports). Since #2912 the SURFACE is
   // the leaf `wizardHarness` value ('codex' vs 'codexDesktop') chosen by the
@@ -3018,11 +3025,8 @@ function claimIntentInFlight() {
   // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
   // longer WRITES the harness-connected checkpoint — that click-writer was
   // deleted, so this flag covers the refresh that sharpens the done step's read
-  // of the server projection. review cycle 4 (item 7): `wizardConnectError` is
-  // CLEARED by that advance (`setWizardConnectError('')`) and never given a
-  // message there; the only writer of a message is the copy-failure path.
+  // of the server projection.
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
-  const [wizardConnectError, setWizardConnectError] = React.useState('')
   const [wizardKeyMode, setWizardKeyMode] = React.useState('included')
   // #1998 fold-in (durable connect key, PR #2161 finding): the connect step's
   // universal command must embed a DURABLE key. #2246 (ADR-010): the browser
@@ -3105,28 +3109,6 @@ function claimIntentInFlight() {
     }
     api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
-  }
-
-  // #1701 R2: chatgpt's copy handler is AWAITED — Continue (the checkpoint)
-  // must never be reachable without a successful copy, so the clipboard write
-  // resolves BEFORE the sticky wizardCopied='harness' state lands (mirrors
-  // claude-web's gate: copying ≠ setup done). The PATCH beacon fires on
-  // resolution only; wizardCopy above stays fire-and-forget so the 6 keyed
-  // harnesses keep byte-identical behavior.
-  async function wizardCopyChatgpt() {
-    setWizardConnectError('')
-    const text = HARNESS_INSTALL.chatgpt()
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      setWizardCopyFailed(true)
-      setWizardConnectError('Copy failed — select the prompt below and press ⌘/Ctrl-C, then Continue below')
-      return
-    }
-    setWizardCopyFailed(false)
-    setWizardCopied('harness')
-    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ harness: 'chatgpt', section: 'config' }) }).catch(() => {})
   }
 
   const stopGithubPoll = () => {
@@ -4963,7 +4945,6 @@ function claimIntentInFlight() {
   // checkpoint the AGENT wrote.
   async function wizardHarnessContinue() {
     setWizardConnectBusy(true)
-    setWizardConnectError('')
     // Best-effort, matching every other refreshOnboarding call site: it only
     // sharpens the done step's reading of the server projection, and the write
     // that used to justify a blocking error is gone.
@@ -7741,7 +7722,7 @@ function claimIntentInFlight() {
                                 <button key={f.id} type="button"
                                   className={'harness-family' + (activeFamily.id === f.id ? ' active' : '')}
                                   aria-pressed={activeFamily.id === f.id}
-                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardDurableError('') }}>
                                   {f.name}
                                 </button>
                               ))}
@@ -7752,7 +7733,7 @@ function claimIntentInFlight() {
                                   <button key={s.id} type="button"
                                     className={'harness-surface' + (wizardHarness === s.id ? ' active' : '')}
                                     aria-pressed={wizardHarness === s.id}
-                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardDurableError('') }}>
                                     <span className="harness-surface-name">{s.name}</span>
                                     {s.hint && <span className="harness-surface-hint">{s.hint}</span>}
                                   </button>
@@ -7885,7 +7866,6 @@ function claimIntentInFlight() {
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
                                 {wizardConnectBusy ? 'Checking…' : (wizardKeyless
                                   ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
