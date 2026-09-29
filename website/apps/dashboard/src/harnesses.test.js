@@ -521,12 +521,17 @@ test('#3661: every capture surface names the opt-in, and none claims capture hap
   for (const h of ['codex', 'cursor']) {
     assert.doesNotMatch(HARNESS_CAPTURE_INSTALL[h], /capture-spool/,
       `HARNESS_CAPTURE_INSTALL.${h} must not claim a local spool — its seam refuses before anything is written`)
-    // The same claim reaches users through the archived wizard's prose step, so
-    // the asymmetry is pinned THERE too (the tripwire test pinned only the
-    // registry snippet, so a spool claim in the step left the suite green).
+    // The same claim could reach users through the archived wizard's prose
+    // steps, so the asymmetry is pinned THERE too — as a FORWARD guard.
+    // Only Cursor has a step list today (`HARNESS_STEPS` is a lookup, not a
+    // registry: it returns undefined for claude/codex/pi, i.e. there is no step
+    // to pin). Asserting on the empty string would be false assurance — it can
+    // never fail — so the absent case is skipped explicitly, and a future
+    // Codex step that claims a Tortoise spool REDs here instead.
     const steps = HARNESS_STEPS(h, KEY)
-    assert.doesNotMatch(Array.isArray(steps) ? steps
-      .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n') : '', /capture-spool/,
+    if (!Array.isArray(steps)) continue
+    assert.doesNotMatch(steps
+      .map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n'), /capture-spool/,
     `HARNESS_STEPS.${h} must not claim a local spool either — same seam, same refusal`)
   }
   // The negative half is a SOURCE scan, not a list of rendered values: the
