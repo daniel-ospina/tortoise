@@ -108,6 +108,7 @@ if _REPO_ROOT not in sys.path:
 # The ONE capture-shaped seeder (#3914) plus the shared leg primitives. Imported,
 # never mirrored: a local copy is exactly how the shape drifts.
 from tools.ask_spotcheck import (  # noqa: E402
+    SEED_SEARCH_KEYS_BY_DEFAULT,
     SEED_TURNS_EMBEDDED_BY_DEFAULT,
     _gold_sessions_covered,
     _seed_memory,
@@ -1554,10 +1555,18 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                      else "un-embedded-backlog"),
             "seeder": "tools.ask_spotcheck._seed_memory",
             "embed": SEED_TURNS_EMBEDDED_BY_DEFAULT,
+            # #5534: the E3 ``search_keys`` substrate A4 harvests. A false
+            # here means the A4 A/B on this store is STRUCTURALLY ZERO (the
+            # lever has no input), so the mode must ride the receipt — a
+            # receipt that does not name it cannot distinguish "A4 is inert"
+            # from "A4 was never measured".
+            "search_keys": SEED_SEARCH_KEYS_BY_DEFAULT,
             "note": ("embedded = turn Points carry the product's own vector "
                      "via encode_batch_for_store/required_embedding_dim "
                      "(#4194/#4304); un-embedded-backlog = #4197's pre-#4194 "
-                     "store, where the dense leg is inert"),
+                     "store, where the dense leg is inert; search_keys = the "
+                     "E3 alias substrate A4's PRF expansion harvests from the "
+                     "first-pass top-5 hits (#5534)"),
         },
         # Which store the rate was measured against. The docker selector
         # (TORTOISE_ASK_SHAPE_DB_URI) is a substrate change the SDK branches
