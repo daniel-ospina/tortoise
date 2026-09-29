@@ -2,8 +2,18 @@
 """S1 flash story-summary test — show the owner the raw output."""
 from __future__ import annotations
 
-import json  # noqa: F401
 import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/experiments/extractor-v2/run_s1_test.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/experiments/extractor-v2/run_s1_test.py`"
+    )
+
+import json  # noqa: F401
 import time
 from pathlib import Path
 
