@@ -3294,8 +3294,11 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # its contract is carried by `hook_install.ARTIFACT_CONTRACTS['pi']`.  Before
 # #4680 the Pi seam carried no marker at all, which is why a two-week-old
 # installed copy read as merely UNVERIFIABLE while capturing the old logic.
+# pi 1→2 is #4897: `extractTurns` now marks a turn it clips instead of cutting
+# it silently, so the bytes the seam POSTs changed and every installed
+# generation-1 copy must read as stale.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 7, "codex": 2, "cursor": 2,
-                             "pi": 1}
+                             "pi": 2}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3346,12 +3349,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 1`` from
+    Mutation: delete ``// tortoise-hook-version: 2`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 1
+    assert hook_install.read_hook_version(_PI_SRC) == 2
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
