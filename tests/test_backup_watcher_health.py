@@ -283,9 +283,13 @@ def test_health_non_hosted_default_reports_expected_false(monkeypatch):
     """The non-hosted/TestClient default: same ``disabled`` block, but
     ``expected`` False — so the two cases are distinguishable (#4498).
 
-    Also pins the non-hosted boot end-to-end: ``status: "ok"`` through the
-    /health response with ``expected`` False. The marker defaults False and a
-    non-hosted lifespan must never publish True.
+    This pins /health's *rendering* for a non-hosted boot: with the marker
+    False the body carries ``expected: False`` and still ``status: "ok"``. It
+    assigns the marker by hand and never runs a lifespan, so it does NOT pin the
+    *publication* half — that a non-hosted ``_lifespan`` never publishes True.
+    The publication is pinned structurally, for both the hosted and the
+    non-hosted case, by
+    ``test_watcher_expected_publish_is_unconditional_and_global`` below.
     """
     hosted_api._WATCHER = None
     hosted_api._WATCHER_START_ERROR = None
@@ -297,3 +301,85 @@ def test_health_non_hosted_default_reports_expected_false(monkeypatch):
     assert body["backup_watcher"]["state"] == "disabled"
     assert body["backup_watcher"]["ok"] is True
     assert body["backup_watcher"]["expected"] is False
+
+
+def test_watcher_expected_publish_is_unconditional_and_global():
+    """#4498 structural guard: the FIELD is worthless without the BOOT PLUMB.
+
+    ``/health`` reads the module marker ``_WATCHER_EXPECTED``, and the only
+    thing that sets it on a real boot is ``_WATCHER_EXPECTED = _watcher_expected``
+    inside ``_lifespan``. The tests above assign the marker by hand, so they
+    exercise the handler and never the plumb that feeds it — deleting that one
+    line left this suite green. This is the analog of the
+    ``_WATCHER_START_ERROR`` pin above, and it carries three conditions:
+
+      * the assignment must EXIST in ``_lifespan`` (an unqualified search would
+        otherwise be satisfied by the module default);
+      * it must sit OUTSIDE every conditional — in particular the
+        ``if _watcher_expected:``/``else`` branch, which only logs: inside that
+        branch only the True case is republished, so a non-hosted re-entry
+        keeps a prior boot's ``True`` and #4498's distinction is corrupted;
+      * ``_WATCHER_EXPECTED`` must be named in a ``global`` statement of
+        ``_lifespan``, or the assignment binds a local and the module marker
+        never moves.
+
+    Failure it prevents, in the reviewer's words: a later refactor drops or
+    moves that line; the suite stays green; a hosted deploy that loses its
+    ``BACKUP_*`` config again answers
+    ``{"state":"disabled","ok":true,"expected":false}`` — indistinguishable
+    from "deliberately off", i.e. #4498's blindness silently returns.
+    """
+    lifespan = _lifespan_node()
+
+    declared_global = {
+        name
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Global)
+        for name in node.names
+    }
+    assert "_WATCHER_EXPECTED" in declared_global, (
+        "`_WATCHER_EXPECTED` is not declared `global` in _lifespan — the boot "
+        "assignment then binds a function local and /health keeps reading the "
+        "module default False (#4498)"
+    )
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(lifespan):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def _ancestors(node: ast.AST) -> list[ast.AST]:
+        chain: list[ast.AST] = []
+        current = parents.get(node)
+        while current is not None:
+            chain.append(current)
+            current = parents.get(current)
+        return chain
+
+    publishes = [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id == "_WATCHER_EXPECTED"
+    ]
+    assert publishes, (
+        "_lifespan must publish `_WATCHER_EXPECTED = _watcher_expected` on boot "
+        "— without it /health's `expected` field only ever renders the module "
+        "default (#4498)"
+    )
+
+    unconditional = [
+        node
+        for node in publishes
+        if not any(
+            isinstance(anc, (ast.If, ast.ExceptHandler)) for anc in _ancestors(node)
+        )
+    ]
+    assert unconditional, (
+        "the `_WATCHER_EXPECTED` publish must sit OUTSIDE every conditional — "
+        "inside the `if _watcher_expected:`/`else` log branch (or the "
+        "`_not_started_reason` branch) only ONE of the two cases reaches the "
+        "marker, so a non-hosted re-entry can serve a stale `True` and #4498's "
+        "distinction silently returns"
+    )

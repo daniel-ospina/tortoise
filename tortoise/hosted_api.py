@@ -1357,9 +1357,14 @@ async def _lifespan(app):
             # the very signal #2922 needed.
             _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
             # #4498: publish it to the module marker `_backup_watcher_health()`
-            # reads. One unconditional assignment right after the computation,
-            # so BOTH cases are republished and a later lifespan re-entry can
-            # never serve a stale True from a previous boot.
+            # reads. The assignment sits ABOVE the `_not_started_reason` branch,
+            # so BOTH the `_watcher_expected` true and false cases reach the
+            # marker rather than only the logged one. Bounded, not unconditional:
+            # it is inside the `try`, after `cfg = _backup_config_safe()`, so an
+            # exception `_backup_config_safe` does not catch skips it and the
+            # marker keeps a prior boot's value. That path also sets
+            # `_WATCHER_START_ERROR`, so /health reports `failed` (degraded),
+            # never `disabled`+`ok` — the #4498 distinction is never corrupted.
             _WATCHER_EXPECTED = _watcher_expected
             _not_started_reason = None
             if cfg is None:
