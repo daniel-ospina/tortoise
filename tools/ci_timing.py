@@ -429,8 +429,9 @@ def integrity_problems(manifest_text: str) -> list[str]:
     manifest is. As of #5050 the durations-map half IS the entry point's own
     contract: `ci_manifest.check` owns the map's checks (dead keys, malformed
     values, coverage, the leg partition, any weight the writer could not have
-    rendered — sub-floor, finer precision, or negative — and a stale capture
-    date) and both callers compose it, so the invariant is structural rather
+    rendered — sub-floor, finer precision, or negative — a non-empty map whose
+    every weight is the `0.0` sentinel, and a stale capture date) and both
+    callers compose it, so the invariant is structural rather
     than a convention each caller has to re-implement. The rest of the list is
     composed here because `ci_manifest` does not own it — most importantly
     `workflow_halves_issues`: a refresh that skews a weight hard enough to tilt

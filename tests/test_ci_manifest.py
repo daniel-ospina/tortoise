@@ -113,7 +113,7 @@ def test_an_unquoted_iso_stamp_is_a_timestamp_not_unknown() -> None:
     """The artifact under validation is the FILE, so the parser is fed YAML text.
 
     PyYAML resolves an UNQUOTED ISO-8601 scalar to ``datetime.datetime``. A
-    parser that accepted only ``str`` reported the natural YAML spelling as
+    parser that accepted only ``str`` reported that UNQUOTED spelling as
     "not a parseable timestamp" — UNKNOWN, staleness skipped, `--integrity`
     green — so whether a stale map was caught depended on quoting alone.
     """
@@ -143,10 +143,12 @@ def test_a_date_only_stamp_is_midnight_utc() -> None:
 def test_an_unquoted_stale_stamp_is_red_through_the_cli(tmp_path) -> None:
     """The CLI verdict must not flip to UNKNOWN on quoting alone.
 
-    The stamp is written UNQUOTED, so `yaml.safe_load` hands the validator a
-    ``datetime``. Before the fix that value was "not a parseable timestamp" →
-    exit 2, and the staleness check that is this PR's headline capability never
-    ran. It must be the OBSERVED defect: exit 1, not 2.
+    The writer emits a QUOTED stamp; the UNQUOTED spelling here is the
+    HAND-EDITED case this parser also accepts, and `yaml.safe_load` then hands
+    the validator a ``datetime``. Before the fix that value was "not a
+    parseable timestamp" → exit 2, and the staleness check that is this PR's
+    headline capability never ran. It must be the OBSERVED defect: exit 1, not
+    2.
     """
     import yaml
 
@@ -338,6 +340,22 @@ def test_cli_exit_codes_are_zero_one_and_two(tmp_path) -> None:
     green["durations"][cs.fast_pool(green)[0]] = 0.05
     assert _cli(green, tmp_path) == 1
 
+    assert _cli(_manifest(), tmp_path) == 2
+
+
+def test_the_cli_still_distinguishes_red_from_unknown(tmp_path) -> None:
+    """#6243 review cycle 2 (d): the selector-side K1 fix must NOT move the
+    validator's own contract.
+
+    Through `ci_manifest.py` itself, a stale but PARSEABLE stamp stays RED
+    (exit 1), while an unparseable one and an absent one both stay UNKNOWN
+    (exit 2). The red-with-junk decision lives in the enforcing selector entry
+    point; it does not change exit-2-for-unknown here.
+    """
+    stale = (dt.datetime.now(dt.UTC)
+             - dt.timedelta(days=ci_manifest.MAX_AGE_DAYS + 1)).isoformat()
+    assert _cli(_manifest(stale), tmp_path) == 1
+    assert _cli(_manifest("not-a-date"), tmp_path) == 2
     assert _cli(_manifest(), tmp_path) == 2
 
 

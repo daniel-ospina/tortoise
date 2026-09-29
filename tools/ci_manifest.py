@@ -30,7 +30,8 @@ Each of the four checks the ruling names is implemented at ONE level:
                    selector; a validator-local copy of it would be a second
                    gate, free to disagree with the one that decides the legs.
     plausibility   any weight the writer could not have rendered   (here)
-                   — sub-floor, finer precision, or negative
+                   — sub-floor, finer precision, or negative — and a
+                   non-empty map whose every weight is the `0.0` sentinel
     staleness/age  ``durations_captured_at`` vs ``MAX_AGE_DAYS``   (here)
 
 ``tools/ci_selection.py --integrity`` and the refresh's own gate in
@@ -164,12 +165,13 @@ def _load(path: Path) -> dict:
 def _parse_captured_at(raw: object) -> dt.datetime | None:
     """A stamp from the value as the FILE spells it, not as we wish it did.
 
-    PyYAML resolves an UNQUOTED ISO-8601 scalar to ``datetime.datetime`` (and a
-    date-only scalar to ``datetime.date``), so the natural YAML spelling of the
-    stamp arrives here as a datetime rather than a string. Accepting only
-    ``str`` reported that file as "not a parseable timestamp" — UNKNOWN, the
-    staleness check skipped, ``--integrity`` green — so the map's freshness
-    flipped fail→pass on quoting alone.
+    The writer (``ci_timing._set_captured_at``) QUOTES the stamp, so the
+    canonical spelling arrives here as a ``str``. A HAND-EDITED manifest may
+    leave it UNQUOTED, and PyYAML then resolves an ISO-8601 scalar to
+    ``datetime.datetime`` (and a date-only scalar to ``datetime.date``).
+    Accepting only ``str`` reported that hand-edited file as "not a parseable
+    timestamp" — UNKNOWN, the staleness check skipped, ``--integrity`` green —
+    so the map's freshness flipped fail→pass on quoting alone.
     """
     if isinstance(raw, dt.datetime):
         return (raw if raw.tzinfo is not None
@@ -254,12 +256,16 @@ def plausibility_issues(manifest: dict) -> list[str]:
     ``(0, 0.1)`` window is, so ``duration_issues`` and this check both name it —
     a duplicated diagnostic on a list that is read as a whole, not two gates.
 
-    Note the honest limit: ``0.0`` is ALLOWED because whether a given zero is an
-    unmeasured carry-forward, a deliberate pack pin, or a lazy stand-in for a
-    number nobody took cannot be decided from the value at all. That
+    Note the honest limit: an INDIVIDUAL ``0.0`` is ALLOWED because whether a
+    given zero is an unmeasured carry-forward, a deliberate pack pin, or a lazy
+    stand-in for a number nobody took cannot be decided from the value at all.
+    The map-LEVEL rule below is the exception: a non-empty map in which EVERY
+    value is the ``0.0`` sentinel carries no measurement, and the writer — which
+    refuses a zero measured key and floors every resolved key to
+    ``max(seconds, VALUE_FLOOR)`` — cannot produce one. That
     indistinguishability is exactly why the map needed a writer-side capture
     date, so the freshness half of this module — not a guess about a zero — is
-    what guards those rows.
+    what guards the individual sentinel rows.
     """
     issues: list[str] = []
     durations = _durations(manifest)

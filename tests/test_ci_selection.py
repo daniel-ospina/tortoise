@@ -3184,6 +3184,58 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
         assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"
 
 
+# ── #6243 review cycle 2 (K1): presence-with-junk is RED, absence is a notice ──
+
+def _integrity_with_stamp(tmp_path, monkeypatch, stamp):
+    """Drive the real `--integrity` CLI over the committed manifest with the
+    capture date set to `stamp` (removed entirely when `stamp is None`)."""
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    m = dict(cs.load_manifest())
+    m.pop("durations_captured_at", None)
+    if stamp is not None:
+        m["durations_captured_at"] = stamp
+    path = tmp_path / "stamped-ci-surfaces.yml"
+    path.write_text(yaml.safe_dump(m))
+    monkeypatch.setattr(cs, "MANIFEST", path)
+    monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+    return cs.main()
+
+
+def test_integrity_reds_a_stale_but_parseable_stamp(tmp_path, monkeypatch):
+    # (a) The baseline the inversion is measured against: an old but parseable
+    # capture date is an OBSERVED defect, so the enforcing entry point exits 1.
+    assert _integrity_with_stamp(tmp_path, monkeypatch,
+                                 "2000-01-01T00:00:00Z") == 1
+
+
+def test_integrity_reds_a_present_but_unparseable_stamp(tmp_path, monkeypatch):
+    # (b) #6243 review cycle 2 (K1): this is the INVERSION. `--integrity`
+    # printed the validator's UNKNOWN list as a notice and returned only `red`,
+    # so a stale-but-parseable stamp exited 1 while the SAME value degraded to
+    # 'not-a-date' exited 0 — strictly worse data, strictly better verdict. A
+    # stamp that is present but unparseable is a MALFORMED manifest value, i.e.
+    # an observed defect: RED, exit 1. Absence stays the soft notice below.
+    assert _integrity_with_stamp(tmp_path, monkeypatch, "not-a-date") == 1, (
+        "a present-but-unparseable stamp must be RED (exit 1), not the soft "
+        "UNKNOWN notice — otherwise degrading a stale stamp to junk flips "
+        "exit 1 to exit 0 (fail-open, K1)")
+
+
+def test_integrity_still_notices_an_absent_stamp_and_exits_zero(
+        tmp_path, monkeypatch, capsys):
+    # (c) Absence is the never-refreshed state no lane owns until #6091 lets a
+    # refresh carry a real date, so it must STAY a notice: exit 0, with the
+    # reason still printed (visible, not silent).
+    assert _integrity_with_stamp(tmp_path, monkeypatch, None) == 0
+    out = capsys.readouterr().out
+    assert "durations map UNKNOWN (not gating this run)" in out, out
+    assert "durations_captured_at" in out, out
+
+
 # ── #4378: changed-set diffs must disable rename detection ──────────────
 #
 # The predicate below is per COMMAND, not per line: `python-ci.yml`'s "Tiered

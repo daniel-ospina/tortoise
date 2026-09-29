@@ -734,9 +734,12 @@ TOOL_CARVEOUTS = (
     "tools/ci_manifest.py",
     # #5050: the sole writer of the measured `durations` map (tools/ci_timing.py)
     # is pinned by the same suites as the validator it feeds:
-    # tests/test_ci_timing.py holds the `VALUE_FLOOR ==
-    # ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal render pin, and
-    # tests/test_ci_manifest.py pins the writer's output format. A writer-only
+    # tests/test_ci_manifest.py holds the `VALUE_FLOOR ==
+    # ci_timing.DURATIONS_VALUE_FLOOR_S` pin and the one-decimal render pin
+    # (`test_the_floor_is_the_writers_own`,
+    # `test_the_writers_precision_is_the_one_this_check_assumes`) — the two
+    # contracts the validator ASSUMES about the writer — and
+    # tests/test_ci_timing.py covers the writer's refresh path. A writer-only
     # change matches no SOURCE_PATTERNS entry, so without this carve-out the
     # flat "tools/" prefix swallows it, `changed` comes back empty and select()
     # takes the docs-only return — a writer drift would merge green and red
@@ -2387,7 +2390,8 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     calls that used to sit in the ``--integrity`` composition, and adds the
     plausibility/freshness checks the validator contributes (any weight the
     writer could not have rendered — sub-floor, finer precision, or negative —
-    and a stale capture date).
+    a non-empty map whose every weight is the `0.0` sentinel, and a stale
+    capture date).
 
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —
@@ -2402,13 +2406,23 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     ``test_null_or_non_mapping_durations_reports_instead_of_tracebacking``), and
     failing on it would red ``manifest-integrity`` repo-wide until a weekly data
     refresh landed — refusing honest merges for a state no lane owns. The notice
-    keeps it visible instead of silent. The strict exit-2 verdict lives in
-    ``tools/ci_manifest.py``, which no workflow invokes yet: this enforcing entry
-    point reports an absent or unparseable stamp as a notice and exits 0, and
-    that polarity is deliberate (#6091-blocked).
+    keeps it visible instead of silent.
+
+    ABSENCE ONLY is softened. A ``durations_captured_at`` that is PRESENT but
+    unparseable is a MALFORMED manifest value — an OBSERVED defect — and is
+    added to ``problems`` (RED). Softening it too would invert fail-closed: a
+    stale-but-parseable stamp is RED, so degrading that same value to
+    ``'not-a-date'`` would turn exit 1 into exit 0 — strictly worse data,
+    strictly better verdict — and a one-character typo would silently disable
+    the staleness control at this, the only CI-invoked, entry point. The strict
+    exit-2 verdict for the genuinely-UNKNOWN states lives in
+    ``tools/ci_manifest.py``, which no workflow invokes yet: this enforcing
+    entry point exits 0 on an ABSENT stamp until #6091 lets a refresh carry a
+    real date.
     """
     try:
-        red, unknown = _ci_manifest_module().check(manifest)
+        module = _ci_manifest_module()
+        red, unknown = module.check(manifest)
     except ImportError as exc:  # pragma: no cover - module shipped with the repo
         return [
             "the #5050 durations-map validator (tools/ci_manifest.py) could "
@@ -2417,6 +2431,26 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
         ]
     for reason in unknown:
         print(f"⚠ durations map UNKNOWN (not gating this run): {reason}")
+    # #6243 review cycle 2 (K1): a stamp that is PRESENT but UNPARSEABLE is a
+    # MALFORMED manifest value — an observed defect — NOT the unobserved
+    # "never refreshed" state the notice is for. Absence stays a notice (see
+    # the docstring), but presence-with-junk is RED, or degrading a stale stamp
+    # to `'not-a-date'` would flip exit 1 to exit 0 (a fail-open inversion).
+    # The raw value is already in hand, so the parser's verdict (from `unknown`)
+    # is combined with presence rather than re-parsing the stamp here.
+    raw_stamp = manifest.get(module.CAPTURED_AT_KEY)
+    unparseable = any(
+        module.CAPTURED_AT_KEY in reason
+        and "not a parseable timestamp" in reason
+        for reason in unknown
+    )
+    if raw_stamp not in (None, "") and unparseable:
+        red.append(
+            f"`{module.CAPTURED_AT_KEY}` is {raw_stamp!r}, which is not a "
+            f"parseable timestamp — a malformed stamp is an OBSERVED defect in "
+            f"the manifest, not the unobserved 'never refreshed' state, so it "
+            f"is RED (#5050)"
+        )
     return red
 
 
@@ -2454,7 +2488,8 @@ def main() -> int:
         # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
         # `duration_coverage_issues`) plus the plausibility/freshness checks the
         # validator adds (any weight the writer could not have rendered —
-        # sub-floor, finer precision, or negative — and a stale capture date)
+        # sub-floor, finer precision, or negative — a non-empty map whose every
+        # weight is the `0.0` sentinel, and a stale capture date)
         # are called from ONE place, so
         # they cannot be half-wired into one entry point and missing from the
         # other.

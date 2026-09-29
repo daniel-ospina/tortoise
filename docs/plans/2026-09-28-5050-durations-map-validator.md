@@ -105,9 +105,12 @@ values that occur are exactly `0.0` ∪ one-decimal values `>= 0.1`. Anything el
 `0.15` — is unreachable by construction, and that is what makes it decidable
 from the value alone. The precision is pinned to the writer's own output
 (`test_the_writers_precision_is_the_one_this_check_assumes`), not to a constant
-this module hopes stays true. `0.0` is allowed deliberately: whether a given zero
-is an honest carry-forward or a lazy stand-in cannot be decided from the value,
-which is the whole reason the map needed a writer-side capture date.
+this module hopes stays true. An INDIVIDUAL `0.0` is allowed deliberately:
+whether a given zero is an honest carry-forward or a lazy stand-in cannot be
+decided from the value, which is the whole reason the map needed a writer-side
+capture date. The map-LEVEL exception is that a non-empty map in which EVERY
+weight is `0.0` is RED — the writer refuses a zero measured key and floors every
+resolved key, so it cannot produce one.
 
 **The honest limit of this increment, measured.** The refresh **merges**:
 `render_refreshed_manifest` rewrites only the keys the collector sampled and
@@ -131,8 +134,8 @@ now the invariant is structural.
 
 | code | meaning | conditions |
 |---|---|---|
-| **0** | observed, plausible, fresh, complete, disjoint | a parseable `durations_captured_at` within `MAX_AGE_DAYS` (21 — three missed weekly refreshes), every weight `0.0` (the sentinel) or a one-decimal value `>= 0.1`, and no `ci_selection` map/leg defect |
-| **1** | an **OBSERVED** defect | a weight in `(0, 0.1)`, a weight carrying finer precision than the writer renders (one decimal place), a map whose every value is the `0.0` sentinel (no measurement at all), a capture date in the future (beyond 1 day of clock skew), a capture date older than `MAX_AGE_DAYS`, or any coverage / dead-key / partition defect |
+| **0** | observed, plausible, fresh, complete, disjoint | a parseable `durations_captured_at` that is no more than `FUTURE_TOLERANCE` (1 day) ahead of now and no older than `MAX_AGE_DAYS` (21 — three missed weekly refreshes); every weight `0.0` (the sentinel) or a one-decimal value `>= 0.1`, with **at least one** such `>= 0.1` value (an all-`0.0` map is RED); and no `ci_selection` map/leg defect |
+| **1** | an **OBSERVED** defect | a weight in `(0, 0.1)`, a negative weight, a weight carrying finer precision than the writer renders (one decimal place), a map whose every value is the `0.0` sentinel (no measurement at all), a capture date in the future (beyond 1 day of clock skew), a capture date older than `MAX_AGE_DAYS`, or any `ci_selection` map/leg defect (a non-numeric or non-finite weight, a `durations` key that is not a mapping, coverage / dead-key / partition defects) |
 | **2** | **UNKNOWN** | `durations_captured_at` absent or unparseable; an empty/absent `durations` map while the manifest classifies fast-pool files; a manifest that cannot be read or parsed |
 
 **Exit 2 is never 0 and red outranks unknown.** The state in which a stale or
@@ -148,10 +151,14 @@ gates which refuse honest merges are a cost. The gate keeps its documented
 polarity (an absent map is "this repo has not adopted durations" = PASS, pinned
 by `test_null_or_non_mapping_durations_reports_instead_of_tracebacking`), and
 prints the reason as a NOTICE. The ENFORCING entry point therefore exits 0 on an
-absent or unparseable stamp: `ci_selection.py --integrity` — the required
-`manifest-integrity` job — reports UNKNOWN as a notice and its exit code does
-not carry it. The strict exit-2 verdict lives in `tools/ci_manifest.py`, which
-no workflow invokes yet; wiring it as a required job is not this PR's scope.
+ABSENT stamp — and ONLY on absence: `ci_selection.py --integrity` — the required
+`manifest-integrity` job — reports the genuinely-UNKNOWN states as a notice and
+its exit code does not carry them. A stamp that is PRESENT but unparseable is a
+MALFORMED manifest value, an OBSERVED defect, and stays RED (exit 1): softening
+it too would invert fail-closed, because degrading a stale-but-parseable stamp
+(RED) to `'not-a-date'` would turn exit 1 into exit 0. The strict exit-2 verdict
+lives in `tools/ci_manifest.py`, which no workflow invokes yet; wiring it as a
+required job is not this PR's scope.
 
 Everything the gate *can* observe is already fail-closed: the moment a capture
 date exists, a stale one, a future one and an unreachable weight are all RED and
