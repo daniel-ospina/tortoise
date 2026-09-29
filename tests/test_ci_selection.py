@@ -3055,10 +3055,11 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
 
 # ── #4378: changed-set diffs must disable rename detection ──────────────
 #
-# The predicate below is per COMMAND, not per line: `python-ci.yml`'s "Tiered
-# selection" step carries TWO `git diff` invocations on ONE line joined by `||`,
-# so a whole-line substring check is satisfied by the flag on either side —
-# removing it from the second command reintroduces #4378 while the check still
+# The predicate below is per COMMAND, not per line: a workflow step MAY write two
+# `git diff` invocations on ONE line joined by `||` (that was `python-ci.yml`'s
+# "Tiered selection" shape until #3442 collapsed it to one canonical merge-base
+# diff), and a whole-line substring check is satisfied by the flag on either side
+# — removing it from the second command reintroduces #4378 while the check still
 # passes. These helpers are module-level so the parser can be exercised directly
 # on synthetic shell text.
 
@@ -3749,8 +3750,8 @@ def test_changed_set_parser_cross_check_fails_closed_on_colocation():
     """#4378 FIX 1: an unparsed changed-set diff cannot hide beside a parsed one.
 
     `unparsed_changed_set_diff_lines` used to mark a whole line "covered" as soon
-    as ONE parsed command started on it, so this shape — `python-ci.yml:188`'s two
-    changed-set diffs on one line, with the second written in a spelling the
+    as ONE parsed command started on it, so this shape — two changed-set diffs on
+    one line, with the second written in a spelling the
     parser does not recognise (`--name-status`, no flag) — passed the pin clean
     (`offenders=[]`, `unparsed=[]`) while the second command computed a changed set
     with rename detection ON. The cross-check must count the flag spellings, not
@@ -3992,14 +3993,14 @@ def test_every_changed_set_diff_disables_rename_detection():
         the eval-drift gate — are filed as follow-ups, not covered here.
     * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
       three. It is counted from the PARSED commands above — measured today as
-      FOUR: two on `python-ci.yml`'s "Tiered selection" step, one on `ci.yml`'s
+      THREE: ONE on `python-ci.yml`'s "Tiered selection" step (#3442 collapsed its
+      two `||`-joined diffs into one canonical merge-base diff), one on `ci.yml`'s
       "Compute per-surface path gates (#2149)" step, and one on the dead step
       below. So a comment cannot satisfy it (and a comment mentioning the flag
-      cannot inflate it). Because the other THREE commands satisfy the floor by
-      themselves, deleting the dead step alone leaves `checked == 3` and needs NO
-      floor change; the floor has to come down to 2 only if a SECOND command is
-      removed, once just two remain.
-    * The dead FOURTH command — from the "Get changed markdown files" step in
+      cannot inflate it). The floor now has ZERO headroom: the two LIVE commands
+      already meet it, so deleting the dead step alone leaves `checked == 2` and
+      FAILS the floor — the floor must come down to 2 BEFORE that step is removed.
+    * The dead third command — from the "Get changed markdown files" step in
       `ci.yml` (cited by step name, not line number, because line numbers drift)
       — is INERT today. That step builds a lint-target list, and the `docs` job
       checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
