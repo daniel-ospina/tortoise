@@ -404,8 +404,9 @@ print(status())
 
 ### No-Docker path (single-agent eval) — stdio
 
-Add a `tortoise` server to your MCP client's config (`.mcp.json` for Claude
-Code, `.cursor/mcp.json` for Cursor, or the equivalent for your client):
+Add a `tortoise` server to your MCP client's config — `.mcp.json` for Claude
+Code, `.cursor/mcp.json` for Cursor (whose stdio entry also needs
+`"type": "stdio"`), or the equivalent for your client:
 
 ```json
 {

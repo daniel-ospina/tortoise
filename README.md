@@ -91,8 +91,9 @@ One transport per setup — daemon MCP over **HTTP** for hosted + the Docker
 path; **stdio** for the no-Docker single-agent eval path (quickstart §5):
 
 ```bash
-# Hosted
-claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/
+# Hosted — export TORTOISE_API_KEY in your shell profile first
+claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
+  --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 # Self-hosted — Docker path (compose daemon from §1): daemon MCP over HTTP
 claude mcp add --transport http tortoise http://localhost:8000/mcp
 ```
@@ -108,11 +109,10 @@ claude mcp add --transport http tortoise http://localhost:8000/mcp
 > **Sharing the config with the repo instead?** `--scope project` writes a
 > **committable** `.mcp.json` at the project root, approved once per machine —
 > start `claude` in the project and allow the prompt, or run `/mcp`
-> (`claude mcp reset-project-choices` resets the choice). Neither command above
-> sends a `--header`, so the file carries no key; if you add one, **single-quote
-> it** (`--header 'Authorization: Bearer ${TORTOISE_API_KEY}'`) so the shell
-> passes the reference through instead of writing your key into a file you are
-> about to commit.
+> (`claude mcp reset-project-choices` resets the choice). ⛔ Re-using the hosted
+> `--header` there? **Single-quote it** (`'Authorization: Bearer
+> ${TORTOISE_API_KEY}'`) so the shell writes the reference, not your key, into a
+> file you are about to commit. (The self-hosted daemon needs no header.)
 
 ```bash
 # Codex

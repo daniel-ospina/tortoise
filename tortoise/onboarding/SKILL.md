@@ -243,7 +243,7 @@ Validate the config was written (`claude mcp list` shows `tortoise`).
 > **project-scope server approval** below, but no scope is approval-free:
 > Claude Code prompts for permission the first time it calls each MCP tool —
 > allow that once, or pre-allow `mcp__tortoise__*`. `Added …` means the entry
-> was written, not that it connected; `claude mcp list` is the check.
+> was written, not that it connected.
 >
 > **Sharing the config with the repo instead?** `claude mcp add --scope project`
 > writes a **committable** `.mcp.json` at the project root. ⛔ **Single-quote
