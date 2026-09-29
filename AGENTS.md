@@ -303,6 +303,7 @@ Public repository that houses:
 |---|---|---|
 | Any git operation (commit, push, merge) | `skills/commit-workflow/SKILL.md` | No review gate, unreviewed code in production |
 | Any Tortoise graph write (create point, operator, mitigation, NAND, supersede, annotate) | `skills/how-to-use-tortoise/SKILL.md` | EP weights nuked by batch-connected mitigations, orphaned NANDs |
+| Starting work on any issue whose root is being investigated anywhere in the fleet — **read the graph BEFORE you derive** | `~/.pi/agent/state/TORTOISE-GRAPH-BRIEF.md` (URI, node ids, read/write recipes, the 8 trap rules) | A lane re-derives a conclusion the map already holds — or already refuted — and reports it as new (#6134: a root re-investigated that the graph already held, and a false "the SDK cannot delete an operator" that was one call away from disproof) |
 | Writing an implementation plan | `skills/writing-plans/SKILL.md` | Unplanned code, missed design decisions |
 | Scoping an issue | `skills/issue-scoping/SKILL.md` | Unscoped work, missed complexity rating |
 | Reviewing a PR | `skills/code-review/SKILL.md` | Unreviewed code in production |

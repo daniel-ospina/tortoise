@@ -11,7 +11,7 @@ import {
   overviewDigest,
   overviewNextAction,
 } from './overview.js'
-import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED } from './connectionObservation.js'
+import { NO_CONNECTION_OBSERVED, SETUP_PAUSED_NO_CONNECTION_OBSERVED, harnessConnectionObserved } from './connectionObservation.js'
 import { wizardStageLabel } from './wizardFlow.js'
 import { setupGuide } from './setupGuide.js'
 import { stripComments } from './testSupport.js'
@@ -72,6 +72,18 @@ const CONNECTION_MATRIX = [
   { status: 'complete', completed_steps: [], ...FLOW },
   // ... and the discriminator for the DELETED `onboarding_complete` leg:
   { status: 'active', completed_steps: [], onboarding_complete: true, ...FLOW },
+  // #5352: a COLLAPSED guide whose PROGRESS is non-zero while the observed
+  // connection is absent — the discriminator that pins the `done` copy to the
+  // `harness-connected` EDGE rather than to general guide progress. Without it
+  // the shared matrix loop alone cannot tell a progress-keyed implementation
+  // (`observed = g.done > 0`, or `rows.some(r => r.done)`) from an edge-keyed
+  // one: every other collapsed negative member has done === 0 and every
+  // collapsed positive member carries the edge. (Test #5352 (D) asserts this
+  // same shape directly, so the file is not undefended without the member — the
+  // member is what makes the MATRIX itself discriminating.) Reachable: a node
+  // CREATED `complete` off the legacy jsonb mirror (`status_from_mirror`) that
+  // carries this step edge and no harness edge.
+  { status: 'complete', fork: 'self', completed_steps: ['first-points-filed'], ...FLOW },
   // POSITIVE members carrying the fields the negative arms do not, so a leg
   // that gates on an untested field cannot hide behind the parity loop:
   { status: 'active', fork: 'build', completed_steps: ['team-named', 'harness-connected'], ...FLOW },
@@ -263,9 +275,14 @@ test('#4646 (B): main.jsx derives serverHarnessConnected from the ONE shared hel
   // (`connected: serverHarnessConnected || onboarding?.status === 'complete'`, or
   // a second, widened variable). Both wizard headings must pass the BARE
   // identifier (round 4, P1).
-  assert.equal((code.match(/connected:\s*serverHarnessConnected\s*[,}]/g) ?? []).length, 2,
-    'both wizard headings must pass the bare serverHarnessConnected as `connected` — '
-    + 'no inline widening at the render site')
+  assert.equal((code.match(/connected:\s*serverHarnessConnected\s*[,}]/g) ?? []).length, 3,
+    'every site that passes the observed connection as `connected` must pass the bare '
+    + 'serverHarnessConnected — no inline widening at the render site. THREE sites now: the '
+    + 'wizard announcement + the <h1> (#4646) and the #3725 step-3 lede `wizardStepSub`. '
+    + 'The count was 2 when this pin was written; #3725 landed the third site on a parallel '
+    + 'branch and the count was not updated at the merge, so this pin was red on main '
+    + '(PRE-EXISTING, not this issue) — the INTENT is unchanged: a widened site drops the '
+    + 'count and still fails.')
   // ... and then that the import resolves to the shared module's own export.
   const mod = await import('./connectionObservation.js')
   assert.equal(typeof mod.harnessConnectionObserved, 'function')
@@ -673,6 +690,143 @@ test('next action: degraded graph → unavailable, never a false action', () => 
 
 test('next action: null state → loading', () => {
   assert.equal(overviewNextAction(null).kind, 'loading')
+})
+
+// ── #5352: the `done` arm's FILING claim follows an OBSERVATION ──────────────
+// `setupGuide`'s collapse is a WIRE-COMPLETION verdict — a recorded decision of
+// its own (a grandfathered org "must never render a false active checklist") —
+// and the grandfathered population reaches it with ZERO agent step edges
+// (`resolve_wire_completion` step 2, `tortoise/onboarding/state.py`). Licensing
+// "your agent is filing" on that verdict asserted an event the server never
+// observed (this lane's D1 class), and contradicted element 1 (the connection
+// card) and element 2 (the digest) rendered from the SAME projection on the
+// SAME grid.
+
+// The projection the issue names: wire-complete by the grandfather branch, NO
+// observed `harness-connected` edge, zero filed memories (`point_count` is the
+// team-side field element 2's digest reads).
+const GRANDFATHERED_ZERO_POINTS = Object.freeze({
+  ...GRANDFATHERED, ...FLOW, point_count: 0,
+})
+
+// A genuinely-filing Organization: the observed edge, and the file steps the
+// gate requires of it.
+const FILING = Object.freeze({
+  status: 'complete', fork: 'self', compact: false, onboarding_complete: true,
+  completed_steps: ['team-named', 'harness-connected', 'first-points-filed', 'decide-completed'],
+  ...FLOW,
+})
+
+test('#5352 (A): a grandfathered wire-complete org with zero filed memories is NOT told its agent is filing', () => {
+  const g = setupGuide(GRANDFATHERED_ZERO_POINTS)
+  // PRECONDITION — the collapse is UNCHANGED. This issue is the COPY, not the
+  // collapse: `setupGuide.test.js` owns (and still pins) the collapse itself.
+  assert.equal(g.collapsed, true, 'the arm under test is the one this population reaches')
+  assert.equal(harnessConnectionObserved(GRANDFATHERED_ZERO_POINTS), false,
+    'the population carries NO server-observed connection edge')
+  const a = overviewNextAction(g)
+  assert.equal(a.kind, 'done')
+  assert.doesNotMatch(a.detail, /filing/i,
+    'a completion verdict must not license a FILING claim the server never observed')
+  assert.doesNotMatch(a.detail, /connected/i, 'nor a connection claim')
+  // ... and it states the MISSING OBSERVATION instead, in the shared phrase, so
+  // element 3 and element 1 state ONE fact (see test C):
+  assert.match(a.detail, new RegExp(NO_CONNECTION_OBSERVED, 'i'))
+})
+
+test('#5352 (B): a genuinely-filing org keeps the filing claim', () => {
+  const g = setupGuide(FILING)
+  assert.equal(g.collapsed, true)
+  assert.equal(harnessConnectionObserved(FILING), true)
+  const a = overviewNextAction(g)
+  assert.equal(a.kind, 'done')
+  assert.match(a.detail, /your agent is filing to this Organization/,
+    'the positive claim is KEPT where the observation exists')
+})
+
+test('#5352 (C): the connection card and the next action state the SAME observed connection on every projection', () => {
+  // The contradiction the issue records is CO-RENDERED: element 1 and element 3
+  // sit in one grid and read ONE projection (main.jsx). Execute BOTH
+  // derivations on every member, so a future edit cannot re-divide them.
+  let positive = 0
+  let negative = 0
+  for (const s of CONNECTION_MATRIX) {
+    const card = overviewConnection(s)
+    const next = overviewNextAction(setupGuide(s))
+    const claimsFiling = /filing to this Organization/.test(String(next.detail))
+    if (card.kind === 'connected') {
+      if (next.kind === 'done') { assert.ok(claimsFiling, JSON.stringify(s)); positive++ }
+      continue
+    }
+    assert.equal(claimsFiling, false,
+      `element 3 may not claim filing where element 1 shows no observed connection: ${JSON.stringify(s)}`)
+    negative++
+  }
+  assert.ok(positive > 0 && negative > 0, 'the matrix must exercise BOTH polarities')
+})
+
+test('#5352 (D): the OBSERVATION decides the done copy — the collapse alone does not', () => {
+  const collapsedNoEdge = setupGuide(GRANDFATHERED_ZERO_POINTS)
+  assert.equal(collapsedNoEdge.collapsed, true)
+  assert.match(overviewNextAction(collapsedNoEdge, () => true).detail, /filing to this Organization/,
+    'the observed fact must be able to license the claim')
+  assert.doesNotMatch(overviewNextAction(collapsedNoEdge, () => false).detail, /filing/i,
+    'an absent observed fact must not make the claim')
+  // The injected derivation DECIDES — a collapsed, observed guide cannot be
+  // talked out of ... and an unobserved one cannot be talked into it:
+  assert.doesNotMatch(overviewNextAction(setupGuide(FILING), () => false).detail, /filing/i)
+  assert.match(overviewNextAction(collapsedNoEdge, () => true).detail, /filing to this Organization/)
+  // The sibling's parameter is a predicate over the RAW PROJECTION; this one is
+  // asked about the GUIDE. Handing over the shared state-predicate must fail
+  // CLOSED (the guide carries no `completed_steps` → "not observed"), never
+  // open — the fail-open direction would license the exact claim this fix
+  // removes:
+  assert.doesNotMatch(overviewNextAction(collapsedNoEdge, harnessConnectionObserved).detail, /filing/i)
+  assert.doesNotMatch(overviewNextAction(setupGuide(FILING), harnessConnectionObserved).detail, /filing/i,
+    'a mismatched predicate must never license the claim')
+  // The copy keys on the observed EDGE, not on general guide progress: a
+  // collapsed guide with a counted step done and NO observed connection must
+  // still be negative (asserted against the real default so a progress-keyed
+  // mutation fails with a message that names it):
+  const progressedNoEdge = { status: 'complete', fork: 'self',
+    completed_steps: ['first-points-filed'], ...FLOW }
+  const progressedGuide = setupGuide(progressedNoEdge)
+  assert.equal(progressedGuide.collapsed, true)
+  assert.ok(progressedGuide.done > 0, 'precondition: the guide has real progress')
+  assert.equal(harnessConnectionObserved(progressedNoEdge), false)
+  assert.doesNotMatch(overviewNextAction(progressedGuide).detail, /filing/i,
+    'the copy keys on the observed EDGE, not on guide progress')
+  // The default IS the guide-derived observation (the shipped call site passes
+  // NO argument) — pinned on both polarities of a collapsed guide:
+  assert.match(overviewNextAction(setupGuide(FILING)).detail, /filing to this Organization/)
+  assert.doesNotMatch(overviewNextAction(collapsedNoEdge).detail, /filing/i)
+})
+
+test('#5352 (E): a populated digest is never co-rendered above a filing claim the connection card denies', () => {
+  // The reachable co-rendered pair is element 1 vs element 3 in the grid, which
+  // mounts ONLY at `point_count > 0` (main.jsx). The issue body's original
+  // element-2-vs-3 table (zero points) was WITHDRAWN in its own round-5
+  // correction: at `point_count === 0` the grid is replaced by the empty state,
+  // and `overviewDigest`'s `empty` arm is the module's documented
+  // pre-first-memory renderable, not a card. So the pair asserted here is the
+  // one that can actually render: memories present, connection NOT observed
+  // (they may come from the capture path, which files no `harness-connected`).
+  const wireCompleteNoEdgeWithMemories = { ...GRANDFATHERED, ...FLOW, point_count: 5 }
+  const d = overviewDigest(wireCompleteNoEdgeWithMemories.point_count)
+  const a = overviewNextAction(setupGuide(wireCompleteNoEdgeWithMemories))
+  assert.equal(d.kind, 'populated')
+  assert.equal(d.value, 5)
+  assert.match(d.detail, /memories filed to your Organization graph/)
+  assert.doesNotMatch(a.detail, /filing/i,
+    'element 3 may not claim filing beside a connection card that observed none')
+  // The zero-point fact stays pinned as the MODULE-level pre-first-memory
+  // renderable (never described here as a co-rendered card):
+  assert.equal(overviewDigest(0).kind, 'empty')
+  assert.match(overviewNextAction(setupGuide(GRANDFATHERED_ZERO_POINTS)).detail,
+    new RegExp(NO_CONNECTION_OBSERVED, 'i'))
+  // ... and the positive grid pair — the claim beside a populated digest, where
+  // the observed edge licenses it:
+  assert.match(overviewNextAction(setupGuide(FILING)).detail, /filing to this Organization/)
 })
 
 test('DE2E-2 copy sweep: Overview derivations never say team/workspace', () => {
