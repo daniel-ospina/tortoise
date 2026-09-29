@@ -140,6 +140,32 @@ test('#2865: the built dist no longer carries the beta Request-headers caveat', 
     `${entryName} still diverts users off the connector surfaces — rebuild dist/`)
 })
 
+test('#3661: the shipped bundle states the capture opt-in and never claims capture by default', () => {
+  // main.jsx renders the live Settings sentence and CANNOT be imported by
+  // `node --test` (JSX with no build step), so the only assertions that can reach
+  // it are on the artifact users actually load.
+  const { js, entryName } = shippedBundle()
+  assert.ok(js.includes('TORTOISE_CAPTURE'),
+    `${entryName} must name TORTOISE_CAPTURE — a machine cannot opt in to a variable the page never mentions (#3661)`)
+  // Exact substrings of the RENDERED Settings sentence, which lives in the entry
+  // chunk. A Settings reword must update them, exactly as a wizard copy edit must
+  // update wizardPrompts.snapshot.json — that is the price of pinning a promise
+  // rather than a phrase shape.
+  assert.ok(js.includes('still opt in separately'),
+    `${entryName} must keep the Settings sentence that separates the organization permission from the per-machine opt-in (#3661)`)
+  assert.ok(js.includes('installing the extension is the opt-in'),
+    `${entryName} must keep the Pi exception — the Pi seam reads no TORTOISE_CAPTURE (#3575)`)
+  // The negative leg runs over EVERY shipped script, not just the entry chunk:
+  // this file's own history (#3428 mutation b) is that an entry-only scan stays
+  // green while the claim lives in a code-split chunk or a `public/`-copied
+  // script. Mutation-checked: adding the old sentence to the copied consent.js
+  // REDs this leg and leaves an entry-only scan green.
+  const offenders = shippedScripts().filter((s) => /recording is\s+ON by default/i.test(s.js))
+  assert.deepEqual(offenders.map((s) => s.name), [],
+    `${offenders.map((s) => s.name).join(', ') || 'a shipped script'} still claims capture ` +
+    'happens by default (#3661) — rebuild dist/ and fix the copy')
+})
+
 test('#2865: every asset dist/index.html references exists in the build (no orphan or missing chunk)', () => {
   const { html, entryName } = shippedBundle()
   const refs = [...new Set([...html.matchAll(/(?:src|href)="\/assets\/([^"]+)"/g)].map((m) => m[1]))]

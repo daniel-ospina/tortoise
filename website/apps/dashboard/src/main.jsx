@@ -13,7 +13,7 @@ import { errorMessage, headerUpgradeEligible, nudgeRoute, shouldNudgeUpgrade } f
 // card, the usage bar, and the at/near-limit nudge). Pure, node --test
 // unit-tested (nodeUsage.test.js).
 import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, CAPTURE_OPT_IN_LINE, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #4880/#4365: the wizard's agent-facing copy is a RENDERED value the guards
 // assert — main.jsx is JSX and cannot be imported by `node --test`, so parsing
 // it as source is the mechanism that produced five false greens.
@@ -530,7 +530,7 @@ function SettingsTab(props) {
             the deep link from the Overview empty state moves focus here
             (WCAG 2.4.3 / 2.4.11) and scroll-margin-top keeps it clear. */}
         <h3 id="settings-memory-heading" tabIndex={-1}>Memory sources</h3>
-        <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph; session recording is on by default and can be turned off any time.</p>
+        <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph. Session recording is permission for this Organization: it is on unless you switch it off, but each machine's Claude Code, Codex or Cursor hooks still opt in separately (<code>{CAPTURE_OPT_IN_LINE}</code>) before they file anything — on a Pi machine, installing the extension is the opt-in. Turning this on grants the permission; it is not the switch.</p>
         <MemorySources {...memorySourcesProps} />
       </section>
 
@@ -541,7 +541,7 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby="settings-capture-heading">
         <h3 id="settings-capture-heading">Captured sessions</h3>
         <p className="dim small">
-          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory.
+          When session recording is on, sessions from machines that opted in — Claude Code, Codex and Cursor via <code>{CAPTURE_OPT_IN_LINE}</code>, or a Pi machine with the extension installed — are filed to this Organization as memory.
         </p>
         {/* #2000 (W4) review P2-3: honest states — never a fabricated
             "recording is off" while the onboarding state is still loading
@@ -10434,7 +10434,7 @@ function MemorySources(props) {
         />
         <div className="toggle-body">
           <h4>Agent session recording</h4>
-          <p>When on, sessions from tools with capture installed are filed to your graph as memory.</p>
+          <p>When on, sessions from machines that opted in — Claude Code, Codex and Cursor via <code>{CAPTURE_OPT_IN_LINE}</code>, or a Pi machine with the extension installed — are filed to your Organization's graph as memory.</p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
           <div className="harness-statuses">
             {HARNESS_ORDER.map((h) => {

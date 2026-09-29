@@ -20,12 +20,16 @@
 //   session_shutdown → POST /v1/sessions               { harness, session_id,
 //                                                        source, conversation }
 //
-// Recording is ON by default (ToS-covered — the same default as the Claude
-// hooks): the server refuses the capture POST with a 409 while the
-// organization has agent sessions switched off (Memory sources > Agent
-// sessions). There is deliberately NO `autoCapture`-style default-false flag —
-// installing this extension IS the opt-in, so the shipped capture step can
-// never silently do nothing.
+// Installing this extension IS the opt-in, and it is the one IN-REPO capture
+// seam that reads no TORTOISE_CAPTURE — unlike the in-repo Claude Code, Codex
+// and Cursor hooks, which file nothing until the machine sets
+// TORTOISE_CAPTURE=1 (#3615). (The agent-infra `reflect-hook` is the other
+// ungated producer and lives outside this repo — agent-infra#1117.) There is
+// deliberately NO `autoCapture`-style default-false flag, so the shipped
+// capture step can never silently do nothing. The server can still refuse the
+// capture POST with a 409 while the organization has agent sessions switched
+// off (Memory sources > Agent sessions) — that toggle is default-ON
+// (ToS-covered) and can only refuse, never enable.
 //
 // Self-contained on purpose: it talks to the same hosted API the generated
 // `.mcp.json` points at, using `TORTOISE_API_KEY` / `TORTOISE_API_URL` (both

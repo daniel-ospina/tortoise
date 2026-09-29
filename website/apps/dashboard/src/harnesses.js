@@ -63,7 +63,8 @@ export const WORKFLOWS_PROMPT =
 //            ~1 s SessionEnd budget, measured live)
 //   pi     = tortoise/pi-hooks/tortoise-capture.ts copied into
 //            ~/.pi/agent/extensions/ (extension session_start install-probe +
-//            session_shutdown capture; recording ON by default)
+//            session_shutdown capture; installing it IS the opt-in — no
+//            TORTOISE_CAPTURE gate, see captureInstallNote below)
 //   cursor = tortoise/cursor-hooks/session-end.sh copied into
 //            ~/.cursor/hooks + wired in hooks.json under
 //            "sessionEnd" (Cursor 3.20.21 reads hooks.json from the HOME-scoped
@@ -140,7 +141,7 @@ export const HARNESS_STEPS = (harness, key) => ({
     // #3819 (owner ruling): the IDE-only limitation is disclosed on the
     // install/connect surface, not buried in a footnote.
     { label: 'Install session capture (the sessionEnd hook):', code: 'tortoise install cursor', copy: 'tortoise install cursor' },
-    "Session capture is IDE-ONLY: local desktop-editor sessions are captured, but CURSOR CLOUD AGENT sessions are not — Cursor's docs: 'Cloud agents have no editor-lifetime session boundary. sessionEnd is tied to the IDE session, not a cloud agent chat.'",
+    "Session capture is opt-in on this machine and IDE-ONLY: without `export TORTOISE_CAPTURE=1` the sessionEnd hook files nothing to Tortoise Cloud (a credential alone never enables capture, #3615); with it, local desktop-editor sessions are captured, but CURSOR CLOUD AGENT sessions are not — Cursor's docs: 'Cloud agents have no editor-lifetime session boundary. sessionEnd is tied to the IDE session, not a cloud agent chat.'",
   ],
   chatgpt: [
     'Enable Developer mode: chatgpt.com → Settings → Security and login → Developer mode (Plus/Pro/Business/Enterprise/Education).',
@@ -206,19 +207,84 @@ export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
 // contained prompt (Pi) — nothing extra is appended after the copy.
 export const HARNESS_SKILLS_IN_PROMPT = ['pi']
 
+// #3615/#3661 — THE capture-consent disclosure, stated ONCE.
+//
+// Before #3615 this claim was hand-authored in six instalments of copy (both
+// Claude snippets, Codex, Cursor, Pi, claude-web). #3615 made every in-repo
+// hook fail closed on an explicit per-machine opt-in, which turned all six
+// into the OLD contract inside a user-facing install snippet — the built bundle
+// shipped the old default-on sentence and `TORTOISE_CAPTURE` zero times
+// (#3661). Every installed snippet below interpolates this one function, so the
+// sentence cannot drift from the code again. The claude-web filing paragraph is
+// the one exception: it describes the MCP tool-call path, which this opt-in does
+// NOT gate (the agent's own call plus the team off-switch do), so it is worded
+// separately and deliberately never names the variable.
+//
+// The old copy conflated TWO different layers:
+//   * server policy — `session_recording`, per organization, default-ON
+//     (ToS-covered), an off-switch that can only REFUSE a file (409). It never
+//     enables capture.
+//   * host transmission authorization — `TORTOISE_CAPTURE`, per machine,
+//     default-OFF. Every in-repo hook (Claude Code, Codex, Cursor) files
+//     nothing until this machine opts in, and a credential never enables
+//     capture (#3615, tortoise/capture_consent.py).
+// Pi's in-repo extension is the deliberate exception (`optIn: false`): it reads
+// no TORTOISE_CAPTURE, so installing it IS the opt-in (that decision is pinned
+// by tests/test_pi_capture_hooks.py).
+export const CAPTURE_OPT_IN_ENV = 'TORTOISE_CAPTURE'
+export const CAPTURE_OPT_IN_LINE = `${CAPTURE_OPT_IN_ENV}=1`
+
+export function captureInstallNote({ heading, inert, stays, optIn = true }) {
+  // `inert` names the unit that stops and `stays` says where the transcript
+  // remains. Both are PER SEAM, because the local-spool fact is not shared: only
+  // the Claude Code seam spools without consent (session-turn.sh runs
+  // `tortoise session spool` ungated). Codex and Cursor route through
+  // `sessions import`, which refuses at the consent gate BEFORE it can write
+  // anything, so their transcript never reaches ~/.tortoise/capture-spool/.
+  if (optIn && (!inert || !stays)) {
+    throw new Error('captureInstallNote: `inert` and `stays` are required when optIn is true')
+  }
+  const consent = optIn
+    ? [`Filing is OFF until this machine opts in — \`export ${CAPTURE_OPT_IN_LINE}\``,
+       '(truthy: 1/true/yes/on), and a credential alone never enables capture.',
+       `Without that opt-in ${inert}.`,
+       `${stays}.`]
+    : ['Installing this extension IS the opt-in: unlike the Claude Code, Codex and',
+       `Cursor hooks it reads no ${CAPTURE_OPT_IN_ENV} opt-in, so the shipped capture`,
+       'step can never silently do nothing.']
+  return `# ${heading}
+# ${consent.join('\n# ')}
+# Your Organization's Agent sessions toggle is default-ON (ToS-covered) and can
+# only refuse a file — the server answers 409 while it is off (Memory sources >
+# Agent sessions). It never enables capture.`
+}
+
+// The Claude Code seam's note, defined ONCE for BOTH Claude surfaces (the
+// connect-wizard snippet and the Memory-sources row) — the same sharing rule the
+// Pi/Codex/Cursor constants already follow, so the two Claude surfaces cannot
+// drift and one pin covers both.
+export const CLAUDE_CAPTURE_NOTE = captureInstallNote({
+  heading: 'Session capture (#1727 T1)',
+  inert: 'these hooks file no session to Tortoise Cloud',
+  stays: 'Transcripts stay on this machine (spooled under ~/.tortoise/capture-spool/)',
+})
+
 // #3575: the Pi capture-INSTALL step — the in-repo extension that makes Pi
 // sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.pi (the setup
 // prompt) and HARNESS_CAPTURE_INSTALL.pi (the Memory-sources inline row) so
-// the two surfaces can never drift. Recording is ON by default (ToS-covered
-// — the same default as the Claude hooks); the server refuses the capture
+// the two surfaces can never drift. It is the one IN-REPO capture seam with no
+// consent gate (see captureInstallNote above) — the agent-infra `reflect-hook` is
+// the other ungated producer and lives outside this repo (agent-infra#1117);
+// the server can still refuse the capture
 // POST with a 409 while the organization has agent sessions switched off
 // (Memory sources > Agent sessions). The extension fires an install-probe on
 // load (harness + timestamp only, no content) and files the session when it
 // ends. It has no agent-infra dependency and needs no local tortoise CLI.
-export const PI_CAPTURE_INSTALL = `# Session capture for Pi (#1727 T1, #3575): install the in-repo capture
-# extension. Recording is ON by default (ToS-covered) — switch it off in
-# Memory sources > Agent sessions (the server then returns a 409). The
-# extension probes on load (harness + timestamp only, no content) and files
+export const PI_CAPTURE_INSTALL = `${captureInstallNote({
+  heading: 'Session capture for Pi (#1727 T1, #3575) — install the in-repo capture extension',
+  optIn: false,
+})}
+# The extension probes on load (harness + timestamp only, no content) and files
 # each session on exit. Install from your Tortoise checkout
 # (github.com/daniel-ospina/tortoise):
 mkdir -p ~/.pi/agent/extensions
@@ -247,10 +313,12 @@ tortoise sessions import --harness pi --file <session.jsonl>`
 // 0.154.0, a project-local .codex/hooks.json fires nothing. Codex runs a hook
 // only once it is trusted; the CLI's SessionEnd budget is ~1 s, so the shipped
 // hook detaches the capture POST and returns immediately.
-export const CODEX_CAPTURE_INSTALL = `# Session capture (#3818): recording is on by default (ToS-covered); the
-# SessionEnd hook files every session to Tortoise Cloud unless your
-# organization switches it off (Memory sources > Agent sessions — the server
-# returns a 409 while disabled). Codex reads hook registrations from
+export const CODEX_CAPTURE_INSTALL = `${captureInstallNote({
+  heading: 'Session capture (#3818)',
+  inert: 'this SessionEnd hook files no session to Tortoise Cloud',
+  stays: 'The transcript stays wherever Codex wrote it',
+})}
+# Codex reads hook registrations from
 # $CODEX_HOME/hooks.json — the CODEX_HOME override moves the whole config
 # tree, default ~/.codex — and NOT from a project .codex/, so this seam is
 # home-scoped. Install from your Tortoise checkout
@@ -278,10 +346,12 @@ chmod +x "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
 // project-local `.cursor/hooks.json` is gated on workspace trust. Cursor's
 // entry is a FLAT {"command": …} script object; its validator rejects a
 // nested matcher group and invalidates the whole hooks.json.
-export const CURSOR_CAPTURE_INSTALL = `# Session capture for Cursor (#3819): recording is on by default (ToS-covered);
-# the sessionEnd hook files each LOCAL desktop-editor session to Tortoise Cloud
-# unless your organization switches it off (Memory sources > Agent sessions —
-# the server returns a 409 while disabled). Install from your Tortoise checkout
+export const CURSOR_CAPTURE_INSTALL = `${captureInstallNote({
+  heading: 'Session capture for Cursor (#3819)',
+  inert: 'this sessionEnd hook files no session to Tortoise Cloud —\n# not even for a LOCAL desktop-editor session',
+  stays: 'The transcript stays wherever Cursor wrote it',
+})}
+# Install from your Tortoise checkout
 # (github.com/daniel-ospina/tortoise):
 tortoise install cursor
 # ...or by hand: copy tortoise/cursor-hooks/session-end.sh into
@@ -308,10 +378,8 @@ export const HARNESS_INSTALL = {
   claude: (key) =>
     `claude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"
 
-# Session capture (#1727 T1): recording is on by default (ToS-covered); the
-# hooks file every session to Tortoise Cloud unless your organization switches it
-# off (Memory sources > Agent sessions — the server returns a 409 while
-# disabled). Install from your
+${CLAUDE_CAPTURE_NOTE}
+# Install from your
 # Tortoise checkout (github.com/daniel-ospina/tortoise):
 mkdir -p .claude/hooks
 cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
@@ -340,7 +408,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh .claude/hoo
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
     // single source of truth (web is currently false: disabled-with-reason).
     const filing = HARNESS_CAPTURE_SUPPORT['claude-web']
-      ? `\n\n4) Session filing — recording is on by default (ToS-covered); if your team switched it off (Memory sources > Agent sessions in the dashboard), the server returns a 409. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. Capture only runs when you call it; nothing is recorded otherwise. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
+      ? `\n\n4) Session filing — nothing is filed unless you call it, and your team's Agent sessions toggle (Memory sources > Agent sessions; default ON, ToS-covered, #1927) can refuse the file with a 409 — this path has no automatic capture. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
       : ''
     return base + filing
   },
@@ -445,9 +513,7 @@ export const HARNESS_CONTINUE_LABEL = {
 // HARNESS_INSTALL so the row shows only the capture step, not the full MCP
 // setup). claude = in-repo hooks install; pi = extension copy-install.
 export const HARNESS_CAPTURE_INSTALL = {
-  claude: `# Session capture (#1727 T1): recording is on by default (ToS-covered); the
-# hooks file every session to Tortoise Cloud unless switched off (Memory
-# sources > Agent sessions — the server returns a 409 while disabled).
+  claude: `${CLAUDE_CAPTURE_NOTE}
 # Install from your Tortoise checkout:
 mkdir -p .claude/hooks
 cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
