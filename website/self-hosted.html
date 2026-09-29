@@ -102,7 +102,7 @@ Next: connect your agent (step 4)
   <h2><span class="n">4</span>Connect your agent (MCP)</h2>
   <div class="card">
     <p><strong>Docker path (recommended):</strong> point your agent at the daemon:</p>
-    <pre><span class="cmd">claude mcp add --transport http tortoise http://localhost:8000/mcp</span>   <span class="out"># writes local scope (~/.claude.json, private); the project-scope .mcp.json block is committable — no key here, one-time approval</span></pre>
+    <pre><span class="cmd">claude mcp add --transport http tortoise http://localhost:8000/mcp</span>   <span class="out"># writes local scope (~/.claude.json, private); or the project-scope .mcp.json block — committable, no key here (a local daemon needs none), and it stays Pending approval until you start claude in the project and allow the prompt (or run /mcp)</span></pre>
     <p><strong>Stdio path (same durable sidecar):</strong> if you prefer stdio transport, point the harness at the sidecar (requires the Docker sidecar from step 2 running):</p>
     <div class="harness-tabs" id="harness-tabs">
       <button class="harness-tab active" data-harness="claude" aria-pressed="true">Claude Code</button>
