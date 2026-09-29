@@ -137,6 +137,11 @@ _PREDICATE_CONSUMERS = {
         _GRAPH_SCRIPTS / "audit_beta_gate.py",
     "graph-scripts/1714_dedup_observation.py":
         _GRAPH_SCRIPTS / "1714_dedup_observation.py",
+    # #2500: the pre-#2490 terminal-EP backfill is a new predicate consumer —
+    # registering it here keeps the #2901 no-literal guard on it (it composes
+    # its MATCH from live._terminal_expression, so it has no status literal).
+    "graph-scripts/2500_backfill_terminal_ep_vacuity.py":
+        _GRAPH_SCRIPTS / "2500_backfill_terminal_ep_vacuity.py",
 }
 
 
