@@ -500,12 +500,23 @@ def is_billing_exhausted(exc: BaseException) -> bool:
       * **HTTP 403 carrying a key-limit body signature** (#4860) —
         ``is_key_limit_403``; the BODY, not the status, is the discriminator.
 
-    CONSULTED BY TWO CALLERS, ON DELIBERATELY DIFFERENT SCOPES:
+    CONSULTED BY THREE CALLERS, WITH A DELIBERATE FULL/NARROW SCOPE SPLIT:
     ``RotatingModel`` uses the FULL class (402 and the key-limit 403 both
     rotate to an alternative), while ``RoutingModel`` uses only the NARROW
     ``is_key_limit_403`` — a bare 402 stays fatal there by the recorded
     #1987/#1509 decision, and must not be "tidied" into symmetry. The
     predicate itself is unchanged and remains the rotation contract.
+    The extractor's census classifier (``extractor_v2._classify_error``,
+    #4959) consults the SAME seam to map a key-limit 403 to the census's
+    billing class, so the extraction-killer gate fires on a key-limited
+    run — one seam, so the two consumers make the same key-limit/billing
+    discrimination on every requests-shaped error this lane produces. They
+    disagree in OTHER ways, all tracked on #5525: the census classifier
+    reads the status from ``e.response.status_code``, so a
+    ``urllib.error.HTTPError`` (status on ``.code``, no ``.response``) never
+    reaches this discrimination; and 408/425 map to ``fatal_4xx`` there while
+    the retry taxonomy calls them transient. The extractor's ``ImportError``
+    fallback is a third, defensive divergence — see ``_is_key_limit_error``.
 
     With no alternative lane ``RotatingModel`` raises loud (its n==1
     guard). Deliberately NOT part of the M2/M3 taxonomy export contract —

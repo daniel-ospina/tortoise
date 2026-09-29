@@ -267,18 +267,35 @@ def _resolve_auth_retry_after_s() -> int:
     return max(1, min(v, 3600))
 
 
+def _jsonrpc_error_body(code: int, message: str,
+                        data: dict | None = None, *,
+                        request_id: Any = None) -> dict[str, Any]:
+    """The auth plane's one JSON-RPC error envelope.
+
+    Split out of ``_jsonrpc_error`` so an error that is framed differently on
+    the wire -- ``mcp_server``'s ``tools/call`` admission guard answers 200 with
+    an SSE frame instead of a JSON HTTP error -- shares the SAME envelope
+    definition rather than hand-building a second one. (The SSE framing around
+    it is still the guard's own.) ``request_id`` defaults to null, i.e. the
+    pre-existing behaviour for every auth-plane caller (a rejected request has
+    no trustworthy id to echo).
+    """
+    body: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "error": {"code": code, "message": message},
+        "id": request_id,
+    }
+    if data is not None:
+        body["error"]["data"] = data
+    return body
+
+
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
                    status: int = 400,
                    headers: dict[str, str] | None = None) -> JSONResponse:
     """Build an MCP-compatible JSON-RPC error response with an HTTP status."""
-    body: dict[str, Any] = {
-        "jsonrpc": "2.0",
-        "error": {"code": code, "message": message},
-        "id": None,
-    }
-    if data is not None:
-        body["error"]["data"] = data
-    return JSONResponse(body, status_code=status, headers=headers)
+    return JSONResponse(_jsonrpc_error_body(code, message, data),
+                        status_code=status, headers=headers)
 
 
 def _resource_metadata_url(request: Request) -> str | None:
@@ -755,9 +772,10 @@ class StaticKeyMiddleware(BaseHTTPMiddleware):
         if request.method != "POST":
             return await call_next(request)
         if self._api_key is None:
-            return JSONResponse(
-                {"jsonrpc": "2.0", "error": {"code": -32099, "message": "Static auth misconfigured: no API key set."}, "id": None},
-                status_code=503,
+            return _jsonrpc_error(
+                -32099,
+                "Static auth misconfigured: no API key set.",
+                status=503,
             )
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):

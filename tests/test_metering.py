@@ -161,8 +161,11 @@ class TestRecordWriteOps:
         and window resolution RAISES by design — so the old shape could not
         tell "I could not resolve the window" apart from "the row write
         failed". The window resolves; the MERGE raises; the write is non-fatal
-        (the increment is dropped — it is NOT retried at any call site; that
-        residual is #3824's representation scope).
+        (the increment is dropped — it is NOT retried at any call site; since
+        #4779 that drop is REPRESENTED durably as
+        ``drop_class="increment_write_unconfirmed"``. #3824 does NOT represent
+        it: that counter rides the capture-cost MEASUREMENT row, a different
+        surface).
         """
         sdk, tid = reg_sdk
         _break_increment_only(monkeypatch, sdk)

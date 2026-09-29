@@ -435,3 +435,141 @@ instrument cannot make and this record therefore states (F8).
 | **F8** | S1 cannot distinguish a required context that **never** emits on main (D13's five) from one whose push run **has not completed** (`python-ci-gate`); both read `NO_MAIN_SIGNAL` | plan §11 S1 / D13 |
 | **F10** | M5 asks for the conflicted set *in the same window*. The PR API keeps **no historical conflict state**, so the read is a **point-in-time snapshot** (stamped `window_scope` on the record) reused for both windows — the item is **not retrospectively observable** as windowed. Batch-arrival timestamps and **queue depth at formation** ARE windowed and recorded per formation | plan §5 M5 — limitation stated, never silently claimed |
 | **F9** | **Resolved by reconciliation.** Plan Task 3's Files line says *"modify the measurement doc (created by Task 2 — it must land first)"*. Task 2 had **not** landed when this lane created the doc; it landed (#5874, M2) while this PR was open, so the two versions are **merged into one file** — M2 (weight-driven 38/28 split) preserved verbatim, M3–M6 appended. The earlier UNKNOWN M2 placeholder is superseded | plan §10 Task 3 / §4.1 wave map — **RESOLVED** |
+
+---
+
+## M8 — duration-map vs observed wall time, and the collector → map bridge (Task 4b)
+
+**Intent.** Compare `config/ci-surfaces.yml:durations` against the latest completed run's
+Jobs-API per-job times, and the map's capture age. `shard_imbalance_minutes` is **observed wall
+time**, not the map — a perfectly balanced map with a 10-minute observed split is the whole point.
+Task 4b also builds the missing **bridge** from the collector into that map (⟨C2⟩).
+
+### Record
+
+| Field | Value |
+| --- | --- |
+| `capture` (`verified_at`) | `2026-09-28T01:46:07Z` |
+| validity window | **14 days** (§5: M8) |
+| resolved `origin/main` at capture | `f520a6575b949e65497a856e548f7573c7f8eba8` |
+| instrument | `tools/merge_throughput.py` @ #5705 (`cd536622f`) + this lane's Task 4b collectors |
+| measured run id | `36361388386` (event `push`, branch `main`, `created_at` `2026-09-28T00:13:15Z`) |
+| heavy legs | `test (a)` = **2465 s (41.08 min)**, conclusion `failure` · `test (b)` = **1539 s (25.65 min)**, conclusion `success` |
+
+### Observed vs the map — the divergence M8 exists to catch
+
+| reading | value | source |
+| --- | --- | --- |
+| `shard_imbalance_minutes` (observed) | **15.43 min** | Jobs API wall time of the two heavy legs, run `36361388386` |
+| map half weights (`half_a` / `half_b`) | 29.25 / 29.26 min | `ci_selection.push_legs` over the committed map |
+| map ratio | **1.000×** (tolerance 1.25×) | the map claims perfect balance |
+| observed ratio | **1.60×** | 41.08 / 25.65 |
+
+**The map's per-file weights are wrong, not the packing.** The LPT pack balanced the *map's*
+weights to 1.000×, while the observed wall time diverges 1.60×. This is the M2 verdict
+(`m2_verdict: weight_driven`) reproduced on a second run.
+
+**`check shard-balance --max 3` returns `2` (UNKNOWN), never a false 0.** S8 requires **both** heavy
+legs present and `success`; the leg conclusions in this run are `(failure, success)`, so the check
+exits 2 with `2: heavy leg 'a' absent or not success`. A red leg is a coverage failure, not a
+3-minute pass.
+
+### No both-green run exists in the scanned window
+
+A bounded scan of the **19** most recent completed push-to-main `python-ci.yml` runs (each
+Jobs-API read spaced 3 s) found **zero** runs with both heavy legs `success` — every run has exactly
+one red half. The observed imbalance across those runs ranged **0.90 – 16.40 min**, and **16 of the
+19 exceed the 3-minute criterion** (the exceptions were 2.43, 0.90 and 0.92 min). The imbalance is
+not a constant: it swings by an order of magnitude run to run, which is itself evidence that the
+map's fixed 29.25/29.26 split does not predict the observed wall time. This confirms M2's sample
+caveat: the 38/28 signal **cannot be cleanly separated from the live main-red defect (⟨C4⟩)** until
+a both-green run exists, so `shard-balance` will keep exiting **2** — never 0 — in this window.
+
+| run | created_at | `test (a)` | `test (b)` | observed imbalance |
+| --- | --- | ---: | ---: | ---: |
+| `36361388386` | 2026-09-28T00:13:15Z | failure 41.08 | success 25.65 | 15.43 min |
+| `36361356924` | 2026-09-28T00:12:46Z | failure 37.90 | success 33.68 | 4.22 min |
+| `36353414171` | 2026-09-27T21:54:35Z | failure 39.42 | success 31.18 | 8.23 min |
+| `36347054264` | 2026-09-27T20:10:37Z | success 37.08 | failure 32.63 | 4.45 min |
+| `36343532859` | 2026-09-27T19:13:00Z | success 36.78 | failure 32.00 | 4.78 min |
+| `36340267748` | 2026-09-27T18:20:17Z | success 30.42 | failure 21.88 | 8.53 min |
+| `36339264075` | 2026-09-27T18:04:07Z | success 37.18 | failure 34.17 | 3.02 min |
+| `36333730533` | 2026-09-27T16:34:17Z | success 36.50 | failure 26.78 | 9.72 min |
+| `36333688276` | 2026-09-27T16:33:37Z | success 25.28 | failure 31.52 | 6.23 min |
+| `36324597528` | 2026-09-27T14:04:20Z | success 37.00 | failure 31.80 | 5.20 min |
+| `36322252428` | 2026-09-27T13:23:58Z | success 25.88 | failure 33.02 | 7.13 min |
+| `36319743555` | 2026-09-27T12:40:00Z | success 36.10 | failure 21.87 | 14.23 min |
+| `36319740432` | 2026-09-27T12:39:56Z | success 34.25 | failure 31.10 | 3.15 min |
+| `36313443838` | 2026-09-27T10:43:19Z | success 29.20 | failure 31.63 | 2.43 min |
+| `36309985069` | 2026-09-27T09:37:56Z | success 37.12 | failure 30.23 | 6.88 min |
+| `36308247727` | 2026-09-27T09:05:14Z | failure 38.18 | success 30.88 | 7.30 min |
+| `36285863638` | 2026-09-27T01:32:52Z | failure 30.27 | success 31.17 | 0.90 min |
+| `36273920361` | 2026-09-26T21:43:42Z | failure 38.65 | success 22.25 | 16.40 min |
+| `36272313147` | 2026-09-26T21:15:36Z | failure 30.98 | success 31.90 | 0.92 min |
+
+### The bridge: `tools/ci_timing.py --refresh-durations`
+
+`--refresh-durations` is now the **sole writer** of `config/ci-surfaces.yml:durations`. It derives
+from the collector's own `parse_log` (no second parser), is **text-preserving** (line edits, never a
+whole-file `yaml.safe_dump`, which would strip the sweep-basis comment header), and **fail-closed**:
+a zero-key projection, a collector key not already classified in the manifest, or a refresh that
+would fail the manifest-side 0.90 floor writes **nothing** and exits non-zero.
+
+**Demonstration on run `36361388386`** (the same run as the shard reading), into a scratch copy of
+the manifest — the committed map is **not** hand-edited (that would re-create the retired one-off
+sweep; the scheduled `ci-timing.yml` refresh is the only producer):
+
+```
+python3 tools/ci_timing.py --refresh-durations \
+  --repo daniel-ospina/tortoise --run-id 36361388386 \
+  --logs-dir /tmp/task4b-logs --manifest /tmp/ci-surfaces-mt4b.yml
+# → refreshed …: 30 sampled, 658 carried forward (captured_at 2026-09-28T12:00:00Z)
+```
+
+**30 weights changed**, 658 carried forward (the collector's `--durations=15` projection is
+**partial** — it cannot enumerate the whole 688-key map, which is exactly why the 0.90 floor lives on
+the resulting MANIFEST, not on the projection). The 30 re-derivations include several massive stale
+over-estimates that the 2026-09-22 sweep carried:
+
+| key | committed | refreshed |
+| --- | ---: | ---: |
+| `test_onboarding_state_split.py` | 310.7 | **18.4** |
+| `test_reaper.py` | 195.9 | **34.3** |
+| `test_longmem_runner.py` | 173.3 | **17.0** |
+| `test_embedded_lifecycle.py` | 87.7 | **46.6** |
+| `test_github_indexer.py` | 50.2 | **24.4** |
+| `eval/write_path/test_write_path_benchmark.py` | 101.8 | **229.4** |
+| `test_selfhost_rest.py` | 1.4 | **60.4** |
+| `test_session_verify.py` | 97.4 | **72.2** |
+
+**Resulting pack (scratch copy):** the map's aggregate pack weight falls from **58.51 min** to
+**54.34 min** (the phantom over-estimates removed), and the LPT re-pack stays inside the 1.25×
+tolerance (`half_a` 27.17 = `half_b` 27.17 min). That ~4.2-minute map reduction is the mechanism
+behind T-B's claimed ~4-minute cycle win — **conditional on the collector actually running**, which
+is why this bridge must not land before the collector fix (#5393) and why the committed map is only
+refreshed by the scheduled workflow, never by hand.
+
+### Not measurable (recorded, not silently zeroed)
+
+- **A both-green run does not exist** in the 19-run scan, so `shard-balance` is **UNKNOWN (2)** on
+  every sample; the imbalance numbers above are observed wall times from red runs, not a clean
+  both-green criterion result.
+- **The committed map has no `durations_captured_at`**, so `check durations-map --max-age-days 14`
+  exits **2** (age UNKNOWN) until the first scheduled `--refresh-durations` writes it. The bridge
+  writes the key; its absence is UNKNOWN, never "fresh".
+- **The projection is partial by construction** (top-15 per job): 30 of 688 keys were measured, 658
+  carried forward. `diverged` is therefore only computed over the observed keys; an un-observed key
+  is not evidence of a wrong weight.
+
+### Reproduction
+
+```bash
+RUN=$(python3 tools/ci_timing.py --pick-run --repo daniel-ospina/tortoise)
+gh run download "$RUN" -R daniel-ospina/tortoise -p 'pytest-log-*' -D /tmp/task4b-logs
+# observed shard metric (the instrument's own exit code)
+python3 tools/merge_throughput.py check shard-balance --max 3     # → 2 (one heavy leg red)
+# the bridge, against a scratch manifest (run twice, or omit --dry-run to write the scratch)
+cp config/ci-surfaces.yml /tmp/ci-surfaces-mt4b.yml
+python3 tools/ci_timing.py --refresh-durations --repo daniel-ospina/tortoise \
+  --run-id "$RUN" --logs-dir /tmp/task4b-logs --manifest /tmp/ci-surfaces-mt4b.yml
+```

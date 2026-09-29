@@ -207,17 +207,43 @@ def test_gold_turn_in_pool_membership_embedded():
             sdk.close()
 
 
+def _embedder_installed() -> bool:
+    """Cheap, import-time-safe capability probe for MARKER conditions.
+
+    Deliberately NOT `_embedder_present()`: that one calls
+    `EmbeddingModel.get()`, which LOADS a model (cold ~57 s, bounded by
+    `_LOAD_TIMEOUT_S` = 90 s). A `pytest.mark.xfail(condition=...)` is evaluated
+    at module import, so using the decisive probe there would block collection
+    for every run of this file — including `--collect-only` and deselected
+    runs — and, worse, a transient load failure returns None and populates the
+    negative cache, misclassifying a vector-capable checkout as the keyword
+    lane and silently XFAILing the very assertion that is worst-case red. The
+    decisive probe stays inside the test body, where a failure fails the
+    assertion instead of converting it to an XFAIL.
+    """
+    import importlib.util
+    return importlib.util.find_spec("sentence_transformers") is not None
+
+
 @pytest.mark.xfail(
     strict=True,
+    condition=not _embedder_installed(),
     reason="Accepted regression from the #4155 grouping fix — root-caused as "
-           "#5821. The corrected bucket key makes the per-session cap stop "
-           "binding (120 in → 119 out, was 91), so the UNCHANGED byte cap is "
-           "now the binding constraint and keeps 58 items where it kept 70; "
-           "the gold turn sits at rank 67 and is cut. This test's premise — "
-           "that raising the window and the item cap TOGETHER is sufficient — "
-           "no longer holds, so it is marked rather than silently red. "
-           "strict=True so that landing #5821 makes this an XPASS failure and "
-           "forces the marker's removal.",
+           "#5821 — on the KEYWORD LANE, which is what this marker's condition "
+           "now encodes. Measured 2026-09-28 at origin/main 20e4819be: on the "
+           "keyword lane the #4155 key deepens the pool (dedup 91 → 119) while "
+           "the assembly step keeps 58, so the gold moves from rank 55 (kept "
+           "70 — it landed) to rank 68 post-boost (> 58 — cut). Isolating the "
+           "#4155 key alone reproduces exactly that: with the pre-#4155 key the "
+           "gold lands on this lane. On the VECTOR lane the dense leg holds the "
+           "gold at rank 9 and it lands at item_cap=40, so this test XPASSes "
+           "an unconditional strict marker and reds the suite on any "
+           "vector-capable checkout — the canonical dev env. The 58-item keep is "
+           "the TOKEN cap's doing, not the byte cap this marker used to name; "
+           "the measured attribution is pinned by "
+           "test_ask_cap_attribution_5821 below. strict=True on the keyword lane "
+           "so that a real fix there makes this an XPASS failure and forces the "
+           "marker's removal.",
 )
 def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     """A6 measurement-gated cap review, embedded lane: 1d4e3b97 (in-pool,
@@ -226,9 +252,23 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     Step 0. Default-off knobs are exercised explicitly.
 
     ⚠️ Known-failing by owner decision, tracked as #5821 — see the marker
-    reason. The value that would make this pass is a working ordering/budget
-    fix, not a louder assertion: it is xfail(strict) so the fix cannot land
-    without removing this marker.
+    reason. **The failure is lane-dependent and the marker now says so.** On
+    the keyword lane the #4155 key deepens the pool (dedup 91 → 119) while the
+    assembly step keeps 58, so the gold moves from rank 55 post-boost in a pool
+    of 91 with a keep of 70 (it landed) to rank 68 post-boost in a pool of 119
+    with a keep of 58 (> 58 — cut). On the vector lane the dense leg holds the
+    gold at rank 9 and it lands at `item_cap=40`,
+    so the test passes and an unconditional `strict=True` would red the suite.
+    That is why the marker carries `condition=not _embedder_installed()` — it
+    encodes the lane the regression belongs to instead of asserting it
+    universally, and it probes cheaply because marker conditions are evaluated
+    at import.
+
+    This test raises the window and the item cap but not the token cap, so on
+    the keyword lane those two raises cannot lift the keep above 58 (a
+    token-cap decision belongs to #5821's Task 3 and is deliberately NOT made
+    here). On the keyword lane it is `xfail(strict)` so a real fix there cannot
+    land without removing the marker.
     """
     questions = _recorded_questions()
     if not questions:
@@ -246,6 +286,99 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
         assert {h["id"] for h in ctx} & gold, (
             "1d4e3b97: gold must land in context when the window+cap are "
             "raised together (A6 tandem threading)")
+    finally:
+        sdk.close()
+
+
+def test_ask_cap_attribution_5821():
+    """#5821 Task 1: pin WHICH cap binds, so this gate cannot mis-attribute it.
+
+    The #4155 marker originally blamed the byte cap for the 58-item keep.
+    Measured on main at b2448869d, BOTH caps bind: with no explicit or
+    env-provided ceiling the derived one is `token x 8` (floored at 32768), so
+    at the lane default the two move together — but the 58 is the TOKEN cap's
+    doing, because holding the byte ceiling at the lane's own 64000 while
+    raising tokens admits more than 58. This records that attribution as a
+    PROPERTY rather than a fixed count, so it pins the mechanism without
+    becoming a place to widen a budget (#5821 Task 3 keeps that decision out
+    of code).
+
+    What value makes this test fail: if the token cap stops being the tighter
+    constraint at the 8000-token lane (property 2 breaks), if relaxing the cap
+    pair no longer raises the keep (property 1 breaks), or if the byte cap
+    stops constraining anything (property 3 breaks) — any of those makes the
+    attribution recorded on the #5821 marker false again, and this test says so
+    instead of letting the comment drift.
+
+    The fixture is what makes those falsifying values reachable: the seeded
+    `1d4e3b97` question yields a 119-item post-boost pool in which the gold turn
+    sits at rank 68, so the pool is deeper than the byte-capped 78 that
+    property 3 needs to be discriminating. The test SKIPS (rather than passing
+    vacuously) when the cached LongMemEval dataset is absent.
+    """
+    questions = _recorded_questions()
+    if not questions:
+        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    q = questions.get("1d4e3b97")
+    if q is None:
+        pytest.skip("1d4e3b97 not in cached dataset")
+
+    from tortoise.retrieval import (
+        DEFAULT_MAX_CHUNKS_PER_SESSION,
+        apply_evidence_boost,
+        ask_session_key,
+        assemble_context,
+        dedup_pool,
+        resolve_ask_boost_multipliers,
+        resolve_byte_cap_from_caps,
+    )
+
+    sdk = _fresh_sdk()
+    try:
+        _seed(sdk, q)
+        hits = sdk.tortoise_fts_query(
+            q["question"], limit=120, pool_size=120, include_terminal=True,
+            keep_numeric=True, search_keys_prf=True)
+        ann = sdk.annotate_ask_hits(hits)
+        assert ann, "retrieval returned nothing — the premise is broken"
+        ded = dedup_pool(
+            ann, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
+            session_key=ask_session_key)
+        mult = resolve_ask_boost_multipliers()
+        bo, _ = apply_evidence_boost(
+            ded, boost_answer_string=mult["answer_string"],
+            boost_verbatim=mult["verbatim"], boost_source=mult["source"])
+
+        def kept(token_cap: int, byte_cap: int | None = None) -> int:
+            bc = byte_cap if byte_cap is not None else resolve_byte_cap_from_caps(
+                {"context_token_cap": token_cap})
+            return len(assemble_context(
+                bo, top_k=120, max_context_tokens=token_cap,
+                context_item_cap=120, byte_cap=bc))
+
+        # (1) relaxing the token cap — and, by derivation, the byte cap it
+        #     carries with it — raises the keep. This deliberately does NOT
+        #     claim to isolate the token cap: `byte_cap=None` makes the helper
+        #     DERIVE the ceiling, so both move together here. The isolation is
+        #     (2), which holds the byte ceiling fixed.
+        assert kept(16000) > kept(8000), (
+            "relaxing the token cap did not raise the keep — the cap pair is "
+            "no longer doing what the #5821 attribution describes")
+
+        # (2) with the byte ceiling held constant at the 8000-token lane's own
+        #     64000, raising only the token budget still raises the keep — so
+        #     the 58 is the TOKEN cap's doing, and the assertion fails if the
+        #     byte cap is the constraining one at that lane.
+        assert kept(16000, byte_cap=64000) > kept(8000), (
+            "holding the byte ceiling at the lane's 64000, raising only the "
+            "token budget did not raise the keep — the 58 is not the token "
+            "cap's doing, so the #5821 attribution is wrong")
+
+        # (3) the byte cap is a real, independently binding constraint — it is
+        #     NOT inert, and no comment should say it is.
+        assert kept(64000, byte_cap=64000) < kept(64000, byte_cap=1000000), (
+            "raising the byte ceiling alone did not change the keep — the byte "
+            "cap is inert here, contradicting the measured attribution")
     finally:
         sdk.close()
 
@@ -344,14 +477,14 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         # is now env-resolvable AND honest — the historical 40/40/8000
         # truncated at a 32 KiB literal, so a raise above it was a no-op).
         # Here we pin the shipped window LITERALLY: the cap posture is the
-        # measured 200/200/200/16000/128000. Inequalities alone cannot
+        # measured 200/400/200/16000/128000. Inequalities alone cannot
         # detect a changed literal, and the pre-#4105 pin was an exact dict —
         # replacing it with three tautologies left the window unpinned.
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
         assert caps == {
             "limit": 200,
-            "pool_size": 200,
+            "pool_size": 400,
             "context_item_cap": 200,
             "context_token_cap": 16000,
             "context_byte_cap": 128000,

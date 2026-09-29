@@ -42,9 +42,14 @@ _log = logging.getLogger(__name__)
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
 
-    Only sets environment keys that are empty/unset, so an explicit
-    TORTOISE_DB_URI in the process env always wins. Mirrors the hosted
-    entrypoint philosophy: the DB target must be explicit, never accidental.
+    Only sets environment keys that are ABSENT from ``os.environ`` — a key
+    that is explicitly set, even to the empty string, is never overridden.
+    That presence test is load-bearing: ``tools/ask_shape_rate.py`` narrows
+    the non-pinned provider keys to ``""`` (present-but-unkeyed) so a later
+    ``_load_dotenv()`` cannot re-arm them and defeat the reader pin (#4582).
+    An explicit TORTOISE_DB_URI in the process env always wins. Mirrors the
+    hosted entrypoint philosophy: the DB target must be explicit, never
+    accidental.
     """
     if path is None:
         path = os.path.join(
@@ -2053,6 +2058,12 @@ def tortoise_get_operator(id: str) -> dict:
     Raises error if the Point is not an operator.
     Alias → get(id, type='operator') (epic #888 W3)."""
     point = _safe(_get_org_sdk().get_point, id)
+    # _safe reports ANY failure as an _SafeError — itself a dict subclass — so
+    # the non-operator guard below would match a failed call and fabricate a
+    # domain fact ('is not an operator'), discarding the real cause. Surface
+    # the typed failure FIRST (#4576; same pattern as #3926).
+    if isinstance(point, _SafeError):
+        return point
     if isinstance(point, dict) and point and not point.get("is_operator"):
         return {"error": f"Point {id!r} is not an operator"}
     return point
@@ -2434,7 +2445,16 @@ def tortoise_health() -> dict:
     tight fast-degrade bound. The allowance is resolved at CALL time
     (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
     set in the repo-root ``.env`` — loaded after this module imports
-    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
+    ``tortoise.monitoring`` — is honoured instead of frozen at import.
+
+    #3253 (health-truthful): the ``graph_size`` taxonomy count is bounded by
+    ``monitoring.GRAPH_SIZE_TIMEOUT`` on its own worker, so this tool's total
+    is ``probe_setup_timeout() + PROBE_TIMEOUT + GRAPH_SIZE_TIMEOUT`` at
+    worst — never as long as a half-broken server stalls. When the count
+    cannot be measured, the report carries the per-call ``graph_size_error``
+    marker (``None`` when ``graph_size`` was really measured, so a 0 is a
+    genuinely empty graph; a string otherwise), instead of the previous
+    indistinguishable ok/0."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
     # #3143: pass the cold-start allowance (call-time resolved) so a reachable
@@ -3916,8 +3936,10 @@ def tortoise_session_capture(conversation: list[dict],
         _capture_lane,
         _capture_session_impl,
         _capture_session_key,
+        _observed_capture_harness,
         _record_capture_last_error,
         _reserve_capture_slot,
+        _stored_session_harness,
         _submit_off_loop,
     )
     limits = _current_org_limits.get() or {}
@@ -4006,8 +4028,25 @@ def tortoise_session_capture(conversation: list[dict],
         # #3129: likewise the in-flight 409.
         if (status >= 400 and status != 429
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
+            # #4898: attribute the failure to the SESSION's stored harness, NOT
+            # the caller's raw ``harness`` argument — the SAME resolution the
+            # REST capture applies to both per-harness keys
+            # (``_observed_capture_harness``: stored or claimed,
+            # first-writer-wins; #3681 / #3700). Without it, a failed
+            # re-capture of an existing ``session_id`` whose stored harness
+            # differs writes the error under the CALLER's declaration and the
+            # dashboard paints the failure on another harness's row — the
+            # relabel class #3681 closed for the receipt key, one key down.
+            # ``_stored_session_harness`` fails open to None, which restores
+            # the fresh-session rule (the claim only ever introduces a harness
+            # the server has not stamped).
             with contextlib.suppress(Exception):
-                _record_capture_last_error(org_id, harness, str(detail))
+                _record_capture_last_error(
+                    org_id,
+                    _observed_capture_harness(
+                        org, harness,
+                        asyncio.run(_stored_session_harness(org, session_id))),
+                    str(detail))
         # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
         # — the points-estimate gate, the cohort cost cap, or the
         # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
@@ -4145,6 +4184,268 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
 
 # ── HTTP Streamable transport (#236) ─────────────────────────────
 
+# ── #3656: say WHY a `tools/call` is rejected ────────────────────
+# The ONLY producer of the observed signature -- HTTP 200 carrying
+# ``-32602 "Invalid request parameters"`` with ``data: ""`` -- is the MCP SDK's
+# session receive loop (``mcp/shared/session.py``), whose blanket
+# ``except Exception`` around request admission converts EVERY failure there
+# into that one message. Two consequences follow, and both are tortoise's to
+# fix:
+#
+#   1. The reason is DISCARDED. The SDK logs it (``Failed to validate
+#      request: ...``) and puts nothing actionable on the wire, which is
+#      exactly the harm #3656 reports -- "the client learns nothing
+#      actionable".
+#   2. The signature is unclassifiable after the fact. #3656 could only be
+#      reported as an observation because no artifact said which member the
+#      server objected to.
+#
+# Because a ``tools/call`` rejected here is one the SDK had already admitted at
+# the transport layer, the only way this signature appears is the request
+# reaching the session and being rejected there.
+#
+# WHAT THIS CANNOT REACH (measured, not assumed): the same ``except Exception``
+# has a SECOND arm -- any exception escaping ``ServerSession._handle_incoming``
+# (demonstrated: ``anyio.BrokenResourceError`` when the session's
+# incoming-message stream is already broken) is ALSO answered with this exact
+# ``-32602`` / ``data: ""``, for a perfectly well-formed request, with no
+# validator involved. That arm is reproduced at the SDK-session level (see
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary::
+# test_second_arm_of_the_signature_is_a_broken_incoming_stream), where the
+# session's write stream is alive and the error IS written back; it is NOT
+# reproduced through the HTTP surface, and nothing here shows the transport can
+# reach that state -- so whether it is client-visible on ``/mcp`` is
+# unestablished. It is therefore reported rather than papered over -- there is
+# no "member" to name in that arm, and inventing one would be a lie. The
+# underlying defect there is the SDK's, not tortoise's: an internal failure is
+# reported as INVALID_PARAMS.
+#
+# The fix runs the SDK's OWN model for the ENVELOPE VERDICT, so an envelope is
+# never refused that the session would serve. That guarantee is exact for the
+# envelope and is pinned against a live ``ServerSession`` in
+# tests/test_mcp_http.py::TestToolCallAdmissionBoundary. It is NOT a claim about
+# the transport gates, which are a transcription with a documented drift edge --
+# see `_transport_would_dispatch_jsonrpc_post`.
+def _tools_call_rejection(raw: Any) -> list[dict[str, Any]] | None:
+    """The SDK's own validation errors for a ``tools/call`` envelope, or None.
+
+    Gate 3 is the producer of the arm this guard names (the receive loop is the
+    one exception SITE, and it has a second arm this guard cannot reach -- see
+    the module comment above). These are the SDK's own expressions, in the
+    order the SDK runs them:
+
+    1. ``JSONRPCMessage.model_validate(raw)`` -- the transport's pure-format
+       check. On failure the transport owns the answer (its 400 carrying
+       ``-32602 Validation error: ...``; ``-32700`` is the earlier
+       ``json.loads`` failure), so this returns None and the request passes
+       through untouched.
+    2. ``isinstance(message.root, JSONRPCRequest)`` -- the transport dispatches
+       ONLY a request; a notification / response / error body is answered
+       ``202 Accepted`` (`mcp/server/streamable_http.py`). This gate is
+       load-bearing for a body carrying ``method``/``id`` **and an ``error``
+       member**, which the union resolves to ``JSONRPCError`` (measured: a
+       ``result`` member instead resolves to a REQUEST, which always has a real
+       rejection reason and is handled by gate 3). Without this gate the guard
+       would replace that body's 202 with a ``-32602`` -- the over-strict
+       direction, which breaks a working caller.
+    3. ``ClientRequest.model_validate(<root re-dumped by_alias/exclude_none>)``
+       -- what ``BaseSession._receive_loop`` runs, and the producer of the
+       opaque ``-32602 "Invalid request parameters"`` this guard exists to
+       replace.
+
+    Those three gates gate the arm this guard is for: an envelope the SDK
+    rejects. The same SDK ``except`` also answers a well-formed request when
+    ``_handle_incoming`` raises, and there is no member to name in that arm --
+    the caller passes through and the SDK keeps the last word, which is why this
+    guard is a message fix and not a fix for #3656's transient (see the module
+    comment above).
+
+    The REASON comes from ``CallToolRequest``, the one variant that
+    ``method == "tools/call"`` discriminates to. A union failure reports every
+    variant's errors (a 30-entry dump naming ``PingRequest``, ``GetTaskRequest``
+    and the rest), which is noise on the wire; the concrete variant reports only
+    the members of THIS call -- ``params.name``, ``params.arguments``, ... If the
+    concrete variant unexpectedly validates anyway, the union's own errors are
+    used rather than a fabricated reason.
+
+    Returns None when the envelope is one the SDK admits -- and ALSO whenever
+    the reproduction cannot be made (models unavailable, an unexpected
+    exception). A guard that cannot reproduce the SDK's verdict must never
+    invent one: pass-through is the fail-safe direction, and it is why a stale
+    copy of these expressions can rename an error but can never refuse a
+    request the SDK would have served.
+    """
+    try:
+        from mcp.types import (CallToolRequest, ClientRequest,  # noqa: I001
+                               JSONRPCRequest, JSONRPCMessage)
+        from pydantic import ValidationError as _PydanticValidationError
+    except Exception:  # pragma: no cover - import guard, never a request failure
+        return None
+
+    def _errors(exc) -> list[dict[str, Any]]:
+        return [
+            {
+                "loc": [str(part) for part in err.get("loc", ())],
+                "msg": str(err.get("msg", "invalid")),
+                "type": str(err.get("type", "value_error")),
+            }
+            for err in exc.errors()
+        ]
+
+    try:
+        message = JSONRPCMessage.model_validate(raw)
+        # Gate 2: the transport dispatches only a REQUEST. A notification /
+        # response / error body is answered 202, not "invalid params".
+        if not isinstance(message.root, JSONRPCRequest):
+            return None
+        dumped = message.root.model_dump(by_alias=True, mode="json",
+                                        exclude_none=True)
+    except Exception:
+        return None  # the transport owns this failure; do not pre-empt it
+    try:
+        ClientRequest.model_validate(dumped)
+    except _PydanticValidationError as union_exc:
+        try:
+            CallToolRequest.model_validate(dumped)
+        except _PydanticValidationError as concrete_exc:
+            return _errors(concrete_exc)
+        except Exception:  # pragma: no cover - fall back to the union dump
+            return _errors(union_exc)
+        return _errors(union_exc)  # pragma: no cover - unreachable in practice
+    except Exception:  # pragma: no cover - never invent a reason
+        return None
+    return None
+
+
+def _routed_path(request: Any) -> str:
+    """The request path AS THE ROUTER SEES IT.
+
+    A middleware inside a MOUNTED app receives the full path with the mount
+    prefix still on it, plus ``root_path``: a POST to ``/mcp`` arrives as
+    ``path='/mcp/'`` with ``root_path='/mcp'`` (measured — Starlette's ``Mount``
+    leaves the prefix in place and the router strips it while matching). So a
+    check against the transport's own endpoint has to strip it too, or the guard
+    would never fire in production (mounted at ``/mcp``) while firing in a test
+    that mounts at the root.
+    """
+    root = request.scope.get("root_path") or ""
+    path = request.url.path
+    if root and path.startswith(root):
+        return path[len(root):] or "/"
+    return path
+
+
+def _transport_would_dispatch_jsonrpc_post(path: str, endpoint: str,
+                                          headers: Any) -> bool:
+    """True when the SDK's transport would DISPATCH this POST to the session.
+
+    Every gate listed below is reproduced from the transport, so the guard
+    speaks only where the SDK speaks. The middleware wraps the ROUTER, so
+    without this predicate it can answer ``200 -32602`` for a request no part of
+    the SDK ever saw. Each clause closes a MEASURED divergence of that kind:
+
+    * ``endpoint`` -- the route. A POST to a path this app does not route is a
+      404; the caller passes the same string it gives ``mcp.http_app(path=...)``
+      and the request's path as the router sees it (``_routed_path``), so the
+      guard's idea of "the endpoint" cannot drift from the route table.
+    * ``TransportSecurityMiddleware._validate_content_type`` -- the raw header
+      must START WITH ``application/json`` (its 400). This is a different and
+      STRICTER gate than the transport's own part match below: ``text/plain,
+      application/json`` is a 400, not a 415.
+    * ``StreamableHTTPServerTransport._check_content_type`` -- an EXACT
+      ``application/json`` part in the ``;``/``,``-split (its 415), so
+      ``application/jsonx`` keeps the 415 that the prefix gate above let
+      through.
+    * ``_check_accept_headers`` -- both media types, because this app is built
+      with ``json_response=False`` (SSE responses); otherwise the transport
+      answers 406.
+    * ``_validate_protocol_version`` -- absent means the negotiated default, an
+      unsupported value is the transport's 400 ``-32600``.
+    * ``RequestBodyLimitMiddleware`` -- a DECLARED length within
+      ``DEFAULT_MAX_REQUEST_BODY_SIZE``; without the bound this middleware would
+      buffer an unbounded body and then replace that limit's 413. In THIS app
+      ``mcp_auth.RequestBodySizeMiddleware`` (1 MB) binds first, so this clause
+      is the belt to that braces: it keeps the guard's own memory bounded if
+      that cap is ever reordered or removed. A chunked POST declares no length,
+      so it is passed straight through to the limiter that counts bytes.
+
+    NOT reproduced, deliberately, because each is answered before this
+    middleware or is a no-op here -- named rather than silently assumed:
+
+    * ``TransportSecurityMiddleware``'s **Host** (421) and **Origin** (403)
+      checks: ``HostOriginGuardMiddleware`` sits OUTSIDE this middleware with
+      the same allowlists and answers both
+      (``test_origin_and_host_refusals_still_precede_the_guard``).
+    * ``_validate_session``: a no-op under ``stateless_http=True``
+      (``mcp_session_id`` is None), and the initialize-only session-id 404
+      cannot apply to ``tools/call``.
+
+    The order of the header clauses here is this function's, not the SDK's
+    (the transport checks accept before content-type); each is independently
+    decisive, so the order cannot admit a request the SDK refuses.
+
+    Being STRICTER than the transport is always safe here: the request simply
+    passes through and the SDK answers, so relaxing a gate, changing the
+    response mode or raising a limit makes the guard stop intercepting rather
+    than mislabel -- and an import failure returns False for the same reason
+    (never pre-empt on a broken assumption). The converse does NOT hold, and is
+    this design's known edge: a gate the SDK ADDS, or one narrowed here by
+    mistake, makes the guard LOOSER and it would answer for a request the
+    transport refuses. The tests pin the gates enumerated below; a new upstream
+    gate is not detectable from here.
+    """
+    try:
+        from mcp.server.streamable_http import CONTENT_TYPE_JSON, CONTENT_TYPE_SSE
+        from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
+        from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+        from mcp.types import DEFAULT_NEGOTIATED_VERSION
+    except Exception:  # pragma: no cover - never pre-empt on an import failure
+        return False
+    if path != endpoint:  # ── the route: anything else is the router's 404
+        return False
+    # ── the transport's own gates, in its own order ──
+    content_type = headers.get("content-type", "")
+    if not content_type.lower().startswith(CONTENT_TYPE_JSON):
+        return False  # TransportSecurityMiddleware: 400
+    parts = [p.strip() for p in content_type.split(";")[0].split(",")]
+    if not any(p == CONTENT_TYPE_JSON for p in parts):
+        return False  # _check_content_type: 415
+    accepted = [m.strip() for m in headers.get("accept", "").split(",")]
+    has_json = any(m.startswith(CONTENT_TYPE_JSON) for m in accepted)
+    has_sse = any(m.startswith(CONTENT_TYPE_SSE) for m in accepted)
+    if not (has_json and has_sse):
+        return False  # _validate_accept_header: 406
+    # The SDK substitutes the default only when the header is ABSENT (`is
+    # None`), so a present-but-empty value is its 400 -- `.get(k, default)`, not
+    # `or`, or an empty header would be silently upgraded to the default.
+    version = headers.get("mcp-protocol-version", DEFAULT_NEGOTIATED_VERSION)
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return False  # _validate_protocol_version: 400 -32600
+    declared = headers.get("content-length")
+    if declared is None:
+        return False  # chunked: RequestBodyLimitMiddleware counts the bytes
+    try:
+        if int(declared) > DEFAULT_MAX_REQUEST_BODY_SIZE:
+            return False  # RequestBodyLimitMiddleware: 413
+    except ValueError:  # pragma: no cover - a malformed length is not ours
+        return False
+    return True
+
+
+def _tools_call_rejection_message(errors: list[dict[str, Any]]) -> str:
+    """Render the field locations the SDK rejected, in the client's language.
+
+    ``loc`` from a pydantic union error is the offending MEMBER PATH (e.g.
+    ``params.name``), which is precisely what the discarded reason held and
+    what a client needs to repair the call.
+    """
+    parts = []
+    for err in errors:
+        member = ".".join(err.get("loc") or []) or "<request>"
+        parts.append(f"{member}: {err.get('msg', 'invalid')}")
+    return "Invalid params: " + "; ".join(parts)
+
+
 def create_http_app(*, allowed_origins: list[str] | None = None,
                     allowed_hosts: list[str] | None = None,
                     rate_limit: int = 100,
@@ -4182,11 +4483,17 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     (route unused) and coexists with the POST/DELETE streamable-http route.
     """
     from starlette.middleware import Middleware  # noqa: I001
+    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
     from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
+
+    # The transport's endpoint INSIDE this sub-app. One value, used both to
+    # build the route and to gate the #3656 admission guard -- so the guard can
+    # never intercept a path the route table does not serve (its 404).
+    mcp_path = "/"
 
     # auth_mode middleware selection. OrgResolutionMiddleware (tenant mode) is
     # imported here but only ever INSTANTIATED in the tenant branch — static/none
@@ -4252,6 +4559,76 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
             return [t for t in tools if _visible(t)]
 
+    class ToolCallAdmissionMiddleware(BaseHTTPMiddleware):
+        """Answer a rejected ``tools/call`` with the SDK's OWN reason (#3656).
+
+        See ``_tools_call_rejection`` above for why this surface has one producer
+        SITE of the OPAQUE ``-32602`` signature -- this middleware, when it
+        answers, is a second producer of ``-32602`` with a real reason -- and one
+        validator for the envelope verdict (the SDK's own model, which the guard
+        runs rather than replaces). Scope is deliberately narrow, and each
+        narrowing is a case where the SDK does NOT emit the opaque signature:
+
+        * ``POST`` only, and only to the transport's own endpoint
+          (``mcp_path``), and only when the SDK's own gates would let the body
+          through -- see ``_transport_would_dispatch_jsonrpc_post`` and
+          ``_routed_path``. Everything the transport would answer itself (404
+          for another path, 400/403/406/413/415 for its own refusals) stays the
+          transport's answer.
+        * ``jsonrpc == "2.0"`` and an ``id`` present -- so a
+          ``tools/call`` NOTIFICATION passes through (the SDK only logs those)
+          and a body missing ``jsonrpc`` passes through (the transport rejects
+          it first, with a different message).
+        * ``method == "tools/call"`` only -- every other method is untouched.
+        * A JSON object only -- a batch array is left to the transport.
+        * A body ``JSONRPCMessage`` resolves to a REQUEST -- a notification /
+          response / error root is answered 202 by the transport, and this
+          middleware must not turn that into a ``-32602``.
+
+        As the transport does, this marks the response uncacheable and
+        unbuffered (``Cache-Control: no-cache, no-transform`` and
+        ``X-Accel-Buffering: no``): a proxy must not store or coalesce a
+        JSON-RPC error, and the frame is one event long. The body framing is the
+        transport's SSE event; the headers are pinned by
+        ``test_the_named_error_is_uncacheable_and_unbuffered``.
+        """
+
+        async def dispatch(self, request, call_next):
+            if request.method != "POST":
+                return await call_next(request)
+            if not _transport_would_dispatch_jsonrpc_post(
+                    _routed_path(request), mcp_path, request.headers):
+                return await call_next(request)
+            try:
+                raw = json.loads(await request.body())
+            except Exception:
+                # The transport owns parse errors (it answers -32700), and it
+                # must still see the body -- BaseHTTPMiddleware replays it.
+                return await call_next(request)
+            if not isinstance(raw, dict):
+                return await call_next(request)
+            if (raw.get("jsonrpc") != "2.0" or "id" not in raw
+                    or raw.get("method") != "tools/call"):
+                return await call_next(request)
+            errors = _tools_call_rejection(raw)
+            if errors is None:
+                return await call_next(request)
+            from starlette.responses import Response
+            # The auth plane's one envelope builder (#5281 house primitive),
+            # framed here as the transport's SSE event instead of a JSON
+            # HTTP error. Same code, same shape, one definition.
+            body = json.dumps(_mcp_auth._jsonrpc_error_body(
+                # The SDK's own code for this failure class -- unchanged.
+                -32602,
+                _tools_call_rejection_message(errors),
+                {"method": "tools/call", "errors": errors},
+                request_id=raw["id"],
+            ))
+            return Response(f"event: message\ndata: {body}\n\n",
+                            status_code=200, media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache, no-transform",
+                                     "X-Accel-Buffering": "no"})
+
     # Guard against transform accumulation: create_http_app() is called at
     # hosted_api import AND in every test fixture — each call would append a
     # new _HTTPToolFilter to the shared module-level mcp instance (code-review
@@ -4298,13 +4675,19 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         # Sets the curation-group ContextVar for the tools/list transform.
         middleware.append(group_mw)
 
+    # #3656: INNERMOST — it runs after security headers / body-size / auth /
+    # rate-limit have each had their say, immediately before the MCP transport,
+    # so the reason it reports is the LAST word on the request rather than a
+    # substitute for an auth or quota refusal. See the class docstring.
+    middleware.append(Middleware(ToolCallAdmissionMiddleware))
+
     return mcp.http_app(
         transport="streamable-http",
         stateless_http=True,
         host_origin_protection=True,
         allowed_origins=allowed_origins or [],
         allowed_hosts=allowed_hosts or [],
-        path="/",
+        path=mcp_path,
         middleware=middleware,
     )
 
