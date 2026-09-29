@@ -1474,6 +1474,11 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm — drives ask_lane.run_ask_assembled/run_ask_lane (also under `eval`)
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
+  # #5534: the D3/A4 instrument's INPUT guard — the fixture seeder must seed
+  # the E3 search_keys substrate A4's PRF expansion harvests (unit /
+  # mechanism / arm-difference), and the shared capture-exact seeder must NOT
+  # (the golden-store contract).
+  - test_a4_instrument_input.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
@@ -2148,6 +2153,7 @@ durations:
   test_agent_ops_pack.py: 1.0
   test_ask_retrieval_levers.py: 0.9
   test_ask_retrieval_budget.py: 0.3
+  test_a4_instrument_input.py: 5.0  # locally measured (4.5s marginal; the ~14s once-per-leg import cost is not attributed to any file — #3400 method)
   test_ask_shape_rate_receipt_redaction.py: 0.2
   test_battery_arms_real.py: 0.9
   test_capability_catalog.py: 0.9
