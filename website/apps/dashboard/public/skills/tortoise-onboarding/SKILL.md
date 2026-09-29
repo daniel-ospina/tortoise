@@ -233,7 +233,8 @@ claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/ \
   --header "Authorization: Bearer ${TORTOISE_API_KEY}"
 ```
 
-`$TORTOISE_API_KEY` must be exported in your shell profile first
+`$TORTOISE_API_KEY` must be exported in the shell you run this in — and in
+your profile for later sessions
 (`export TORTOISE_API_KEY=<key>` in `~/.zshrc` / `~/.bashrc`). The shell
 expands it, so the key lands in **`~/.claude.json`** — local scope, under this
 project's entry: private to you, this project only, **never committed**.
@@ -322,8 +323,8 @@ grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<ke
 reads — the MCP HTTP client (`tortoise/mcp_client.py`), the hosted SDK
 (`tortoise/sdk.py`), the CLI (`tortoise/__main__.py`), and
 `serve --http --auth static` (`tortoise/auth.py`). Giving the MCP credential a
-different name is a legitimate policy choice (#3615) — but the committed
-`.mcp.json` expands `${TORTOISE_API_KEY}` from `process.env`, so a
+different name is a legitimate policy choice (#3615) — but the committable
+`.mcp.json` (project scope) expands `${TORTOISE_API_KEY}` from `process.env`, so a
 differently-named credential that is NOT also aliased sends an empty Bearer and
 401s while every entry point above goes unauthenticated — a config-name
 mismatch that reads as an auth failure (#5153). If the profile names it

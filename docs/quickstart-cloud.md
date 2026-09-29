@@ -41,7 +41,7 @@ The hosted endpoint is `https://api.premiselabs.co/mcp/`, and it only speaks **s
 Export the key first, then add this to your client's `.mcp.json` (Claude Code and Pi read this file; Cursor reads `.cursor/mcp.json` and expands only the `${env:…}` form) — the file is **committable**, so it carries the env reference, never the key:
 
 ```bash
-export TORTOISE_API_KEY=tt_YOUR_KEY   # in ~/.zshrc / ~/.bashrc — never in the JSON
+export TORTOISE_API_KEY=tt_YOUR_KEY   # in this shell, and in ~/.zshrc / ~/.bashrc
 ```
 
 ```json
