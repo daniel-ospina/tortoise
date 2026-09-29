@@ -33,7 +33,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.pack_registry import (  # noqa: E402
+from tortoise.pack_registry import (
     MAX_PROMPT_FRAGMENT_CHARS,
     MAX_PROMPT_FRAGMENT_TOKENS,
     MAX_PROMPT_FRAGMENTS_TOKENS,

@@ -1142,13 +1142,14 @@ class PackRegistry:
                         f"extraction.relationTemplates[{i}].predicate "
                         f"'{template_pred}' must be camelCase"
                     )
-                if "fromKind" in tpl or "toKind" in tpl:
-                    if "fromKind" not in tpl or "toKind" not in tpl:
-                        errors.append(
-                            f"extraction.relationTemplates[{i}]: both fromKind "
-                            f"and toKind are required when either is given "
-                            f"(a half-declared shape cannot be matched)"
-                        )
+                if ("fromKind" in tpl or "toKind" in tpl) and (
+                    "fromKind" not in tpl or "toKind" not in tpl
+                ):
+                    errors.append(
+                        f"extraction.relationTemplates[{i}]: both fromKind "
+                        f"and toKind are required when either is given "
+                        f"(a half-declared shape cannot be matched)"
+                    )
                 if mechanism is not None and mechanism not in ("IMPL", "NAND"):
                     errors.append(
                         f"extraction.relationTemplates[{i}].mechanism must be "
