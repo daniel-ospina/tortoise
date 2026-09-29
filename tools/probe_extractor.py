@@ -12,18 +12,28 @@ SYSTEM's output directly and the loop calibrates the rubric.
 This is the bootstrap probe: the rubric prompt here is the lineage of the
 future value_brief + value_extractor prompts.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/probe_extractor.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/probe_extractor.py`"
+    )
 
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
+from pathlib import Path as _Path
 
 # ── Ontology vocabulary + SEMANTICS — compiled at runtime from the merged
 # packs (PackRegistry, the canonical source — same lineage as the value brief)
 import yaml
-from pathlib import Path as _Path
 
 
 def _compile_vocab(packs_dir: _Path) -> dict:
