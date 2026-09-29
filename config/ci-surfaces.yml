@@ -763,6 +763,21 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6144: the required-status-check set is declared in THREE places — live
+  # branch protection, `.mergify.yml`'s queue_conditions/merge_conditions, and
+  # `.github/settings.yml`. Nothing read two of them: `.mergify.yml` stated the
+  # invariant in a COMMENT and carried a hand-maintained "Last reconciled …"
+  # line. This test pins the guard that asserts all three agree, that every
+  # condition the queue waits on — `queue_conditions` (entry, evaluated against
+  # the PR head) and `merge_conditions` (merge, against the queue branch) — is
+  # producible on a PR-like ref, since an unproducible name in EITHER stalls
+  # every PR, and that `python-ci-gate`'s `needs:` and its `LEGS` verdict table
+  # describe the SAME set (a leg in `needs:` with no row escapes fail-closed on
+  # `skipped` — the #5219 shape from the other door).
+  # Hermetic: no DB, no network; the `--live` path is env-gated. Registered in
+  # `core` beside the other gate pins (`test_ci_selection.py`,
+  # `test_merge_throughput.py`) because it constrains CI config, not the engine.
+  - test_required_set_sync.py
   # #5215 (merge-throughput plan, Task 3): the queue-window observer that feeds
   # M3/M4/M5/M6 records to the instrument. Hermetic (no DB, no network) — it
   # pins tools/queue_window_observe.py, which `core` runs on engine-wide changes.
@@ -2018,6 +2033,11 @@ durations:
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
+  # #6144: measured floor over 3 runs on the dev box (19.0 / 21.2 / 23.4s); the
+  # spread is fleet I/O contention, not the guard (user+sys ~4s). The YAML parses
+  # are memoized on (path, mtime, size) so the 2.2k-line python-ci.yml is read
+  # once per process instead of twice per run() call.
+  test_required_set_sync.py: 19.0
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5
