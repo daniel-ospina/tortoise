@@ -469,6 +469,14 @@ jobs:
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
           tail -n 300 /tmp/pmv-pytest.log
+          # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
+          # post-summary interpreter-exit noise fills it and pushes BOTH the
+          # session summary and the `-r fEs` report above the cut, so the log
+          # stops saying whether the leg finished. This leg carries no nodeid
+          # grep either, so the tail was its ONLY attribution channel. Read the
+          # summary from the FULL log instead, and name the INCOMPLETE case out
+          # loud. One definition: .github/scripts/pytest-attribution.sh.
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pmv-pytest.log --rc "$rc"
           # 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the
           # count banner must print for all three (#880).
