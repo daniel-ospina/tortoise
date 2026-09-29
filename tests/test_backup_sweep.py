@@ -33,6 +33,7 @@ from tortoise.backup_sweep import (
     run_graph_purge,
     org_graph_name,
 )
+from tortoise.backup_ledger import BACKUP_OBJECT_SUFFIXES
 from tortoise.hosted_backup import MemoryStorage, list_backups, source_dialect
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
@@ -1683,6 +1684,11 @@ def test_sweep_writes_flat_index_and_prunes_custom_flats_on_default_failure(shar
         # Pre-#2313 C5-era flat dumps: one for the DEFAULT, one for the CUSTOM
         default_bid = _seed_flat_for_sweep(store, "team_fi", _team_graph("team_fi"), 0.1)
         custom_bid = _seed_flat_for_sweep(store, "team_fi", ns, 0.1)
+        # #5062 review F4: a flat artifact that carries a ledger must not be
+        # orphaned by the custom-era cleanup — the cleanup must route through
+        # the shared object set, not a hardcoded dump+manifest pair. Pre-fix
+        # this ledger survives the drain (the assertion below fails).
+        store.upload(f"backups/{custom_bid}/ledger.json", b"{}")
 
         r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                               config=_config())
@@ -2522,7 +2528,7 @@ def test_sweep_mirrors_accepted_archive_when_configured(shared_proj):
 
         prim_keys = sorted(store.list("backups/team_x/"))
         mir_keys = sorted(mirror.list("backups/team_x/"))
-        assert len(prim_keys) == 2  # dump.enc + manifest.json
+        assert len(prim_keys) == len(BACKUP_OBJECT_SUFFIXES)  # dump.enc + manifest.json + ledger.json
         assert mir_keys == prim_keys  # keys preserved byte-for-byte
         # read-back integrity: mirrored ciphertext matches the primary
         for k in prim_keys:
@@ -2574,7 +2580,7 @@ def test_sweep_mirror_failure_is_loud_and_primary_survives(shared_proj):
         assert "mirror failed" in default_res["error"]
         # the primary archive is intact (durable regardless of the mirror)
         prim_keys = sorted(store.list("backups/team_x/"))
-        assert len(prim_keys) == 2
+        assert len(prim_keys) == len(BACKUP_OBJECT_SUFFIXES)
         assert [k for k in prim_keys if k.endswith("dump.enc")]
         # and the streak is recorded so /status surfaces the breach
         assert res["graph_error_streaks"].get("team_x:default") == 1

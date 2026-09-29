@@ -3748,3 +3748,172 @@ def test_collect_durations_map_disjoint_keys_is_unknown(monkeypatch):
     assert payload["durations_map"]["compared_keys"] == 0
     assert "diverged" not in payload
     assert mt.run_check("durations-map", json=payload, max_age_days=14) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 8 (#5215 D13) — the main-health signal for the five pull_request-only
+# required contexts. Spec: plan §10 Task 8.
+#
+# These pin the WIRING (the deliverable) by parsing the workflow files: a
+# check-run can only appear on `main` for a required context if ci.yml is
+# callable and the job still answers to the context's name. They are hermetic
+# (YAML + the module's own map), never a live read.
+# ---------------------------------------------------------------------------
+
+FIVE_MAIN_HEALTH_CONTEXTS = [
+    "pricing-artifact",
+    "docs",
+    "test-isolation",
+    "license-surface",
+    "legal-e2e",
+]
+WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+
+
+def _load_workflow(name):
+    import yaml  # third-party, not in the module's stdlib-only import set
+
+    return yaml.safe_load((WORKFLOWS_DIR / name).read_text())
+
+
+def _on_block(workflow):
+    # PyYAML reads the bare `on:` key as the boolean True.
+    return workflow.get(True) if True in workflow else workflow.get("on")
+
+
+def test_main_health_context_mapping_pins_the_real_reusable_name_shape():
+    # GitHub names a reusable workflow's check runs `<caller job> / <called
+    # job>` — verified live in this repo on `dashboard-js-tests`' node-ci call
+    # (`dashboard-js-tests / unit-test`). The nightly emits `main-health / docs`,
+    # NOT a bare `docs`; the mapping must resolve the prefixed shape.
+    for ctx in FIVE_MAIN_HEALTH_CONTEXTS:
+        assert mt.main_health_context(f"{mt.MAIN_HEALTH_CALLER} / {ctx}") == ctx
+    # Negative control: an unknown called job is NOT silently mapped to a
+    # context — it stays NO_MAIN_SIGNAL under its real name.
+    unknown = f"{mt.MAIN_HEALTH_CALLER} / not-a-context"
+    assert mt.main_health_context(unknown) == unknown
+    # A bare name still resolves (non-reusable shape unchanged).
+    assert mt.main_health_context("docs") == "docs"
+
+
+def test_main_health_caller_matches_the_nightly_workflow_job():
+    """The prefix constant must track the caller job's effective name."""
+    jobs = _load_workflow("main-health-nightly.yml")["jobs"]
+    assert "main-health" in jobs, "the caller job id must be `main-health`"
+    job = jobs["main-health"]
+    # Both the job id and its (optional) `name:` are the GitHub prefix source;
+    # pin both so a rename of either cannot silently re-break the mapping.
+    assert (job.get("name") or "main-health") == mt.MAIN_HEALTH_CALLER
+    assert mt.MAIN_HEALTH_CALLER == "main-health"
+
+
+def test_strict_main_gate_resolves_the_prefixed_main_health_name(monkeypatch):
+    """Discriminating: the shape the reusable call actually emits resolves.
+
+    Required `pricing-artifact`, run `main-health / pricing-artifact`: without
+    the prefix-strip this is NO_MAIN_SIGNAL and (no observed success) exit 2.
+    """
+    prefixed = f"{mt.MAIN_HEALTH_CALLER} / pricing-artifact"
+    payload = _gate([_gcheck(prefixed, "success")], ["pricing-artifact"])
+    assert run_check("main-gate", json=payload, strict=True) == 0
+    # Control: neutralise the mapping and the same run is excluded → 2.
+    monkeypatch.setattr(mt, "MAIN_HEALTH_JOB_ID_TO_CONTEXT", {})
+    monkeypatch.setattr(mt, "MAIN_HEALTH_CALLER", "no-such-caller")
+    assert run_check("main-gate", json=payload, strict=True) == 2
+
+
+def test_ci_yml_declares_the_main_health_workflow_call_input():
+    on = _on_block(_load_workflow("ci.yml"))
+    assert "pull_request" in on, "the PR trigger must remain"
+    call = on.get("workflow_call")
+    assert isinstance(call, dict), "ci.yml must be callable (Task 8)"
+    spec = call.get("inputs", {}).get("main_health")
+    assert isinstance(spec, dict)
+    assert spec.get("type") == "boolean"
+    assert spec.get("default") is False
+
+
+def test_the_five_required_jobs_always_run_and_are_not_name_shadowed():
+    jobs = _load_workflow("ci.yml")["jobs"]
+    for ctx in FIVE_MAIN_HEALTH_CONTEXTS:
+        job = jobs.get(ctx)
+        assert job is not None, f"{ctx} is not a job in ci.yml"
+        # A required job that is `needs:`/`if:`-gated can be SKIPPED, and a
+        # skipped required job reports SUCCESS (#2055) — a green signal that
+        # never ran. The main-health call relies on these always running.
+        assert "needs" not in job, f"{ctx} must not be needs-gated"
+        assert "if" not in job, f"{ctx} must not be if-gated"
+        # A `name:` changes the emitted check-run name away from the required
+        # context (emitter-map rule: `name` wins over job id).
+        assert job.get("name") in (None, ctx), (
+            f"{ctx} carries name={job.get('name')!r}; the check-run would not "
+            f"be named {ctx!r}"
+        )
+
+
+def test_changes_job_honours_main_health():
+    changes = _load_workflow("ci.yml")["jobs"]["changes"]
+    step = next(s for s in changes["steps"] if s.get("id") == "gate")
+    run = step["run"]
+    assert "inputs.main_health" in run, "changes must short-circuit main_health"
+    assert "exit 0" in run
+
+
+def test_docs_job_main_health_uses_a_safe_post_merge_gate():
+    steps = _load_workflow("ci.yml")["jobs"]["docs"]["steps"]
+    checkouts = [
+        s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")
+    ]
+    assert any(s.get("with", {}).get("fetch-depth") == 0 for s in checkouts), (
+        "the main_health checkout must set fetch-depth: 0"
+    )
+    # The PR path must be inert under main_health (there is no PR base on a
+    # schedule, and #2386's fail-closed check would otherwise red the nightly).
+    changed = next(s for s in steps if s.get("id") == "changed")
+    assert "main_health" in changed.get("if", "")
+    mh = next(s for s in steps if s.get("id") == "changed_mh")
+    assert "main_health" in mh.get("if", "")
+    assert "HEAD^" in mh["run"]
+    # A deleted/renamed-away .md path does not exist on disk and lychee
+    # hard-errors on a nonexistent input — the list must be AC(M)R only.
+    assert "--diff-filter" in mh["run"] and "ACMR" in mh["run"]
+    # Filenames are PR-author-controlled: they must never be interpolated into a
+    # shell command (#4449). markdownlint consumes them as ARGV; lychee reads a
+    # FILE — neither via `${{ ... }}` text expansion.
+    lint = next(
+        s for s in steps if str(s.get("name", "")).startswith("Markdownlint (main health")
+    )
+    assert "xargs -0" in lint["run"]
+    assert "${{ steps.changed_mh" not in lint["run"]
+    link = next(
+        s for s in steps if str(s.get("name", "")).startswith("Link check (main health")
+    )
+    assert "--files-from" in link["with"]["args"]
+    assert "${{ steps.changed_mh" not in link["with"]["args"]
+    # A link-free markdown file is legitimate: the action's failIfEmpty default
+    # (true) would red the nightly on common prose-only commits.
+    assert link["with"].get("failIfEmpty") is False
+
+
+def test_main_health_nightly_calls_ci_yml_and_never_gates_main():
+    wf = _load_workflow("main-health-nightly.yml")
+    on = _on_block(wf)
+    assert set(on) == {"schedule", "workflow_dispatch"}, (
+        "D13 chose nightly/on-demand — a push/PR trigger would pay the CI time "
+        f"the plan exists to cut; got {sorted(on)}"
+    )
+    job = wf["jobs"]["main-health"]
+    assert job["uses"] == "./.github/workflows/ci.yml"
+    assert job["with"]["main_health"] is True
+    assert job.get("secrets") == "inherit"
+
+
+def test_inbound_relay_keeps_both_mergify_exemption_belts():
+    text = (WORKFLOWS_DIR / "inbound-relay.yml").read_text()
+    # Two INDEPENDENT belts (#3558): either alone exempts Mergify's batch PR;
+    # only removing BOTH re-breaks the relay and dequeues every queued PR.
+    assert "github.actor != 'mergify[bot]'" in text
+    assert (
+        "startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')"
+        in text
+    )

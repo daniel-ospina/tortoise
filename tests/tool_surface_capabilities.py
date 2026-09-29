@@ -211,12 +211,13 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_packs_list", "tortoise_entity_profile", "tortoise_analyze",
 })
 
-# Writer-annotated tools that are NOT in WRITE_TOOL_NAMES because they are
-# HTTP-excluded (operator-only) and self-guard with _http_excluded_error().
-NON_HTTP_WRITER_TOOLS: frozenset[str] = frozenset({
-    "tortoise_backfill_v25", "tortoise_dream", "tortoise_index_sessions",
-    "tortoise_ingest_corpus", "tortoise_org_create",
-})
+# #4474 removed `NON_HTTP_WRITER_TOOLS` — the last hand-maintained parallel name
+# list of writer-annotated, `http_policy=False` entries that were served as reads.
+# The five it named now declare `writes=True` (#4170: the permission lives on the
+# entry), so `WRITE_TOOL_NAMES` is the single authority and the exemption is
+# empty by construction. `exemption_set_violations` below is the property that
+# replaced it — an annotation/flag coherence check, broader than the name list it
+# stood in for.
 
 
 def served_registry() -> list:
@@ -908,7 +909,14 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
             elif not handler_self_guards(e.name, mcp_src):
                 out.append(
                     f"{e.name}: HTTP-excluded writer whose handler does not self-guard")
-        # 2b — writer-annotated must be write-classified or self-guarded
+        # 2b — writer-annotated must be write-classified or self-guarded.
+        # The self-guard branch is deliberate and stays (#4474's issue comment
+        # pins it; `test_T1_exempted_tool_without_self_guard_fails` exercises
+        # it): an HTTP-excluded graph writer must self-guard. On a coherent
+        # registry the branch is reached only by a writer-annotated entry
+        # OUTSIDE WRITE_TOOL_NAMES — empty since #4474, and that class is caught
+        # by `exemption_set_violations` — so this arm remains the handler-side
+        # cross-check plus the synthetic-probe path, not the primary guard.
         writer_annotated = (
             e.annotations is not None and e.annotations.readOnlyHint is False
         )
@@ -1031,19 +1039,36 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
 
 
 def exemption_set_violations(entries) -> list[str]:
-    """The tool-level non-HTTP exemption must be exactly NON_HTTP_WRITER_TOOLS."""
-    import tortoise.mcp_server as _ms
+    """An entry's read/write ANNOTATION and its declared `writes` flag must be
+    the same statement, over the whole served set.
 
-    exempt = {
-        e.name for e in entries
-        if e.annotations is not None and e.annotations.readOnlyHint is False
-        and e.name not in _ms.WRITE_TOOL_NAMES and e.http_policy is False
-    }
-    if exempt != set(NON_HTTP_WRITER_TOOLS):
-        return [
-            f"non-HTTP writer exemption set mismatch: got {sorted(exempt)} "
-            f"expected {sorted(NON_HTTP_WRITER_TOOLS)}"]
-    return []
+    This used to pin "writer-annotated AND NOT in WRITE_TOOL_NAMES AND
+    `http_policy is False`" to exactly `NON_HTTP_WRITER_TOOLS` — the five entries
+    that were writer-annotated yet served as reads (#4474). After those five
+    declared `writes=True` (#4170: the permission lives on the entry) the
+    exemption is empty, so that name-list equality is either a permanent false
+    red (list kept at its five names) or a narrower, one-directional restatement
+    keyed to `http_policy is False` (list emptied to match). It is restated as
+    the property it was approximating and could only ever see half of:
+    `readOnlyHint` and the declared `writes` flag must agree, in both
+    directions, for any entry. A `_rw()`/`_idem()` entry with `writes=False` —
+    the #4474 defect — still fails (pinned by the rogue probes in
+    `test_exemption_set_is_exact`).
+
+    Note this is the ANNOTATION half, not the handler half: a handler that
+    reaches a graph mutation is caught by `write_classification_violations`.
+    """
+    out: list[str] = []
+    for e in entries:
+        if e.annotations is None:
+            continue
+        annotated_write = e.annotations.readOnlyHint is False
+        if annotated_write != bool(e.writes):
+            out.append(
+                f"{e.name}: writer annotation and declared `writes` disagree — "
+                f"readOnlyHint={e.annotations.readOnlyHint}, writes={e.writes} "
+                f"(#4170: the entry's `writes` flag is the permission)")
+    return out
 
 
 def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
