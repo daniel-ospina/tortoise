@@ -165,6 +165,20 @@ async function isAdmin(env: AdminGateEnv, accessToken: string): Promise<{ kind: 
   }
 }
 
+// #3955: an ASSET request is a subresource the browser loads as a module or a
+// stylesheet (`/admin/assets/index-<hash>.js|css`). It must NEVER be answered
+// with the HTML shell or an HTML redirect: the browser rejects the module on
+// MIME type and the page blanks, which masks a missing chunk (or an expired
+// session) as a SUCCESSFUL response. A pure predicate so the test harness can
+// execute it under node.
+function isAssetRequest(request: Request): boolean {
+  try {
+    return new URL(request.url).pathname.startsWith("/admin/assets/");
+  } catch {
+    return false;
+  }
+}
+
 async function serveShell(env: Env, request: Request): Promise<Response> {
   // Real assets (built SPA bundles: /admin/assets/*.js|css, etc.) pass through
   // — the gate must NOT answer them with the HTML shell (MIME mismatch).
@@ -184,6 +198,19 @@ async function serveShell(env: Env, request: Request): Promise<Response> {
       return new Response(assetRes.body, { status: assetRes.status, headers: assetHeaders });
     }
     return assetRes;
+  }
+
+  // #3955: a non-ok response under `/admin/assets/` is a MISSING ASSET, not a
+  // client route. Falling through to the shell answers it 200 text/html, and
+  // the browser then refuses the module ("expected a JavaScript module script
+  // but the server responded with a MIME type of text/html") — a chunk dropped
+  // by a deploy presents as a blank console with no signal. Return a real 404
+  // as plain text instead of the shell.
+  if (isAssetRequest(request)) {
+    return new Response("Asset not found.", {
+      status: 404,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", ...HSTS },
+    });
   }
 
   // Client route → serve the shell. #1864: every admin-shell response carries
@@ -293,6 +320,17 @@ export const onRequest: PagesFunction<AdminGateEnv> = async ({ request, env }) =
 
   switch (gateDecision({ configured, token: handle, session: session.kind, admin: admin.kind })) {
     case "auth":
+      // #3955: the session can expire BETWEEN the document load and the
+      // subresource loads. Bouncing a module to /auth hands the browser HTML
+      // where it expects JavaScript (MIME rejection, blank page). Fail the
+      // subresource cleanly — the DOCUMENT's own gate still owns the
+      // navigation to /auth, so the user is not stranded.
+      if (isAssetRequest(request)) {
+        return new Response("Session required.", {
+          status: 401,
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", ...HSTS },
+        });
+      }
       return redirectToAuth(returnTo);
     case "not-admin":
       return notAnAdmin();
