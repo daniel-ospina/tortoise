@@ -54,10 +54,16 @@
 #      Read the mode before reasoning about the list; the same list behaves
 #      differently under the two modes.
 #
-# Last reconciled with the live required set: 2026-09-26
+# Last reconciled with the live required set: 2026-09-29
 #   queue_conditions (entry) : pricing-artifact, docs, test-isolation,
 #                              license-surface, legal-e2e
 #   merge_conditions (merge) : python-ci-gate
+#   required, NOT listed     : ai-review-gate — enforced at the MERGE by the
+#                              branch-protection injection below, so naming it here
+#                              would additionally make it an ENTRY gate. The live
+#                              required set is SEVEN names, not six (#6144);
+#                              `.github/scripts/check-required-set.py` asserts all
+#                              of this, including the count.
 
 # ── Parallel speculative checks — test several batches at once ────────────────
 #
@@ -203,7 +209,9 @@ queue_rules:
 #     · #3016 — the base race this queue exists to remove
 #     · #5215 — merge throughput, and what the click actually cost
 #     · #5426 — `ai-review-gate` is red whenever no valid recorded review marker
-#       exists for the PR, and it is not a required context
+#       exists for the PR. It IS a required context (required on `main`), and it is
+#       enforced at the merge by the branch-protection injection relying on the
+#       `merge` mode above — see the reconciliation block earlier in this file
 #     · #5433 — the review record is enforced only by LOCAL tooling
 #       (`review-enforcer` and `scripts/atomic-land.sh`); Mergify merges
 #       server-side, so no step on that path reads it
