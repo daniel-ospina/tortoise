@@ -29,13 +29,21 @@ on:
       - 'tools/redis-guard.py'
       - '.github/workflows/redis-guard.yml'
   # H20: GitHub cannot report a required check for a workflow a `paths:` filter
-  # skipped, so a filtered required check would sit pending forever on a
+  # skipped, so a filtered check that is required sits pending forever on a
   # non-matching PR. redis-guard is NOT required today (measured 2026-09-30), but
-  # .github/settings.yml still declares it as required — that file is stale in
-  # BOTH directions (it omits the 7 real contexts and sets strict: true, where
-  # live protection is strict: false) and must be reconciled. This dispatch
-  # trigger is the escape hatch in the meantime: a maintainer can force the
-  # check on a PR the filter skipped.
+  # the declaration-home file still names it as required — it is stale in BOTH
+  # directions (it omits the 7 real contexts and sets strict: true, where live
+  # protection is strict: false). Reconciling that file is owner decision D9
+  # (#3467) and is deliberately NOT done here.
+  #
+  # `workflow_dispatch` below is a MANUAL-RUN affordance ONLY. It does NOT
+  # satisfy a required status check: GitHub evaluates checks only for push /
+  # pull_request / pull_request_review / pull_request_target / deployment, so a
+  # dispatch run's checks never join the PR's check set (GitHub docs: "Checks
+  # from some workflow jobs are not evaluated"). If the declaration-home file is
+  # ever applied, the remedies are to stop requiring redis-guard, or to move the
+  # filter INSIDE an always-on job behind an aggregate gate, the way
+  # python-ci-gate does.
   workflow_dispatch:
 
 # #6590: with no concurrency group every push ADDS an uncancellable run to an
