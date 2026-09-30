@@ -1445,19 +1445,15 @@ def test_no_required_check_names_a_fast_leg():
     assert "test (" not in mergify_code, \
         "no enforced mergify line may name a shard leg — the shard set changes with S"
     assert "      - check-success=python-ci-gate" in mergify_code
-    # The LIVE required set is a GitHub API surface. Its in-repo PROJECTION is
-    # the guard's own record (mcg.RECORD_REL), written from that API surface and
-    # only while a live read is SATISFIED. It is NOT a mirror of the declaration
-    # home: the equality check between them is inert today (the record's own
-    # consistency flag is false, D9 pending) and no leg has ever appeared in the
-    # declaration home's own list. Read the PROJECTION, never the declaration
-    # home — a test or tool reading the declaration home is what makes it
-    # silently live, and clause viii(b) of the guard refuses exactly that
-    # (reading it here turned this file into a reported divergence).
+    # The LIVE required set is a GitHub API surface; its in-repo projection is the
+    # guard's record (mcg.RECORD_REL). Read the PROJECTION, never the declaration
+    # home: a test or tool reading the declaration home is what makes it silently
+    # live, and clause viii(b) of the guard refuses exactly that — reading it here
+    # turned this file into a reported divergence.
     record = json.loads((REPO / mcg.RECORD_REL).read_text())
-    # Anchor the field BEFORE testing it: a truncated, emptied or renamed list
-    # would satisfy the comprehension below silently, which is a pin that cannot
-    # fail. `python-ci-gate` is the aggregate every merge keys on.
+    # Anchor the field before testing it, so an emptied or renamed list cannot
+    # satisfy the comprehension below silently. `python-ci-gate` is the
+    # aggregate every merge keys on.
     assert "python-ci-gate" in record["required_contexts"], (
         f"{mcg.RECORD_REL} no longer names python-ci-gate — the required-context "
         "list moved or emptied, so the shard-leg check below would read empty and pass")
