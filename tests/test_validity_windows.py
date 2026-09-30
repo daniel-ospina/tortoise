@@ -771,6 +771,121 @@ def test_window_end_equal_start_allowed():
                        stored_vf="2026-06-10T00:00:00Z") == "2026-06-10T00:00:00Z"
 
 
+def test_window_end_falsey_but_present_orderable_start_is_used():
+    """#3985 — a FALSEY-but-PRESENT, ORDERABLE start is the successor's real
+    window start, not an absent one.
+
+    ``stored_vf`` is the successor's own stored ``validFrom``, and the read
+    path reads it with ``_covers``'s ``is not None`` presence predicate, so a
+    numeric ``0`` is the epoch-0 instant there.  This resolver gated on
+    truthiness, so it skipped ``0`` and fell back to ``successor_created_at`` —
+    a value INSIDE the read path's ``[epoch 0, ∞)`` successor window.  The
+    predecessor's end then landed inside the successor's window and
+    ``restore_point_at`` reported a 2-candidate ``ambiguous`` instead of the
+    successor.
+
+    Value that makes it fail: ``stored_vf = 0`` (or ``0.0``).  Pre-fix both
+    assertions below see the ``successor_created_at`` fallback
+    (``'2026-09-28T00:00:00+00:00'``); post-fix they see ``0`` / ``0.0``.
+    The fixture reaches the value — ``create_point`` accepts any caller
+    ``validFrom`` and stores it verbatim, so ``0`` is a real graph state (the
+    probe that pinned this issue created one and read back ``validFrom == 0``;
+    the #5358 sibling's ``test_falsey_but_present_valid_from_is_a_real_past_
+    start`` writes the same value through the public path).
+
+    An OPEN predecessor window is the shape where the fixed branch is
+    observable as a plain value: there is no start to compare against, so no
+    inversion is possible and the resolution's answer is the return value.
+    """
+    created = "2026-09-28T00:00:00+00:00"
+    assert _window_end(None, stored_vf=0, successor_created_at=created) == 0
+    assert _window_end(None, stored_vf=0.0, successor_created_at=created) == 0.0
+    # Contiguity: an epoch-0 predecessor is the SAME instant, so the guard's
+    # strictly-before test does not fire and write == read exactly.
+    assert _window_end(0, stored_vf=0, successor_created_at=created) == 0
+    # Control — the fallback still applies when there is no stored start.
+    assert _window_end(None, stored_vf=None,
+                       successor_created_at=created) == created
+
+
+def test_supersede_refuses_epoch0_successor_over_a_dated_predecessor(sdk):
+    """#3985 end-to-end — the overlap is gone, replaced by the honest refusal.
+
+    The issue's own reproduction: a successor created with ``validFrom=0`` and
+    a predecessor dated ``'2026-06-01'``, superseded with NO ``valid_from``
+    kwarg (the documented fallback chain).
+
+    Measured on the pre-fix code, exactly as the issue reports: the supersede
+    SUCCEEDS with ``old.validTo == <successor.createdAt>``, and
+    ``restore_point_at`` then returns ``ambiguous=True`` with two candidates —
+    the successor's ``[0 .. None]`` window CONTAINS the predecessor's
+    ``['2026-06-01' .. createdAt]``.
+
+    Post-fix the same call raises, because epoch-0 precedes ``'2026-06-01'``: the
+    resolution now hands the guard the successor's real start, and the guard's
+    existing strictly-before test refuses the inverted window (#4021's
+    contract).  The refusal is the fix — a silent two-candidate ambiguity is
+    replaced by an error that names the route out.
+
+    Value that makes it fail: the successor's ``validFrom = 0``.  The fixture
+    reaches it — ``create_point`` stores it verbatim, asserted below so a
+    future change that normalises it away cannot let this test pass vacuously.
+
+    The refusal must leave the predecessor UNTOUCHED: it is raised before any
+    mutation, so no event is journaled and no half-write survives.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom=0)
+
+    assert _props(sdk, new["id"])["validFrom"] == 0, (
+        "the fixture must reach the epoch-0 start for this to mean anything"
+    )
+
+    with pytest.raises(ValueError, match="inverted window"):
+        sdk.supersede_point(old["id"], new["id"])  # NO valid_from kwarg
+
+    # No half-write: the predecessor still carries its original window and is
+    # not superseded, so a caller can retry with a repair rather than having
+    # to reverse a mutation.
+    op = _props(sdk, old["id"])
+    assert op["validFrom"] == "2026-06-01"
+    assert op.get("validTo") is None, f"predecessor was stamped: {op!r}"
+    assert op.get("status") != "superseded"
+
+
+def test_window_end_unorderable_starts_keep_their_old_behaviour():
+    """#3985 residual — the fix must change EXACTLY ONE case.
+
+    The natural "tidier" spelling of the fix is ``stored_vf is not None``,
+    and it is wrong in both directions.  This test pins the two inputs that
+    distinguish the predicates, so a later simplification is caught rather
+    than silently re-introducing a worse bug:
+
+    - ``''`` is falsey AND unorderable.  ``is not None`` would take it and
+      stamp the predecessor's end ``''``, which ``_covers`` reads as an OPEN
+      end (``(1, text) < (0, instant)`` is False) — so the predecessor would
+      cover every later instant and the successor would NEVER become the
+      answer.  That is worse than today's honest absence.  It must stay on the
+      ``successor_created_at`` fallback.
+    - ``'TBD'`` is TRUTHY and unorderable, and is a recorded deliberate
+      residual (it already resolved unparseably).  It must keep resolving to
+      the stored value, NOT be dropped to the fallback by an
+      orderability-only predicate.
+
+    Value that makes it fail: ``''`` and ``'TBD'`` as the stored successor
+    start.  Both fixtures reach them — ``create_point`` stores any caller
+    ``validFrom`` verbatim, and ``test_unparseable_predecessor_start_matches_
+    the_sibling_5358`` writes ``'TBD'`` through the same public path.
+    """
+    created = "2026-09-28T00:00:00+00:00"
+    # falsey + unorderable: unchanged (fallback), NOT the stored ''
+    assert _window_end("2026-06-01", stored_vf="",
+                       successor_created_at=created) == created
+    # truthy + unorderable: unchanged (stored), NOT the fallback
+    assert _window_end("2026-06-01", stored_vf="TBD",
+                       successor_created_at=created) == "TBD"
+
+
 def test_window_end_falsey_or_unparseable_start_refused():
     """B4/B5 — the PRESENCE predicate is ``is not None`` and the measure is
     ``_created_sort_key`` (the read path's), not truthiness.

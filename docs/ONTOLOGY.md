@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.18"
+title: "Tortoise — Canonical Ontology v3.19"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-27
+updated: 2026-09-28
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.18
+# Tortoise — Canonical Ontology v3.19
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -32,6 +32,26 @@ doc_status: live
 > **⭐ If this document and the code disagree, THIS DOCUMENT IS RIGHT and the code
 > has a defect.** The single exception is a *factual* error — the model itself
 > being wrong — which is corrected here and recorded in the changelog.
+>
+> **Changelog v3.19 (2026-09-28, issue #3985 — a falsey-but-ORDERABLE stored `validFrom` is a real window start):**
+> - §4.7 (`validTo`): the resolution branch and the read path now agree for every successor
+>   start both can *order*. `_supersede_window_end` resolved with a truthiness test while
+>   `_covers` gates on presence, so a stored `validFrom = 0` was a real epoch-0 start to the
+>   read path (`[epoch 0, ∞)`) but was treated as undated by the write path, which stamped the
+>   predecessor's `validTo` at the successor's `createdAt` — inside that window, so the
+>   predecessor and the successor both covered and `restore_point_at` returned a two-candidate
+>   `ambiguous` instead of the successor. The resolution now takes a present, **orderable**
+>   start (`is not None` and `_created_sort_key(...)[0] == 0`), so `0`/`0.0` becomes the
+>   predecessor's `validTo`; where it precedes the predecessor's own start the existing #4021
+>   guard refuses the write rather than persisting an inverted window.
+> - §4.7 (`validTo`): **narrows, and does not resolve,** the v3.13 sentence above. The
+>   falsey-**and-unorderable** `""` still falls through to `createdAt`, so `write != read` for
+>   `""` remains. Which of the two is intended — an OPEN window start or an ABSENT one — is an
+>   owner decision over temporal semantics, not a predicate alignment, so it is left open and
+>   tracked as **#6140** (deliberately not decided here; it is NOT #3982, which ruled on
+>   date-only parsing — a different question).
+> - Supersedes the v3.13 no-kwarg sentence's scope from "the falsey case" to "the
+>   falsey-and-unorderable case". This entry records only what the code now does.
 >
 > **Changelog v3.18 (2026-09-27 — issue #5025, owner ruling — `related` is the neutral association link and carries no EP):**
 > - §3.9: **`related` is defined.** It means *connected, and nothing more* — no

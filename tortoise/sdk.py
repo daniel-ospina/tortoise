@@ -2731,11 +2731,31 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     the predecessor became unreachable from every read surface with no error
     anywhere — a silent, permanent loss of the old fact.
 
-    Resolution order is unchanged and is the ONE home for it::
+    Resolution order is the same five SOURCES in the same order — a clause was
+    inserted, so the step list is not unchanged (#3985)::
 
-        str(valid_from) → stored_vf (truthiness) → successor_created_at → now
+        str(valid_from) → stored_vf (truthy) → stored_vf (falsey but
+        ORDERABLE — #3985) → successor_created_at → now
 
-    Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
+    The fourth step is #3985.  ``stored_vf`` is the successor's OWN stored
+    start, and the read path reads it with an ``is not None`` presence
+    predicate (``_covers``), so a numeric ``0`` is a REAL window start there —
+    the epoch-0 instant.  This resolver's truthiness test skipped it and fell
+    back to ``successor_created_at``, which lands INSIDE the read path's
+    ``[epoch 0, ∞)`` window: the predecessor and the successor then both cover
+    ⇒ a 2-candidate ``ambiguous`` answer instead of the successor.  Splitting
+    the falsey case out fixes the write/read divergence for ``0``.
+
+    It is a SEPARATE clause rather than ``stored_vf is not None`` so that
+    exactly one case changes.  ``is not None`` would also absorb the
+    falsey-but-UNPARSEABLE ``""``, stamping the predecessor's end ``""`` —
+    which ``_covers`` reads as an OPEN end, so the predecessor would cover
+    every later instant and the successor would never become the answer;
+    and an orderability-only predicate would drop the truthy-but-unparseable
+    ``"TBD"``, which the Scope note below records as a deliberate residual.
+    Both keep their current behaviour.
+
+    Returns the value AS PERSISTED.  The ``stored_vf`` branches stay RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
     (``_created_sort_key`` documents numeric epochs as supported and seeded
     corpora carry them) — passing it through ``str()`` makes it unparseable
@@ -2777,6 +2797,16 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     with no kwarg) is a SEPARATE residual — the orderability gap on the
     no-kwarg path — deliberately NOT absorbed here.
 
+    #3985's residual, stated so the next reader does not "tidy" it: the
+    falsey-but-unparseable ``""`` start still falls through to
+    ``successor_created_at``, so write != read for it.  Making it agree means
+    deciding whether ``""`` should be an OPEN end or an absent one, which is
+    a semantic choice of the same CLASS as #3982's (that one ruled on
+    date-only parsing; this is a different question) and an owner decision —
+    not a predicate alignment.  It is tracked as **#6140**.  What #3985 does
+    fix is the case where the two paths CAN be made to agree without one: a
+    start both paths can order.
+
     The ``valid_from``-vs-successor agreement guard is NOT here: it is
     reachable only when a kwarg is passed, and it stays inline at its
     reviewed call site.
@@ -2785,6 +2815,18 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     if valid_from is not None:
         succ_vf = str(valid_from)
     elif stored_vf:
+        succ_vf = stored_vf
+    elif stored_vf is not None and _created_sort_key(stored_vf)[0] == 0:
+        # #3985: a FALSEY-but-PRESENT start the read path CAN order (numeric
+        # ``0`` / ``0.0`` / ``False`` -> the epoch-0 instant).  ``_covers``
+        # gates on ``vf is not None``, so the read path already treats ``0``
+        # as a real window start; the truthiness test above skipped it and
+        # fell back to ``successor_created_at``, which lands INSIDE the read
+        # path's ``[epoch 0, ∞)`` window -> both candidates cover -> a
+        # 2-candidate ``ambiguous`` answer.  The orderability conjunct (the
+        # measure the guard itself uses) admits ONLY the case both paths can
+        # order: ``""`` keys as ``(1, text)`` and stays on the fallback, and
+        # the truthy-but-unparseable ``"TBD"`` still takes the clause above.
         succ_vf = stored_vf
     elif successor_created_at:
         succ_vf = successor_created_at
@@ -6858,16 +6900,23 @@ class TortoiseSDK:
         # always True) — an unparseable QUERY instant also keys as
         # `(1, <text>)` and IS covered by it, so `""` only hides the successor
         # from parseable queries, which land in the predecessor's window end
-        # instead. The resolution
-        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
-        # those two values it falls through to `createdAt`. The guard follows
-        # `_covers`: with a kwarg present it refuses rather than allow an
-        # unchecked window end against a start the read path treats as real
-        # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
-        # predecessor end the kwarg writes at or after epoch 0, and gaps
-        # before it). The no-kwarg falsey case keeps
-        # the pre-existing truthiness fallback — its read/write divergence is
-        # real and tracked in #3985, not silently redefined here.
+        # instead.
+        #
+        # The resolution branch below now follows `_covers` for the case both
+        # paths can ORDER: `elif stored_vf:` (truthy) then
+        # `elif stored_vf is not None and _created_sort_key(stored_vf)[0] == 0:`
+        # (#3985), so a numeric `0` is the predecessor's `validTo` — the
+        # epoch-0 instant the read path already keys it as. Only the
+        # falsey-but-UNORDERABLE `""` still falls through to `createdAt`;
+        # that remaining divergence is the #3985 residual. Deciding it is an
+        # owner call on temporal semantics, not a predicate alignment, so it
+        # is tracked as #6140 and deliberately left open here. (It is NOT
+        # #3982 — that one ruled on date-only parsing, a different question.)
+        # The guard follows `_covers`: with a kwarg present it refuses
+        # rather than allow an unchecked window end against a start the read
+        # path treats as real (a `validFrom=0` successor's `[epoch0, ∞)` window
+        # overlaps any predecessor end the kwarg writes at or after epoch 0,
+        # and gaps before it).
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
             params={"id": new_id},
