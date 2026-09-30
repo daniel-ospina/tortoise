@@ -2275,31 +2275,57 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
     fetch is indistinguishable from a complete one and the loss is silent.
 
     This is the same root three times over in this repo, each found by hand
-    after the data was already gone: `n-test-slow` x2 (the #3467 plan's
-    defect (i), observed as 13 of leg (b)'s files absent), the canary
+    after the data was already gone: `pytest-log-test-slow` x2 (the #3467
+    plan's defect (i), observed as 13 of leg (b)'s files absent), the canary
     producer name (#6135), and `pytest-log-test-slow` (#6263).
 
-    A fixed name in a matrix job is legitimate ONLY when the step's own `if:`
-    constrains the matrix, so just one leg can ever run it. That is why
-    `pytest-canary-producer` is safe — its `if:` requires
-    `matrix.canary_producer`. The rule is derived from the workflow, not kept
-    as a hand-maintained allowlist that the next edit silently outgrows.
+    A name is accepted when it interpolates a matrix key the job actually
+    declares, or when the step (or its job) carries an `if:` that names the
+    matrix — that is why `pytest-canary-producer` is safe, its `if:` requires
+    `matrix.canary_producer`. The matrix is resolved from the workflow, not
+    kept as a hand-maintained allowlist that the next edit silently outgrows.
+
+    Deliberately conservative, and NOT a proof of safety in the other
+    direction: an `if:` that merely mentions the matrix without constraining
+    it to one leg, a single-entry matrix (no fan-out to collide), and a
+    composite action wrapping `upload-artifact` all pass unremarked. It can
+    also only see `python-ci.yml`. It catches the observed defect class — a
+    fixed name in a real fan-out — and the typo'd-key variant below.
     """
     offenders = []
     for job_name, job in _load_python_ci()["jobs"].items():
-        if not (job.get("strategy") or {}).get("matrix"):
+        matrix = (job.get("strategy") or {}).get("matrix")
+        if not matrix:
             continue
+        # A `matrix:` built by `fromJSON(...)` is a string here and cannot be
+        # resolved statically; only a literal mapping can be checked for the
+        # key an interpolated name refers to.
+        declared: set[str] = set()
+        resolvable = isinstance(matrix, dict)
+        if resolvable:
+            declared.update(k for k in matrix if k != "include")
+            for row in matrix.get("include") or []:
+                if isinstance(row, dict):
+                    declared.update(row)
         for step in job.get("steps") or []:
             if not str(step.get("uses") or "").startswith("actions/upload-artifact"):
                 continue
             name = str((step.get("with") or {}).get("name") or "")
-            if "matrix." in name or "matrix." in str(step.get("if") or ""):
+            if "matrix." in str(step.get("if") or "") or "matrix." in str(job.get("if") or ""):
                 continue
+            if "matrix." in name:
+                # GitHub renders an UNDEFINED matrix property as the empty
+                # string, so a typo'd key yields the SAME name for every leg
+                # and the collision returns with the guard green.
+                keys = set(re.findall(r"matrix\.(\w+)", name))
+                if not resolvable or keys <= declared:
+                    continue
             offenders.append(f"{job_name} uploads {name!r}")
     assert not offenders, (
         "a matrix job uploads a fixed-name artifact, so its legs collide and "
         "one leg's files are overwritten by the other's without any check "
-        "failing (#6263; same root as #3467's n-test-slow defect and #6135): "
+        "failing (#6263; same root as the #3467 plan's pytest-log-test-slow "
+        "defect (i) and #6135): "
         + "; ".join(offenders))
 
 
