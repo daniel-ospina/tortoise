@@ -155,6 +155,17 @@ SHARED_MODULES = (
     "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # #6673: the docker-lane port/host seam, imported by 50+ test modules that
+    # are registered across every docker-lane surface (core, ep, sdk, api,
+    # eval) — `git grep -l _live_utils -- tests/` lists every file that touches
+    # it (the importers, plus a couple of mention-only references), and the count
+    # is deliberately not restated here because it drifts. A seam edit is
+    # therefore cross-surface by construction: the `_embedded.py` /
+    # `_tmpdir_hygiene.py` case below, at a larger blast radius, because the
+    # seam is now how the whole docker lane resolves its port. Without this
+    # entry a seam-only edit selects `core` and the other surfaces' consumers
+    # never run on the PR that made the edit.
+    "tests/_live_utils.py",
     # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
     # imported at conftest MODULE level and hand their fixtures to every surface's
     # tests, and neither is a `test_*.py` file, so the manifest never classifies
@@ -1318,7 +1329,7 @@ def push_legs(manifest: dict) -> dict:
     # neutral rather than dumping the whole bench set on one shard.
     extras = [f.replace(".py", "") for f in manifest.get("push_extra", [])]
     shards = []
-    for i, (label, bin_files) in enumerate(zip(labels, bins)):
+    for i, (label, bin_files) in enumerate(zip(labels, bins, strict=True)):
         # BARE names (no `.py`): the workflow's run step maps them with
         # `tests/<name>.py`, and `workflow_halves_issues` keys the manifest on
         # bare names too. A `.py` left here would be read as a file named
@@ -1364,7 +1375,7 @@ def build_shard_entries(files: list[str], durations: dict,
     bins = split_fast_gate(files, durations, shards=shards)
     labels = shard_labels(len(bins))
     entries = []
-    for label, bin_files in zip(labels, bins):
+    for label, bin_files in zip(labels, bins, strict=True):
         # BARE names — see push_legs: the workflow maps them with `tests/<n>.py`.
         names = sorted((f[len("tests/"):] if f.startswith("tests/") else f)
                        .replace(".py", "") for f in bin_files)
