@@ -2274,23 +2274,15 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
     a file count against a positive artifact count only at zero, so a partial
     fetch is indistinguishable from a complete one and the loss is silent.
 
-    This is the same root three times over in this repo, each found by hand
-    after the data was already gone: `pytest-log-test-slow` x2 (the #3467
-    plan's defect (i), observed as 13 of leg (b)'s files absent), the canary
-    producer name (#6135), and `pytest-log-test-slow` (#6263).
+    observed three times over in this repo, each found by hand after the data
+    was already gone: the #3467 plan's defect (i), the canary producer name
+    (#6135), and `pytest-log-test-slow` (#6263).
 
     A name is accepted when it interpolates a matrix key the job actually
-    declares, or when the step (or its job) carries an `if:` that names the
+    declares, or when the step (or its job) carries an `if:` that mentions the
     matrix — that is why `pytest-canary-producer` is safe, its `if:` requires
     `matrix.canary_producer`. The matrix is resolved from the workflow, not
     kept as a hand-maintained allowlist that the next edit silently outgrows.
-
-    Deliberately conservative, and NOT a proof of safety in the other
-    direction: an `if:` that merely mentions the matrix without constraining
-    it to one leg, a single-entry matrix (no fan-out to collide), and a
-    composite action wrapping `upload-artifact` all pass unremarked. It can
-    also only see `python-ci.yml`. It catches the observed defect class — a
-    fixed name in a real fan-out — and the typo'd-key variant below.
     """
     offenders = []
     for job_name, job in _load_python_ci()["jobs"].items():
@@ -2324,8 +2316,7 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
     assert not offenders, (
         "a matrix job uploads a fixed-name artifact, so its legs collide and "
         "one leg's files are overwritten by the other's without any check "
-        "failing (#6263; same root as the #3467 plan's pytest-log-test-slow "
-        "defect (i) and #6135): "
+        "failing (#6263; same root as the #3467 plan's defect (i) and #6135): "
         + "; ".join(offenders))
 
 
