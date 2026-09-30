@@ -1336,7 +1336,7 @@ async def _lifespan(app):
         # driver-disabled case is covered by construction. Spawned only when
         # the sweep config validates (fail-closed default keeps TestClient and
         # misconfigured deploys quiet) and not explicitly disabled for tests.
-        global _WATCHER, _WATCHER_START_ERROR
+        global _WATCHER, _WATCHER_START_ERROR, _WATCHER_EXPECTED
         # #2877: recompute watcher liveness per app instance. Without the
         # reset, a prior lifespan's start failure (or a stale thread) would
         # leak into /health on TestClient/app reuse — reporting a dead watcher
@@ -1360,6 +1360,16 @@ async def _lifespan(app):
             # every healthy non-production boot is training-to-ignore material for
             # the very signal #2922 needed.
             _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            # #4498: publish it to the module marker `_backup_watcher_health()`
+            # reads. The assignment sits ABOVE the `_not_started_reason` branch,
+            # so BOTH the `_watcher_expected` true and false cases reach the
+            # marker rather than only the logged one. Bounded, not unconditional:
+            # it is inside the `try`, after `cfg = _backup_config_safe()`, so an
+            # exception `_backup_config_safe` does not catch skips it and the
+            # marker keeps a prior boot's value. That path also sets
+            # `_WATCHER_START_ERROR`, so /health reports `failed` (degraded),
+            # never `disabled`+`ok` — the #4498 distinction is never corrupted.
+            _WATCHER_EXPECTED = _watcher_expected
             _not_started_reason = None
             if cfg is None:
                 _not_started_reason = (
@@ -3962,6 +3972,12 @@ def _backup_watcher_health() -> dict:
         alive (a dead monitor that must not read as healthy).
       * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
 
+    Every state also carries ``expected`` — whether THIS boot expected a
+    backup watcher at all (``_WATCHER_EXPECTED``, hosted marker only; #4498).
+    It makes "expected and absent" visible from /health, but it does NOT
+    affect ``ok``: a hosted deploy that legitimately runs without backups
+    stays ``ok``.
+
     Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
     ``status`` by the caller. Never raises and never 5xxes — a dead monitor
     must not kill a live process's liveness probe (#338).
@@ -3971,17 +3987,28 @@ def _backup_watcher_health() -> dict:
         if watcher is not None:
             thread = getattr(watcher, "_thread", None)
             if thread is not None and thread.is_alive():
-                return {"state": "running", "ok": True, "error": None}
+                return {"state": "running", "ok": True, "error": None, "expected": _WATCHER_EXPECTED}
             return {
                 "state": "stopped",
                 "ok": False,
                 "error": "watcher thread is not alive",
+                "expected": _WATCHER_EXPECTED,
             }
         if _WATCHER_START_ERROR is not None:
-            return {"state": "failed", "ok": False, "error": _WATCHER_START_ERROR}
-        return {"state": "disabled", "ok": True, "error": None}
+            return {
+                "state": "failed",
+                "ok": False,
+                "error": _WATCHER_START_ERROR,
+                "expected": _WATCHER_EXPECTED,
+            }
+        return {"state": "disabled", "ok": True, "error": None, "expected": _WATCHER_EXPECTED}
     except Exception as exc:  # liveness must answer, always
-        return {"state": "unknown", "ok": False, "error": str(exc)[:200]}
+        return {
+            "state": "unknown",
+            "ok": False,
+            "error": str(exc)[:200],
+            "expected": _WATCHER_EXPECTED,
+        }
 
 
 @app.get("/health")
@@ -27129,6 +27156,13 @@ _WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # 
 # the watcher starts cleanly, so the one signal it carries is "wanted but
 # failed". Read by `_backup_watcher_health()` for /health.
 _WATCHER_START_ERROR: str | None = None
+# #4498: whether THIS boot expected a backup watcher (hosted marker
+# FLY_APP_NAME, the same truthiness test the durability guard uses). Read by
+# `_backup_watcher_health()` for /health so an operator can tell "expected and
+# absent" from "intentionally off" WITHOUT reading the boot log. Default False
+# is the non-hosted/TestClient default, and must stay False so those boots keep
+# reporting `ok`.
+_WATCHER_EXPECTED: bool = False
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
