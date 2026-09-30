@@ -5366,8 +5366,16 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
     Both writes run off the event loop: the Supabase RPC / embedded registry
     write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
     blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
-    class). The analytics emit keeps its OWN best-effort handler — a ledger
-    failure is not an analytics failure and must not be labelled one.
+    class). The analytics emit goes through the SHARED off-loop entry point
+    (``_emit_analytics_off_loop`` → ``_cp_offload`` on the dedicated
+    ``telemetry`` pool, #4468) rather than the loop's SHARED default executor,
+    which the abuse hooks compete on — #4015 moved every other hosted funnel
+    emit there and left this lane for #4468. The ledger write stays on
+    ``asyncio.to_thread`` deliberately: it is a DIFFERENT op (the durable
+    per-period row the spend cap reads, not the analytics row), it has no
+    pooled seam that owns it, and moving it is not #4468's question. The
+    analytics emit keeps its OWN best-effort handler — a ledger failure is not
+    an analytics failure and must not be labelled one.
     """
     try:
         _cost_props = _capture_cost_props(session_id, meta)
@@ -5381,8 +5389,16 @@ async def _emit_capture_ledger(org_id: str, session_id: str,
         _alert_unmetered("capture_ledger", org_id, e)
         return
     try:
-        await asyncio.to_thread(
-            _track_analytics_event, org_id, "capture_cost", _cost_props)
+        # #4468: the analytics emit rides the shared off-loop entry point
+        # (telemetry pool) instead of the loop's shared default executor.
+        # ``_emit_analytics_off_loop`` deliberately lets the #3821 strict-mode
+        # ``UnregisteredTelemetryKey`` escape so a misregistered prop cannot be
+        # silently swallowed — and HERE that escape is deliberately re-caught
+        # by the handler below, because this function's contract is that a
+        # committed capture is never failed by bookkeeping. The onboarding
+        # wrapper (``_track_onboarding_event``) depends on the same raise, so
+        # do NOT "unify" the two sites by weakening either one.
+        await _emit_analytics_off_loop(org_id, "capture_cost", _cost_props)
     except Exception:  # noqa: BLE001, RUF100 — never block capture
         logging.getLogger("tortoise.api").exception(
             "capture_cost analytics emit failed (non-fatal)")
@@ -24712,11 +24728,12 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     """#4015: the shared off-loop entry point for a hosted funnel-event emit.
 
     It is the one entry point for the sites that #4352 routed through
-    ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
-    own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
+    ``_cp_offload``, and since #4468 it is also the capture-cost lane's
+    (``_emit_capture_ledger``) off-loop path: that lane used to keep its own
+    ``asyncio.to_thread`` call — still off-loop, but on the loop's SHARED
     default executor, which the abuse hooks and the selfhost readiness probe
-    also use, so it is not isolated the way this pool is — and ``mcp_server``
-    its own retained emitter. Moving the capture lane onto this pool is #4468.
+    also use, so it was not isolated the way this pool is. ``mcp_server`` keeps
+    its own retained emitter.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
