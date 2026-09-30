@@ -76,8 +76,8 @@ pytestmark = pytest.mark.embedded_only
 # trains a reader to retry the guard, making it worthless on the day it reports
 # a real regression. A timeout is now INCONCLUSIVE; a parked child is still a
 # FAIL regardless of timing (structural evidence beats a wall clock).
-from tests._verdict import inconclusive  # noqa: E402
 from tests._fork_safety_verdict import assert_fixed_race_verdict  # noqa: E402
+from tests._verdict import inconclusive  # noqa: E402
 
 _FIXTURE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -163,7 +163,7 @@ def _timeout_types() -> tuple[type[BaseException], ...]:
         except Exception:  # pragma: no cover - redis is a hard dependency
             _RedisTimeout = None  # type: ignore[assignment]
         if _RedisTimeout is not None and _RedisTimeout is not TimeoutError:
-            types = types + (_RedisTimeout,)
+            types = (*types, _RedisTimeout)
         _TIMEOUT_TYPES = types
     return _TIMEOUT_TYPES
 
