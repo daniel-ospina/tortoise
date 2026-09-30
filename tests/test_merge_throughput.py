@@ -2127,6 +2127,10 @@ def test_report_does_not_launder_a_failed_collector(monkeypatch):
     assert report["fast_files_unclassified"] is mt.UNKNOWN
     assert report["durations_map"]["sampled_keys"] is mt.UNKNOWN
     assert report["shard_imbalance_minutes"] is mt.UNKNOWN
+    # #6135: the newly surfaced critical-path metric must not be laundered
+    # either — a failed collector leaves it UNKNOWN, not 0.
+    assert report["max_shard_minutes"] is mt.UNKNOWN
+    assert report["shard_count"] is mt.UNKNOWN
     assert report["legs"] is mt.UNKNOWN
     assert report["diverged"] is None
 
@@ -3602,6 +3606,10 @@ def test_job_wall_seconds_defers_to_the_jobs_api_timestamps():
 def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
     import ci_timing
 
+    # #6135: the collector refuses a family that is not the CONFIGURED shard
+    # set, so this unit test states the set it is exercising (two legs) rather
+    # than depending on the repo's current `fast_shards`.
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: {"a", "b"})
     monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
         {"name": "test (a)", "conclusion": "success",
@@ -3622,6 +3630,7 @@ def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
 def test_collect_shard_balance_requires_both_legs(monkeypatch):
     import ci_timing
 
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: {"a", "b"})
     monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
         {"name": "test (a)", "conclusion": "success",
@@ -3629,6 +3638,57 @@ def test_collect_shard_balance_requires_both_legs(monkeypatch):
          "completed_at": "2026-09-27T16:36:30Z"},
     ])
     assert mt.collect_shard_balance() == {}
+
+
+def test_collect_shard_balance_refuses_a_partial_family(monkeypatch):
+    """#6135: a truncated Jobs-API read must be UNKNOWN, not a measurement
+    taken over 2 of the configured 9 shards (that under-reports max(shard))."""
+    import ci_timing
+
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: set("abcdefghi"))
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_collect_shard_balance_fails_closed_when_config_is_unreadable(monkeypatch):
+    """#6135: an UNREADABLE config must not skip the completeness check — that
+    would measure whatever page of jobs was fetched and under-report max(shard)
+    in exactly the degraded environment the guard exists for."""
+    import ci_timing
+
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: None)
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_shard_balance_check_requires_every_observed_leg_green():
+    """#6135: the check must not validate two of nine shards. A 9-leg payload
+    with a red shard outside a/b is a coverage failure, not a pass."""
+    def leg(c):
+        return {"conclusion": c, "wall_seconds": 300.0}
+    nine = {ch: leg("success") for ch in "abcdefghi"}
+    ok = {"shard_imbalance_minutes": 0.0, "legs": nine}
+    assert mt.run_check("shard-balance", json=ok, max=3) == 0
+    red_i = dict(ok, legs=dict(nine, i=leg("failure")))
+    assert mt.run_check("shard-balance", json=red_i, max=3) == 2
+    red_c = dict(ok, legs=dict(nine, c=leg("skipped")))
+    assert mt.run_check("shard-balance", json=red_c, max=3) == 2
 
 
 def test_diverged_duration_keys_flags_only_observed_overshoot():
