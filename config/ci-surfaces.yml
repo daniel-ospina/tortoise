@@ -1,4 +1,28 @@
 version: 1
+
+# #6135: how many parallel shards the fast pool (`test`) is split into. The PR
+# gate's critical path IS `max(shard)`, so this single number decides it.
+#
+# WHY A REVIEWED LITERAL (and not derived from `durations` per diff): the shard
+# set IS the required-check name set (`test (a)`, `test (b)`, …). The merge
+# rail's lane-parity subtracts the PR's job names from main's, and branch
+# protection / the Mergify queue name `python-ci-gate` — so a set that drifted
+# per diff would change an unreviewed contract run to run. Raising S here is a
+# one-line, reviewable change; the labels are positional letters so an S-adding
+# diff stays a SUPERSET of main's names (a rename would refuse every merge).
+#
+# The value (recomputable from the committed `durations` map:
+# `max(s['est_seconds'] for s in push_legs({**m, 'fast_shards': S})['shards'])`):
+# LPT puts max(shard) at 6.8 min of test time at S=9 (30.6 min at S=2, 5.6 at
+# S=11), and the measured per-shard fixed cost is ~3.4 min, so T ≈ 10.2 min —
+# at the epic's 10-minute goal. S≥12 buys nothing more: the largest single fast
+# file (`test_onboarding_state_split.py`, 310.7 s = 5.18 min) is then
+# max(shard) itself, which is #6133's floor expressed as a number. Raising this
+# trades WALL CLOCK for AGGREGATE runner time (~61 min of test time + ~9 × 3.4
+# min of setup ≈ 92 min at S=9, the same self-hosted capacity the epic is
+# trying to enlarge), so it is a wall-clock lever, not a free win.
+fast_shards: 9
+
 surfaces:
   api:
   - test_1162_add_operator_local_svbp.py
@@ -1474,6 +1498,11 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm — drives ask_lane.run_ask_assembled/run_ask_lane (also under `eval`)
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
+  # #5534: the D3/A4 instrument's INPUT guard — the fixture seeder must seed
+  # the E3 search_keys substrate A4's PRF expansion harvests (unit /
+  # mechanism / arm-difference), and the shared capture-exact seeder must NOT
+  # (the golden-store contract).
+  - test_a4_instrument_input.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
@@ -2148,6 +2177,7 @@ durations:
   test_agent_ops_pack.py: 1.0
   test_ask_retrieval_levers.py: 0.9
   test_ask_retrieval_budget.py: 0.3
+  test_a4_instrument_input.py: 5.0  # locally measured (4.5s marginal; the ~14s once-per-leg import cost is not attributed to any file — #3400 method)
   test_ask_shape_rate_receipt_redaction.py: 0.2
   test_battery_arms_real.py: 0.9
   test_capability_catalog.py: 0.9
