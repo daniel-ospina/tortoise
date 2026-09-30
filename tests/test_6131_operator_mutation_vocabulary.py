@@ -103,7 +103,12 @@ def test_the_readable_surfaces_name_the_generic_verbs() -> None:
     """Docstrings are the artifact for a discoverability defect (#6131, part 3)."""
     for fn, needle in (
         (TortoiseSDK.delete, "operator"),
-        (TortoiseSDK.update, "operator"),
+        # NOT the bare word "operator": that matches vacuously elsewhere in
+        # `update.__doc__` (`create_operator`, `<operator_id>`), so deleting the
+        # whole operator paragraph left all five tests GREEN (review cycle 3,
+        # P2). Pin the distinctive CLAIM instead of a word that happens to recur.
+        (TortoiseSDK.update, "edits an existing operator edge in place"),
+        (TortoiseSDK.update, "belongs to the operator-mutation vocabulary"),
         (TortoiseSDK.update, "list_relations"),
         # The DISCLOSURE itself, not just the pointer to the vocabulary. Pinning
         # only "list_relations" let the P2 regression return: a reviewer replaced
