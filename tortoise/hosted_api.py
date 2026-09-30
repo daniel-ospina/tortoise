@@ -23476,7 +23476,7 @@ _ALLOWED_ANALYTICS_PROPS = {
     # the PII filter or the measurement is silently lost.
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
-    "deadline_aborts", "by_stage",
+    "calls_without_tokens", "deadline_aborts", "by_stage",
     # #3824: provider calls the capture made that NO roll-up accounted for.
     # Without this key in the allowlist the counter is stripped here — the
     # documented #3359 loss mode — and F2 stays invisible even though the
@@ -24709,18 +24709,33 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # F1: zero provider calls. No measurement exists, so no row — a
         # fabricated $0 row here is the phantom the reader must never see.
         return None
+    # #5854: the emitter validates the token fields with the SAME normaliser
+    # the accumulator uses, so a future lane that builds its own ``meta``
+    # (the docstring's F2 concern) cannot reintroduce the fabricate/truncate
+    # defect downstream of the accumulator. Imported lazily: ``extractor_v2``
+    # is a documented cold-start cost and this lane always runs AFTER
+    # extraction, so the module is already loaded.
+    from tortoise.extractor_v2 import _normalise_token_count
     return {
         "session_id": session_id,
         "calls": int(llm.get("calls", 0) or 0),
         "retries": int(llm.get("retries", 0) or 0),
-        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
-        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "prompt_tokens": _normalise_token_count(llm.get("prompt_tokens")) or 0,
+        "completion_tokens": (
+            _normalise_token_count(llm.get("completion_tokens")) or 0),
         "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
         "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
         # #3359: a call that returned NO usage block at all (no tokens, no
         # charge) is a distinct disclosure from one that returned tokens but
         # no charge — both ride the row, so neither is silently a clean $0.
         "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #5854: calls whose provider TOKEN count was malformed (a bool, a
+        # fractional float, a negative, an absurd magnitude). Rejected, never
+        # shaped into a number — the counter races the row so the absence is
+        # disclosed. (``calls_without_usage`` cannot carry it: a rejected
+        # token can sit beside a valid sibling and a valid charge, so the
+        # call is not usage-less.)
+        "calls_without_tokens": int(llm.get("calls_without_tokens", 0) or 0),
         # #3359: deadline-killed generations are BILLED upstream but produce
         # no tokens, so they are spend this measurement cannot price. Carried
         # on the row so the report can disclose it instead of reading the
