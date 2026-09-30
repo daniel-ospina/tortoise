@@ -962,12 +962,20 @@ def _read_jev_key(git_bin: str, cwd: str) -> str | None:
     env_key = os.environ.get("JEV_API_KEY", "").strip()
     if env_key:
         return env_key
-    candidates: list[Path] = []
+    # An EXPLICIT override is the caller's declaration of where the credential
+    # lives, so it is AUTHORITATIVE: when it is set, the implicit candidates are
+    # NOT consulted. Prepending it to the list instead made "no key file"
+    # inexpressible — a caller that pointed this at a path carrying no key still
+    # picked one up from <repo-root>/.env, so a run intending to be OFFLINE made
+    # a real, billable JEV call while believing no credential existed, and the
+    # fail-closed path could not be reached from a test at all (#5278).
     override = os.environ.get(JEV_ENV_FILE_ENV, "").strip()
     if override:
-        candidates.append(Path(override))
-    candidates.append(Path(__file__).resolve().parent.parent / ".env")
-    candidates.append(Path(cwd) / ".env")
+        return _dotenv_value(Path(override), "JEV_API_KEY")
+    candidates: list[Path] = [
+        Path(__file__).resolve().parent.parent / ".env",
+        Path(cwd) / ".env",
+    ]
     main = _main_worktree_root(git_bin, cwd, min(JEV_TIMEOUT, 10.0))
     if main:
         candidates.append(Path(main) / ".env")
