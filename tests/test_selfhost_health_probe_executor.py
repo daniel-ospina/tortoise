@@ -493,6 +493,23 @@ def test_liveness_probe_carries_the_cold_start_allowance():
             "monitoring.probe_setup_timeout() — a literal here would ignore "
             "TORTOISE_PROBE_SETUP_TIMEOUT (#3143)"
         )
+    # #3446: the SDK lookup must ALSO be handed in as a bounded phase, not
+    # performed inline on this coordinator's own thread. Without it the outer
+    # bound sums an ENFORCED term (probe_db's deadline) with an UNENFORCED one
+    # (the acquisition), which is why the ordering could never be proven.
+    acquisitions = [kw for call in calls for kw in call.keywords
+                    if kw.arg == "acquire"]
+    assert acquisitions, (
+        "selfhost _probe_db calls probe_db WITHOUT acquire= — the SDK lookup "
+        "then runs unbounded on the coordinator's thread, so "
+        "_liveness_probe_hard_timeout() sums an unenforced term (#3446)"
+    )
+    for kw in acquisitions:
+        assert getattr(kw.value, "id", None) == "_acquire_probe_sdk", (
+            f"the acquisition at line {kw.value.lineno} is not the module's "
+            "cache-invalidating wrapper — a bare ``_probe_sdk`` reference skips "
+            "the reset-on-failure path (#3446)"
+        )
 
 
 def test_liveness_coordinator_bound_sits_above_its_probe_total():
@@ -643,7 +660,7 @@ class _StubSDK:
         return None
 
 
-def _ok_probe(sdk=None, setup_timeout=None):
+def _ok_probe(sdk=None, setup_timeout=None, *, acquire=None):
     return {"ok": True, "latency_ms": 0.1, "error": None}
 
 
@@ -723,10 +740,10 @@ def _seed(selfhost, monkeypatch, *, ok=True, error=None):
     import tortoise.monitoring as mon
 
     if ok:
-        def _probe(sdk=None, setup_timeout=None):
+        def _probe(sdk=None, setup_timeout=None, *, acquire=None):
             return {"ok": True, "latency_ms": 0.1, "error": None}
     else:
-        def _probe(sdk=None, setup_timeout=None):
+        def _probe(sdk=None, setup_timeout=None, *, acquire=None):
             raise ConnectionError(error or "NXDOMAIN")
 
     monkeypatch.setattr(mon, "probe_db", _probe)
@@ -752,7 +769,7 @@ def test_health_answers_instantly_from_memory_with_a_saturated_default_executor(
 
     seen: list[str] = []
 
-    def _probe(sdk=None, setup_timeout=None):
+    def _probe(sdk=None, setup_timeout=None, *, acquire=None):
         seen.append(threading.current_thread().name)
         return {"ok": True, "latency_ms": 0.1, "error": None}
 
@@ -794,7 +811,7 @@ def test_refresher_keeps_the_verdict_fresh_without_a_request(selfhost, monkeypat
 
     calls = {"n": 0}
 
-    def _probe(sdk=None, setup_timeout=None):
+    def _probe(sdk=None, setup_timeout=None, *, acquire=None):
         calls["n"] += 1
         return {"ok": True, "latency_ms": 0.5, "error": None}
 
@@ -852,7 +869,7 @@ def test_endpoint_degrades_within_one_refresh_after_a_healthy_verdict(
 
     state = {"ok": True}
 
-    def _probe(sdk=None, setup_timeout=None):
+    def _probe(sdk=None, setup_timeout=None, *, acquire=None):
         if state["ok"]:
             return {"ok": True, "latency_ms": 0.1, "error": None}
         raise ConnectionError("NXDOMAIN")
@@ -911,7 +928,7 @@ def test_health_reports_an_honest_not_yet_state_before_the_first_probe(selfhost,
 
     release = threading.Event()
 
-    def _blocking(sdk=None, setup_timeout=None):
+    def _blocking(sdk=None, setup_timeout=None, *, acquire=None):
         release.wait(10)
         return {"ok": True, "latency_ms": 0.1, "error": None}
 
@@ -943,7 +960,7 @@ def test_liveness_probe_passes_the_resolved_cold_start_allowance(selfhost, monke
 
     seen: dict = {}
 
-    def _probe(sdk=None, setup_timeout=None):
+    def _probe(sdk=None, setup_timeout=None, *, acquire=None):
         seen["setup_timeout"] = setup_timeout
         return {"ok": True, "latency_ms": 0.1, "error": None}
 

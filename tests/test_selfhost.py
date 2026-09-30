@@ -116,9 +116,10 @@ class TestHealth:
 
         seen = {"calls": 0, "setup_timeout": None}
 
-        def _spy_probe_db(sdk, setup_timeout=None):
+        def _spy_probe_db(sdk=None, setup_timeout=None, *, acquire=None):
             seen["calls"] += 1
             seen["setup_timeout"] = setup_timeout
+            seen["acquire"] = acquire
             return {"ok": True, "latency_ms": 0.1, "error": None}
 
         monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
@@ -129,6 +130,11 @@ class TestHealth:
             assert seen["setup_timeout"] == mon.probe_setup_timeout(), (
                 "the refresher did not pass the #3243 cold-start allowance — a "
                 f"reachable cold graph would read degraded {seen}"
+            )
+            assert seen["acquire"] is not None, (
+                "#3446: the refresher must hand its SDK lookup to probe_db as "
+                "acquire= so the phase is bounded — passing an already-acquired "
+                "sdk leaves it unbounded on this coordinator's thread"
             )
             r = tc.get("/health")
             assert r.status_code == 200
@@ -144,7 +150,7 @@ class TestHealth:
         import tortoise.monitoring as mon
         from tortoise import selfhost
 
-        def _boom_probe(sdk, setup_timeout=None):
+        def _boom_probe(sdk=None, setup_timeout=None, *, acquire=None):
             raise ConnectionError("NXDOMAIN")
 
         # probe_db is imported lazily from tortoise.monitoring inside the
@@ -342,11 +348,16 @@ class TestHealthTruthMCP:
         import tortoise.monitoring as mon
         from tortoise import selfhost
 
-        def _boom_probe(sdk, *args, **kwargs):
+        def _boom_probe(sdk=None, setup_timeout=None, *, acquire=None):
             # probe_db's contract is never-raise: a dead DB is a FAILED probe
             # result, not an exception. Return the degraded shape both /health
             # and metrics() turn into status="degraded". (#3143 widened the
-            # signature with optional budget args — the stub accepts them.)
+            # signature with optional budget args, #3446 added keyword-only
+            # ``acquire=`` — the stub must accept ALL of them. This stub serves
+            # BOTH callers: selfhost._probe_db passes ``acquire=``, while
+            # metrics() passes an already-acquired ``sdk`` positionally. A
+            # signature mismatch raises a TypeError that HealthProbe._run
+            # SWALLOWS, so the test below also asserts the error MESSAGE.)
             return {"ok": False, "latency_ms": 0.0, "error": "NXDOMAIN"}
 
         # probe_db is imported lazily from tortoise.monitoring inside both
@@ -357,6 +368,10 @@ class TestHealthTruthMCP:
             r = tc.get("/health")
             assert r.status_code == 200
             assert r.json()["status"] == "degraded"
+            assert "NXDOMAIN" in r.json()["db"]["error"], (
+                "the stub's own error must survive: a swallowed TypeError would "
+                "also produce 'degraded', so assert the MESSAGE (#3446)"
+            )
 
             r, body = _mcp_post_auth(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",

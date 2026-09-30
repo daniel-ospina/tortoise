@@ -343,13 +343,21 @@ class TestHealthEndpoints:
         seen = {}
         real_probe_db = mon.probe_db
 
-        def _spy_probe_db(sdk, setup_timeout=None):
+        def _spy_probe_db(sdk=None, setup_timeout=None, *, acquire=None):
             seen["setup_timeout"] = setup_timeout
-            return real_probe_db(sdk, setup_timeout=setup_timeout)
+            seen["acquire"] = acquire
+            return real_probe_db(sdk, setup_timeout=setup_timeout,
+                                 acquire=acquire)
 
         monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
         result = ha_mod._probe_db()
         assert seen["setup_timeout"] is None, seen
+        assert seen["acquire"] is not None, (
+            "#3446: _probe_db must hand the SDK acquisition to probe_db as "
+            "acquire= so it runs as a BOUNDED phase — passing an "
+            "already-acquired sdk leaves the phase unbounded on this "
+            "coordinator's thread and makes DB_PROBE_HARD_TIMEOUT unprovable"
+        )
         assert "ok" in result
 
     def test_health_degraded_when_db_down(self, client, monkeypatch):
@@ -661,27 +669,35 @@ class TestHealthEndpoints:
         ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
         in the docker lane, red in the embedded one). ``HealthProbe.reset()``
         nulls its ``_worker`` handle, so the leftover thread cannot be joined.
-        Fixed by counting only the builds made on THIS test's thread, and by
-        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
-        The autouse fixture also resets the SDK cache, not just the probe
-        coordinators.
+        Fixed by counting only builds attributable to this test's own probe
+        path, and by pinning ``_probe_sdk_key`` so no thread can compute a
+        mismatching key. The autouse fixture also resets the SDK cache, not just
+        the probe coordinators. #3446 moved the build off the caller's thread,
+        so the count follows it onto the probe worker lane (see ``_factory``).
         """
         from unittest.mock import MagicMock
 
         import tortoise.hosted_api as ha_mod
 
         own_thread = threading.current_thread().name
-        calls = {"all": 0, "own": 0}
+        calls = {"all": 0, "own": 0, "probe_lane": 0}
 
         def _factory(*, namespace=None, graph_name=None):
-            # Only builds made by THIS test's two ``_probe_db()`` calls count.
-            # Leftover ``tortoise-health-probe`` threads from earlier tests
-            # share the process-global cache (and cannot be joined —
-            # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
-            # counting them is what made the old assertion flaky.
+            # Count builds by the LANE they run on. Leftover
+            # ``tortoise-health-probe`` threads from earlier tests share the
+            # process-global cache (and cannot be joined — ``HealthProbe.reset()``
+            # drops its ``_worker`` handle), so the original test deliberately
+            # counted only its OWN thread's builds. #3446 moved the build off
+            # that thread and onto the shared probe worker, which made
+            # ``calls["own"] <= 1`` structurally 0 — a VACUOUS guard. The
+            # rewritten test asserts the thread move directly (``own == 0``)
+            # and lets ``first_sdk is second_sdk`` carry the anti-rebuild check.
             calls["all"] += 1
-            if threading.current_thread().name == own_thread:
+            name = threading.current_thread().name
+            if name == own_thread:
                 calls["own"] += 1
+            if name.startswith("tortoise-probe-worker"):
+                calls["probe_lane"] += 1
             sdk = MagicMock()
             sdk._get_proj.return_value.g.query.return_value = MagicMock()
             return sdk
@@ -706,11 +722,23 @@ class TestHealthEndpoints:
         assert first["ok"] is True and second["ok"] is True
         assert first_sdk is second_sdk, (
             "the probe rebuilt its connection between two consecutive checks")
-        # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
-        # Zero is possible when a still-running probe from an earlier test won
-        # the race and warmed the cache first — that does not weaken the point.
-        assert calls["own"] <= 1, (
-            f"the two checks built the SDK {calls['own']}x — not reused")
+        # #3446: the build must happen on the PROBE WORKER lane, not on this
+        # test's thread. ``own == 0`` is the assertion that carries the weight:
+        # it reds the moment the acquisition moves back inline. (It replaces
+        # the old ``calls["own"] <= 1``, which became structurally 0 — and
+        # therefore VACUOUS — as soon as the acquisition left this thread.)
+        #
+        # Deliberately NOT asserted here: an upper bound on ``probe_lane``. Every
+        # leftover in-flight probe from an earlier test in this file builds on
+        # that same shared lane, so a count is the flaky half — and it is also
+        # redundant: a per-call rebuild is caught by ``first_sdk is
+        # second_sdk`` above. ``>= 1`` is monotone, so it cannot flake.
+        assert calls["probe_lane"] >= 1, (
+            "no SDK build reached the probe worker lane — the acquisition did "
+            "not run there")
+        assert calls["own"] == 0, (
+            "#3446: the SDK acquisition ran on the CALLER's thread — it must be "
+            "handed to probe_db as acquire= and bounded on the probe worker")
 
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
