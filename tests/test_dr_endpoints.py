@@ -187,11 +187,22 @@ def _sweep_diagnosis(body: dict) -> str:
             detail = res.get("error")
             causes.append(f"{tid}: {res.get('status')}"
                           + (f" ({detail})" if detail else ""))
+    incidents = body.get("incidents")
+    if isinstance(incidents, list):
+        # A sweep can report `no_teams` / `no_eligible_teams` with the reason in
+        # `incidents[].kind` (NO_ELIGIBLE_TEAMS, ENUM_DELTA) and nothing in
+        # `error`/`graph_failures`/`results` — so incidents are a cause source too.
+        for inc in incidents:
+            if isinstance(inc, dict) and inc.get("kind"):
+                causes.append(f"incident {inc.get('kind')}")
     if not causes:
-        # Nothing in the body claims a cause. Say exactly that, and show what
-        # the body did carry, rather than asserting something false about it.
-        causes.append(f"no cause field present; top-level keys={sorted(body)}")
+        # Nothing in the body claims a cause. Say exactly what it carried, and
+        # do not call a normal status a failure: several (no_teams, no_work)
+        # are self-describing outcomes, not errors.
+        causes.append("no cause in error/graph_failures/results/incidents; "
+                      f"top-level keys={sorted(body, key=str)}")
     return (f"sweep status={body.get('status')} "
+            f"teams={body.get('teams_backed_up')} "
             f"totals={body.get('graph_totals')} "
             f"source={body.get('source')} causes=[{'; '.join(causes)}]")
 
