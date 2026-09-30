@@ -27,6 +27,7 @@ from tools.ci_selection import (  # noqa: I001
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
     duration_issues, TESTS_DIR,
 )
+from tools import mergify_config_guard as mcg
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1444,13 +1445,22 @@ def test_no_required_check_names_a_fast_leg():
     assert "test (" not in mergify_code, \
         "no enforced mergify line may name a shard leg — the shard set changes with S"
     assert "      - check-success=python-ci-gate" in mergify_code
-    # The LIVE required set is a GitHub API surface. Its in-repo MIRROR is
-    # docs/ci/required-contexts.json, which the guard owns and keeps equal to the
-    # declaration home — read the MIRROR, never the declaration home itself. A
-    # test or tool reading the declaration home is what makes it silently live,
-    # and clause viii(b) of tools/mergify_config_guard.py refuses exactly that
+    # The LIVE required set is a GitHub API surface. Its in-repo PROJECTION is
+    # the guard's own record (mcg.RECORD_REL), written from that API surface and
+    # only while a live read is SATISFIED. It is NOT a mirror of the declaration
+    # home: the equality check between them is inert today (the record's own
+    # consistency flag is false, D9 pending) and no leg has ever appeared in the
+    # declaration home's own list. Read the PROJECTION, never the declaration
+    # home — a test or tool reading the declaration home is what makes it
+    # silently live, and clause viii(b) of the guard refuses exactly that
     # (reading it here turned this file into a reported divergence).
-    record = json.loads((REPO / "docs" / "ci" / "required-contexts.json").read_text())
+    record = json.loads((REPO / mcg.RECORD_REL).read_text())
+    # Anchor the field BEFORE testing it: a truncated, emptied or renamed list
+    # would satisfy the comprehension below silently, which is a pin that cannot
+    # fail. `python-ci-gate` is the aggregate every merge keys on.
+    assert "python-ci-gate" in record["required_contexts"], (
+        f"{mcg.RECORD_REL} no longer names python-ci-gate — the required-context "
+        "list moved or emptied, so the shard-leg check below would read empty and pass")
     assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
         "no required context may be a shard leg — the shard set changes with S, so "
         "keying the required set on a leg name would make the gate unsatisfiable")
