@@ -158,23 +158,42 @@ def _sweep_diagnosis(body: dict) -> str:
     both carry nothing. Surfacing it explicitly makes a red attributable from
     the log instead of from a re-run (#5049 — a verdict from ambient machine
     state must still say what happened).
+
+    Total by construction: this runs while building a failure message, so it
+    must never raise — an exception here would replace the real assertion
+    error and mask the very failure it exists to explain.
     """
-    failures = body.get("graph_failures") or []
-    if failures:
-        detail = "; ".join(
-            f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}"
-            for f in failures)
-    else:
-        # A resolution/error result carries no graph map, so an org-level
-        # failure leaves graph_failures empty — fall back to the results map.
-        detail = "; ".join(
-            f"{tid}: {res.get('error')}"
-            for tid, res in (body.get("results") or {}).items()
-            if isinstance(res, dict) and res.get("error")
-        ) or "no graph_failures and no per-team error in the response"
+    if not isinstance(body, dict):
+        return f"sweep body is not a dict: {type(body).__name__}"
+    causes: list[str] = []
+    if body.get("error"):
+        # `enum_failed` puts the cause at the top level with no results map
+        # at all, so a results-only fallback would drop it.
+        causes.append(str(body["error"]))
+    failures = body.get("graph_failures")
+    if isinstance(failures, list):
+        for f in failures:
+            if isinstance(f, dict):
+                causes.append(
+                    f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}")
+    results = body.get("results")
+    if isinstance(results, dict):
+        for tid, res in results.items():
+            if not isinstance(res, dict) or res.get("status") == "backed_up":
+                continue
+            # A non-error status (empty_skipped, data_loss_candidate,
+            # p0_guard_failed, aborted_size_guard) names the cause in
+            # `status` itself; an error result carries `error` as well.
+            detail = res.get("error")
+            causes.append(f"{tid}: {res.get('status')}"
+                          + (f" ({detail})" if detail else ""))
+    if not causes:
+        # Nothing in the body claims a cause. Say exactly that, and show what
+        # the body did carry, rather than asserting something false about it.
+        causes.append(f"no cause field present; top-level keys={sorted(body)}")
     return (f"sweep status={body.get('status')} "
             f"totals={body.get('graph_totals')} "
-            f"source={body.get('source')} causes=[{detail}]")
+            f"source={body.get('source')} causes=[{'; '.join(causes)}]")
 
 
 def _held_proj_db():
