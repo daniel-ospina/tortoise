@@ -104,6 +104,7 @@ def test_the_readable_surfaces_name_the_generic_verbs() -> None:
     for fn, needle in (
         (TortoiseSDK.delete, "operator"),
         (TortoiseSDK.update, "operator"),
+        (TortoiseSDK.update, "list_relations"),
         (TortoiseSDK.operator_action, "update(<operator_id>"),
         (TortoiseSDK.operator_action, "delete(<operator_id>"),
     ):

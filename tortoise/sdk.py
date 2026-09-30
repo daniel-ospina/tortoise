@@ -6201,6 +6201,12 @@ class TortoiseSDK:
         vocabulary even though ``operator_action`` exposes only mitigate/annotate
         (#6131).
 
+        Note what this path does NOT do: unlike ``create_operator``, which returns
+        a structured ``undeclared_relation`` warning when no installed pack
+        declares the predicate, ``update(<operator_id>, label=...)`` performs no
+        declaredness check and installs the label silently. Take valid predicates
+        from ``list_relations()``.
+
         Detects the node type by label:
           - Point → point-lifecycle semantics (delegates to update_point):
             draft→live promote via status (only transition allowed), version
