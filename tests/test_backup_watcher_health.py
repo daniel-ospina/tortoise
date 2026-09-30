@@ -353,9 +353,12 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
         (2) EVERY ``try`` / ``try*`` (``TryStar``) ANCESTOR must make a skipped
             publish LOUD. A ``try/finally`` (no handlers) qualifies only when
             its ``finally`` cannot discard the pending exception: a ``return``
-            / ``break`` / ``continue`` at ANY depth in ``finalbody`` leaves the
-            frame and drops the in-flight exception, so such a ``try/finally``
-            is not loud. A ``try`` with handlers qualifies
+            in ``finalbody`` (outside a nested scope) leaves the frame and drops
+            the in-flight exception, so such a ``try/finally`` is not loud.
+            ``break``/``continue`` are counted even when they target a loop
+            INSIDE the ``finally`` — a deliberate, fail-closed
+            over-approximation that can only red a safe ``finally``, never green
+            a swallowing one. A ``try`` with handlers qualifies
             only if at least one handler makes the skip loud as a DIRECT
             statement of its body: an assignment to ``_WATCHER_START_ERROR``
             (so /health reports ``failed``, degraded) or a ``raise`` of ANY
@@ -535,8 +538,10 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # "the publish was skipped" into /health `failed` (degraded). So a `try`
     # ancestor is acceptable only if it cannot swallow the skip. A `try` with
     # no handlers (`try/finally`) cannot swallow the skip UNLESS its `finally`
-    # leaves the frame — a `return`/`break`/`continue` at ANY depth in
-    # `finalbody` discards the pending exception, so that shape is not loud. A
+    # leaves the frame — a `return` in `finalbody` discards the pending
+    # exception, so that shape is not loud. `break`/`continue` are counted even
+    # when they target a loop INSIDE the `finally`: over-approximating only
+    # reds a safe `finally`, never greens a swallowing one. A
     # `try` with handlers can swallow, unless at least one handler makes it loud
     # as a DIRECT statement of its body: a `raise` (ANY form — a raised
     # exception propagates unless an enclosing handler swallows it, and any
@@ -548,14 +553,24 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
         if not node.handlers:
             # try/finally: loud only if the `finally` cannot discard the
             # in-flight exception. `ast.walk` (not just the top-level
-            # statements) because a `return`/`break`/`continue` nested in an
-            # `if` inside the `finally` still leaves the frame and drops the
-            # pending exception — the skipped publish then goes silent, which
-            # is #4498 all over again.
+            # statements) because a `return` nested in an `if` inside the
+            # `finally` still leaves the frame and drops the pending exception
+            # — the skipped publish then goes silent, which is #4498 all over
+            # again. Nested `def`/`lambda`/`class` bodies are excluded: a
+            # `return` in there cannot leave THIS frame, and counting it was a
+            # fail-closed false positive.
+            nested: set[int] = set()
+            for inner in ast.walk(node):
+                if isinstance(
+                    inner,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+                ):
+                    nested.update(id(sub) for sub in ast.walk(inner))
             return not any(
-                isinstance(inner, (ast.Return, ast.Break, ast.Continue))
+                isinstance(sub, (ast.Return, ast.Break, ast.Continue))
+                and id(sub) not in nested
                 for stmt in node.finalbody
-                for inner in ast.walk(stmt)
+                for sub in ast.walk(stmt)
             )
         for handler in node.handlers:
             for stmt in handler.body:
