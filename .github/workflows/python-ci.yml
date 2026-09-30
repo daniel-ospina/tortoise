@@ -2298,9 +2298,39 @@ jobs:
   # NON-ZERO per red leg, a leg dropped from `needs:` fails closed instead of
   # vanishing, and a `skipped` leg is forgiven only when the selector declined
   # it).
+  workflow-lint:
+    # #6253: a malformed Actions expression makes GitHub refuse the WHOLE
+    # workflow file — zero jobs, zero logs, and therefore ZERO check-runs. The
+    # required aggregate below then does not exist on that head at all: not
+    # red, ABSENT, and an absent required check cannot block a merge. Observed
+    # on #6212, where the run reported `total_count: 0` with "This run likely
+    # failed because of a workflow file issue". A forced merge in that window
+    # would have landed a dead gate. This leg makes the class a pre-merge red.
+    #
+    # The expression is evaluated over the ENTIRE `run:` scalar, so a shell
+    # comment is NOT exempt — that is how the #6212 instance slipped past
+    # YAML-level parsers, which never evaluate expressions at all.
+    #
+    # The pinned actionlint image is invoked directly and deliberately NOT via
+    # scripts/check-workflow-actionlint.sh: `scripts` is a tracked symlink
+    # (git mode 120000) pointing outside this repository, so that file does not
+    # exist in a CI checkout, and its default scope also names a templates/
+    # tree this repository does not have (it exits 3 at the glob).
+    #
+    # Ungated on purpose: a leg that reaches these `needs` but SKIPS has no row
+    # that can fail closed, so the required check could certify a shard that
+    # never ran (#5219). It therefore always runs and must always succeed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint (workflow syntax + Actions-expression errors)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint:1.7.12 -shellcheck= .github/workflows/*.yml
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, surface-guard]
+    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
@@ -2338,6 +2368,7 @@ jobs:
           done <<'LEGS'
           changes|${{ needs.changes.result }}|-
           manifest-integrity|${{ needs.manifest-integrity.result }}|-
+          workflow-lint|${{ needs.workflow-lint.result }}|-
           test|${{ needs.test.result }}|${{ needs.changes.outputs.python }}
           test-slow|${{ needs.test-slow.result }}|${{ needs.changes.outputs.slow_run }}
           test-carve-out|${{ needs.test-carve-out.result }}|${{ needs.changes.outputs.carve_out_run }}
