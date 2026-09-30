@@ -7712,10 +7712,22 @@ class TortoiseSDK:
 
         For each new non-operator Point whose pointKind is 'decision':
         Tier 1 — content-hash vs existing decision Points; Tier 2 — embedding
-        cosine vs existing decision Points. On a hit:
-          - existing prior is DRAFT → wire the "already decided" IMPL now
-            (draft-to-draft, create_operator(promote_source=False)) and flag
-            the candidate (DedupeRecorded event).
+        cosine vs existing decision Points. A hit is always FLAGGED for the
+        review queue; whether it is also WIRED is decided by the D12/O4
+        never-across boundary (#5316). Tier 2 matches on embedding similarity
+        alone, and a connective swap (`and`/`or`, `then`/`else`, `than`/`as`,
+        `to`/`from`) sits well inside the 0.94 band, so a rival pair can land
+        here. A pair is therefore wired only when
+        `fold_allowed(prior_content, content)` holds — the same predicate the
+        four other near-duplicate consumers consult.
+          - existing prior is DRAFT and the boundary allows → wire the
+            "already decided" IMPL now (draft-to-draft,
+            create_operator(promote_source=False)) and flag the candidate
+            (DedupeRecorded event).
+          - existing prior is DRAFT and the boundary refuses → flag, do NOT
+            wire (counted in `boundary_blocked`): the pair differs in a
+            distinguishing dimension, so the IMPL would assert that two rival
+            claims are one decision.
           - existing prior is LIVE → flag the candidate WITHOUT wiring
             (W-2 live-prior rule: a draft must never wire an operator to a
             live Point) — the link is scheduled for D2's promotion time
@@ -7723,9 +7735,11 @@ class TortoiseSDK:
         Idempotent: points already carrying dedup_candidate=true are skipped
         (re-run → no duplicate IMPL, no new DedupeRecorded — DE2E-3).
 
-        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n}.
+        Returns {"hits": n, "wired_draft_to_draft": n, "deferred_live_prior": n,
+                 "boundary_blocked": n}.
         """
         threshold = self.DEDUP_REVIEW_THRESHOLD if threshold is None else threshold
+        from tortoise.extractor_v2 import fold_allowed
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
@@ -7734,7 +7748,7 @@ class TortoiseSDK:
             "       coalesce(n.dedup_candidate, false)",
             params={"ids": list(point_ids)},
         ).result_set
-        hits = wired = deferred = 0
+        hits = wired = deferred = boundary_blocked = 0
         for pid, content, kind, status, already in rows:
             if already or status != "draft" or kind != "decision":
                 continue
@@ -7747,6 +7761,9 @@ class TortoiseSDK:
                                          exclude_id=pid)
             method = "hash"
             similarity = 1.0
+            # Tier 1 is a content hash, so a hit there IS the same text — the
+            # boundary is trivially satisfied and only tier 2 needs it.
+            prior_content = content
             if prior is None:
                 # Tier 2: embedding similarity vs existing decisions,
                 # excluding the candidate itself (self-cosine 1.0 would
@@ -7762,12 +7779,21 @@ class TortoiseSDK:
                 if not pairs:
                     continue
                 prior = pairs[0]["existing"]
+                prior_content = pairs[0].get("existing_content")
                 method = "embedding"
                 similarity = pairs[0]["similarity"]
             if prior == pid:
                 # Belt-and-braces: never self-target.
                 _logger.warning("dedup: candidate %s matched itself — skipped", pid)
                 continue
+            # D12/O4 never-across boundary (#5316). The flag below is
+            # review-queue state, so a boundary refusal must not silence it —
+            # what it must stop is the IMPL wire, which asserts the two claims
+            # are ONE decision. Fail-closed toward KEEP: `fold_allowed`
+            # refuses an unreadable pair, so an unknown prior body refuses the
+            # wire rather than assuming the claims match.
+            boundary_ok = (prior_content is not None
+                           and fold_allowed(prior_content, content))
             # Mark the candidate (review-queue state on the Point).
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true, "
@@ -7783,8 +7809,13 @@ class TortoiseSDK:
             ).result_set
             prior_status = (prow[0][0] if prow else None) or "live"
             if prior_status == "draft":
-                # Variant A: draft-to-draft "already decided" IMPL.
-                if sdk_for_wiring is not None:
+                if not boundary_ok:
+                    # #5316: a distinguishing difference makes these rival
+                    # claims, not one decision. The flag above stays (a human
+                    # should still see the pair); the wire does not happen.
+                    boundary_blocked += 1
+                elif sdk_for_wiring is not None:
+                    # Variant A: draft-to-draft "already decided" IMPL.
                     sdk_for_wiring.create_operator(
                         "IMPL", pid, [prior], label="alreadyDecided",
                         direction="unidirectional", promote_source=False)
@@ -7794,7 +7825,8 @@ class TortoiseSDK:
                 deferred += 1
             self._emit_event("DedupeRecorded", point=self.get_point(pid))
         return {"hits": hits, "wired_draft_to_draft": wired,
-                "deferred_live_prior": deferred}
+                "deferred_live_prior": deferred,
+                "boundary_blocked": boundary_blocked}
 
     def list_dedup_candidates(self, candidate_type: str = "content",
                               limit: int = 50) -> list[dict]:
