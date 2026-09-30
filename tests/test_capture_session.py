@@ -4798,6 +4798,101 @@ def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
         "the marker must still reach the model for a turn that has content")
 
 
+def test_the_default_v2_lane_cannot_mint_a_claim_from_a_marker_only_turn():
+    """#4897 round 18 P2: the sibling lane must not disagree with the transcript.
+
+    The rounds 14-16 skip lives in ``_session_llm_transcript`` — the m2 lane and
+    the Source summary. The DEFAULT lane is ``_extract_session_v2``, which hands
+    the raw turns to ``extractor_v2._edus_from_conversation``, and that builder
+    keeps any turn with truthy content: a clipped turn whose real body is a lone
+    ``X`` was fed to the model as ``"X …[truncated: …]"``, i.e. a turn with
+    nothing to say whose only sentence is this module's own marker. Pinned here
+    as an EDU-LEVEL invariant (no DB, no provider, no LLM): the marker-only turn
+    yields no edu, the real turn still does, and turn INDICES are unshifted.
+
+    ⛔ NARROW BY CONSTRUCTION — an UNMARKED short turn (``"ok"``) is untouched,
+    and a marked turn that still has a sentence keeps its marker. The fix must
+    not silently become "drop every short turn from v2"; that would be a
+    different, unreviewed change to the default extraction lane.
+    """
+    from tortoise.extractor_v2 import _edus_from_conversation
+    from tortoise.sdk import (
+        _blank_unextractable_marked_turns,
+        _capture_truncation_marker,
+    )
+
+    marker = _capture_truncation_marker(6001)
+    conversation = [
+        {"role": "user", "content": "a real sentence here."},
+        {"role": "assistant", "content": "X" + marker},
+        {"role": "user", "content": "another real sentence."},
+    ]
+    blanked = _blank_unextractable_marked_turns(conversation)
+
+    # Length preserved: the edu builder derives each turn's index from its
+    # POSITION, and `_resolve_source_turn` anchors quotes to those indices.
+    assert len(blanked) == len(conversation)
+    assert blanked[0]["content"] == conversation[0]["content"]
+    assert blanked[1]["content"] == "", "the marker-only turn is still content"
+    assert blanked[2]["content"] == conversation[2]["content"]
+    assert conversation[1]["content"] == "X" + marker, "input mutated in place"
+
+    edus = _edus_from_conversation(blanked)
+    assert [e["index"] for e in edus] == [0, 2], (
+        f"the marker-only turn produced an edu, or indices shifted: {edus}")
+    assert all(marker not in e["text"] for e in edus), (
+        f"the marker reached the v2 model as its own turn: {edus}")
+
+    # Narrowness — the two ways this fix could over-reach.
+    short = _blank_unextractable_marked_turns([{"role": "user", "content": "ok"}])
+    assert short[0]["content"] == "ok", "an unmarked short turn was dropped"
+    kept = _blank_unextractable_marked_turns(
+        [{"role": "user", "content": "a real sentence. " + marker}])
+    assert kept[0]["content"].endswith(marker), (
+        "a marked turn WITH content lost its marker")
+
+    # Idempotent: a blanked turn carries no marker, so a second pass is a no-op.
+    assert _blank_unextractable_marked_turns(blanked) == blanked
+
+
+def test_extract_session_v2_blanks_a_marker_only_turn_before_the_pipeline(
+        sdk, monkeypatch):
+    """#4897 round 18 P2 — the WIRING, not just the helper.
+
+    The helper test above would still pass if nobody called it. This drives the
+    DEFAULT lane's real entry point and captures the conversation the v2
+    pipeline actually receives, so deleting the call site reds this test.
+    ``extract_session_v2`` is replaced (the same seam the session-date tests
+    use), so no provider key, network or DB is involved; the autouse mock seam
+    satisfies the lane's inner provider gate.
+    """
+    import tortoise.extractor_v2 as ev2
+    from tortoise.sdk import _capture_truncation_marker
+
+    marker = _capture_truncation_marker(6001)
+    seen: list = []
+
+    def _fake_extract(model, conversation, **kw):
+        seen.append(conversation)
+        return {"payload": None, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": ["no payload produced"]}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+    sdk._extract_session_v2(
+        [{"role": "user", "content": "a real sentence here."},
+         {"role": "assistant", "content": "   X" + marker}],
+        session_id="s-marker-lane", now="2026-08-20T00:00:00Z")
+
+    assert len(seen) == 1, "the v2 pipeline was not reached"
+    received = seen[0]
+    assert len(received) == 2, "the turn list was renumbered, not blanked"
+    assert received[0]["content"] == "a real sentence here."
+    assert received[1]["content"] == "", (
+        f"a marker-only turn reached the v2 pipeline: {received[1]!r}")
+
+
 def test_the_clippers_blank_set_is_explicit():
     """#4897 review round 15, P3: blankness is an explicit code-point set.
 

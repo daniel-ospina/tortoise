@@ -683,7 +683,12 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     report the scrubbed size instead of what the user said. The stored window is
     exactly what the LLM must see, so the two cannot drift.
     ``_session_extraction_estimate`` windows its own input for the callers that
-    hand it a raw one."""
+    hand it a raw one.
+
+    The sentence predicate lives in :func:`_extractable_sentences` — one home,
+    shared with the v2 lane's marker-only-turn blanking (#4897), so the two
+    lanes cannot disagree about which turns have anything to say.
+    """
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
@@ -751,8 +756,8 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
         # are ONE `_SENT` match. The node still stores the marker verbatim as written; this is the
         # TRANSCRIPT view, and relocating it within the turn is what lets it reach the model
         # WITHOUT becoming a claim of its own.
-        body_only, marker = _split_truncation_marker(content)
-        sents = _extractable_sentences(body_only)
+        _body, marker = _split_truncation_marker(content)
+        sents = _extractable_sentences(content)
         if not sents:
             continue
         # Cap BEFORE attaching: `MAX_EXTRACTIONS_PER_TURN` keeps the FIRST 200 sentences and
@@ -1058,6 +1063,59 @@ def _clip_capture_turn_content(
     return (content[:keep] + marker)[:cap]
 
 
+def _extractable_sentences(content: str) -> list[str]:
+    """The >=3-char sentences *content* contributes, from its MARKER-FREE body.
+
+    The ONE home of "does this turn have anything to say" (#6246, #4897). It is
+    the exact predicate ``_session_llm_transcript`` has always applied inline
+    (and the transcript is the lane that already REFUSED a turn it yields
+    nothing for), so extracting it here lets the shared extraction view apply
+    the SAME test before the default v2 lane sees the turns and the two lanes
+    cannot drift apart about emptiness. A clipped turn whose real body holds no
+    >=3-char sentence has nothing to contribute — the marker's own text is all
+    that is left — so the marker is split OFF first and every extraction lane
+    treats it as empty. Judging the marker-free body with the SAME predicate the
+    transcript's sentence filter applies is what makes "empty" mean the same
+    thing here as it does there.
+    """
+    from tortoise.extractor import _SENT
+    body_only, _marker = _split_truncation_marker(content)
+    real = " ".join(body_only.split())
+    return [s.group(0).strip() for s in _SENT.finditer(real)
+            if len(s.group(0).strip()) >= 3]
+
+
+def _blank_unextractable_marked_turns(
+        conversation: list[dict],
+) -> list[dict]:
+    """Blank CUT turns that have nothing to say, for the v2 lane (#4897).
+
+    The v2 lane hands the raw turn text to ``extractor_v2``, whose edu builder
+    keeps any turn with truthy content. So a clipped turn whose real body is a
+    lone ``X`` reached the model as ``"X …[truncated: …]"`` — a turn with
+    nothing to say whose only sentence is this module's own marker, the exact
+    shape the m2/transcript lane learned to SKIP in review rounds 14-16. The
+    default lane was left as the unguarded sibling; this makes the two agree.
+
+    ⛔ NARROW BY CONSTRUCTION: only a turn that CARRIES a marker is eligible, so
+    an unmarked short turn (``"ok"``) is untouched — this does not change how
+    the v2 lane treats ordinary short turns. The list LENGTH is preserved (the
+    turn is blanked, never removed) because
+    ``extractor_v2._edus_from_conversation`` derives each edu's turn index from
+    its position and ``_resolve_source_turn`` anchors quotes to those indices —
+    shortening the list would renumber every later turn.
+    """
+    out: list[dict] = []
+    for turn in conversation:
+        content = str(turn.get("content") or "")
+        _body, marker = _split_truncation_marker(content)
+        if marker and not _extractable_sentences(content):
+            out.append({**turn, "content": ""})
+        else:
+            out.append(turn)
+    return out
+
+
 def _capture_turn_window(
     conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
     """Clip each turn's content to the stored-window cap, MARKED (#1532 D1).
@@ -1104,32 +1162,15 @@ def _capture_turn_window(
     return out
 
 
-def _extractable_sentences(content: str) -> list[str]:
-    """The >=3-char sentences *content* contributes, from its flattened body.
-
-    The ONE home of "does this turn have anything to say" (#6246). It is the
-    exact predicate ``_session_llm_transcript`` has always applied inline (and
-    the transcript is the lane that already REFUSED a turn it yields nothing
-    for). Extracting it here lets the shared extraction view apply the SAME
-    test before the default v2 lane sees the turns, so the two lanes cannot
-    drift apart about emptiness.
-    """
-    from tortoise.extractor import _SENT
-
-    body = " ".join(content.split())
-    return [s.group(0).strip() for s in _SENT.finditer(body)
-            if len(s.group(0).strip()) >= 3]
-
-
 def _capture_extraction_window(
     conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
     """The SHARED extraction view of a capture conversation (#6246).
 
-    ``_capture_turn_window`` is the STORED view: it clips silently and the
-    clipped text is what the turn Points hold. Both extraction lanes consume
-    THIS view instead, and it blanks a turn that was CLIPPED and still has no
-    extractable sentence of its own — so a cut whose readable body has nothing
-    to say contributes no unit to EITHER lane.
+    ``_capture_turn_window`` is the STORED view: it clips (marking the cut,
+    #4897) and the clipped text is what the turn Points hold. Both extraction
+    lanes consume THIS view instead, and it blanks a turn that was CLIPPED and
+    still has no extractable sentence of its own — so a cut whose readable body
+    has nothing to say contributes no unit to EITHER lane.
 
     The invariant ("a turn with no extractable content of its own yields no
     claims", #4897) previously lived only inside ``_session_llm_transcript``,
@@ -7083,6 +7124,9 @@ class TortoiseSDK:
         # store share (#721 parity). The cap is decided here, on pre-redaction
         # text; ``_redact_turn_contents`` never clips.
         conversation = _capture_turn_window(conversation)
+        # #4897: the v2 lane's turn view must not admit a cut turn whose only
+        # content is the marker — the transcript lane already skips those.
+        conversation = _blank_unextractable_marked_turns(conversation)
         out = extract_session_v2(model, _redact_turn_contents(conversation)[0],
                                  sdk=self,
                                  session_id=session_id, master=master)
