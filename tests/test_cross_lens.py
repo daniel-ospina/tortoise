@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _live_utils
 from tortoise.cross_lens import (  # noqa: E402, I001, RUF100
     DEFAULT_THRESHOLD,
     NEAR_DUPLICATE_THRESHOLD,
@@ -359,13 +360,13 @@ def _docker_uri() -> str | None:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.0)
     try:
-        s.connect(("localhost", 6379))
+        s.connect((_live_utils.service_host(), _live_utils.docker_port()))
     except OSError:
         return None
     finally:
         s.close()
     return os.environ.get("TORTOISE_DB_URI") \
-        or "docker://:falkordb@localhost:6379/tortoise_test_xlens"
+        or _live_utils.docker_uri("tortoise_test_xlens")
 
 
 def test_docker_lane_cross_lens_calibrated(monkeypatch):
@@ -388,7 +389,8 @@ def test_docker_lane_cross_lens_calibrated(monkeypatch):
     """
     uri = _docker_uri()
     if uri is None:
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()})"
+                    " not reachable")
     from urllib.parse import urlparse
     if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
         pytest.skip(f"resolved URI {uri!r} is not a test graph "
