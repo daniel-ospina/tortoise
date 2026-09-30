@@ -1,10 +1,33 @@
 # redis-guard CI gate (issue #176, Task 13)
-# Runs the unified hook; must BLOCK merge (branch protection requires it).
+# Runs the unified hook; must BLOCK merge. NOTE: it is NOT in main's
+# required_status_checks (measured 2026-09-30: pricing-artifact, docs,
+# test-isolation, license-surface, legal-e2e, python-ci-gate, ai-review-gate) —
+# this header previously claimed "branch protection requires it", which is false
+# and would wrongly justify running it on every PR.
 name: redis-guard
 on:
   pull_request:
+    # H20: this guard reads ONLY tortoise/**/*.py and graph-scripts/**/*.py
+    # (tools/redis-guard.py:101-103 — with no argv it rglobs exactly those two
+    # trees), so its verdict is a function of those trees ALONE. A PR that
+    # touches neither cannot change it, and running it there is a reservation
+    # that buys no signal. The correctness direction is proved both ways:
+    #   - matching  (touches tortoise/**)      -> still triggers  (no hole)
+    #   - non-matching (docs-only)             -> skipped, and could not have
+    #     failed, because a leak must live in a scanned tree to be found.
+    # The workflow file itself is listed so that editing the guard re-runs it.
+    paths:
+      - 'tortoise/**'
+      - 'graph-scripts/**'
+      - 'tools/redis-guard.py'
+      - '.github/workflows/redis-guard.yml'
   push:
     branches: [main]
+    paths:
+      - 'tortoise/**'
+      - 'graph-scripts/**'
+      - 'tools/redis-guard.py'
+      - '.github/workflows/redis-guard.yml'
 
 # #6590: with no concurrency group every push ADDS an uncancellable run to an
 # already-saturated pool, so a superseded run is never replaced — it just waits
