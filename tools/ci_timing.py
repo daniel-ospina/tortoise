@@ -441,6 +441,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     manifest = _manifest_of(manifest_text)
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
+                + cs.fast_shard_issues(manifest)
                 + cs.duration_issues(manifest)
                 + cs.leg_coverage_issues(manifest)
                 + cs.duration_coverage_issues(manifest))
@@ -448,7 +449,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     problems += wf_issues
     if not wf_issues:
         legs = cs.push_legs(manifest)
-        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
         problems += cs.workflow_halves_issues(manifest, halves)
     else:
         problems += cs.workflow_halves_issues(
