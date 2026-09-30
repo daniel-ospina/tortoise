@@ -11,6 +11,11 @@ surfaces:
   # #3820: the analytics sink's OUTCOME contract + degraded-sink incident. Load-bearing
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
+  # #3944: the ABSENCE half of that same alarm (the #3820 sibling) — the canary
+  # heartbeat on /status and the driver's silence verdict. Load-bearing here for
+  # the same reason: everything it pins (the canary loop, `_analytics_heartbeat_
+  # block`, the /status block) lives in tortoise/hosted_api.py, which selects `api`.
+  - test_analytics_sink_absence.py
   - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
@@ -646,6 +651,10 @@ surfaces:
   # this is the fallback arm, and it also covers a tortoise/monitoring.py-only change
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
+  # #3944: the absence half, belt-and-braces alongside the load-bearing `api`
+  # entry (nothing in `core`'s own source map reaches hosted_api.py, so this
+  # only widens the always-on smoke to cover the dead-man's-switch guard).
+  - test_analytics_sink_absence.py
   - test_client_status_vocabulary.py
   # KEEP BOTH ARMS — a conflict in THIS list is a registration conflict: one
   # name arrives on each side and the resolver must keep both.
@@ -2491,6 +2500,7 @@ durations:
   test_4220_blog_residue_cleanup.py: 0.1
   test_activation_scorecard.py: 1.6
   test_analytics_fallback_alert.py: 1.9
+  test_analytics_sink_absence.py: 2.1
   test_analytics_write_path_resolution.py: 0.1
   test_ask_eval_only.py: 4.6
   test_ask_seed_shape.py: 0.6

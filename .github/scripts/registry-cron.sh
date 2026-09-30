@@ -938,6 +938,128 @@ if [ "$ENABLED" = "unknown" ]; then
   exit 1
 fi
 
+# ── 1c. analytics sink ABSENCE (#3944) — NOT gated on the sweep switch ──────
+# The #3820 transition half alerts on a write that DEGRADES. A sink that
+# silently STOPS emitting produces NO write, so it is invisible there: no
+# outcome, no streak, nothing counted. #3944 adds the heartbeat — the app's
+# canary writes through the REAL sink path on a fixed cadence, and /status
+# carries a last-DELIVERED timestamp plus the app's OWN Period+Grace threshold
+# (so the two cannot drift).
+#
+# This check runs on EVERY driver run, BEFORE the enabled gate below: the
+# #3820 D5a decision requires the sink alert never be gated on
+# BACKUP_SWEEP_ENABLED (a deliberate backups pause must not hide a dead sink).
+#
+# `unknown` is NOT `stale`: a missing/malformed block (an older app during a
+# rolling deploy) leaves the incident UNCHANGED, exactly as the watcher block
+# below does. An app with NO sink intended (selfhost/dev) never fires — the
+# local JSONL IS its intended sink. A cold start never fires: "no delivery
+# YET" is measured against uptime and is only an incident past the threshold.
+ANALYTICS_CONFIGURED="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.configured|type)=="boolean" then (.analytics.configured|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_INTENDED="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.intended|type)=="boolean" then (.analytics.intended|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_AGE_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.age_s|type)=="number" then (.analytics.age_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_UPTIME_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.uptime_s|type)=="number" then (.analytics.uptime_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_THRESHOLD_S="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.silent_threshold_s|type)=="number" then (.analytics.silent_threshold_s|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_ATTEMPTS="$(printf '%s' "$STATUS" | jq -r 'if (.analytics.canary_attempts|type)=="number" then (.analytics.canary_attempts|tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+ANALYTICS_SILENT=0
+ANALYTICS_FRESH=0
+# A shape we cannot compare is NOT the same state as an ABSENT age. jq has
+# already proven `.analytics.age_s` is a number (or `unknown`); so:
+#
+#   absent           (`unknown`)  → "no delivery since boot"  → the UPTIME arm
+#   present+decimal  (digits[.digits], <=18 int digits)        → compare
+#   present+other    (sign, exponent, hex, whitespace, 2nd dot, int64 overflow)
+#                                → UNMEASURABLE  → change NOTHING
+#
+# Two reasons the third state must not fall through to the uptime arm. (1) A
+# PRESENT age proves a delivery happened, so the uptime arm's premise ("no
+# delivery since boot") is false by construction — and a NEGATIVE age (a stamp
+# at or after the snapshot, which the pre-clamp app revision could publish
+# during a rolling deploy) would then FILE a false incident on a healthy sink.
+# (2) Truncation is not a parse: jq prints 1.2e16 as `1.2E+16`, whose integer
+# part is `1` — it would compare under any threshold and RESOLVE an open
+# incident on a grossly stale age. Bash also compares signed 64-bit, so an
+# all-digit operand longer than that makes `[ -gt ]` ERROR, and a failed
+# comparison must never read as "fresh". A non-compliant /status therefore can
+# neither fabricate an incident nor resolve one. The app cannot emit such a
+# value: with the clamp, `age_s` is a plain decimal in [0, 1e16) — jq
+# normalises to exponent form past 1e16 or below ~1e-6 (measured on jq 1.7.1:
+# `1e-4` and `1e-5` render plain, `9e-7` renders `9E-7`), and the app's
+# timestamps are microsecond-resolution, so its smallest non-zero age is 1e-6,
+# which renders plain. Neither end is a stale sink. Leading zeros cannot occur:
+# jq never emits them.
+ANALYTICS_AGE_PRESENT=0
+ANALYTICS_AGE_INT=""
+case "$ANALYTICS_AGE_S" in
+  ''|unknown) : ;;
+  *)
+    ANALYTICS_AGE_PRESENT=1
+    case "$ANALYTICS_AGE_S" in
+      *[!0-9.]*|.|.*|*.|*.*.*) : ;;
+      *)
+        ANALYTICS_AGE_INT="${ANALYTICS_AGE_S%%.*}"
+        [ "${#ANALYTICS_AGE_INT}" -le 18 ] || ANALYTICS_AGE_INT=""
+        ;;
+    esac
+    ;;
+esac
+ANALYTICS_UPTIME_INT=""
+case "$ANALYTICS_UPTIME_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *)
+    ANALYTICS_UPTIME_INT="${ANALYTICS_UPTIME_S%%.*}"
+    [ "${#ANALYTICS_UPTIME_INT}" -le 18 ] || ANALYTICS_UPTIME_INT=""
+    ;;
+esac
+ANALYTICS_THRESHOLD_INT=""
+case "$ANALYTICS_THRESHOLD_S" in
+  ''|*[!0-9.]*|.|.*|*.|*.*.*) : ;;
+  *)
+    ANALYTICS_THRESHOLD_INT="${ANALYTICS_THRESHOLD_S%%.*}"
+    [ "${#ANALYTICS_THRESHOLD_INT}" -le 18 ] || ANALYTICS_THRESHOLD_INT=""
+    ;;
+esac
+if [ "$ANALYTICS_INTENDED" = "true" ] && [ -n "$ANALYTICS_THRESHOLD_INT" ]; then
+  if [ -n "$ANALYTICS_AGE_INT" ]; then
+    # TWO probes, not one: the comparison must be observed to have SUCCEEDED
+    # before it decides anything. A single `if ... else FRESH` would treat a
+    # comparison ERROR as freshness (the R3 P1 regression).
+    if [ "$ANALYTICS_AGE_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
+      ANALYTICS_SILENT=1
+    elif [ "$ANALYTICS_AGE_INT" -ge 0 ] 2>/dev/null; then
+      # A MEASURED age at or under the threshold — the only shape that proves
+      # a delivered write.
+      ANALYTICS_FRESH=1
+    fi
+  elif [ "$ANALYTICS_AGE_PRESENT" = "0" ] && [ -n "$ANALYTICS_UPTIME_INT" ] \
+       && [ "$ANALYTICS_UPTIME_INT" -gt "$ANALYTICS_THRESHOLD_INT" ] 2>/dev/null; then
+    # No deliverED write SINCE BOOT (the age is genuinely ABSENT), and the
+    # process is past the threshold — not a cold start. This is the "the
+    # emitter never ran" arm.
+    ANALYTICS_SILENT=1
+  fi
+  if [ "$ANALYTICS_SILENT" = "1" ]; then
+    log "analytics sink silent (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s attempts=${ANALYTICS_ATTEMPTS} > ${ANALYTICS_THRESHOLD_S}s) — filing ANALYTICS_SINK_DEGRADED (job red)"
+    file_alert ANALYTICS_SINK_DEGRADED "[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered" \
+      "The /status analytics heartbeat has not advanced for longer than the app's own Period+Grace threshold (threshold=${ANALYTICS_THRESHOLD_S}s = 3x the canary period; age=${ANALYTICS_AGE_S}s; uptime=${ANALYTICS_UPTIME_S}s; canary_attempts=${ANALYTICS_ATTEMPTS}; configured=${ANALYTICS_CONFIGURED}). Either the sink is not being written to at all (the emitter never runs, or _track_analytics_event regressed to a bare return) or every write is failing. Treat as a SINK OUTAGE, not a DR outage: check the Fly secrets SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY and the Supabase project status / RLS on analytics_events; check the app log for 'analytics sink degraded'. If canary_attempts is 0 while uptime exceeds the threshold, the CANARY never ran (a lost heartbeat task or a loop that never started) — the instrument is dead, not the sink. If canary_attempts is NON-zero but no write landed, the canary RAN and nothing was delivered: a saturated/refused telemetry-pool offload, a real sink outage, or a half-configured env. This same kind also covers a write that degrades (see the runbook). Runbook: docs/ops/registry-backup-dr.md" ""
+  elif [ "$ANALYTICS_FRESH" = "1" ]; then
+    resolve_global ANALYTICS_SINK_DEGRADED "Resolved — the app delivered an analytics write within its Period+Grace threshold (age=${ANALYTICS_AGE_S}s <= ${ANALYTICS_THRESHOLD_S}s)."
+  else
+    # #3944 (bug-scan P1): a NON-SILENT but UNESTABLISHED heartbeat is NOT
+    # fresh. Three shapes land here and none may resolve: a cold start (no
+    # delivery yet, uptime under the threshold); a genuinely unmeasurable age
+    # (present but not comparable); and an unmeasurable/malformed block.
+    # Resolving on any of them would close — and delete the dedup object of — a
+    # genuinely open incident with NO evidence of a delivered write; on a
+    # crash-looping deploy (which never reaches its first write) every hourly
+    # run would re-resolve it, keeping the absence alarm permanently silent on
+    # exactly the failure it exists to catch. Resolve ONLY on a measured age.
+    log "analytics heartbeat not established (age=${ANALYTICS_AGE_S}s uptime=${ANALYTICS_UPTIME_S}s) — leaving ANALYTICS_SINK_DEGRADED unchanged"
+  fi
+else
+  log "analytics heartbeat unknown/unconfigured (configured=${ANALYTICS_CONFIGURED} intended=${ANALYTICS_INTENDED}) — leaving ANALYTICS_SINK_DEGRADED unchanged"
+fi
+
 if [ "$ENABLED" != "true" ]; then
   # #2796: enabled:false conflates four states. Only a genuine deliberate
   # pause (no config error, no storage error, fresh pool) may exit silently.

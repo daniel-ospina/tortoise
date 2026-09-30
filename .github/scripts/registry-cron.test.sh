@@ -124,6 +124,29 @@
 #      (the org census) precedes it in the payload
 #  81. #5028: the outcome's org census is `unknown` (never blank) when /status
 #      carries no object `per_team`; an object still reports the real count
+#  82. #3944: a /status with NO analytics block leaves the kind untouched
+#  83. #3944: a STALE heartbeat (age > threshold) files ANALYTICS_SINK_DEGRADED
+#  84. #3944: a FRESH heartbeat resolves the open incident
+#  85. #3944: cold start (no delivery yet, uptime under threshold) files nothing
+#  86. #3944: age null + uptime past threshold (the emitter never ran) files
+#  87. #3944: an UNCONFIGURED deployment never fires (the D5a principle)
+#  88. #3944: the HALF-CONFIGURED shape (#3677) DOES fire (`intended` gate)
+#  89. #3944 x #3820 D5a: the sink check fires with BACKUP_SWEEP_ENABLED=false
+#  90. #3944: a cold start must NOT RESOLVE an open incident (no delivered
+#      write yet — resolving would delete the dedup object on zero evidence)
+#  91. #3944: an unmeasurable/malformed block must NOT RESOLVE one either
+#  92. #3944: an exponent-notation age is NOT a measurement (truncation must
+#      not read as fresh) — changes NOTHING: no file, no resolve (R4: a
+#      present-but-unmeasurable age must not take the 'no delivery' arm)
+#  93. #3944: an ALL-DIGIT age beyond int64 must not resolve either (a failed
+#      `[ -gt ]` is not freshness)
+#  94. #3944: the boundary is strict — age == threshold is HEALTHY (resolves)
+#  95. #3944: a NEGATIVE age must not be read as "no delivery since boot" (a
+#      present age proves a delivery; the pre-clamp app can publish one)
+#  96. #3944: the threshold is the BODY's `silent_threshold_s`, not a hardcoded
+#      900 (the period is never re-typed in bash)
+#  97. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band — a
+#      19-digit magnitude compares successfully, so without the bound it files
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -486,6 +509,14 @@ run_driver() { # -> sets RC
 status_body() { # enabled config storage [watcher_running] [watcher_age] [last_sweep_at]
   printf '{"enabled":%s,"config_error":%s,"storage_error":%s,"per_team":{},"last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":%s,"age_minutes":%s}}' \
     "$1" "$2" "$3" "${6:-2026-08-09T23:30:00Z}" "${4:-true}" "${5:-1}"
+}
+
+# #3944: a /status body carrying the analytics heartbeat block. `age` and
+# `uptime` accept the literal `null` (jq then reports the `unknown` string, so
+# the "no delivered write yet" and "unmeasurable" arms are reachable).
+analytics_status_body() { # enabled intended configured age uptime [threshold] [attempts]
+  printf '{"enabled":%s,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"%s","last_team_count":0},"watcher":{"running":true,"age_minutes":1},"analytics":{"configured":%s,"intended":%s,"canary_period_s":300,"silent_threshold_s":%s,"uptime_s":%s,"canary_attempts":%s,"last_delivered_at":null,"age_s":%s}}' \
+    "$1" "$TS_RECENT" "$3" "$2" "${6:-900}" "$5" "${7:-40}" "$4"
 }
 
 echo "registry-cron.test.sh — #2796 taxonomy"
@@ -1790,6 +1821,290 @@ export STUB_STATUS_BODY="$(printf '{"enabled":true,"config_error":null,"storage_
 run_driver
 assert_eq "$RC" 0 "81. a run with an object per_team stays healthy"
 assert_contains "$OUT" "orgs=2" "81. an object per_team reports the real org count"
+
+# ── 82. #3944: an ABSENT analytics block leaves the incident unchanged ─────
+# `unknown` is NOT `stale`. An older app during a rolling deploy carries no
+# `.analytics` block; filing on that would manufacture an outage, and resolving
+# on it would erase a real one. This is also the control for every case above:
+# their status bodies carry no analytics block, so none of them gained a
+# GitHub call from the #3944 check.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(status_body true null null)"
+run_driver
+assert_eq "$RC" 0 "82. a status body with no analytics block stays healthy"
+assert_not_match "$(cat "$LOG")" "GH (POST|PATCH) .*/issues(/[0-9]+)? .*ANALYTICS_SINK_DEGRADED" \
+  "82. an absent analytics block files/resolves nothing"
+assert_contains "$OUT" "analytics heartbeat unknown/unconfigured" \
+  "82. the absence is logged as unknown, not stale"
+
+# ── 83. #3944: a STALE heartbeat files the absence incident ─────────────────
+# age_s (1800) exceeds the app's own Period+Grace threshold (900): no write has
+# been DELIVERED for three canary periods. This is the D5b absence half — the
+# shape the #3820 transition alert cannot see, because there is no write.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 1800 10000)"
+run_driver
+assert_eq "$RC" 1 "83. a silent sink reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "83. a stale heartbeat files ANALYTICS_SINK_DEGRADED"
+assert_contains "$OUT" "analytics sink silent (age=1800s" \
+  "83. the log names the age and the threshold"
+assert_contains "$OUT" "attempts=40" "83. the log carries the canary attempt count"
+
+# ── 84. #3944: a FRESH heartbeat resolves the incident ─────────────────────
+# The driver's self-heal is the backstop the app's in-process gate cannot be:
+# the app's resolve flag can be CLEAN while an incident is open, and it only
+# revisits that on a delivered write. `unknown`/unmeasurable must NOT resolve.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 120 10000)"
+run_driver
+assert_eq "$RC" 0 "84. a fresh heartbeat stays green"
+assert_contains "$(cat "$LOG")" \
+  "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
+  "84. a fresh heartbeat self-heals the open incident"
+
+# ── 85. #3944: cold start is NOT an incident ────────────────────────────────
+# No delivered write YET (age_s null) but the process is 5 s old: the canary has
+# not had its first period. A fabricated boot seed would hide this state; the
+# uptime comparison is what keeps a deploy from paging.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true null 5)"
+run_driver
+assert_eq "$RC" 0 "85. a cold-started app stays green"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "85. a cold start files nothing"
+
+# ── 86. #3944: the EMITTER NEVER RAN (age null, uptime past threshold) ──────
+# The other absence shape: the canary never delivered anything since boot and
+# the process is old. `unknown` age is not freshness here — uptime supplies the
+# disambiguation.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true null 10000)"
+run_driver
+assert_eq "$RC" 1 "86. no delivery since boot past the threshold reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "86. the emitter-never-ran arm files ANALYTICS_SINK_DEGRADED"
+
+# ── 87. #3944: an UNCONFIGURED deployment never fires ───────────────────────
+# selfhost/dev: the local JSONL IS the intended sink. Even with an arbitrary
+# age, `intended` false must keep the kind untouched — the #3820 D5a principle
+# that a sink which was never configured is not a degradation.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true false false 99999 99999)"
+run_driver
+assert_eq "$RC" 0 "87. an unconfigured deployment stays green"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*ANALYTICS_SINK_DEGRADED" \
+  "87. an unconfigured deployment files nothing"
+
+# ── 88. #3944: the HALF-CONFIGURED shape (#3677) DOES fire ──────────────────
+# URL set, key resolving to "": `configured` false but `intended` true. This is
+# the shape that created #3820, and the reason the absence gate is `intended`.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true false 1800 10000)"
+run_driver
+assert_eq "$RC" 1 "88. a half-configured sink reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "88. a half-configured deployment files ANALYTICS_SINK_DEGRADED"
+
+# ── 89. #3944 x #3820 D5a: a stale heartbeat fires with the sweep OFF ───────
+# The D5a decision: the sink alert must NOT ride BACKUP_SWEEP_ENABLED. The
+# deliberate-pause path (enabled=false, fresh pool) exits silently; the #3944
+# check runs BEFORE that gate, so a disabled sweep cannot hide a dead sink.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body false true true 1800 10000)"
+run_driver
+assert_eq "$RC" 1 "89. a stale heartbeat reds a deliberately-paused sweep"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "89. the sink check is NOT gated on BACKUP_SWEEP_ENABLED (D5a)"
+assert_contains "$OUT" "backups deliberately disabled" \
+  "89. the sweep-side deliberate pause still took its own path"
+
+# ── 90. #3944: a cold start must NOT RESOLVE an open incident ───────────────
+# The bug-scan P1 shape: `intended` true, no delivered write yet, uptime under
+# the threshold. Not stale (nothing to file) — but also NOT fresh, so it must
+# not CLOSE an open incident either: resolving here deletes the R2 dedup object
+# with zero evidence of a delivered write, and a crash-looping deploy (which
+# never reaches its first write) would re-resolve it every hourly run, keeping
+# the absence alarm permanently silent on exactly the failure it exists for.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true null 5)"
+run_driver
+assert_eq "$RC" 0 "90. a cold start with an open incident stays green"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "90. a cold start does NOT resolve the open incident (no delivered write yet)"
+assert_contains "$OUT" "analytics heartbeat not established" \
+  "90. the log says the heartbeat is not established"
+
+# ── 91. #3944: an UNMEASURABLE block must NOT RESOLVE an open incident ──────
+# `intended` true and a threshold present, but neither age_s nor uptime_s is a
+# number (a malformed / partial /status). Acceptance criterion 6 — an absent or
+# malformed block never files AND never resolves. `unknown` is not freshness,
+# and a garbage numeric operand must not be read as `<= threshold` either.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":{"last_sweep_at":"'"$TS_RECENT"'","last_team_count":0},"watcher":{"running":true,"age_minutes":1},"analytics":{"intended":true,"configured":true,"silent_threshold_s":900}}'
+run_driver
+assert_eq "$RC" 0 "91. an unmeasurable heartbeat stays green"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "91. an unmeasurable block does NOT resolve the open incident"
+assert_contains "$OUT" "analytics heartbeat not established" \
+  "91. the log reports the record as unestablished, not fresh"
+
+# ── 92. #3944: an exponent-notation age is NOT a measurement ───────────────
+# R2 (bug-scan P3): `${x%.*}` truncates, and jq prints 1.2e16 as `1.2E+16` —
+# whose integer part truncates to `1` and would compare UNDER any threshold,
+# RESOLVING an open incident on a grossly stale age. The operand shape is now
+# validated, so this reads as unmeasurable-for-age and changes NOTHING — R4
+# removed the fall-through to the uptime arm, which would FILE on a healthy
+# sink whose delivery is merely un-measurable.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 1.2e16 10000)"
+run_driver
+assert_eq "$RC" 0 "92. an exponent-notation age changes nothing"
+# R4: a PRESENT but unmeasurable age must not fall through to the uptime arm —
+# a present age proves a delivery happened, so the arm's premise ("no delivery
+# since boot") is false, and a pre-clamp app could publish a negative age (a
+# false FILE on a healthy sink). Unmeasurable changes nothing at all.
+assert_not_match "$OUT" "analytics sink silent" \
+  "92. an uncomparable age is not read as stale (no FILE decision)"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "92. a truncated non-decimal age NEVER resolves the open incident"
+assert_contains "$OUT" "leaving ANALYTICS_SINK_DEGRADED unchanged" \
+  "92. an unmeasurable age leaves the kind untouched"
+
+# ── 93. #3944: an ALL-DIGIT age that overflows bash int64 must not resolve ──
+# R3 P1: `[ -gt ]` compares in signed 64-bit, so a longer all-digit operand
+# ERRORS (rc=2). With a single `if ... else FRESH`, that error read as
+# freshness and RESOLVED the open incident — the same fail-open class as case
+# 92, via a different operand. The guard now bounds the digit count and the
+# decision requires the comparison to have SUCCEEDED.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 12000000000000000000000000 10000)"
+run_driver
+assert_eq "$RC" 0 "93. an int64-overflowing age changes nothing"
+assert_not_match "$OUT" "analytics sink silent" \
+  "93. an uncomparable magnitude is not read as stale (no FILE decision)"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "93. an int64-overflowing age NEVER resolves the open incident"
+
+# ── 94. #3944: the boundary is strict (age == threshold is HEALTHY) ─────────
+# The resolve is destructive (it closes the issue and deletes the dedup
+# object), so the boundary that decides incident-vs-healthy is pinned: the
+# comparison is `>`, not `>=`, and an age of exactly the threshold resolves.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 900 10000 "" 900)"
+run_driver
+assert_eq "$RC" 0 "94. age == threshold is treated as healthy"
+assert_contains "$(cat "$LOG")" \
+  "GH PATCH https://api.github.com/repos/daniel-ospina/tortoise/issues/321" \
+  "94. age == threshold self-heals (strict >, not >=)"
+
+# ── 95. #3944: a NEGATIVE age must not be read as "no delivery since boot" ──
+# R4 P3: a negative age is shape-rejected, and admitting it into the uptime arm
+# FILED a false incident on a demonstrably healthy sink (age_s is only non-null
+# when a write was DELIVERED, so a negative value means the delivery is at or
+# after the snapshot). A PRESENT-but-unmeasurable age now changes nothing; only
+# a genuinely ABSENT one may take the uptime arm.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true -0 10000)"
+run_driver
+assert_eq "$RC" 0 "95. a negative age does not red the run"
+assert_not_match "$OUT" "analytics sink silent" \
+  "95. a negative age must NOT file a false incident on a healthy sink"
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "95. a negative age leaves an open incident untouched"
+
+# ── 96. #3944: the threshold comes from the BODY, not a hardcoded 900 ──────
+# The whole point of publishing `silent_threshold_s` is that bash never
+# re-types the period. The app derives it where the period lives (`3 x period`),
+# so a change to the period must move the driver's verdict. A body threshold of
+# 60 with an age of 120 files; a hardcoded 900 in the driver would not.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 120 10000 60)"
+run_driver
+assert_eq "$RC" 1 "96. a non-default threshold from the body reds the run"
+assert_filed "$(cat "$LOG")" "ANALYTICS_SINK_DEGRADED" \
+  "96. the driver uses the body's silent_threshold_s (not a hardcoded 900)"
+
+# ── 97. #3944: the 18-DIGIT bound is load-bearing in the int64-FITTING band ──
+# Case 93 does NOT pin the digit bound, and this is why. Its 26-digit operand
+# makes `[ -gt ]` itself ERROR (rc=2), so 93 stays unmeasurable even with the
+# bound gone — `[ "${#ANALYTICS_AGE_INT}" -le 18 ]` can be deleted and 93 stays
+# green. But a 19-digit operand that still FITS signed 64-bit (1e18 < 9.2e18)
+# compares SUCCESSFULLY, so without the bound it reads as a grossly stale sink
+# and FILES. The bound is what keeps an over-long magnitude unmeasurable. No
+# producer can emit one (the app clamps `age_s` to [0, 1e16)), so this pins the
+# defensive contract against a non-compliant /status — the same class as 92/93.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_SWEEP_BODY='{"status":"backed_up"}'
+export STUB_GH_SEARCH_BODY='{"items":[{"number":321,"title":"[DR] ANALYTICS_SINK_DEGRADED — no analytics write delivered"}]}'
+export STUB_STATUS_BODY="$(analytics_status_body true true true 1000000000000000000 10000)"
+run_driver
+assert_eq "$RC" 0 "97. a 19-digit int64-fitting age changes nothing"
+assert_not_match "$OUT" "analytics sink silent" \
+  "97. the 18-digit bound keeps an over-long magnitude unmeasurable (no FILE)"
+# NB: no separate 'files nothing' assertion in ANY case whose fixture holds
+# an OPEN #321 (84, 92, 93, 94, 95, 97): `file_alert` adopts it and creates
+# nothing, so a `GH POST .../issues ` regex can never match and would pass
+# even on a mutant that decides SILENT — false assurance. The decision is
+# pinned instead by RC + the no-'sink silent' assertion (+ the PATCH/unchanged
+# clause). Cases 85 and 87 KEEP the line: they set no search fixture, so a
+# wrong file would genuinely POST there and the line can fail.
+assert_not_match "$(cat "$LOG")" "GH PATCH .*/issues/321" \
+  "97. an over-long magnitude never resolves the open incident"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
