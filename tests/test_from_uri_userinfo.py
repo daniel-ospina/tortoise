@@ -1039,3 +1039,47 @@ def test_session_indexer_failure_log_names_real_endpoint_on_cache_hit(
     # broken client stays cached, so a repeated WARNING is one per session file.
     assert miss_levels == {"WARNING"}
     assert hit_levels == {"DEBUG"}
+
+def test_graph_script_helpers_do_not_connect_at_import():
+    """Importing a helper must NOT open a socket (#6595 CI red).
+
+    The fast shards deliberately get no ``TORTOISE_DB_URI`` ("the ~600 embedded
+    tests need the redislite default"), so an import-time connect falls back to
+    the fixed ``localhost:16379`` — nothing listens there on a runner — and this
+    file ERRORS on a ``ConnectionError`` instead of exercising the parser. The
+    bug is selection-dependent: it appeared on a PR whose diff merely changed
+    which tests share the shard, so the guard must pin the property, not the CI
+    coincidence. ``socket.connect`` is sabotaged so the check is independent of
+    whatever happens to be reachable.
+    """
+    import importlib.util
+    import socket
+    import sys
+
+    scripts_dir = REPO_ROOT / "graph-scripts"
+    saved_path = list(sys.path)
+    saved_connect = socket.socket.connect
+
+    def _boom(self, *args, **kwargs):
+        raise AssertionError("importing the helper opened a socket")
+
+    connecting: list[str] = []
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        for module_name in _GRAPH_SCRIPT_HELPERS:
+            spec = importlib.util.spec_from_file_location(
+                f"_gs_import_{module_name}", scripts_dir / f"{module_name}.py")
+            module = importlib.util.module_from_spec(spec)
+            socket.socket.connect = _boom
+            try:
+                spec.loader.exec_module(module)
+            except AssertionError:
+                connecting.append(module_name)
+            finally:
+                socket.socket.connect = saved_connect
+    finally:
+        sys.path[:] = saved_path
+    assert not connecting, (
+        f"{connecting} open a connection at IMPORT — every importer, including "
+        "this file, then depends on a live server at TORTOISE_DB_URI or the "
+        "fixed fallback port")

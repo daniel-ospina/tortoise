@@ -30,8 +30,26 @@ def _parse_uri(uri: str) -> dict:
 
 _uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
 _cfg = _parse_uri(_uri)
-DB = FalkorDB(host=_cfg["host"], port=_cfg["port"], password=_cfg["password"] or None)
-G = DB.select_graph(_cfg["graph"])
+
+# Importing this module must NOT open a socket. The URI parse above is
+# import-safe; the connection is not. Connecting here made every importer
+# depend on a live server being reachable at TORTOISE_DB_URI — or, in the CI
+# fast shards, on the FIXED fallback port (localhost:16379) happening to have
+# something listening, which it does not: the fast lane deliberately gets no
+# TORTOISE_DB_URI. So a test that only wants `_parse_uri` failed with
+# ConnectionError instead of testing the parser.
+_CONN: dict = {}
+
+
+def __getattr__(name):  # PEP 562 — resolved on FIRST ACCESS, not at import
+    """`DB` and `G` are created on first access, so the module stays import-safe."""
+    if name not in ("DB", "G"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if "DB" not in _CONN:
+        _CONN["DB"] = FalkorDB(host=_cfg["host"], port=_cfg["port"],
+                               password=_cfg["password"] or None)
+        _CONN["G"] = _CONN["DB"].select_graph(_cfg["graph"])
+    return _CONN[name]
 
 CONTEXTS = [
     'concept|operations|agent',
