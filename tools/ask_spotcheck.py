@@ -210,11 +210,77 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
 #: it by hand (a receipt that does not name its seeding mode is not evidence).
 SEED_TURNS_EMBEDDED_BY_DEFAULT = True
 
+#: #5534: whether the ask FIXTURE seeder (``_seed_memory``) stores the E3
+#: ``search_keys`` substrate the A4 PRF gate harvests. Single source so a
+#: receipt can NAME the mode it was produced in (a receipt that does not name
+#: its seeding mode is not evidence).
+#:
+#: **``False`` is the faithful CAPTURE shape** (the default): ``search_keys``
+#: is an indexed Point FTS field (``tortoise/projection/__init__.py`` —
+#: ``("Point", ["content", "search_keys"])``) and capture's TURN write stores
+#: none (E3 writes it on extracted claim Points), so a capture-exact turn
+#: store has none — exactly why the SHARED primitive
+#: ``seed_capture_turn_store`` defaults OFF. Flipping this default ON would
+#: silently change the store of EVERY non-A4 caller that passes nothing
+#: (``tools/profile_read_path.py``, ``tools/ask_pool_admission_probe.py``,
+#: the ``w6c_*`` / ``w7a_*`` / ``4107_*`` runbook diagnostics), so their
+#: previously recorded numbers would stop reproducing.
+#:
+#: A caller that NEEDS A4's input opts in EXPLICITLY with ``search_keys=True``
+#: (the diagnostic and the ask-shape ruler do; both default their own CLI to
+#: the A4 behaviour). ``True`` = the store carries the aliases A4 needs and
+#: the A/B can be non-zero; ``False`` = #5534's defect shape (A4 structurally
+#: inert, the A/B a guaranteed zero).
+SEED_SEARCH_KEYS_BY_DEFAULT = False
+
+#: commit_schema.Point.search_keys entry bound (1-60 chars, at most 4
+#: entries).
+_MAX_SEARCH_KEY_LEN = 60
+_MAX_SEARCH_KEYS = 4
+
+
+def _derive_search_keys(text: str, *,
+                        max_entries: int = _MAX_SEARCH_KEYS) -> str:
+    """#5534: deterministic E3-shaped ``search_keys`` for ONE seeded turn.
+
+    A4 (``TORTOISE_ASK_SEARCH_KEYS_PRF``) is implemented entirely as
+    ``sdk._search_keys_prf_expansion`` → ``tortoise.sparse.expansion_tokens``,
+    whose output depends ONLY on the ``search_keys`` harvested from the
+    first-pass top-5 hits (``expansion_tokens`` opens with ``if not aliases:
+    return []``). A store with no ``search_keys`` therefore makes the FTS leg
+    byte-identical on/off — every A4 A/B returns a guaranteed zero, which is
+    #5534's defect: not "A4 has no effect", but "the instrument has no A4
+    input".
+
+    This supplies that input from the turn's OWN text — the same substrate
+    E3's extractor writes for a claim: up to 4 distinct tokens, longest
+    first (the specificity rule ``expansion_tokens`` itself applies), each
+    within the schema's 60-char entry bound, non-stopword and >= 2 chars by
+    construction (``tokenize_sparse_query``). Returns the FLAT space-joined
+    STRING the product stores after ``sdk._flatten_search_keys_prop``
+    (#1541 D3: FalkorDB's fulltext index does not index array-valued
+    properties). Empty when the turn yields no storable token.
+    """
+    if not text:
+        return ""
+    from tortoise.sparse import tokenize_sparse_query
+
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for tok in tokenize_sparse_query(str(text), keep_numeric=True):
+        if tok in seen or len(tok) > _MAX_SEARCH_KEY_LEN:
+            continue
+        seen.add(tok)
+        uniq.append(tok)
+    uniq.sort(key=len, reverse=True)
+    return " ".join(uniq[:max_entries])
+
 
 def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
                             conversation: list[dict], *,
                             now: str | _CaptureClock | None = CAPTURE_CLOCK,
                             embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT,
+                            search_keys: bool = False,
                             ) -> list[str]:
     """Write ONE session's turns in the CAPTURE shape (#3914, #3910).
 
@@ -261,6 +327,15 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     — capture's gate is PRE-MUTATION), so a degenerate session contributes no
     Session stub, no turn and no edge, exactly as in capture.
 
+    ``search_keys`` (#5534) is OFF by default and stays a fixture-seeder
+    concern: capture's turn write stores no ``search_keys`` (E3 writes it on
+    extracted claim Points), so a capture-exact turn store has none — and
+    the committed transcript goldens seed through this function. When ON,
+    each turn's aliases are DERIVED from its own stored text via
+    :func:`_derive_search_keys` and written as one flat space-joined string
+    (the product's post-``_flatten_search_keys_prop`` shape); the write is
+    deterministic, and therefore a re-seed of the same turn converges.
+
     ``now`` follows :func:`merge_capture_session` exactly: the default
     (``CAPTURE_CLOCK``) models a capture's own clock and is resolved ONCE so
     the session and every turn share it. An explicit ``now=None`` means the
@@ -302,6 +377,12 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     # and after the loop the WHOLE stored ``CONTAINS`` set is swept — the
     # deleted ``_clear_recorded_time`` cleared every stored turn, and a
     # shorter re-seed must not leave an earlier call's timestamps behind.
+    sk_sets = ""
+    if search_keys:
+        # #5534: the E3 alias substrate the A4 PRF gate harvests. Written in
+        # the same SET as the turn so a search_keys write can never be a
+        # separate, skippable step.
+        sk_sets = "t.search_keys=$sk, "
     time_sets = ""
     time_params: dict[str, object] = {}
     if now is not None:
@@ -351,6 +432,7 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             f"    {time_sets}"
+            f"    {sk_sets}"
             "    t.content_hash=$ch, "
             # The product's own vector, vecf32-wrapped (the read path's
             # vec.euclideanDistance rejects a plain-list stored embedding),
@@ -364,6 +446,8 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft",
                     "ch": _content_hash(turn_text), "emb": embeddings[i],
+                    **({"sk": _derive_search_keys(turn_text)}
+                       if search_keys else {}),
                     **time_params},
         )
         proj.g.query(
@@ -391,7 +475,8 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
 
 
 def _seed_memory(sdk: TortoiseSDK, question: dict, *,
-                 embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT) -> None:
+                 embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT,
+                 search_keys: bool = SEED_SEARCH_KEYS_BY_DEFAULT) -> None:
     """Seed the haystack in the CAPTURE shape (#3910).
 
     Mirrors the turn-store sub-step of ``_capture_session_impl`` — the part
@@ -430,8 +515,21 @@ def _seed_memory(sdk: TortoiseSDK, question: dict, *,
     ``p.sessionId`` prop over the CONTAINS edge, so that fixture read GREEN
     on a graph where the edge path was entirely broken.
 
+    Reproduced IN ADDITION to capture's own write (#5534): callers that opt
+    in (``search_keys=True``) get the E3 ``search_keys`` substrate on each
+    turn Point, DERIVED deterministically from that turn's own text, because
+    A4 (``TORTOISE_ASK_SEARCH_KEYS_PRF``) harvests ``search_keys`` from the
+    first-pass top-5 hits and is STRUCTURALLY INERT on a store with none —
+    the instrument's A/B then returns a guaranteed zero and cannot clear
+    A4. This is the same class of instrument repair as W7A's embedding
+    default: capture's TURN write stores no ``search_keys`` (E3 writes it on
+    extracted claim Points), so a pure turn store leaves the lever with no
+    input. ``search_keys`` defaults OFF because that IS the capture shape;
+    the A4-bearing runs turn it on EXPLICITLY (see
+    ``SEED_SEARCH_KEYS_BY_DEFAULT``) so no non-A4 caller's store moves.
+
     Deliberately NOT reproduced (this seeds a TURN STORE, it is not a
-    capture): no ``search_keys`` on turn Points, no ``:Source``
+    capture): no ``:Source``
     materialization, no extracted claim Points. The turn EMBEDDING **IS**
     reproduced (``embed=True``, the default) because the product's write path
     now stores one (#4194) and a fixture without it blinds every retrieval
@@ -477,7 +575,7 @@ def _seed_memory(sdk: TortoiseSDK, question: dict, *,
         turn_ids = seed_capture_turn_store(
             sdk, sid, session or [],
             now=f"{sdate}T10:00:00Z" if sdate else None,
-            embed=embed)
+            embed=embed, search_keys=search_keys)
         if not turn_ids:
             continue
         if not sdate:
