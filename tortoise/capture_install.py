@@ -1037,6 +1037,13 @@ def legacy_extension_obstacle(harness: str,
     the caller's to render when it has none of its own (``doctor`` uses it as
     the whole hint), so a reworded refusal cannot leave a stale copy behind.
 
+    The INSTALLER keeps its own, more detailed refusal message: this predicate
+    is a MIRROR of that condition, and a mirror is the one thing that can
+    drift, so
+    ``test_pi_legacy_obstacle_matches_the_installers_own_refusal`` drives both
+    over the shape space (no legacy entry / a renameable one / its backup name
+    taken / a symlinked entry) and pins them together.
+
     A symlinked legacy entry is deliberately NOT a collision: the installer
     unlinks it (the checkout it points at is untouched) and never reaches the
     refusal, so calling it one would withhold a command that works.

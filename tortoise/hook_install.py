@@ -892,11 +892,11 @@ def contract_version_for(harness: str) -> int | None:
     is a shell hook (answered by ``contract_version`` over a ``HarnessLayout``)
     or a non-shell artifact (answered from :data:`ARTIFACT_CONTRACTS`), so
     ``pi`` is pinned by the SAME test table as its three shell siblings instead
-    of falling outside the machinery (#4680).  Its production consumer is
-    ``tortoise doctor`` step 7, which grades both seam classes;
-    ``tortoise hooks status`` also reads its version through it, but only for
-    layout harnesses — the CLI still rejects ``pi`` before reaching this call,
-    so Pi is unreachable there (#5351).
+    of falling outside the machinery (#4680).  BOTH seam classes reach this
+    version through BOTH surfaces: ``tortoise doctor`` step 7 grades them, and
+    ``tortoise hooks status`` reads it for a layout OR (since #5351) an
+    artifact harness — the CLI resolves the latter through
+    ``ARTIFACT_CONTRACTS`` and prints ``contract vN`` for a Pi seam.
 
     ``None`` means "no contract is registered for this harness" or "the
     shipped seam declares no readable generation".  The former is the normal

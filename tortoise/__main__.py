@@ -3573,45 +3573,62 @@ def _cmd_hooks(args) -> int:
             print(f"✅ {args.harness} capture hooks in {root} are current "
                   f"(contract v{version}).")
         else:
+            # Repairability is decided BEFORE the findings are rendered, because
+            # an artifact finding's OWN detail embeds a repair command
+            # ("reinstall with `tortoise install pi`") — unconditionally, and in
+            # the legacy collision the installer REFUSES it.  That detail is the
+            # "second place a refusing recommendation can come from", so it is
+            # replaced whenever the obstacle is present, exactly as `doctor`
+            # replaces it (independent of the MANUAL arm: a manual step does not
+            # clear the collision, so the conditional hint below never names a
+            # command for this state either).
+            blocking = [f for f in findings if f.blocking]
+            # Some blocking kinds are NOT repairable by `upgrade` (it refuses
+            # rather than clobber an unreadable/unsafe/foreign path), so the
+            # hint must name the manual fix for those instead of recommending
+            # a command that will refuse.  Which kinds those are is declared
+            # ONCE, in `hook_install`, because `doctor` recommends a repair for
+            # the same kinds (#4680 review).  It is asked over ALL findings,
+            # not just the blocking ones, so a non-blocking symlink note still
+            # blocks the recommendation.
+            manual = {f.kind for f in findings if is_manual_fix(f.kind)}
+            # An artifact seam's installer has ONE refusal state no finding
+            # kind expresses — a legacy extension already disabled at its
+            # backup name (#3713) — so repairability cannot be read off the
+            # kinds alone.  Consult the ONE declaration `doctor` also reads,
+            # never a second copy of the condition (#5351).
+            obstacle = ("" if layout is not None
+                        else legacy_extension_obstacle(args.harness, root))
             print(f"Capture-hook install at {root} (contract v{version}):")
             for f in findings:
-                print(f"  {f.line()}")
-            blocking = [f for f in findings if f.blocking]
+                if obstacle:
+                    # The detail's embedded command is refused in this state,
+                    # so replace it with the repair-path pointer `doctor`
+                    # renders for the same reason.
+                    icon = "❌" if f.blocking else "⚠️"
+                    print(f"  {icon} {f.kind}: run `tortoise session verify "
+                          f"--harness {args.harness}` for the repair path")
+                else:
+                    print(f"  {f.line()}")
             if blocking:
-                # Some blocking kinds are NOT repairable by `upgrade` (it
-                # refuses rather than clobber an unreadable/unsafe/foreign
-                # path), so the hint must name the manual fix for those
-                # instead of recommending a command that will refuse.  Which
-                # kinds those are is declared ONCE, in `hook_install`, because
-                # `doctor` recommends a repair for the same kinds (#4680
-                # review).
                 kinds = {f.kind for f in blocking}
-                # `upgrade` refuses on ANY symlink in a target path, and the
-                # finding kinds for those are not knowable in advance, so
-                # `is_manual_fix` treats every symlink kind as manual — and it
-                # is asked over ALL findings, not just the blocking ones, so a
-                # non-blocking symlink note still blocks the recommendation.
-                manual = {f.kind for f in findings if is_manual_fix(f.kind)}
-                # An artifact seam's installer has ONE refusal state no finding
-                # kind expresses — a legacy extension already disabled at its
-                # backup name (#3713) — so repairability cannot be read off the
-                # kinds alone.  Consult the ONE declaration `doctor` also
-                # reads, never a second copy of the condition (#5351).
-                obstacle = ("" if layout is not None
-                            else legacy_extension_obstacle(args.harness, root))
                 if manual:
                     # A manual kind makes `upgrade` refuse the WHOLE run, so
                     # recommending it (even alongside repairable findings)
                     # would point at a command that refuses.
                     print("\nSome findings need a manual fix before upgrade "
                           "can run: " + ", ".join(sorted(manual)) + ".")
-                elif obstacle:
+                # NOT an `elif`: the two obstacles are INDEPENDENT — clearing
+                # the manual kind (e.g. re-pointing a symlink) does not clear
+                # the legacy collision, so suppressing this line would promise
+                # a repair that still refuses.  Both are named when both hold.
+                if obstacle:
                     # The installer's own refusal, in its own words: `upgrade`
                     # would refuse, so name the obstacle instead of a command
                     # that cannot run until a human clears it.
                     print("\nUpgrade cannot run until this is fixed: "
                           + obstacle + ".")
-                elif kinds:
+                elif not manual and kinds:
                     print("\nRun `tortoise hooks upgrade"
                           f"{hsel}" f" --dir {root}` to repair.")
         # #3797: the hook-run observation — the install's OWN evidence that

@@ -739,6 +739,11 @@ class TestDoctorPreInit:
         assert "Capture hooks" in out, out
         assert "tortoise install pi" not in out, (
             "the hint recommends a command that refuses in this state")
+        # Neither of the installer-shaped repairs may be named: in this state
+        # `tortoise install pi` AND `hooks upgrade --harness pi` both call the
+        # same installer and both refuse.
+        assert "hooks upgrade" not in out, (
+            "the hint recommends an upgrade that refuses in this state")
         assert _ci.PI_DISABLED_DIRNAME in out, out
         # The replacement the hint names must itself accept `--harness pi`.
         # It does NOT pin WHICH read-only surface is named: `hooks status

@@ -3705,6 +3705,53 @@ def _stale_pi_seam(home: Path) -> Path:
     return installed
 
 
+@pytest.mark.parametrize("shape", ["absent", "renameable", "taken", "file_taken",
+                                   "symlink", "symlink_taken"])
+def test_pi_legacy_obstacle_matches_the_installers_own_refusal(shape, home):
+    """The hint predicate is a MIRROR of the installer's own refusal, so pin
+    the mirror to the thing it mirrors.
+
+    Over every legacy shape, the `hooks status`/`doctor` predicate must say
+    "blocked" exactly when `install_capture` refuses with the legacy collision
+    — a mirror that drifts tells the user to run a command that refuses (the
+    #3713 class this predicate exists for).
+
+    Mutation: drop the `not legacy.is_symlink()` exemption (the symlink shapes
+    then block a repair the installer performs), or widen `is_dir()` to
+    `exists()` (a regular FILE at the legacy name — `file_taken` — is IGNORED
+    by the installer, but `exists()` would call it a collision); either REDs.
+    """
+    ext = home / ".pi" / "agent" / "extensions"
+    ext.mkdir(parents=True)
+    legacy = ext / capture_install.LEGACY_PI_DIRNAME
+    disabled = ext / capture_install.PI_DISABLED_DIRNAME
+    target = home / "checkout"
+    target.mkdir()
+    if shape in ("renameable", "taken"):
+        legacy.mkdir()
+    if shape == "file_taken":
+        # A regular file is neither unlinked (not a symlink) nor renamed (not a
+        # directory): `_install_pi` ignores it and never refuses.
+        legacy.write_text("not a directory\n", encoding="utf-8")
+    if shape in ("symlink", "symlink_taken"):
+        legacy.symlink_to(target, target_is_directory=True)
+    if shape in ("taken", "file_taken", "symlink_taken"):
+        disabled.mkdir()
+
+    obstacle = capture_install.legacy_extension_obstacle("pi", ext)
+    # The installer's REAL verdict, write-free: `--dry-run` runs every guard
+    # (`_preflight_probe`, the legacy disable) and writes nothing.
+    res = install_capture("pi", home=home, dry_run=True)
+    installer_refuses = (not res.ok) and "legacy" in (res.error or "")
+
+    assert bool(obstacle) == installer_refuses, (
+        f"shape={shape}: obstacle={obstacle!r} but the installer said "
+        f"ok={res.ok} error={res.error!r}")
+    if obstacle:
+        assert capture_install.PI_DISABLED_DIRNAME in obstacle, obstacle
+    assert capture_install.legacy_extension_obstacle("claude", ext) == ""
+
+
 def test_artifact_home_is_the_inverse_of_artifact_root(home):
     """`artifact_home` must invert `artifact_root` EXACTLY.
 
@@ -3831,3 +3878,41 @@ def test_pi_hooks_status_never_recommends_an_upgrade_that_refuses(cli):
     assert "move one aside" in r.stdout, r.stdout
     assert "hooks upgrade" not in r.stdout, (
         "the hint recommends an upgrade that refuses in this state")
+    assert "tortoise install pi" not in r.stdout, (
+        "the finding's OWN detail names the installer, which refuses in this "
+        "state — the second place a refusing recommendation comes from:\n"
+        + r.stdout)
+
+
+def test_pi_hooks_status_with_a_manual_fix_and_a_collision_names_no_refusing_command(
+        cli):
+    """The obstacle and MANUAL arms are independent: a manual step does not
+    clear the legacy collision, so in their COMBINATION the finding's detail
+    still must not be printed raw (it names `tortoise install pi`, which
+    refuses) — the precedence `doctor` uses, where the detail is replaced
+    whenever the obstacle is present.
+
+    Mutation: render the detail whenever `not manual` (the first, incomplete
+    fix) — this case prints `tortoise install pi` and REDs.
+    """
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+    (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
+    (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
+    # A MANUAL kind BESIDE the obstacle: an out-of-home leaf symlink is refused
+    # by the installer, so `is_manual_fix` fires for `symlinked-artifact`.
+    outside = home / "outside.ts"
+    outside.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
+                       encoding="utf-8")
+    installed = root / capture_install.PI_EXTENSION_NAME
+    installed.unlink()
+    installed.symlink_to(outside)
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert "tortoise install pi" not in r.stdout, (
+        "a manual step does not clear the legacy collision, so the installer "
+        "this names still refuses:\n" + r.stdout)
+    assert capture_install.PI_DISABLED_DIRNAME in r.stdout, r.stdout
