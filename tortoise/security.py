@@ -385,6 +385,100 @@ _REDACTION_VALUE = "[REDACTED:{kind}]"
 
 #: ``(kind, pattern, replacement)`` — ordered, and the ORDER IS LOAD-BEARING.
 _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    # ── Tortoise's OWN minted credentials ───────────────────────────────────
+    # FIRST, for the same reason `sk-ant-` precedes the generic `sk-`: these are
+    # the narrowest anchors in the table, so they must win the label when a
+    # value is also reachable by a broader rule (a `Bearer oat_…` is matched by
+    # the bare-bearer rule too, and the credit belongs here).
+    #
+    # ⛔ THE BODIES DIFFER PER FAMILY AND THE FLOOR CARRIES A `,` — that comma
+    # is the whole fix (#6158). `tortoise/oauth.py::_new_token` is
+    # `prefix + secrets.token_urlsafe(32)`, i.e. URL-SAFE BASE64-ish text
+    # (mixed case, `-`, `_`, exactly 43 chars after `.rstrip("=")`), so the
+    # `[0-9a-f]{32}` body used for the API-key shapes CANNOT match it. `st_` is
+    # minted by `token_hex(32)` — SIXTY-FOUR lowercase hex, twice the API-key
+    # width — so the `,` is required. ⚠️ A fixed `{32}` does NOT truncate: with a
+    # boundary lookahead it matches NOTHING on a longer body (the greedy 32 is
+    # followed by another hex character, the lookahead fails, there is no shorter
+    # alternative), so the WHOLE credential survives. Remove the lookahead
+    # instead and only the tail survives. Both leak; the first is the wider one.
+    # Measured in review against a real 64-hex `st_`.
+    #
+    # ⛔ `ct_` IS A CLIENT ID, NOT A SECRET — INCLUDED DELIBERATELY. Redacting a
+    # non-secret is the safe direction; omitting a rule is not. ⚠️ The guard DOES
+    # carry a non-secret list (`_NON_SECRET_PREFIXES`), so "it would force an
+    # exemption list" was wrong — the asymmetry is the whole reason.
+    #
+    # ⛔ THE TRAILING LOOKAHEAD CLASS IS THE BODY CLASS MINUS ITS OWN
+    # CHARACTERS, WHICH IS WHAT KEEPS THIS LINEAR. For the `oat_`/`ort_`/`ct_`/
+    # `cs_` family the body is `[A-Za-z0-9_-]` and the lookahead is
+    # `[A-Za-z0-9]` — a subset — so after a greedy body match the next character
+    # can never be alnum and the lookahead succeeds on the FIRST try (no
+    # backtracking). The `st_` body is `[0-9a-f]` only, so its lookahead
+    # excludes hex rather than alnum: with an alnum lookahead a body followed
+    # by a non-hex letter (`st_…g`) would backtrack one character at a time and
+    # scan quadratically — the failure mode #4911 was fixed for.
+    # ⚠️ RECORDED RESIDUALS for these families, so they are not mistaken for
+    # coverage: (1) a value SPLIT by a newline matches nothing — the `jwt` rule
+    # carries `\s*` because long tokens wrap, and these get no equivalent, having
+    # no internal delimiter; (2) a body followed by `_suffix` or `-prod-2` has
+    # those swallowed too (the safe direction); (3) `_has_a_rule` in the guard
+    # tests `value=<token> end`, so it does not exercise the boundary lookahead at
+    # all — narrowing a lookahead is undetectable there.
+    # ⛔ THE TENANT API KEY — the product's PRIMARY credential, and the one the
+    # first cut of the guard could NOT see: it is `f"tt_{uuid.uuid4().hex}"`, so
+    # it names none of the token helpers, and `tortoise/sdk.py` (which mints the
+    # same key) was not in the scanned module list. The guard certified coverage
+    # it did not have (found in review). Body is `uuid4().hex` — 32 lowercase
+    # hex — and the `{32,}` floor with a HEX-only lookahead keeps the scan linear
+    # while making a surviving suffix impossible.
+    # ⛔ PR #6096 CARRIES A MATERIALLY WEAKER RULE FOR THE SAME KIND, so the
+    # de-dup DIRECTION matters. #6096 uses `{32}` with an ALNUM lookahead
+    # (`[0-9a-f]{32}(?![A-Za-z0-9])`), which FAILS THE WHOLE MATCH on any body
+    # LONGER than 32 characters — measured from 33 hex upward, not only 65+: the
+    # greedy 32 is followed by an alnum, the lookahead fails,
+    # and there is no shorter alternative — so it cannot redact the 64-hex `tt_`
+    # key the Supabase Edge provisioner mints (`supabase/functions/
+    # tenant-provision/index.ts`, the width `_edge_tt_body_width()` reads).
+    # Whichever lands second must keep THIS rule (`{32,}` + the HEX-only
+    # lookahead) and drop the other copy; taking #6096's direction instead leaves
+    # the deployed Edge key in cleartext with `capture_redactions: 0`.
+    ("tortoise_api_key",
+     re.compile(r"(?<![A-Za-z0-9])(?:tt|tk)_[0-9a-f]{32,}(?![0-9a-f])"),
+     _REDACTION_VALUE.format(kind="tortoise_api_key")),
+    ("tortoise_oauth_access_token",
+     re.compile(r"(?<![A-Za-z0-9])oat_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_access_token")),
+    ("tortoise_oauth_refresh_token",
+     re.compile(r"(?<![A-Za-z0-9])ort_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_refresh_token")),
+    ("tortoise_oauth_client_id",
+     re.compile(r"(?<![A-Za-z0-9])ct_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_client_id")),
+    # ⛔ `cs_` MUST NOT SWALLOW STRIPE'S CHECKOUT-SESSION IDS. Stripe mints
+    # `cs_test_…`/`cs_live_…`, and this rule's body class matches them happily,
+    # so without the exclusion a third-party Stripe id in a checkout URL was
+    # recorded as `tortoise_oauth_client_secret` — a WRONG attribution, which is
+    # worse than no match (found in review: one real hit in a 615-transcript
+    # scan). The negation is on the SEGMENT, not the body: Tortoise's body is 43
+    # RANDOM url-safe characters, so it cannot begin `test_`/`live_` except by
+    # coincidence.
+    ("tortoise_oauth_client_secret",
+     re.compile(r"(?<![A-Za-z0-9])cs_(?!(?:test|live)_)[A-Za-z0-9_-]{43,}"
+                r"(?![A-Za-z0-9])"),
+     _REDACTION_VALUE.format(kind="tortoise_oauth_client_secret")),
+    # ⛔ CASE-INSENSITIVE, because the PRODUCT ACCEPTS IT CASE-INSENSITIVELY.
+    # `hosted_api.py` lowercases a user-entered signup token BEFORE the format
+    # gate (`signup_token.lower()` then `_SIGNUP_TOKEN_RE`) — explicitly so that
+    # "a copy-pasted token with uppercase hex must resolve to the same org". So
+    # `ST_<UPPER HEX>` is a fully valid recovery credential, and a lowercase-only
+    # rule stored it verbatim: the #6158 failure mode, one case-flip from the
+    # covered form (found in review). No other family gets `(?i)`: `tt_`/`tk_`
+    # are hashed raw with no lowering, so an uppercased one is not a credential
+    # and widening those would only over-redact.
+    ("tortoise_signup_token",
+     re.compile(r"(?i)(?<![A-Za-z0-9])st_[0-9a-f]{64,}(?![0-9a-f])"),
+     _REDACTION_VALUE.format(kind="tortoise_signup_token")),
     # Anthropic — BEFORE the generic `sk-` (see the ordering rule above).
     ("anthropic_api_key",
      re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])"),

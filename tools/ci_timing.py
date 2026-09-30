@@ -29,13 +29,23 @@ failure, not the exit-1 manifest-gate meaning below. Deterministic output
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ci_timing.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ci_timing.py`"
+    )
+
 import argparse
 import glob
 import json
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -441,6 +451,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     manifest = _manifest_of(manifest_text)
     problems = (cs.integrity(manifest)
                 + cs.slow_file_issues(manifest)
+                + cs.fast_shard_issues(manifest)
                 + cs.duration_issues(manifest)
                 + cs.leg_coverage_issues(manifest)
                 + cs.duration_coverage_issues(manifest))
@@ -448,7 +459,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
     problems += wf_issues
     if not wf_issues:
         legs = cs.push_legs(manifest)
-        halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+        halves = {s["name"]: set(s["files"]) for s in legs["shards"]}
         problems += cs.workflow_halves_issues(manifest, halves)
     else:
         problems += cs.workflow_halves_issues(

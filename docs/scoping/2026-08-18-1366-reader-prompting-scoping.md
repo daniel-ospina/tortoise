@@ -52,4 +52,4 @@ New `tests/test_longmem_reader_prompting.py` (offline, mock judge, embedded DB):
 ## Verify
 
 - `uv run pytest tests/test_longmem_reader_prompting.py tests/test_longmem_runner.py -q`
-- `python3 tools/ci_selection.py --integrity` after registering the new file in `config/ci-surfaces.yml`.
+- `uv run python tools/ci_selection.py --integrity` after registering the new file in `config/ci-surfaces.yml`.

@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import errno
+import logging
 import os
 import socket
 import threading
@@ -52,6 +53,8 @@ import requests
 # free of model_adapters — this one-way import cannot cycle).
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink
+
+_logger = logging.getLogger("tortoise.model_adapters")
 
 
 class OpenRouterModel:
@@ -525,6 +528,38 @@ def is_billing_exhausted(exc: BaseException) -> bool:
     if _http_status(exc) == 402:
         return True
     return is_key_limit_403(exc)
+
+
+def _alert_provider_billing_exhausted(adapter, exc: BaseException,
+                                      pool_size: int) -> None:
+    """Best-effort #3873 operator alert for an observed billing exhaustion.
+
+    The provider's own refusal (402 / key-limit 403) is the trigger — an
+    OBSERVED event, not a threshold — so this adds no spend-policy number. It
+    exists because ``RotatingModel`` consumed the classification silently: it
+    cooled the lane, rotated, and (with no alternative lane) raised, while no
+    operator was told that the aggregate bound — the provider credit balance —
+    had been reached.
+
+    Never raises and never changes the request's outcome: the whole dispatch —
+    including the import — is inside the ``try``, so a missing/broken alert
+    plane cannot turn a rotation into a 500. ``has_alternative`` records whether
+    ANOTHER lane was configured (``False`` = the refusal is about to be raised);
+    it says nothing about whether a later lane also refuses.
+    """
+    try:
+        from tortoise.operator_alert import alert_provider_billing_exhausted
+
+        alert_provider_billing_exhausted(
+            getattr(adapter, "provider", "") or "",
+            exc,
+            status=_http_status(exc),
+            has_alternative=pool_size > 1,
+        )
+    except Exception:
+        _logger.warning(
+            "provider billing-exhaustion alert not dispatched (provider=%s)",
+            getattr(adapter, "provider", "?"), exc_info=True)
 
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
@@ -1183,6 +1218,13 @@ class RotatingModel:
                 last_err = e
                 self._in_flight = None  # no longer mid-call on this adapter
                 billing = is_billing_exhausted(e)
+                if billing:
+                    # #3873: the refusal that makes us rotate is ALSO the
+                    # operator's only signal that the provider budget is
+                    # spent — record it before the raise paths below, so the
+                    # no-alternative case (n == 1) alerts too. Best-effort:
+                    # this can never affect the outcome.
+                    _alert_provider_billing_exhausted(p, e, n)
                 if is_fatal(e) and not billing:
                     raise  # auth (401/403) + config 4xx — never rotate (#1951)
                 if billing and n == 1:

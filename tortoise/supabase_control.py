@@ -3502,25 +3502,109 @@ def metering_increment_ask(cp, org_id: str, period_start: str,
 def metering_increment_capture_cost(cp, org_id: str, period_start: str,
                                     period_end: str, *,
                                     calls: int = 0,
+                                    tokens_in: int = 0,
+                                    tokens_out: int = 0,
                                     cost_usd: float = 0.0) -> None:
-    """Increment the org's MEASURED capture-extraction cost for the window
-    ``[period_start, period_end)`` (#3665) via the
-    ``metering_increment_capture_cost`` SQL RPC (20260918000001 re-issues it)
+    """Increment the org's MEASURED capture-extraction cost and TOKEN WORKLOAD
+    for the window ``[period_start, period_end)`` (#3665, #5045) via the
+    ``metering_increment_capture_cost`` SQL RPC (20260926000001 re-issues it)
     — the capture-side mirror of ``metering_increment_ask`` (atomic under
     Postgres row locking; best-effort by contract — the caller swallows
     exceptions).
 
-    #3825: the window, not a month label, is the row key. NOTE the RPC is
-    DROPPED and recreated by 20260918000001 rather than replaced in place:
-    a new argument list would otherwise be an OVERLOAD, leaving the old
-    month-keyed function callable — the silent second path #3825 removes.
+    ``tokens_in``/``tokens_out`` are the extraction LLM token counts the
+    caller ALREADY measured (``hosted_api._capture_cost_props`` reads them
+    from ``meta["stats"]["llm"]``) — they are WORKLOAD, never price, and are
+    never read by any spend cap (#5045).
+
+    #3825/#5045: the window, not a month label, is the row key. NOTE the RPC
+    is DROPPED and recreated (20260918000001, then 20260926000001) rather than
+    replaced in place: a new argument list would otherwise be an OVERLOAD,
+    leaving the old signature callable — the silent second path #3825 removes.
     """
     cp.rpc(
         "metering_increment_capture_cost",
         {"p_org_id": org_id, "p_period_start": period_start,
          "p_period_end": period_end, "p_calls": calls,
+         "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
+
+
+def metering_set_graph_storage(cp, org_id: str, period_start: str,
+                               period_end: str, *, total_mb: float,
+                               indices_mb: float | None = None,
+                               samples: int = 100, repeats: int = 1,
+                               min_mb: float | None = None,
+                               max_mb: float | None = None,
+                               spread_mb: float = 0.0,
+                               measured_at: str | None = None) -> None:
+    """SET the org's graph-storage GAUGE for the window
+    ``[period_start, period_end)`` (#5331) via the ``metering_set_graph_storage``
+    SQL RPC.
+
+    A GAUGE, not an increment: the latest reading in the window wins. Callers
+    are best-effort by contract — ``metering.record_graph_storage_reading``
+    absorbs a failure and the request is served.
+
+    ``indices_mb`` is the index share of the total and ``min_mb``/``max_mb``/
+    ``spread_mb`` are the observed range across the reading's repeats, so the
+    figure's own precision (or lack of it) is stored WITH it.
+
+    #3825: the window, not a month label, is the row key.
+    """
+    cp.rpc(
+        "metering_set_graph_storage",
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_total_mb": total_mb,
+         "p_indices_mb": indices_mb, "p_samples": samples,
+         "p_repeats": repeats, "p_min_mb": min_mb, "p_max_mb": max_mb,
+         "p_spread_mb": spread_mb, "p_measured_at": measured_at},
+    )
+
+
+def metering_get_graph_storage(cp, org_id: str, period_start: str) -> dict:
+    """The org's last graph-storage reading for the window STARTING at
+    *period_start* (#5331) — the supabase-mode READ path for
+    ``get_graph_storage_reading``. Returns the ``graph_storage_*`` columns as a
+    dict (ZEROS and a ``None`` timestamp when the row is absent).
+
+    A plain table READ, mirroring ``metering_get_usage``: one row per
+    (org, period) read by its PRIMARY KEY, so there is no row LIST for
+    PostgREST's ``db-max-rows`` cap to truncate.
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
+    zeros = {"graph_storage_mb": 0.0, "graph_storage_indices_mb": None,
+             "graph_storage_samples": 0, "graph_storage_repeats": 0,
+             "graph_storage_min_mb": 0.0, "graph_storage_max_mb": 0.0,
+             "graph_storage_spread_mb": 0.0,
+             "graph_storage_measured_at": None}
+    rows = cp.query(
+        "metering_records",
+        select=["graph_storage_mb", "graph_storage_indices_mb",
+                "graph_storage_samples", "graph_storage_repeats",
+                "graph_storage_min_mb", "graph_storage_max_mb",
+                "graph_storage_spread_mb", "graph_storage_measured_at"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return zeros
+    row = rows[0]
+    return {
+        "graph_storage_mb": float(row.get("graph_storage_mb") or 0.0),
+        "graph_storage_indices_mb": (
+            float(row["graph_storage_indices_mb"])
+            if row.get("graph_storage_indices_mb") is not None else None),
+        "graph_storage_samples": int(row.get("graph_storage_samples") or 0),
+        "graph_storage_repeats": int(row.get("graph_storage_repeats") or 0),
+        "graph_storage_min_mb": float(row.get("graph_storage_min_mb") or 0.0),
+        "graph_storage_max_mb": float(row.get("graph_storage_max_mb") or 0.0),
+        "graph_storage_spread_mb": float(
+            row.get("graph_storage_spread_mb") or 0.0),
+        "graph_storage_measured_at": row.get("graph_storage_measured_at"),
+    }
 
 
 def metering_cohort_spend(cp, org_ids: list[str], period_start: str,

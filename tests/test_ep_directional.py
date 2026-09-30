@@ -6,6 +6,8 @@ confidence in an unrelated sub-argument (B) that shares only a conclusion.
 """
 import os  # noqa: I001
 import pytest
+
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
@@ -14,7 +16,7 @@ from tortoise.sdk import TortoiseSDK
 # semantics — the E019 numeric cascade is calibrated against live FalkorDB;
 # running embedded yields different drops, code-review #803). Mirrors
 # tests/test_directional_impl.py.
-_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_ep_directional"
+_DB_URI = _live_utils.docker_uri("tortoise_test_ep_directional")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:

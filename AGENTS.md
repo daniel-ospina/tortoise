@@ -309,7 +309,7 @@ Public repository that houses:
 | Reviewing a PR | `skills/code-review/SKILL.md` | Unreviewed code in production |
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
-| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `uv run python tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
 ### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
 
@@ -344,10 +344,10 @@ matter**:
 
 ```bash
 # from the target repo's worktree (`--repo .` pins the target to THIS repo):
-python3 tools/collision_preflight.py <N> --repo .
+uv run python tools/collision_preflight.py <N> --repo .
 # or name the repo explicitly (required when dispatching an issue that lives in
 # another repo — the tool RESOLVES the target, it never infers it from the cwd):
-python3 tools/collision_preflight.py <N> --repo owner/name
+uv run python tools/collision_preflight.py <N> --repo owner/name
 ```
 
 **The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
@@ -402,8 +402,8 @@ Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatc
 only dispatch path that confirms the ARTIFACT rather than the send:
 
 ```bash
-python3 tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
-    --label <lane> --file <brief.txt>        # exit 0 ONLY if it became a turn
+uv run python tools/cmux_dispatch.py send --workspace <ws> --surface <surf> \
+    --label <lane> --file <brief.txt>        # exit 0 only on positive evidence pi got it
 ```
 
 `cmux send` exits 0 when *bytes were written to the terminal*, which is a different event from *the
@@ -418,10 +418,13 @@ are invisible to any exit code (#4292):
    **eaten**, or its prefix is eaten and the remainder submitted as a **truncated turn**.
 
 The dispatcher waits for the pane to be safe to send (dismissing a boot-block prompt instead of
-feeding it the brief), sends text + a bare Enter, then confirms via
-`cmux list-workspaces --json` → `latest_submitted_message`, recovering automatically (release the
-composer with a bare Enter, or dismiss-and-re-send when the text was eaten). It exits non-zero with
-`sent-but-not-consumed` when the message never became a turn.
+feeding it the brief), sends text + a bare Enter, then confirms on **positive evidence that pi
+took the message** — via either `cmux list-workspaces --json` → `latest_submitted_message` (it became
+a turn) **or** the pane's pending-turn display (`Steering:` / `Follow-up:`, the queue pi accepted a
+mid-turn submission into). It recovers automatically (release the composer with a bare Enter, or
+dismiss-and-re-send when the text was eaten). It exits non-zero with `sent-but-not-consumed` when
+the message appears in neither — **text still sitting in the composer is the UNSENT state, never a
+success** (pi clears the editor before it queues).
 
 **One-line check until every caller is migrated:** after dispatching, confirm the lane shows a
 `Working` spinner (`cmux read-screen --workspace <ws> --lines 6`) before assuming it started. A pane

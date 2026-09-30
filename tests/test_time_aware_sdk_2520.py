@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 
@@ -31,7 +32,7 @@ def _falkordb_available() -> bool:
     """Probe a live FalkorDB; reads TORTOISE_DB_URI at CALL time."""
     uri = os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
     old = os.environ.get("TORTOISE_DB_URI")
     try:
         os.environ["TORTOISE_DB_URI"] = f"{uri}_probe2520sdk"
@@ -87,7 +88,7 @@ def recording_embedder(monkeypatch):
 def sdk():
     uri = (os.environ.get(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix").rstrip("/")
+        _live_utils.docker_uri("tortoise_test_matrix")).rstrip("/")
         + "_" + uuid.uuid4().hex[:10])
     old = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = uri

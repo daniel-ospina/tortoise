@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+from tests import _live_utils
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE_EMBEDDED = {
@@ -133,8 +134,8 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
 
 _uri_candidates = [
     os.environ.get("TORTOISE_DB_URI"),
-    "docker://:falkordb@localhost:6379/tortoise_test_idx522",
-    "docker://:@localhost:16379/tortoise_test_idx522",
+    _live_utils.docker_uri("tortoise_test_idx522"),
+    _live_utils.legacy_uri("tortoise_test_idx522"),
 ]
 FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb(_uri_candidates)
 
@@ -482,7 +483,8 @@ def _current_uri() -> str:
     exercises it; falls back to the module-probe _WORKING_URI.
     """
     return os.environ.get("TORTOISE_DB_URI") or (
-        _WORKING_URI or "docker://:falkordb@localhost:6379/tortoise_test_idx522")
+        _WORKING_URI or
+        _live_utils.docker_uri("tortoise_test_idx522"))
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,

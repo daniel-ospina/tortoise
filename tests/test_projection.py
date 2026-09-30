@@ -19,11 +19,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _live_utils
 from tortoise.api import EventAPI, provenance  # noqa: E402, I001, RUF100
 from tortoise.log import EventLog  # noqa: E402, RUF100
 from tortoise.projection import (  # noqa: E402, RUF100
-    _apply_one, fold, split,
-    InMemoryProjection, FalkorProjection, Projection,
+    FalkorProjection,
+    InMemoryProjection,
+    Projection,
+    _apply_one,
+    fold,
+    split,
 )  # noqa: E402, RUF100
 
 # ------------------------------------------------------------------ helpers
@@ -95,19 +100,11 @@ def _docker_falkor_reachable() -> bool:
     connecting so the fixture skips instead of raising redis
     ConnectionError (Error 111/61). _skip_if_no_falkor only covers
     redislite import availability, not Docker connectivity.
+
+    #6673: the port comes from tests/_live_utils.py — the provisioned legacy
+    service is published on an EPHEMERAL host port (docker `-p 0:6379`).
     """
-    import socket
-    host = os.environ.get("FALKORDB_HOST", "localhost")
-    port = int(os.environ.get("FALKORDB_PORT", "16379"))
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return _live_utils.legacy_reachable()
 
 
 # ----------------------------------------------------------------- _apply_one
@@ -1853,13 +1850,13 @@ if __name__ == "__main__":
 def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
     if not _docker_falkor_reachable():
-        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
+        pytest.skip(f"live FalkorDB ({_live_utils.service_host()}:{_live_utils.legacy_port()}) not reachable")
     # #1553: the CI tier-2 env exports TORTOISE_DB_URI as an EMPTY string
     # (set-but-empty, not unset) — os.environ.get(..., default) then returns
     # "" and from_uri("") raises "Unsupported scheme:". Treat empty-but-set
     # as absent (fall back to the local default).
     uri = os.environ.get("TORTOISE_DB_URI") or \
-        "docker://:@localhost:16379/tortoise_test_proj125"
+        _live_utils.legacy_uri("tortoise_test_proj125")
     # Epic #1647 (T7, cycle-5 P1-6): the env URI may resolve the SHARED job
     # path — bulk-DETACHing it clobbers concurrent sessions; per-test graph.
     proj = FalkorProjection.from_uri(
@@ -2067,7 +2064,7 @@ def test_add_document_journals_the_anchor_and_replays_identically(live_proj):
     assert _doc_anchor(proj, "doc-h6") == live
 
     uri = (os.environ.get("TORTOISE_DB_URI")
-           or "docker://:@localhost:16379/tortoise_test_proj125")
+           or _live_utils.legacy_uri("tortoise_test_proj125"))
     replay = FalkorProjection.from_uri(
         uri, graph_name=f"test_proj125_5422_{os.urandom(4).hex()}")
     try:

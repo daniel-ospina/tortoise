@@ -101,6 +101,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # graphs per test):
     "test_battery_lane_matrix.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # hermetic env-strip test (fixture-param monkeypatch — auto-undo)
     "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
+    "test_graph_storage.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #5331: embedded lane via delenv (the test_billing pattern — the fixture pins TORTOISE_DB_PATH to a tmp_path db, so the construction never rides the URI)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_selfhost_health_probe_executor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #3331: the probe-lane behavioural tests force the EMBEDDED lane (setenv "" IS the point — the selfhost health handlers are driven without a live server; the fixture-param monkeypatch auto-restores, no lane leak)
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
@@ -192,7 +193,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # #3039: the ACL admin-client decode pin forces a docker:// URI so
     # `_admin_client` takes the redis path; redis.Redis is stubbed, never
     # connects. The setenv IS the test input (deliberate docker lane).
-    "test_from_uri_userinfo.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    "test_from_uri_userinfo.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                     # :950 and :1012 write `monkeypatch.setenv(` and put the
+                                     # URI literal on the FOLLOWING line, so the site's own line
+                                     # matches only the trailing branch - the same multi-line
+                                     # shape and the same remedy as test_backup.py above.
+                                     r'monkeypatch\.setenv\(\s*$'],
     "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      r'monkeypatch\.setenv\(\s*$'],
@@ -272,6 +278,20 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                                      # same multi-line shape and the same remedy as
                                      # `test_backup.py` above.
                                      r'monkeypatch\.setenv\(\s*$'],
+    # #3815: the mitigation-weight-move suite runs a module-level live-FalkorDB
+    # probe (set + try/finally restore at import) PLUS an autouse per-test
+    # isolated-graph fixture whose monkeypatch.setenv IS the test input — the
+    # same shape as test_3276_has_ep_measured.py above, and it never leaves a
+    # mutation behind (the probe restores in finally, pytest undoes the fixture).
+    # DELIBERATE_URI.
+    "test_3815_mitigation_moves_weight.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                             r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #2500: main() assigns os.environ["TORTOISE_DB_URI"] before constructing the
+    # SDK, so the test pins the docker URI and restores it at teardown — the
+    # comment at the site says the restore exists precisely because otherwise it
+    # leaks a live-server URI into every later module (the sdk_factory lane flip).
+    # DELIBERATE_URI: the setenv IS the test input.
+    "test_2500_terminal_ep_backfill.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

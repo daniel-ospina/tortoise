@@ -31,27 +31,31 @@ from pathlib import Path
 
 import pytest
 
+from tests import _live_utils
+
 _TESTS_ROOT = Path(__file__).resolve().parent
 
 
-def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+def _docker_reachable(host: str | None = None,
+                     port: int | None = None) -> bool:
+    """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
+
+    #6673: the port used to be the 6379 literal. It is now the ephemeral host
+    port the workflow's provision step assigned (docker `-p 0:6379`), so two
+    services jobs on the same host cannot collide. `host=None` resolves through
+    `_live_utils.service_host()`, so a `TORTOISE_TEST_DOCKER_HOST`
+    override reaches the probe exactly as it reaches the clients. The host is
+    NOT read from the product's `FALKORDB_HOST` at all, precisely so the probe
+    cannot be moved somewhere a hardcoded client construction does not follow.
+    """
+    return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 
 
 @pytest.fixture
 def uri_env(monkeypatch):
     if not _docker_reachable():
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     yield
 
 
@@ -304,13 +308,20 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     ],
     # CLI routing unit — from_uri is stubbed by the test (never connects)
     "test_pipeline_cli.py": [r"from_uri\("],
+    # #3301: module live-FalkorDB availability probe over candidate URIs
+    # (construct + RETURN 1 + close, never DETACHs) — the same shape as
+    # test_search_engine_gaps.py above. Every DETACH DELETE in the file
+    # targets a `graph_name=`-qualified per-test projection (the `graph`
+    # fixture's random test_object_search_vis_<hex> name).
+    "test_object_search_visibility_3301.py": [r"from_uri\(uri\)"],
     # invalid-scheme raise tests (raise BEFORE any connection)
     "test_projection.py": [r"from_uri\(\"postgresql://", r"from_uri\(\"localhost:6379"],
     # raw-client migration test — per-test tortoise_test_r2_migrate_<uuid> path
     "test_search_engine.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
         r"from_uri\(\s*os\.environ\[.TORTOISE_DB_URI.\]",
-        r'from_uri\(\s*"docker://:@localhost:16379/" \+ gname\)',
+        # #6673: the raw-client site now resolves through the seam.
+        r"from_uri\(\s*_live_utils\.legacy_uri\(gname\)\)",
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],

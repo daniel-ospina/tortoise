@@ -1,6 +1,17 @@
 """Cycle 4 — Decision: Clarify topology, find converged recommendation."""
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
-import sys, os  # noqa: E401, I001
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/auto_discovery_cycle4.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python graph-scripts/auto_discovery_cycle4.py`"
+    )
+
+import os  # noqa: I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from tortoise.api import EventAPI, provenance

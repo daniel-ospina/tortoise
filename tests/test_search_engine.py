@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+from tests import _live_utils
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
     EpBreakdown, EpEvidence, annotate_ep_batch, reset_circuit_breakers,
@@ -13,13 +14,15 @@ from tortoise.search_engine import (
 )
 
 # ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
-# test_sdk_document_search_returns_metadata connects to docker://localhost:16379.
+# test_sdk_document_search_returns_metadata connects to the live
+# docker-lane service; the URI (and its port) is resolved by the #6673
+# probe below, not hardcoded here.
 # Probe at module load so it skips gracefully in embedded-only CI (#493).
 FALKORDB_AVAILABLE = False
 try:
     from tortoise.projection import FalkorProjection as _FP
     _old_uri = os.environ.get("TORTOISE_DB_URI")
-    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_sdk125"
+    os.environ["TORTOISE_DB_URI"] = _live_utils.legacy_uri("tortoise_test_sdk125")
     _probe = _FP.from_uri(os.environ["TORTOISE_DB_URI"])
     _probe.close()
     FALKORDB_AVAILABLE = True
@@ -333,7 +336,7 @@ def test_sdk_document_search_returns_metadata():
     # #1585: treat a set-but-EMPTY TORTOISE_DB_URI as unset (a leaked ""
     # from an earlier test must not short-circuit to the default-less empty
     # string and blow up from_uri with "Unsupported scheme").
-    uri = os.environ.get("TORTOISE_DB_URI") or "docker://:@localhost:16379/tortoise_test_sdk125"
+    uri = os.environ.get("TORTOISE_DB_URI") or _live_utils.legacy_uri("tortoise_test_sdk125")
     # Epic #1647 (T7, cycle-5 P1-6): the env URI may resolve the SHARED job
     # path — bulk-DETACHing it would clobber concurrent sessions; resolve to
     # a per-test test_* graph instead.
@@ -438,7 +441,7 @@ class TestTortoiseFtsQueryLimit:
 
 # ───────────────────────── R2 #1541 OR-union + search_keys ──────────────────
 
-_LIVE_URI = os.environ.get("TORTOISE_DB_URI") or "docker://:@localhost:16379/tortoise_test_sdk125"
+_LIVE_URI = os.environ.get("TORTOISE_DB_URI") or _live_utils.legacy_uri("tortoise_test_sdk125")
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
@@ -544,7 +547,8 @@ class TestR2OrUnionAndSearchKeys:
         # per-test-unique name + journal it (raw-client code is TEST code and
         # CAN import tests/_embedded) so the session-end sweep GRAPH.DELETEs
         # it — the leak is closed, not just renamed (cycle-8 P2-2).
-        client = FalkorDB(host="localhost", port=16379)
+        client = FalkorDB(host=_live_utils.service_host(),
+                     port=_live_utils.legacy_port())
         gname = f"tortoise_test_r2_migrate_{os.urandom(4).hex()}"
         from tests._embedded import _journal_append
         _journal_append(gname)
@@ -563,7 +567,7 @@ class TestR2OrUnionAndSearchKeys:
             "is_operator:false, pointKind:'statement'})")
         # booting the projection runs _ensure_indexes → the migration
         proj = FalkorProjection.from_uri(
-            "docker://:@localhost:16379/" + gname)
+            _live_utils.legacy_uri(gname))
         try:
             # the legacy LIST was flattened in place
             rows = proj.g.query(
@@ -646,13 +650,13 @@ class TestR2OrUnionAndSearchKeys:
 
 # ───────────────────────── #1791 special-char FTS escape (live) ─────────────
 
-# The R2 class above probes the UNAUTHENTICATED :16379 service; this repo's
+# The R2 class above probes the UNAUTHENTICATED legacy service; this repo's
 # compose lane (eldato/operations/memory/docker-compose.yml) maps only the
-# authed 6379 (FALKORDB_PASSWORD). Probe the docker-lane URI so the #1791
+# authed one (FALKORDB_PASSWORD). Probe the docker-lane URI so the #1791
 # regression RUNS on the standard local lane (and in CI, which provisions
-# both services).
+# both services via .github/actions/falkordb-provision — #6673).
 _FTS_LANE_URI = os.environ.get("TORTOISE_DB_URI") or \
-    "docker://:falkordb@localhost:6379/tortoise_test_sdk125"
+    _live_utils.docker_uri("tortoise_test_sdk125")
 _FTS_ESCAPE_LIVE = False
 try:
     from tortoise.projection import FalkorProjection as _FP_escape
