@@ -2261,6 +2261,48 @@ def test_canary_streak_job_consumes_producer_artifacts_only():
     assert up["with"]["path"] == "config/testdb-canary-streak.json"
 
 
+def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
+    """#6263: in a job with a matrix dimension, an artifact name that does not
+    carry the leg makes the legs collide.
+
+    `github.job` is the BASE job id for every matrix leg, so a name built from
+    it alone is uploaded once PER LEG under ONE name.
+    `ci-timing.yml` downloads by pattern with `merge-multiple` unset (false),
+    which places same-named artifacts in ONE directory — so one leg's
+    `pytest.log` overwrites the other's, and the durations map measures one
+    leg while reporting the whole job. Its guard cannot see this: it compares
+    a file count against a positive artifact count only at zero, so a partial
+    fetch is indistinguishable from a complete one and the loss is silent.
+
+    This is the same root three times over in this repo, each found by hand
+    after the data was already gone: `n-test-slow` x2 (the #3467 plan's
+    defect (i), observed as 13 of leg (b)'s files absent), the canary
+    producer name (#6135), and `pytest-log-test-slow` (#6263).
+
+    A fixed name in a matrix job is legitimate ONLY when the step's own `if:`
+    constrains the matrix, so just one leg can ever run it. That is why
+    `pytest-canary-producer` is safe — its `if:` requires
+    `matrix.canary_producer`. The rule is derived from the workflow, not kept
+    as a hand-maintained allowlist that the next edit silently outgrows.
+    """
+    offenders = []
+    for job_name, job in _load_python_ci()["jobs"].items():
+        if not (job.get("strategy") or {}).get("matrix"):
+            continue
+        for step in job.get("steps") or []:
+            if not str(step.get("uses") or "").startswith("actions/upload-artifact"):
+                continue
+            name = str((step.get("with") or {}).get("name") or "")
+            if "matrix." in name or "matrix." in str(step.get("if") or ""):
+                continue
+            offenders.append(f"{job_name} uploads {name!r}")
+    assert not offenders, (
+        "a matrix job uploads a fixed-name artifact, so its legs collide and "
+        "one leg's files are overwritten by the other's without any check "
+        "failing (#6263; same root as #3467's n-test-slow defect and #6135): "
+        + "; ".join(offenders))
+
+
 def _extract_pytest_marker(run_script: str) -> str:
     """Pull the `-m <marker>` filter from a job's pytest run script. The
     docker lanes quote it (`-m 'not track_b and not live'`); the track-b

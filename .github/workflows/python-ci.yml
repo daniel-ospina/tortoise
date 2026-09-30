@@ -1332,11 +1332,21 @@ jobs:
         # #1477: non-gating upload — same contract as the fast job's upload.
         # Epic #1647 Task 9 (cycle-6 P2-8): the junitxml + expected nodeids
         # join the artifact set (the manifest's observed-set evidence).
+        #
+        # #6263: the name MUST carry the leg. `github.job` is the BASE job id for
+        # every matrix leg, so the bare form uploads ONE name from both halves.
+        # ci-timing.yml then downloads by pattern with `merge-multiple` unset
+        # (false), which places same-named artifacts in ONE directory — leg (b)'s
+        # `pytest.log` overwrites leg (a)'s, and the durations map silently
+        # measures one half of the slow shard. Same class as `n-test-slow` ×2
+        # (the #3467 plan's defect (i), observed) and `pytest-canary-producer`
+        # (#6135), both of which were fixed the same way. The `test` job above
+        # already carries its leg and is the in-file precedent.
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log-${{ github.job }}
+          name: pytest-log-${{ github.job }}-${{ matrix.half }}
           path: |
             /tmp/pytest.log
             /tmp/junit.xml
