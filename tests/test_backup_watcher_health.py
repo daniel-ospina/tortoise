@@ -362,11 +362,10 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             only if at least one handler makes the skip loud as a DIRECT
             statement of its body: an assignment to ``_WATCHER_START_ERROR``
             (so /health reports ``failed``, degraded) or a ``raise`` of ANY
-            form. A raised exception propagates unless some enclosing handler
-            swallows it, and any such handler is itself a ``Try`` ancestor
-            this same rule checks — so accepting ``raise SomeError(...)`` and
-            ``raise e`` as well as a bare ``raise`` cannot open a silent
-            escape. A handler that only logs or ``pass``es swallows the skip,
+            form. A ``raise`` counts only while the ``finally`` cannot discard
+            it — ``finally: return`` overrides the re-raise at runtime, so
+            beneath a frame-leaving ``finally`` only the marker assignment is
+            loud. A handler that only logs or ``pass``es swallows the skip,
             which is exactly #4498's original blindness. This is checked for
             EVERY such ancestor, not just the nearest, because an outer
             swallowing ``try`` can skip an inner marker-setting one entirely.
@@ -543,44 +542,55 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # when they target a loop INSIDE the `finally`: over-approximating only
     # reds a safe `finally`, never greens a swallowing one. A
     # `try` with handlers can swallow, unless at least one handler makes it loud
-    # as a DIRECT statement of its body: a `raise` (ANY form — a raised
-    # exception propagates unless an enclosing handler swallows it, and any
-    # such handler is itself a `Try` ancestor this same rule checks) or an
-    # assignment to `_WATCHER_START_ERROR`. Direct statement only, so
+    # as a DIRECT statement of its body: an assignment to
+    # `_WATCHER_START_ERROR`, or a `raise`. A `raise` counts only while the
+    # `finally` cannot discard it (`finally: return` overrides the re-raise at
+    # runtime), so beneath a frame-leaving finally only the marker assignment
+    # is loud. Direct statement only, so
     # `except Exception: if False: _WATCHER_START_ERROR = ...` cannot look loud
     # while setting nothing.
+    def _finalbody_leaves_frame(node: ast.Try | ast.TryStar) -> bool:
+        # Nested `def`/`async def`/`lambda`/`class` bodies are excluded: a
+        # `return` in there binds to that inner frame and cannot leave THIS
+        # one. `break`/`continue` are over-approximated (a `break` targeting a
+        # loop INSIDE the `finally` does not leave the frame but is still
+        # counted) — that only ever reds a safe `finally`, never greens a
+        # swallowing one.
+        nested: set[int] = set()
+        for inner in ast.walk(node):
+            if isinstance(
+                inner,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                nested.update(id(sub) for sub in ast.walk(inner))
+        return any(
+            isinstance(sub, (ast.Return, ast.Break, ast.Continue))
+            and id(sub) not in nested
+            for stmt in node.finalbody
+            for sub in ast.walk(stmt)
+        )
+
     def _is_loud_try(node: ast.Try | ast.TryStar) -> bool:
+        leaves = _finalbody_leaves_frame(node)
         if not node.handlers:
             # try/finally: loud only if the `finally` cannot discard the
             # in-flight exception. `ast.walk` (not just the top-level
             # statements) because a `return` nested in an `if` inside the
             # `finally` still leaves the frame and drops the pending exception
             # — the skipped publish then goes silent, which is #4498 all over
-            # again. Nested `def`/`lambda`/`class` bodies are excluded: a
-            # `return` in there cannot leave THIS frame, and counting it was a
-            # fail-closed false positive.
-            nested: set[int] = set()
-            for inner in ast.walk(node):
-                if isinstance(
-                    inner,
-                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
-                ):
-                    nested.update(id(sub) for sub in ast.walk(inner))
-            return not any(
-                isinstance(sub, (ast.Return, ast.Break, ast.Continue))
-                and id(sub) not in nested
-                for stmt in node.finalbody
-                for sub in ast.walk(stmt)
-            )
+            # again.
+            return not leaves
         for handler in node.handlers:
             for stmt in handler.body:
-                if isinstance(stmt, ast.Raise):
-                    return True
                 if isinstance(stmt, ast.Assign) and any(
                     isinstance(target, ast.Name)
                     and target.id == "_WATCHER_START_ERROR"
                     for target in stmt.targets
                 ):
+                    return True
+                # A re-raise is loud only while the `finally` cannot discard
+                # it: `finally: return` overrides it, so the skip goes silent.
+                if isinstance(stmt, ast.Raise) and not leaves:
                     return True
         return False
 
