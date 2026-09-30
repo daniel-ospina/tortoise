@@ -119,6 +119,7 @@ from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
@@ -10732,6 +10733,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # home in any stored turn (stored-source parity; >5000 turns are accepted
     # and truncated here — the old 422 is removed, D1 contract change).
     windowed = _capture_turn_window(body.conversation)
+    # #6246: the SHARED extraction view, built ONCE and handed to whichever
+    # lane runs below, so a clipped turn with nothing to say contributes no
+    # unit to EITHER the m2 transcript lane or the default v2 lane. The STORED
+    # turns (`windowed`) keep their clipped text — this is the copy only the
+    # extractors see.
+    extraction = _capture_extraction_window(body.conversation)
 
     # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write —
     # whole-conversation transcript emptiness (of the STORED window, the exact
@@ -11189,7 +11196,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # event loop, and never on the shared default pool either.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_llm,
-                windowed, session_id, now)
+                extraction, session_id, now)
         except ValueError as e:
             # inner provider-gate drift on the M2 lane → a clean fail-closed
             # 503 (mirrors the v2 branch below; belt-and-braces so an
@@ -11264,7 +11271,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # See tests/test_capture_loop_responsiveness.py.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_v2,
-                windowed, session_id, now, master=tenant_master)
+                extraction, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 

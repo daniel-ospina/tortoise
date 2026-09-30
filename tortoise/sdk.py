@@ -582,8 +582,6 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     extractor clamps operators ≤ points (LLMExtractor.run dedupe+cap, #1194) —
     a permissive relation model can no longer write more operator nodes than
     points, which would have bypassed this estimate and the 402 gate it feeds."""
-    from tortoise.extractor import _SENT
-
     lines: list[str] = []
     n_sentences = 0
     for turn in conversation:
@@ -597,10 +595,12 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
             speaker = "Speaker"
         raw = turn.get("content")
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
-        body = " ".join(content[:_CAPTURE_TURN_CAP].split())
-        sents = [s.group(0).strip() for s in _SENT.finditer(body)]
-        sents = [s for s in sents if len(s) >= 3]
-        capped = sents[:MAX_EXTRACTIONS_PER_TURN]
+        # #6246: the "does this turn have anything to say" predicate has ONE
+        # home (_extractable_sentences) — the same one the shared extraction
+        # view blanks on, so the m2 lane and the default v2 lane cannot
+        # disagree about which turns contribute a unit.
+        capped = _extractable_sentences(
+            content[:_CAPTURE_TURN_CAP])[:MAX_EXTRACTIONS_PER_TURN]
         n_sentences += len(capped)
         if capped:
             lines.append(f"{speaker}: {' '.join(capped)}")
@@ -640,6 +640,60 @@ def _capture_turn_window(
         content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
         t["content"] = content[:cap]
         out.append(t)
+    return out
+
+
+def _extractable_sentences(content: str) -> list[str]:
+    """The >=3-char sentences *content* contributes, from its flattened body.
+
+    The ONE home of "does this turn have anything to say" (#6246). It is the
+    exact predicate ``_session_llm_transcript`` has always applied inline (and
+    the transcript is the lane that already REFUSED a turn it yields nothing
+    for). Extracting it here lets the shared extraction view apply the SAME
+    test before the default v2 lane sees the turns, so the two lanes cannot
+    drift apart about emptiness.
+    """
+    from tortoise.extractor import _SENT
+
+    body = " ".join(content.split())
+    return [s.group(0).strip() for s in _SENT.finditer(body)
+            if len(s.group(0).strip()) >= 3]
+
+
+def _capture_extraction_window(
+    conversation: list[dict], cap: int = _CAPTURE_TURN_CAP) -> list[dict]:
+    """The SHARED extraction view of a capture conversation (#6246).
+
+    ``_capture_turn_window`` is the STORED view: it clips silently and the
+    clipped text is what the turn Points hold. Both extraction lanes consume
+    THIS view instead, and it blanks a turn that was CLIPPED and still has no
+    extractable sentence of its own — so a cut whose readable body has nothing
+    to say contributes no unit to EITHER lane.
+
+    The invariant ("a turn with no extractable content of its own yields no
+    claims", #4897) previously lived only inside ``_session_llm_transcript``,
+    which is why the m2 lane enforced it and the default v2 lane
+    (``_edus_from_conversation``, which keeps any turn with truthy content)
+    did not. It is built ONCE per capture loop — selfhost ``capture_session``
+    and hosted ``_capture_session_impl`` — and each loop hands the SAME list
+    to whichever lane runs, so no lane re-decides emptiness for itself.
+
+    NARROW BY CONSTRUCTION: only a turn that was CLIPPED (``len > cap``) is
+    eligible, so an ordinary short turn (``"ok"``) is untouched — this is not
+    "drop every sentence-less turn from v2". The list LENGTH is preserved (the
+    turn is blanked, never removed): ``extractor_v2._edus_from_conversation``
+    derives each edu's turn index from its POSITION and ``_resolve_source_turn``
+    anchors quotes to those indices, so shortening the list would renumber
+    every later turn.
+    """
+    windowed = _capture_turn_window(conversation, cap)
+    out: list[dict] = []
+    for turn, win in zip(conversation, windowed, strict=True):
+        raw = turn.get("content")
+        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        if len(content) > cap and not _extractable_sentences(win["content"]):
+            win = {**win, "content": ""}
+        out.append(win)
     return out
 
 
@@ -4608,6 +4662,12 @@ class TortoiseSDK:
         # structured contract — the M2 branch's meta now carries
         # errors/warnings/mode (no fabricated empty meta) so the assembly is
         # branch-independent and fails closed on either extractor.
+        # #6246: the SHARED extraction view — built ONCE and handed to
+        # whichever lane runs below, so a clipped turn with nothing to say
+        # contributes no unit to EITHER the m2 transcript lane or the default
+        # v2 lane. The STORED turns above keep their clipped text (this is a
+        # copy); only the extraction input is blanked.
+        extraction = _capture_extraction_window(conversation)
         # W5 Phase F (#2104): the #1727 replay skip — a re-capture of an
         # existing session_id is a NO-OP replay (extraction_mode "replayed",
         # 0 new non-episodic nodes), byte-parity with hosted_api's replay
@@ -4664,10 +4724,10 @@ class TortoiseSDK:
             }
         elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
-                windowed, session_id, now)
+                extraction, session_id, now)
         else:
             extracted, meta = self._extract_session_v2(
-                windowed, session_id, now)
+                extraction, session_id, now)
 
         # P1 #1529: the fail-closed assembly consumes the shared contract.
         extraction_errors = list(meta.get("errors") or [])
