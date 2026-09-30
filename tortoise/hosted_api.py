@@ -119,6 +119,7 @@ from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
@@ -10417,11 +10418,14 @@ class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
 
     # #1532 D1 (contract change, flagged): hosted previously rejected per-turn
-    # content > 5000 chars with 422 (Pydantic field_validator failure); it now
-    # accepts and truncates to the 5000-char stored window exactly like the SDK
-    # (the shared _capture_turn_window helper in the handler — both paths
-    # produce byte-identical stored turns). Non-str content is coerced in the
-    # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
+    # content over the stored window with 422 (Pydantic field_validator
+    # failure); it now accepts and clips to the stored window exactly like the
+    # SDK (the shared _capture_turn_window helper in the handler — both paths
+    # produce byte-identical stored turns). The window is ONE number
+    # (sdk._CAPTURE_TURN_CAP) and the clip is ONE definition
+    # (sdk._clip_capture_turn_content, which marks a cut so it is never
+    # silent, #4897) — neither is restated here. Non-str content is coerced in
+    # the handler turn loop (P1 #1529 D10) — no validator-side crash surface.
     # W5 P2 (review round 1): session_id becomes the point-level provenance
     # source_session — an unbounded caller string would amplify onto every
     # extracted point (N x len).  Bounded at 256 (real ids are ULIDs / the
@@ -10844,8 +10848,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #1532 D1: compute the shared stored-window conversation ONCE — the
     # empty/blank gate, the turn-store loop, and the extraction call all
     # consume the SAME window so the extractors can never see a phrase with no
-    # home in any stored turn (stored-source parity; >5000 turns are accepted
-    # and truncated here — the old 422 is removed, D1 contract change).
+    # home in any stored turn (stored-source parity; over-window turns are
+    # accepted and clipped here — the old 422 is removed, D1 contract change;
+    # the clip marks what it cut, #4897).
     windowed = _capture_turn_window(body.conversation)
 
     # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write —
@@ -10855,7 +10860,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # empty conversation is never ok=True / a silent extracted:0).
     # 422 over 400: same family as the empty-conversation rejection; a
     # handler-level check because blankness is transcript-derived.
-    transcript, _est = _session_llm_transcript(windowed)
+    transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
     if not transcript.strip():
         raise HTTPException(
             status_code=422,
