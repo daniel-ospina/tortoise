@@ -352,6 +352,11 @@ const suites = [
   '20260919000001_metering_period_end_repair.sql',  // #4216
   '20260925000001_oauth_referential_integrity.sql',  // #3036
   '20260925000002_oauth_redemption_state.sql',  // #3027
+  // #5331 — the graph-storage gauge, asserted against the REAL SQL function.
+  // NOTE: this list is EXPLICIT, not a glob — a suite file that is not named
+  // here never runs, and "the suite exists" is then mistaken for "the suite
+  // passes". Add the entry in the same commit as the file.
+  '20260926000002_metering_set_graph_storage.sql',  // #5331
   '20260927000001_metering_unmetered_increments.sql',  // #4779
 ];
 for (const suite of suites) {
