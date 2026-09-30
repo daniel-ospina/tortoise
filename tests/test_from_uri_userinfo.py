@@ -1064,6 +1064,7 @@ def test_graph_script_helpers_do_not_connect_at_import():
         raise AssertionError("importing the helper opened a socket")
 
     connecting: list[str] = []
+    unbound: list[str] = []
     sys.path.insert(0, str(scripts_dir))
     try:
         for module_name in _GRAPH_SCRIPT_HELPERS:
@@ -1077,8 +1078,19 @@ def test_graph_script_helpers_do_not_connect_at_import():
                 connecting.append(module_name)
             finally:
                 socket.socket.connect = saved_connect
+            # A module-level ``__getattr__`` (PEP 562) is NOT enough: it is
+            # consulted for attribute access on the MODULE object only, never by
+            # the ``LOAD_GLOBAL`` a function inside the module uses — so a lazy
+            # attribute left ``q()`` raising NameError while this very test
+            # passed. `G`/`DB` must therefore be REAL module globals.
+            if hasattr(module, "q") and not {"DB", "G"} <= set(vars(module)):
+                unbound.append(module_name)
     finally:
         sys.path[:] = saved_path
+    assert not unbound, (
+        f"{unbound} expose no module-global `G`/`DB`: a module-level "
+        "__getattr__ does not serve the LOAD_GLOBAL inside `q()`, so the "
+        "script raises NameError instead of connecting")
     assert not connecting, (
         f"{connecting} open a connection at IMPORT — every importer, including "
         "this file, then depends on a live server at TORTOISE_DB_URI or the "

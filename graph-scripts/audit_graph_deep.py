@@ -43,15 +43,39 @@ _cfg = _parse_uri(_uri)
 _CONN: dict = {}
 
 
-def __getattr__(name):  # PEP 562 — resolved on FIRST ACCESS, not at import
-    """`DB` and `G` are created on first access, so the module stays import-safe."""
-    if name not in ("DB", "G"):
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def _connect() -> dict:
+    """Build the client and its graph ONCE, on first USE — never at import."""
     if "DB" not in _CONN:
         _CONN["DB"] = FalkorDB(host=_cfg["host"], port=_cfg["port"],
                                password=_cfg["password"] or None)
         _CONN["G"] = _CONN["DB"].select_graph(_cfg["graph"])
-    return _CONN[name]
+    return _CONN
+
+
+class _Lazy:
+    """Module-global stand-in for ``DB``/``G`` that connects on first USE.
+
+    Why a proxy and NOT a module-level ``__getattr__`` (PEP 562) — which was the
+    first attempt at this fix, and was WRONG: module ``__getattr__`` is consulted
+    only for attribute access ON THE MODULE OBJECT, never by the ``LOAD_GLOBAL``
+    that a function defined in this module uses to resolve ``G``. With only
+    ``__getattr__``, ``q()`` — this module's sole DB access path, and every
+    ``__main__`` call — raised ``NameError: name 'G' is not defined`` before it
+    could connect. Binding a proxy under the REAL name keeps both paths working:
+    in-module globals resolve, and importing still opens no socket.
+    """
+
+    __slots__ = ("_key",)
+
+    def __init__(self, key: str) -> None:
+        self._key = key
+
+    def __getattr__(self, name: str):
+        return getattr(_connect()[self._key], name)
+
+
+DB = _Lazy("DB")
+G = _Lazy("G")
 
 CONTEXTS = ['concept|operations|agent', 'brain-research', 'roadmap|H1|in_progress', 'value-prop']
 
