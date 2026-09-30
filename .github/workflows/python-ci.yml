@@ -2304,8 +2304,16 @@ jobs:
     # required aggregate below then does not exist on that head at all: not
     # red, ABSENT, and an absent required check cannot block a merge. Observed
     # on #6212, where the run reported `total_count: 0` with "This run likely
-    # failed because of a workflow file issue". A forced merge in that window
-    # would have landed a dead gate. This leg makes the class a pre-merge red.
+    # failed because of a workflow file issue".
+    #
+    # SCOPE LIMIT, stated because it bounds what this leg can claim: the leg
+    # reads every workflow file it can LOAD, so it catches a malformed
+    # expression in any workflow OTHER than this one. If this file
+    # (`python-ci.yml`) is itself malformed, GitHub refuses it, this leg never
+    # starts, `python-ci-gate` stays ABSENT, and nothing here changes. Closing
+    # that last case needs the lint to live in its own workflow file AND be a
+    # required status check itself, which is a branch-protection change and
+    # not something this leg can do from inside `python-ci-gate`.
     #
     # The expression is evaluated over the ENTIRE `run:` scalar, so a shell
     # comment is NOT exempt — that is how the #6212 instance slipped past
@@ -2317,16 +2325,29 @@ jobs:
     # exist in a CI checkout, and its default scope also names a templates/
     # tree this repository does not have (it exits 3 at the glob).
     #
+    # Both extensions are linted: GitHub loads either `.yml` or `.yaml`, so a
+    # `*.yml`-only glob would silently skip a `.yaml` workflow.
+    #
     # Ungated on purpose: a leg that reaches these `needs` but SKIPS has no row
     # that can fail closed, so the required check could certify a shard that
     # never ran (#5219). It therefore always runs and must always succeed.
+    #
+    # Bounded like `manifest-integrity`: this job pulls a Docker image to feed
+    # the REQUIRED aggregate, so a stalled registry must not hold
+    # `python-ci-gate` pending for hours on every PR.
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: actionlint (workflow syntax + Actions-expression errors)
         run: |
+          files=$(ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null || true)
+          if [ -z "$files" ]; then
+            echo "no workflow files matched — refusing to certify an empty surface"
+            exit 1
+          fi
           docker run --rm -v "$PWD:/repo" -w /repo \
-            rhysd/actionlint:1.7.12 -shellcheck= .github/workflows/*.yml
+            rhysd/actionlint:1.7.12 -shellcheck= $files
 
   python-ci-gate:
     if: always()

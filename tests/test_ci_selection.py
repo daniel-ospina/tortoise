@@ -2570,6 +2570,42 @@ def test_a_matrix_job_never_uploads_a_fixed_name_artifact():
         + "; ".join(offenders))
 
 
+def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
+    """The `workflow-lint` leg is only a check while it still RUNS actionlint.
+
+    The plumbing guards (needs/LEGS) prove the leg is wired in; they cannot
+    see its body. Without this pin, replacing the step with `echo ok`, or
+    unpinning `rhysd/actionlint:1.7.12` to `:latest`, leaves every test green
+    while the leg stops being a check — the same fail-open shape #6253 is
+    about. Mirrors the step-shape pin that `manifest-integrity` carries in
+    `tests/test_mergify_config_guard.py`.
+    """
+    job = _load_python_ci()["jobs"]["workflow-lint"]
+    runs = "\n".join(
+        str(step.get("run") or "") for step in job.get("steps") or []
+    )
+    assert "actionlint" in runs, (
+        "workflow-lint no longer invokes actionlint — the leg would certify "
+        "nothing while still reporting green (#6253)"
+    )
+    tags = re.findall(r"actionlint:(\S+)", runs)
+    assert tags, "workflow-lint does not name an actionlint image tag"
+    for tag in tags:
+        assert re.fullmatch(r"\d+\.\d+\.\d+", tag), (
+            f"actionlint image must be pinned to major.minor.patch, got {tag!r} "
+            "— a floating tag re-opens the unpinned-dependency class (#5440)"
+        )
+    assert "-shellcheck=" in runs, (
+        "the actionlint invocation must set -shellcheck= explicitly; the "
+        "image's default would add a shell dependency the runners do not "
+        "guarantee"
+    )
+    assert "*.yaml" in runs, (
+        "workflow-lint globs only *.yml; GitHub loads workflows with either "
+        "extension, so a .yaml workflow would be silently unlinted"
+    )
+
+
 def _extract_pytest_marker(run_script: str) -> str:
     """Pull the `-m <marker>` filter from a job's pytest run script. The
     docker lanes quote it (`-m 'not track_b and not live'`); the track-b
