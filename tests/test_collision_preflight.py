@@ -383,8 +383,21 @@ CLAIM_COLLISION_CORPUS = {
 }
 
 def _git(repo: Path, *args: str) -> None:
+    # A temp repo has no committer identity, so any git commit through this
+    # helper dies with exit 128 ("Author identity unknown") on a machine with
+    # no global user.email. Set it in the ENVIRONMENT rather than by running
+    # `git config user.email` per repo: the environment covers every temp repo
+    # this module creates, including the ones built inside a test body, and it
+    # cannot be forgotten at a new call site the way a per-repo config can.
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
     subprocess.run(["git", *args], cwd=repo, check=True,
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=env)
 
 
 def _write_exec(path: Path, body: str) -> Path:
@@ -2015,7 +2028,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_fixtures(open_prs=[])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
-        remote_row = [ln for ln in out.splitlines() if ln.startswith("remote branches")][0]
+        remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
         self.assertIn("terminal tests are NOT applied here", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
@@ -2258,8 +2271,8 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        wt_row = [ln for ln in out.splitlines()
-                  if ln.startswith("local worktrees")][0]
+        wt_row = next(ln for ln in out.splitlines()
+                      if ln.startswith("local worktrees"))
         self.assertIn("HIT", wt_row, wt_row)
         self.assertNotIn("merged into origin/main", wt_row)
 
@@ -2385,8 +2398,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         for row_prefix in ("local branches", "local worktrees"):
-            row = [ln for ln in out.splitlines()
-                   if ln.startswith(row_prefix)][0]
+            row = next(ln for ln in out.splitlines()
+                       if ln.startswith(row_prefix))
             self.assertIn("HIT", row, row)
         self.assertNotIn("merged into origin/main", out)
 
