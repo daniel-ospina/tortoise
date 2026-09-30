@@ -30,6 +30,21 @@ on:
         type: boolean
         default: false
 
+# #6590: ci.yml had no concurrency group, so each `pull_request` synchronize
+# ADDED an uncancellable run to a saturated pool. Scoped exactly as
+# python-ci.yml scopes it (its own comment records this reasoning; not
+# re-invented here): on `pull_request` github.ref is refs/pull/N/merge, which is
+# PER-PR, so a new commit cancels only that PR's stale run.
+#
+# This workflow is also reached via `workflow_call` (main-health-nightly), and
+# the expression below yields FALSE for that event. Precise reading: false stops
+# a RUNNING scheduled run being cancelled; a shared group still supersedes a
+# merely PENDING one, so overlapping calls can cancel each other's not-yet-
+# started runs. The newest always survives, which is the intended outcome.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # #2149 (ci-audit F3): path-gate the NON-required jobs. `changes` is a
   # cheap changed-files selector (the python-ci.yml `changes` pattern) that
