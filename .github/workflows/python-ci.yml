@@ -1924,9 +1924,36 @@ jobs:
             # spell its way out of the junitxml. --manifest-only: this lane's
             # skips are the exempt reason family, so the docker-calibrated
             # matchers must not run here.
-            python3 tools/skip-guard.py /tmp/pytest.log \
-              --junitxml=/tmp/junit.xml \
-              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only || guard_rc=1
+            #
+            # W37: this committed set is REPO-LEVEL — it spans the whole
+            # carve-out — but the job now runs ONE SHARD of that set, so
+            # comparing the whole file against one shard's junitxml reports a
+            # false red for every nodeid living in a sibling shard. It did
+            # exactly that on the sharding PR: the 4 `test_fork_safety_3845.py`
+            # nodeids (lines 23-26) are owned by shard (c), so shards 0 and (b)
+            # reddened on a run whose pytest was fully green.
+            #
+            # Scope it to the files THIS shard runs. The guarantee is
+            # unchanged, not weakened: the union over shards still requires
+            # every nodeid in the committed set EXACTLY ONCE, enforced by the
+            # shard that actually runs the file. A shard owning none of them
+            # has nothing to require — and says so rather than passing quietly.
+            OWNER_PATTERNS=""
+            for f in ${{ matrix.files }}; do OWNER_PATTERNS="$OWNER_PATTERNS -e tests/$f.py::"; done
+            if [ -n "$OWNER_PATTERNS" ]; then
+              # `grep -F` (fixed strings): every -e is a literal nodeid prefix.
+              # An unmatched file simply contributes nothing; rc=1 is the
+              # expected "no lines" case, not an error.
+              grep -F $OWNER_PATTERNS config/ci-expected-nodeids/platform-gated.txt \
+                > "${RUNNER_TEMP:-/tmp}/platform-gated-shard.txt" || true
+            fi
+            if [ -s "${RUNNER_TEMP:-/tmp}/platform-gated-shard.txt" ]; then
+              python3 tools/skip-guard.py /tmp/pytest.log \
+                --junitxml=/tmp/junit.xml \
+                --manifest "${RUNNER_TEMP:-/tmp}/platform-gated-shard.txt" --manifest-only || guard_rc=1
+            else
+              echo "no platform-gated nodeids belong to this shard — nothing to require here"
+            fi
             exit $guard_rc
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
