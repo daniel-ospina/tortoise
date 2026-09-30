@@ -1078,12 +1078,12 @@ def test_graph_script_helpers_do_not_connect_at_import():
                 connecting.append(module_name)
             finally:
                 socket.socket.connect = saved_connect
-            # A module-level ``__getattr__`` (PEP 562) is NOT enough: it is
-            # consulted for attribute access on the MODULE object only, never by
-            # the ``LOAD_GLOBAL`` a function inside the module uses — so a lazy
-            # attribute left ``q()`` raising NameError while this very test
-            # passed. `G`/`DB` must therefore be REAL module globals.
-            if hasattr(module, "q") and not {"DB", "G"} <= set(vars(module)):
+            # `q()` resolves `G` through LOAD_GLOBAL, which consults only the
+            # module globals — so the name must be BOUND to something usable,
+            # not merely present. Reading it off `q.__globals__` is what `q()`
+            # itself will see, and `is None` catches a placeholder binding.
+            q_fn = getattr(module, "q", None)
+            if q_fn is not None and q_fn.__globals__.get("G", None) is None:
                 unbound.append(module_name)
     finally:
         sys.path[:] = saved_path
