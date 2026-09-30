@@ -23,6 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tests import _live_utils
 from tortoise.consistency import recover_from_log
 from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
@@ -894,7 +895,7 @@ def test_reconcile_cli_refuses_a_torn_removal_tail(capsys):
                    full[:full.index('"op"')], torn_last=True)
 
     rc = _cmd_reconcile(argparse.Namespace(
-        db="docker://:falkordb@localhost:6379/tortoise_test_matrix",
+        db=_live_utils.docker_uri("tortoise_test_matrix"),
         log=log_path))
     captured = capsys.readouterr()
     assert rc == 1, f"a refused reconcile must exit non-zero, got {rc!r}"
