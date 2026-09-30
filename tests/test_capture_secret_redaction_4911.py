@@ -117,6 +117,13 @@ CASES: tuple[tuple[str, str, str], ...] = (
      _synth("cs_", _fill(43))),
     ("tortoise_signup", "tortoise_signup_token",
      _synth("st_", "a1b2c3d4e5f6a7b8" * 4)),
+    # #6158 review: the product LOWERCASES a user-entered signup token before its
+    # format gate (`hosted_api.py`: `signup_token.lower()` then
+    # `_SIGNUP_TOKEN_RE`), explicitly so an uppercase-hex paste resolves to the
+    # same org. So this uppercase form is a VALID recovery credential, and a
+    # lowercase-only rule stored it verbatim.
+    ("tortoise_signup_uppercase", "tortoise_signup_token",
+     _synth("ST_", "A1B2C3D4E5F6A7B8" * 4)),
     # #6158 review: the tenant API key is the product's PRIMARY credential and
     # the first cut of this PR had no rule for it at all — `uuid4().hex` is not
     # a `token_hex`/`token_urlsafe` call, so the guard could not see it either.
@@ -914,7 +921,6 @@ _NON_SECRET_PREFIXES = {
 #: API key is `f"tt_{uuid.uuid4().hex}"`, which names none of the token helpers,
 #: and that blind spot is exactly how `tt_` stayed invisible to the first cut of
 #: this guard (found in review — the guard certified coverage it did not have).
-_TOKEN_HELPERS = ("token_hex", "token_urlsafe", "uuid4")
 
 
 def _new_token_body() -> str:
@@ -946,7 +952,13 @@ def _body_from_helpers(node: ast.AST) -> str | None:
                     return (secrets.token_hex(arg.value) if name == "token_hex"
                             else secrets.token_urlsafe(arg.value))
             if name == "uuid4":
-                return uuid.uuid4().hex
+                # ⛔ A BARE `uuid4()` IS NOT `.hex`. `str(uuid.uuid4())` is 36
+                # characters with dashes; `.hex` is 32 without. Returning the
+                # hex shape for both measured 32 where the site mints 36, so a
+                # rule certified against the shorter body left the real value in
+                # cleartext (found in review). The `.hex` spelling is claimed by
+                # the Attribute branch above, which walk reaches first.
+                return str(uuid.uuid4())
         elif isinstance(inner, ast.Attribute) and inner.attr == "hex":
             base = getattr(inner.value, "func", None)
             base_name = getattr(base, "attr", None) or getattr(base, "id", None)
@@ -987,6 +999,32 @@ def _draws_randomness(node: ast.AST) -> bool:
             if any(frag in name for frag in _RANDOMNESS_FRAGMENTS):
                 return True
     return False
+
+
+def test_the_signup_rule_matches_what_the_product_ACCEPTS():
+    """#6158 review: the rule must be as WIDE as the product's own acceptance.
+
+    `hosted_api.py` lowercases a user-entered signup token BEFORE its format gate
+    — deliberately, so that "a copy-pasted token with uppercase hex must resolve
+    to the same org". An uppercase form is therefore a VALID recovery credential,
+    and a lowercase-only rule stored it verbatim with `capture_redactions: 0`:
+    the #6158 failure mode, one case-flip from the covered form.
+
+    The first assertion is the load-bearing one — it mirrors the PRODUCT's own
+    normalization rather than asserting a case-fold the product might drop, so it
+    fails if acceptance narrows instead of silently pinning a stale rule.
+    """
+    from tortoise.hosted_api import _SIGNUP_TOKEN_RE
+
+    minted = "st_" + secrets.token_hex(32)           # always lowercase at mint
+    pasted = "ST_" + secrets.token_hex(32).upper()   # what a user may paste
+    assert _SIGNUP_TOKEN_RE.match(pasted.lower()), (
+        "the product no longer accepts a lowercased uppercase-hex signup token; "
+        "re-derive whether `(?i)` is still the right width for this rule")
+    for form in (minted, pasted, minted.upper()):
+        out, counts = redact_secrets("token=" + form + " end")
+        assert counts.get("tortoise_signup_token"), (form[:3], counts)
+        assert form not in out and form[3:] not in out, form[:3]
 
 
 def _const_prefixes(value: ast.AST) -> tuple[str, ...]:
@@ -1089,11 +1127,14 @@ def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
     this scanner RECOGNIZES but cannot resolve is a FAILURE rather than a silent
     omission.
 
-    ⛔ LIMIT, stated so it is not mistaken for exhaustiveness: a body built
-    through an intermediate variable (``b = token_hex(32)`` then ``f"zz_{b}"``)
-    is not recognized as a mint at all, so it is neither claimed nor checked. The
-    set pin is what makes a NEW prefix visible, and a family minted that way
-    would have to be added deliberately. Only the shapes above are claimed.
+    ⛔ LIMIT, stated so it is not mistaken for exhaustiveness. NOT claimed and
+    NOT checked: a body built through an intermediate variable (``b =
+    token_hex(32)`` then ``f"zz_{b}"``); a body drawn from a helper this scanner
+    does not model (``f"g_{_short_id()}"``, live in the tree today); and any
+    module outside ``_MINT_MODULES``. The set pin makes a NEW prefix visible only
+    when it is minted in one of the claimed shapes, inside a scanned module — a
+    family arriving any other way has to be added deliberately. Only the shapes
+    above are claimed.
     """
     found: dict[str, list[str]] = {}
     unresolved: list[str] = []
@@ -1133,17 +1174,38 @@ def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
             heads = _prefixes_of_head(node.values[0], names)
             if heads is None:
                 continue
-            body = None
+            # ⛔ CONCATENATE EVERY TAIL — do not stop at the first helper. A body
+            # may be assembled from more than one: `f"zz_{token_hex(16)}"`
+            # `{token_hex(16)}` mints 64 hex, and taking only the first measured
+            # 32, certifying a rule that leaves the other half in cleartext
+            # (found in review).
+            parts: list[str] = []
+            unresolved_tail = False
             for t in tails:
+                if isinstance(t, ast.Constant) and isinstance(t.value, str):
+                    parts.append(t.value)
+                    continue
                 raw = _body_from_helpers(t)
-                if raw is not None:
-                    body = _truncated_body(t, raw)
+                if raw is None:
+                    unresolved_tail = _draws_randomness(t)
                     break
-            if body is not None and heads:
-                for prefix in heads:
-                    found.setdefault(prefix, []).append(body)
-            elif any(_draws_randomness(t) for t in tails):
+                parts.append(_truncated_body(t, raw))
+            # A token DIRECTLY behind an unknown prefix name
+            # (`f"{prefix}{uuid4().hex}"`) is an unresolved mint. Requiring the
+            # token to be the FIRST tail is what keeps that narrow: a token
+            # merely APPEARING in a template (`f"{t}: {token_hex(32)}"`) has a
+            # constant first tail and is not a prefix shape at all — treating it
+            # as one failed the whole scan closed on ordinary formatting strings.
+            joins_head = (
+                bool(tails)
+                and not isinstance(tails[0], ast.Constant)
+                and _body_from_helpers(tails[0]) is not None
+            )
+            if unresolved_tail or (joins_head and not heads):
                 unresolved.append(ast.dump(node)[:120])
+            elif heads and parts:
+                for prefix in heads:
+                    found.setdefault(prefix, []).append("".join(parts))
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             # `"zz_" + token_urlsafe(32)` — the non-f-string spelling — and the
             # same with the prefix in a NAME: `P + token_urlsafe(32)`.
@@ -1310,7 +1372,7 @@ def test_the_scanner_ignores_a_prefix_that_is_only_NAMED_in_prose():
 
 
 def test_every_credential_the_product_mints_has_a_redaction_rule():
-    """#6158: enumerate the MINT SITES; every minted prefix must have a rule.
+    """#6158: every prefix minted IN THE SCANNED MODULES must have a rule.
 
     This is the mechanism whose ABSENCE let ``oat_``/``ort_``/``st_`` — and, on
     the first cut of this PR itself, ``tt_``/``tk_`` — ship with no rule at all

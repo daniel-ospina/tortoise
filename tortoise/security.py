@@ -451,8 +451,17 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
      re.compile(r"(?<![A-Za-z0-9])cs_(?!(?:test|live)_)[A-Za-z0-9_-]{43,}"
                 r"(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="tortoise_oauth_client_secret")),
+    # ⛔ CASE-INSENSITIVE, because the PRODUCT ACCEPTS IT CASE-INSENSITIVELY.
+    # `hosted_api.py` lowercases a user-entered signup token BEFORE the format
+    # gate (`signup_token.lower()` then `_SIGNUP_TOKEN_RE`) — explicitly so that
+    # "a copy-pasted token with uppercase hex must resolve to the same org". So
+    # `ST_<UPPER HEX>` is a fully valid recovery credential, and a lowercase-only
+    # rule stored it verbatim: the #6158 failure mode, one case-flip from the
+    # covered form (found in review). No other family gets `(?i)`: `tt_`/`tk_`
+    # are hashed raw with no lowering, so an uppercased one is not a credential
+    # and widening those would only over-redact.
     ("tortoise_signup_token",
-     re.compile(r"(?<![A-Za-z0-9])st_[0-9a-f]{64,}(?![0-9a-f])"),
+     re.compile(r"(?i)(?<![A-Za-z0-9])st_[0-9a-f]{64,}(?![0-9a-f])"),
      _REDACTION_VALUE.format(kind="tortoise_signup_token")),
     # Anthropic — BEFORE the generic `sk-` (see the ordering rule above).
     ("anthropic_api_key",
