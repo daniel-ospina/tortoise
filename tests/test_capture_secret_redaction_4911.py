@@ -357,6 +357,396 @@ def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
         "the whole credential survived the cut, so this test proves nothing")
 
 
+@pytest.mark.parametrize("secret,kind,direction", [
+    # SHRINKS: 72 chars -> 25 (`[REDACTED:openai_api_key]`) — the old test's
+    # only shape, which made the post-scrub re-clip a no-op and hid the defect.
+    ("sk-proj-" + _fill(64), "openai_api_key", "shrinking"),
+    # EXPANDS: 20 chars -> 28 (`[REDACTED:aws_access_key_id]`) — the P1 shape.
+    ("AKIA" + "ABCDEFGHIJKLMNOP", "aws_access_key_id", "expanding"),
+    # EXPANDS: 30 chars -> 32 (`[REDACTED:stripe_webhook_secret]`) — a second
+    # expanding shape alongside aws, so the direction is pinned twice.
+    ("whsec_" + _fill(24), "stripe_webhook_secret", "expanding-whsec"),
+])
+def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
+        sdk, monkeypatch, secret, kind, direction):
+    """#4911 and #4897 COMPOSE: a turn that is both cut AND carrying a
+    credential must (a) still have the credential redacted and counted, and
+    (b) still carry the truncation marker — neither control may eat the other.
+
+    The cut and the scrub are separate passes over the same window; a marker
+    appended after the cut must not be removed by the scrubber, and the
+    scrubber's replacement must not sit where the marker's length reservation
+    assumed text — so the two markers coexist and the count is still recorded.
+
+    ⛔ BOTH redaction DIRECTIONS are pinned. A shrinking replacement (the
+    original shape only) makes a post-scrub re-clip a silent no-op, so the
+    marker could report the SCRUBBED length (5,008 for a 6,927-char turn) and
+    this test still passed. The marker's length is the turn as POSTed, either
+    way.
+    """
+    _keyless(monkeypatch)
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
+    # The credential sits INSIDE the kept window; the turn is long enough that
+    # a marker must also be appended.
+    content = f"My key is {secret} and here is why. " + "context " * 800
+    assert len(content) > _CAPTURE_TURN_CAP
+    sid = f"sess-4897-4911-compose-{direction}"
+    res = sdk.capture_session([{"role": "user", "content": content}],
+                              session_id=sid)
+    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
+    assert secret not in stored, "the credential survived the combined cut+scrub"
+    assert f"[REDACTED:{kind}]" in stored, (
+        "the credential must be MARKED redacted, not silently dropped")
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        "the truncation marker must survive alongside the redaction marker")
+    assert f"original length {len(content)}" in stored, (
+        "the marker's true length must be the turn as POSTed (pre-scrub)")
+    assert res["capture_redactions"] == 1
+
+
+def test_a_dangling_pem_header_past_the_cut_still_carries_the_marker(
+        sdk, monkeypatch):
+    """#4897 round-2 P2: a fail-closed PEM redaction must not eat the marker.
+
+    The ``private_key`` rule's ``\\Z`` branch consumes from a dangling header to
+    the END OF THE TEXT, so when the header sits inside the window and its
+    ``-----END`` falls past the cut, the scrubber replaced everything after the
+    header — the truncation marker included — and a cut turn was stored UNMARKED.
+    Reproduced end-to-end: an 11,263-char turn stored as 4,823 chars with no
+    sentinel. Every such cut the fuzz below produced carried a PEM. A cut
+    turn with no marker is exactly the silent truncation #4897 exists to end.
+    """
+    _keyless(monkeypatch)
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
+    content = ("p" * 4800 + " " + _pem("RSA PRIVATE KEY") + "\n"
+               + "MIIEowIBAAKCAQEA" * 400 + "\n"
+               + _pem_end("RSA PRIVATE KEY"))
+    assert len(content) > _CAPTURE_TURN_CAP
+    sid = "sess-4897-pem-marker"
+    sdk.capture_session([{"role": "user", "content": content}], session_id=sid)
+    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
+    assert "[REDACTED:private_key]" in stored, (
+        "the dangling key header must still be redacted")
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        "a fail-closed PEM redaction ate the truncation marker — a cut turn is "
+        "stored UNMARKED, which is the silent truncation #4897 exists to end")
+    assert f"original length {len(content)} chars]" in stored, (
+        "the re-attached marker must carry the turn's TRUE length")
+
+
+def test_the_truncation_marker_is_never_in_the_scanned_text(monkeypatch):
+    """The GENERAL rule (#4897 round 2), not just the PEM instance.
+
+    Any redaction whose body can run to end-of-text can consume the marker, so
+    ``_redact_turn_contents`` splits the marker OFF before calling
+    ``redact_secrets``. This proves the general property directly — by capturing
+    every string the scrubber is handed — so it holds for a ``\\Z`` rule added
+    in FUTURE without needing a per-rule test. (Today only ``private_key``
+    carries a ``\\Z`` branch; see
+    ``test_only_the_private_key_rule_can_consume_the_text_tail``.)
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    content = ("p" * 4800 + " " + _pem("RSA PRIVATE KEY") + "\n"
+               + "MIIEowIBAAKCAQEA" * 400)
+    seen: list[str] = []
+    real = sdk_mod.redact_secrets
+
+    def spy(text: str):
+        seen.append(text)
+        return real(text)
+
+    monkeypatch.setattr(sdk_mod, "redact_secrets", spy)
+    # #4897 round 5: the window (the sole clipper) runs FIRST on the raw text,
+    # so the marker the redactor must not scan is the one the window wrote.
+    out, _counts = _redact_turn_contents(
+        _capture_turn_window([{"role": "user", "content": content}]))
+    assert seen, "the scrubber was never called — the fixture proves nothing"
+    assert all(_CAPTURE_TRUNCATION_SENTINEL not in t for t in seen), (
+        "the truncation marker reached redact_secrets — a fail-closed rule "
+        "(any branch matching to \\Z) can then consume it")
+    assert _CAPTURE_TRUNCATION_SENTINEL in out[0]["content"]
+
+
+def test_only_the_private_key_rule_can_consume_the_text_tail():
+    """Which rules CAN eat the marker: exactly the end-of-text branches.
+
+    Enumerated from the pattern sources so a NEW ``\\Z``/``$``-to-end rule makes
+    this test name it rather than passing silently. Every listed rule is safe by
+    construction now — the marker is not part of its input (#4897 round 2) —
+    which is what makes the list a control rather than a to-do.
+    """
+    from tortoise.security import _SECRET_SHAPES
+    tail_consumers = [
+        kind for kind, pattern, _repl in _SECRET_SHAPES
+        if r"\Z" in pattern.pattern or pattern.pattern.rstrip().endswith("$")
+    ]
+    assert tail_consumers == ["private_key"], (
+        "a new rule gained an end-of-text branch; the marker is safe (it is "
+        "never scanned) but this list must name the rule so the guarantee is "
+        "documented: " + repr(tail_consumers))
+
+
+@pytest.mark.parametrize(
+    "case,kind,value", CASES, ids=[c for c, _k, _v in CASES])
+def test_every_credential_kind_still_carries_the_truncation_marker(
+        case, kind, value):
+    """The generalisation, per kind: the marker survives EVERY redaction rule.
+
+    Each sample sits INSIDE the kept window on a turn long enough to be cut, so
+    the scrubber runs over it and the marker must still be present with the true
+    pre-redaction length. This is the invariant the single PEM fixture proves
+    for one rule, stated for the whole table.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    content = "filler. " * 300 + value + " tail " * 900
+    assert len(content) > 5000, case
+    windowed = _capture_turn_window([{"role": "user", "content": content}])
+    out, counts = _redact_turn_contents(windowed)
+    stored = out[0]["content"]
+    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+        f"{case}: the truncation marker did not survive the {kind} scrub")
+    assert f"original length {len(content)} chars]" in stored, case
+    assert value not in stored, f"{case}: the {kind} value survived"
+    assert counts.get(kind), f"{case}: {kind} not counted"
+
+
+def test_every_cut_turn_is_stored_with_a_marker_fuzz():
+    """Deterministic fuzz over >cap turns with PEM fragments (#4897 round 2).
+
+    The shape that found the bug: a turn over the cap that contains a PEM
+    header whose ``-----END`` is absent or falls past the cut (i.e. pasting a
+    real key). Before the fix, cuts on a turn shaped like this stored NO marker.
+    Every cut must now carry the marker, with the true pre-redaction length.
+    """
+    import random
+
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts_with_redactions,
+        _capture_turn_window,
+    )
+    alnum = _ALNUM
+
+    def fill(n: int) -> str:
+        return (alnum * (n // len(alnum) + 1))[:n]
+
+    pems = (
+        (_pem("RSA PRIVATE KEY"), _pem_end("RSA PRIVATE KEY")),
+        (_pem("OPENSSH PRIVATE KEY"), _pem_end("OPENSSH PRIVATE KEY")),
+        (_pem("EC PRIVATE KEY"), _pem_end("EC PRIVATE KEY")),
+        (_pem("PGP PRIVATE KEY BLOCK"), _pem_end("PGP PRIVATE KEY BLOCK")),
+        (_synth("-----begin rsa private key-----"),
+         _synth("-----end rsa private key-----")),
+    )
+    rng = random.Random(4897)
+    checked = 0
+    for _ in range(300):
+        total = rng.randint(_CAPTURE_TURN_CAP + 1, 20000)
+        header, end = rng.choice(pems)
+        body = fill(rng.randint(10, 400)) * rng.randint(1, 60)
+        if rng.random() < 0.5:
+            pre = fill(rng.randint(0, total // 2))
+            mid = header + "\n" + body
+            tail = ("\n" + end) if rng.random() < 0.5 else ""
+            post = fill(max(0, total - len(pre) - len(mid) - len(tail)))
+            content = pre + mid + tail + post
+        else:
+            content = fill(total)
+        checked += 1
+        # #4897 round 5: the WINDOW is the sole clipper; the stored-text sink
+        # is redaction-only, so a raw over-cap turn must be windowed first.
+        texts, _counts = _capture_turn_texts_with_redactions(
+            _capture_turn_window([{"role": "user", "content": content}]))
+        stored = texts[0][len("[user] "):]
+        assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
+            "a cut turn was stored with NO marker (the #4897 defect): "
+            f"{content[:60]!r}...")
+        assert f"original length {len(content)} chars]" in stored, (
+            "the marker's total is not the turn's true pre-redaction length")
+    assert checked == 300
+
+
+def test_capped_reapplication_preserves_the_true_total():
+    """#4897 round-5 P3: re-applying the redactor preserves the true total.
+
+    The redactor no longer clips at all (``_capture_turn_window`` is the sole
+    owner of the cap), so re-applying it to a body an EXPANDING redaction has
+    already pushed past the cap must be byte-identical: the marker is split off
+    before the scan and re-attached verbatim.
+
+    This is the reviewer's reproduction — ``("xapp-1-A-1-Z " * 600)[:6000]``,
+    the most-expanding rule (slack ``xapp-``, 12 in → 22 out, space-separated):
+    pass 1 windows to 5,000 (marker reports the true total 6,000), then the
+    scrub grows the STORED turn to **8,810** chars — 1.762x on the 5,000-char
+    window. (The 1.768x max-density figure recorded on ``_redact_turn_contents``
+    is the MARKER-FREE ratio, 8,770 / 4,960 — a different quantity; do not
+    conflate the two. Both integers were off by one until review round 14: the
+    marker's LEADING SPACE stays in the body, so the marker-free body is 4,960,
+    not 4,959, and its scrubbed length is 8,770.)
+
+    This test binds the NEW invariant — the redactor is REDACTION-ONLY, so
+    re-applying it to its own output is byte-identical and can never recount a
+    span. It would go RED if a production-default ``cap`` were reintroduced into
+    ``redact_turn_contents`` (it would re-clip and rewrite the total).
+
+    ⚠️ It is NOT, however, a regression test for the historical round-4 P1. That
+    P1 lived in ``cd662b370``'s ``cap=...`` call path, and this test calls the
+    redactor with a SINGLE positional argument — under the old signature ``cap``
+    defaulted to ``None``, so the re-clip branch never fired and the test would
+    have PASSED at ``cd662b370`` (verified by running this fixture against the
+    old function body: pass 2 byte-identical). The historical P1 is covered by
+    the ABSENCE of the parameter plus
+    ``test_the_redactor_is_redaction_only_and_never_clips``. The old test this
+    replaced was separately vacuous: its pass-1 body was 4,968 chars, so it
+    never entered the re-clip branch, and it asserted ``len(body) > 5000`` on
+    the whole content rather than the marker-free quantity the code tested.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    raw = ("xapp-1-A-1-Z " * 600)[:6000]
+    assert len(raw) == 6000
+    once, counts1 = _redact_turn_contents(
+        _capture_turn_window([{"role": "user", "content": raw}]))
+    body = once[0]["content"]
+    assert counts1 == {"slack_token": 381}, counts1
+    assert len(body) == 8810, (
+        "the expanding redaction must push the windowed body past the cap")
+    assert f"original length {len(raw)} chars]" in body, (
+        "the marker must report the TRUE pre-redaction total")
+    assert _CAPTURE_TRUNCATION_SENTINEL in body
+    # Re-application is REDACTION-ONLY: no re-clip, no recounted span, and the
+    # stored turn is byte-for-byte unchanged.
+    twice, counts2 = _redact_turn_contents([{"role": "user", "content": body}])
+    assert twice[0]["content"] == body, "re-application changed the stored turn"
+    assert counts2 == {}, "re-application recounted a redaction"
+    assert f"original length {len(body)} chars]" not in twice[0]["content"], (
+        "the false post-redaction total was written on re-application")
+
+
+def test_the_redactor_is_redaction_only_and_never_clips():
+    """#4897 round 5: the cap lives in ONE place — ``_capture_turn_window``.
+
+    Five rounds of patches lived in ``_redact_turn_contents`` because it did two
+    jobs (clip AND redact), and the clip had to discriminate a marker this
+    module wrote from marker-shaped caller text — not decidable in-band. This
+    pins the separation directly: given a raw over-cap conversation the redactor
+    returns a REDACTED but UNCLIPPED body (no marker trust, no re-clip, no cap
+    decided here), while the window is what bounds it. A future change that
+    reintroduces clipping into the redactor reds this.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TURN_CAP,
+        _capture_turn_window,
+        _redact_turn_contents,
+    )
+    raw = "A" * (_CAPTURE_TURN_CAP + 1000)
+    out, _counts = _redact_turn_contents([{"role": "user", "content": raw}])
+    assert out[0]["content"] == raw, (
+        "the redactor clipped — the cap must be decided ONLY by the window, on "
+        "raw text, exactly once")
+    assert len(
+        _capture_turn_window([{"role": "user", "content": raw}])[0]["content"]
+    ) <= _CAPTURE_TURN_CAP
+
+
+def test_the_window_caps_by_total_length_not_by_a_marker_free_body():
+    """#4897 round-5 P2: the cap tests the TOTAL length, marker included.
+
+    ``_TRUNCATION_MARKER_FULL_RE`` accepts an ``original length \\d+`` run of ANY
+    width, so a caller can append a marker-shaped tail whose digit run is six
+    figures. If the window tested a marker-free BODY instead of the total, this
+    content (101 chars + a 100,036-char "marker") would be stored at 100,137
+    chars — an unbounded turn in the turn store and the session ``:Source``
+    sink. ``_clip_capture_turn_content`` tests the TOTAL, so the turn is a cut
+    turn whose fresh marker reports the length actually seen.
+    """
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_turn_texts_with_redactions,
+        _capture_turn_window,
+    )
+    content = ("A" * 100 + " …[truncated: original length "
+               + "9" * 100_000 + " chars]")
+    assert len(content) > _CAPTURE_TURN_CAP * 10
+    windowed = _capture_turn_window([{"role": "user", "content": content}])
+    body = windowed[0]["content"]
+    assert len(body) <= _CAPTURE_TURN_CAP, len(body)
+    assert _CAPTURE_TRUNCATION_SENTINEL in body
+    assert f"original length {len(content)} chars]" in body, (
+        "the fresh marker must report the total actually seen")
+    # The stored-text sink (redaction-only over the window) preserves the bound.
+    texts, _counts = _capture_turn_texts_with_redactions(windowed)
+    assert len(texts[0][len("[user] "):]) <= _CAPTURE_TURN_CAP
+
+
+def test_rfind_not_find_so_an_earlier_lookalike_cannot_hide_the_marker():
+    """#4897 round-3 P3/M10: ``rfind`` is load-bearing, and was untested.
+
+    ``_split_truncation_marker`` must find the marker THIS module appended — the
+    LAST sentinel in the text. If it used ``content.find`` it would take an
+    EARLIER sentinel-lookalike as the split point; the tail would then no longer
+    ``fullmatch`` a marker, the split would return the whole content UNSPLIT,
+    and the real trailing marker would enter the scan, where ``private_key``'s
+    fail-closed ``\\Z`` branch eats it. The cut turn is stored UNMARKED — the
+    round-2 P2 returns. The lookalike is ordinary user prose, so this is a body
+    any client can send.
+    """
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL as S
+    # Inside the cap, so the round-3 pre-scan clip is NOT the behaviour under
+    # test — only which sentinel the split picks.
+    content = (
+        "user pasted earlier: " + S + " original length 1 chars] "
+        + "x" * 200 + " " + _pem("RSA PRIVATE KEY") + "\n"
+        + "MIIEowIBAAKCAQEA" * 40 + " "
+        + S + " original length 1234 chars]")
+    assert len(content) <= 5000, "keep the clip out of this fixture"
+    out, _counts = _redact_turn_contents(
+        [{"role": "user", "content": content}])
+    stored = out[0]["content"]
+    assert "original length 1234 chars]" in stored, (
+        "an earlier sentinel-lookalike moved the split point: the real marker "
+        "entered the scan and a fail-closed rule ate it")
+
+
+def test_a_marker_lookalike_cannot_hide_a_credential_tail():
+    """#4897 round-3 P3/M11: ``fullmatch`` is load-bearing, and was untested.
+
+    ``_split_truncation_marker`` returns the ENTIRE tail from the sentinel to
+    end-of-text as the marker. If recognition used ``search`` instead of
+    ``fullmatch``, a marker-shaped PREFIX followed by a credential would be
+    classified as a marker and re-attached VERBATIM — the tail is never scanned,
+    so the credential is STORED. ``fullmatch`` means a tail with anything after
+    the marker is not a marker at all, and the credential stays in the scanned
+    body. Security-relevant: ``search`` leaks.
+    """
+    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL as S
+    key = "AKIA" + "ABCDEFGHIJKLMNOP"          # aws_access_key_id, 20 chars
+    content = "filler. " * 50 + S + " original length 5 chars] " + key
+    assert len(content) <= 5000, "keep the clip out of this fixture"
+    out, counts = _redact_turn_contents(
+        [{"role": "user", "content": content}])
+    assert key not in out[0]["content"], (
+        "a credential AFTER a marker-shaped prefix was re-attached verbatim — "
+        "the tail would then never be scanned")
+    assert counts.get("aws_access_key_id") == 1, (
+        "the credential under a marker lookalike must be COUNTED, not just "
+        "absent by accident")
+
+
 def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     """The Source scrub is bounded, and a non-str content cannot dodge it.
 
@@ -376,14 +766,35 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     utterance, so it IS the summary — which makes the marker check load-bearing.
     """
     _keyless(monkeypatch)
+    # #4897 round 6: capture every string the scrubber is handed on the Source
+    # path so the WINDOW itself is asserted, not just the absence of one value.
+    # Row (b)'s absence assertion is vacuous on its own: dropping
+    # ``_capture_turn_window`` from ``_materialize_session_source`` still scans
+    # the whole raw turn (``len(raw)`` below) and still redacts ``beyond``, so
+    # the test stayed GREEN under that mutation (measured). The scan-length
+    # bound is what binds the control.
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+
+    scanned: list[int] = []
+    _real_redact = sdk_mod.redact_secrets
+
+    def _spy(text: str):
+        scanned.append(len(text))
+        return _real_redact(text)
+
+    monkeypatch.setattr(sdk_mod, "redact_secrets", _spy)
     secret = "sk_live_" + _fill(24)
     beyond = "sk-proj-" + _fill(64)
     sid = "sess-4911-source-bound"
     # A turn far larger than the stored window (its credential sits past the
     # 5,000-char cap), plus a structurally odd first turn carrying the secret.
+    # The size is bound to a NAME so the prose and the failure message below can
+    # reference it instead of a hand-copied number that drifts (round 6).
+    raw = "pad " * 200_000 + beyond
     sdk.capture_session(
         [{"role": "user", "content": {"note": f"my key is {secret}"}},
-         {"role": "user", "content": "pad " * 200_000 + beyond}],
+         {"role": "user", "content": raw}],
         session_id=sid)
 
     rows = sdk._get_proj().g.query(
@@ -404,6 +815,14 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     #     credential cannot reach this sink (the documented residual is a
     #     PREFIX of a value cut mid-body in the stored TURN, not this sink).
     assert beyond not in blob, blob
+    # (c) the WINDOW is load-bearing: every string the Source path scans is
+    #     bounded by the cap. Without this assertion the mutation named above is
+    #     invisible — and the sink is cheap *here* only because the cap holds.
+    assert scanned, "the capture path never reached redact_secrets"
+    assert max(scanned) <= _CAPTURE_TURN_CAP, (
+        "the Source sink scanned an UNBOUNDED window — max scanned "
+        f"{max(scanned)} chars vs the {_CAPTURE_TURN_CAP}-char cap; the "
+        f"{len(raw)}-char raw turn should have been windowed before the scan")
 
 
 # ── AC3: count recorded per session AND surfaced ───────────────────────────
@@ -697,38 +1116,41 @@ def test_anchored_shapes_do_not_redact_prose():
         assert redact_secrets(bare) == (bare, {})
 
 
-def test_a_capped_scan_truncates_the_text_it_returns():
-    """``cap`` must bound the RESULT, not just the text that was scanned.
+def test_the_window_bounds_the_text_before_the_scan():
+    """The window bounds the RETURNED text, and the redactor only redacts.
 
-    The bug this pins: with the credential past the cap, the scanned prefix
-    matched nothing and the ORIGINAL uncapped turn was returned — so the
-    credential was forwarded un-scanned to whoever asked for a capped scan
-    (at the ``commit_session`` call site, straight into the extractor prompt
-    and off to the provider). A cap that does not cap is a leak, not a
-    performance knob.
+    #4897 round 5 moved the cap to ``_capture_turn_window`` (the sole clipper,
+    applied to RAW text) and made ``_redact_turn_contents`` redaction-only. The
+    property that still matters is the one the old test protected: a credential
+    past the window is never returned (the window cut it before the scan) and a
+    credential inside the window is redacted and counted. A cap that does not
+    cap is a leak, not a performance knob.
     """
+    from tortoise.sdk import _capture_turn_window
     secret = "sk-proj-" + _fill(64)
     long_turn = "x" * 5500 + " " + secret + " tail"
     out, counts = _redact_turn_contents(
-        [{"role": "user", "content": long_turn}], cap=5000)
-    assert len(out[0]["content"]) <= 5000, "the cap did not bound the result"
+        _capture_turn_window([{"role": "user", "content": long_turn}]))
+    assert len(out[0]["content"]) <= 5000, "the window did not bound the result"
     assert secret not in out[0]["content"]
     assert counts == {}
-    # ... for EVERY input type, not just str: a non-str turn is coerced for the
-    # scan, so the cut has to bound the coerced result too (a 100k-item list
-    # came back whole, with the credential still in it).
+    # ... for EVERY input type, not just str: a non-str turn is coerced and cut
+    # by the window too (a 100k-item list came back whole, with the credential
+    # still in it, before the coercion was added).
     out, counts = _redact_turn_contents(
-        [{"role": "user", "content": ["z"] * 100_000 + [secret]}], cap=5000)
+        _capture_turn_window(
+            [{"role": "user", "content": ["z"] * 100_000 + [secret]}]))
     assert isinstance(out[0]["content"], str)
     assert len(out[0]["content"]) <= 5000
     assert secret not in out[0]["content"]
     # A turn that needs no cut is passed through untouched (same object).
     turn = {"role": "user", "content": 5}
-    out, counts = _redact_turn_contents([turn], cap=10)
+    out, counts = _redact_turn_contents([turn])
     assert out[0] is turn and counts == {}
     # A match inside the window still redacts and still counts.
     out, counts = _redact_turn_contents(
-        [{"role": "user", "content": secret + "\n" + "x" * 6000}], cap=5000)
+        _capture_turn_window(
+            [{"role": "user", "content": secret + "\n" + "x" * 6000}]))
     assert secret not in out[0]["content"]
     assert counts == {"openai_api_key": 1}
 
