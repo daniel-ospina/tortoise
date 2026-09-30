@@ -1224,6 +1224,13 @@ surfaces:
   - test_unjournaled_mutation_class.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
+  # #5365: a fail-open supersession skip must be VISIBLE — the refusal from
+  # #4021 lands in an OPTIONAL `skipped` result channel on
+  # commit_ops.apply_supersessions and in promote_point's response, instead of
+  # being only a callback warning. `tortoise/commit_ops.py` and
+  # `tortoise/sdk.py` are SHARED_MODULEs -> full matrix; `core` is the default
+  # home, the same surface as the E6 window suite above.
+  - test_5365_fail_open_visible.py
   # #5358: fail-closed refusal for an INVERTED predecessor window in
   # invalidate_point (a future-dated validFrom would be stamped validTo=now).
   # `tortoise/sdk.py` is a SHARED_MODULE -> full matrix, so no single surface
@@ -2165,6 +2172,7 @@ durations:
   test_subjectadded_journal.py: 1.9
   test_turnstile_signup.py: 0.9
   test_validity_windows.py: 4.4
+  test_5365_fail_open_visible.py: 21.2  # unmeasured — local single run (5 tests); refresh from CI junit
   bench/test_degradation_chain.py: 1.3
   longmem_eval/test_measure_temporal.py: 2.2
   test_assembly_fixtures.py: 2.2

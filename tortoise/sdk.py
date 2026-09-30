@@ -7459,6 +7459,9 @@ class TortoiseSDK:
         # target can never produce a live point with no event (#1080 review).
         temporal_wired = False
         superseded = False
+        # #5365: unapplied supersessions during this promotion — see the
+        # temporal_replacement loop below.
+        supersede_skipped: list[dict] = []
         temporal_targets = point.get("temporal_target_ids") or []
         if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
             temporal_targets.append(point["temporal_target_id"])
@@ -7496,6 +7499,12 @@ class TortoiseSDK:
                     self.supersede_point(tgt, point_id)
                     superseded = True
                 except ValueError as exc:
+                    # #5365: the same fail-open skip as commit_ops — the
+                    # promotion PROCEEDS without superseding, so the caller
+                    # must be able to SEE that, not just find a log line.
+                    # Reported in the result below.
+                    supersede_skipped.append({"target": tgt,
+                                              "reason": str(exc)})
                     _logger.warning(
                         "promote_point: supersede of %s failed for %s: %s",
                         tgt, point_id, exc)
@@ -7547,6 +7556,14 @@ class TortoiseSDK:
             result["temporal_wired"] = True
         if superseded:
             result["superseded"] = True
+        if supersede_skipped:
+            # #5365: a promotion that could not supersede its temporal target
+            # is a PARTIAL promotion. Surfaced as a counted, listed field so a
+            # caller sees the skip without parsing logs (mirrors the
+            # `race_detected` precedent above: a lost race is reported, not
+            # hidden).
+            result["supersede_skipped"] = supersede_skipped
+            result["supersede_skipped_count"] = len(supersede_skipped)
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
