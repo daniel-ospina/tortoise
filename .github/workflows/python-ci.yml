@@ -1719,6 +1719,32 @@ jobs:
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
+      - name: "Temp-dir guard tests (TMPDIR unset — the GitHub-runner spelling condition, #3776)"
+        # #3776: `ubuntu-latest` leaves `$TMPDIR` unset, so on the runner
+        # `tempfile.gettempdir()` falls back to `/tmp`, while a dev box (macOS)
+        # sets `/var/folders/...`. The temp-dir guards are spelling-sensitive
+        # pre-filters — `tools/tmpdir_sweep.py::_FORBIDDEN_ROOTS` stores BOTH the
+        # raw and the realpath spelling of every unbounded root precisely because
+        # a guard that matches only one of them fails OPEN, and a fail-open
+        # refusal is silent (the check simply never fires). Nothing in this
+        # workflow sets `TMPDIR`, so the runner is in the right condition today;
+        # pinning it here makes that DELIBERATE, so a future step that exports
+        # `TMPDIR` cannot move this lane out of the environment the guard is
+        # deployed in without reddening this step.
+        #
+        # #3776's literal path — `tests/test_tmpdir_isolation.py` — lives only on
+        # the CLOSED branch `fix/3752-tmpdir-isolation` (PR #3763) and does NOT
+        # exist on `main`; naming it here would red every run. `tests/_tmpdir_hygiene.py`
+        # is the file #3752's re-scoped delivery (PR #6379) extends with the
+        # gettempdir-spelling guard, so this invocation starts covering that
+        # guard's raw-fallback path the day it lands. `test_tmpdir_hygiene_4096.py`
+        # (the AST fixture-leak guard) is deliberately NOT included: it is not a
+        # spelling pre-filter and already runs in the fast pool.
+        #
+        # `if: always()`: this is independent evidence — a red embedded suite above
+        # must not hide whether the guard still holds under the runner condition.
+        if: always()
+        run: env -u TMPDIR python -m pytest tests/test_tmpdir_hygiene.py tests/test_tmpdir_sweep.py -q -rs -p no:cacheprovider
       - name: Skip-fail guard (carve-out, epic #1647 E2E-4)
         # The carve-out's redislite-availability skips are the exempt reason
         # family (embedded/redislite-unavailable) — never a guard trip; a
