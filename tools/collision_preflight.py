@@ -619,7 +619,7 @@ def _short_branch(ref: str) -> str:
     for prefix in ("refs/remotes/", "remotes/"):
         if ref.startswith(prefix):
             rest = ref[len(prefix):]
-            head, sep, tail = rest.partition("/")
+            _head, sep, tail = rest.partition("/")
             return tail if sep else rest
     return ref
 
@@ -3292,7 +3292,7 @@ def format_report(
     lines.append(
         f"title: {' '.join(_sanitize(title).split()) if title else '(unavailable — target not established)'}"
     )
-    lines.append(f"keyword gate: none — the lexical arm is deleted (#3504). A blocking "
+    lines.append("keyword gate: none — the lexical arm is deleted (#3504). A blocking "
                  "hit is a match on the ISSUE NUMBER or a computed GitHub field; shared "
                  "domain vocabulary is never consulted.")
     lines.append(
@@ -3310,10 +3310,7 @@ def format_report(
                 if surface.authority == AUTHORITY_ADVISORY
                 else "⚠ TRUNCATED — list is partial"
             )
-        if surface.authority == AUTHORITY_ADVISORY:
-            status = "ADVISORY"
-        else:
-            status = surface.status
+        status = "ADVISORY" if surface.authority == AUTHORITY_ADVISORY else surface.status
         lines.append(f"{surface.name:<24} {status:<11} {len(surface.hits):<5} {note}")
     if hits:
         lines.append("")
