@@ -6,6 +6,23 @@ on:
   push:
     branches: [main]
 
+# #6590: with no concurrency group every push ADDS an uncancellable run to an
+# already-saturated pool, so a superseded run is never replaced — it just waits
+# behind everything else. Scoped exactly as python-ci.yml scopes it (its own
+# comment records this reasoning; not re-invented here): on `pull_request`
+# github.ref is refs/pull/N/merge, which is PER-PR, so a new commit cancels only
+# that PR's stale run.
+#
+# On `push` to main the ref is shared by ALL pushes, so cancel-in-progress is
+# false there — otherwise one landing would kill another landing's IN-FLIGHT
+# guard. Be precise about what false does and does not buy: it prevents
+# cancelling a RUNNING main run, but a shared group still supersedes a merely
+# PENDING one, so a third landing cancels the second's not-yet-started run.
+# Only the newest run always survives, which is the intended outcome.
+concurrency:
+  group: redis-guard-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   redis-guard:
     runs-on: ubuntu-latest
