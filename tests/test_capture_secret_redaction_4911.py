@@ -901,6 +901,29 @@ _MINT_MODULES: tuple[str, ...] = (
 #: The prefixes the product mints as CREDENTIALS — each must have a rule.
 _CREDENTIAL_PREFIXES = ("tt_", "tk_", "oat_", "ort_", "ct_", "cs_", "st_")
 
+#: The full CHARACTER CLASS each family's body is drawn from.
+#: ⛔ `_has_a_rule` is also checked against a DETERMINISTIC body built from this,
+#: because a body taken from the generator is a SAMPLE. Measured in review: over
+#: 2,000 runs, narrowing the url-safe class to alnum was missed ~26% of the time
+#: (a random 43-char `token_urlsafe` body contains no `-`/`_` about that often),
+#: and the CASES rows use `_fill(43)` over alphanumerics, so the shipped suite
+#: pinned that alphabet nowhere.
+_BODY_ALPHABETS = {
+    "tt_": "0123456789abcdef",
+    "tk_": "0123456789abcdef",
+    "st_": "0123456789abcdef",
+    "oat_": "aZ09-_",
+    "ort_": "aZ09-_",
+    "ct_": "aZ09-_",
+    "cs_": "aZ09-_",
+}
+
+
+def _alphabet_probe(prefix: str, width: int) -> str:
+    """A `width`-character body covering EVERY member of the family's class."""
+    alphabet = _BODY_ALPHABETS[prefix]
+    return (alphabet * (width // len(alphabet) + 1))[:width]
+
 #: The shortest run of a body that counts as a surviving fragment. A rule that
 #: swallows only part of a value leaves the rest in cleartext, and a surviving
 #: run this long is a leak even though the WHOLE body string is no longer
@@ -1037,9 +1060,12 @@ def test_the_signup_rule_matches_what_the_product_ACCEPTS():
     and a lowercase-only rule stored it verbatim with `capture_redactions: 0`:
     the #6158 failure mode, one case-flip from the covered form.
 
-    The first assertion is the load-bearing one — it mirrors the PRODUCT's own
-    normalization rather than asserting a case-fold the product might drop, so it
-    fails if acceptance narrows instead of silently pinning a stale rule.
+    ⚠️ SCOPE: this binds the RULE, not the product's acceptance. The first
+    assertion applies the product's normalization (its format gate to the LOWERED
+    value) by hand — the handler's `signup_token.lower()` calls are inline in
+    `hosted_api.py`, not a function this test can call, so DELETING them would
+    not redden this test. It pins that the rule is wide enough for the form the
+    gate accepts; the gate's own normalization is not pinned here.
     """
     from tortoise.hosted_api import _SIGNUP_TOKEN_RE
 
@@ -1462,6 +1488,13 @@ def test_every_credential_the_product_mints_has_a_redaction_rule():
     # pin said {32} while `supabase/functions/tenant-provision` mints 64 hex.)
     bodies["tt_"] = tuple(dict.fromkeys(
         bodies["tt_"] + ("0" * _edge_tt_body_width(),)))
+    # Deterministic ALPHABET coverage. The bodies above come from the generator,
+    # so whether they happen to include `-`/`_` is a coin flip; a rule narrowed to
+    # alnum therefore passed ~74% of runs (found in review).
+    for prefix in _CREDENTIAL_PREFIXES:
+        bodies[prefix] = tuple(dict.fromkeys(
+            bodies[prefix]
+            + tuple(_alphabet_probe(prefix, len(b)) for b in bodies[prefix])))
     unruled = sorted(f"{p} (minted in {sites[p]})" for p in _CREDENTIAL_PREFIXES
                      if not _has_a_rule(p, bodies[p]))
     assert not unruled, (

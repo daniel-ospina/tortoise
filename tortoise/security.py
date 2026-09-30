@@ -397,10 +397,12 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # (mixed case, `-`, `_`, exactly 43 chars after `.rstrip("=")`), so the
     # `[0-9a-f]{32}` body used for the API-key shapes CANNOT match it. `st_` is
     # minted by `token_hex(32)` — SIXTY-FOUR lowercase hex, twice the API-key
-    # width — so anchoring it at `{32}` (no comma) would replace a PREFIX and
-    # leave the tail in cleartext, the defect filed as #5470 for
-    # `deepseek_api_key`. `{N,}` matches every real token AND cannot leave a
-    # suffix behind.
+    # width — so the `,` is required. ⚠️ A fixed `{32}` does NOT truncate: with a
+    # boundary lookahead it matches NOTHING on a longer body (the greedy 32 is
+    # followed by another hex character, the lookahead fails, there is no shorter
+    # alternative), so the WHOLE credential survives. Remove the lookahead
+    # instead and only the tail survives. Both leak; the first is the wider one.
+    # Measured in review against a real 64-hex `st_`.
     #
     # ⛔ `ct_` IS A CLIENT ID, NOT A SECRET — INCLUDED DELIBERATELY. Redacting a
     # non-secret is the safe direction; omitting a rule is not. ⚠️ The guard DOES
@@ -416,6 +418,13 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # excludes hex rather than alnum: with an alnum lookahead a body followed
     # by a non-hex letter (`st_…g`) would backtrack one character at a time and
     # scan quadratically — the failure mode #4911 was fixed for.
+    # ⚠️ RECORDED RESIDUALS for these families, so they are not mistaken for
+    # coverage: (1) a value SPLIT by a newline matches nothing — the `jwt` rule
+    # carries `\s*` because long tokens wrap, and these get no equivalent, having
+    # no internal delimiter; (2) a body followed by `_suffix` or `-prod-2` has
+    # those swallowed too (the safe direction); (3) `_has_a_rule` in the guard
+    # tests `value=<token> end`, so it does not exercise the boundary lookahead at
+    # all — narrowing a lookahead is undetectable there.
     # ⛔ THE TENANT API KEY — the product's PRIMARY credential, and the one the
     # first cut of the guard could NOT see: it is `f"tt_{uuid.uuid4().hex}"`, so
     # it names none of the token helpers, and `tortoise/sdk.py` (which mints the
@@ -425,15 +434,15 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # while making a surviving suffix impossible.
     # ⛔ PR #6096 CARRIES A MATERIALLY WEAKER RULE FOR THE SAME KIND, so the
     # de-dup DIRECTION matters. #6096 uses `{32}` with an ALNUM lookahead
-    # (`[0-9a-f]{32}(?![A-Za-z0-9])`), which FAILS THE WHOLE MATCH on any 65+
-    # character body: the greedy 32 is followed by an alnum, the lookahead fails,
+    # (`[0-9a-f]{32}(?![A-Za-z0-9])`), which FAILS THE WHOLE MATCH on any body
+    # LONGER than 32 characters — measured from 33 hex upward, not only 65+: the
+    # greedy 32 is followed by an alnum, the lookahead fails,
     # and there is no shorter alternative — so it cannot redact the 64-hex `tt_`
     # key the Supabase Edge provisioner mints (`supabase/functions/
     # tenant-provision/index.ts`, the width `_edge_tt_body_width()` reads).
     # Whichever lands second must keep THIS rule (`{32,}` + the HEX-only
-    # lookahead) and drop the other copy. (This note previously said the
-    # opposite — that the copies were interchangeable — which steered the merge
-    # into leaving a deployed key in cleartext with `capture_redactions: 0`.)
+    # lookahead) and drop the other copy; taking #6096's direction instead leaves
+    # the deployed Edge key in cleartext with `capture_redactions: 0`.
     ("tortoise_api_key",
      re.compile(r"(?<![A-Za-z0-9])(?:tt|tk)_[0-9a-f]{32,}(?![0-9a-f])"),
      _REDACTION_VALUE.format(kind="tortoise_api_key")),
