@@ -25,11 +25,16 @@ URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
 # slow pull can raise it, and the hermetic tests lower it.
 HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 
-# Ownership label: one value per JOB INSTANCE. Both the teardown step and the
-# runner-host stale reaper select on it, so a leaked container is attributable
-# and reapable without guessing names.
+# Ownership label: one value per JOB INSTANCE. The teardown step selects on
+# it, so this job can remove exactly its own containers.
 #
-# ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 9-shard
+# ⚠️ Residual risk, stated rather than papered over: a job that is HARD-KILLED
+# (runner death) runs neither the teardown step nor the EXIT trap, and `--rm`
+# only removes a container when the container itself exits — so such a job can
+# leave a RUNNING container behind. Its label names the run/job/attempt, which
+# is how a human or a future reaper can attribute it; NO automatic reaper
+# exists today.
+## ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 9-shard
 # fast matrix is ONE GITHUB_JOB), so the run/job/attempt triple alone is NOT
 # unique among concurrent shards: keying on it made each shard's
 # `docker rm -f` (and the teardown's label sweep) destroy a PEER SHARD's live
@@ -48,17 +53,31 @@ NAME_LEGACY="falkordb-6673-legacy-${SUFFIX}"
 echo "TORTOISE_CI_FALKORDB_LABEL=$LABEL" >> "$GITHUB_ENV"
 
 # A failure mid-provision (image pull, port read, PING gate) must not leave a
-# running container eating memory on the runner host.
-cleanup_own() { docker rm -f "$NAME_PW" "$NAME_LEGACY" >/dev/null 2>&1 || true; }
+# running container eating memory on the runner host. The trap is DISARMED on
+# the success path below: it fires on a normal exit too, so leaving it armed
+# would delete the containers this step just started — the false red this
+# action exists to remove, with the ports already exported and dead.
+cleanup_own() {
+  docker rm -f "$NAME_PW" "$NAME_LEGACY" >/dev/null 2>&1 || true
+  rm -f "$PORT_FILE"
+}
 trap cleanup_own EXIT
+
+# The assigned port is handed back through a FILE, not stdout: `$( )` capture
+# would swallow any diagnostic written inside start(), and GitHub renders an
+# `::error::` annotation only for a workflow command that starts the line on
+# the step's stdout stream (which the capture would eat).
+PORT_FILE="$(mktemp)"
+
+# GitHub annotations must be the first thing on the line — no `#6673 ` prefix.
+annotate_error() { printf '::error::%s\n' "$*"; }
 
 # ALL logging must go to STDERR: `start` is called inside $( ) to capture the
 # assigned port on stdout, so a log line on stdout would corrupt the port.
 log() { printf '#6673 %s\n' "$*" >&2; }
 
 # start <name> <REDIS_ARGS> <health-cli-auth-args>
-# Prints the ASSIGNED host port on stdout; everything else goes to stderr so
-# the caller can capture the port with $( ).
+# Writes the ASSIGNED host port to $PORT_FILE; all output goes to stderr.
 start() {
   local name="$1" redis_args="$2" auth="$3" port i
 
@@ -67,8 +86,9 @@ start() {
   docker rm -f "$name" >/dev/null 2>&1 || true
 
   # -p 0:6379 asks Docker for ANY free host port (the collision fix).
-  # --rm  removes the container when it stops, so a killed job cannot leave a
-  #       stopped husk behind.
+  # --rm  removes the container when it STOPS (a normal exit, a crash, or a
+  #       `docker stop`) — it is not a job-death reaper: a hard-killed runner
+  #       can leave a RUNNING container, attributable by $LABEL.
   docker run -d --rm --name "$name" --label "$LABEL" \
     -e REDIS_ARGS="$redis_args" \
     -p 0:6379 \
@@ -78,7 +98,7 @@ start() {
   # "[::]:PORT"); take the first and keep the port.
   port="$(docker port "$name" 6379/tcp | head -n 1 | sed 's/.*://')"
   if [ -z "$port" ]; then
-    log "::error::$name got no host port from docker"
+    annotate_error "$name got no host port from docker"
     docker logs "$name" 2>&1 | tail -n 40 >&2 || true
     return 1
   fi
@@ -89,23 +109,25 @@ start() {
     # shellcheck disable=SC2086  # $auth is a deliberate 0-or-2 word "cli args"
     if docker exec "$name" redis-cli $auth ping 2>/dev/null | grep -q PONG; then
       log "$name healthy on host port $port after ${i}s"
-      printf '%s' "$port"
+      printf '%s' "$port" > "$PORT_FILE"
       return 0
     fi
     sleep 1
   done
-  log "::error::$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)"
+  annotate_error "$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)"
   docker logs "$name" 2>&1 | tail -n 40 >&2 || true
   return 1
 }
 
 log "starting passworded service from $IMAGE (label $LABEL)"
-PW_PORT="$(start "$NAME_PW" "--requirepass falkordb --save ''" "-a falkordb")"
+start "$NAME_PW" "--requirepass falkordb --save ''" "-a falkordb"
+PW_PORT="$(cat "$PORT_FILE")"
 echo "TORTOISE_TEST_DOCKER_PORT=$PW_PORT" >> "$GITHUB_ENV"
 
 if [ "$LEGACY" = "true" ]; then
   log "starting passwordless legacy service"
-  LG_PORT="$(start "$NAME_LEGACY" "--save ''" "")"
+  start "$NAME_LEGACY" "--save ''" ""
+  LG_PORT="$(cat "$PORT_FILE")"
   echo "TORTOISE_TEST_LEGACY_PORT=$LG_PORT" >> "$GITHUB_ENV"
 fi
 
@@ -113,3 +135,10 @@ if [ -n "$URI_GRAPH" ]; then
   echo "TORTOISE_DB_URI=docker://:falkordb@localhost:${PW_PORT}/${URI_GRAPH}" >> "$GITHUB_ENV"
   log "exported TORTOISE_DB_URI for graph $URI_GRAPH on port $PW_PORT"
 fi
+
+# SUCCESS: disarm the EXIT trap. It fires on a normal exit as well, so leaving
+# it armed removes the containers just started — every later step would then
+# dial a closed port and the availability-skip guards would red.
+trap - EXIT
+rm -f "$PORT_FILE"
+log "provisioned $IMAGE (label $LABEL) — containers stay up for this job"

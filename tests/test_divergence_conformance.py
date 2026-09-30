@@ -40,7 +40,8 @@ _LEGS = ["embedded", "docker"]
 _DOCKER_URI = _live_utils.docker_base_uri()
 
 
-def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:
+def _docker_reachable(host: str | None = None,
+                     port: int | None = None) -> bool:
     """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     Repo skip-guard convention (#1436): the docker leg SKIPS with a
@@ -50,7 +51,9 @@ def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:
     there and the docker leg actually runs.
 
     #6673: the port used to be the 6379 literal; it is now the ephemeral host
-    port assigned by the provision step (docker `-p 0:6379`).
+    port assigned by the provision step (docker `-p 0:6379`). `host=None`
+    resolves through `_live_utils.service_host()` — the SAME host the clients
+    use, so a host override cannot make the probe and the client disagree.
     """
     return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 

@@ -306,6 +306,10 @@ def test_ownership_label_is_unique_per_JOB_INSTANCE_not_per_job_id():
     assert "trap cleanup_own EXIT" in provision, (
         "a provision that fails after `docker run` must remove what it started"
     )
+    assert "trap - EXIT" in provision, (
+        "and the success path must DISARM that trap — it fires on a normal exit "
+        "too, which would delete the containers just started"
+    )
 
     cleanup = (ACTION_DIR / "falkordb-teardown" / "cleanup.sh").read_text()
     assert "${TORTOISE_CI_FALKORDB_LABEL:-}" in cleanup, (
@@ -586,3 +590,45 @@ def test_teardown_removes_only_the_recorded_containers(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert "label=tortoise-ci-falkordb=42-test-1-999-1234" in calls.read_text()
+
+
+def test_provision_leaves_its_containers_RUNNING_on_success(tmp_path):
+    """The reverse of the failure-path test, and the reason it exists: an EXIT
+    trap fires on a NORMAL exit too, so a provision that arms one and never
+    disarms it deletes the containers it just started — the step still exports
+    the ports and the label, every later step dials a closed port, and the
+    availability-skip guards red. Reproduced against the real script before the
+    fix.
+    """
+    proc, genv, calls = _run_provision(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    text = calls.read_text()
+    launches = [ln for ln in text.splitlines() if ln.startswith("run -d ")]
+    removals = [ln for ln in text.splitlines() if ln.startswith("rm -f ")]
+    assert len(launches) == 2, f"both services must be started:\n{text}"
+
+    # the only removal the success path may perform is the pre-clean of each
+    # name (one name per call) — never a call that removes both
+    for ln in removals:
+        assert not ("falkordb-6673-pw-" in ln and "falkordb-6673-legacy-" in ln), (
+            "a successful provision must NOT remove both containers — the "
+            "EXIT trap was left armed:\n" + text
+        )
+    assert [ln for ln in text.splitlines() if ln.startswith("port ")], (
+        "both ports must be read back on the success path"
+    )
+    # and the ports the job will use are the ones that were read back
+    lines = genv.read_text().splitlines()
+    assert "TORTOISE_TEST_DOCKER_PORT=32768" in lines
+    assert "TORTOISE_TEST_LEGACY_PORT=32769" in lines
+
+
+def test_provision_emits_a_real_error_annotation_on_failure(tmp_path):
+    """GitHub renders `::error::` only for a workflow command that STARTS the
+    line — so it must not go through log() (prefixed) and must not be eaten by
+    the port capture."""
+    proc, _genv, _calls = _run_provision(tmp_path, ping="FAIL")
+    assert proc.returncode != 0
+    assert any(ln.startswith("::error::") for ln in proc.stdout.splitlines()), (
+        "the failure must be a real annotation on stdout:\n" + proc.stdout
+    )

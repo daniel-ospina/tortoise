@@ -12,7 +12,8 @@ SUFFIX="${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}-${GITHUB_RUN_ATTEMPT:-1}"
 # matrix shard (GITHUB_JOB is the job_id, not the shard), so sweeping that
 # prefix would delete a PEER shard's live server. A container left behind by a
 # provision that failed before exporting is removed by provision.sh's own EXIT
-# trap, and `--rm` covers a job that was killed outright.
+# trap. A HARD-KILLED job runs neither path and can leave a running container
+# behind (its label names the run/job/attempt) — there is no automatic reaper.
 LABEL="${TORTOISE_CI_FALKORDB_LABEL:-}"
 if [ -z "$LABEL" ]; then
   echo "#6673 teardown: no TORTOISE_CI_FALKORDB_LABEL ($SUFFIX) — nothing to remove"

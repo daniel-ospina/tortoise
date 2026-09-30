@@ -36,12 +36,16 @@ from tests import _live_utils
 _TESTS_ROOT = Path(__file__).resolve().parent
 
 
-def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:
+def _docker_reachable(host: str | None = None,
+                     port: int | None = None) -> bool:
     """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     #6673: the port used to be the 6379 literal. It is now the ephemeral host
     port the workflow's provision step assigned (docker `-p 0:6379`), so two
-    services jobs on the same host cannot collide.
+    services jobs on the same host cannot collide. `host=None` resolves through
+    `_live_utils.service_host()` — the SAME host the clients use, so a
+    `FALKORDB_HOST`/`TORTOISE_TEST_DOCKER_HOST` override cannot make the probe
+    and the client disagree.
     """
     return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 

@@ -19,7 +19,7 @@ from tests._embedded import (
 )
 
 
-def _docker_reachable(host: str = "localhost",
+def _docker_reachable(host: str | None = None,
                       port: int | None = None) -> bool:
     """Live-FalkorDB probe (#1436 skip convention — post-merge-validation
     runs without a docker service; docker-required tests SKIP, never error)."""
@@ -28,7 +28,7 @@ def _docker_reachable(host: str = "localhost",
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(1.0)
     try:
-        s.connect((host, port))
+        s.connect((host or _live_utils.service_host(), port))
         return True
     except OSError:
         return False
