@@ -367,8 +367,8 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             overrides the re-raise at runtime), and the marker assignment
             counts only while the ``finally`` does not itself write
             ``_WATCHER_START_ERROR`` (a clearing ``finally`` undoes it). A
-            handler that only logs or ``pass``es swallows the skip,
-            which is exactly #4498's original blindness. This is checked for
+            handler that only logs or ``pass``es swallows the skip, which is
+            exactly #4498's original blindness. This is checked for
             EVERY such ancestor, not just the nearest, because an outer
             swallowing ``try`` can skip an inner marker-setting one entirely.
             The rule is per-``try``, not per-handler: a ``try`` with one
@@ -584,8 +584,8 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             return not leaves
         # A `finally` that itself writes `_WATCHER_START_ERROR` undoes a
         # handler's marker assignment — the symmetric counterpart to `leaves`
-        # gating the raise. Fail-closed at any depth: a `finally` that assigns
-        # the marker on a healthy boot would degrade /health anyway.
+        # gating the raise. Fail-closed at any depth: a `finally` writing the
+        # marker is not something a legitimate boot path does.
         finally_writes_marker = any(
             isinstance(sub, ast.Assign)
             and any(
