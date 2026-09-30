@@ -1265,6 +1265,12 @@ class TestDoctorPiSeamFreshness:
         assert "run `tortoise install pi`" not in row, (
             "the installer refuses a symlinked install root, so recommending "
             "it is wrong")
+        # The withholding covers the finding's OWN detail too, whose phrasing
+        # is "reinstall with `tortoise install pi`" — a needle on the HINT's
+        # "run `...`" wording passes straight over it, which is how this
+        # refusal survived the first pass (#5351 round 3).
+        assert "reinstall with" not in row, (
+            "the detail embeds the same refusing command as the hint")
 
     def test_doctor_never_recommends_the_installer_for_an_out_of_home_symlink(
             self, clear_db_env, tmp_path, monkeypatch, capsys):
@@ -1289,3 +1295,6 @@ class TestDoctorPiSeamFreshness:
         assert "❌" in row, row
         assert "needs a manual fix" in row, row
         assert "run `tortoise install pi`" not in row, row
+        assert "reinstall with" not in row, (
+            "a manual kind with no legacy collision must withhold the detail's "
+            "unconditional `reinstall with `tortoise install pi`` too")
