@@ -224,7 +224,10 @@ jobs:
     # TORTOISE_TEST_NO_REDIRECT stem list — no CARVE_OUT needed (URI
     # is set), and the carve-out files stay embedded by exemption.
     env:
-      TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+      # #6673: TORTOISE_DB_URI is exported by the provision step in the job
+      # steps below (`uri_graph: tortoise_test_matrix`) — it cannot be a
+      # job-level literal any more because the host port is assigned at
+      # runtime.
       TORTOISE_TEST_EXPECT_URI: "1"
       # #1886: dedicated fresh-per-job docker container — journal-blind
       # team_* stray pass stays live in CI (opt-in only; the shared dev
@@ -233,53 +236,39 @@ jobs:
     # Mirror the fast matrix's two falkordb services: the passworded 6379
     # (the job URI + probe family) and the legacy passwordless 16379 (the
     # raw-client probes in test_search_engine et al.).
-    services:
-      falkordb:
-        image: falkordb/falkordb-server:latest
-        env:
-          # #2216: no periodic RDB snapshot in this lane. Redis refuses a second
-          # fork while any child is active ("Can't fork for module: File exists"
-          # - errno EEXIST, Redis' single-fork-slot rule), and FalkorDB's
-          # GRAPH.COPY forks via RedisModule_Fork with 10 x 5ms retries - a
-          # shorter window than a BGSAVE, so a restore/drill test landing inside
-          # one fails with "GRAPH.COPY failed, could not fork" (main run
-          # 34527934725, test (a): the only failure of 4905). Reproduced locally
-          # 3/3 with the default config and 0/3 with this flag. Automatic
-          # snapshots are worthless in a throwaway test container, and explicit
-          # BGSAVE still works, so the RDB/snapshot tests are unaffected.
-          # (docker-compose.yml spells the same flag --save \"\" for its
-          # persistent dev container; both spellings are verified equivalent
-          # under run.sh's unquoted ${REDIS_ARGS} expansion.)
-          REDIS_ARGS: "--requirepass falkordb --save ''"
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli -a falkordb ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-      falkordb-legacy:
-        image: falkordb/falkordb-server:latest
-        env:
-          # #2216: same no-periodic-snapshot rule as the passworded falkordb
-          # service above (see there for the mechanism + the reproduced
-          # evidence). Deliberately NO --requirepass: this is the passwordless
-          # probe lane (tests use docker://:@localhost:16379/) and its
-          # health-cmd is plain `redis-cli ping`.
-          REDIS_ARGS: "--save ''"
-        ports:
-          - 16379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+    # #6673: the two FalkorDB services used to be declared HERE as a `services:`
+    # block on the fixed host ports 6379:6379 / 16379:6379. They are now started
+    # by `.github/actions/falkordb-provision` (see the first FalkorDB step
+    # below) on EPHEMERAL host ports, because every self-hosted runner on this
+    # host shares ONE Docker daemon: a fixed host port is a single global
+    # namespace, so two services jobs overlapping made the second container's
+    # `docker start` fail with "Bind for 0.0.0.0:6379 failed: port is already
+    # allocated" — which aborts the RUNNER in its `initialize_containers`
+    # pre-step and reds the job in ~9s with ZERO tests run (a false red).
+    # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair, the
+    # passwordless legacy lane and the health gate all moved with it. The two
+    # probe families are unchanged; the ports are now
+    # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
+    # (legacy), read by tests/_live_utils.py.
     steps:
       # #1474 review (P1): checkout MUST run unconditionally FIRST — the
       # skip-comment step requires postmerge-dedup.js from the workspace, and
       # the skip path never ran checkout before (empty runner -> MODULE_NOT_FOUND
       # -> red check + no comment on the primary path).
       - uses: actions/checkout@v4
+      # #6673: replaced this job's `services:` block. Gated on the skip path —
+      # the covered-run path never runs pytest, so it needs no service. The
+      # assigned ports land in $TORTOISE_TEST_DOCKER_PORT /
+      # $TORTOISE_TEST_LEGACY_PORT (read by tests/_live_utils.py), and
+      # `uri_graph` exports the TORTOISE_DB_URI this job used to carry as a
+      # literal. The teardown step at the end of the job removes the containers.
+      # The image pin stays this file's own (`:latest`, not python-ci's v4.20.6).
+      - name: Provision FalkorDB services on ephemeral host ports (#6673)
+        if: needs.dedup-check.outputs.skip != 'true'
+        uses: ./.github/actions/falkordb-provision
+        with:
+          image: falkordb/falkordb-server:latest
+          uri_graph: tortoise_test_matrix
       # #1474 skip path — python-ci's push run on this tree was green; only
       # comment "covered" (aggregator reports success; no second pytest run).
       - name: Skip — covered by python-ci push run (no re-run)
@@ -571,6 +560,11 @@ jobs:
                 core.warning('verdict failed but no linked issue was parsed — issue flag skipped');
               }
             }
+      - name: Stop FalkorDB services (#6673)
+        # Before the verdict step so the containers are gone whether or not
+        # `Fail the check` runs (always() also covers the early-exit paths).
+        if: always()
+        uses: ./.github/actions/falkordb-teardown
       - name: Fail the check
         if: steps.tests.outcome == 'failure'
         run: exit 1

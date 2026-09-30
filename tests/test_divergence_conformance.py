@@ -28,6 +28,7 @@ import os
 
 import pytest
 
+from tests import _live_utils
 from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
 
@@ -39,25 +40,19 @@ _LEGS = ["embedded", "docker"]
 _DOCKER_URI = "docker://:falkordb@localhost:6379"
 
 
-def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
-    """True when a live FalkorDB answers a TCP connect on host:port.
+def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:
+    """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     Repo skip-guard convention (#1436): the docker leg SKIPS with a
     FalkorDB-reason when the docker is absent (post-merge-validation runs the
     full suite with NO docker service) — never ERROR on redis.ConnectionError.
     The fast CI job provisions the falkordb service, so the probe passes
     there and the docker leg actually runs.
+
+    #6673: the port used to be the 6379 literal; it is now the ephemeral host
+    port assigned by the provision step (docker `-p 0:6379`).
     """
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 
 
 @pytest.fixture(params=_LEGS)
@@ -75,7 +70,7 @@ def leg(request, monkeypatch):
         monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
     else:
         if not _docker_reachable():
-            pytest.skip("live FalkorDB (localhost:6379) not reachable")
+            pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
         monkeypatch.setenv("TORTOISE_DB_URI", _DOCKER_URI)
         monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     return request.param
@@ -263,7 +258,8 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
             proj.close()
         return
     # Server leg — explicit host= construction (never redirects).
-    proj = FalkorProjection(host="localhost", port=6379, password="falkordb",
+    proj = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+                            password="falkordb",
                             graph_name="divergence_guard_probe")
     try:
         with pytest.raises(RuntimeError, match="Graph guard"):
@@ -275,7 +271,8 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
         _drop_own_graph(proj)
         proj.close()
     # A test_-prefixed graph passes the guard.
-    proj2 = FalkorProjection(host="localhost", port=6379, password="falkordb",
+    proj2 = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+                             password="falkordb",
                              graph_name="test_d4_guard_probe")
     try:
         proj2.g.query("MATCH (n) DETACH DELETE n")  # allowed
@@ -368,7 +365,8 @@ def test_d7_boolean_index_purge(leg, tmp_path):
     # single-property boolean index and confirm a reopen drops it (a legacy
     # or copy-destination graph must not keep a boolean index: `= false`)
     # would otherwise read 0 forever).
-    proj = FalkorProjection(host="localhost", port=6379, password="falkordb",
+    proj = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+                            password="falkordb",
                             graph_name="test_d7_sweep")
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
@@ -376,7 +374,8 @@ def test_d7_boolean_index_purge(leg, tmp_path):
         proj.g.query("CREATE INDEX FOR (n:Point) ON (n.is_operator)")
         proj.close()
         proj = None  # reopen below
-        proj2 = FalkorProjection(host="localhost", port=6379, password="falkordb",
+        proj2 = FalkorProjection(host="localhost", port=_live_utils.docker_port(),
+                                 password="falkordb",
                                  graph_name="test_d7_sweep")
         try:
             rows = proj2.g.query("CALL db.indexes()").result_set

@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
@@ -19,7 +20,7 @@ from tortoise.sdk import TortoiseSDK
 # DOCKER URI explicitly (embedded is "available" but lacks URI-mode graph
 # semantics) and ALWAYS restores the env (try/finally — import-time leaks
 # contaminate later test files, #176).
-_URI = "docker://:falkordb@localhost:6379/tortoise_test_221_namespace"
+_URI = _live_utils.docker_uri("tortoise_test_221_namespace")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:

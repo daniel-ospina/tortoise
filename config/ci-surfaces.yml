@@ -781,6 +781,12 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  # #6673: the docker-lane service ports are EPHEMERAL (a `services:` block's
+  # fixed host ports collided across runners sharing one Docker daemon and made
+  # the runner abort in `initialize_containers`). Hermetic — it pins
+  # tests/_live_utils.py's port seam, the python-ci/pmv provisioning wiring and
+  # .github/actions/falkordb-{provision,teardown}.
+  - test_runner_ports_6673.py
   # #5215 (merge-throughput plan, Task 3): the queue-window observer that feeds
   # M3/M4/M5/M6 records to the instrument. Hermetic (no DB, no network) — it
   # pins tools/queue_window_observe.py, which `core` runs on engine-wide changes.
@@ -2037,6 +2043,7 @@ durations:
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
+  test_runner_ports_6673.py: 4.3
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5

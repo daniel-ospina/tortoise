@@ -25,14 +25,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # after) — NOT at import time. An import-time set leaks into every later test
 # file (#176 contamination).
 
-from tortoise.sdk import TortoiseSDK  # noqa: I001
+from tests import _live_utils
 from tortoise.ep import TortoiseEP
+from tortoise.sdk import TortoiseSDK
 from tortoise.weights import compute_operator_weight  # noqa: F401
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
 # no-Docker embedded suite stays green (AGENTS.md). Probe targets the DOCKER
 # URI explicitly (embedded is "available" but lacks docker graph semantics).
-_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl"
+_DB_URI = _live_utils.docker_uri("tortoise_test_dir_impl")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:

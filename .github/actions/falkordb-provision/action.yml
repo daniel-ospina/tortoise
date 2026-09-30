@@ -1,0 +1,41 @@
+name: falkordb-provision
+description: >-
+  Start the docker-lane FalkorDB services on EPHEMERAL host ports (#6673) and
+  export the assigned ports. Use INSTEAD of a `services:` block for any job
+  that needs the live FalkorDB pair, and pair it with the matching
+  `.github/actions/falkordb-teardown` step at the END of the job (`if: always()`).
+  WHY (#6673): every self-hosted runner on this host shares ONE Docker daemon,
+  so the fixed `6379:6379` / `16379:6379` host ports are a single global
+  namespace — two services jobs overlapping made the second container's
+  `docker start` die ("Bind for 0.0.0.0:6379 failed: port is already
+  allocated"), which aborts the RUNNER in its `initialize_containers` pre-step
+  and turns the job into a FALSE RED in ~9s with zero tests run (6 measured
+  executions: `test (b)`, `test-track-b`, `test-concurrency-falkor`). An
+  ephemeral port cannot collide, so N runners can run services jobs at once.
+inputs:
+  image:
+    description: FalkorDB server image (each caller keeps its own pin).
+    required: false
+    default: falkordb/falkordb-server:v4.20.6
+  legacy:
+    description: Also start the passwordless legacy service (the 16379 family).
+    required: false
+    default: "true"
+  uri_graph:
+    description: >-
+      When non-empty, also export TORTOISE_DB_URI pointing at the passworded
+      service with this graph name. Leave EMPTY in jobs that must NOT hand the
+      whole suite a URI (the fast/slow matrix jobs); set it in jobs whose
+      job-level TORTOISE_DB_URI used to be a literal (track-b, pmv).
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Start FalkorDB services on ephemeral host ports (#6673)
+      shell: bash
+      env:
+        FALKORDB_IMAGE: ${{ inputs.image }}
+        FALKORDB_LEGACY: ${{ inputs.legacy }}
+        FALKORDB_URI_GRAPH: ${{ inputs.uri_graph }}
+      run: bash ${{ github.action_path }}/provision.sh

@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from tests import _live_utils
 from tortoise.projection import FalkorProjection
 
 # Cycle-5 P2-14: import-time snapshot of the session nonce — the stability
@@ -15,8 +16,8 @@ from tortoise.projection import FalkorProjection
 _SESSION_NONCE_AT_IMPORT = os.environ.get("TORTOISE_TEST_SESSION", "")
 
 
-def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
-    """True when a live FalkorDB answers a TCP connect on host:port.
+def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:
+    """True when the PROVISIONED docker-lane FalkorDB answers a TCP connect.
 
     Mirrors tests/test_ingest.py's _docker_falkor_reachable — the repo's
     skip-guard convention (#1436): live-FalkorDB-required tests SKIP with a
@@ -24,24 +25,18 @@ def _docker_reachable(host: str = "localhost", port: int = 6379) -> bool:
     the full suite with NO docker service), never ERROR on
     redis.ConnectionError. The fast CI job provisions the falkordb service,
     so the probe passes there and the redirect tests actually run.
+
+    #6673: the port used to be the 6379 literal; it is now the ephemeral host
+    port assigned by the provision step (docker `-p 0:6379`).
     """
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        s.connect((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 
 
 @pytest.fixture
 def uri_env(monkeypatch):
     if not _docker_reachable():
-        pytest.skip("live FalkorDB (localhost:6379) not reachable")
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+        pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     yield
 
 
@@ -110,7 +105,7 @@ def test_no_arg_does_not_redirect(monkeypatch):
     # Decoupled from uri_env (review P2): this test only needs the URI SET
     # to prove the redirect does NOT fire for no-arg — it never contacts the
     # server, so it must run on docker-absent lanes too.
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     proj = FalkorProjection()
     try:
         assert proj._is_embedded is True
@@ -123,7 +118,7 @@ def test_no_redirect_env_exempts_caller_test_module(monkeypatch):
     # never on the DB-file basename. List this test file's own stem.
     # Decoupled from uri_env (review P2): the exempted caller stays embedded
     # — no server contact — so it must run on docker-absent lanes too.
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "test_redirect_seam")
     proj = FalkorProjection("/tmp/seam-test-d.db")
     try:
@@ -151,7 +146,7 @@ def test_no_test_frame_in_stack_no_redirect(monkeypatch):
     # TORTOISE_DB_URI + TORTOISE_TEST_MODE via os.environ.copy() but their
     # process has NO test module in the stack (_caller_test_stem() → None).
     # The redirect must NOT fire — the child exercises the embedded/CLI lane.
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     out = subprocess.run(
         [sys.executable, "-c",
@@ -206,7 +201,7 @@ def test_no_redirect_without_test_mode(monkeypatch):
     # P0-4: TORTOISE_TEST_MODE is the test-session signal. URI set but
     # TEST_MODE absent (prod tool: backup/rebuild/migrate) → NO redirect —
     # prod path constructions are preserved byte-for-byte.
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
     proj = FalkorProjection("/tmp/seam-test-f.db", skip_health_check=True)
     try:
@@ -339,7 +334,8 @@ def test_redirect_connection_boundedness(uri_env):
     live = [r for r in pools if r() is not None]
     assert len(live) <= 1, \
         f"close() leaked {len(live)} of 20 live ConnectionPool instances (weakref)"
-    probe = redis.Redis(host="localhost", port=6379, password="falkordb",
+    probe = redis.Redis(host=_live_utils.service_host(),
+                    port=_live_utils.docker_port(), password="falkordb",
                         socket_connect_timeout=5)
     try:
         before = int(probe.info("clients")["connected_clients"])
@@ -348,7 +344,8 @@ def test_redirect_connection_boundedness(uri_env):
     for i in range(20):
         p = FalkorProjection(f"/tmp/seam-conn-{i}.db")
         p.close()
-    probe = redis.Redis(host="localhost", port=6379, password="falkordb",
+    probe = redis.Redis(host=_live_utils.service_host(),
+                    port=_live_utils.docker_port(), password="falkordb",
                         socket_connect_timeout=5)
     try:
         after = int(probe.info("clients")["connected_clients"])
@@ -413,7 +410,7 @@ def test_loopback_predicate_single_source():
         "hostless URI is not loopback (absent hostname, fail-closed)"
     assert _is_loopback_host(None) is False, \
         "None host is not loopback — the redirect's hostless path must refuse"
-    assert is_loopback_uri("docker://:falkordb@localhost:6379") is True
+    assert is_loopback_uri(_live_utils.docker_base_uri()) is True
 
 
 # ── Epic #1686: worker-thread carve-out attribution ─────────────────────
@@ -448,7 +445,7 @@ def test_worker_thread_carve_out_stays_embedded(monkeypatch):
 
     from tests._embedded import _worker_stem_embedded_probe
 
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "test_redirect_seam")
     # conftest's pytest_runtest_setup recorded this module's stem on the
     # main thread before the test body ran — sanity-check the hook is live.
@@ -474,7 +471,7 @@ def test_worker_thread_non_exempt_redirects(monkeypatch):
 
     from tests._embedded import _worker_stem_embedded_probe
 
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "some_other_stem")
     # Host-branch stub (same surface as test_allow_remote_escape above):
     # the redirect's host branch constructs falkordb.FalkorDB, whose real
