@@ -990,7 +990,14 @@ jobs:
               test_mcp_http test_mcp_route_challenge test_pack_shipping_wheel
               test_search_engine_gaps test_source_inheritance_own
     name: test-slow (${{ matrix.half }})
-    timeout-minutes: 90
+    # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
+    # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
+    # that fires first cancels the step and loses them. Measured 2026-09-30
+    # over the 60 newest completed runs: pytest-step max 4.70m (leg a) /
+    # 3.50m (leg b), job max 7.98m. 20m clears the observed work 2.5x; the
+    # inherited 90m cleared it 11x and let a hung leg hold the per-PR
+    # concurrency slot for the whole cap (#3239).
+    timeout-minutes: 20
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
     # passworded falkordb service (same block as the fast job — both probe
     # families: 6379 passworded + 16379 passwordless legacy).
@@ -1213,7 +1220,10 @@ jobs:
           # -r flags, and a trailing -rfE would suppress the skip summary the
           # guard depends on; pinned by
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #3239: 10m = 2x the measured pytest step (max 4.70m leg a /
+          # 3.50m leg b) — tools/ci_selection.WATCHDOG_HEADROOM, the factor
+          # #6135 already validated for the fast shards.
+          timeout -s INT -k 10 10m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1237,7 +1247,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 75m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after 10m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
@@ -1513,6 +1523,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
+    # #3239: this job carried NO outer cap, so GitHub's 360m default applied —
+    # a hung Track B leg could withhold the REQUIRED python-ci-gate for six
+    # hours. Measured 2026-09-30 (60 newest completed runs): pytest-step max
+    # 0.08m, job max 1.15m — 10m is a floor, not a measurement-thin bound.
+    timeout-minutes: 10
     # Epic #1647 Task 9 Step 5: track-b flips to docker — the track_b tests'
     # db_path SDK constructions redirect to the server lane via the seam.
     # The URI carries the test-prefixed path (P1-2) for consistency.
@@ -1571,7 +1586,9 @@ jobs:
         # (the coverage-manifest observed-set source).
         run: |
           set +e
-          timeout -s INT -k 10 20m stdbuf -oL python -m pytest \
+          # #3239: 5m (was 20m) — the measured pytest step is 0.08m; the
+          # in-step kill must stay BELOW the job's 10m outer cap (#798).
+          timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
             -p no:cacheprovider --maxfail=20 -r fEs --junitxml=/tmp/junit.xml \
             -o junit_family=xunit1 > /tmp/trackb.log 2>&1
@@ -1641,7 +1658,14 @@ jobs:
     needs: changes
     if: always() && needs.changes.result == 'success' && needs.changes.outputs.carve_out_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # #3239: OUTER cap, strictly above the in-step watchdog below (#798: the
+    # in-step kill is the one that prints the counts). Measured 2026-09-30
+    # over the 60 newest completed runs: pytest-step max 16.02m, job max
+    # 18.27m — 45m clears the observed work 2.0x (the worst run in any window
+    # was a 22.2m push job, still 2.0x inside). The inherited 90m cleared it
+    # 4.9x and let a hung cancelled job hold the per-PR concurrency slot for
+    # the whole cap with no way to release it (#3239).
+    timeout-minutes: 45
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
@@ -1695,7 +1719,12 @@ jobs:
             done ) &
           HB_PID=$!
           ulimit -n 65536 || true  # #1988: fd headroom for the embedded suites
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #3239: 35m = 2x the measured pytest step (max 16.02m over the 60
+          # newest completed runs) — tools/ci_selection.WATCHDOG_HEADROOM, the
+          # factor #6135 already validated for the fast shards. Was 75m, 4.7x
+          # the work, so a hang inside pytest ran the long pole for an hour+
+          # on the old budget.
+          timeout -s INT -k 10 35m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1715,7 +1744,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: carve-out pytest killed after 75m ($passed passed, $failed failed, $errored errored so far) ===================="
+            echo "==================== WATCHDOG: carve-out pytest killed after 35m ($passed passed, $failed failed, $errored errored so far) ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc

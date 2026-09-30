@@ -25,7 +25,7 @@ from tools.ci_selection import (  # noqa: I001
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
-    duration_issues, TESTS_DIR,
+    duration_issues, TESTS_DIR, WATCHDOG_HEADROOM, WATCHDOG_CEILING_MIN,
 )
 from tools import mergify_config_guard as mcg
 
@@ -1975,6 +1975,118 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert "needs.changes.outputs.carve_out" in run["run"], \
         "the carve-out job must consume the selector's carve_out leg"
     assert "--junitxml=/tmp/junit.xml" in run["run"]
+
+
+# ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
+# The `concurrency:` group is per-PR with `cancel-in-progress: true`, so a
+# stale-head run that will not die blocks the CURRENT head's run — and
+# `gh run cancel` cannot finish while a job is still executing, so the job's
+# OUTER `timeout-minutes` is the exposure window. Two invariants follow, and
+# all of them had been violated:
+#
+#   * ORDER: the in-step watchdog must stay STRICTLY BELOW the outer cap. The
+#     watchdog is the bound that PRINTS the pass/fail counts (#798: a
+#     runner-level cap that fires first cancels the step and loses the log
+#     tail), so a cap beneath it silently restores #798's death mode — and a
+#     MISSING cap (test-track-b before #3239) leaves GitHub's 360m default:
+#     six hours of held slot instead of the 90m the issue reports.
+#   * PROPORTION: the cap clears the measured work with `WATCHDOG_HEADROOM`
+#     (#6135's validated 2.0x factor, reused rather than invented) and is not
+#     an order of magnitude above it.
+#
+# The work is MEASURED, not asserted: Actions API on the 60 newest completed
+# python-ci.yml runs, `started_at`→`completed_at` on the pytest step
+# (2026-09-30T02:17Z..12:52Z, #3239). `_MEASURED_PYTEST_MAX_MIN` is that tap;
+# the carve-out test also re-derives a floor from the committed `durations`
+# map, so the bound cannot silently rot as the carve-out set grows.
+#
+# Before the change the caps were 90m (carve-out, 4.9x its 16.02m pytest
+# step), 90m (test-slow, 11x its 4.70m) and none at all (test-track-b).
+_CAP_CEILING_FACTOR = 3.0
+_MEASURED_PYTEST_MAX_MIN = {
+    "test-carve-out": 16.02,
+    "test-slow": 4.70,
+    "test-track-b": 0.08,
+}
+_PYTEST_WATCHDOG_RE = re.compile(r"timeout -s INT -k \d+ (\d+)m")
+
+
+def _literal_pytest_watchdog(job: dict) -> int | None:
+    """The job's in-step watchdog in minutes, or None when it is not a
+    literal. The fast shards pass `${{ matrix.watchdog_minutes }}m`, which is
+    derived by `tools.ci_selection.shard_watchdog_minutes` — it has no literal
+    here, so it is covered by the ceiling assertion instead."""
+    for step in job.get("steps", []):
+        hit = _PYTEST_WATCHDOG_RE.search(step.get("run", ""))
+        if hit:
+            return int(hit.group(1))
+    return None
+
+
+def test_every_bounded_pytest_job_caps_above_its_watchdog():
+    """#3239: a pytest job whose in-step watchdog kills it must ALSO carry an
+    outer `timeout-minutes` strictly above that watchdog.
+
+    Both halves are load-bearing and both had been broken: test-track-b ran
+    pytest under a 20m watchdog with NO job cap (GitHub's 360m default), and
+    the fast shards' derived watchdog can reach `WATCHDOG_CEILING_MIN`."""
+    wf = _load_python_ci()
+    jobs = wf["jobs"]
+    bounded = {}
+    for name, job in jobs.items():
+        watchdog = _literal_pytest_watchdog(job)
+        if watchdog is None:
+            continue
+        cap = job.get("timeout-minutes")
+        assert isinstance(cap, int), (
+            f"{name}: runs pytest under a {watchdog}m in-step watchdog but has "
+            f"no `timeout-minutes` cap — GitHub's 360m default then holds the "
+            f"per-PR concurrency slot for a hung job (#3239)")
+        assert watchdog < cap, (
+            f"{name}: the in-step watchdog ({watchdog}m) must stay BELOW the "
+            f"outer cap ({cap}m), or the runner kills the step before it can "
+            f"print its pass/fail counts (#798)")
+        bounded[name] = (watchdog, cap)
+    assert "test-carve-out" in bounded, (
+        "the carve-out job's bounds are the subject of #3239 — if its pytest "
+        "step no longer carries a literal watchdog, re-derive this pin")
+    # The fast shards' watchdog is per-shard, clamped by the selector at
+    # WATCHDOG_CEILING_MIN — so the cap must clear that ceiling, not a literal.
+    fast_cap = jobs["test"].get("timeout-minutes")
+    assert isinstance(fast_cap, int) and fast_cap > WATCHDOG_CEILING_MIN, (
+        f"the fast job's cap ({fast_cap}) must clear the selector's "
+        f"WATCHDOG_CEILING_MIN ({WATCHDOG_CEILING_MIN}) — a per-shard "
+        f"watchdog may legitimately reach it (#6135/#3239)")
+
+
+def test_carve_out_bounds_clear_the_measured_work_without_dwarfing_it():
+    """#3239: the carve-out's watchdog must clear its MEASURED work with the
+    house headroom, and its cap must not dwarf that work.
+
+    The floor is tapped twice on purpose: the frozen API measurement (what the
+    bound was chosen from) and the committed `durations` map for the carve-out
+    set (a lower bound that moves with the code — so a carve-out set that grows
+    past the budget reds here instead of surfacing as a 90-minute hang)."""
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+    watchdog = _literal_pytest_watchdog(job)
+    cap = job["timeout-minutes"]
+    measured = _MEASURED_PYTEST_MAX_MIN["test-carve-out"]
+    assert watchdog >= WATCHDOG_HEADROOM * measured, (
+        f"the carve-out watchdog ({watchdog}m) must clear the measured "
+        f"pytest step ({measured}m) by WATCHDOG_HEADROOM "
+        f"({WATCHDOG_HEADROOM}x) or a slow run becomes a guaranteed red")
+    manifest = load_manifest()
+    committed = sum(manifest["durations"].get(f, 0.0)
+                    for f in manifest["carve_out"]) / 60.0
+    assert watchdog >= WATCHDOG_HEADROOM * committed, (
+        f"the carve-out watchdog ({watchdog}m) no longer clears the committed "
+        f"carve-out estimate ({committed:.2f}m) by WATCHDOG_HEADROOM "
+        f"({WATCHDOG_HEADROOM}x) — re-derive it from a fresh measurement "
+        f"rather than widening the hang window (#3239)")
+    assert cap <= _CAP_CEILING_FACTOR * measured, (
+        f"the carve-out cap ({cap}m) dwarfs its measured pytest step "
+        f"({measured}m) — the cap IS the stale-head exposure, and 90m against "
+        f"this work is exactly the defect #3239 reports")
 
 
 def test_diff_gated_jobs_consume_changes_outputs():
