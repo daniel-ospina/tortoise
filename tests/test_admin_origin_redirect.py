@@ -36,6 +36,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIDDLEWARE = REPO_ROOT / "website" / "functions" / "_middleware.ts"
 APP_ORIGIN = "https://app.premiselabs.co"
@@ -65,9 +67,13 @@ console.log(JSON.stringify(out));
 
 
 def _run(cases: list[dict]) -> list[dict]:
+    # #4916: a present-but-too-old Node must SKIP, not RED. The driver passes
+    # `--experimental-strip-types`, so the recorded flag floor (22.7) applies.
+    require_node_floor(
+        NODE_FLOOR_STRIP_TYPES,
+        what="the admin-origin redirect middleware driver",
+    )
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not available")
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
