@@ -406,9 +406,10 @@ jobs:
       # File exists" — EEXIST, its single-fork-slot rule). FalkorDB's GRAPH.COPY
       # retries 10x5ms, shorter than a BGSAVE, so a restore landing inside a
       # periodic save window dies. The falkordb service containers now run
-      # --save '' (see the services: block above), which removes the periodic
-      # BGSAVE and with it this class. If a PMV red still shows ONLY this class,
-      # it is still not a regression — re-run.
+      # --save '' — by the #6673 provision action (its step is above), which is
+      # where the `services:` block that used to carry it moved to — which
+      # removes the periodic BGSAVE and with it this class. If a PMV red still
+      # shows ONLY this class, it is still not a regression — re-run.
       - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'

@@ -88,9 +88,10 @@ def fresh_sdk(graph_name=None):
     each other's EP runs (#86).
     """
     gname = graph_name or f"tortoise_test_dir_{uuid.uuid4().hex[:8]}"
-    # Point at the real FalkorDB (16379) but a uniquely-named test graph
+    # Point at the real (passwordless legacy) FalkorDB but a uniquely-named
+    # test graph. #6673: its host port is the PROVISIONED one, not 16379.
     sdk = TortoiseSDK(db_path=None, namespace=None)
-    sdk._db_uri = f"docker://:@localhost:16379/{gname}"
+    sdk._db_uri = _live_utils.legacy_uri(gname)
     sdk._proj = None  # force re-init on first use
     return sdk
 

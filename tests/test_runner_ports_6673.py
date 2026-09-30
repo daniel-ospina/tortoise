@@ -23,8 +23,11 @@ Two things are pinned here:
 """
 from __future__ import annotations
 
+import os
 import socket
+import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -39,13 +42,17 @@ PYTHON_CI = ROOT / ".github" / "workflows" / "python-ci.yml"
 PMV = ROOT / ".github" / "workflows" / "post-merge-validation.yml"
 ACTION_DIR = ROOT / ".github" / "actions"
 
-# (workflow, job, uri_graph expected on the provision step['with'])
+# (workflow, job, uri_graph expected on the provision step['with'], legacy)
+# `legacy` is the EFFECTIVE value: the fast/slow/validate jobs replace a
+# two-service `services:` block (passworded + passwordless legacy), while
+# test-concurrency-falkor and test-track-b replaced a ONE-service block, so
+# they must pass legacy: "false" to keep that shape exactly.
 PROVISIONED_JOBS = [
-    (PYTHON_CI, "test", None),
-    (PYTHON_CI, "test-slow", None),
-    (PYTHON_CI, "test-concurrency-falkor", "tortoise"),
-    (PYTHON_CI, "test-track-b", "tortoise_test_matrix"),
-    (PMV, "validate", "tortoise_test_matrix"),
+    (PYTHON_CI, "test", None, "true"),
+    (PYTHON_CI, "test-slow", None, "true"),
+    (PYTHON_CI, "test-concurrency-falkor", "tortoise", "false"),
+    (PYTHON_CI, "test-track-b", "tortoise_test_matrix", "false"),
+    (PMV, "validate", "tortoise_test_matrix", "true"),
 ]
 
 
@@ -150,9 +157,10 @@ def test_reachable_helpers_use_the_provisioned_port(monkeypatch):
 # ── 2. the wiring: no job may pin a fixed host port again ────────────────
 
 @pytest.mark.parametrize(
-    ("wf_path", "job_name", "uri_graph"), PROVISIONED_JOBS,
-    ids=[f"{p.name}:{j}" for p, j, _ in PROVISIONED_JOBS])
-def test_services_bearing_job_provisions_ephemerally(wf_path, job_name, uri_graph):
+    ("wf_path", "job_name", "uri_graph", "legacy"), PROVISIONED_JOBS,
+    ids=[f"{p.name}:{j}" for p, j, _u, _l in PROVISIONED_JOBS])
+def test_services_bearing_job_provisions_ephemerally(wf_path, job_name, uri_graph,
+                                                     legacy):
     job = _job(wf_path, job_name)
     steps = job["steps"]
     uses = [str(s.get("uses", "")) for s in steps]
@@ -193,12 +201,19 @@ def test_services_bearing_job_provisions_ephemerally(wf_path, job_name, uri_grap
         assert with_inputs.get("uri_graph") == uri_graph, (
             f"{job_name}: the provision step carries the job's docker-lane URI"
         )
+    assert str(with_inputs.get("legacy", "true")) == legacy, (
+        f"{job_name}: the legacy service must match the `services:` block this "
+        f"replaces — expected legacy={legacy!r}, got "
+        f"{with_inputs.get('legacy', 'true')!r}. Starting a legacy container a "
+        "job never had (or dropping one it did) silently changes which tests "
+        "run there."
+    )
 
 
 def test_python_ci_jobs_keep_the_v4206_image_pin():
     """Each caller keeps its own image pin — the provision step must not
     silently switch the shared services jobs to another FalkorDB build."""
-    for _wf, job_name, _g in PROVISIONED_JOBS:
+    for _wf, job_name, _g, _l in PROVISIONED_JOBS:
         if _wf is not PYTHON_CI:
             continue
         job = _job(PYTHON_CI, job_name)
@@ -258,17 +273,316 @@ def test_provision_script_carries_the_requirepass_pair_and_the_legacy_lane():
 
 def test_teardown_selects_by_ownership_label_and_never_fails_the_job():
     script = (ACTION_DIR / "falkordb-teardown" / "cleanup.sh").read_text()
-    assert "tortoise-ci-falkordb=" in script
+    assert "TORTOISE_CI_FALKORDB_LABEL" in script, (
+        "teardown must select this job's containers by the label provision "
+        "exported — never by a run/job/attempt prefix shared by every matrix "
+        "shard"
+    )
     assert "docker rm -f" in script
     assert "exit 0" in script
     assert "set -e" not in script, "a teardown must not red the job"
 
 
+def test_ownership_label_is_unique_per_JOB_INSTANCE_not_per_job_id():
+    """GITHUB_JOB is the job_id, so a 9-shard matrix shares one
+    `run-job-attempt`. Keying the container name/label on that triple alone made
+    each shard's `docker rm -f` (and the teardown's label sweep) destroy a PEER
+    SHARD's live server — the very collision #6673 removes, moved from the port
+    namespace into the name namespace. The instance token must be generated in
+    the provision step and exported for the teardown.
+    """
+    provision = (ACTION_DIR / "falkordb-provision" / "provision.sh").read_text()
+    suffix = [ln for ln in provision.splitlines() if ln.startswith("SUFFIX=")]
+    assert len(suffix) == 1, "exactly one SUFFIX assignment"
+    # an instance token: the shell pid and/or $RANDOM, not just the CI ids
+    assert ("$$" in suffix[0]) or ("$RANDOM" in suffix[0]), (
+        "the ownership key must include a per-instance token; "
+        f"got {suffix[0]!r}"
+    )
+    assert "TORTOISE_CI_FALKORDB_LABEL=" in provision, (
+        "provision must EXPORT the label so teardown can select exactly this "
+        "job's containers"
+    )
+    assert "trap cleanup_own EXIT" in provision, (
+        "a provision that fails after `docker run` must remove what it started"
+    )
+
+    cleanup = (ACTION_DIR / "falkordb-teardown" / "cleanup.sh").read_text()
+    assert "${TORTOISE_CI_FALKORDB_LABEL:-}" in cleanup, (
+        "teardown must read the exported per-instance label, never re-derive a "
+        "shared run/job/attempt prefix"
+    )
+
+
+def test_provision_logging_never_corrupts_the_captured_port():
+    """`start` is called inside $( ) to capture the assigned port on stdout, so
+    EVERY diagnostic must go to stderr — a log line on stdout becomes part of
+    the port value in $GITHUB_ENV."""
+    script = (ACTION_DIR / "falkordb-provision" / "provision.sh").read_text()
+    log_def = [ln for ln in script.splitlines() if ln.startswith("log()")]
+    assert len(log_def) == 1, "exactly one log() definition"
+    assert ">&2" in log_def[0], f"log() must write to stderr: {log_def[0]!r}"
+    for ln in script.splitlines():
+        if "docker logs" in ln:
+            assert "&2" in ln, f"diagnostic must go to stderr: {ln.strip()!r}"
+
+
+# Every file that reads the #6673 seam must not ALSO hardcode a docker-lane
+# port. This is the split-brain guard: migrating a file's *probe* while leaving
+# its *consumer* on the dead literal makes the probe pass and the client dial
+# nothing, which is worse than not migrating at all. Entries are (path, the
+# literal substring), each a shape fixture that never dials.
+SEAM_FILES_WITH_ALLOWED_LITERALS = {
+    "tests/test_search_engine_gaps.py": [
+        # a MOCKED non-local host (the probe is stubbed)
+        "docker://:falkordb@test-host:6379/tortoise_test",
+    ],
+    "tests/test_redirect_seam.py": [
+        # is_loopback_uri() classification inputs — pure string predicates
+        "docker://:pw@db.internal.example.com:6379",
+        "docker://:pw@:6379",
+        "{_host_form}:6379",
+        "{host}:6379",
+    ],
+    "tests/test_tripwire.py": [
+        # non-loopback refusal fixture (asserted, never dialled)
+        "docker://:pw@db.internal.example.com:6379",
+    ],
+    "tests/test_projection.py": [
+        # from_uri() raises on the scheme BEFORE connecting
+        'from_uri("localhost:6379")',
+        # non-resolvable host: a parse fixture
+        'host="example.invalid", port=6379',
+    ],
+    "tests/test_derived_names.py": [
+        # the from_uri census names test_projection's ValueError fixture
+        # (a regex string, not a connection target)
+        'from_uri\\(\\"localhost:6379',
+    ],
+    "tests/test_pre_migration_safety.py": [
+        # Every localhost literal in this file is an INPUT to
+        # _docker_projection_target(), which parses the URI and refuses a
+        # non-test graph name — it never constructs a client. (The one real
+        # site, the `port=parsed.port or 6379` fallback, is migrated.)
+        "docker://:falkordb@localhost:6379",
+    ],
+}
+
+
+def _port_literals_in_code(path: Path) -> list[tuple[int, str]]:
+    """Every port literal that is a CODE constant in `path`.
+
+    Docstrings are documentation, and comments have no AST node at all, so
+    neither counts — only a string or int constant the code actually uses.
+    """
+    import ast
+
+    src = path.read_text()
+    tree = ast.parse(src)
+    docstrings = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body:
+            first = body[0]
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                docstrings.add(id(first.value))
+
+    lines = src.splitlines()
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant):
+            continue
+        val = node.value
+        has = ((isinstance(val, str) and ("6379" in val or "16379" in val))
+               or (isinstance(val, int) and val in (6379, 16379)))
+        if not has or id(node) in docstrings:
+            continue
+        line = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+        hits.append((node.lineno, line))
+    return hits
+
+
+def test_no_migrated_file_still_hardcodes_a_lane_port():
+    """A file that reads the #6673 seam must not ALSO hardcode a docker-lane
+    port wherever the code can use it.
+
+    This is the split-brain guard: migrating a file's *probe* while leaving its
+    *consumer* on the dead literal makes the probe pass and the client dial
+    nothing — the failure mode this change exists to remove, one level up.
+    """
+    seam_files = sorted(
+        p for p in (ROOT / "tests").rglob("*.py")
+        if "import _live_utils" in p.read_text()
+    )
+    assert seam_files, "the seam must be imported somewhere"
+
+    offenders: dict[str, list[str]] = {}
+    for p in seam_files:
+        rel = p.relative_to(ROOT).as_posix()
+        if rel == "tests/test_runner_ports_6673.py":
+            # the seam's OWN test — it must spell the literals to pin them
+            continue
+        allowed = SEAM_FILES_WITH_ALLOWED_LITERALS.get(rel, [])
+        for lineno, line in _port_literals_in_code(p):
+            if any(a in line for a in allowed):
+                continue
+            offenders.setdefault(rel, []).append(f"{lineno}: {line[:78]}")
+
+    assert not offenders, (
+        "a file that resolves ports through tests/_live_utils must not ALSO "
+        "hardcode a docker-lane port — the probe would pass while the client "
+        "dials a dead 6379/16379. Migrate the site, or declare it in "
+        "SEAM_FILES_WITH_ALLOWED_LITERALS with its reason:\n"
+        + "\n".join(f"  {k}:\n    " + "\n    ".join(v)
+                    for k, v in sorted(offenders.items()))
+    )
+
+
 def test_action_inputs_are_declared():
     prov = yaml.safe_load((ACTION_DIR / "falkordb-provision" / "action.yml").read_text())
     assert prov["runs"]["using"] == "composite"
-    assert set(prov["inputs"]) == {"image", "legacy", "uri_graph"}
+    assert set(prov["inputs"]) == {"image", "legacy", "uri_graph", "health_timeout"}
     assert prov["inputs"]["legacy"]["default"] == "true"
     assert prov["inputs"]["uri_graph"]["default"] == ""
     teardown = yaml.safe_load((ACTION_DIR / "falkordb-teardown" / "action.yml").read_text())
     assert teardown["runs"]["using"] == "composite"
+
+
+# ── 3. the actions, executed for real against a stub `docker` ────────────
+#
+# The host Docker daemon cannot be assumed available on a dev box (and was
+# wedged when this was written), so the provision/teardown CONTRACT is pinned
+# by executing the real scripts against a stub `docker` on PATH. This is the
+# behaviour test the wiring pins above cannot be: it catches a port polluted by
+# a stdout log line, a lost EXIT-trap cleanup, and a label shared by two
+# concurrent jobs.
+
+STUB_DOCKER = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$DOCKER_CALLS"
+case "$1" in
+  run)  echo "cid-stub" ;;
+  port) case "$2" in *legacy*) echo "0.0.0.0:32769" ;; *) echo "0.0.0.0:32768" ;; esac ;;
+  exec) if [ "${FAKE_PING:-PONG}" = "PONG" ]; then echo PONG; else exit 1; fi ;;
+  logs) echo "stub logs" ;;
+  rm)   exit 0 ;;
+esac
+exit 0
+"""
+
+
+def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
+                   uri_graph: str = "tortoise_test_matrix",
+                   ping: str = "PONG", health_timeout: str = "1"
+                   ) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "docker").write_text(STUB_DOCKER)
+    (bindir / "docker").chmod(0o755)
+    # per-call scratch paths: a shared GITHUB_ENV would be truncated by the
+    # second call and hide the first call's label
+    token = uuid.uuid4().hex[:8]
+    calls = tmp_path / f"calls-{token}"
+    genv = tmp_path / f"env-{token}"
+    genv.write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "DOCKER_CALLS": str(calls),
+        "GITHUB_ENV": str(genv),
+        "GITHUB_RUN_ID": run_id,
+        "GITHUB_JOB": "test",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "FALKORDB_IMAGE": "falkordb/falkordb-server:v4.20.6",
+        "FALKORDB_LEGACY": legacy,
+        "FALKORDB_URI_GRAPH": uri_graph,
+        "FAKE_PING": ping,
+        "FALKORDB_HEALTH_TIMEOUT": health_timeout,
+    }
+    proc = subprocess.run(
+        ["bash", str(ACTION_DIR / "falkordb-provision" / "provision.sh")],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    return proc, genv, calls
+
+
+def test_provision_exports_exactly_the_assigned_ports(tmp_path):
+    proc, genv, _calls = _run_provision(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", (
+        "provision's stdout must stay EMPTY: the port is captured with $( ), so "
+        f"a log line there becomes part of the exported port. Got {proc.stdout!r}"
+    )
+    lines = genv.read_text().splitlines()
+    assert "TORTOISE_TEST_DOCKER_PORT=32768" in lines, lines
+    assert "TORTOISE_TEST_LEGACY_PORT=32769" in lines, lines
+    assert ("TORTOISE_DB_URI=docker://:falkordb@localhost:32768/"
+            "tortoise_test_matrix") in lines, lines
+    assert len([ln for ln in lines if ln.startswith("TORTOISE_CI_FALKORDB_LABEL=")]) == 1
+    assert proc.stderr, "the progress log belongs on stderr"
+
+
+def test_provision_omits_the_legacy_port_and_uri_when_not_asked(tmp_path):
+    proc, genv, _calls = _run_provision(tmp_path, legacy="false", uri_graph="")
+    assert proc.returncode == 0, proc.stderr
+    lines = genv.read_text().splitlines()
+    assert "TORTOISE_TEST_DOCKER_PORT=32768" in lines
+    assert not [ln for ln in lines if ln.startswith("TORTOISE_TEST_LEGACY_PORT=")]
+    assert not [ln for ln in lines if ln.startswith("TORTOISE_DB_URI=")]
+
+
+def test_two_concurrent_jobs_get_DISTINCT_ownership_labels(tmp_path):
+    """The matrix-shard defect: a shared label let one shard's `docker rm -f`
+    kill a peer's live server."""
+    a, genv_a, _ = _run_provision(tmp_path, run_id="42")
+    b, genv_b, _ = _run_provision(tmp_path, run_id="42")
+    assert a.returncode == 0 and b.returncode == 0
+    labels = {
+        ln for f in (genv_a, genv_b)
+        for ln in f.read_text().splitlines()
+        if ln.startswith("TORTOISE_CI_FALKORDB_LABEL=")
+    }
+    assert len(labels) == 2, f"same run+job must still differ per instance: {labels}"
+
+
+def test_provision_cleans_up_its_own_containers_when_it_fails(tmp_path):
+    proc, _genv, calls = _run_provision(tmp_path, ping="FAIL")
+    assert proc.returncode != 0, "a failed health gate must fail the step"
+    text = calls.read_text()
+    trap_calls = [ln for ln in text.splitlines() if ln.startswith("rm -f ")]
+    assert any("falkordb-6673-pw-" in ln and "falkordb-6673-legacy-" in ln
+               for ln in trap_calls), (
+        "the EXIT trap must remove BOTH containers it started before failing:\n"
+        + text
+    )
+
+
+def test_teardown_removes_only_the_recorded_containers(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "docker").write_text(STUB_DOCKER)
+    (bindir / "docker").chmod(0o755)
+    calls = tmp_path / "td-calls"
+
+    # (a) no label recorded → nothing is claimed (never a shared-prefix sweep)
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}",
+           "DOCKER_CALLS": str(calls), "GITHUB_RUN_ID": "42", "GITHUB_JOB": "test",
+           "GITHUB_RUN_ATTEMPT": "1"}
+    env.pop("TORTOISE_CI_FALKORDB_LABEL", None)
+    proc = subprocess.run(
+        ["bash", str(ACTION_DIR / "falkordb-teardown" / "cleanup.sh")],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not calls.exists(), f"no label → no docker call, got: {calls.read_text() if calls.exists() else ''}"
+
+    # (b) with the label → exactly that label is selected, and the exit is 0
+    calls.write_text("")
+    env["TORTOISE_CI_FALKORDB_LABEL"] = "tortoise-ci-falkordb=42-test-1-999-1234"
+    proc = subprocess.run(
+        ["bash", str(ACTION_DIR / "falkordb-teardown" / "cleanup.sh")],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "label=tortoise-ci-falkordb=42-test-1-999-1234" in calls.read_text()

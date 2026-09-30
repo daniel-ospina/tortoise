@@ -65,7 +65,7 @@ def test_round_trip_same_shape(leg, tmp_path, monkeypatch):
     else:
         if not _docker_reachable():
             pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+        monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
         monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     hits = _round_trip(tmp_path, "rt-1", "parity claim")
     assert hits and hits[0][0] == "rt-1" and hits[0][1] == "parity claim"

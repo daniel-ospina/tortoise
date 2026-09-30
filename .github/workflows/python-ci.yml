@@ -1370,10 +1370,14 @@ jobs:
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block. `uri_graph` is set here
         # because this job's TORTOISE_DB_URI used to be the fixed-port literal
-        # (the two live tests run against the real sidecar by definition).
+        # (the live tests run against the real sidecar by definition).
+        # `legacy: "false"` preserves the original shape exactly: this job's
+        # `services:` block declared ONLY the passworded service, so it never
+        # had a passwordless legacy container to probe.
         uses: ./.github/actions/falkordb-provision
         with:
           uri_graph: tortoise
+          legacy: "false"
       - name: Run live concurrency tests (real FalkorDB sidecar)
         env:
           HF_HUB_OFFLINE: "1"
@@ -1526,10 +1530,14 @@ jobs:
         # #6673: replaced this job's `services:` block (same mechanics as the
         # fast job). `uri_graph` is set because this job's TORTOISE_DB_URI used
         # to be the fixed-port literal — the track_b tests redirect onto the
-        # server lane by definition. Paired with the teardown step below.
+        # server lane by definition. `legacy: "false"` preserves the original
+        # shape: this job's `services:` block declared ONLY the passworded
+        # service (legacy probes skip there, as before). Paired with the
+        # teardown step below.
         uses: ./.github/actions/falkordb-provision
         with:
           uri_graph: tortoise_test_matrix
+          legacy: "false"
       - name: Generate coverage manifest (track-b, epic #1647 Task 9)
         # The track-b run uses `-m track_b` — the manifest's collect-only
         # MUST use the same marker (never the default 'not track_b'), or the

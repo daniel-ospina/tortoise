@@ -20,14 +20,37 @@ set -euo pipefail
 IMAGE="${FALKORDB_IMAGE:?}"
 LEGACY="${FALKORDB_LEGACY:-true}"
 URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
+# Health-gate bound (seconds). Widened from the `services:` blocks' 5s x 10
+# because this also covers the image pull on a cold runner; a caller with a
+# slow pull can raise it, and the hermetic tests lower it.
+HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 
-# Ownership label: one value per (run, job, attempt). Both the teardown step
-# and the runner-host stale reaper select on it, so a leaked container is
-# attributable and reapable without guessing names.
-SUFFIX="${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}-${GITHUB_RUN_ATTEMPT:-1}"
+# Ownership label: one value per JOB INSTANCE. Both the teardown step and the
+# runner-host stale reaper select on it, so a leaked container is attributable
+# and reapable without guessing names.
+#
+# ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 9-shard
+# fast matrix is ONE GITHUB_JOB), so the run/job/attempt triple alone is NOT
+# unique among concurrent shards: keying on it made each shard's
+# `docker rm -f` (and the teardown's label sweep) destroy a PEER SHARD's live
+# server — the collision this change exists to remove, moved into the name
+# namespace. The instance token is generated here and exported, so teardown
+# removes exactly this job's containers and its own EXIT trap removes what it
+# started if it fails part-way.
+SUFFIX="${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}-${GITHUB_RUN_ATTEMPT:-1}-$$-$RANDOM"
 LABEL="tortoise-ci-falkordb=${SUFFIX}"
 NAME_PW="falkordb-6673-pw-${SUFFIX}"
 NAME_LEGACY="falkordb-6673-legacy-${SUFFIX}"
+
+# Export the exact label BEFORE anything is created, so the paired teardown
+# step can always select this job's containers (the fallback is that the
+# EXIT trap below has already removed them).
+echo "TORTOISE_CI_FALKORDB_LABEL=$LABEL" >> "$GITHUB_ENV"
+
+# A failure mid-provision (image pull, port read, PING gate) must not leave a
+# running container eating memory on the runner host.
+cleanup_own() { docker rm -f "$NAME_PW" "$NAME_LEGACY" >/dev/null 2>&1 || true; }
+trap cleanup_own EXIT
 
 # ALL logging must go to STDERR: `start` is called inside $( ) to capture the
 # assigned port on stdout, so a log line on stdout would corrupt the port.
@@ -56,13 +79,13 @@ start() {
   port="$(docker port "$name" 6379/tcp | head -n 1 | sed 's/.*://')"
   if [ -z "$port" ]; then
     log "::error::$name got no host port from docker"
-    docker logs "$name" 2>&1 | tail -n 40 || true
+    docker logs "$name" 2>&1 | tail -n 40 >&2 || true
     return 1
   fi
 
   # Health gate — the `services:` health-cmd equivalent (5s x 10 retries),
   # widened to 60s because this also covers the image pull on a cold runner.
-  for i in $(seq 1 60); do
+  for i in $(seq 1 "$HEALTH_TIMEOUT"); do
     # shellcheck disable=SC2086  # $auth is a deliberate 0-or-2 word "cli args"
     if docker exec "$name" redis-cli $auth ping 2>/dev/null | grep -q PONG; then
       log "$name healthy on host port $port after ${i}s"
@@ -71,8 +94,8 @@ start() {
     fi
     sleep 1
   done
-  log "::error::$name did not answer PING within 60s (host port $port)"
-  docker logs "$name" 2>&1 | tail -n 40 || true
+  log "::error::$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)"
+  docker logs "$name" 2>&1 | tail -n 40 >&2 || true
   return 1
 }
 

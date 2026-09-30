@@ -2043,7 +2043,7 @@ durations:
   test_dashboard_login.py: 6.8
   test_capture_phase_d_dedup.py: 4.7
   test_ci_selection.py: 18.8
-  test_runner_ports_6673.py: 4.3
+  test_runner_ports_6673.py: 4.3  # unmeasured (new file, #6673 — no CI junit yet)
   test_epic903_freshness.py: 3.8
   test_onboarding_integration.py: 4.5
   test_pack_cli.py: 4.5

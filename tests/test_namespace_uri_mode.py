@@ -48,7 +48,7 @@ def uri_mode(monkeypatch):
     """Force URI mode with a test-prefixed session graph (like conftest)."""
     monkeypatch.setenv(
         "TORTOISE_DB_URI",
-        "docker://:falkordb@localhost:6379/tortoise_test_221_namespace",
+        _live_utils.docker_uri("tortoise_test_221_namespace"),
     )
     yield
 
@@ -95,7 +95,7 @@ class TestNamespaceInURIMode:
 
     def test_uri_without_path_defaults_to_tortoise(self, monkeypatch):
         """A URI without a graph path still resolves (no crash)."""
-        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+        monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
         sdk = TortoiseSDK()
         try:
             assert _graph_name(sdk) == "tortoise"

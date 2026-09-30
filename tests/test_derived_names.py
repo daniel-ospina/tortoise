@@ -50,7 +50,7 @@ def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:
 def uri_env(monkeypatch):
     if not _docker_reachable():
         pytest.skip(f"live FalkorDB (localhost:{_live_utils.docker_port()}) not reachable")
-    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_DB_URI", _live_utils.docker_base_uri())
     yield
 
 
@@ -309,7 +309,8 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     "test_search_engine.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
         r"from_uri\(\s*os\.environ\[.TORTOISE_DB_URI.\]",
-        r'from_uri\(\s*"docker://:@localhost:16379/" \+ gname\)',
+        # #6673: the raw-client site now resolves through the seam.
+        r"from_uri\(\s*_live_utils\.legacy_uri\(gname\)\)",
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],

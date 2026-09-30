@@ -37,7 +37,7 @@ pytestmark = pytest.mark.timeout(300)
 _LEGS = ["embedded", "docker"]
 
 # Docker-leg URI (E2E-1's leg constant — the local provisioned service).
-_DOCKER_URI = "docker://:falkordb@localhost:6379"
+_DOCKER_URI = _live_utils.docker_base_uri()
 
 
 def _docker_reachable(host: str = "localhost", port: int | None = None) -> bool:

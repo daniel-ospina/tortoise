@@ -72,8 +72,18 @@ def legacy_port() -> int:
 
 
 def service_host() -> str:
-    """The host the published service ports are reachable on."""
-    return os.environ.get(_HOST_ENV) or "localhost"
+    """The host the published service ports are reachable on.
+
+    Resolution order mirrors legacy_port(): the #6673 var wins, then the
+    product's ``FALKORDB_HOST`` — which the pre-#6673 probes in
+    test_projection.py honoured — then localhost. Reading it keeps a local
+    ``FALKORDB_HOST``-based override working (#6673 review P3).
+    """
+    return (
+        os.environ.get(_HOST_ENV)
+        or os.environ.get("FALKORDB_HOST")
+        or "localhost"
+    )
 
 
 # Import-time snapshots — for the module-level URI constants that were

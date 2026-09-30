@@ -21,6 +21,12 @@ inputs:
     description: Also start the passwordless legacy service (the 16379 family).
     required: false
     default: "true"
+  health_timeout:
+    description: >-
+      Seconds to wait for the service's PING (per container). Default 60 covers
+      a cold image pull on a fresh runner; raise it on a slow host.
+    required: false
+    default: "60"
   uri_graph:
     description: >-
       When non-empty, also export TORTOISE_DB_URI pointing at the passworded
@@ -38,4 +44,5 @@ runs:
         FALKORDB_IMAGE: ${{ inputs.image }}
         FALKORDB_LEGACY: ${{ inputs.legacy }}
         FALKORDB_URI_GRAPH: ${{ inputs.uri_graph }}
+        FALKORDB_HEALTH_TIMEOUT: ${{ inputs.health_timeout }}
       run: bash ${{ github.action_path }}/provision.sh
