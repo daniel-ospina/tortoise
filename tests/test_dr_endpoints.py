@@ -148,6 +148,35 @@ def _reset_graph(db, graph_name: str) -> None:
     db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
 
 
+def _sweep_diagnosis(body: dict) -> str:
+    """What a `degraded` sweep actually says, in one line.
+
+    pytest truncates a dict used as the assertion message BEFORE it reaches
+    ``graph_failures`` — the one field that names why a graph was not backed
+    up, and effectively the only place that cause survives: the per-graph
+    error paths return without logging, so the failure message and the app log
+    both carry nothing. Surfacing it explicitly makes a red attributable from
+    the log instead of from a re-run (#5049 — a verdict from ambient machine
+    state must still say what happened).
+    """
+    failures = body.get("graph_failures") or []
+    if failures:
+        detail = "; ".join(
+            f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}"
+            for f in failures)
+    else:
+        # A resolution/error result carries no graph map, so an org-level
+        # failure leaves graph_failures empty — fall back to the results map.
+        detail = "; ".join(
+            f"{tid}: {res.get('error')}"
+            for tid, res in (body.get("results") or {}).items()
+            if isinstance(res, dict) and res.get("error")
+        ) or "no graph_failures and no per-team error in the response"
+    return (f"sweep status={body.get('status')} "
+            f"totals={body.get('graph_totals')} "
+            f"source={body.get('source')} causes=[{detail}]")
+
+
 def _held_proj_db():
     """A data-plane `db` handle whose SDK is HELD for the session.
 
@@ -411,7 +440,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "backed_up"
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert ("resolve", "ENUM_DELTA", "") in fake.calls
         assert ("resolve", "P0_GUARD_FAIL", "team_x") in fake.calls
         # Not open → no resolve call. (This line would hold even without the
@@ -474,7 +503,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200
         body = r.json()
-        assert body["status"] == "backed_up"
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert body["teams_backed_up"] == 1
         assert body["results"]["team_x"]["status"] == "backed_up"
         manifests = [k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")]
@@ -526,7 +555,7 @@ class TestDrSweep:
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "backed_up", body
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
         assert body["teams_backed_up"] == 2
         assert body["source"] == "supabase"
         assert set(body["results"]) == {"team_s1", "team_s2"}
