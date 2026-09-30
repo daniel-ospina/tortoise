@@ -409,7 +409,17 @@ jobs:
     # on ephemeral host ports instead of a `services:` block (#6673).
     # NO job-level TORTOISE_DB_URI: the ~600 embedded tests need the redislite default;
     # the live tests' probes read the provisioned ports from tests/_live_utils.py.
-    # ~2-3 min added runtime vs the per-shard watchdog.
+    # Cost, MEASURED on main run 36736931554 across all nine shards: 5-14s each
+    # (a=5 b=7 c=14 d=13 e=8 f=13 g=8 h=8 i=8). That is the composite action
+    # below — NOT a `services:` block. A much larger per-shard figure stood
+    # here and described the runner-side `initialize_containers` cost of the OLD
+    # `services:` block; #6673 removed that block but left the figure behind,
+    # and W15 then read it as a live cost and priced it into a shard-isolation
+    # proposal — #6785 holds the measurement that refuted it.
+    # Isolating the docker-seam files into their own shard is therefore NOT
+    # worth doing: the saving is bounded by that ~9s, while concentrating their
+    # ~317s of measured duration risks a NEW long pole (the nine shards ran
+    # 163-523s in that same run, so the packer's estimate already spreads 3x).
     # The skip-fail guard step below fails closed if they skip.
     # #6673: the two FalkorDB services used to be declared HERE as a `services:`
     # block on the fixed host ports 6379:6379 / 16379:6379. They are now started
