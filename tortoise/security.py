@@ -418,6 +418,18 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # excludes hex rather than alnum: with an alnum lookahead a body followed
     # by a non-hex letter (`st_…g`) would backtrack one character at a time and
     # scan quadratically — the failure mode #4911 was fixed for.
+    # ⛔ THE TENANT API KEY — the product's PRIMARY credential, and the one the
+    # first cut of the guard could NOT see: it is `f"tt_{uuid.uuid4().hex}"`, so
+    # it names none of the token helpers, and `tortoise/sdk.py` (which mints the
+    # same key) was not in the scanned module list. The guard certified coverage
+    # it did not have (found in review). Body is `uuid4().hex` — 32 lowercase
+    # hex — and the `{32,}` floor with a HEX-only lookahead keeps the scan linear
+    # while making a surviving suffix impossible.
+    # NOTE: PR #6096 carries the same rule for the same reason; whichever lands
+    # second should drop its copy rather than double-define the kind.
+    ("tortoise_api_key",
+     re.compile(r"(?<![A-Za-z0-9])(?:tt|tk)_[0-9a-f]{32,}(?![0-9a-f])"),
+     _REDACTION_VALUE.format(kind="tortoise_api_key")),
     ("tortoise_oauth_access_token",
      re.compile(r"(?<![A-Za-z0-9])oat_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="tortoise_oauth_access_token")),
