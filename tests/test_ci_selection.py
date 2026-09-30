@@ -382,7 +382,7 @@ def test_the_docker_lane_seam_forces_the_full_matrix():
     """#6673: `tests/_live_utils.py` carries the docker lane's port/host
     resolution and is imported by test modules registered on every docker-lane
     surface (core, ep, sdk, api, eval) — `git grep -l _live_utils -- tests/`
-    lists them. The conftest-derived ratchet cannot cover it (it is not a
+    lists every file that touches it (importers plus mention-only references). The conftest-derived ratchet cannot cover it (it is not a
     conftest import), so without the explicit entry a seam-only edit selected
     `core` and the other surfaces' consumers never ran on the PR that made it.
     """

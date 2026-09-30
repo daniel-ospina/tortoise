@@ -157,8 +157,9 @@ SHARED_MODULES = (
     "tests/fake_control_plane.py",
     # #6673: the docker-lane port/host seam, imported by 50+ test modules that
     # are registered across every docker-lane surface (core, ep, sdk, api,
-    # eval) — `git grep -l _live_utils -- tests/` lists the current set, and the
-    # count is deliberately not restated here because it drifts. A seam edit is
+    # eval) — `git grep -l _live_utils -- tests/` lists every file that touches
+    # it (the importers, plus a couple of mention-only references), and the count
+    # is deliberately not restated here because it drifts. A seam edit is
     # therefore cross-surface by construction: the `_embedded.py` /
     # `_tmpdir_hygiene.py` case below, at a larger blast radius, because the
     # seam is now how the whole docker lane resolves its port. Without this

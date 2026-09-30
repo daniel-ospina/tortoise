@@ -404,8 +404,9 @@ jobs:
     # families: the passworded docker://:falkordb@localhost:6379 URIs and the legacy
     # passwordless docker://:@localhost:16379 URIs (test_search_engine / test_ingest /
     # test_session_capture_e2e / the 16379 candidates in test_hnsw_vector_index and
-    # test_integration_search). Same two-service shape as test-concurrency-falkor,
-    # started on ephemeral host ports instead of a `services:` block (#6673).
+    # test_integration_search). Unlike test-concurrency-falkor / test-track-b —
+    # which carry only the passworded service — this job keeps BOTH, now started
+    # on ephemeral host ports instead of a `services:` block (#6673).
     # NO job-level TORTOISE_DB_URI: the ~600 embedded tests need the redislite default;
     # the live tests' probes read the provisioned ports from tests/_live_utils.py.
     # ~2-3 min added runtime vs the per-shard watchdog.
