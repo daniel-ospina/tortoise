@@ -105,10 +105,22 @@ def test_the_readable_surfaces_name_the_generic_verbs() -> None:
         (TortoiseSDK.delete, "operator"),
         (TortoiseSDK.update, "operator"),
         (TortoiseSDK.update, "list_relations"),
+        # The DISCLOSURE itself, not just the pointer to the vocabulary. Pinning
+        # only "list_relations" let the P2 regression return: a reviewer replaced
+        # this whole sentence with a neutral one that still said
+        # "list_relations()" and all five tests stayed green. These two needles
+        # pin the two facts the disclosure exists to state — that no declaredness
+        # check runs here, and that the label is therefore stored silently.
+        (TortoiseSDK.update, "no declaredness check"),
+        (TortoiseSDK.update, "installs the label silently"),
         (TortoiseSDK.operator_action, "update(<operator_id>"),
         (TortoiseSDK.operator_action, "delete(<operator_id>"),
     ):
-        doc = fn.__doc__ or ""
+        # Collapse whitespace before matching: a docstring is wrapped to the
+        # line length, so a needle that spans a wrap ("performs no\n        declaredness
+        # check") would never match and the test would fail while the prose was
+        # correct. Re-wrapping is a legitimate edit; losing the disclosure is not.
+        doc = " ".join((fn.__doc__ or "").split())
         assert needle in doc, (
             f"{fn.__name__}.__doc__ no longer mentions {needle!r} — the "
             f"operator-mutation vocabulary is undiscoverable again: {doc[:160]!r}"
