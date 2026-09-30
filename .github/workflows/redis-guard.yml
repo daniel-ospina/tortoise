@@ -28,6 +28,15 @@ on:
       - 'graph-scripts/**'
       - 'tools/redis-guard.py'
       - '.github/workflows/redis-guard.yml'
+  # H20: GitHub cannot report a required check for a workflow a `paths:` filter
+  # skipped, so a filtered required check would sit pending forever on a
+  # non-matching PR. redis-guard is NOT required today (measured 2026-09-30), but
+  # .github/settings.yml still declares it as required — that file is stale in
+  # BOTH directions (it omits the 7 real contexts and sets strict: true, where
+  # live protection is strict: false) and must be reconciled. This dispatch
+  # trigger is the escape hatch in the meantime: a maintainer can force the
+  # check on a PR the filter skipped.
+  workflow_dispatch:
 
 # #6590: with no concurrency group every push ADDS an uncancellable run to an
 # already-saturated pool, so a superseded run is never replaced — it just waits
