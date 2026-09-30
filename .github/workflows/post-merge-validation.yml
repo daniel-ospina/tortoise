@@ -562,8 +562,10 @@ jobs:
               }
             }
       - name: Stop FalkorDB services (#6673)
-        # Before the verdict step so the containers are gone whether or not
-        # `Fail the check` runs (always() also covers the early-exit paths).
+        # Deliberately AFTER the verdict/comment step and immediately before
+        # `Fail the check`: `always()` means the containers are gone however
+        # this job ends, including the verdict step's early exits and the
+        # final `exit 1`.
         if: always()
         uses: ./.github/actions/falkordb-teardown
       - name: Fail the check

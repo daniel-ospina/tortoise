@@ -29,8 +29,9 @@ def _docker_reachable(host: str | None = None,
 
     #6673: the port used to be the 6379 literal; it is now the ephemeral host
     port assigned by the provision step (docker `-p 0:6379`). `host=None`
-    resolves through `_live_utils.service_host()` — the SAME host the clients
-    use, so a host override cannot make the probe and the client disagree.
+    resolves through `_live_utils.service_host()`, so a
+    `TORTOISE_TEST_DOCKER_HOST` override reaches the probe exactly as it reaches
+    the clients (the product's `FALKORDB_HOST` is not read — see the seam).
     """
     return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 

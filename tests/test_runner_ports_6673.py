@@ -143,6 +143,18 @@ def test_tcp_reachable_true_for_a_listener_and_false_for_a_closed_port():
     assert _live_utils.tcp_reachable(dead_port, host="127.0.0.1", timeout=0.3) is False
 
 
+def test_the_product_host_var_cannot_move_the_service_host(monkeypatch):
+    """Pins the P2 fix. Honouring the product's FALKORDB_HOST made the PROBE
+    follow the override while this lane's hardcoded client constructions (the
+    `FalkorProjection(host="localhost", …)` sites) did not: the probe passed,
+    the docker leg was selected, and the client dialled a dead localhost. The
+    product var is therefore not consulted; only the opt-in seam var moves it.
+    """
+    monkeypatch.delenv("TORTOISE_TEST_DOCKER_HOST", raising=False)
+    monkeypatch.setenv("FALKORDB_HOST", "10.1.2.3")
+    assert _live_utils.service_host() == "localhost"
+
+
 def test_reachable_helpers_use_the_provisioned_port(monkeypatch):
     """The probes must follow the ephemeral port, not 6379."""
     srv, port = _listening_socket()
@@ -309,6 +321,17 @@ def test_ownership_label_is_unique_per_JOB_INSTANCE_not_per_job_id():
     assert "trap - EXIT" in provision, (
         "and the success path must DISARM that trap — it fires on a normal exit "
         "too, which would delete the containers just started"
+    )
+    # POSITION matters, and text presence alone does not pin it: a disarm
+    # placed BEFORE the second start would leave that container's failure
+    # leaking the already-started first one.
+    lines = provision.splitlines()
+    disarm = next(i for i, ln in enumerate(lines, 1) if ln.strip() == "trap - EXIT")
+    starts = [i for i, ln in enumerate(lines, 1) if ln.strip().startswith("start ")]
+    assert len(starts) == 2, f"expected two start calls, got {starts}"
+    assert disarm > max(starts), (
+        f"the disarm (line {disarm}) must come AFTER every start "
+        f"({starts}) so a later start's failure still cleans up"
     )
 
     cleanup = (ACTION_DIR / "falkordb-teardown" / "cleanup.sh").read_text()

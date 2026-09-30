@@ -43,9 +43,10 @@ def _docker_reachable(host: str | None = None,
     #6673: the port used to be the 6379 literal. It is now the ephemeral host
     port the workflow's provision step assigned (docker `-p 0:6379`), so two
     services jobs on the same host cannot collide. `host=None` resolves through
-    `_live_utils.service_host()` — the SAME host the clients use, so a
-    `FALKORDB_HOST`/`TORTOISE_TEST_DOCKER_HOST` override cannot make the probe
-    and the client disagree.
+    `_live_utils.service_host()`, so a `TORTOISE_TEST_DOCKER_HOST`
+    override reaches the probe exactly as it reaches the clients. The host is
+    NOT read from the product's `FALKORDB_HOST` at all, precisely so the probe
+    cannot be moved somewhere a hardcoded client construction does not follow.
     """
     return _live_utils.tcp_reachable(port or _live_utils.docker_port(), host=host)
 

@@ -47,6 +47,7 @@ LIVE_URI_SKIP_REASON = (
 # `tortoise doctor` etc. connect to. FALKORDB_PORT is honoured here only as
 # the LEGACY fallback, which is where test_ingest.py / test_projection.py
 # already read it from (their pre-#6673 behaviour, preserved).
+# FALKORDB_HOST is not read at all — see service_host().
 _PORT_ENV = "TORTOISE_TEST_DOCKER_PORT"
 _LEGACY_PORT_ENV = "TORTOISE_TEST_LEGACY_PORT"
 _HOST_ENV = "TORTOISE_TEST_DOCKER_HOST"
@@ -74,16 +75,18 @@ def legacy_port() -> int:
 def service_host() -> str:
     """The host the published service ports are reachable on.
 
-    Resolution order mirrors legacy_port(): the #6673 var wins, then the
-    product's ``FALKORDB_HOST`` — which the pre-#6673 probes in
-    test_projection.py honoured — then localhost. Reading it keeps a local
-    ``FALKORDB_HOST``-based override working (#6673 review P3).
+    The #6673 var wins; otherwise ``localhost`` — the historical literal, and
+    the host this lane's remaining hardcoded client constructions (e.g. the
+    ``FalkorProjection(host="localhost", …)`` sites) actually dial.
+
+    The product's ``FALKORDB_HOST`` is deliberately NOT consulted. Honouring it
+    here made the probe follow the override while those clients did not: the
+    probe would pass, the docker leg would be selected, and the client would
+    dial a dead localhost — the split-brain this seam exists to remove, moved
+    to the host axis. A test-only var cannot be half-threaded that way because
+    nothing assumes its default.
     """
-    return (
-        os.environ.get(_HOST_ENV)
-        or os.environ.get("FALKORDB_HOST")
-        or "localhost"
-    )
+    return os.environ.get(_HOST_ENV) or "localhost"
 
 
 # Import-time snapshots — for the module-level URI constants that were

@@ -63,21 +63,26 @@ cleanup_own() {
 }
 trap cleanup_own EXIT
 
-# The assigned port is handed back through a FILE, not stdout: `$( )` capture
-# would swallow any diagnostic written inside start(), and GitHub renders an
-# `::error::` annotation only for a workflow command that starts the line on
-# the step's stdout stream (which the capture would eat).
+# The assigned port is handed back through a FILE, not stdout. Two reasons:
+# `$( )` capture would swallow any diagnostic written inside start(), and
+# GitHub renders an `::error::` annotation only for a workflow command that
+# starts the line on the step's stdout stream — so a captured stdout would
+# quietly turn the failure annotation into plain text.
 PORT_FILE="$(mktemp)"
 
 # GitHub annotations must be the first thing on the line — no `#6673 ` prefix.
 annotate_error() { printf '::error::%s\n' "$*"; }
 
-# ALL logging must go to STDERR: `start` is called inside $( ) to capture the
-# assigned port on stdout, so a log line on stdout would corrupt the port.
+# Logging goes to STDERR: stdout is reserved for GitHub workflow commands
+# (`::error::` below must be the first thing on its line — a `#6673 ` prefix
+# would make it plain text). The port does not travel on this stream at all;
+# it goes through $PORT_FILE.
 log() { printf '#6673 %s\n' "$*" >&2; }
 
 # start <name> <REDIS_ARGS> <health-cli-auth-args>
-# Writes the ASSIGNED host port to $PORT_FILE; all output goes to stderr.
+# On success writes the ASSIGNED host port to $PORT_FILE and returns 0. All
+# diagnostics go to stderr; on failure it emits an ::error:: annotation on
+# stdout (uncaptured) and returns non-zero.
 start() {
   local name="$1" redis_args="$2" auth="$3" port i
 
