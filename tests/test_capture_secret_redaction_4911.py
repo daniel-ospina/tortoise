@@ -37,6 +37,7 @@ from __future__ import annotations
 import ast
 import re
 import secrets
+import string
 import uuid
 from pathlib import Path
 
@@ -901,7 +902,10 @@ _MINT_MODULES: tuple[str, ...] = (
 #: The prefixes the product mints as CREDENTIALS — each must have a rule.
 _CREDENTIAL_PREFIXES = ("tt_", "tk_", "oat_", "ort_", "ct_", "cs_", "st_")
 
-#: The full CHARACTER CLASS each family's body is drawn from.
+#: The full CHARACTER CLASS each family's body is drawn from — EVERY member, not
+#: a representative sample. The probe below is built from this, so a class that
+#: loses one member must go red: with a 6-character sample, dropping a single
+#: subcategory (`q`) slipped past 48% of runs (found in review).
 #: ⛔ `_has_a_rule` is also checked against a DETERMINISTIC body built from this,
 #: because a body taken from the generator is a SAMPLE. Measured in review: over
 #: 2,000 runs, narrowing the url-safe class to alnum was missed ~26% of the time
@@ -912,10 +916,14 @@ _BODY_ALPHABETS = {
     "tt_": "0123456789abcdef",
     "tk_": "0123456789abcdef",
     "st_": "0123456789abcdef",
-    "oat_": "aZ09-_",
-    "ort_": "aZ09-_",
-    "ct_": "aZ09-_",
-    "cs_": "aZ09-_",
+    # `-_` FIRST, not last: the probe takes the FIRST `width` characters of the
+    # repeated alphabet, and `width` is 43 — so with the specials appended they
+    # fell outside the window and the alnum narrowing still slipped through. The
+    # classes are `[A-Za-z0-9_-]` (64 members) and this string is all 64.
+    "oat_": "-_" + string.ascii_letters + string.digits,
+    "ort_": "-_" + string.ascii_letters + string.digits,
+    "ct_": "-_" + string.ascii_letters + string.digits,
+    "cs_": "-_" + string.ascii_letters + string.digits,
 }
 
 
@@ -1134,9 +1142,16 @@ def _prefixes_of_head(
 ) -> tuple[str, ...] | None:
     """Prefixes this f-string head contributes; ``None`` if it is not one of ours.
 
-    ``None`` means "not a credential-prefix shape" (skip it). An EMPTY tuple
-    means "it IS one, but its prefix could not be resolved" — the caller fails
-    closed on that, because skipping quietly is how a family escapes.
+    ``None`` means "not a credential-prefix shape" (skip it); an EMPTY tuple means
+    "it IS one, but its prefix could not be resolved".
+
+    ⚠️ The caller fails closed on an empty tuple only when the token is the FIRST
+    tail (`f"{prefix}{uuid4().hex}"`). A token later in the template
+    (`f"{prefix}_{uuid4().hex}"` — prefix name, a literal `_`, then the token) is
+    SKIPPED SILENTLY, because nothing there marks the leading value as a prefix.
+    No such credential site exists today (the only FormattedValue-headed mint in
+    the three modules is `hosted_api.py:8924`, which fails closed), but the limit
+    is real: "fails closed" does not cover it.
     """
     if isinstance(head, ast.Constant) and isinstance(head.value, str):
         return (head.value,) if head.value.endswith("_") else None
