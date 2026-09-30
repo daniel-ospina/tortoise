@@ -24,9 +24,11 @@ settles the claim ~0.65 unmitigated, ~0.589 at strength 0.50 (Δ≈0.064),
 
 import os  # noqa: I001
 import pytest
+
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 
-_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_ep_mitigation"
+_DB_URI = _live_utils.docker_uri("tortoise_test_ep_mitigation")
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
