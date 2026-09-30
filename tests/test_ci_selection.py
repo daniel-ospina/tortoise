@@ -9,6 +9,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shlex
 import shutil
@@ -1443,10 +1444,16 @@ def test_no_required_check_names_a_fast_leg():
     assert "test (" not in mergify_code, \
         "no enforced mergify line may name a shard leg — the shard set changes with S"
     assert "      - check-success=python-ci-gate" in mergify_code
-    settings = (REPO / ".github" / "settings.yml").read_text()
-    settings_code = "\n".join(
-        ln for ln in settings.splitlines() if not ln.lstrip().startswith("#"))
-    assert "test (" not in settings_code
+    # The LIVE required set is a GitHub API surface. Its in-repo MIRROR is
+    # docs/ci/required-contexts.json, which the guard owns and keeps equal to the
+    # declaration home — read the MIRROR, never the declaration home itself. A
+    # test or tool reading the declaration home is what makes it silently live,
+    # and clause viii(b) of tools/mergify_config_guard.py refuses exactly that
+    # (reading it here turned this file into a reported divergence).
+    record = json.loads((REPO / "docs" / "ci" / "required-contexts.json").read_text())
+    assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
+        "no required context may be a shard leg — the shard set changes with S, so "
+        "keying the required set on a leg name would make the gate unsatisfiable")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
