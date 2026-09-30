@@ -378,6 +378,19 @@ def test_every_conftest_module_level_tests_import_is_shared():
         assert result["test_files"] == "ALL", result
 
 
+def test_the_docker_lane_seam_forces_the_full_matrix():
+    """#6673: `tests/_live_utils.py` carries the docker lane's port/host
+    resolution and is imported by test modules registered on every docker-lane
+    surface (core, ep, sdk, api, eval) — `git grep -l _live_utils -- tests/`
+    lists every file that touches it (importers plus mention-only references). The conftest-derived ratchet cannot cover it (it is not a
+    conftest import), so without the explicit entry a seam-only edit selected
+    `core` and the other surfaces' consumers never ran on the PR that made it.
+    """
+    result = _sel(["tests/_live_utils.py"])
+    assert result["full"] is True, result
+    assert result["test_files"] == "ALL", result
+
+
 def test_every_shared_module_entry_selects_the_full_matrix():
     """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
 
@@ -1324,9 +1337,15 @@ def test_shard_labels_are_a_superset_when_s_changes():
 def test_watchdog_is_per_shard_and_scales_with_the_shard():
     """#6135: the watchdog is PER-LEG. Inheriting the old 55m means a hung
     ~6-minute shard is detected ~8× later than it should be."""
-    from tools.ci_selection import (WATCHDOG_CEILING_MIN, WATCHDOG_FLOOR_MIN,
-                                    _duration_weight, _durations_map, fast_pool,
-                                    load_manifest, shard_watchdog_minutes)
+    from tools.ci_selection import (
+        WATCHDOG_CEILING_MIN,
+        WATCHDOG_FLOOR_MIN,
+        _duration_weight,
+        _durations_map,
+        fast_pool,
+        load_manifest,
+        shard_watchdog_minutes,
+    )
     small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
     old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
     assert small == WATCHDOG_FLOOR_MIN == 15, small
@@ -1733,7 +1752,12 @@ def test_expect_uri_gated_iff_uri():
     assert "matrix.half" not in script, \
         "the URI gate must NOT be half-specific (Task 9 flipped BOTH halves)"
     then_block = script.split("then", 1)[1].split("fi", 1)[0]
-    assert 'URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"' in then_block
+    # #6673: the host port is assigned at runtime by the provision step, so the
+    # URI expands $TORTOISE_TEST_DOCKER_PORT. What this assertion protects is
+    # unchanged: the passworded docker:// shape and the test-prefixed path.
+    assert ('URI="docker://:falkordb@localhost:'
+            '${TORTOISE_TEST_DOCKER_PORT') in then_block
+    assert '/tortoise_test_matrix"' in then_block
     assert 'EXPECT_URI="1"' in then_block
     assert 'echo "URI=$URI" >> "$GITHUB_ENV"' in script
     assert 'echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"' in script
@@ -1826,14 +1850,25 @@ def test_pmv_job_carries_uri_manifest_guard():
                / "post-merge-validation.yml")
     wf = _yaml.safe_load(wf_path.read_text())
     job = wf["jobs"]["validate"]
-    assert job["env"]["TORTOISE_DB_URI"] == \
-        "docker://:falkordb@localhost:6379/tortoise_test_matrix", \
-        "pmv must run the docker lane with the test-prefixed URI path"
-    assert job["env"]["TORTOISE_TEST_EXPECT_URI"] == "1"
-    assert "falkordb" in job.get("services", {}) and \
-        "falkordb-legacy" in job.get("services", {}), \
-        "pmv must provision BOTH falkordb services (6379 URI + 16379 probes)"
     steps = job["steps"]
+    # #6673: the URI can no longer be a job-level literal — the host port is
+    # assigned at runtime — so the SAME invariants (docker lane, test-prefixed
+    # path, BOTH probe families provisioned) are now carried by the provision
+    # step. A `services:` block must never come back: its fixed host ports are
+    # the mechanism whose collision produced the false reds.
+    assert "services" not in job, \
+        "pmv must not go back to a `services:` block (fixed host ports, #6673)"
+    assert "TORTOISE_DB_URI" not in job.get("env", {}), \
+        "the pmv URI is exported at runtime by the provision step, not a literal"
+    assert job["env"]["TORTOISE_TEST_EXPECT_URI"] == "1"
+    provision = next(s for s in steps
+                     if str(s.get("uses", "")).endswith("falkordb-provision"))
+    assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
+    assert provision["with"]["image"] == "falkordb/falkordb-server:latest"
+    assert provision.get("if") == "needs.dedup-check.outputs.skip != 'true'"
+    assert any(str(s.get("uses", "")).endswith("falkordb-teardown")
+               and s.get("if") == "always()" for s in steps), \
+        "pmv must tear the services down even when the job fails"
     run = next(s for s in steps
                if s.get("name", "").startswith("Run tests"))
     invocation = run["run"]
@@ -1893,7 +1928,11 @@ def test_live_required_job_runs_only_declared_live_tests():
     # L111-153 + test_event_store L165-185). If a future test adds a
     # path=/URI-default DETACH, the job URI must gain the P1-2 test-prefixed
     # path.
-    assert job["env"]["TORTOISE_DB_URI"] == "docker://:falkordb@localhost:6379/tortoise"
+    assert "TORTOISE_DB_URI" not in job.get("env", {}), \
+        "#6673: the carrier moved to the provision step (runtime host port)"
+    provision = next(s for s in steps
+                     if str(s.get("uses", "")).endswith("falkordb-provision"))
+    assert provision["with"]["uri_graph"] == "tortoise"
 
 
 def test_test_slow_job_carries_junitxml_manifest_guard():
@@ -2184,8 +2223,15 @@ def test_track_b_docker_lane_sets_team_stray_opt_in():
     opt-in must be set there too, or the #1686 journal-blind closure is
     silently inert on that lane."""
     wf = _load_python_ci()
-    env = wf["jobs"]["test-track-b"].get("env", {})
-    assert env.get("TORTOISE_DB_URI", "").endswith("tortoise_test_matrix")
+    job = wf["jobs"]["test-track-b"]
+    # #6673: the URI moved from a job-level literal to the provision step's
+    # `uri_graph` (the host port is Docker-assigned at runtime). The invariant
+    # this pins is unchanged: test-track-b IS a docker lane on the test-prefixed
+    # graph, so the #1886 journal-blind team_* closure must not go inert there.
+    provision = next(s for s in job["steps"]
+                     if str(s.get("uses", "")).endswith("falkordb-provision"))
+    assert provision["with"]["uri_graph"] == "tortoise_test_matrix"
+    env = job.get("env", {})
     assert env.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1", \
         "test-track-b (dedicated docker lane) must set the team_* stray opt-in"
 
