@@ -1318,7 +1318,7 @@ def push_legs(manifest: dict) -> dict:
     # neutral rather than dumping the whole bench set on one shard.
     extras = [f.replace(".py", "") for f in manifest.get("push_extra", [])]
     shards = []
-    for i, (label, bin_files) in enumerate(zip(labels, bins)):
+    for i, (label, bin_files) in enumerate(zip(labels, bins, strict=True)):
         # BARE names (no `.py`): the workflow's run step maps them with
         # `tests/<name>.py`, and `workflow_halves_issues` keys the manifest on
         # bare names too. A `.py` left here would be read as a file named
@@ -1364,7 +1364,7 @@ def build_shard_entries(files: list[str], durations: dict,
     bins = split_fast_gate(files, durations, shards=shards)
     labels = shard_labels(len(bins))
     entries = []
-    for label, bin_files in zip(labels, bins):
+    for label, bin_files in zip(labels, bins, strict=True):
         # BARE names — see push_legs: the workflow maps them with `tests/<n>.py`.
         names = sorted((f[len("tests/"):] if f.startswith("tests/") else f)
                        .replace(".py", "") for f in bin_files)
