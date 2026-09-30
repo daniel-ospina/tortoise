@@ -362,10 +362,12 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             only if at least one handler makes the skip loud as a DIRECT
             statement of its body: an assignment to ``_WATCHER_START_ERROR``
             (so /health reports ``failed``, degraded) or a ``raise`` of ANY
-            form. A ``raise`` counts only while the ``finally`` cannot discard
-            it — ``finally: return`` overrides the re-raise at runtime, so
-            beneath a frame-leaving ``finally`` only the marker assignment is
-            loud. A handler that only logs or ``pass``es swallows the skip,
+            form. Both are gated on the ``finally``: a ``raise`` counts only
+            while the ``finally`` cannot discard it (``finally: return``
+            overrides the re-raise at runtime), and the marker assignment
+            counts only while the ``finally`` does not itself write
+            ``_WATCHER_START_ERROR`` (a clearing ``finally`` undoes it). A
+            handler that only logs or ``pass``es swallows the skip,
             which is exactly #4498's original blindness. This is checked for
             EVERY such ancestor, not just the nearest, because an outer
             swallowing ``try`` can skip an inner marker-setting one entirely.
@@ -543,12 +545,12 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
     # reds a safe `finally`, never greens a swallowing one. A
     # `try` with handlers can swallow, unless at least one handler makes it loud
     # as a DIRECT statement of its body: an assignment to
-    # `_WATCHER_START_ERROR`, or a `raise`. A `raise` counts only while the
-    # `finally` cannot discard it (`finally: return` overrides the re-raise at
-    # runtime), so beneath a frame-leaving finally only the marker assignment
-    # is loud. Direct statement only, so
-    # `except Exception: if False: _WATCHER_START_ERROR = ...` cannot look loud
-    # while setting nothing.
+    # `_WATCHER_START_ERROR`, or a `raise`. Both are gated on the `finally`: the
+    # raise counts only while it cannot discard it (`finally: return` overrides
+    # the re-raise), and the marker assignment only while the `finally` does not
+    # itself write the marker (a clearing `finally` undoes it). Direct statement
+    # only, so `except Exception: if False: _WATCHER_START_ERROR = ...` cannot
+    # look loud while setting nothing.
     def _finalbody_leaves_frame(node: ast.Try | ast.TryStar) -> bool:
         # Nested `def`/`async def`/`lambda`/`class` bodies are excluded: a
         # `return` in there binds to that inner frame and cannot leave THIS
@@ -580,6 +582,20 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
             # — the skipped publish then goes silent, which is #4498 all over
             # again.
             return not leaves
+        # A `finally` that itself writes `_WATCHER_START_ERROR` undoes a
+        # handler's marker assignment — the symmetric counterpart to `leaves`
+        # gating the raise. Fail-closed at any depth: a `finally` that assigns
+        # the marker on a healthy boot would degrade /health anyway.
+        finally_writes_marker = any(
+            isinstance(sub, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_WATCHER_START_ERROR"
+                for target in sub.targets
+            )
+            for stmt in node.finalbody
+            for sub in ast.walk(stmt)
+        )
         for handler in node.handlers:
             for stmt in handler.body:
                 if isinstance(stmt, ast.Assign) and any(
@@ -587,7 +603,7 @@ def test_watcher_expected_publish_happens_outside_conditionals_and_in_module_sco
                     and target.id == "_WATCHER_START_ERROR"
                     for target in stmt.targets
                 ):
-                    return True
+                    return not finally_writes_marker
                 # A re-raise is loud only while the `finally` cannot discard
                 # it: `finally: return` overrides it, so the skip goes silent.
                 if isinstance(stmt, ast.Raise) and not leaves:
