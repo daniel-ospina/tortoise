@@ -1722,6 +1722,81 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
             f"slow carve-out file {carved} must not ride the docker slow legs"
 
 
+def test_xdist_is_admitted_only_in_the_d3_shape():
+    """#6136 / epic #5215 owner decision D3: xdist is admitted for ONE shard
+    only, with `--dist loadscope`, gated to the docker (URI-set) shape.
+
+    Every expectation is DERIVED from the workflow text — the invocation
+    sites that pass `-n`, the `--dist` mode they pass, and the guard that
+    admits the pinned worker count — never a frozen literal naming a job or
+    a half. A literal would re-stale the moment the admitted shard moved;
+    D3's properties (one site / loadscope / docker-gated) do not.
+    """
+    wf = _load_python_ci()
+    sites: list[tuple[str, str, str]] = []
+    for job_name, job in wf["jobs"].items():
+        for step in job.get("steps", []) or []:
+            for line in (step.get("run") or "").splitlines():
+                if "python -m pytest" in line:
+                    sites.append((job_name, step.get("name", ""), line))
+    assert sites, "no pytest invocation site found in python-ci.yml"
+
+    xdist_sites = [s for s in sites
+                   if _re.search(r'(?:^|\s)-n(?:\s|")', s[2])]
+    assert len(xdist_sites) == 1, (
+        "D3 admits xdist on ONE shard only: the workflow passes `-n` at "
+        f"{len(xdist_sites)} pytest invocation site(s) "
+        f"{[(j, n) for j, n, _ in xdist_sites]}")
+    assert not any("--dist loadfile" in line for _, _, line in sites), (
+        "D3 names `--dist loadscope`; `--dist loadfile` is not the admitted "
+        "distribution mode")
+
+    job_name, step_name, cmdline = xdist_sites[0]
+    assert "--dist loadscope" in cmdline, (
+        f"{job_name}/{step_name}: the admitted xdist site must pass "
+        f"`--dist loadscope` (D3), got: {cmdline}")
+    assert '-n "$XDIST_WORKERS"' in cmdline, (
+        f"{job_name}/{step_name}: the worker count must flow through the "
+        "step-local `XDIST_WORKERS`, so the admit/deny decision has ONE home")
+    pinned = wf.get("env", {}).get("PYTEST_XDIST_WORKERS", "")
+    assert pinned.isdigit() and int(pinned) > 0, (
+        "the pinned xdist worker count must be a positive integer (D3: a "
+        f"pinned count, not `auto`), got {pinned!r}")
+    for jn, job in wf["jobs"].items():
+        for step in job.get("steps", []) or []:
+            if "PYTEST_XDIST_WORKERS" in (step.get("run") or ""):
+                assert (jn, step.get("name", "")) == (job_name, step_name), (
+                    f"{jn}/{step.get('name', '')}: the pinned count must be "
+                    "consumed at exactly the ONE admitted site")
+
+    # Derive the admitted shard(s) from the step's own guard + the job's
+    # matrix, so "one shard" is computed rather than asserted by name.
+    script = next(s["run"] for s in wf["jobs"][job_name]["steps"]
+                  if s.get("name", "") == step_name)
+    assert "TORTOISE_DB_URI" in script, (
+        f"{job_name}/{step_name}: the xdist site must be gated on the docker "
+        "URI — the URI-less embedded lane is the RC5 leak surface (#2875, "
+        "#3653) D3 keeps serial")
+    guard = _re.search(
+        r'matrix\.half \}\}" = "([^"]+)" \] && '
+        r'\[ -n "\$\{TORTOISE_DB_URI:-\}" \]',
+        script)
+    assert guard, (
+        f"{job_name}/{step_name}: the xdist site is not gated on BOTH a "
+        "single matrix half and a non-empty TORTOISE_DB_URI — D3 admits ONE "
+        "shard on the docker shape only")
+    halves = wf["jobs"][job_name]["strategy"]["matrix"]["half"]
+    admitted = [h for h in halves if h == guard.group(1)]
+    assert len(admitted) == 1, (
+        f"{job_name}/{step_name}: the guard `matrix.half == "
+        f"{guard.group(1)!r}` admits {len(admitted)} of the job's {halves} "
+        "half/ies; D3 admits one")
+    # Every shape that misses the guard must run serial (xdist's `-n 0`).
+    assert _re.search(r"^\s*XDIST_WORKERS=0\s*$", script, _re.M), (
+        f"{job_name}/{step_name}: the worker count must DEFAULT to xdist's "
+        "serial mode (`0`) and be raised only inside the D3 guard")
+
+
 def test_carve_out_job_uri_unset_with_carve_out_flag():
     """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the embedded
     set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the

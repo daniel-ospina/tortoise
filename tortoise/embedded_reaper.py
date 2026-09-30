@@ -497,11 +497,19 @@ def active_suite_tokens() -> list[str]:
 def active_suite_markers() -> list[dict]:
     """Liveness-verified active-suite marker records.
 
-    Returns [{token, pid, start}] for markers whose recorded (pid,
+    Returns [{token, pid, start, run}] for markers whose recorded (pid,
     start_time) identity is live (#1642 FIX 5: a recycled pid — live but a
     DIFFERENT process — counts as stale, so a SIGKILLed suite's marker can
     never defer later sweeps forever). Markers without a parsable pid or
     start are skipped (fail toward absent).
+
+    `run` is the optional xdist run identity (#6136): pytest-xdist writes
+    the same PYTEST_XDIST_TESTRUNUID into every worker of one `pytest -n`
+    invocation, and conftest records it in each worker's marker. Readers use
+    it to tell a SIBLING WORKER (different pid, same run — its graphs belong
+    to a separate journal and never defer ours) from a GENUINELY CONCURRENT
+    SUITE (different run, or a non-xdist process with no run id). None when
+    the marker predates this field or was written by a non-xdist session.
     """
     try:
         entries = os.listdir(ACTIVE_SUITES_DIR)
@@ -547,7 +555,9 @@ def active_suite_markers() -> list[dict]:
                 start = None
         if not _pid_identity_matches(pid, start):
             continue  # dead pid OR recycled (start mismatch) -> stale
-        markers.append({"token": e, "pid": pid, "start": start})
+        rm = re.search(r"run=(\S+)", text)
+        run = rm.group(1) if rm else None
+        markers.append({"token": e, "pid": pid, "start": start, "run": run})
     return markers
 
 

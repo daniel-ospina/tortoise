@@ -1571,6 +1571,32 @@ def test_active_suite_markers_recycled_pid_is_stale(monkeypatch, tmp_path):
     assert tokens == ["legacy-no-start", "right-identity"], tokens
 
 
+def test_active_suite_markers_carries_the_xdist_run_id(monkeypatch, tmp_path):
+    """#6136: the marker's optional `run=` line is surfaced as `run`, so a
+    teardown can tell a SIBLING xdist worker (same run, different pid) from a
+    genuinely concurrent suite. A marker without the line (pre-#6136, or a
+    non-xdist session) reads `run=None` — fail-closed: nothing is a sibling,
+    so every foreign marker keeps its pre-#6136 deferral semantics."""
+    from tortoise.embedded_reaper import (
+        _process_start_time,
+        active_suite_markers,
+    )
+    marker_dir = tmp_path / "active_suites"
+    marker_dir.mkdir(parents=True)
+    start = _process_start_time(os.getpid())
+    assert start is not None, "cannot derive own start time"
+    (marker_dir / "with-run").write_text(
+        f"pid={os.getpid()}\nstart={start}\nrun=deadbeef01234567\n")
+    (marker_dir / "no-run").write_text(
+        f"pid={os.getpid()}\nstart={start}\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    by_token = {m["token"]: m for m in active_suite_markers()}
+    assert set(by_token) == {"with-run", "no-run"}
+    assert by_token["with-run"]["run"] == "deadbeef01234567"
+    assert by_token["no-run"]["run"] is None
+
+
 def test_dead_suite_marker_does_not_hold_the_only_safe_gate(
         monkeypatch, tmp_path):
     """#4487 directive (verified ALREADY satisfied): the only-safe gate must be

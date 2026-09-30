@@ -151,6 +151,33 @@ env:
   # and env-broken exclusions are derived by the selector (#1472).
   # Env-broken in this job (tests/e2e needs browsers; test_agent_signup needs
   # a live redis on 6379) — single source is tools/ci_selection.py.
+  # #6136 (epic #5215, owner decision D3 at docs/plans/2026-09-26-5215-merge-
+  # throughput.md): the pytest-xdist worker count for the ONE shard D3
+  # admits. It is consumed at exactly ONE site — the `test` job's run step —
+  # and only when BOTH hold: `matrix.half == 'a'` (one shard) AND
+  # TORTOISE_DB_URI is non-empty (the docker shape). No other pytest
+  # invocation site reads this value.
+  #
+  # The URI condition is what keeps the EMBEDDED shape serial. The tier-2
+  # URI gate leaves TORTOISE_DB_URI empty BY DESIGN (epic #1647 Task 10
+  # P1-9), so on a tier-2 PR this very step runs the embedded redislite
+  # lane — the RC5 leak surface (#2875, #3653) that D3 does not admit `-n`
+  # on. That is a runtime condition on the URI, not a claim that the step
+  # can never run embedded: the step shares its run block with tier-2, so a
+  # comment asserting "docker only" would be false. The condition is
+  # evaluated in the step and echoed there, so which shape got `-n` is
+  # legible in the log rather than inferred.
+  #
+  # PINNED rather than `-n auto`: ubuntu-latest is 4 vCPU, and a pinned
+  # count cannot silently follow a runner-class change. The shard keeps
+  # PYTEST_XDIST_TESTRUNUID (xdist sets it in every worker), which is what
+  # lets tests/conftest.py's E2E-7 survivor gate tell a sibling worker
+  # from a genuinely concurrent suite — D3's leak-count assertion.
+  #
+  # Scope note: ONE shard is the isolation-bounded proof D3 admits, not the
+  # full throughput lever — it cannot move the overall gate wall on its own
+  # (see the run step's HONEST LIMIT note).
+  PYTEST_XDIST_WORKERS: "4"
 
 jobs:
   changes:
@@ -663,7 +690,55 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          # #6136 (epic #5215, owner decision D3): xdist is admitted for ONE
+          # shard, on the DOCKER shape only. The decision is made HERE, at
+          # the point of use, so both limits are enforced by the command that
+          # actually runs — not by a comment claiming them.
+          #   * one shard — `matrix.half == "a"` ONLY. Half (b) stays serial:
+          #     it is the control leg that keeps a flake attributable, and
+          #     bounding the fan-out to one leg is what D3 admits. Plan input
+          #     (docs/plans/2026-09-26-5215-merge-throughput.md §2.2 T-I):
+          #     test (a) 38 m vs test (b) 28 m, so (a) is the half whose
+          #     reduction can move the job's wall.
+          #     HONEST LIMIT: this parallelises ONE of the fast job's two
+          #     halves, so the job's wall becomes max(half a / speedup,
+          #     half b) and the OVERALL gate wall may still be the serial
+          #     `test-slow` legs. One shard is not claimed to reach the
+          #     <10 min target on its own — it is the isolation-bounded
+          #     proof D3 admits, not the full throughput lever.
+          #   * docker shape — TORTOISE_DB_URI non-empty. On a tier-2 PR the
+          #     URI gate above leaves it empty and this SAME step runs the
+          #     embedded redislite lane — the RC5 leak surface (#2875,
+          #     #3653) D3 does not admit `-n` on. Enforced by the `-n` test
+          #     below, not assumed; the branch that ran is echoed so which
+          #     shape got `-n` is legible in the job log.
+          #   * `--dist loadscope`, NOT loadfile: distribution is by module/
+          #     class scope, so a module's fixtures and intra-module ordering
+          #     stay on one worker by construction while files still
+          #     parallelise. D3 names loadscope specifically.
+          #   * leak count — per-worker resources come for free (each worker
+          #     is its own process: its own TORTOISE_TEST_SESSION nonce,
+          #     journal and active-suite marker), and the E2E-7 survivor gate
+          #     in tests/conftest.py is now sibling-worker-aware, so it
+          #     asserts the OWNED leak count PER WORKER rather than once per
+          #     job. Every output contract the steps below read is
+          #     xdist-safe: the -r fEs summary (`^FAILED ` nodeids, the
+          #     skip-guard's reason source) is printed unprefixed by the
+          #     controller, `grep -c ' PASSED'` still counts, and the
+          #     junitxml the coverage manifest reconciles is aggregated.
+          # `-n 0` is xdist's serial mode (no worker subprocesses; every
+          # session fixture runs in the main process — verified against the
+          # pinned pytest-xdist 3.8.0 with `--dist loadscope`), so the
+          # command line carries the flag unconditionally while the EFFECTIVE
+          # worker count is 0 everywhere except the one admitted shard. That
+          # keeps the whole decision on the single line a reader (and the
+          # workflow pin in tests/test_ci_selection.py) inspects.
+          XDIST_WORKERS=0
+          if [ "${{ matrix.half }}" = "a" ] && [ -n "${TORTOISE_DB_URI:-}" ]; then
+            XDIST_WORKERS="$PYTEST_XDIST_WORKERS"
+          fi
+          echo "#6136 xdist: -n $XDIST_WORKERS --dist loadscope (half=${{ matrix.half }} uri=${TORTOISE_DB_URI:-<unset>})"
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" --dist loadscope -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
