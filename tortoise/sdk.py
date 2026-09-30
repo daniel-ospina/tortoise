@@ -2733,7 +2733,14 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
 
     Resolution order is unchanged and is the ONE home for it::
 
-        str(valid_from) → stored_vf (truthiness) → successor_created_at → now
+        str(valid_from) [a STRING must name an instant; a numeric is exempt]
+                        → stored_vf (TRUTHY and ORDERABLE)
+                        → successor_created_at (ORDERABLE) → now
+
+    ``stored_vf`` is taken only when it is ORDERABLE (#5360), not merely
+    truthy: a present-but-unparseable stored start carries no instant, and
+    persisting it as the end leaves the window unbounded — see the branch
+    comment below.
 
     Returns the value AS PERSISTED.  The ``stored_vf`` branch stays RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
@@ -2766,34 +2773,99 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     legacy or imported point carrying a non-ISO start is reachable, and
     refusing here would make such a point impossible to supersede until its
     window was repaired — foreclosing the very write a caller would use to
-    move past it.  An unparseable resolved END is #5360's residual for the
-    same reason.
+    move past it.  (An unparseable resolved END was #5360's residual; it is
+    closed below on every route reachable under the declared ``str | None``
+    type plus the numeric-epoch extension — the numeric kwarg being the
+    deliberate exemption: the no-kwarg STORED-start branch requires
+    orderability, a STRING ``valid_from`` kwarg that names no instant falls
+    through, and the ``createdAt`` fallback likewise requires an orderable
+    value and otherwise lands on ``now``. So a value naming no instant becomes
+    an orderable instant rather than an end no query can order — see the branch
+    comments below.)
 
     Raises ``ValueError`` BEFORE any mutation at either call site, so no
     event is journaled and no half-write survives a refusal.
 
-    Scope: this refuses the **inverted** direction.  An **unparseable**
-    resolved end (a truthy-but-unparseable stored successor ``validFrom``
-    with no kwarg) is a SEPARATE residual — the orderability gap on the
-    no-kwarg path — deliberately NOT absorbed here.
+    Scope: this refuses the **inverted** direction.  The resolution of an
+    **unparseable** end is handled in the resolution block below (#5360): the
+    no-kwarg STORED-start branch requires orderability, and a STRING
+    ``valid_from`` kwarg that names no instant falls through to
+    ``successor_created_at`` rather than being persisted. A NUMERIC kwarg is
+    deliberately exempt there.
 
     The ``valid_from``-vs-successor agreement guard is NOT here: it is
     reachable only when a kwarg is passed, and it stays inline at its
     reviewed call site.
     """
     from .search_engine import _created_sort_key  # lazy — import cycle
-    if valid_from is not None:
+    if valid_from is not None and not (
+        # #5360 — a STRING kwarg that names no instant must not be persisted as
+        # the end either. A NUMERIC kwarg is deliberately EXEMPT from this and
+        # is passed through to ``str(valid_from)`` as before: that string keys
+        # ``(1, text)`` (no ``-``/``T``), and
+        # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
+        # that the guard measures that RESOLVED value, so the numeric case is
+        # NOT an inversion. Gating on ``isinstance(valid_from, str)`` keeps B3's
+        # decision intact — a blanket orderability test here, applied to
+        # numbers too, replaces the numeric kwarg's end and reddens B3.
+        isinstance(valid_from, str)
+        and _created_sort_key(valid_from)[0] != 0
+    ):
         succ_vf = str(valid_from)
-    elif stored_vf:
+    elif stored_vf and _created_sort_key(stored_vf)[0] == 0:
+        # #5360 — ORDERABLE, not merely truthy. A stored start that is present
+        # but unorderable ("not-a-date", "TBD") names no instant, and this
+        # branch used to persist it RAW as the predecessor's window END. The
+        # resulting window has no orderable boundary:
+        # ``_created_sort_key("not-a-date")`` is ``(1, text)``, so the #4021
+        # inversion guard's ``end >= start`` conjunct is trivially satisfied
+        # (that guard skips an unorderable successor — see below), while
+        # ``_covers`` cannot exclude the window either, because
+        # ``(1, x) < (0, y)`` is False. The predecessor then appears to cover
+        # EVERY later instant — the exact overlap class #3980 exists to
+        # prevent, on the one path #3980 does not guard.
+        #
+        # Falling through to ``successor_created_at`` is the SAME treatment a
+        # FALSEY stored start already gets (#3985), and normalising rather
+        # than refusing is this function's own documented policy for the
+        # identical shape on the predecessor side, where a present-but-
+        # unparseable start is "SKIPPED, not refused" — because
+        # ``create_point`` accepts any caller ``validFrom``, so refusing would
+        # make a legacy/imported point impossible to supersede until its
+        # window was repaired, foreclosing the very write a caller would use
+        # to move past it. The successor side is the same shape: refuse there
+        # and such a point could never be superseded at all.
+        #
+        # The test for ORDERABILITY lives HERE and NOT as a normalisation of
+        # the resolved value below, because such a normalisation would reverse
+        # a deliberate, pinned decision: a numeric ``valid_from`` kwarg is
+        # persisted as ``str(valid_from)``, which keys ``(1, text)`` (no
+        # ``-``/``T``), and
+        # ``test_window_end_numeric_kwarg_resolved_before_measure`` (B3) pins
+        # that the guard measures that RESOLVED value — so the numeric case is
+        # NOT an inversion.
         succ_vf = stored_vf
-    elif successor_created_at:
+    elif successor_created_at and _created_sort_key(successor_created_at)[0] == 0:
+        # #5360, the THIRD route (found in the third review cycle): ``createdAt``
+        # is a normal CALLER prop — ``create_point``'s own comment records that
+        # api.py, ingest.py and the source-inheritance path all pass one, and
+        # ``_create_map`` lets a caller override the ``"$now"`` default — so an
+        # unparseable ``createdAt`` is reachable through the public API, and
+        # this fallback used to persist it RAW as the predecessor's END. Same
+        # unbounded window as the other two routes. Requiring orderability here
+        # sends it to ``now`` instead, which is always ISO.
         succ_vf = successor_created_at
     else:
         succ_vf = now  # monotone fallback — never a gap
     if old_vfs:
         k_succ = _created_sort_key(succ_vf)
-        # An unparseable successor start has no instant to compare against;
-        # that is #5360's residual, not this guard's.
+        # A NUMERIC KWARG can still resolve unparseable here and is
+        # DELIBERATELY left that way (see above and B3): the guard measures the
+        # value the writer persists, and an unparseable resolved value is
+        # skipped rather than compared, so it is not an inversion. Every other
+        # route yields an orderable ``succ_vf`` — #5360 closed the no-kwarg
+        # STORED-start route, the string-kwarg route, and the ``createdAt``
+        # fallback.
         if k_succ[0] == 0:
             for old_vf in old_vfs:
                 if old_vf is None:
@@ -6744,7 +6816,13 @@ class TortoiseSDK:
         is legal. The comparison needs an INSTANT on both sides: a resolved
         start that is itself unparseable is not compared (it names no instant,
         so a refusal would rest on a lexicographic accident rather than a
-        comparison) — that open orderability residual is #5360's.
+        comparison) — the orderability residual is closed on the WRITE path
+        (#5360) for every route EXCEPT the deliberately-exempt numeric-epoch
+        ``valid_from`` kwarg: an unorderable resolved start or end is otherwise
+        normalised to an orderable instant rather than persisted. That kwarg is
+        still ``str()``-ed and left unorderable (see ``_supersede_window_end``
+        and ``docs/ONTOLOGY.md`` §4.7), so that ONE route can still write a
+        bound ``_covers`` cannot order.
 
         The kwarg is a CLAIM about the successor's window start, so when the
         successor carries a stored ``validFrom`` the two must be parseable
@@ -6753,9 +6831,13 @@ class TortoiseSDK:
         uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
         predecessor ``validTo`` that disagrees either leaves a GAP (a query
         instant covered by neither window) or an OVERLAP (two covering
-        candidates ⇒ ``ambiguous``). The kwarg remains the SOLE source when
-        the successor carries no stored ``validFrom`` (an undated successor),
-        unchanged. See docs/ONTOLOGY.md §4.7 (``validTo``).
+        candidates ⇒ ``ambiguous``). The kwarg is the SOLE source when the
+        successor carries no stored ``validFrom`` (an undated successor)
+        **unless it names no instant**: an unparseable STRING kwarg falls
+        through to the successor's ``createdAt``, and that fallback itself
+        requires an orderable value and otherwise lands on ``now`` (#5360). A
+        numeric-epoch kwarg is deliberately exempt — see
+        ``_supersede_window_end``. See docs/ONTOLOGY.md §4.7 (``validTo``).
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
@@ -6859,8 +6941,12 @@ class TortoiseSDK:
         # `(1, <text>)` and IS covered by it, so `""` only hides the successor
         # from parseable queries, which land in the predecessor's window end
         # instead. The resolution
-        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
-        # those two values it falls through to `createdAt`. The guard follows
+        # branch below takes a stored start only when it is TRUTHY **and**
+        # ORDERABLE (#5360), so `0` falls through because it is falsey (it IS
+        # orderable, keying `(0, 0.0)`, which is why truthiness cannot be
+        # dropped from the description) and `""` falls through because it is
+        # falsey too. The guard
+        # follows
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real
         # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
