@@ -427,8 +427,17 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("tortoise_oauth_client_id",
      re.compile(r"(?<![A-Za-z0-9])ct_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="tortoise_oauth_client_id")),
+    # ⛔ `cs_` MUST NOT SWALLOW STRIPE'S CHECKOUT-SESSION IDS. Stripe mints
+    # `cs_test_…`/`cs_live_…`, and this rule's body class matches them happily,
+    # so without the exclusion a third-party Stripe id in a checkout URL was
+    # recorded as `tortoise_oauth_client_secret` — a WRONG attribution, which is
+    # worse than no match (found in review: one real hit in a 615-transcript
+    # scan). The negation is on the SEGMENT, not the body: Tortoise's body is 43
+    # RANDOM url-safe characters, so it cannot begin `test_`/`live_` except by
+    # coincidence.
     ("tortoise_oauth_client_secret",
-     re.compile(r"(?<![A-Za-z0-9])cs_[A-Za-z0-9_-]{43,}(?![A-Za-z0-9])"),
+     re.compile(r"(?<![A-Za-z0-9])cs_(?!(?:test|live)_)[A-Za-z0-9_-]{43,}"
+                r"(?![A-Za-z0-9])"),
      _REDACTION_VALUE.format(kind="tortoise_oauth_client_secret")),
     ("tortoise_signup_token",
      re.compile(r"(?<![A-Za-z0-9])st_[0-9a-f]{64,}(?![0-9a-f])"),

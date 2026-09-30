@@ -35,6 +35,7 @@ text, or a reader recomputing it would disagree with the node).
 from __future__ import annotations
 
 import ast
+import secrets
 from pathlib import Path
 
 import pytest
@@ -113,7 +114,7 @@ CASES: tuple[tuple[str, str, str], ...] = (
     ("tortoise_oauth_client_secret", "tortoise_oauth_client_secret",
      _synth("cs_", _fill(43))),
     ("tortoise_signup", "tortoise_signup_token",
-     _synth("st_", "a1b2c3d4e5f6a7b8" * 8)),
+     _synth("st_", "a1b2c3d4e5f6a7b8" * 4)),
     ("jev", "jev_api_key", "jv_live_" + _fill(24)),
     ("github_classic", "github_token", "ghp_" + _fill(36)),
     ("github_fine_grained", "github_token", "github_pat_" + _fill(60)),
@@ -894,6 +895,19 @@ def _names_a_token_helper(node: ast.AST) -> bool:
     )
 
 
+def _resolve_prefix(arg: ast.AST | None, consts: dict[str, str]) -> str | None:
+    """The prefix literal, or None when this scanner cannot resolve it.
+
+    ``None`` is a FAILURE at the call site, not an omission — see
+    ``_mint_sites``.
+    """
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.Name) and arg.id in consts:
+        return consts[arg.id]
+    return None
+
+
 def _mint_sites(source: str) -> set[str]:
     """Credential prefixes this source MINTS, read from the parsed tree.
 
@@ -903,10 +917,14 @@ def _mint_sites(source: str) -> set[str]:
     ``f"<prefix>{token_hex(32)}"``.
 
     Parsing rather than scanning text is load-bearing in BOTH directions: a
-    reformatted call is still found, and a prefix merely NAMED in a comment or
-    docstring is not counted as a mint site.
+    prefix merely NAMED in a comment or docstring is not counted as a mint site,
+    and a mint call spelled in a way this scanner does not understand is a FAILURE
+    rather than a silent omission (see ``unresolved`` below) — a scanner that
+    quietly skips what it cannot parse is the same defect as a rule list nobody
+    checks.
     """
     found: set[str] = set()
+    unresolved: list[str] = []
     tree = ast.parse(source)
     consts: dict[str, str] = {}
     for node in tree.body:
@@ -920,13 +938,16 @@ def _mint_sites(source: str) -> set[str]:
         if isinstance(node, ast.Call):
             fn = node.func
             name = getattr(fn, "id", None) or getattr(fn, "attr", None)
-            if name != "_new_token" or not node.args:
+            if name != "_new_token":
                 continue
-            arg = node.args[0]
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                found.add(arg.value)
-            elif isinstance(arg, ast.Name) and arg.id in consts:
-                found.add(consts[arg.id])
+            # Positional `_new_token("oat_")` OR keyword `_new_token(prefix=…)`.
+            arg = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "prefix"), None)
+            resolved = _resolve_prefix(arg, consts)
+            if resolved is None:
+                unresolved.append(ast.dump(node)[:120])
+            else:
+                found.add(resolved)
         elif isinstance(node, ast.JoinedStr) and node.values:
             head = node.values[0]
             if not (isinstance(head, ast.Constant) and isinstance(head.value, str)
@@ -934,22 +955,84 @@ def _mint_sites(source: str) -> set[str]:
                 continue
             if any(_names_a_token_helper(tail) for tail in node.values[1:]):
                 found.add(head.value)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            # `"zz_" + token_urlsafe(32)` — the non-f-string spelling of a mint.
+            left = node.left
+            if (isinstance(left, ast.Constant) and isinstance(left.value, str)
+                    and left.value.endswith("_")
+                    and _names_a_token_helper(node.right)):
+                found.add(left.value)
+    if unresolved:
+        raise AssertionError(
+            "this scanner cannot resolve these mint calls, so it cannot prove "
+            "they are ruled — extend the scanner rather than letting a family "
+            "escape unseen: " + "; ".join(unresolved))
     return found
 
 
-def _minted_widths() -> tuple[str, str]:
-    """One body per minted SHAPE: 43 URL-safe chars, and 64 lowercase hex."""
-    return _fill(43), "a1b2c3d4e5f6a7b8" * 8
+def _minted_bodies() -> tuple[str, ...]:
+    """The bodies the product ACTUALLY mints, taken from the mint helpers.
+
+    ⛔ READ FROM THE PRODUCT, NEVER TYPED IN. The first cut of this guard
+    hardcoded a 128-hex ``st_`` body — 2x the real 64 — so it probed a width the
+    product never mints and stayed GREEN while a drift that raised a rule's floor
+    above the real width left every token leaking. Calling the helpers means the
+    probe is the true width, and a helper that changes shape fails the test
+    below instead of silently invalidating the guard.
+    """
+    from tortoise.oauth import _new_token
+
+    # ``_new_token("")`` is exactly ``secrets.token_urlsafe(32)`` — the prefix is
+    # concatenated, so an empty one yields the body alone.
+    return (_new_token(""), secrets.token_hex(32))
+
+
+def test_the_minted_bodies_are_the_widths_the_rules_assume():
+    """Pin the widths the rule floors are derived from (43 url-safe, 64 hex).
+
+    The floors in ``_SECRET_SHAPES`` (``{43,}``/``{64,}``) are only safe while
+    the minted bodies are at least that wide. If a mint helper changes, the rule
+    floors must be re-derived deliberately — this test is what forces that.
+    """
+    widths = sorted(len(body) for body in _minted_bodies())
+    assert widths == [43, 64], (
+        f"the minted body widths changed to {widths}; re-derive the rule floors "
+        "in _SECRET_SHAPES and update the CASES rows accordingly")
 
 
 def _has_a_rule(prefix: str) -> bool:
-    """True when SOME rule redacts this prefix at one of the minted widths."""
-    for body in _minted_widths():
+    """True when SOME rule redacts this prefix at a REAL minted width."""
+    for body in _minted_bodies():
         value = prefix + body
         out, _ = redact_secrets("value=" + value + " end")
         if value not in out:
             return True
     return False
+
+
+def test_the_scanner_fails_closed_on_a_mint_it_cannot_resolve():
+    """A mint call the scanner cannot parse must ERROR, not be skipped.
+
+    Silently omitting it is how a sixth family escapes: the prefix would be in
+    neither the set pin nor the unruled check, so the guard would pass while the
+    family leaked. Fail-closed is the only safe direction for a completeness
+    check.
+    """
+    fabricated = (
+        "def _new_token(prefix):\n"
+        "    return prefix\n"
+        "def f():\n"
+        '    p = "zzbogus_"\n'
+        "    return _new_token(p)\n"
+    )
+    with pytest.raises(AssertionError, match="cannot resolve"):
+        _mint_sites(fabricated)
+
+
+def test_the_scanner_resolves_the_other_ways_a_prefix_can_be_spelled():
+    """The two non-idiomatic spellings that were silently missed in review."""
+    assert _mint_sites('p = "zz_" + secrets.token_urlsafe(32)\n') == {"zz_"}
+    assert _mint_sites('x = _new_token(prefix="qq_")\n') == {"qq_"}
 
 
 def test_the_mint_site_scanner_reports_a_prefix_that_has_no_rule():
