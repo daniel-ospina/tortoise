@@ -28,10 +28,40 @@ def _parse_uri(uri: str) -> dict:
     }
 
 
-_uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
-_cfg = _parse_uri(_uri)
-DB = FalkorDB(host=_cfg["host"], port=_cfg["port"], password=_cfg["password"] or None)
-G = DB.select_graph(_cfg["graph"])
+_GRAPH = None
+
+
+def _graph():
+    """The graph handle, built on FIRST USE — never at import.
+
+    Constructing a client at module scope made IMPORTING this script perform
+    network I/O. That is wrong in two ways (#W32, the modal CI red):
+
+    1. A consumer that only wants a pure helper (``_parse_uri``, the context
+       matcher, ``_bindings_from_*``-style AST work) paid a live connection it
+       never used. ``tests/test_from_uri_userinfo.py`` reaches ``_parse_uri``
+       by ``exec_module``-ing this file, so it inherited the connection.
+    2. With ``TORTOISE_DB_URI`` unset the fallback pinned port 16379. On a CI
+       tier-2 PR the job deliberately leaves the URI EMPTY (the ~600 embedded
+       tests need the redislite default) and the legacy FalkorDB service is
+       provisioned on an EPHEMERAL port (#6673) — so the fallback dialled a
+       port nothing listens on and the import died with
+       ``Connection refused``. That was 20 of the sampled PR reds, from two
+       nodeids, on the two graph-scripts that construct eagerly.
+
+    Lazy construction keeps first-use behaviour IDENTICAL (the client is built
+    the first time ``q`` runs) while making the import free.
+    """
+    global _GRAPH
+    if _GRAPH is None:
+        uri = os.environ.get(
+            "TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise"
+        )
+        cfg = _parse_uri(uri)
+        _GRAPH = FalkorDB(
+            host=cfg["host"], port=cfg["port"], password=cfg["password"] or None
+        ).select_graph(cfg["graph"])
+    return _GRAPH
 
 CONTEXTS = [
     'concept|operations|agent',
@@ -41,7 +71,7 @@ CONTEXTS = [
 ]
 
 def q(cypher, **params):
-    return G.query(cypher, params).result_set
+    return _graph().query(cypher, params).result_set
 
 def context_filter(context):
     """Match exact or contained contexts."""
