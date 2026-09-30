@@ -402,12 +402,10 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # `deepseek_api_key`. `{N,}` matches every real token AND cannot leave a
     # suffix behind.
     #
-    # ⛔ `ct_` IS A CLIENT ID, NOT A SECRET — INCLUDED DELIBERATELY. Exempting
-    # it would force the exhaustiveness guard in
-    # `tests/test_capture_secret_redaction_4911.py` to carry an exemption list,
-    # and that list is exactly the drift surface the guard exists to remove
-    # (#6158). Redacting a non-secret is the safe direction; omitting a rule is
-    # not.
+    # ⛔ `ct_` IS A CLIENT ID, NOT A SECRET — INCLUDED DELIBERATELY. Redacting a
+    # non-secret is the safe direction; omitting a rule is not. ⚠️ The guard DOES
+    # carry a non-secret list (`_NON_SECRET_PREFIXES`), so "it would force an
+    # exemption list" was wrong — the asymmetry is the whole reason.
     #
     # ⛔ THE TRAILING LOOKAHEAD CLASS IS THE BODY CLASS MINUS ITS OWN
     # CHARACTERS, WHICH IS WHAT KEEPS THIS LINEAR. For the `oat_`/`ort_`/`ct_`/
@@ -425,8 +423,17 @@ _SECRET_SHAPES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     # it did not have (found in review). Body is `uuid4().hex` — 32 lowercase
     # hex — and the `{32,}` floor with a HEX-only lookahead keeps the scan linear
     # while making a surviving suffix impossible.
-    # NOTE: PR #6096 carries the same rule for the same reason; whichever lands
-    # second should drop its copy rather than double-define the kind.
+    # ⛔ PR #6096 CARRIES A MATERIALLY WEAKER RULE FOR THE SAME KIND, so the
+    # de-dup DIRECTION matters. #6096 uses `{32}` with an ALNUM lookahead
+    # (`[0-9a-f]{32}(?![A-Za-z0-9])`), which FAILS THE WHOLE MATCH on any 65+
+    # character body: the greedy 32 is followed by an alnum, the lookahead fails,
+    # and there is no shorter alternative — so it cannot redact the 64-hex `tt_`
+    # key the Supabase Edge provisioner mints (`supabase/functions/
+    # tenant-provision/index.ts`, the width `_edge_tt_body_width()` reads).
+    # Whichever lands second must keep THIS rule (`{32,}` + the HEX-only
+    # lookahead) and drop the other copy. (This note previously said the
+    # opposite — that the copies were interchangeable — which steered the merge
+    # into leaving a deployed key in cleartext with `capture_redactions: 0`.)
     ("tortoise_api_key",
      re.compile(r"(?<![A-Za-z0-9])(?:tt|tk)_[0-9a-f]{32,}(?![0-9a-f])"),
      _REDACTION_VALUE.format(kind="tortoise_api_key")),

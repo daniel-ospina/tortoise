@@ -903,7 +903,11 @@ _CREDENTIAL_PREFIXES = ("tt_", "tk_", "oat_", "ort_", "ct_", "cs_", "st_")
 
 #: The shortest run of a body that counts as a surviving fragment. A rule that
 #: swallows only part of a value leaves the rest in cleartext, and a surviving
-#: run this long is a leak even though the WHOLE body string is no longer present.
+#: run this long is a leak even though the WHOLE body string is no longer
+#: present.
+#: ⚠️ This is a THRESHOLD, not a proof of absence: a rule can still leave up to
+#: `_LEAK_WINDOW - 1` characters of a body behind and pass. Stated here because
+#: the assertion that uses it reads as "nothing survives", which would over-claim.
 _LEAK_WINDOW = 8
 
 #: Randomness-minted prefixed values that are NOT credentials, with the reason.
@@ -914,14 +918,6 @@ _NON_SECRET_PREFIXES = {
     "session_": "opaque session identifier (uuid4 hex, truncated to 12)",
     "g_": "graph identifier (uuid4 hex truncated to 16, or a sha256 digest)",
 }
-
-#: The helpers that YIELD secret material. A `_`-headed f-string is a mint only
-#: when the value it interpolates comes from one of these — otherwise every
-#: f-string ending in `_` would be counted. `uuid4` is NOT redundant: the tenant
-#: API key is `f"tt_{uuid.uuid4().hex}"`, which names none of the token helpers,
-#: and that blind spot is exactly how `tt_` stayed invisible to the first cut of
-#: this guard (found in review — the guard certified coverage it did not have).
-
 
 def _new_token_body() -> str:
     """The body ``tortoise/oauth.py::_new_token`` appends to every prefix.
@@ -935,52 +931,83 @@ def _new_token_body() -> str:
     return _new_token("")
 
 
+def test_the_cs_rule_leaves_STRIPE_checkout_ids_alone():
+    """`cs_` is a Tortoise OAuth client secret; Stripe uses the same prefix.
+
+    `cs_test_...`/`cs_live_...` are documented Stripe checkout-session
+    identifiers, not credentials, so the rule negates the SEGMENT. Pinned
+    because that lookahead is the whole reason the rule is safe to add: without
+    this test, deleting it reddens nothing (found in review).
+    """
+    for stripe_id in ("cs_test_" + "a1B2c3D4e5F6" * 4,
+                      "cs_live_" + "a1B2c3D4e5F6" * 4):
+        out, counts = redact_secrets("id=" + stripe_id + " end")
+        assert not counts, (stripe_id[:8], counts)
+        assert stripe_id in out
+    real = "cs_" + secrets.token_urlsafe(32)
+    out, counts = redact_secrets("secret=" + real + " end")
+    assert counts.get("tortoise_oauth_client_secret"), counts
+    assert real not in out
+
+
+def _apply_slice(node: ast.AST, parent: ast.AST | None, body: str) -> str:
+    """Truncate `body` when `node` is the value of a constant `[:N]` subscript.
+
+    The slice must wrap the HELPER EXPRESSION ITSELF. A slice anywhere else in
+    the tail belongs to a different value: `f"zz_{d['k'][:5] + uuid4().hex}"`
+    mints 32 hex, and reading the unrelated `[:5]` measured 5 — certifying a rule
+    that left the real value in cleartext (found in review).
+    """
+    if (isinstance(parent, ast.Subscript) and parent.value is node
+            and isinstance(parent.slice, ast.Slice)):
+        upper = parent.slice.upper
+        if isinstance(upper, ast.Constant) and isinstance(upper.value, int):
+            return body[:upper.value]
+    return body
+
+
 def _body_from_helpers(node: ast.AST) -> str | None:
     """The REAL body this subtree draws, or None if it names no known helper.
 
     ⛔ THE BODY COMES FROM THE SITE'S OWN HELPER AND ARGUMENT. Cycle 1 hardcoded
-    this at 128 hex and cycle 2 at 64; in both, a change to the mint site's width
+    this at 128 hex and cycle 2 at 64; in both, a change in the mint site's width
     left the guard green while real tokens leaked. Calling the helper the SITE
     names, with the argument the SITE passes, is what closes that.
+
+    ⛔ EVERY HELPER IN THE SUBTREE CONTRIBUTES, concatenated — and each match is
+    consumed (`uuid4().hex` is not also counted as a bare `uuid4()`). A body
+    assembled from two helpers (`token_hex(16) + token_hex(16)`) is 64; stopping
+    at the first measured 32 and certified a rule that left half the value in
+    cleartext (found in review).
     """
-    for inner in ast.walk(node):
-        if isinstance(inner, ast.Call):
-            name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
-            if name in ("token_hex", "token_urlsafe") and len(inner.args) == 1:
-                arg = inner.args[0]
+    parts: list[str] = []
+
+    def visit(n: ast.AST, parent: ast.AST | None) -> None:
+        if isinstance(n, ast.Attribute) and n.attr == "hex":
+            base = getattr(n.value, "func", None)
+            if (getattr(base, "attr", None) or getattr(base, "id", None)) == "uuid4":
+                parts.append(_apply_slice(n, parent, uuid.uuid4().hex))
+                return
+        if isinstance(n, ast.Call):
+            name = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+            if name in ("token_hex", "token_urlsafe") and len(n.args) == 1:
+                arg = n.args[0]
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, int):
-                    return (secrets.token_hex(arg.value) if name == "token_hex"
+                    body = (secrets.token_hex(arg.value) if name == "token_hex"
                             else secrets.token_urlsafe(arg.value))
+                    parts.append(_apply_slice(n, parent, body))
+                    return
             if name == "uuid4":
-                # ⛔ A BARE `uuid4()` IS NOT `.hex`. `str(uuid.uuid4())` is 36
-                # characters with dashes; `.hex` is 32 without. Returning the
-                # hex shape for both measured 32 where the site mints 36, so a
-                # rule certified against the shorter body left the real value in
-                # cleartext (found in review). The `.hex` spelling is claimed by
-                # the Attribute branch above, which walk reaches first.
-                return str(uuid.uuid4())
-        elif isinstance(inner, ast.Attribute) and inner.attr == "hex":
-            base = getattr(inner.value, "func", None)
-            base_name = getattr(base, "attr", None) or getattr(base, "id", None)
-            if base_name == "uuid4":
-                return uuid.uuid4().hex
-    return None
+                # `str(uuid.uuid4())` is 36 chars with dashes; `.hex` is 32. The
+                # bare call is the 36 shape — returning the hex shape for both
+                # measured 32 where the site mints 36 (found in review).
+                parts.append(_apply_slice(n, parent, str(uuid.uuid4())))
+                return
+        for child in ast.iter_child_nodes(n):
+            visit(child, n)
 
-
-def _truncated_body(node: ast.AST, body: str) -> str:
-    """Apply a constant `[:N]` slice, so a truncated body is measured EXACTLY.
-
-    `f"session_{uuid.uuid4().hex[:12]}"` mints 12 characters, not the 32 its
-    helper returns; reading 32 there would overstate the value a rule must
-    cover — and a width pin that is wrong is worse than none, because it looks
-    like a check.
-    """
-    for inner in ast.walk(node):
-        if isinstance(inner, ast.Subscript) and isinstance(inner.slice, ast.Slice):
-            upper = inner.slice.upper
-            if isinstance(upper, ast.Constant) and isinstance(upper.value, int):
-                return body[:upper.value]
-    return body
+    visit(node, None)
+    return "".join(parts) or None
 
 
 #: Name fragments that mark a body as coming from a RANDOMNESS primitive. A
@@ -1087,15 +1114,27 @@ def _prefixes_of_head(
     """
     if isinstance(head, ast.Constant) and isinstance(head.value, str):
         return (head.value,) if head.value.endswith("_") else None
-    if isinstance(head, ast.FormattedValue) and isinstance(head.value, ast.Name):
-        name = head.value.id
-        if name not in names:
-            return ()  # an unknown prefix name is unresolved, not skipped
-        return tuple(p for p in names[name] if p.endswith("_")) or None
+    if isinstance(head, ast.BinOp) and isinstance(head.op, ast.Add):
+        # `"zz_" + token_hex(16) + token_hex(16)` nests LEFT, so the prefix is
+        # the innermost left operand. Not recursing skipped the whole site.
+        return _prefixes_of_head(head.left, names)
+    if isinstance(head, ast.FormattedValue):
+        inner = head.value
+        if isinstance(inner, ast.Name):
+            if inner.id not in names:
+                return ()  # an unknown prefix name is unresolved, not skipped
+            return tuple(p for p in names[inner.id] if p.endswith("_")) or None
+        # An ATTRIBUTE or SUBSCRIPT prefix (`f"{self.prefix}{uuid4().hex}"`) is a
+        # mint whose prefix cannot be resolved from here, so it must be
+        # UNRESOLVED. Returning None made the caller skip it silently — the very
+        # escape this function promises cannot happen (found in review).
+        return ()
     if isinstance(head, ast.Name):
         if head.id not in names:
             return ()
         return tuple(p for p in names[head.id] if p.endswith("_")) or None
+    if isinstance(head, (ast.Attribute, ast.Subscript)):
+        return ()
     return None
 
 
@@ -1150,9 +1189,22 @@ def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
     for fn in ast.walk(tree):
         if isinstance(fn, ast.FunctionDef) and fn.name == "_new_token":
             helper_nodes.update(id(inner) for inner in ast.walk(fn))
+    # ⛔ SUB-EXPRESSIONS BELONG TO THEIR CONTAINER, so the walk must consider only
+    # top-level expressions. A `BinOp` inside an f-string is part of that
+    # f-string's body, not a site of its own (visiting it failed the whole scan
+    # closed on `f"zz_{d['k'][:5] + uuid4().hex}"`), and the inner `BinOp` of
+    # `a + b + c` is part of the outer one (visiting both double-counted the
+    # body: `"zz_" + token_hex(16) + token_hex(16)` measured [32, 32] where the
+    # site mints 64). Both found in review.
+    nested: set[int] = set()
+    for js in (n for n in ast.walk(tree) if isinstance(n, ast.JoinedStr)):
+        for part in js.values:
+            if isinstance(part, ast.FormattedValue):
+                nested.update(id(x) for x in ast.walk(part.value))
+    nested.update(id(n.left) for n in ast.walk(tree) if isinstance(n, ast.BinOp))
     oauth_body = None
     for node in ast.walk(tree):
-        if id(node) in helper_nodes:
+        if id(node) in helper_nodes or id(node) in nested:
             continue
         if isinstance(node, ast.Call):
             name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
@@ -1189,7 +1241,7 @@ def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
                 if raw is None:
                     unresolved_tail = _draws_randomness(t)
                     break
-                parts.append(_truncated_body(t, raw))
+                parts.append(raw)
             # A token DIRECTLY behind an unknown prefix name
             # (`f"{prefix}{uuid4().hex}"`) is an unresolved mint. Requiring the
             # token to be the FIRST tail is what keeps that narrow: a token
@@ -1212,8 +1264,11 @@ def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
             heads = _prefixes_of_head(node.left, names)
             if heads is None:
                 continue
-            raw = _body_from_helpers(node.right)
-            body = None if raw is None else _truncated_body(node.right, raw)
+            # The body is the WHOLE node, not just `right`: for the nested
+            # `"zz_" + token_hex(16) + token_hex(16)` the first helper is in the
+            # left operand, which is skipped as a site of its own.
+            raw = _body_from_helpers(node)
+            body = raw
             if body is not None and heads:
                 for prefix in heads:
                     found.setdefault(prefix, []).append(body)
