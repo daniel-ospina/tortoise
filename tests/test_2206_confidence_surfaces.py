@@ -29,12 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
+from tests import _live_utils
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import annotate_ep_batch
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable.
 _GRAPH = f"tortoise_test_2206conf_{uuid.uuid4().hex[:8]}"
-_DB_URI = f"docker://:falkordb@localhost:6379/{_GRAPH}"
+_DB_URI = _live_utils.docker_uri(_GRAPH)
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 try:
