@@ -1974,6 +1974,119 @@ class TestBudgetDE2E7:
         assert _session_counter("s1", "commit_count") == 1
 
 
+class TestCommitPointsGate:
+    """#4051 — the commit lane's pre-write org `max_points` gate.
+
+    Until #4010 the flat `max_sessions` bounded this lane's TOTAL node growth;
+    sessions are now unlimited for every tier, and `_count_resource("points")`
+    excludes the chain this lane mints (:Session, :Event, transcript :Source).
+    A free-tier key could therefore loop POST /v1/sessions/commit with a fresh
+    session_id — even `points: []` — and mint nodes no quota counted.
+    """
+
+    @staticmethod
+    def _set_max_points(limit: int) -> None:
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, "max_points": limit}
+
+    @staticmethod
+    def _seed_points(n: int) -> None:
+        for i in range(n):
+            _team_sdk()._get_proj().g.query(
+                "MERGE (p:Point {id:$pid}) "
+                "SET p.content='seed', p.is_episodic=false",
+                params={"pid": f"pt_seed_{i}"},
+            )
+
+    @staticmethod
+    def _point_count() -> int:
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (p:Point) RETURN count(p)").result_set
+        return int(rows[0][0])
+
+    @staticmethod
+    def _chain_counts(session_id: str) -> tuple[int, int, int]:
+        """(:Session, :Event, transcript :Source) minted for a session.
+
+        Counts by `sessionId` for Event/Source — the transcript :Source MERGE
+        is keyed by `url`, but stamps `s.sessionId` (D10: a document is a
+        :Source; the :Document label is retired).
+        """
+        g = _team_sdk()._get_proj().g
+        sess = g.query("MATCH (s:Session {id:$sid}) RETURN count(s)",
+                       params={"sid": session_id}).result_set[0][0]
+        ev = g.query("MATCH (e:Event {sessionId:$sid}) RETURN count(e)",
+                     params={"sid": session_id}).result_set[0][0]
+        src = g.query("MATCH (s:Source {sessionId:$sid}) RETURN count(s)",
+                      params={"sid": session_id}).result_set[0][0]
+        return int(sess), int(ev), int(src)
+
+    def test_at_max_points_refused_and_mints_nothing(self, client):
+        """#4051: with the org AT max_points, a `points: []` commit — the
+        cheapest possible loop iteration — 402s and mints no
+        Session/Event/transcript-Source/Point node."""
+        self._set_max_points(1)
+        self._seed_points(1)  # count == limit → the boundary is inclusive
+        before = self._point_count()
+        r = _commit(client, _raw_payload(0, session_id="sGateAt", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 402, r.text
+        detail = r.json()["detail"]
+        # Same structured refusal the capture/points lanes raise (#4614).
+        assert detail["code"] == "quota_exceeded"
+        assert detail["resource"] == "points"
+        assert detail["limit"] == 1
+        assert detail["used"] == 1
+        assert self._chain_counts("sGateAt") == (0, 0, 0), (
+            "a refused commit must mint NOTHING")
+        assert self._point_count() == before  # no partial Point either
+
+    def test_over_max_points_refused_and_mints_nothing(self, client):
+        """#4051: one over the limit (count > max_points) refuses too."""
+        self._set_max_points(1)
+        self._seed_points(3)
+        r = _commit(client, _raw_payload(0, session_id="sGateOver", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 402, r.text
+        assert r.json()["detail"]["resource"] == "points"
+        assert self._chain_counts("sGateOver") == (0, 0, 0)
+
+    def test_one_under_max_points_still_commits(self, client):
+        """#4051 boundary: at max_points - 1 the same payload lands — a normal
+        commit is untouched by the gate (regression)."""
+        self._set_max_points(1)
+        # count == 0 == limit - 1 → admitted
+        r = _commit(client, _raw_payload(0, session_id="sGateUnder", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 200, r.text
+        assert r.json()["nodes_created"] == 0
+        sess, ev, src = self._chain_counts("sGateUnder")
+        assert (sess, ev, src) == (1, 1, 1)
+
+    def test_replayed_commit_not_re_gated(self, client):
+        """#4051 replay interaction: a fully_written re-POST returns 200
+        duplicate even when the org is AT max_points. The gate sits after
+        every replay return, so a replay (zero writes) is never 402'd —
+        #1727's lesson.
+
+        The first commit is an empty payload so the test does NOT load the
+        embedding model (which can exceed the 10s transport bound in a
+        targeted run). The cap is then reached by a direct Point seed.
+        """
+        self._set_max_points(1)
+        raw = _raw_payload(0, session_id="sGateReplay", points=[],
+                           entities=[], provenance_refs=[])
+        r1 = _commit(client, raw)
+        assert r1.status_code == 200, r1.text
+        # push the org AT max_points AFTER the first commit landed
+        self._seed_points(1)
+        r2 = _commit(client, dict(raw))
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["duplicate"] is True
+        # the replay minted nothing beyond the first commit's chain
+        assert self._chain_counts("sGateReplay") == (1, 1, 1)
+
+
 class TestLayer1:
     def test_missing_required_field_400(self, client):
         raw = _raw_payload(1)
