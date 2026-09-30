@@ -18,16 +18,17 @@ export const MCP_URL = 'https://api.premiselabs.co/mcp/'
 // trailing slash, so an existing connector with the slashed URL keeps working
 // — no re-add is required.
 //
-// #2849 — the measured routing matrix. The comment here used to claim bare
+// #2849 — the measured routing matrix. Before 814d1a3d31 the connector-URL
+// comment in this file (`CHATGPT_MCP_URL`, then lines 6-9) claimed bare
 // `POST /mcp` "dispatches directly into the mounted MCP app (no 307)". That
 // was FALSE: Starlette's `redirect_slashes` answered /mcp with a 307 on every
 // method. Measured with `TestClient(app, follow_redirects=False)`:
 //   before #2864   /mcp    GET 307  HEAD 307  POST 307 → /mcp/  OPTIONS 307
 //                  /mcp/   GET 200  HEAD 200  POST 401           OPTIONS 405
-//   on main today  /mcp    GET 200  HEAD 200  POST 401  OPTIONS 405
+//   after #2864    /mcp    GET 200  HEAD 200  POST 401  OPTIONS 405
 //                  /mcp/   GET 200  HEAD 200  POST 401  OPTIONS 405
-// #2864 landed (PR #2910) and its `McpPathCanonicalizerMiddleware` rewrites
-// the exact `/mcp` scope path, so the no-slash form is served with no
+// #2864 landed (PR #2910, 06dc66756) and its `McpPathCanonicalizerMiddleware`
+// rewrites the exact `/mcp` scope path, so the no-slash form is served with no
 // redirect. It is canonical because it matches the PRM `resource` — NOT
 // because bare /mcp ever routed directly (it did not).
 export const CANONICAL_MCP_URL = 'https://api.premiselabs.co/mcp'
