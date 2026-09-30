@@ -927,10 +927,20 @@ _BODY_ALPHABETS = {
 }
 
 
-def _alphabet_probe(prefix: str, width: int) -> str:
-    """A `width`-character body covering EVERY member of the family's class."""
+def _alphabet_probes(prefix: str, width: int) -> tuple[str, ...]:
+    """Bodies whose UNION covers every member of the family's class.
+
+    ⛔ ONE BODY IS NOT ENOUGH. The url-safe class has 64 members and the url-safe
+    width is 43, so a single 43-character body covers only the first 43 — and a
+    class that dropped one of the remaining 21 (`0123456789PQRSTUVWXYZ`) escaped
+    the guard about half the time. Rotating the start point fills the union.
+    """
     alphabet = _BODY_ALPHABETS[prefix]
-    return (alphabet * (width // len(alphabet) + 1))[:width]
+    if width >= len(alphabet):
+        return ((alphabet * (width // len(alphabet) + 1))[:width],)
+    count = -(-len(alphabet) // width)  # ceil
+    return tuple((alphabet[i * width:] + alphabet[:i * width])[:width]
+                 for i in range(count))
 
 #: The shortest run of a body that counts as a surviving fragment. A rule that
 #: swallows only part of a value leaves the rest in cleartext, and a surviving
@@ -1149,9 +1159,10 @@ def _prefixes_of_head(
     tail (`f"{prefix}{uuid4().hex}"`). A token later in the template
     (`f"{prefix}_{uuid4().hex}"` — prefix name, a literal `_`, then the token) is
     SKIPPED SILENTLY, because nothing there marks the leading value as a prefix.
-    No such credential site exists today (the only FormattedValue-headed mint in
-    the three modules is `hosted_api.py:8924`, which fails closed), but the limit
-    is real: "fails closed" does not cover it.
+    No such LATER-TAIL credential site exists today — a scan of `tortoise/*.py`
+    finds none, and the two FormattedValue-headed mints that do exist
+    (`hosted_api.py:8924` and `sdk.py:17940`) both put the token FIRST, so both
+    resolve — but the limit is real: "fails closed" does not cover it.
     """
     if isinstance(head, ast.Constant) and isinstance(head.value, str):
         return (head.value,) if head.value.endswith("_") else None
@@ -1509,7 +1520,8 @@ def test_every_credential_the_product_mints_has_a_redaction_rule():
     for prefix in _CREDENTIAL_PREFIXES:
         bodies[prefix] = tuple(dict.fromkeys(
             bodies[prefix]
-            + tuple(_alphabet_probe(prefix, len(b)) for b in bodies[prefix])))
+            + tuple(p for b in bodies[prefix]
+                    for p in _alphabet_probes(prefix, len(b)))))
     unruled = sorted(f"{p} (minted in {sites[p]})" for p in _CREDENTIAL_PREFIXES
                      if not _has_a_rule(p, bodies[p]))
     assert not unruled, (
