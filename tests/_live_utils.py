@@ -75,9 +75,9 @@ def legacy_port() -> int:
 def service_host() -> str:
     """The host the published service ports are reachable on.
 
-    The #6673 var wins; otherwise ``localhost`` — the historical literal, and
-    the host this lane's remaining hardcoded client constructions (e.g. the
-    ``FalkorProjection(host="localhost", …)`` sites) actually dial.
+    The #6673 var wins; otherwise ``localhost`` — the historical literal every
+    client in this lane was written against, and what the remaining
+    ``SimpleNamespace(_host="localhost", …)`` fakes model.
 
     The product's ``FALKORDB_HOST`` is deliberately NOT consulted. Honouring it
     here made the probe follow the override while those clients did not: the

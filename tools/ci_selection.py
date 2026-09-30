@@ -155,13 +155,15 @@ SHARED_MODULES = (
     "tortoise/projection/__init__.py",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
-    # #6673: the docker-lane port/host seam. 43 test modules import it, spread
-    # over FIVE surfaces (core 20 / ep 8 / sdk 7 / api 4 / eval 4), so a seam
-    # edit is a cross-surface change by construction — the `_embedded.py` /
-    # `_tmpdir_hygiene.py` case below, at a larger blast radius: the seam is now
-    # how the whole docker lane resolves its port. Without this entry a
-    # seam-only edit selects `core` and 23 consumer tests on the other four
-    # surfaces never run on the PR that made the edit.
+    # #6673: the docker-lane port/host seam, imported by 50+ test modules that
+    # are registered across every docker-lane surface (core, ep, sdk, api,
+    # eval) — `git grep -l _live_utils -- tests/` lists the current set, and the
+    # count is deliberately not restated here because it drifts. A seam edit is
+    # therefore cross-surface by construction: the `_embedded.py` /
+    # `_tmpdir_hygiene.py` case below, at a larger blast radius, because the
+    # seam is now how the whole docker lane resolves its port. Without this
+    # entry a seam-only edit selects `core` and the other surfaces' consumers
+    # never run on the PR that made the edit.
     "tests/_live_utils.py",
     # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
     # imported at conftest MODULE level and hand their fixtures to every surface's

@@ -144,11 +144,11 @@ def test_tcp_reachable_true_for_a_listener_and_false_for_a_closed_port():
 
 
 def test_the_product_host_var_cannot_move_the_service_host(monkeypatch):
-    """Pins the P2 fix. Honouring the product's FALKORDB_HOST made the PROBE
-    follow the override while this lane's hardcoded client constructions (the
-    `FalkorProjection(host="localhost", …)` sites) did not: the probe passed,
-    the docker leg was selected, and the client dialled a dead localhost. The
-    product var is therefore not consulted; only the opt-in seam var moves it.
+    """Pins the P2 fix. Honouring the product's FALKORDB_HOST moved the PROBE
+    but not the client constructions written against the historical
+    `localhost`: the probe passed, the docker leg was selected, and the client
+    dialled a dead localhost. The product var is therefore not consulted; only
+    the opt-in seam var moves it.
     """
     monkeypatch.delenv("TORTOISE_TEST_DOCKER_HOST", raising=False)
     monkeypatch.setenv("FALKORDB_HOST", "10.1.2.3")

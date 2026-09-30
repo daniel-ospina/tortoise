@@ -1308,8 +1308,9 @@ jobs:
     # assigned at runtime — so the provision step below exports it
     # (`uri_graph: tortoise`), and the teardown step at the end of the job
     # removes the container.
-    # #6673: the two FalkorDB services used to be declared HERE as a `services:`
-    # block on the fixed host ports 6379:6379 / 16379:6379. They are now started
+    # #6673: the passworded FalkorDB service used to be declared HERE as a
+    # `services:` block on the fixed host port 6379:6379 (this job starts the
+    # passworded service only — it passes `legacy: "false"`). It is now started
     # by `.github/actions/falkordb-provision` (see the first FalkorDB step
     # below) on EPHEMERAL host ports, because every self-hosted runner on this
     # host shares ONE Docker daemon: a fixed host port is a single global
@@ -1317,11 +1318,9 @@ jobs:
     # `docker start` fail with "Bind for 0.0.0.0:6379 failed: port is already
     # allocated" — which aborts the RUNNER in its `initialize_containers`
     # pre-step and reds the job in ~9s with ZERO tests run (a false red).
-    # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair, the
-    # passwordless legacy lane and the health gate all moved with it. The two
-    # probe families are unchanged; the ports are now
-    # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
-    # (legacy), read by tests/_live_utils.py.
+    # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair and
+    # the health gate moved with it. The probe family is unchanged; the port is
+    # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1504,8 +1503,9 @@ jobs:
       # journal-blind team_* stray pass is safe here and stays live
       # (opt-in only since #1884; the shared dev container never sets it).
       TORTOISE_TEST_SWEEP_TEAM_STRAYS: "1"
-    # #6673: the two FalkorDB services used to be declared HERE as a `services:`
-    # block on the fixed host ports 6379:6379 / 16379:6379. They are now started
+    # #6673: the passworded FalkorDB service used to be declared HERE as a
+    # `services:` block on the fixed host port 6379:6379 (this job starts the
+    # passworded service only — it passes `legacy: "false"`). It is now started
     # by `.github/actions/falkordb-provision` (see the first FalkorDB step
     # below) on EPHEMERAL host ports, because every self-hosted runner on this
     # host shares ONE Docker daemon: a fixed host port is a single global
@@ -1513,11 +1513,9 @@ jobs:
     # `docker start` fail with "Bind for 0.0.0.0:6379 failed: port is already
     # allocated" — which aborts the RUNNER in its `initialize_containers`
     # pre-step and reds the job in ~9s with ZERO tests run (a false red).
-    # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair, the
-    # passwordless legacy lane and the health gate all moved with it. The two
-    # probe families are unchanged; the ports are now
-    # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
-    # (legacy), read by tests/_live_utils.py.
+    # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair and
+    # the health gate moved with it. The probe family is unchanged; the port is
+    # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

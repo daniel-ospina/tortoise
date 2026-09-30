@@ -22,8 +22,7 @@ LEGACY="${FALKORDB_LEGACY:-true}"
 URI_GRAPH="${FALKORDB_URI_GRAPH:-}"
 # Health-gate bound (seconds) for the PING loop — NOT a bound on the image
 # pull, which happens inside `docker run` before the loop starts (a cold pull
-# is bounded only by the step/job `timeout-minutes`). Widened from the
-# `services:` blocks' 5s x 10 for slow starts on a loaded runner.
+# is bounded only by the step/job `timeout-minutes`).
 HEALTH_TIMEOUT="${FALKORDB_HEALTH_TIMEOUT:-60}"
 
 # The two log helpers are used from the first validation below, so they are
@@ -135,7 +134,9 @@ start() {
   esac
 
   # Health gate — the `services:` health-cmd equivalent (5s x 10 retries),
-  # widened to 60s because this also covers the image pull on a cold runner.
+  # widened to 60s for slow starts on a loaded runner. It does NOT cover the
+  # image pull, which happens inside `docker run` above (the pull is bounded by
+  # the step/job timeout-minutes only).
   for i in $(seq 1 "$HEALTH_TIMEOUT"); do
     # shellcheck disable=SC2086  # $auth is a deliberate 0-or-2 word "cli args"
     if docker exec "$name" redis-cli $auth ping 2>/dev/null | grep -q PONG; then

@@ -380,11 +380,11 @@ def test_every_conftest_module_level_tests_import_is_shared():
 
 def test_the_docker_lane_seam_forces_the_full_matrix():
     """#6673: `tests/_live_utils.py` carries the docker lane's port/host
-    resolution and is imported by 43 test modules across five surfaces
-    (core 20 / ep 8 / sdk 7 / api 4 / eval 4). The conftest-derived ratchet
-    cannot cover it (it is not a conftest import), so without the explicit
-    entry a seam-only edit selected `core` and the 23 consumers on the other
-    four surfaces never ran on the PR that made the edit.
+    resolution and is imported by test modules registered on every docker-lane
+    surface (core, ep, sdk, api, eval) — `git grep -l _live_utils -- tests/`
+    lists them. The conftest-derived ratchet cannot cover it (it is not a
+    conftest import), so without the explicit entry a seam-only edit selected
+    `core` and the other surfaces' consumers never ran on the PR that made it.
     """
     result = _sel(["tests/_live_utils.py"])
     assert result["full"] is True, result
