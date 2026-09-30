@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402, RUF100
 
-from tortoise.cypher_guard import guarded_client  # noqa: E402, RUF100
+from tortoise.cypher_guard import guarded_client, guarded_client_class  # noqa: E402, RUF100
 from tortoise.exceptions import UnsupportedCypherOperatorError  # noqa: E402, RUF100
 from tortoise.projection import (  # noqa: E402, RUF100
     FalkorProjection,
@@ -500,4 +500,78 @@ def test_permissive_factory_object_is_not_short_circuited():
     guard = client.select_graph("g")
     with pytest.raises(UnsupportedCypherOperatorError):
         guard.query(LEGACY_SHAPE_CHECK)
+
+
+# ── round 3: the REAL production client classes ─────────────────────────────
+# The tests above drive the seam through hand-written client classes. These
+# drive the ACTUAL classes the package constructs, so a vendor shape the fakes
+# happen to share but the vendor does not (the round-2 `AttributeError` class of
+# bug) cannot pass unnoticed.
+
+
+def test_the_real_vendor_client_class_is_subclassed_not_proxied():
+    """Falsifier: the server-lane client must be SUBCLASSED, not proxied.
+
+    A proxy would break `isinstance(client, falkordb.FalkorDB)` for every caller
+    holding the client; an INHERITED (un-overridden) `select_graph` would let the
+    vendor's own `Graph(...)` through unguarded. Both are asserted on the real
+    vendor class — no fake stands in for it.
+    """
+    import falkordb
+
+    cls = guarded_client_class(falkordb.FalkorDB)
+    assert cls is not falkordb.FalkorDB
+    assert issubclass(cls, falkordb.FalkorDB), "a proxy would break isinstance"
+    assert "select_graph" in vars(cls), "select_graph is inherited, so unguarded"
+    # Idempotent: re-guarding must not nest a second layer.
+    assert guarded_client_class(falkordb.FalkorDB) is cls
+    assert guarded_client_class(cls) is cls
+
+
+def test_the_real_vendor_client_guards_the_handles_it_yields():
+    """Falsifier: end-to-end through the REAL vendor class, still no server.
+
+    ``falkordb.FalkorDB.__init__`` contacts the server (its sentinel probe), so
+    the instance is built with ``object.__new__`` and only the ONE attribute the
+    vendor's ``Graph`` constructor needs (``execute_command``) is stubbed —
+    everything else is the real class. The handle that comes back is the
+    vendor's own ``Graph`` subclass, a supported query reaches the wire, and
+    ``=~`` is refused BEFORE anything is sent.
+    """
+    import falkordb
+
+    wire: list[tuple] = []
+
+    def execute_command(*args, **kwargs):
+        wire.append(args)
+        return [[], [], []]
+
+    client = object.__new__(guarded_client_class(falkordb.FalkorDB))
+    client.execute_command = execute_command
+    g = client.select_graph("g")
+    assert isinstance(g, falkordb.Graph), "the vendor Graph contract was broken"
+    g.query("MATCH (n) WHERE n.id STARTS WITH 'obj-' RETURN n.id")
+    assert len(wire) == 1, wire
+    with pytest.raises(UnsupportedCypherOperatorError) as exc:
+        g.query(LEGACY_SHAPE_CHECK)
+    assert exc.value.operator == "=~"
+    assert len(wire) == 1, "the unsupported statement reached the wire"
+
+
+def test_the_embedded_client_class_is_guarded_too():
+    """Falsifier: the embedded lane's class is the redislite subclass.
+
+    ``tortoise.FalkorDB`` is redislite's ``FalkorDB`` (built by the pre-existing
+    ``_build_guarded_falkordb``), whose ``select_graph`` keys off ``self.client``
+    rather than the raw client — so it must be guarded as its OWN class, never
+    assumed to share the server lane's shape. Class-level only: constructing it
+    starts an embedded server, which these tests deliberately never do.
+    """
+    from tortoise import FalkorDB as EmbeddedFalkorDB
+
+    cls = guarded_client_class(EmbeddedFalkorDB)
+    assert cls is not EmbeddedFalkorDB
+    assert issubclass(cls, EmbeddedFalkorDB)
+    assert "select_graph" in vars(cls), "select_graph is inherited, so unguarded"
+    assert guarded_client_class(EmbeddedFalkorDB) is cls
 
