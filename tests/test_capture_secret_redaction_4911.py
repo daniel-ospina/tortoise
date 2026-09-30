@@ -35,6 +35,7 @@ text, or a reader recomputing it would disagree with the node).
 from __future__ import annotations
 
 import ast
+import re
 import secrets
 import uuid
 from pathlib import Path
@@ -891,7 +892,7 @@ _MINT_MODULES: tuple[str, ...] = (
 )
 
 #: The prefixes the product mints as CREDENTIALS — each must have a rule.
-_CREDENTIAL_PREFIXES = ("tt_", "oat_", "ort_", "ct_", "cs_", "st_")
+_CREDENTIAL_PREFIXES = ("tt_", "tk_", "oat_", "ort_", "ct_", "cs_", "st_")
 
 #: The shortest run of a body that counts as a surviving fragment. A rule that
 #: swallows only part of a value leaves the rest in cleartext, and a surviving
@@ -988,47 +989,130 @@ def _draws_randomness(node: ast.AST) -> bool:
     return False
 
 
-def _resolve_prefix(arg: ast.AST | None, consts: dict[str, str]) -> str | None:
-    """The prefix literal, or None when this scanner cannot resolve it.
+def _const_prefixes(value: ast.AST) -> tuple[str, ...]:
+    """Every string this expression can evaluate to, when it is a prefix."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return (value.value,)
+    if isinstance(value, ast.IfExp):
+        return _const_prefixes(value.body) + _const_prefixes(value.orelse)
+    if isinstance(value, ast.BoolOp):
+        return tuple(s for v in value.values for s in _const_prefixes(v))
+    return ()
+
+
+def _collect_prefix_names(tree: ast.AST) -> dict[str, tuple[str, ...]]:
+    """name -> every string it is assigned OR defaults to.
+
+    ⛔ THE MOST PRIVILEGED KEY IS MINTED THROUGH A NAME. `hosted_api.py` writes
+    ``prefix = "tk_" if (final_scopes or graph_id) else "tt_"`` and then
+    ``f"{prefix}{uuid.uuid4().hex}"``; the SDK mints via
+    ``def apikey_create(..., prefix: str = "tt_", ...)``. A scanner that knew
+    only literal f-string heads saw `tt_` and never `tk_`, so the SCOPED key was
+    covered only by the accident that one regex happens to read ``(?:tt|tk)``:
+    narrowing it to `tt_` leaked `tk_` while this guard stayed green. Found in
+    review, independently, by two reviewers.
+    """
+    names: dict[str, list[str]] = {}
+
+    def add(name: str, value: ast.AST) -> None:
+        for got in _const_prefixes(value):
+            names.setdefault(name, [])
+            if got not in names[name]:
+                names[name].append(got)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    add(target.id, node.value)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            positional = [*args.posonlyargs, *args.args]
+            if args.defaults:
+                for arg, default in zip(positional[-len(args.defaults):], args.defaults,
+                                        strict=True):
+                    add(arg.arg, default)
+            for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+                if default is not None:
+                    add(arg.arg, default)
+    return {name: tuple(values) for name, values in names.items()}
+
+
+def _prefixes_of_head(
+    head: ast.AST, names: dict[str, tuple[str, ...]],
+) -> tuple[str, ...] | None:
+    """Prefixes this f-string head contributes; ``None`` if it is not one of ours.
+
+    ``None`` means "not a credential-prefix shape" (skip it). An EMPTY tuple
+    means "it IS one, but its prefix could not be resolved" — the caller fails
+    closed on that, because skipping quietly is how a family escapes.
+    """
+    if isinstance(head, ast.Constant) and isinstance(head.value, str):
+        return (head.value,) if head.value.endswith("_") else None
+    if isinstance(head, ast.FormattedValue) and isinstance(head.value, ast.Name):
+        name = head.value.id
+        if name not in names:
+            return ()  # an unknown prefix name is unresolved, not skipped
+        return tuple(p for p in names[name] if p.endswith("_")) or None
+    if isinstance(head, ast.Name):
+        if head.id not in names:
+            return ()
+        return tuple(p for p in names[head.id] if p.endswith("_")) or None
+    return None
+
+
+def _resolve_prefix(
+    arg: ast.AST | None, names: dict[str, tuple[str, ...]],
+) -> tuple[str, ...] | None:
+    """The prefix(es) this argument can carry, or None when unresolvable.
 
     ``None`` is a FAILURE at the call site, not an omission — see ``_mint_sites``.
     """
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-        return arg.value
-    if isinstance(arg, ast.Name) and arg.id in consts:
-        return consts[arg.id]
+        return (arg.value,)
+    if isinstance(arg, ast.Name) and arg.id in names:
+        return names[arg.id]
     return None
 
 
 def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
     """prefix -> the REAL minted bodies, read from the parsed tree.
 
-    Three shapes are in use: ``_new_token("<prefix>")`` — resolving a module-level
-    constant where the prefix is passed BY NAME, as ``ACCESS_TOKEN_PREFIX`` and
-    ``REFRESH_TOKEN_PREFIX`` are — the signup token's
-    ``f"<prefix>{token_hex(32)}"``, and the tenant API key's
-    ``f"<prefix>{uuid.uuid4().hex}"``.
+    The shapes in use: ``_new_token("<prefix>")`` — resolving a constant passed
+    BY NAME, as ``ACCESS_TOKEN_PREFIX``/``REFRESH_TOKEN_PREFIX`` are — the signup
+    token's ``f"<prefix>{token_hex(32)}"``, the tenant API key's
+    ``f"<prefix>{uuid.uuid4().hex}"``, and the scoped variant that supplies the
+    prefix through a NAME.
 
     Parsing rather than scanning text is load-bearing in BOTH directions: a
     prefix merely NAMED in a comment or docstring is not a mint site, and a mint
-    this scanner cannot resolve is a FAILURE rather than a silent omission — a
-    scanner that quietly skips what it cannot parse is the same defect as a rule
-    list nobody checks.
+    this scanner RECOGNIZES but cannot resolve is a FAILURE rather than a silent
+    omission.
+
+    ⛔ LIMIT, stated so it is not mistaken for exhaustiveness: a body built
+    through an intermediate variable (``b = token_hex(32)`` then ``f"zz_{b}"``)
+    is not recognized as a mint at all, so it is neither claimed nor checked. The
+    set pin is what makes a NEW prefix visible, and a family minted that way
+    would have to be added deliberately. Only the shapes above are claimed.
     """
     found: dict[str, list[str]] = {}
     unresolved: list[str] = []
 
     tree = ast.parse(source)
-    consts: dict[str, str] = {}
-    for node in tree.body:
-        if (isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    consts[target.id] = node.value.value
+    names = _collect_prefix_names(tree)
+    # ⛔ THE GENERATOR IS NOT A SITE. `_new_token` itself is written
+    # `return prefix + secrets.token_urlsafe(32)` — its `prefix` parameter has no
+    # default, so it cannot be resolved, and treating it as an unresolved SITE
+    # would fail the whole scan on the very helper whose CALLERS are the sites.
+    # Its callers are enumerated by the `Call` branch below.
+    helper_nodes: set[int] = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef) and fn.name == "_new_token":
+            helper_nodes.update(id(inner) for inner in ast.walk(fn))
     oauth_body = None
     for node in ast.walk(tree):
+        if id(node) in helper_nodes:
+            continue
         if isinstance(node, ast.Call):
             name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
             if name != "_new_token":
@@ -1036,46 +1120,69 @@ def _mint_sites(source: str) -> dict[str, tuple[str, ...]]:
             # Positional `_new_token("oat_")` OR keyword `_new_token(prefix=…)`.
             arg = node.args[0] if node.args else next(
                 (kw.value for kw in node.keywords if kw.arg == "prefix"), None)
-            prefix = _resolve_prefix(arg, consts)
-            if prefix is None:
+            resolved = _resolve_prefix(arg, names)
+            if resolved is None:
                 unresolved.append(ast.dump(node)[:120])
             else:
                 if oauth_body is None:
                     oauth_body = _new_token_body()
-                found.setdefault(prefix, []).append(oauth_body)
+                for prefix in resolved:
+                    found.setdefault(prefix, []).append(oauth_body)
         elif isinstance(node, ast.JoinedStr) and node.values:
-            head = node.values[0]
-            if not (isinstance(head, ast.Constant) and isinstance(head.value, str)
-                    and head.value.endswith("_")):
-                continue
             tails = list(node.values[1:])
+            heads = _prefixes_of_head(node.values[0], names)
+            if heads is None:
+                continue
             body = None
             for t in tails:
                 raw = _body_from_helpers(t)
                 if raw is not None:
                     body = _truncated_body(t, raw)
                     break
-            if body is not None:
-                found.setdefault(head.value, []).append(body)
+            if body is not None and heads:
+                for prefix in heads:
+                    found.setdefault(prefix, []).append(body)
             elif any(_draws_randomness(t) for t in tails):
                 unresolved.append(ast.dump(node)[:120])
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            # `"zz_" + token_urlsafe(32)` — the non-f-string spelling of a mint.
-            left = node.left
-            if (isinstance(left, ast.Constant) and isinstance(left.value, str)
-                    and left.value.endswith("_")):
-                raw = _body_from_helpers(node.right)
-                body = None if raw is None else _truncated_body(node.right, raw)
-                if body is not None:
-                    found.setdefault(left.value, []).append(body)
-                elif _draws_randomness(node.right):
-                    unresolved.append(ast.dump(node)[:120])
+            # `"zz_" + token_urlsafe(32)` — the non-f-string spelling — and the
+            # same with the prefix in a NAME: `P + token_urlsafe(32)`.
+            heads = _prefixes_of_head(node.left, names)
+            if heads is None:
+                continue
+            raw = _body_from_helpers(node.right)
+            body = None if raw is None else _truncated_body(node.right, raw)
+            if body is not None and heads:
+                for prefix in heads:
+                    found.setdefault(prefix, []).append(body)
+            elif _draws_randomness(node.right):
+                unresolved.append(ast.dump(node)[:120])
     if unresolved:
         raise AssertionError(
             "this scanner cannot resolve these mint sites, so it cannot prove "
             "they are ruled — extend the scanner rather than letting a family "
             "escape unseen: " + "; ".join(unresolved))
     return {prefix: tuple(dict.fromkeys(bodies)) for prefix, bodies in found.items()}
+
+
+def _edge_tt_body_width() -> int:
+    """The width of the `tt_` body the Supabase Edge function mints.
+
+    That function is TypeScript, so the AST scan cannot see it — yet it mints the
+    SAME `tt_` family, with 64 hex (32 bytes) rather than the 32 the Python sites
+    use. A floor of exactly `{32}` would leak it with every test green, so its
+    width is read from the file and folded into the pin. (Found in review: the
+    guard pinned `{32}` while a deployed mint site mints 64.)
+    """
+    src = (_REPO / "supabase/functions/tenant-provision/index.ts").read_text(
+        encoding="utf-8")
+    match = re.search(r"new Uint8Array\((\d+)\);.{0,300}?const apiKeyHex", src,
+                      re.DOTALL)
+    assert match, ("the Edge tenant-provision mint shape changed; re-derive the "
+                   "tt_ body width rather than trusting the pin")
+    assert re.search(r"apiKey = `tt_\$\{apiKeyHex\}`", src), (
+        "the Edge provisioner no longer mints a tt_ key; re-derive this pin")
+    return int(match.group(1)) * 2
 
 
 def test_every_minted_body_width_is_pinned_from_the_mint_sites():
@@ -1092,7 +1199,9 @@ def test_every_minted_body_width_is_pinned_from_the_mint_sites():
         for prefix, bodies in _mint_sites(source).items():
             if prefix in _CREDENTIAL_PREFIXES:
                 widths.setdefault(prefix, set()).update(len(body) for body in bodies)
-    assert widths == {"tt_": {32}, "oat_": {43}, "ort_": {43},
+    # The Edge provisioner mints the SAME tt_ family with a DIFFERENT width.
+    widths.setdefault("tt_", set()).add(_edge_tt_body_width())
+    assert widths == {"tt_": {32, 64}, "tk_": {32}, "oat_": {43}, "ort_": {43},
                       "ct_": {43}, "cs_": {43}, "st_": {64}}, widths
 
 
@@ -1128,6 +1237,21 @@ def test_the_scanner_resolves_the_other_ways_a_prefix_can_be_spelled():
     # helpers. This is the spelling that hid `tt_` from the first cut.
     found = _mint_sites('k = f"zz_{uuid.uuid4().hex}"\n')
     assert set(found) == {"zz_"} and len(next(iter(found.values()))[0]) == 32
+    # ⛔ THE VARIABLE-PREFIX SHAPE. `tk_` — the SCOPED, more privileged key — is
+    # minted as `prefix = "tk_" if scoped else "tt_"` then
+    # `f"{prefix}{uuid.uuid4().hex}"`. The literal `tt_` sites kept this guard
+    # green while `tk_` was enumerated nowhere, so narrowing the rule to `tt_`
+    # leaked it. Pinned in both spellings: a same-function assignment, and the
+    # SDK's parameter default (`def apikey_create(..., prefix: str = "tt_")`).
+    found = _mint_sites('prefix = "tk_" if scoped else "tt_"\n'
+                        'k = f"{prefix}{uuid.uuid4().hex}"\n')
+    assert set(found) == {"tk_", "tt_"}, found
+    found = _mint_sites('def mint(org, prefix="tt_"):\n'
+                        '    return f"{prefix}{uuid.uuid4().hex}"\n')
+    assert set(found) == {"tt_"}, found
+    # A prefix name the scanner cannot resolve is UNRESOLVED, not skipped.
+    with pytest.raises(AssertionError, match="cannot resolve"):
+        _mint_sites('k = f"{mystery_prefix}{secrets.token_hex(32)}"\n')
 
 
 def test_the_scanner_fails_closed_on_a_mint_it_cannot_resolve():
@@ -1215,6 +1339,12 @@ def test_every_credential_the_product_mints_has_a_redaction_rule():
         f"minted prefixes changed to {sorted(sites)}; each is either a credential "
         "needing a rule in _SECRET_SHAPES or a non-secret needing a line in "
         "_NON_SECRET_PREFIXES")
+    # The Edge provisioner mints the SAME tt_ family from TypeScript, so the
+    # AST scan cannot see it — but a rule must cover ITS width too, or a deployed
+    # key leaks while this Python-only check stays green. (Found in review: the
+    # pin said {32} while `supabase/functions/tenant-provision` mints 64 hex.)
+    bodies["tt_"] = tuple(dict.fromkeys(
+        bodies["tt_"] + ("0" * _edge_tt_body_width(),)))
     unruled = sorted(f"{p} (minted in {sites[p]})" for p in _CREDENTIAL_PREFIXES
                      if not _has_a_rule(p, bodies[p]))
     assert not unruled, (
