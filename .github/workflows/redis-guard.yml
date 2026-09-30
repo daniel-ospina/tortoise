@@ -37,12 +37,12 @@ on:
   # (#3467) and is deliberately NOT done here.
   #
   # `workflow_dispatch` below is a MANUAL-RUN affordance ONLY. It does NOT
-  # satisfy a required status check: GitHub evaluates checks only for push /
-  # pull_request / pull_request_review / pull_request_target / deployment, so a
-  # dispatch run's checks never join the PR's check set (GitHub docs: "Checks
-  # from some workflow jobs are not evaluated"). If the declaration-home file is
-  # ever applied, the remedies are to stop requiring redis-guard, or to move the
-  # filter INSIDE an always-on job behind an aggregate gate, the way
+  # satisfy a required status check: GitHub evaluates workflow-job checks only
+  # for pull-request-ish events, and `workflow_dispatch` is not one of them, so a
+  # dispatch run's checks never join the PR's check set (GitHub docs:
+  # "Checks from some workflow jobs are not evaluated"). If the declaration-home
+  # file is ever applied, the remedies are to stop requiring redis-guard, or to
+  # move the filter INSIDE an always-on job behind an aggregate gate, the way
   # python-ci-gate does.
   workflow_dispatch:
 
