@@ -1324,9 +1324,15 @@ def test_shard_labels_are_a_superset_when_s_changes():
 def test_watchdog_is_per_shard_and_scales_with_the_shard():
     """#6135: the watchdog is PER-LEG. Inheriting the old 55m means a hung
     ~6-minute shard is detected ~8× later than it should be."""
-    from tools.ci_selection import (WATCHDOG_CEILING_MIN, WATCHDOG_FLOOR_MIN,
-                                    _duration_weight, _durations_map, fast_pool,
-                                    load_manifest, shard_watchdog_minutes)
+    from tools.ci_selection import (
+        WATCHDOG_CEILING_MIN,
+        WATCHDOG_FLOOR_MIN,
+        _duration_weight,
+        _durations_map,
+        fast_pool,
+        load_manifest,
+        shard_watchdog_minutes,
+    )
     small = shard_watchdog_minutes(6.81 * 60)     # a 6.81-min shard at S=9
     old_two = shard_watchdog_minutes(30.62 * 60)  # a 30.62-min shard at S=2
     assert small == WATCHDOG_FLOOR_MIN == 15, small
