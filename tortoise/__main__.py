@@ -3563,6 +3563,12 @@ def _cmd_hooks(args) -> int:
                 # "installed and ran" from "never ran" too.  `None` means this
                 # harness's hooks do not write a record at all.
                 "hook_run": _hook_run_json(args.harness, layout, root),
+                # `detail` is the DETECTOR's own finding, verbatim (#5351): it
+                # is data about the install, not a recommendation to execute,
+                # and the TEXT surface — which owns the human-facing repair
+                # wording — is where a prescription that would refuse is
+                # withheld.  A consumer that RENDERS `detail` to a human owns
+                # that distinction.
                 "findings": [
                     {"kind": f.kind, "script": f.script, "event": f.event,
                      "detail": f.detail, "blocking": f.blocking}
@@ -3574,14 +3580,15 @@ def _cmd_hooks(args) -> int:
                   f"(contract v{version}).")
         else:
             # Repairability is decided BEFORE the findings are rendered, because
-            # an artifact finding's OWN detail embeds a repair command
-            # ("reinstall with `tortoise install pi`") — unconditionally, and in
-            # the legacy collision the installer REFUSES it.  That detail is the
-            # "second place a refusing recommendation can come from", so it is
-            # replaced whenever the obstacle is present, exactly as `doctor`
-            # replaces it (independent of the MANUAL arm: a manual step does not
-            # clear the collision, so the conditional hint below never names a
-            # command for this state either).
+            # an ARTIFACT finding's OWN detail embeds a repair command
+            # ("reinstall with `tortoise install pi`") — unconditionally — and
+            # the installer REFUSES that command whenever this seam is
+            # unrepairable.  That detail is the "second place a refusing
+            # recommendation can come from" (the same reason `doctor` replaces
+            # it).  TWO independent reasons make the installer refuse: a MANUAL
+            # kind (`is_manual_fix` is by construction "the installer refuses
+            # this kind") and the legacy collision (#3713).  A manual step does
+            # not clear the collision, so both are reported below.
             blocking = [f for f in findings if f.blocking]
             # Some blocking kinds are NOT repairable by `upgrade` (it refuses
             # rather than clobber an unreadable/unsafe/foreign path), so the
@@ -3599,14 +3606,18 @@ def _cmd_hooks(args) -> int:
             # never a second copy of the condition (#5351).
             obstacle = ("" if layout is not None
                         else legacy_extension_obstacle(args.harness, root))
+            unrepairable = bool(manual) or bool(obstacle)
             print(f"Capture-hook install at {root} (contract v{version}):")
             for f in findings:
-                if obstacle:
-                    # The detail's embedded command is refused in this state,
-                    # so replace it with the repair-path pointer `doctor`
-                    # renders for the same reason.
-                    icon = "❌" if f.blocking else "⚠️"
-                    print(f"  {icon} {f.kind}: run `tortoise session verify "
+                # Replaced only where a PRESCRIPTION must not be printed: an
+                # artifact (a shell finding's detail carries no command), a
+                # BLOCKING finding, whose detail is the unconditional
+                # recommendation, and not a MANUAL kind, whose detail is a
+                # CONDITIONAL two-step ("move it aside, then re-run …") — its
+                # own condition IS the manual instruction, so it is kept.
+                if (layout is None and unrepairable and f.blocking
+                        and not is_manual_fix(f.kind)):
+                    print(f"  ❌ {f.kind}: run `tortoise session verify "
                           f"--harness {args.harness}` for the repair path")
                 else:
                     print(f"  {f.line()}")

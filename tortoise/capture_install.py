@@ -1042,7 +1042,8 @@ def legacy_extension_obstacle(harness: str,
     drift, so
     ``test_pi_legacy_obstacle_matches_the_installers_own_refusal`` drives both
     over the shape space (no legacy entry / a renameable one / its backup name
-    taken / a symlinked entry) and pins them together.
+    taken / a regular FILE at its name with the backup taken / a symlinked
+    entry, with and without the backup name taken) and pins them together.
 
     A symlinked legacy entry is deliberately NOT a collision: the installer
     unlinks it (the checkout it points at is untouched) and never reaches the

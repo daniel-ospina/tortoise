@@ -3885,12 +3885,11 @@ def test_pi_hooks_status_never_recommends_an_upgrade_that_refuses(cli):
 
 
 def test_pi_hooks_status_with_a_manual_fix_and_a_collision_names_no_refusing_command(
-        cli):
+        cli, tmp_path):
     """The obstacle and MANUAL arms are independent: a manual step does not
     clear the legacy collision, so in their COMBINATION the finding's detail
     still must not be printed raw (it names `tortoise install pi`, which
-    refuses) — the precedence `doctor` uses, where the detail is replaced
-    whenever the obstacle is present.
+    refuses).
 
     Mutation: render the detail whenever `not manual` (the first, incomplete
     fix) — this case prints `tortoise install pi` and REDs.
@@ -3900,14 +3899,20 @@ def test_pi_hooks_status_with_a_manual_fix_and_a_collision_names_no_refusing_com
     root = capture_install.pi_home(home)
     (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
     (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
-    # A MANUAL kind BESIDE the obstacle: an out-of-home leaf symlink is refused
-    # by the installer, so `is_manual_fix` fires for `symlinked-artifact`.
-    outside = home / "outside.ts"
+    # A MANUAL kind BESIDE the obstacle: a leaf symlink whose target is
+    # OUTSIDE `$HOME` is refused by the installer, so the manual arm fires on
+    # a target the installer really will not write through.  (`home` is
+    # `tmp_path/home`, so `tmp_path` is outside it.)
+    outside = tmp_path / "outside.ts"
     outside.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
                        encoding="utf-8")
     installed = root / capture_install.PI_EXTENSION_NAME
     installed.unlink()
     installed.symlink_to(outside)
+    refused = install_capture("pi", home=home, dry_run=True)
+    assert not refused.ok and "install home" in (refused.error or ""), (
+        "the fixture must be a state the installer REFUSES, or the test's "
+        f"premise is false: {refused.error!r}")
 
     r = run("hooks", "status", "--harness", "pi")
 
@@ -3916,3 +3921,43 @@ def test_pi_hooks_status_with_a_manual_fix_and_a_collision_names_no_refusing_com
         "a manual step does not clear the legacy collision, so the installer "
         "this names still refuses:\n" + r.stdout)
     assert capture_install.PI_DISABLED_DIRNAME in r.stdout, r.stdout
+
+
+def test_pi_hooks_status_hides_the_installer_when_a_manual_kind_refuses(cli,
+                                                                       tmp_path):
+    """The MANUAL arm ALONE also makes the installer refuse: `is_manual_fix`
+    is by construction "the installer refuses this kind", so the unconditional
+    `reinstall with `tortoise install pi`` in a blocking artifact detail must
+    not be printed even with NO legacy collision.
+
+    Mutation: gate the replacement on `obstacle` alone — the blocking
+    `stale-artifact` detail is printed beside a manual `symlinked-artifact`
+    note, and this REDs.
+    """
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+    outside = tmp_path / "outside.ts"
+    outside.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
+                       encoding="utf-8")
+    installed = root / capture_install.PI_EXTENSION_NAME
+    installed.unlink()
+    installed.symlink_to(outside)
+    refused = install_capture("pi", home=home, dry_run=True)
+    assert not refused.ok and "install home" in (refused.error or ""), (
+        f"the installer must refuse this state: {refused.error!r}")
+    # No legacy collision anywhere in the fixture.
+    assert capture_install.legacy_extension_obstacle("pi", root) == ""
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert "tortoise install pi" not in r.stdout, (
+        "the blocking detail's unconditional `reinstall with tortoise install "
+        "pi` is refused by the installer for this seam:\n" + r.stdout)
+    # The MANUAL finding keeps its own note — it carries the step that
+    # unblocks the installer — and the manual hint still fires, so the user is
+    # told what blocks the repair.
+    assert "re-point or copy it to upgrade" in r.stdout, r.stdout
+    assert "manual fix" in r.stdout, r.stdout
+    assert "hooks upgrade" not in r.stdout, r.stdout
