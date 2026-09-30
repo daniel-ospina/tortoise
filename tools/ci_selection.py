@@ -23,8 +23,9 @@ should be exercised; the workflow header comment says the same).
 Selection rules (fail-closed, conservative):
 - push to main / schedule  -> full (tier 3 — the trunk backstop)
 - any changed file UNKNOWN to the surface map -> full (new dirs/subsystems)
-  — EXCEPT a root-level file in ROOT_NON_PYTHON_FILES (or a root `*.md`),
-  which is non-python-relevant by explicit name (#6784)
+  — EXCEPT a root-level file in ROOT_NON_PYTHON_FILES, which is
+  non-python-relevant by explicit name (#6784). There is deliberately NO
+  blanket `*.md` clause: only named files are ever exempted.
 - any changed SHARED/core module -> full (cross-cutting code wants max coverage)
 - otherwise -> tier 2 = core ∪ union(matched surfaces' test files)
   (docs-only PRs -> core set only — the always-on smoke)
@@ -669,10 +670,12 @@ NON_PYTHON_PREFIXES = (
 # is left after measuring that. The issue assumed a root-level prose file is
 # "not python-relevant". In THIS repo it usually is: the root files are
 # deliberately PINNED by tests across several surfaces. Reader census
-# (`grep -rlF "<name>" tests tools scripts .github tortoise`, root files only):
+# (`grep -rlF "<name>" tests tools scripts .github tortoise`, root files only,
+# EXCLUDING both `tools/ci_selection.py` and `tests/test_ci_selection.py` — the
+# first only quotes this census, the second only names the members):
 #
-#   AGENTS.md 35 · README.md 21 · fly.toml 18 · pyproject.toml 17 · .env.example 15
-#   .mcp.json 10 · entrypoint.sh 9 · .gitignore 8 · CONTRIBUTING.md 8 · LICENSE 5
+#   AGENTS.md 35 · README.md 21 · fly.toml 18 · pyproject.toml 16 · .env.example 15
+#   .mcp.json 10 · entrypoint.sh 9 · .gitignore 7 · CONTRIBUTING.md 7 · LICENSE 4
 #   MANIFEST.in 5 · requirements.txt 5 · docker-compose.yml 4 · index.md 3 · …
 #
 # So allowlisting README.md made `test_embedded_durability_claim.py` skip on
@@ -681,13 +684,17 @@ NON_PYTHON_PREFIXES = (
 # so a single-surface claim would silently skip the rest. Every root file with a
 # reader therefore KEEPS the fail-closed full matrix:
 #   README.md LICENSE CHANGELOG.md CONTRIBUTING.md AGENTS.md CLAUDE.md MEMORY.md
-#   index.md .gitignore .gitattributes .python-version .env.example .mcp.json …
+#   index.md .gitignore .env.example .mcp.json .mergify.yml fly.toml …
+# (`.gitattributes` is NOT in that list because it does not exist in this tree;
+# `.python-version` IS kept fail-closed although its census is zero, because a
+# toolchain file is exactly what should not be silently exempted.)
 #
-# Membership is ONLY a root file with no reader at all. To add a name, prove it:
-#   grep -rlF "<name>" tests tools scripts .github tortoise
-# (ignore tests/test_ci_selection.py, which only names the members, and .pyc
-# artifacts). A name that earns a guard belongs in SOURCE_PATTERNS/CORE_ALSO
-# instead — which is also why `_keep_changed` tests a CLAIM before this tuple.
+# Membership is ONLY a root file with no reader at all. The rule is
+# MACHINE-ENFORCED, not merely stated here:
+# `tests/test_ci_selection.py::test_no_allowlisted_root_file_has_a_reader`
+# derives the readers for every member and fails if any is read.
+# A name that earns a guard belongs in SOURCE_PATTERNS/CORE_ALSO instead —
+# which is also why `_keep_changed` tests a CLAIM before this tuple.
 #
 # These three are stray committed artifacts under a dot-prefix or an obvious
 # scratch name, not project files a reader could be pinned to.
@@ -970,6 +977,8 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         CORE_ALSO could no longer rescue it, and any future root `.md` guard
         pin would have inherited the same trap.
         """
+        if c.startswith(SHARED_MODULES):
+            return True
         if c.startswith(TOOL_CARVEOUTS) or c.startswith(SITE_CARVEOUTS):
             return True
         if _selection_relevant(c):

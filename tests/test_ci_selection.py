@@ -451,23 +451,70 @@ def test_every_allowlisted_root_file_actually_exists():
             "entry that skips the matrix for nothing")
 
 
+# Files that only NAME the census/members rather than reading them: the census
+# module quotes it, and this test file hard-codes the members.
+_SELF_NAMERS = frozenset({"tools/ci_selection.py", "tests/test_ci_selection.py"})
+
+
+def _readers_of(name: str) -> list[str]:
+    """Every non-self file under tests/tools/scripts/.github/tortoise naming `name`."""
+    out = subprocess.run(
+        ["grep", "-rlF", name, "tests", "tools", "scripts", ".github", "tortoise"],
+        cwd=REPO, capture_output=True, text=True).stdout.split("\n")
+    return sorted(h for h in (x.strip() for x in out)
+                  if h and h not in _SELF_NAMERS and not h.endswith(".pyc"))
+
+
+def test_no_allowlisted_root_file_has_a_reader():
+    """#6784 review cycle 3 P2: the GENERAL invariant, not a name sample.
+
+    The earlier guard was a hard-coded 11-name list, so it only defended the
+    names someone had thought of. Measured counterexamples: adding `.env.example`
+    (16 readers, one of them the cycle-1 P1 guard itself) or `fly.toml`
+    (18 readers, 7 of them non-tier1) left the whole suite GREEN while silently
+    skipping guards — the exact class this allowlist exists to prevent.
+
+    This derives the readers for EVERY member, so any future addition of a file
+    something reads fails here instead of in production. REDs if a member gains
+    a reader, or if a file with a reader is added to the allowlist.
+    """
+    offenders = {name: _readers_of(name) for name in sorted(cs.ROOT_NON_PYTHON_FILES)
+                 if _readers_of(name)}
+    assert not offenders, (
+        "allowlisted root file(s) are READ by the listed files — allowlisting them "
+        f"makes those guards skip on exactly the PR that edits the file: {offenders}")
+
+
+def test_allowlist_members_are_real_root_level_files():
+    """Companion to the invariant above: every member must be a ROOT-LEVEL
+    tracked file, so the census is about real paths, not invented ones."""
+    roots = subprocess.run(["git", "ls-files"], cwd=REPO,
+                           capture_output=True, text=True).stdout.split("\n")
+    root_set = {f for f in roots if f and "/" not in f}
+    for name in sorted(cs.ROOT_NON_PYTHON_FILES):
+        assert name in root_set, (
+            f"{name} is allowlisted but is not a root-level tracked file in this tree")
+
+
 def test_root_file_read_by_a_test_is_never_allowlisted():
     """#6784 review cycle 1 P1 + cycle 2 P1: a file a test READS is not "not
     python-relevant".
 
     `tests/test_embedded_durability_claim.py` reads `ROOT/README.md` and asserts
     its durability claim, and it is `core`+carve-out (NOT tier1) — so allowlisting
-    README.md made that guard skip on exactly the PR that edits it. Measured
-    census: README.md 21 readers, AGENTS.md 35, CONTRIBUTING.md 8, .gitignore 8,
-    LICENSE 5 — spread across `core`, `api` and `tests/bench`, so neither an
+    README.md made that guard skip on exactly the PR that edits it. Census:
+    README.md 21 readers, AGENTS.md 35, CONTRIBUTING.md 7, .gitignore 7,
+    LICENSE 4 — spread across `core`, `api` and `tests/bench`, so neither an
     allowlist NOR a single-surface claim is safe for them.
 
-    This REDs if any of them is put back in the allowlist, and also if the
+    This is the explicit spot-check for the files that matter most; the GENERAL
+    rule is pinned by `test_no_allowlisted_root_file_has_a_reader`. It REDs if the
     removed blanket `*.md`-at-root clause is reintroduced (it admitted README.md).
     """
     for name in ("README.md", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md",
                  "LICENSE", "MEMORY.md", "CLAUDE.md", "index.md",
-                 ".gitignore", ".gitattributes", "pyproject.toml"):
+                 ".gitignore", ".env.example", "fly.toml", "pyproject.toml",
+                 ".python-version"):
         r = _sel([name])
         assert r["full"] is True, (
             f"{name} is read by a test — it must keep the fail-closed FULL "
