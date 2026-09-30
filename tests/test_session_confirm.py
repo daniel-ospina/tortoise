@@ -259,17 +259,28 @@ def test_the_stored_text_matches_the_servers_own_writer_definition():
     derived from the writer's shared helper AND split by the reader's shared
     inverse rather than mirrored.
 
+    #4897 round 5: BOTH sides window first. ``expected_turns`` (the client's
+    confirmation) and the server's writer both feed ``_capture_turn_texts`` a
+    ``_capture_turn_window``'d conversation — the stored-text helper is
+    redaction-only and does NOT window, so the raw fixture must be windowed here
+    exactly as ``expected_turns`` windows it.
+
     MUTATION THAT REDS THIS: return the raw `"[role] text"` string (the
     pre-fix shape) — the expectation stops matching a served row.
     """
-    from tortoise.sdk import _capture_turn_role_text, _capture_turn_texts
+    from tortoise.sdk import (
+        _capture_turn_role_text,
+        _capture_turn_texts,
+        _capture_turn_window,
+    )
     odd = [{"role": "user", "content": "x"}, {"role": None, "content": None},
            {"role": 7, "content": 42}, {"content": "no role"},
            {"role": "assistant", "content": "y" * 6000},
            {"role": "user", "content": "  leading space"}]
+    windowed = _capture_turn_window([dict(t) for t in odd])
     assert expected_turns("abc", odd) == {
         f"abc_t{i}": _capture_turn_role_text(text)
-        for i, text in enumerate(_capture_turn_texts([dict(t) for t in odd]))}
+        for i, text in enumerate(_capture_turn_texts(windowed))}
 
 
 def test_the_role_split_is_the_inverse_of_the_writer_and_the_servers_own():

@@ -509,6 +509,55 @@ def test_a_504_whose_session_never_appears_still_spools(
     assert read_spool_meta(spool, "sid-never") is not None
 
 
+def test_a_retryable_import_spools_a_marked_over_cap_turn(
+        tmp_path, monkeypatch):
+    """#4897 review round 15, P3: the `sessions import` spool leg is PINNED.
+
+    `_spool_if_retryable` clips each parsed turn through the SDK's ONE definition
+    (`_clip_capture_turn_content`). Reverting it to a bare `t["content"][:5000]`
+    left the suite green: a retryable refusal then parked a silently cut turn in
+    the durable spool — the path that exists precisely so a lost session can be
+    replayed later, and the cut would be invisible to every reader of the spool.
+
+    MUTATION THAT REDS THIS: replace the clip in `_spool_if_retryable` with
+    `t["content"][:5000]` — the marker assertion fails.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_meta, read_spool_turns
+    from tortoise.sdk import (
+        _CAPTURE_TRUNCATION_SENTINEL,
+        _CAPTURE_TURN_CAP,
+        _capture_truncation_marker,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    over = _CAPTURE_TURN_CAP + 1234
+    long = "a" * over
+    p = tmp_path / "session-long.jsonl"
+    p.write_text(json.dumps({
+        "type": "response_item",
+        "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": long}]},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _post_refused_get_serves("sid-mark", [], get_404=True))
+
+    rc = _cmd_sessions_import(SimpleNamespace(
+        file=str(p), harness="codex", session_id="sid-mark"))
+
+    assert rc == 1
+    assert read_spool_meta(spool, "sid-mark") is not None, (
+        "a retryable refusal must park the turns durably")
+    turns = read_spool_turns(spool, "sid-mark")
+    assert len(turns) == 1, turns
+    assert _CAPTURE_TRUNCATION_SENTINEL in turns[0]["content"], (
+        f"the spool stored a silently cut turn: {turns[0]['content'][-60:]!r}")
+    assert _capture_truncation_marker(over) in turns[0]["content"], (
+        "the marker must carry the turn's TRUE length, not the window width")
+    assert len(turns[0]["content"]) == _CAPTURE_TURN_CAP
+
+
 def test_an_unreachable_api_that_still_committed_writes_the_receipt(
         tmp_path, monkeypatch, codex_jsonl, capsys):
     """The URLError branch gets the SAME confirmation. A read timeout or a

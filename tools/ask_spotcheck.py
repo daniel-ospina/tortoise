@@ -83,6 +83,7 @@ from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
+    _capture_gate_window,
     _capture_turn_embeddings,
     _capture_turn_texts_with_redactions,
     _capture_turn_window,
@@ -283,7 +284,16 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     turn to an ``:Event`` — in capture either.
     """
     windowed = _capture_turn_window(conversation or [])
-    transcript, _est = _session_llm_transcript(windowed)
+    # Same marker-stripped view as capture's own gates (#4897 review round 12): this mirror
+    # previously admitted an over-cap blank turn and seeded a marker-only session, while capture
+    # refused it — contradicting this function's own docstring ("exactly as in capture").
+    #
+    # ⛔ ``_capture_gate_window`` is a MODULE-LEVEL function in ``tortoise.sdk``, not a
+    # ``TortoiseSDK`` method, and ``sdk`` here is an SDK INSTANCE. Round 12 wrote
+    # ``sdk._capture_gate_window(windowed)``, which raised ``AttributeError`` for EVERY caller —
+    # caught by ``tests/test_ask_seed_shape.py`` in review round 14. Import it and call it
+    # directly; the SDK class has no ``__getattr__``.
+    transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
     if not transcript.strip():
         return []
     proj = sdk._get_proj()
@@ -334,8 +344,10 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         turn_id = f"{session_id}_t{i}"
-        # `_capture_turn_window` already truncated to the cap; the [:5000]
-        # mirrors the live store loop's explicit (idempotent) window.
+        # `_capture_turn_window` applied the cap and its marker to the
+        # pre-redaction text; the shared `_capture_turn_texts` (#4911) scrubs
+        # that window and does NOT re-clip it (#4897), exactly as the live
+        # store loop does.
         turn_text = turn_texts[i]
         # Node MERGE BEFORE the edge MERGE — capture's #490 ordering rule: a
         # full-path MERGE whose edge is missing makes FalkorDB create the

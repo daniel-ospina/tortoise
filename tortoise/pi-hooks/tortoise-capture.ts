@@ -1,4 +1,4 @@
-// tortoise-hook-version: 1
+// tortoise-hook-version: 2
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -9,6 +9,12 @@
 // capturing with the old logic: `session verify` called it UNVERIFIABLE-IN-CI
 // rather than STALE, and `tortoise doctor` printed no freshness row for it at
 // all. Generation 1 is the first contract for this seam.
+//
+// Generation 2 (#4897): `extractTurns` no longer cuts a >TURN_MAX_CHARS turn
+// SILENTLY. A clipped turn now carries a truncation marker with its true
+// length (see `clipTurnContent`), so the bytes this seam POSTs changed and
+// every already-installed generation-1 copy must read as stale and be
+// reinstalled — an old copy would keep storing an unmarked 5,000-char wall.
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -71,8 +77,94 @@ export const CONFIG_PATH = join(homedir(), ".pi", "agent", "tortoise-config.json
  * pins this literal to it so the two legs cannot drift.
  */
 export const MAX_TURNS = 500;
-/** Hosted per-turn stored window (tortoise _capture_turn_window). */
+/** Hosted per-turn stored window (tortoise sdk._CAPTURE_TURN_CAP).
+ *
+ * ⛔ ONE number, owned by Python. The extension is shipped standalone (it
+ * cannot import a Python constant), so this literal is the client's copy and
+ * `tests/test_pi_capture_hooks.py` pins it to `sdk._CAPTURE_TURN_CAP` — a
+ * divergence reds a test instead of storing a different window per lane. */
 export const TURN_MAX_CHARS = 5000;
+/**
+ * Sentinel prefix of the truncation marker appended when a turn is clipped at
+ * `TURN_MAX_CHARS` (#4897). MUST stay identical to the Python sentinel
+ * (`sdk._CAPTURE_TRUNCATION_SENTINEL`): the server stores a client-clipped
+ * turn verbatim, so a reader on either side has to recognise the other's
+ * marker. Pinned by `tests/test_pi_capture_hooks.py`.
+ */
+export const TRUNCATION_SENTINEL = "…[truncated:";
+
+/** The marker appended INSIDE the window when a turn is cut (#4897). */
+export function truncationMarker(total: number): string {
+  return ` ${TRUNCATION_SENTINEL} original length ${total} chars]`;
+}
+
+/**
+ * Code points treated as BLANK by `clipTurnContent` — the exact Python set
+ * (`tortoise/sdk.py::_CAPTURE_BLANK_CHARS`). Spelled out explicitly instead of
+ * using `String.prototype.trim()` because this is the client half of a
+ * TWO-LANGUAGE contract (#4897 review round 15, P3): `trim()` strips U+FEFF but
+ * NOT U+001C-U+001F or U+0085, while Python's `str.strip()` does the reverse —
+ * so the two clippers disagreed on exactly those five code points and the
+ * "byte-identical stored turns" claim was false for them. This is the UNION of
+ * the two sets, so no input either side called blank becomes non-blank on the
+ * other. Pinned to the Python literal by the cross-language parity case in
+ * `tests/test_pi_capture_hooks.py`.
+ */
+export const BLANK_CHARS =
+  "\u0009\u000a\u000b\u000c\u000d" +          // tab, LF, VT, FF, CR
+  "\u001c\u001d\u001e\u001f" +                // file/group/record/unit separator
+  "\u0020\u0085\u00a0\u1680" +
+  "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
+  "\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+/** `content` is blank iff this finds nothing (see `BLANK_CHARS`). */
+const NON_BLANK_RE = new RegExp(`[^${BLANK_CHARS}]`);
+
+/**
+ * `content` unchanged when it fits `cap`; otherwise cut AND marked (#4897).
+ *
+ * Code-point safe on purpose: iteration is over `Array.from(content)`, so a
+ * multi-byte character (a surrogate pair) straddling the cut is never split
+ * into a lone surrogate, and counting CODE POINTS (not UTF-16 units) matches
+ * the server, whose `len()` counts code points — so a client-clipped turn is
+ * always `<= cap` on the server and the server's own cap re-application is a
+ * no-op.
+ *
+ * The marker is reserved INSIDE the cap, so the result is `<= cap` code points
+ * and `clip(clip(x)) === clip(x)`: a marker appended after a full-width cut
+ * would be destroyed by the server's second application.
+ */
+export function clipTurnContent(
+  content: string,
+  cap: number = TURN_MAX_CHARS,
+): string {
+  const points = Array.from(content);
+  if (points.length <= cap) return content;
+  // ⛔ A BLANK RETENTION IS NOT MARKED — the SAME predicate as the Python
+  // clipper (#4897 review round 14, P3; blankness unified in round 15). The
+  // marker means "there is more"; for a body that holds nothing that statement
+  // is misleading, and a marker-ONLY turn is what made the server's v1 extractor
+  // mint a Point whose entire content was the marker itself. The server now skips
+  // such a turn at extraction, and `NON_BLANK_RE` keeps the two clippers
+  // byte-identical on blank input too — `trim()`/`strip()` disagree on five code
+  // points, so the blankness test is the explicit shared set, not either
+  // language's builtin.
+  if (!NON_BLANK_RE.test(content)) return points.slice(0, cap).join("");
+  let marker = truncationMarker(points.length);
+  let keep = cap - Array.from(marker).length;
+  if (keep < 0) {
+    // `cap` too small to carry the full marker (never the production 5000).
+    // Fall back to the bare sentinel so the cut stays VISIBLE.
+    marker = TRUNCATION_SENTINEL;
+    keep = Math.max(cap - Array.from(marker).length, 0);
+  }
+  const out = points.slice(0, keep).join("") + marker;
+  // The degenerate branch can still exceed the cap by the sentinel's own
+  // width; trim by code points (never a UTF-16 slice, which could split a
+  // surrogate).
+  const outPoints = Array.from(out);
+  return outPoints.length <= cap ? out : outPoints.slice(0, cap).join("");
+}
 /** Bounded network budget — Pi must never be blocked by a capture. */
 export const REQUEST_TIMEOUT_MS = 10_000;
 /**
@@ -200,7 +292,10 @@ export function extractTurns(entries: Array<Record<string, unknown>>): Turn[] {
     if (role !== "user" && role !== "assistant") continue;
     const text = flattenContent(message.content).trim();
     if (!text) continue;
-    turns.push({ role, content: text.slice(0, TURN_MAX_CHARS) });
+    // #4897: clip WITH a marker rather than `slice(0, TURN_MAX_CHARS)`. A cut
+    // turn now records its true length, so a reader can tell "the user said
+    // this much" from "we cut it here" — the silent mid-word cut is the defect.
+    turns.push({ role, content: clipTurnContent(text) });
     // Keep the MOST RECENT turns — matching the backfill leg's
     // `window_turns` (`turns[-MAX_TURNS:]`). Dropping the oldest is the
     // whole point: recent context is what memory wants. An early `break`
@@ -354,7 +449,8 @@ export const SPOOL_DIR = join(homedir(), ".tortoise", "capture-spool");
  *
  * `SPOOL_MAX_ENTRY_BYTES` must exceed the SERVER's own legal maximum, or a
  * legal capture is discarded as oversized: the handler accepts `MAX_TURNS`
- * (500) turns of up to `TURN_MAX_CHARS` (5000) characters, and non-ASCII text
+ * (500) turns of up to `TURN_MAX_CHARS` characters — the client clip reserves
+ * the #4897 truncation marker inside that window — and non-ASCII text
  * is up to 4 UTF-8 bytes per character → ~10 MB of JSON. 16 MiB leaves room for
  * the envelope. (A 4 MiB ceiling silently discarded legal CJK sessions.)
  */
