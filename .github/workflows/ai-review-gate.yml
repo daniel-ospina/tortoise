@@ -1,9 +1,9 @@
 name: ai-review-gate
 
-# AI review evidence gate (#2055, #2982). It passes only when the PR body
-# carries a SIGNED AI-review evidence marker produced by record-review.sh,
-# bound to this PR and repo and to EITHER the PR's current head sha OR its
-# current diff:
+# AI review evidence gate (#2055, #2982, #1224). It passes only when the PR
+# body OR a PR comment carries a SIGNED AI-review evidence marker produced by
+# record-review.sh, bound to this PR and repo and to EITHER the PR's current
+# head sha OR its current diff:
 #
 # ⛔ It is NOT a required status context. Verified 2026-09-28: live
 # branches/main/protection contexts are pricing-artifact, docs, test-isolation,
@@ -19,6 +19,60 @@ name: ai-review-gate
 # emitted by record-review.sh for a content-only (prose/stylesheet) diff whose linked
 # issue may be standard/complex (agent-infra #1348). It must NOT become `verdict=.*`:
 # an out-of-vocabulary verdict (e.g. `verdict=clean-anything`) must still fail.
+#
+# #1224 — THE MARKER IS READ FROM EITHER THE PR BODY OR A PR COMMENT. The body
+# is a MUTABLE field and the recording party routinely rewrites it (a typo fix,
+# a corrected claim, a mechanical rewrite), so ANY later, entirely legitimate
+# body edit destroys a marker kept only there and reddens the check on a review
+# that genuinely happened — two measured instances on 2026-09-18
+# (agent-infra#1209, premise-labs#3788), and 11 of the 25 red runs in the
+# 2026-09-30 gate-red sample were NO_MARKER, the population this would land in.
+# record-review.sh (the producer half, agent-infra#1224) therefore posts the
+# SAME signed marker text as an append-only PR COMMENT as well as into the
+# body; this gate unions the two channels, so a body edit cannot hide evidence
+# that still exists in a comment.
+#
+# ⛔ The CHANNEL is not a trust boundary and this changes NO security property.
+# A comment is exactly as attacker-writable as the body, so the marker text is
+# still HMAC-verified against AI_REVIEW_GATE_KEY, and the binding rules are
+# untouched: rule (a) signed `@ <sha>` == the current head, rule (b) signed
+# `diff=` == a live diff digest. A forged comment FAILS the HMAC; a stale
+# comment FAILS rule (a) and rule (b). The union restores AVAILABILITY of
+# genuine evidence, never its authenticity.
+#
+# ⛔ Fail closed on the comment fetch. If
+# `gh api …/issues/<PR>/comments` fails (API blip, missing auth) the run must
+# NOT fall back to accepting unverified comment text — `gh api` prints HTTP
+# error bodies to STDOUT, so a `|| true` / unguarded capture would read an
+# error body as evidence. The fetch below is wrapped in an `if`: on failure
+# `comments` stays EMPTY, a warning is printed, and the BODY path is evaluated
+# exactly as it was before this change. A comment can only ever ADD acceptance,
+# and only after its HMAC verifies, so a network failure can never become a
+# pass.
+#
+# Comment admission is AUTHOR-FILTERED by `PR_EVIDENCE_COMMENTS_JQ`, the
+# BYTE-IDENTICAL jq constant shared with agent-infra's record-review.sh,
+# check-pipeline-compliance.sh and atomic-land.sh (#1224). On a public repo
+# every GitHub user with read access can comment, so admission is narrowed to
+# repo-affiliated authors (OWNER / MEMBER / COLLABORATOR). It is a NARROWING,
+# not parity with the body's writer set — its known over/under-admission
+# residuals are declared at the constant itself. It exists both to stop an
+# arbitrary public commenter from greening this check and so that every reader
+# admits the SAME evidence: a reader acting on a comment the others ignore is
+# the gate/rail divergence #1224 removes. If the producer's constant changes,
+# change this one in the same breath (a cross-repo contract, like the #1362
+# normalization half).
+#
+# ⛔ The trigger is deliberately UNCHANGED — `pull_request_target` on
+# [opened, synchronize, reopened, edited]. A comment alone fires
+# `issue_comment`, NOT this workflow, so a marker posted ONLY as a comment is
+# readable but would not re-run this check. The producer therefore keeps the
+# body mirror, whose PATCH fires `edited` and re-runs this gate against BOTH
+# channels. Do NOT add `issue_comment` here without re-reading the skip-footgun
+# rule at the end of this header and the parsed-trigger pin in
+# tests/test_ai_review_gate_contract.py (this job must stay a single,
+# non-skippable evaluation), and do NOT drop the producer's body mirror — it is
+# what re-triggers the read.
 #
 # The optional `diff=` segment (issue #2982; accepted shape per #3076) is part
 # of the SIGNED text, so every regex here must accept it — a regex that does
@@ -47,9 +101,10 @@ name: ai-review-gate
 # The signature is HMAC-SHA256 over the marker text, keyed by the
 # AI_REVIEW_GATE_KEY repo secret (the agent machine holds the same key at
 # ~/.pi/agent/.ai-review-gate-key). `diff=` sits INSIDE the signed text (the
-# signature covers everything before " sig="), so a body edit cannot forge
-# either field. A marker without a valid signature cannot pass, so the gate
-# cannot be satisfied by editing the PR body.
+# signature covers everything before " sig="), so neither a body edit nor a
+# comment can forge either field. A marker without a valid signature cannot
+# pass, so the gate can be satisfied neither by editing the PR body nor by
+# posting a forged comment — only genuine, correctly-signed evidence passes.
 #
 # Fail closed — scoped to the DIFF-MATCH arm: if the live diff hash cannot be
 # computed (API blip, missing gh/openssl/python3, empty diff) a STALE-SHA `diff=`
@@ -137,10 +192,11 @@ name: ai-review-gate
 #
 # Security: runs via pull_request_target so the workflow file is always the
 # trusted main-branch copy. It NEVER checks out PR code and NEVER executes
-# anything from the PR — it only reads event-payload env vars and the PR body
-# via the REST API, then computes an HMAC with the repo secret. No
-# code-injection or secret-exfiltration vector. The diff is fetched and hashed
-# as bytes only; it is never evaluated.
+# anything from the PR — it only reads event-payload env vars, the PR body and
+# the PR's issue comments via the REST API, then computes an HMAC with the repo
+# secret. No code-injection or secret-exfiltration vector. The diff is fetched
+# and hashed as bytes only; it is never evaluated. Comment text is likewise
+# only pattern-matched and HMAC-verified — never executed.
 #
 # ⛔ FUTURE EDITORS: never add `if:` conditions, path filters, or `needs:` to
 # this job. A SKIPPED job reports as Success and would silently pass the check
@@ -167,6 +223,10 @@ jobs:
   ai-review-gate:
     runs-on: ubuntu-latest
     steps:
+      # NOTE (#1224): the step NAME is matched verbatim by
+      # tests/test_ai_review_gate_contract.py (the block is selected by name, not
+      # position, so it cannot drift onto a different step). It is deliberately
+      # retained even though the gate now also reads PR comments.
       - name: Validate signed AI review evidence in PR body
         shell: bash
         env:
@@ -261,6 +321,46 @@ jobs:
             [ -n "$fetched" ] && [ "$fetched" != "null" ] && body="$fetched"
           else
             echo "::warning::PR body fetch via the REST API failed — falling back to the event-payload PR_BODY (truncated at ~48KB; the evidence marker must lie inside the truncated prefix)."
+          fi
+
+          # ── Comment channel (#1224) ───────────────────────────────────
+          # record-review.sh posts the SAME signed marker as an append-only PR
+          # COMMENT as well as into the (mutable) PR body. Any body rewrite — a
+          # typo fix, a corrected issue ref, a mechanical edit — destroys a
+          # marker kept only there, reddening this check on a review that
+          # genuinely happened (see the #1224 header section). Unioning the two
+          # channels restores AVAILABILITY; it changes no security property,
+          # because the marker text is still HMAC-verified below.
+          #
+          # WHAT IS ADMITTED: PR_EVIDENCE_COMMENTS_JQ, BYTE-IDENTICAL to the
+          # constant in agent-infra's record-review.sh,
+          # check-pipeline-compliance.sh and atomic-land.sh (#1224). On a public
+          # repo every user with read access can comment, so admission is
+          # narrowed to repo-affiliated authors (OWNER / MEMBER /
+          # COLLABORATOR). It is a NARROWING, not parity with the body's writer
+          # set; its known over/under-admission residuals are declared at the
+          # constant in the producer. Its other job is to keep every reader on
+          # the SAME evidence — a reader acting on a comment the others ignore
+          # is the gate/rail divergence #1224 removes. If the producer's
+          # constant changes, change this one in the same breath.
+          PR_EVIDENCE_COMMENTS_JQ='.[] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | .body'
+
+          # Fail closed (see the #1224 header section). On a failed fetch
+          # `comments` stays EMPTY and a warning is printed; the body path below
+          # is then evaluated EXACTLY as before this change, and a comment can
+          # only ever ADD acceptance, and only after its HMAC verifies. Never
+          # `|| true` this into the variable: `gh api` prints HTTP error bodies
+          # to STDOUT, so an unguarded capture would read an error body as
+          # comment text.
+          comments=""
+          comments_read=0
+          if comment_bodies="$(gh api --paginate \
+               "repos/${REPO_NAME}/issues/${PR_NUMBER}/comments" \
+               --jq "$PR_EVIDENCE_COMMENTS_JQ" 2>/dev/null)"; then
+            comments="$comment_bodies"
+            comments_read=1
+          else
+            echo "::warning::PR comment fetch via the REST API failed — evidence carried ONLY in a comment is unavailable for this run. The PR-body path is unaffected and no unverified comment text is used."
           fi
 
           # A marker is acceptable when it names THIS repo, carries a valid
@@ -423,8 +523,29 @@ jobs:
           sha_ok_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ ${expected}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
           marker_re="^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ [0-9a-f]{40}( diff=[0-9a-f]{64})? \(${repo_esc}\) sig=[0-9a-f]{64}$"
 
-          all_markers="$(printf '%s\n' "$body" | grep -E "$marker_re" || true)"
-          all_markers="$(printf '%s\n' "$all_markers" | sed '/^$/d')"
+          # Which evidence channel a matched line came from (#1224). The
+          # diagnostics below must say WHERE a rejected marker was found, or an
+          # operator cannot tell a stale comment copy from a stale body copy. A
+          # line present in BOTH is reported as the PR body (its canonical
+          # channel); the two copies are byte-identical signed text.
+          marker_channel() { # <line>
+            if printf '%s\n' "$body" | grep -Fxq -- "$1"; then
+              printf 'PR body'
+            else
+              printf 'PR comment'
+            fi
+          }
+
+          # Union BOTH channels: PR body ∪ eligible PR comments (#1224). Both
+          # carry the SAME signed marker text (the producer dual-posts), so a
+          # body edit that removes the body copy cannot hide evidence that still
+          # exists in the append-only comment. Channel membership never changes
+          # WHICH marker verifies — the loop below still HMAC-verifies and the
+          # binding rules are untouched.
+          body_markers="$(printf '%s\n' "$body" | grep -E "$marker_re" || true)"
+          comment_markers="$(printf '%s\n' "$comments" | grep -E "$marker_re" || true)"
+          all_markers="$(printf '%s\n%s\n' "$body_markers" "$comment_markers" \
+            | sed '/^$/d' | awk '!seen[$0]++')"
 
           # Keep only markers acceptable by EITHER rule:
           #   (a) recorded sha == current head (legacy + normal case) — the
@@ -457,6 +578,7 @@ jobs:
           # only after its signature verifies, so neither the sha nor the
           # diff= field can be forged by editing the PR body.
           marker=""
+          marker_chan=""
           accepted_via_diff=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -464,6 +586,7 @@ jobs:
             computed="$(printf '%s' "${line% sig=*}" | openssl dgst -sha256 -hmac "$GATE_SECRET" | awk '{print $NF}')"
             if [ "$computed" = "$sig" ]; then
               marker="$line"
+              marker_chan="$(marker_channel "$line")"
               m_sha="$(printf '%s' "$line" | sed -E 's/^review recorded: .* @ ([0-9a-f]{40}).*$/\1/')"
               [ "$m_sha" = "$expected" ] || accepted_via_diff=1
               break
@@ -483,7 +606,7 @@ jobs:
               [ -z "$line" ] && continue
               text="${line% sig=*}"
               text_sha="$(printf '%s' "$text" | openssl dgst -sha256 | awk '{print $NF}')"
-              echo "::error::  text-from-pr-body sha256=${text_sha:0:12}"
+              echo "::error::  text-from-pr-body-or-comment sha256=${text_sha:0:12}  (found in $(marker_channel "$line"))"
               # The same fields WITHOUT the diff= segment — the legacy text an
               # older record-review.sh would have signed. If the recorder's
               # signed text hashes to THIS prefix, the two sides disagree on
@@ -505,25 +628,38 @@ jobs:
             # No acceptable marker. Classify WHY — the operator must not have
             # to guess between "re-record", "fix the repo field", and "fix the
             # key". Priority: unsigned → wrong repo → malformed → stale.
-            all_lines="$(printf '%s\n' "$body" \
-              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ " || true)"
-            all_lines="$(printf '%s\n' "$all_lines" | sed '/^$/d')"
+            # Union both channels here too (#1224): the classification below
+            # (unsigned / wrong-repo / malformed / stale) must work when the
+            # markers came from EITHER channel, or a comment-carried failure
+            # would be misreported as "no evidence at all".
+            all_lines="$(printf '%s\n%s\n' \
+              "$(printf '%s\n' "$body" | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ " || true)" \
+              "$(printf '%s\n' "$comments" | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro|-low)? @ " || true)" \
+              | sed '/^$/d' | awk '!seen[$0]++')"
 
             if [ -z "$all_lines" ]; then
-              echo "::error::No AI review evidence found in PR #${PR_NUMBER} body."
+              echo "::error::No AI review evidence found in PR #${PR_NUMBER} body or comments."
+              if [ "$comments_read" -ne 1 ]; then
+                echo "::error::NOTE: the PR comment fetch failed in this run, so comment-carried evidence could not be examined — re-run this job once the API is reachable before concluding the evidence is absent."
+              fi
               echo "::error::The code-review gate requires a recorded AI review. Run:"
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
               exit 1
             fi
 
             head_unsigned=""
+            head_unsigned_chan=""
             head_wrong_repo=""
+            head_wrong_repo_chan=""
             head_malformed=""
+            head_malformed_chan=""
             latest_sha=""
             latest_raw=""
+            latest_chan=""
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               latest_raw="$line"
+              latest_chan="$(marker_channel "$line")"
               # Per-line sha. A line with NO well-formed 40-hex sha must not
               # inherit the previous line's sha (it would then be attributed to
               # the current head and misclassified).
@@ -537,7 +673,10 @@ jobs:
               # MALFORMED, not unsigned — reporting those as "unsigned" is the
               # same misleading-diagnostic trap #3076 is about.
               if [[ "$line" != *"sig="* ]]; then
-                if [ -z "$head_unsigned" ]; then head_unsigned="$line"; fi
+                if [ -z "$head_unsigned" ]; then
+                  head_unsigned="$line"
+                  head_unsigned_chan="$(marker_channel "$line")"
+                fi
                 continue
               fi
               # Extract the repo ONLY when the text matches the marker grammar
@@ -549,28 +688,34 @@ jobs:
                 l_repo="${BASH_REMATCH[3]}"
               fi
               if [ -n "$l_repo" ] && [ "$l_repo" != "$REPO_NAME" ]; then
-                if [ -z "$head_wrong_repo" ]; then head_wrong_repo="$l_repo"; fi
+                if [ -z "$head_wrong_repo" ]; then
+                  head_wrong_repo="$l_repo"
+                  head_wrong_repo_chan="$(marker_channel "$line")"
+                fi
               else
-                if [ -z "$head_malformed" ]; then head_malformed="$line"; fi
+                if [ -z "$head_malformed" ]; then
+                  head_malformed="$line"
+                  head_malformed_chan="$(marker_channel "$line")"
+                fi
               fi
             done <<< "$all_lines"
 
             if [ -n "$head_unsigned" ]; then
-              echo "::error::AI review evidence for the current head is UNSIGNED — the marker carries no 'sig=<hmac>' segment, and the PR body is editable, so it cannot be trusted."
+              echo "::error::AI review evidence for the current head is UNSIGNED — the marker carries no 'sig=<hmac>' segment, and both the PR body and its comments are writable, so it cannot be trusted (found in ${head_unsigned_chan})."
               echo "::error::  marker=${head_unsigned}"
               echo "::error::Re-record with a record-review.sh that has AI_REVIEW_GATE_KEY configured:"
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
               exit 1
             fi
             if [ -n "$head_wrong_repo" ]; then
-              echo "::error::AI review evidence for the current head exists but was recorded for '${head_wrong_repo}', not '${REPO_NAME}' — evidence is bound to the repo it was recorded for."
+              echo "::error::AI review evidence for the current head exists but was recorded for '${head_wrong_repo}', not '${REPO_NAME}' — evidence is bound to the repo it was recorded for (found in ${head_wrong_repo_chan})."
               echo "::error::Re-record against this repo:"
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
               exit 1
             fi
             if [ -n "$head_malformed" ]; then
               m_sha="$(printf '%s' "${head_malformed% sig=*}" | openssl dgst -sha256 | awk '{print $NF}')"
-              echo "::error::AI review evidence for the current head carries a signature but its marker text is not a shape this gate accepts — malformed marker (producer/gate contract drift, or a damaged line)."
+              echo "::error::AI review evidence for the current head carries a signature but its marker text is not a shape this gate accepts — malformed marker (producer/gate contract drift, or a damaged line) (found in ${head_malformed_chan})."
               echo "::error::  expected: review recorded: reviews/<PR>.json verdict=clean(-micro|-low)? @ <40-hex-sha>[ diff=<64-hex>] (<owner/repo>) sig=<64-hex>"
               echo "::error::  sha256=${m_sha:0:12}"
               echo "::error::  marker=${head_malformed}"
@@ -579,7 +724,7 @@ jobs:
               exit 1
             fi
             if [ -z "$latest_sha" ]; then
-              echo "::error::AI review evidence in PR #${PR_NUMBER} carries no well-formed 40-hex recorded sha — it cannot be bound to this head."
+              echo "::error::AI review evidence in PR #${PR_NUMBER} carries no well-formed 40-hex recorded sha — it cannot be bound to this head (found in ${latest_chan})."
               echo "::error::  marker=${latest_raw}"
               echo "::error::Re-record on the final head:"
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
@@ -605,7 +750,7 @@ jobs:
               echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
               exit 1
             fi
-            echo "::error::AI review evidence is stale: latest recorded ${latest_sha} — expected ${expected}."
+            echo "::error::AI review evidence is stale: latest recorded ${latest_sha} — expected ${expected} (found in ${latest_chan})."
             # A diff= marker that would have carried forward but was not
             # acceptable: say exactly why — this is the #2982 diff-match path
             # failing. A diff= marker is NEVER accepted without a live hash to
@@ -632,7 +777,7 @@ jobs:
             matched_digest="raw"
             if [ "$accepted_diff" = "$live_diff_hash_norm" ]; then matched_digest="normalized"; fi
             echo "AI review gate passed via diff match: the verdict recorded against a previous head carries forward because this PR's diff is unchanged (diff=${accepted_diff}, matched the ${matched_digest} digest). The marker's @ sha is stale; the signed diff= field is the reviewed artifact."
-            echo "AI review gate passed: ${marker% sig=*}"
+            echo "AI review gate passed: ${marker% sig=*} (marker found in ${marker_chan})"
           else
-            echo "AI review gate passed: ${marker% sig=*}"
+            echo "AI review gate passed: ${marker% sig=*} (marker found in ${marker_chan})"
           fi
