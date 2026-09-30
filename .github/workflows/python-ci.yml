@@ -1939,9 +1939,18 @@ jobs:
             # shard that actually runs the file. A shard owning none of them
             # has nothing to require — and says so rather than passing quietly.
             OWNER_PATTERNS=""
-            for f in ${{ matrix.files }}; do OWNER_PATTERNS="$OWNER_PATTERNS -e tests/$f.py::"; done
+            for f in ${{ matrix.files }}; do OWNER_PATTERNS="$OWNER_PATTERNS -e tests/$f.py"; done
             if [ -n "$OWNER_PATTERNS" ]; then
-              # `grep -F` (fixed strings): every -e is a literal nodeid prefix.
+              # `grep -F` (fixed strings): every -e is a literal file path.
+              # ⛔ NO `::` ANCHOR. This file has TWO kinds of line per file and
+              # the filter must keep both: the nodeid lines (`<file>::<test>`)
+              # AND that file's `# allow-skipped: <file>=<n>` directive, which
+              # carries the OUTCOME half — how many skips the file may absorb
+              # off darwin. Anchoring on `::` filtered only the nodeids, so the
+              # directive vanished, the guard turned strict, and shard (c)
+              # reddened on the two legitimate darwin skips it is ALLOWED to
+              # take (`test_fork_safety_3845.py=2`). Matching the bare path
+              # keeps the nodeids and the budget that governs them together.
               # An unmatched file simply contributes nothing; rc=1 is the
               # expected "no lines" case, not an error.
               grep -F $OWNER_PATTERNS config/ci-expected-nodeids/platform-gated.txt \
