@@ -423,12 +423,11 @@ def test_root_level_non_python_files_skip_the_matrix():
     constant: emptying the allowlist must RED this test, which it cannot do if
     the assertion derives its expectation from the same set it is checking.
 
-    ⛔ This set is NARROWER than the change's first revision, and deliberately
-    so: membership is for root files that NO TEST READS (see
-    `test_root_file_read_by_a_test_is_never_allowlisted`).
+    ⛔ This set is the ZERO-READER census only, and it is much smaller than the
+    change's first two revisions: every root file that a test reads KEEPS the
+    fail-closed full matrix (see `test_root_file_read_by_a_test_is_never_allowlisted`).
     """
-    allowlisted = ("CODE_OF_CONDUCT.md", "SECURITY.md", ".editorconfig",
-                   "CODEOWNERS")
+    allowlisted = (".scope-1894.md", ".scope-comment-2578.md", "pr-body.md")
     for name in allowlisted:
         r = _sel([name])
         assert r["full"] is False, f"{name} must skip the matrix, got {r}"
@@ -436,19 +435,39 @@ def test_root_level_non_python_files_skip_the_matrix():
         assert set(r["test_files"]) == _tier1(), name
 
 
+def test_every_allowlisted_root_file_actually_exists():
+    """#6784 review cycle 2, P3: a liveness ratchet on the allowlist.
+
+    `SOURCE_PATTERNS` has an equivalent ratchet (`test_source_patterns_all_name_
+    something_real`). Without one, a name that does not exist in the tree is a
+    dead entry that skips the matrix for nothing — which is exactly how the
+    previous revision passed its own tests while changing NO existing file's
+    behaviour (its four names were all absent on disk, so #6784's headline case
+    was still unfixed and the review had to catch it by hand).
+    """
+    for name in sorted(cs.ROOT_NON_PYTHON_FILES):
+        assert (REPO / name).exists(), (
+            f"{name} is allowlisted but does not exist in the tree — a dead "
+            "entry that skips the matrix for nothing")
+
+
 def test_root_file_read_by_a_test_is_never_allowlisted():
-    """#6784 review P1: a file a test READS is not "not python-relevant".
+    """#6784 review cycle 1 P1 + cycle 2 P1: a file a test READS is not "not
+    python-relevant".
 
     `tests/test_embedded_durability_claim.py` reads `ROOT/README.md` and asserts
     its durability claim, and it is `core`+carve-out (NOT tier1) — so allowlisting
-    README.md made that guard skip on exactly the PR that edits it. Verified by
-    re-appending the banned claim: the guard REDs when it runs. This pins the
-    membership rule for every root file with a reading test, and REDs if any of
-    them is put back in the allowlist; it also REDs if the removed blanket
-    `*.md`-at-root clause is reintroduced (that clause admitted README.md).
+    README.md made that guard skip on exactly the PR that edits it. Measured
+    census: README.md 21 readers, AGENTS.md 35, CONTRIBUTING.md 8, .gitignore 8,
+    LICENSE 5 — spread across `core`, `api` and `tests/bench`, so neither an
+    allowlist NOR a single-surface claim is safe for them.
+
+    This REDs if any of them is put back in the allowlist, and also if the
+    removed blanket `*.md`-at-root clause is reintroduced (it admitted README.md).
     """
-    for name in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE",
-                 "AUTHORS", "NOTICE", ".gitignore", ".gitattributes"):
+    for name in ("README.md", "AGENTS.md", "CHANGELOG.md", "CONTRIBUTING.md",
+                 "LICENSE", "MEMORY.md", "CLAUDE.md", "index.md",
+                 ".gitignore", ".gitattributes", "pyproject.toml"):
         r = _sel([name])
         assert r["full"] is True, (
             f"{name} is read by a test — it must keep the fail-closed FULL "
@@ -469,7 +488,7 @@ def test_a_claimed_root_file_beats_the_allowlist(monkeypatch):
     longer rescue it. Here a root-allowlisted name is CLAIMED via CORE_ALSO and
     must therefore stay selected.
     """
-    claimed = "CODEOWNERS"
+    claimed = ".scope-1894.md"
     assert _sel([claimed])["full"] is False, "precondition: unclaimed → skip"
     monkeypatch.setattr(cs, "CORE_ALSO", (*cs.CORE_ALSO, claimed))
     r = _sel([claimed])

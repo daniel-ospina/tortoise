@@ -663,31 +663,36 @@ NON_PYTHON_PREFIXES = (
     ".ci-checks/", "supabase/",
 )
 
-# ROOT-LEVEL files that are provably not python-relevant (#6784).
+# ROOT-LEVEL files with a VERIFIED ZERO-READER census (#6784).
 #
-# A ROOT-level path matches no NON_PYTHON_PREFIXES entry, so before this tuple
-# a README typo fell through to the unknown-path branch and reserved the FULL
-# matrix (every shard slot) for a prose edit.
+# ⛔ THE HEADLINE CASE OF #6784 IS NOT FIXABLE THIS WAY, and this tuple is what
+# is left after measuring that. The issue assumed a root-level prose file is
+# "not python-relevant". In THIS repo it usually is: the root files are
+# deliberately PINNED by tests across several surfaces. Reader census
+# (`grep -rlF "<name>" tests tools scripts .github tortoise`, root files only):
 #
-# ⛔ MEMBERSHIP RULE — the allowlist is for files NOTHING ELSE CLAIMS.
-# A file that any test READS is not "not python-relevant": that test is a guard
-# pinned to the file's content, and allowlisting the file makes the guard
-# silently skip on exactly the PR that changes it. Measured on the first
-# revision (#6784 review P1): `README.md` was in this tuple while
-# `tests/test_embedded_durability_claim.py:62` reads `ROOT/README.md` and
-# asserts its durability claim — and that test is `core`+carve-out, not tier1,
-# so a README-only PR took the docs-only early return and the guard NEVER RAN.
-# `README.md`, `LICENSE`, `CHANGELOG.md`, `CONTRIBUTING.md`, `AUTHORS`,
-# `NOTICE`, `.gitignore` and `.gitattributes` are therefore all EXCLUDED — each
-# has at least one reading test.
+#   AGENTS.md 35 · README.md 21 · fly.toml 18 · pyproject.toml 17 · .env.example 15
+#   .mcp.json 10 · entrypoint.sh 9 · .gitignore 8 · CONTRIBUTING.md 8 · LICENSE 5
+#   MANIFEST.in 5 · requirements.txt 5 · docker-compose.yml 4 · index.md 3 · …
 #
-# To add a name here, first prove no test reads it:
-#   grep -rlF "<name>" tests/*.py
-# and treat any hit (other than tests/test_ci_selection.py, which only names the
-# members) as a reader. A file that earns a guard belongs in
-# SOURCE_PATTERNS/CORE_ALSO instead, which selects that guard's surface.
+# So allowlisting README.md made `test_embedded_durability_claim.py` skip on
+# exactly the PR that edits it (review cycle 1, P1), and claiming it as `core`
+# is no safer — its 21 readers are spread over `core`, `api` and `tests/bench`,
+# so a single-surface claim would silently skip the rest. Every root file with a
+# reader therefore KEEPS the fail-closed full matrix:
+#   README.md LICENSE CHANGELOG.md CONTRIBUTING.md AGENTS.md CLAUDE.md MEMORY.md
+#   index.md .gitignore .gitattributes .python-version .env.example .mcp.json …
+#
+# Membership is ONLY a root file with no reader at all. To add a name, prove it:
+#   grep -rlF "<name>" tests tools scripts .github tortoise
+# (ignore tests/test_ci_selection.py, which only names the members, and .pyc
+# artifacts). A name that earns a guard belongs in SOURCE_PATTERNS/CORE_ALSO
+# instead — which is also why `_keep_changed` tests a CLAIM before this tuple.
+#
+# These three are stray committed artifacts under a dot-prefix or an obvious
+# scratch name, not project files a reader could be pinned to.
 ROOT_NON_PYTHON_FILES = frozenset({
-    "CODE_OF_CONDUCT.md", "SECURITY.md", ".editorconfig", "CODEOWNERS",
+    ".scope-1894.md", ".scope-comment-2578.md", "pr-body.md",
 })
 
 
