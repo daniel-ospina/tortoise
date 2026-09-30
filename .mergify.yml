@@ -79,6 +79,7 @@
 # queues; this speeds up the single ordered queue. They compose.
 merge_queue:
   max_parallel_checks: 3
+  mode: isolated
 
 # ── Priority — let the changes that unblock others jump the queue ─────────────
 #

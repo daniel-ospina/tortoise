@@ -2028,7 +2028,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_fixtures(open_prs=[])
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
-        remote_row = [ln for ln in out.splitlines() if ln.startswith("remote branches")][0]
+        remote_row = next(ln for ln in out.splitlines() if ln.startswith("remote branches"))
         self.assertIn("terminal tests are NOT applied here", remote_row)
         self.assertNotIn("already merged into main", remote_row)
 
@@ -2271,8 +2271,8 @@ class CollisionPreflightTest(unittest.TestCase):
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        wt_row = [ln for ln in out.splitlines()
-                  if ln.startswith("local worktrees")][0]
+        wt_row = next(ln for ln in out.splitlines()
+                      if ln.startswith("local worktrees"))
         self.assertIn("HIT", wt_row, wt_row)
         self.assertNotIn("merged into origin/main", wt_row)
 
@@ -2398,8 +2398,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         for row_prefix in ("local branches", "local worktrees"):
-            row = [ln for ln in out.splitlines()
-                   if ln.startswith(row_prefix)][0]
+            row = next(ln for ln in out.splitlines()
+                       if ln.startswith(row_prefix))
             self.assertIn("HIT", row, row)
         self.assertNotIn("merged into origin/main", out)
 
