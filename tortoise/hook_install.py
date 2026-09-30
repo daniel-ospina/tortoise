@@ -785,6 +785,33 @@ def artifact_root(harness: str, home: Path) -> Path | None:
     return Path(home) / contract.root_relpath
 
 
+def artifact_home(harness: str, root: str | os.PathLike[str]) -> Path | None:
+    """The ``$HOME`` an artifact install root is scoped under, or ``None``.
+
+    The INVERSE of :func:`artifact_root`: ``root`` is that ``$HOME`` with the
+    contract's ``root_relpath`` appended, so the home is the ancestor
+    ``artifact_root`` appended to.  ``None`` when ``root`` does not END with
+    that relpath, or the harness declares no artifact contract.
+
+    The distinction is LOAD-BEARING, never a best-effort guess: the installer
+    is HOME-scoped (it writes ``<home>/<root_relpath>``), so a caller that
+    derived a home from an unrelated directory would install into a DIFFERENT
+    tree while leaving the directory it named untouched (#5351).
+
+    A caller that only grades whatever is AT ``root`` does not need this —
+    :func:`detect_artifact_install` falls back to ``root`` itself — so ``None``
+    is not an error here; it is "this root is not the contract's root".
+    """
+    contract = ARTIFACT_CONTRACTS.get(harness)
+    if contract is None:
+        return None
+    parts = contract.root_relpath.parts
+    root_path = Path(root)
+    if not parts or tuple(root_path.parts[-len(parts):]) != parts:
+        return None
+    return root_path.parents[len(parts) - 1]
+
+
 #: Shipped non-shell seams, by harness.  The version contract is the
 #: harness-agnostic half of this module: a shell-hook seam answers through
 #: ``HARNESS_LAYOUTS``, a non-shell seam through this registry, and the
@@ -2324,10 +2351,11 @@ def detect_artifact_install(root: str | os.PathLike[str],
     # This is the artifact peer of `detect_install`'s `symlinked-install`.
     # A caller handing us a root unrelated to the contract (a test's tmp_path)
     # falls back to that root, where the check still covers the artifact.
-    home = root_path
-    _parts = contract.root_relpath.parts
-    if tuple(root_path.parts[-len(_parts):]) == _parts:
-        home = root_path.parents[len(_parts) - 1]
+    # The derivation is the shared one (:func:`artifact_home`), never a second
+    # copy — the CLI maps `--dir` back to a home with the same call (#5351).
+    home = artifact_home(harness, root_path)
+    if home is None:
+        home = root_path
     root_link = _symlink_in_path(home, root_path)
     if root_link is not None:
         findings.append(Finding(

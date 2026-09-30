@@ -3676,3 +3676,158 @@ def test_pi_symlinked_install_root_is_noted_as_uninstallable(home):
     res = install_capture("pi", home=home)
     assert not res.ok, res.actions
     assert "symlink" in (res.error or "").lower(), res.error
+
+
+# ── #5351: the drift/repair surface must cover the Pi artifact seam ────────
+#
+# `hooks status`/`hooks upgrade` resolved through `get_layout` alone, so a Pi
+# seam the verifier reports as stale had NO working repair, and `status` could
+# not even name the harness.  These tests pin the ARTIFACT half of the fix:
+# `detect_artifact_install` stays the ONE detector (never a second opinion
+# about the same bytes) and the repair is the installer that already owns them
+# (`install_capture`), never a second writer.  They are the CLI peers of the
+# codex/cursor `..._hooks_status_reports_the_install_as_current` tests above.
+
+
+def _stale_pi_seam(home: Path) -> Path:
+    """Install Pi's seam, then overwrite it with verifiably OLDER bytes.
+
+    Returns the installed artifact path.  The marker is generation 0 — older
+    than whatever the shipped seam declares — so the drift is real whatever
+    the current generation is (a literal generation here goes stale silently
+    on every deliberate bump, the way #4544 left two assertions behind).
+    """
+    assert install_capture("pi", home=home).ok
+    installed = (capture_install.pi_home(home)
+                 / capture_install.PI_EXTENSION_NAME)
+    installed.write_text("// tortoise-hook-version: 0\n// tortoise session\n",
+                         encoding="utf-8")
+    return installed
+
+
+def test_artifact_home_is_the_inverse_of_artifact_root(home):
+    """`artifact_home` must invert `artifact_root` EXACTLY.
+
+    It is what maps a `--dir` back to the HOME the installer writes under, so
+    a mismatch installs into a different tree than the directory the user
+    named — the silent no-capture class the seam exists to prevent.
+
+    Mutation: return the root itself (or the wrong ancestor depth) — the
+    `--dir` CLI test and this RED."""
+    root = hook_install.artifact_root("pi", home)
+    assert hook_install.artifact_home("pi", root) == home
+    assert hook_install.artifact_home("pi", home / "elsewhere") is None
+    assert hook_install.artifact_home("claude", root) is None
+
+
+def test_pi_hooks_status_reports_the_install_as_current(cli):
+    """`tortoise hooks status --harness pi` names the harness instead of
+    rejecting it, and reads a fresh install as current — the positive control
+    that the new branch is not simply always-failing.
+
+    Mutation: route `pi` back through `get_layout` (the pre-#5351 wiring) —
+    the CLI exits 1 with `unknown harness 'pi'` and this REDs."""
+    run, _root, home = cli
+    assert install_capture("pi", home=home).ok
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 0, r.stderr
+    assert "unknown harness" not in (r.stdout + r.stderr), r.stderr
+    assert "are current" in r.stdout, r.stdout
+
+
+def test_pi_hooks_status_reports_stale_drift_through_the_shared_detector(cli):
+    """A stale Pi seam is REPORTED, with the SAME finding `session verify`
+    grades it with — one detector, two consumers, never a second opinion.
+
+    Mutation: give `hooks status` its own Pi check (or answer "current" for a
+    present artifact) — the printed kinds stop matching
+    `detect_artifact_install` and this REDs."""
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert "stale-artifact" in r.stdout, r.stdout
+    expected = {f.kind for f in hook_install.detect_artifact_install(root, "pi")
+                if f.blocking}
+    assert expected == {"stale-artifact"}, expected
+
+
+def test_pi_hooks_upgrade_repairs_a_stale_seam(cli):
+    """The repair path `hooks status` NAMES must actually repair: the hint is
+    only honest if `hooks upgrade --harness pi` re-copies the shipped
+    artifact, and its dry run is write-free.
+
+    Mutation: make the artifact upgrade a no-op (or point at `tortoise install
+    pi` without running it) — the seam stays stale, `status` still exits 1,
+    and this REDs."""
+    run, _root, home = cli
+    installed = _stale_pi_seam(home)
+
+    before = run("hooks", "status", "--harness", "pi")
+    assert before.returncode == 1, before.stdout
+    assert "hooks upgrade --harness pi" in before.stdout, (
+        "a FAIL must name the repair that works:\n" + before.stdout)
+
+    dry = run("hooks", "upgrade", "--harness", "pi", "--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert "would install" in dry.stdout, dry.stdout
+    assert installed.read_bytes() != _PI, "the dry run wrote the artifact"
+
+    r = run("hooks", "upgrade", "--harness", "pi")
+
+    assert r.returncode == 0, r.stderr
+    assert installed.read_bytes() == _PI, "upgrade did not restore the shipped seam"
+    after = run("hooks", "status", "--harness", "pi")
+    assert after.returncode == 0, after.stdout + after.stderr
+
+
+def test_pi_hooks_dir_outside_the_contract_root_is_refused(cli, tmp_path):
+    """`--dir` must never be silently ignored for a HOME-scoped artifact seam:
+    the installer writes under `$HOME`, so a `--dir` naming a DIFFERENT
+    directory would be inspected (and "repaired") nowhere the user pointed.
+
+    Mutation: drop the `artifact_home` guard and hand the installer the
+    process HOME — `--dir <other>` installs into `$HOME` and this REDs."""
+    run, _root, home = cli
+    elsewhere = tmp_path / "not-the-artifact-root"
+    elsewhere.mkdir()
+
+    for sub in ("status", "upgrade"):
+        r = run("hooks", sub, "--harness", "pi", "--dir", str(elsewhere))
+        assert r.returncode == 1, r.stdout
+        assert "is not pi's artifact install root" in r.stderr, r.stderr
+        assert "unknown harness" not in (r.stdout + r.stderr), r.stderr
+
+    assert not (home / ".pi" / "agent" / "extensions"
+                / capture_install.PI_EXTENSION_NAME).exists(), (
+        "a refused --dir still installed into $HOME")
+
+
+def test_pi_hooks_status_never_recommends_an_upgrade_that_refuses(cli):
+    """The hint's invariant, on the surface that now owns the artifact repair:
+    a legacy extension already disabled at the backup name makes the installer
+    REFUSE, and no finding kind expresses that collision (#3713) — so
+    recommending `hooks upgrade` would name a command that cannot run.
+
+    Mutation: drop the `legacy_extension_obstacle` branch in `hooks status` —
+    the refusing command is printed and this REDs.  (`doctor`'s peer guard has
+    the same mutation test in tests/test_doctor.py, and both consult the ONE
+    declaration in `capture_install`.)"""
+    run, _root, home = cli
+    _stale_pi_seam(home)
+    root = capture_install.pi_home(home)
+    (root / capture_install.LEGACY_PI_DIRNAME).mkdir()
+    (root / capture_install.PI_DISABLED_DIRNAME).mkdir()
+
+    r = run("hooks", "status", "--harness", "pi")
+
+    assert r.returncode == 1, r.stdout
+    assert capture_install.PI_DISABLED_DIRNAME in r.stdout, r.stdout
+    assert "move one aside" in r.stdout, r.stdout
+    assert "hooks upgrade" not in r.stdout, (
+        "the hint recommends an upgrade that refuses in this state")

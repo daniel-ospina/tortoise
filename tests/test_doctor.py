@@ -58,11 +58,12 @@ def _pi_seam_name() -> str:
 def _session_verify_accepts_pi_harness() -> bool:
     """The pi-aware read-only query is one that ACCEPTS `--harness pi`.
 
-    Doctor's collision hint names a replacement command, and the obvious
-    `tortoise hooks status` is layout-keyed — it exits 1 with "unknown harness
-    'pi'", so naming it would swap one refusal for another.  This asserts the
-    command actually named accepts the harness.  Its exit code may still be
-    non-zero for a missing config, which is not a refusal of the REQUEST.
+    Doctor's collision hint names a replacement command, and in that state the
+    installer-shaped commands are exactly the ones a user must not be sent to:
+    `tortoise install pi` refuses on the collision, and so does
+    `hooks upgrade --harness pi` (it calls the same installer).  This asserts
+    the command actually named accepts the harness.  Its exit code may still
+    be non-zero for a missing config, which is not a refusal of the REQUEST.
     """
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "session", "verify",
@@ -739,9 +740,10 @@ class TestDoctorPreInit:
         assert "tortoise install pi" not in out, (
             "the hint recommends a command that refuses in this state")
         assert _ci.PI_DISABLED_DIRNAME in out, out
-        # A replacement command must itself accept `--harness pi`: the obvious
-        # `tortoise hooks status` is layout-keyed and exits 1 there.
-        assert "hooks status --harness pi" not in out, out
+        # The replacement the hint names must itself accept `--harness pi`.
+        # It does NOT pin WHICH read-only surface is named: `hooks status
+        # --harness pi` also accepts the harness since #5351, so the only
+        # invariant left here is that the hint is not a refusal.
         assert _session_verify_accepts_pi_harness()
 
     def test_a_symlinked_legacy_entry_is_not_treated_as_a_collision(

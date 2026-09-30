@@ -1017,6 +1017,43 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 
 
+def legacy_extension_obstacle(harness: str,
+                              root: str | os.PathLike[str]) -> str:
+    """The refusal awaiting a repair of ``harness``'s artifact seam at ``root``.
+
+    Returns a human-readable sentence when :func:`install_capture` would
+    REFUSE the install, and ``""`` when it would not.  The condition is a
+    COLLISION no finding kind expresses: a REAL legacy extension directory is
+    already disabled at :data:`PI_DISABLED_DIRNAME`, and the installer will not
+    overwrite the previous backup — so `tortoise install pi` refuses.  The
+    detector's legacy blind spot is #3713; this predicate exists only so a hint
+    never names a command that refuses.
+
+    Declared HERE, once, because BOTH surfaces that recommend a repair consult
+    it (``tortoise hooks status`` for the artifact seams, ``tortoise doctor``
+    for both classes): a copy in each caller drifts, and the drifted copy tells
+    the user to run a command that refuses — the same argument that put
+    ``hook_install.MANUAL_FIX_KINDS`` in one place (#5351).  The sentence is
+    the caller's to render when it has none of its own (``doctor`` uses it as
+    the whole hint), so a reworded refusal cannot leave a stale copy behind.
+
+    A symlinked legacy entry is deliberately NOT a collision: the installer
+    unlinks it (the checkout it points at is untouched) and never reaches the
+    refusal, so calling it one would withhold a command that works.
+    """
+    if harness != "pi":
+        return ""
+    root_path = Path(root)
+    legacy = root_path / LEGACY_PI_DIRNAME
+    legacy_disabled = root_path / PI_DISABLED_DIRNAME
+    if not (legacy.is_dir() and not legacy.is_symlink()):
+        return ""
+    if not (legacy_disabled.exists() or legacy_disabled.is_symlink()):
+        return ""
+    return (f"a legacy capture extension is already disabled at "
+            f"{PI_DISABLED_DIRNAME} — move one aside")
+
+
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
     ext_dir = pi_home(home)
