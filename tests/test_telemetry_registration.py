@@ -735,8 +735,13 @@ def test_every_emitted_prop_key_is_allowlisted():
     # #4015: routing the five analytics sites through ``_emit_analytics_off_loop``
     # does NOT change the count — the collector resolves that helper's args
     # exactly like the direct calls it replaced. main's #3773 added a sixth
-    # emitter, hence 12 here (11 before it).
-    assert len(calls) == 12, (
+    # emitter, hence 12 here (11 before it). #3944 adds a thirteenth: the
+    # absence canary emits `_sink_canary` through ``_emit_analytics_off_loop``
+    # with NO props, so it resolves to ``keys=None`` and is deliberately
+    # excluded from the subset check below (there is no new prop key to
+    # register — the allowlist is props-only, and the canary ships an empty
+    # dict).
+    assert len(calls) == 13, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (
