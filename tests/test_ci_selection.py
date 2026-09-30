@@ -413,6 +413,61 @@ def test_unknown_path_goes_full():
     assert r["full"] is True
 
 
+def test_root_level_non_python_files_skip_the_matrix():
+    """#6784: an EXPLICIT root-level allowlist skips the matrix.
+
+    Before this, a ROOT path matched no NON_PYTHON_PREFIXES entry, fell to the
+    unknown-path branch, and reserved the FULL matrix (every shard slot) for a
+    README typo. The names are hard-coded here, NOT read from the module
+    constant: emptying the allowlist must RED this test, which it cannot do if
+    the assertion derives its expectation from the same set it is checking.
+    """
+    allowlisted = ("README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
+                   "CODE_OF_CONDUCT.md", "SECURITY.md", "AUTHORS", "NOTICE",
+                   ".gitignore", ".gitattributes", ".editorconfig", "CODEOWNERS")
+    # `*.md` at the ROOT is also safe (here: a name not in the explicit set).
+    for name in (*allowlisted, "NOTES.md"):
+        r = _sel([name])
+        assert r["full"] is False, f"{name} must skip the matrix, got {r}"
+        assert r["surfaces"] == [], name
+        assert set(r["test_files"]) == _tier1(), name
+
+
+def test_root_build_files_still_select_the_full_matrix():
+    """Fail-closed must be PRESERVED: the root allowlist is NOT "root-level
+    and no extension ⇒ safe" (that would admit Makefile/Dockerfile/build.sh)
+    and NOT "any non-python extension ⇒ safe". Each of these remains
+    code-relevant and must keep the FULL matrix."""
+    for name in ("Makefile", "Dockerfile", "pyproject.toml", "uv.lock",
+                 ".python-version", "requirements.txt", "conftest.py",
+                 "setup.py"):
+        r = _sel([name])
+        assert r["full"] is True, f"{name} must fail closed to full, got {r}"
+        assert r["test_files"] == "ALL", name
+
+
+def test_unknown_root_file_still_selects_the_full_matrix():
+    """An unknown ROOT-level path must still hit the fail-closed default:
+    the allowlist is additive, it does not soften the unknown-path branch.
+    (Reds if that fall-through defaults to skip instead of full.)"""
+    for name in ("build.sh", "some_new_thing.xyz", "mystery.conf"):
+        r = _sel([name])
+        assert r["full"] is True, f"{name} must fail closed to full, got {r}"
+        assert r["test_files"] == "ALL", name
+
+
+def test_subdirectory_markdown_is_unaffected():
+    """The root rule must not become "any *.md anywhere": `docs/x.md` keeps
+    its NON_PYTHON_PREFIXES skip, and `tortoise/NOTES.md` keeps the `tortoise/`
+    core fallback — it must NOT become a matrix skip by accident."""
+    r_docs = _sel(["docs/x.md"])
+    assert r_docs["full"] is False
+    assert r_docs["surfaces"] == []
+    r_tortoise = _sel(["tortoise/NOTES.md"])
+    assert r_tortoise["full"] is False
+    assert r_tortoise["surfaces"] == ["core"]
+
+
 def test_new_engine_module_maps_to_core():
     # a new file under tortoise/ is engine code → core surface (conservative,
     # 108 files — not silent under-selection)

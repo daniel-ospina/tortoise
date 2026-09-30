@@ -23,6 +23,8 @@ should be exercised; the workflow header comment says the same).
 Selection rules (fail-closed, conservative):
 - push to main / schedule  -> full (tier 3 — the trunk backstop)
 - any changed file UNKNOWN to the surface map -> full (new dirs/subsystems)
+  — EXCEPT a root-level file in ROOT_NON_PYTHON_FILES (or a root `*.md`),
+  which is non-python-relevant by explicit name (#6784)
 - any changed SHARED/core module -> full (cross-cutting code wants max coverage)
 - otherwise -> tier 2 = core ∪ union(matched surfaces' test files)
   (docs-only PRs -> core set only — the always-on smoke)
@@ -661,6 +663,35 @@ NON_PYTHON_PREFIXES = (
     ".ci-checks/", "supabase/",
 )
 
+# ROOT-LEVEL files that are provably not python-relevant (#6784).
+#
+# A ROOT-level path matches no NON_PYTHON_PREFIXES entry, so before this tuple
+# a README typo fell through to the unknown-path branch and reserved the FULL
+# matrix (every shard slot) for a prose edit. The allowlist below is an EXPLICIT
+# name/pattern match on the ROOT level ONLY — deliberately NOT "a root file with
+# no extension is safe" (that would admit Makefile, Dockerfile, `build.sh`, …)
+# and NOT "any *.md anywhere" (that would admit `tortoise/NOTES.md`, a
+# subdirectory doc a future guide might rely on). Only these names, plus `*.md`
+# at the root, are treated as non-python-relevant; every other root-level file
+# (pyproject.toml, uv.lock, requirements.txt, `*.py`, an unknown name) keeps the
+# fail-closed full matrix.
+ROOT_NON_PYTHON_FILES = frozenset({
+    "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md", "SECURITY.md", "AUTHORS", "NOTICE",
+    ".gitignore", ".gitattributes", ".editorconfig", "CODEOWNERS",
+})
+
+
+def _is_safe_root_file(path: str) -> bool:
+    """True only for a ROOT-level path named in the #6784 allowlist (or `*.md`).
+
+    Root-level only: any path containing "/" is never safe here, so a
+    subdirectory doc keeps whatever behaviour its prefix/fallback already had.
+    """
+    return "/" not in path and (path in ROOT_NON_PYTHON_FILES
+                                 or path.endswith(".md"))
+
+
 # website/ paths that ARE selection-relevant (#3332).
 #
 # Superseded by the generic rule in select() (`_selection_relevant`): a path that
@@ -910,10 +941,11 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         ) or path.startswith(CORE_ALSO)
 
     changed = [c for c in changed_files
-               if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or _selection_relevant(c)
-                         or c.startswith(TOOL_CARVEOUTS)
-                         or c.startswith(SITE_CARVEOUTS))]
+               if c and not _is_safe_root_file(c)
+               and (not c.startswith(NON_PYTHON_PREFIXES)
+                    or _selection_relevant(c)
+                    or c.startswith(TOOL_CARVEOUTS)
+                    or c.startswith(SITE_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).
