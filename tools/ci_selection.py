@@ -667,29 +667,40 @@ NON_PYTHON_PREFIXES = (
 #
 # A ROOT-level path matches no NON_PYTHON_PREFIXES entry, so before this tuple
 # a README typo fell through to the unknown-path branch and reserved the FULL
-# matrix (every shard slot) for a prose edit. The allowlist below is an EXPLICIT
-# name/pattern match on the ROOT level ONLY — deliberately NOT "a root file with
-# no extension is safe" (that would admit Makefile, Dockerfile, `build.sh`, …)
-# and NOT "any *.md anywhere" (that would admit `tortoise/NOTES.md`, a
-# subdirectory doc a future guide might rely on). Only these names, plus `*.md`
-# at the root, are treated as non-python-relevant; every other root-level file
-# (pyproject.toml, uv.lock, requirements.txt, `*.py`, an unknown name) keeps the
-# fail-closed full matrix.
+# matrix (every shard slot) for a prose edit.
+#
+# ⛔ MEMBERSHIP RULE — the allowlist is for files NOTHING ELSE CLAIMS.
+# A file that any test READS is not "not python-relevant": that test is a guard
+# pinned to the file's content, and allowlisting the file makes the guard
+# silently skip on exactly the PR that changes it. Measured on the first
+# revision (#6784 review P1): `README.md` was in this tuple while
+# `tests/test_embedded_durability_claim.py:62` reads `ROOT/README.md` and
+# asserts its durability claim — and that test is `core`+carve-out, not tier1,
+# so a README-only PR took the docs-only early return and the guard NEVER RAN.
+# `README.md`, `LICENSE`, `CHANGELOG.md`, `CONTRIBUTING.md`, `AUTHORS`,
+# `NOTICE`, `.gitignore` and `.gitattributes` are therefore all EXCLUDED — each
+# has at least one reading test.
+#
+# To add a name here, first prove no test reads it:
+#   grep -rlF "<name>" tests/*.py
+# and treat any hit (other than tests/test_ci_selection.py, which only names the
+# members) as a reader. A file that earns a guard belongs in
+# SOURCE_PATTERNS/CORE_ALSO instead, which selects that guard's surface.
 ROOT_NON_PYTHON_FILES = frozenset({
-    "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
-    "CODE_OF_CONDUCT.md", "SECURITY.md", "AUTHORS", "NOTICE",
-    ".gitignore", ".gitattributes", ".editorconfig", "CODEOWNERS",
+    "CODE_OF_CONDUCT.md", "SECURITY.md", ".editorconfig", "CODEOWNERS",
 })
 
 
 def _is_safe_root_file(path: str) -> bool:
-    """True only for a ROOT-level path named in the #6784 allowlist (or `*.md`).
+    """True only for a ROOT-level path NAMED in the #6784 allowlist.
 
-    Root-level only: any path containing "/" is never safe here, so a
-    subdirectory doc keeps whatever behaviour its prefix/fallback already had.
+    Root-level only (any path containing "/" is never safe here, so a
+    subdirectory doc keeps whatever behaviour its prefix/fallback already had),
+    and NAME-only: an earlier revision also accepted any root `*.md`, which
+    admitted README.md/CHANGELOG.md/CONTRIBUTING.md — all read by tests — so the
+    pattern clause was removed along with them.
     """
-    return "/" not in path and (path in ROOT_NON_PYTHON_FILES
-                                 or path.endswith(".md"))
+    return "/" not in path and path in ROOT_NON_PYTHON_FILES
 
 
 # website/ paths that ARE selection-relevant (#3332).
@@ -940,12 +951,30 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             for p in pats
         ) or path.startswith(CORE_ALSO)
 
+    def _keep_changed(c: str) -> bool:
+        """#6784: whether a changed path participates in surface selection.
+
+        ORDER IS THE INVARIANT. A path that something else CLAIMS comes first:
+        the carve-outs and `_selection_relevant` (SOURCE_PATTERNS + CORE_ALSO)
+        win, and `_is_safe_root_file` is only a FALLBACK for a path nothing
+        claims. Testing `_is_safe_root_file` first — which an earlier revision
+        did — silently disabled the repo's own documented remedy for the
+        "the guard for file X never runs when X changes" class
+        (#1349/#3332/#3485, and the #6138 review P1 that put
+        `tools/tmpdir_sweep.py` in CORE_ALSO): listing X in SOURCE_PATTERNS or
+        CORE_ALSO could no longer rescue it, and any future root `.md` guard
+        pin would have inherited the same trap.
+        """
+        if c.startswith(TOOL_CARVEOUTS) or c.startswith(SITE_CARVEOUTS):
+            return True
+        if _selection_relevant(c):
+            return True
+        if _is_safe_root_file(c):
+            return False
+        return not c.startswith(NON_PYTHON_PREFIXES)
+
     changed = [c for c in changed_files
-               if c and not _is_safe_root_file(c)
-               and (not c.startswith(NON_PYTHON_PREFIXES)
-                    or _selection_relevant(c)
-                    or c.startswith(TOOL_CARVEOUTS)
-                    or c.startswith(SITE_CARVEOUTS))]
+               if c and _keep_changed(c)]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).

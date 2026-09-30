@@ -28,6 +28,7 @@ from tools.ci_selection import (  # noqa: I001
     duration_issues, TESTS_DIR,
 )
 from tools import mergify_config_guard as mcg
+from tools import ci_selection as cs
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -418,19 +419,63 @@ def test_root_level_non_python_files_skip_the_matrix():
 
     Before this, a ROOT path matched no NON_PYTHON_PREFIXES entry, fell to the
     unknown-path branch, and reserved the FULL matrix (every shard slot) for a
-    README typo. The names are hard-coded here, NOT read from the module
+    prose edit. The names are hard-coded here, NOT read from the module
     constant: emptying the allowlist must RED this test, which it cannot do if
     the assertion derives its expectation from the same set it is checking.
+
+    ⛔ This set is NARROWER than the change's first revision, and deliberately
+    so: membership is for root files that NO TEST READS (see
+    `test_root_file_read_by_a_test_is_never_allowlisted`).
     """
-    allowlisted = ("README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
-                   "CODE_OF_CONDUCT.md", "SECURITY.md", "AUTHORS", "NOTICE",
-                   ".gitignore", ".gitattributes", ".editorconfig", "CODEOWNERS")
-    # `*.md` at the ROOT is also safe (here: a name not in the explicit set).
-    for name in (*allowlisted, "NOTES.md"):
+    allowlisted = ("CODE_OF_CONDUCT.md", "SECURITY.md", ".editorconfig",
+                   "CODEOWNERS")
+    for name in allowlisted:
         r = _sel([name])
         assert r["full"] is False, f"{name} must skip the matrix, got {r}"
         assert r["surfaces"] == [], name
         assert set(r["test_files"]) == _tier1(), name
+
+
+def test_root_file_read_by_a_test_is_never_allowlisted():
+    """#6784 review P1: a file a test READS is not "not python-relevant".
+
+    `tests/test_embedded_durability_claim.py` reads `ROOT/README.md` and asserts
+    its durability claim, and it is `core`+carve-out (NOT tier1) — so allowlisting
+    README.md made that guard skip on exactly the PR that edits it. Verified by
+    re-appending the banned claim: the guard REDs when it runs. This pins the
+    membership rule for every root file with a reading test, and REDs if any of
+    them is put back in the allowlist; it also REDs if the removed blanket
+    `*.md`-at-root clause is reintroduced (that clause admitted README.md).
+    """
+    for name in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE",
+                 "AUTHORS", "NOTICE", ".gitignore", ".gitattributes"):
+        r = _sel([name])
+        assert r["full"] is True, (
+            f"{name} is read by a test — it must keep the fail-closed FULL "
+            f"matrix, got {r}")
+        assert r["test_files"] == "ALL", name
+    # `*.md` at the root is NOT blanket-safe: only explicitly named files are.
+    r_md = _sel(["NOTES.md"])
+    assert r_md["full"] is True, "root *.md must fail closed, not blanket-skip"
+    assert r_md["test_files"] == "ALL"
+
+
+def test_a_claimed_root_file_beats_the_allowlist(monkeypatch):
+    """#6784 review P2: the allowlist is a FALLBACK, never a short-circuit.
+
+    An earlier revision tested `_is_safe_root_file` FIRST, so listing a file in
+    SOURCE_PATTERNS or CORE_ALSO — the repo's own documented remedy for "the
+    guard for file X never runs when X changes" (#6138 review P1) — could no
+    longer rescue it. Here a root-allowlisted name is CLAIMED via CORE_ALSO and
+    must therefore stay selected.
+    """
+    claimed = "CODEOWNERS"
+    assert _sel([claimed])["full"] is False, "precondition: unclaimed → skip"
+    monkeypatch.setattr(cs, "CORE_ALSO", (*cs.CORE_ALSO, claimed))
+    r = _sel([claimed])
+    assert r["full"] is False, f"a claimed path must not become full: {r}"
+    assert r["surfaces"] == ["core"], (
+        f"a claimed root file must be KEPT and select its surface, got {r}")
 
 
 def test_root_build_files_still_select_the_full_matrix():
