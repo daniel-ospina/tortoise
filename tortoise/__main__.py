@@ -7538,6 +7538,14 @@ def _cmd_doctor(args):
                          f"can run ({', '.join(_manual)})" if _layout is not None
                          else "needs a manual fix before `tortoise install "
                          f"{_harness}` can run ({', '.join(_manual)})")
+                # NOT an `elif`, for the reason recorded at the same pair of
+                # arms in `hooks status`: the two obstacles are INDEPENDENT, so
+                # clearing the manual kind (re-pointing a symlink, moving a
+                # foreign file aside) does not clear the legacy collision —
+                # naming only the manual one promises a repair that still
+                # refuses, and no other line in this row would mention it.
+                if _legacy_obstacle:
+                    _hint += f"; also {_legacy_obstacle}"
             elif _legacy_obstacle:
                 # The predicate's own sentence IS the hint: one home for the
                 # wording, so a reworded refusal cannot leave a stale copy here.
@@ -7547,17 +7555,32 @@ def _cmd_doctor(args):
                          "for the repair path" if _layout is not None else
                          f"run `tortoise install {_harness}` to repair")
             # The finding's OWN detail names the repair command too, so it is
-            # the SECOND place a refusing recommendation can come from.  It is
-            # withheld on the SAME terms `hooks status` withholds it — an
-            # artifact seam that is unrepairable (`_manual` OR the collision,
-            # which the installer refuses independently) and a first finding
-            # that is not itself a MANUAL kind — so the two surfaces that
-            # recommend a pi repair cannot disagree about when it refuses
-            # (#5351).  The replacement names a command that ACCEPTS the
-            # harness: the read-only diagnostic that carries the finding.
+            # the SECOND place a refusing recommendation can come from, and the
+            # rule that withholds it is the union of the two reasons the
+            # installer refuses an artifact seam: the collision (which refuses
+            # however the first finding reads, and which `hooks status`'s
+            # non-`elif` arms name alongside), and a MANUAL kind — the DECLARED
+            # conservative proxy, so an in-home leaf link the installer would in
+            # fact replace is withheld too (its own docstring calls that the
+            # cheap error; the safe direction).  A finding that is ITSELF a
+            # manual kind keeps its detail when no collision is present: that
+            # detail is a CONDITIONAL instruction ("move it aside, then re-run
+            # …") whose condition the installer honours, and with the collision
+            # present the detail's step two would still refuse, so it is
+            # withheld there — the row still names the kind, and the pointer
+            # re-reports the detail verbatim, so the instruction is one command
+            # away rather than gone.  The replacement names a command that
+            # ACCEPTS the harness: the read-only diagnostic that carries the
+            # finding.  The surfaces differ in WORDING (one summary row here,
+            # one line per finding there — which is why `hooks status` prints a
+            # manual kind's detail even beside the collision: that line IS the
+            # per-finding instruction, and its collision warning is a separate
+            # paragraph); what they guarantee in common is that neither prints
+            # an artifact repair command once the installer refuses.
             _withhold = (_layout is None
-                         and (bool(_manual) or bool(_legacy_obstacle))
-                         and not is_manual_fix(first.kind))
+                         and (bool(_legacy_obstacle)
+                              or (bool(_manual)
+                                  and not is_manual_fix(first.kind))))
             _detail = (
                 f"({first.kind}; run `tortoise session verify "
                 f"--harness {_harness}` for the repair path)" if _withhold

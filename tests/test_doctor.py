@@ -1298,3 +1298,47 @@ class TestDoctorPiSeamFreshness:
         assert "reinstall with" not in row, (
             "a manual kind with no legacy collision must withhold the detail's "
             "unconditional `reinstall with `tortoise install pi`` too")
+
+    def test_doctor_names_the_collision_beside_a_manual_kind(
+            self, clear_db_env, tmp_path, monkeypatch, capsys):
+        """A MANUAL step does not clear the legacy collision, so naming only the
+        manual obstacle promises a repair that still refuses.
+
+        `foreign-artifact` is BOTH the first blocking finding and a manual kind
+        (it is in `MANUAL_FIX_KINDS`), so the manual arm selects the hint and the
+        `elif` dropped the collision from the row entirely — while the finding's
+        own detail printed the unconditional second step "move it aside, then
+        re-run `tortoise install pi`", a command the collision still refuses.
+        Both halves must hold: the collision is NAMED, and that detail is
+        withheld.
+
+        Mutation: restore the `elif` (or withhold on
+        `not is_manual_fix(first.kind)` without the collision arm) — the
+        collision name disappears and the refusing `re-run … install pi`
+        reappears, and this REDs.
+        """
+        from tortoise import capture_install as _ci
+        from tortoise.hook_install import detect_artifact_install
+        home = tmp_path / "home"
+        self._seam(home, "// some other product's extension\n")
+        kinds = {f.kind for f in detect_artifact_install(
+            home / ".pi" / "agent" / "extensions", "pi")}
+        assert kinds == {"foreign-artifact"}, (
+            "the fixture must read as FOREIGN (a manual kind) and nothing "
+            f"else, or this test is about a different state: {kinds}")
+        root = home / ".pi" / "agent" / "extensions"
+        (root / _ci.LEGACY_PI_DIRNAME).mkdir()
+        (root / _ci.PI_DISABLED_DIRNAME).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        _run_doctor(["--path", "relative.db"])
+        row = self._pi_row(capsys.readouterr().out)
+
+        assert "❌" in row, row
+        assert "foreign-artifact" in row, row
+        assert _ci.PI_DISABLED_DIRNAME in row, (
+            "the collision outlives any manual step, so it must be named: "
+            + row)
+        assert "re-run" not in row, (
+            "the detail's step two re-runs an installer the collision refuses: "
+            + row)

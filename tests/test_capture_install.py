@@ -3926,7 +3926,7 @@ def test_pi_hooks_status_with_a_manual_fix_and_a_collision_names_no_refusing_com
 def test_pi_hooks_status_hides_the_installer_when_a_manual_kind_refuses(cli,
                                                                        tmp_path):
     """The MANUAL arm ALONE also makes the installer refuse: `is_manual_fix`
-    is by construction "the installer refuses this kind", so the unconditional
+    is the declared CONSERVATIVE proxy for refusal, so the unconditional
     `reinstall with `tortoise install pi`` in a blocking artifact detail must
     not be printed even with NO legacy collision.
 
