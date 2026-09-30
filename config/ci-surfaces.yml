@@ -416,6 +416,11 @@ surfaces:
   # `hooks status` wiring in `tortoise/__main__.py`, which selects `api`.
   # Same dual registration as test_4314_inert_hooks.py.
   - test_hook_run_observation.py
+  # #4041: the capture breadcrumb must be READ BACK to the agent — the
+  # shipped `session-start.sh` renders it to stdout. Same dual
+  # registration as its two siblings above (mechanism = core; the
+  # `tortoise/__main__.py` render path = api).
+  - test_4041_breadcrumb_reader.py
   # #4675: the post-commit confirmation — a client-side refusal whose effect
   # LANDED. Its source is tortoise/session_confirm.py (an ENGINE path matching
   # no SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
@@ -530,6 +535,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_4041_breadcrumb_reader.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
   # write/read marker split. No DB, no network — default `core` surface is correct.
